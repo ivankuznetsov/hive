@@ -65,4 +65,70 @@ class AttemptsEvidenceChannelTest < Minitest::Test
     assert_equal reference, evidence.fetch("source_reference")
     refute_includes JSON.generate(evidence), "message"
   end
+
+  def test_descriptor_factory_and_close_are_capability_bounded
+    reader, raw_writer = IO.pipe
+    raw_writer.autoclose = false
+    writer = Hive::Attempts::EvidenceChannel::Writer.for_fd(
+      raw_writer.fileno, route: ROUTE
+    )
+    assert writer.write(SIGNAL)
+    assert_equal SIGNAL, Hive::Attempts::EvidenceChannel.read(reader, route: ROUTE)
+    assert_nil writer.close
+
+    assert_raises(Hive::Attempts::StoreError) do
+      Hive::Attempts::EvidenceChannel::Writer.for_fd("invalid", route: ROUTE)
+    end
+
+    failing_io = Object.new
+    failing_io.define_singleton_method(:closed?) { false }
+    failing_io.define_singleton_method(:close) { raise IOError, "close failed" }
+    assert_nil Hive::Attempts::EvidenceChannel::Writer.new(
+      io: failing_io, route: ROUTE
+    ).close
+  ensure
+    raw_writer&.close unless raw_writer&.closed?
+  end
+
+  def test_account_signal_and_invalid_class_provenance_hint_and_scope_fail_closed
+    account_signal = SIGNAL.merge(
+      "failure_class" => "provider_outage",
+      "scope" => {
+        "kind" => "provider_account", "provider_account_id" => "account-a", "model" => nil
+      }
+    )
+    assert_equal account_signal, Hive::Attempts::EvidenceChannel.validate_signal(
+      account_signal, route: ROUTE
+    )
+
+    invalid = [
+      SIGNAL.merge("failure_class" => "authentication"),
+      SIGNAL.merge("provenance" => "stdout"),
+      SIGNAL.merge("reset_hint_seconds" => -1),
+      SIGNAL.merge("scope" => { "kind" => "model" })
+    ]
+    invalid.each do |signal|
+      assert_raises(Hive::Attempts::StoreError) do
+        Hive::Attempts::EvidenceChannel.validate_signal(signal, route: ROUTE)
+      end
+    end
+    assert_raises(Hive::Attempts::StoreError) do
+      Hive::Attempts::EvidenceChannel.validate_signal(
+        SIGNAL, route: ROUTE.reject { |key, _| key == "model" }
+      )
+    end
+  end
+
+  def test_materialize_uses_record_index_access_when_available
+    routing = { "mode" => "explicit", "route" => ROUTE }
+    record = Object.new
+    record.define_singleton_method(:[]) { |key| key == "routing" ? routing : nil }
+    record.define_singleton_method(:attempt_id) { "attempt-1" }
+    reference = { "path" => "logs/attempt.frames", "size" => 1, "sha256" => "a" * 64 }
+
+    evidence = Hive::Attempts::EvidenceChannel.materialize(
+      SIGNAL, record: record, source_reference: reference
+    )
+    assert_equal "model_capacity", evidence.fetch("failure_class")
+  end
 end

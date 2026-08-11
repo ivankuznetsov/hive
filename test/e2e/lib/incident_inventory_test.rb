@@ -11,7 +11,11 @@ class E2EIncidentInventoryTest < Minitest::Test
     "repository-routing" => [ "incident_repository_routing.yml", "#9771" ],
     "provider-limit-retry" => [ "incident_provider_limit_retry.yml", "#9770" ]
   }.freeze
-  ENABLED_INCIDENTS = %w[plan-only-dependency-gate repository-routing].freeze
+  ENABLED_INCIDENTS = %w[
+    plan-only-dependency-gate
+    provider-limit-retry
+    repository-routing
+  ].freeze
 
   def incident_scenarios
     Dir[File.join(Hive::E2E::Paths.scenarios_dir, "*.yml")]
@@ -40,7 +44,7 @@ class E2EIncidentInventoryTest < Minitest::Test
     assert_equal 6, incident_scenarios.size
     assert_equal 6, incident_scenarios.map(&:incident_id).uniq.size
     assert_equal ENABLED_INCIDENTS.sort, incident_scenarios.reject(&:pending).map(&:incident_id).sort
-    assert_equal 4, incident_scenarios.count(&:pending)
+    assert_equal 3, incident_scenarios.count(&:pending)
     assert_equal EXPECTED_INCIDENTS, actual
   end
 

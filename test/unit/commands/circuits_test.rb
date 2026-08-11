@@ -3,6 +3,8 @@ require "json_schemer"
 require "hive/commands/circuits"
 
 class CommandsCircuitsTest < Minitest::Test
+  include HiveTestHelper
+
   NOW = Time.utc(2026, 8, 10, 12)
 
   class DecisionIndex
@@ -34,6 +36,13 @@ class CommandsCircuitsTest < Minitest::Test
     assert_nil payload.fetch("mutation")
     assert_equal %w[model-a model-b], payload.dig("accounts", 0, "models").map { |row| row.fetch("model") }
     assert_empty schemer.validate(payload).to_a
+  end
+
+  def test_default_clock_is_utc
+    now = Hive::Commands::Circuits.new(accounts: {}).send(:now)
+
+    assert_instance_of Time, now
+    assert now.utc?
   end
 
   def test_json_includes_exact_durable_decision_and_admitted_attempt_identity
@@ -156,6 +165,136 @@ class CommandsCircuitsTest < Minitest::Test
       command("list", provider: nil, model: "model-a").call
     end
     assert_equal 0, @health.inspect_scope(provider_scope).generation
+  end
+
+  def test_error_envelope_classification_and_unknown_actions_are_stable
+    subject = Hive::Commands::Circuits.new(accounts: {})
+    cases = {
+      Hive::Commands::Circuits::UsageError.new("usage") => "usage",
+      Hive::ProviderHealth::StaleGeneration.new("stale") => "stale_generation",
+      Hive::ProviderHealth::InvalidMutation.new("invalid") => "usage",
+      Hive::ProviderHealth::InvalidScope.new("scope") => "usage",
+      Hive::ProviderHealth::Unavailable.new("unavailable") => "unavailable",
+      Hive::Attempts::StoreError.new("store") => "unavailable",
+      Hive::ConfigError.new("config") => "config",
+      RuntimeError.new("bug") => "internal"
+    }
+    cases.each do |error, expected|
+      assert_equal expected, subject.envelope_error_kind(error)
+    end
+
+    error = assert_raises(Hive::Commands::Circuits::UsageError) do
+      command("future-action").call
+    end
+    assert_match(/unknown action/, error.message)
+  end
+
+  def test_mutation_options_require_reason_scope_generation_and_complete_tokens
+    assert_raises(Hive::Commands::Circuits::UsageError) do
+      command("block", yes: true, reason: " ", expected_generation: 0).call
+    end
+    assert_raises(Hive::Commands::Circuits::UsageError) do
+      command("block", yes: true, reason: "maintenance").call
+    end
+    assert_raises(Hive::Commands::Circuits::UsageError) do
+      command(
+        "block", yes: true, reason: "maintenance", expected_generation: 0,
+        journal_epoch: 0
+      ).call
+    end
+    assert_raises(Hive::Commands::Circuits::UsageError) do
+      command(
+        "reset", yes: true, reason: "repair", journal_epoch: 0,
+        corruption_fingerprint: "a" * 64
+      ).call
+    end
+    assert_raises(Hive::Commands::Circuits::UsageError) do
+      command(
+        "reset", yes: true, reason: "repair", expected_generation: 0,
+        journal_epoch: 0, corruption_fingerprint: "a" * 64,
+        last_verified_generation: 0
+      ).call
+    end
+    assert_raises(Hive::Commands::Circuits::UsageError) do
+      command(
+        "block", provider: nil, yes: true,
+        reason: "maintenance", expected_generation: 0
+      ).call
+    end
+    assert_raises(Hive::Commands::Circuits::UsageError) do
+      command(
+        "block", provider: "unknown", yes: true,
+        reason: "maintenance", expected_generation: 0
+      ).call
+    end
+    assert_raises(Hive::Commands::Circuits::UsageError) do
+      command(
+        "block", model: "unknown", yes: true,
+        reason: "maintenance", expected_generation: 0
+      ).call
+    end
+    assert_raises(Hive::Commands::Circuits::UsageError) do
+      command("list", model: "unknown").call
+    end
+    assert_raises(Hive::Commands::Circuits::UsageError) do
+      command("list").send(:integer_option, -1, "--expected-generation")
+    end
+  end
+
+  def test_healthy_reset_and_human_mutation_render_the_audited_result
+    reset = invoke(
+      "reset", yes: true, reason: "clear observed state", expected_generation: 0
+    )
+    assert_equal 1, reset.dig("mutation", "generation")
+
+    stdout, = capture_io do
+      command(
+        "block", json: false, yes: true,
+        reason: "planned maintenance", expected_generation: 1
+      ).call
+    end
+    assert_includes stdout, "MUTATION block accepted generation=2"
+  end
+
+  def test_human_helpers_render_probe_evidence_repair_tokens_and_scoped_exclusions
+    circuit = {
+      "state" => "open", "generation" => 3, "journal_epoch" => 1,
+      "eligible_at" => NOW.iso8601(6), "reason" => "provider_outage",
+      "probe_owner" => { "attempt_id" => "attempt-1", "claim_generation" => 3 },
+      "evidence" => {
+        "failure_class" => "provider_outage", "fingerprint" => "a" * 64,
+        "source_reference" => { "path" => "outputs/safe.json" }
+      },
+      "corruption_token" => {
+        "journal_epoch" => 1, "corruption_fingerprint" => "b" * 64
+      }
+    }
+    summary = command("list").send(:circuit_summary, circuit)
+    assert_includes summary, "probe=attempt-1@3"
+    assert_includes summary, "evidence=provider_outage:"
+    assert_includes summary, "ref=outputs/safe.json"
+    assert_includes summary, "repair_epoch=1"
+
+    @attempts = AttemptStore.new(decision_index: DecisionIndex.new([ decision_entry ]))
+    entry = Marshal.load(Marshal.dump(invoke("list").fetch("decisions").fetch(0)))
+    candidate = entry.dig("decision", "candidates", 0)
+    candidate["capacity"] = nil
+    candidate["eligible"] = false
+    candidate["exclusions"] = [
+      { "reason" => "manual_block", "scope" => model_scope("model-a").to_h }
+    ]
+    stdout, = capture_io { command("list").send(:render_decision, entry) }
+    assert_includes stdout, "capacity=n/a"
+    assert_includes stdout, "manual_block@account-a/model-a"
+  end
+
+  def test_trusted_actor_uses_named_and_uid_only_fallbacks
+    subject = command("list")
+    assert_match(/\Auid:\d+:/, subject.send(:trusted_actor))
+
+    with_replaced_singleton_method(Etc, :getpwuid, ->(*) { raise ArgumentError }) do
+      assert_match(/\Auid:\d+\z/, subject.send(:trusted_actor))
+    end
   end
 
   private

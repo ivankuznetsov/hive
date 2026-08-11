@@ -75,7 +75,7 @@ hosted-runner variance cannot block an otherwise functional change.
 | `finalize-pr-lifecycle-gate` | [incident_finalize_pr_lifecycle_gate.yml](incident_finalize_pr_lifecycle_gate.yml) | `#9769` | finalize and PR merge watcher | Pending |
 | `plan-only-dependency-gate` | [incident_plan_only_dependency_gate.yml](incident_plan_only_dependency_gate.yml) | `#9771` | strict plan assertion, dependency gate, and real execute dispatch | Green |
 | `repository-routing` | [incident_repository_routing.yml](incident_repository_routing.yml) | `#9771` | cross-project repository admission and non-target preservation | Green |
-| `provider-limit-retry` | [incident_provider_limit_retry.yml](incident_provider_limit_retry.yml) | `#9770` | provider-limit healer and retry owner | Pending |
+| `provider-limit-retry` | [incident_provider_limit_retry.yml](incident_provider_limit_retry.yml) | `#9770` | provider-limit healer and retry owner | Green |
 
 ## Hermetic GitHub scripting
 

@@ -2,6 +2,8 @@ require_relative "../../test_helper"
 require "hive/provider_routing/operational_projection"
 
 class ProviderRoutingOperationalProjectionTest < Minitest::Test
+  include HiveTestHelper
+
   NOW = Time.utc(2026, 8, 10, 12)
 
   class DecisionIndex
@@ -11,6 +13,12 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
 
   AttemptStore = Data.define(:scan_result, :decision_index) do
     def scan = scan_result
+  end
+
+  FakeRecord = Data.define(:attempt_id, :provider, :routing, :live) do
+    def [](key) = key == "provider" ? provider : routing
+    def explicit_routing? = routing.fetch("mode") == "explicit"
+    def live? = live
   end
 
   def setup
@@ -56,6 +64,79 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
 
     assert_equal "not_configured", payload.fetch("status")
     assert_empty payload.fetch("accounts")
+    assert_empty payload.fetch("decisions")
+  end
+
+  def test_invalid_registry_and_unavailable_stores_are_bounded_degraded_rows
+    assert_raises(Hive::ConfigError) do
+      Hive::ProviderRouting::OperationalProjection.new(accounts: { "bad" => Object.new })
+    end
+
+    failing_attempts = Object.new
+    failing_attempts.define_singleton_method(:scan) do
+      raise Hive::Attempts::StoreError, "unavailable"
+    end
+    failing_attempts.define_singleton_method(:decision_index) { DecisionIndex.new }
+    payload = Hive::ProviderRouting::OperationalProjection.new(
+      accounts: { "account-a" => account }, attempt_store: failing_attempts,
+      health_store: @health, now: NOW
+    ).to_h
+    assert_includes payload.fetch("issues"), "attempt_storage_unavailable"
+
+    failing_health = Object.new
+    failing_health.define_singleton_method(:inspect_scope) do |_scope|
+      raise Hive::ProviderHealth::Unavailable, "unavailable"
+    end
+    payload = Hive::ProviderRouting::OperationalProjection.new(
+      accounts: { "account-a" => account }, attempt_store: @attempts,
+      health_store: failing_health, now: NOW
+    ).to_h
+    row = payload.fetch("accounts").first
+    assert_equal "health_state_unavailable", row.dig("circuit", "state")
+    assert_equal "health_state_unavailable", row.dig("models", 0, "circuit", "state")
+  end
+
+  def test_capacity_fallback_counts_live_explicit_and_unambiguous_legacy_attempts
+    records = [
+      FakeRecord.new(
+        "explicit", "codex",
+        { "mode" => "explicit", "route" => { "provider_account_id" => "account-a" } },
+        true
+      ),
+      FakeRecord.new("legacy", "codex", { "mode" => "legacy" }, true),
+      FakeRecord.new("terminal", "codex", { "mode" => "legacy" }, false)
+    ]
+    attempts = AttemptStore.new(
+      scan_result: Hive::Attempts::Scan.new(records: records, invalid_records: []),
+      decision_index: DecisionIndex.new
+    )
+    with_replaced_singleton_method(
+      Hive::Attempts::CapacitySnapshot, :build,
+      ->(**) { raise Hive::Attempts::StoreError, "snapshot unavailable" }
+    ) do
+      payload = Hive::ProviderRouting::OperationalProjection.new(
+        accounts: { "account-a" => account }, attempt_store: attempts,
+        health_store: @health, now: NOW
+      ).to_h
+      assert_equal 2, payload.dig("accounts", 0, "capacity", "observed")
+    end
+  end
+
+  def test_decision_projection_failure_is_reported_without_dropping_health
+    index = Object.new
+    index.define_singleton_method(:routing_decisions) do |limit:|
+      raise Hive::Attempts::StoreError, "decision index unavailable" if limit
+    end
+    attempts = AttemptStore.new(
+      scan_result: Hive::Attempts::Scan.new(records: [], invalid_records: []),
+      decision_index: index
+    )
+    payload = Hive::ProviderRouting::OperationalProjection.new(
+      accounts: { "account-a" => account }, attempt_store: attempts,
+      health_store: @health, now: NOW
+    ).to_h
+
+    assert_includes payload.fetch("issues"), "routing_decisions_unavailable"
     assert_empty payload.fetch("decisions")
   end
 

@@ -318,6 +318,25 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_runtime_provider_health_factory_binds_reads_to_the_attempt_store
+    with_store do |store|
+      terminal = terminal_attempt(store)
+      with_tmp_dir do |state_home|
+        runtime = Hive::Attempts::FinalizationMaintenance.runtime(
+          store: store, state_home: state_home
+        )
+        observer = runtime.instance_variable_get(:@provider_health_observer_factory).call
+        health_store = observer.instance_variable_get(:@store)
+        current = health_store.instance_variable_get(:@attempt_reader).call(terminal.attempt_id)
+
+        assert_equal terminal.attempt_id, current.fetch("attempt_id")
+        assert_equal terminal.task_generation, current.fetch("task_generation")
+        assert_equal terminal.ownership_generation, current.fetch("ownership_fence")
+        assert_equal "terminal", current.fetch("state")
+      end
+    end
+  end
+
   def test_promotion_rejects_a_mismatched_permanent_proof
     with_store do |store|
       terminal = terminal_attempt(store)

@@ -94,6 +94,31 @@ class ProviderRoutingRouterTest < Minitest::Test
     assert_equal first.to_h, replay.to_h
   end
 
+  def test_invalid_request_requirement_mismatch_and_missing_observation_fail_closed
+    router = Hive::ProviderRouting::Router.new
+    assert_raises(ArgumentError) { router.call(request: Object.new) }
+
+    strict_policy = Hive::ProviderRouting::Policy.explicit(
+      stage: "execute", routes: policy.routes,
+      requirements: Hive::ProviderRouting::Requirements.new(tools: %w[browser]),
+      pin: nil, account_policy: policy.account_policy
+    )
+    strict = Hive::ProviderRouting::Request.new(
+      policy: strict_policy, task_generation: "generation-1",
+      health: health_evaluations,
+      capacity: capacity("account-a" => 0, "account-b" => 0)
+    )
+    decision = router.call(request: strict, decided_at: NOW)
+    assert_equal %w[requirements_incompatible requirements_incompatible],
+                 decision.exclusions.map(&:reason)
+
+    missing = Hive::ProviderRouting::Request.new(
+      policy: policy, task_generation: "generation-1", health: {}, capacity: {}
+    )
+    unavailable = router.call(request: missing, decided_at: NOW)
+    assert_equal "health_state_unavailable", unavailable.reason
+  end
+
   private
 
   def route(capacity:)

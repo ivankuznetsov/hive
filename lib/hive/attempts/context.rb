@@ -14,7 +14,8 @@ module Hive
       EMPTY_ROUTING_VALUES = [].freeze
 
       attr_reader :attempt_id, :task_generation, :ownership_generation,
-                  :project, :task_slug, :intended_stage, :routing
+                  :project, :task_slug, :intended_stage, :routing,
+                  :progress_token, :predecessor_attempt_id
 
       class << self
         def current
@@ -73,6 +74,8 @@ module Hive
             project: record["project"],
             task_slug: record["task_slug"],
             intended_stage: record["intended_stage"],
+            progress_token: record["progress_token"],
+            predecessor_attempt_id: record["predecessor_attempt_id"],
             routing: record["routing"],
             evidence_writer: evidence_writer
           )
@@ -176,7 +179,8 @@ module Hive
 
       def initialize(attempt_id:, task_generation:, ownership_generation: nil,
                      project: nil, task_slug: nil, intended_stage: nil,
-                     routing: { "mode" => "legacy" }, evidence_writer: nil)
+                     routing: { "mode" => "legacy" }, evidence_writer: nil,
+                     progress_token: nil, predecessor_attempt_id: nil)
         @attempt_id = attempt_id.to_s
         @task_generation, bridged_ownership = numeric_generation_or_legacy(task_generation)
         @legacy_opaque_generation = !bridged_ownership.nil? && ownership_generation.nil?
@@ -184,6 +188,8 @@ module Hive
         @project = project&.to_s
         @task_slug = task_slug&.to_s
         @intended_stage = intended_stage&.to_s
+        @progress_token = progress_token&.to_s
+        @predecessor_attempt_id = predecessor_attempt_id&.to_s
         @routing = deep_freeze(Hive::StringifyKeys.call(routing))
         @evidence_writer = evidence_writer
         raise ArgumentError, "attempt context requires an attempt ID" if @attempt_id.empty?
@@ -227,8 +233,12 @@ module Hive
           task: task, project: project, intended_stage: intended_stage
         )
         ownership_matches = current.ownership_generation == ownership_generation
+        successor_progress_matches = !predecessor_attempt_id.to_s.empty? &&
+                                     !progress_token.to_s.empty? &&
+                                     current.respond_to?(:progress_token) &&
+                                     current.progress_token == progress_token
         epoch_matches = @legacy_opaque_generation || current.task_input_epoch == task_generation
-        unless ownership_matches && epoch_matches
+        unless (ownership_matches || successor_progress_matches) && epoch_matches
           raise Hive::ConcurrentRunError,
                 "durable attempt #{attempt_id} generation is stale; redispatch the current task state"
         end

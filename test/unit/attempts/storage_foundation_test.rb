@@ -12,6 +12,32 @@ class AttemptsStorageFoundationTest < Minitest::Test
   NOW = Time.utc(2026, 8, 9, 12, 0, 0)
   CLAIM_CAPABILITY = "c" * 64
 
+  def test_point_storage_enumeration_is_bounded_and_rejects_non_directory_shards
+    with_tmp_dir do |root|
+      storage = Hive::Attempts::PointStorage.new(root: root, label: "test storage")
+      %w[first second].each do |key|
+        storage.write(
+          "projection", { "id" => key }, "#{key}\n",
+          expected_bytes: nil, max_existing_bytes: 1024
+        )
+      end
+      assert_raises(Hive::Attempts::StoreError) do
+        storage.each_entry("projection", max_entries: 1, max_bytes: 1024).to_a
+      end
+      assert_raises(Hive::Attempts::StoreError) do
+        storage.each_entry("projection", max_entries: "invalid", max_bytes: 1024).to_a
+      end
+
+      broken_root = File.join(root, "broken")
+      broken = Hive::Attempts::PointStorage.new(root: broken_root, label: "broken storage")
+      FileUtils.mkdir_p(File.join(broken_root, "projection"))
+      File.write(File.join(broken_root, "projection", "aa"), "not-a-directory")
+      assert_raises(Hive::Attempts::StoreError) do
+        broken.each_entry("projection", max_entries: 2, max_bytes: 1024).to_a
+      end
+    end
+  end
+
   def test_store_fetches_permanent_proof_without_enumerating_it
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)

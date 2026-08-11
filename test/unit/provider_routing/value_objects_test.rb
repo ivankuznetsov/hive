@@ -67,4 +67,26 @@ class ProviderRoutingValueObjectsTest < Minitest::Test
     assert_nil policy.digest
     assert_nil policy.decision_id
   end
+
+  def test_request_decision_and_canonical_values_reject_invalid_inputs
+    assert_equal %({"kind":"probe"}), Hive::ProviderRouting.canonical_json(kind: :probe)
+    assert_raises(ArgumentError) do
+      Hive::ProviderRouting::Request.new(policy: Object.new, task_generation: "generation-1")
+    end
+    assert_raises(ArgumentError) do
+      Hive::ProviderRouting::Decision.selected(
+        request: Object.new, route: nil, considered: []
+      )
+    end
+
+    policy = Hive::ProviderRouting::Policy.legacy(stage: "execute")
+    request = Hive::ProviderRouting::Request.new(
+      policy: policy, task_generation: "generation-1"
+    )
+    assert_raises(ArgumentError) do
+      Hive::ProviderRouting::Decision.legacy(request: request).send(
+        :normalize_time, "not-a-time"
+      )
+    end
+  end
 end

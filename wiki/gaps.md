@@ -639,16 +639,19 @@ stable local API, so the reserve is deliberately conservative rather than an
 exact forecast. Recalibrate from captured streams if Claude materially changes
 its headless context or event cadence.
 
-## Four incident e2e fixtures remain sibling-gated (2026-07-17)
+## Three incident e2e fixtures remain sibling-gated (updated 2026-08-11)
 
 All six production-incident sequences are synthetic and parseable. The #9771
 plan-only dependency and repository-routing fixtures now execute as ordinary
-green results against the merged fail-closed contracts. Four remain visible as
-pending entries rather than claimed passes because the current tree does not expose the exact sibling-owned
-contracts needed to activate them: #9767's durable attempt lease and adoption
-reason, #9768's generation identity and reconciliation reason, #9769's
-finalize lifecycle terminal reason, and #9770's retry-owner evidence and bounded
-terminal reason. The harness deliberately does not infer those formats or strings.
+green results against the merged fail-closed contracts. The #9770
+provider-limit fixture is also green: it now proves a trusted account-scoped
+failure, one durable health transition, and one charged
+`RecoveryCoordinator` successor on the next route. Three remain visible as
+pending entries rather than claimed passes because the current tree does not
+expose the exact sibling-owned contracts needed to activate them: #9767's
+durable attempt lease and adoption reason, #9768's generation identity and
+reconciliation reason, and #9769's finalize lifecycle terminal reason. The
+harness deliberately does not infer those formats or strings.
 
 Close this gap one fixture at a time after the corresponding sibling lands:
 replace its activation guard with real CLI reconciliation and exact

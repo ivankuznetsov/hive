@@ -86,7 +86,7 @@ coverage:
   - id: recovery.provider_limit
     title: Provider retry ownership
     description: Provider retry cooldown and ownership prevent repeated daemon ticks from creating a retry storm.
-    maturity: planned
+    maturity: required
     profiles: [release]
     constraints: { platforms: [], providers: [codex] }
     docs: [wiki/e2e.md]

@@ -154,7 +154,10 @@ result.usage  # => the normalized usage hash
 
 Malformed or unrelated events return `nil` from `extract_usage`; they do not
 invent zero-token usage. `observe` returns a frozen
-`AgentCliRuntime::ObservableResult` with bounded, redacted diagnostics.
+`AgentCliRuntime::ObservableResult` with bounded, redacted diagnostics. A
+trusted caller may also supply an already-normalized `provider_signal`; the
+runtime carries that optional immutable value but does not classify failures or
+own provider-health policy.
 
 ## Compatibility
 

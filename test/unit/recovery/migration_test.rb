@@ -647,6 +647,86 @@ class RecoveryMigrationTest < Minitest::Test
     end
   end
 
+  def test_source_selection_rejects_material_v2_and_v3_roots
+    with_tmp_dir do |state_home|
+      FileUtils.mkdir_p(File.join(state_home, "attempts", "v2", "records"))
+      FileUtils.mkdir_p(File.join(state_home, "attempts", "v3", "records"))
+      File.write(File.join(state_home, "attempts", "v2", "records", "old.json"), "{}")
+      File.write(File.join(state_home, "attempts", "v3", "records", "new.json"), "{}")
+      migration = Hive::Recovery::Migration.new(state_home: state_home)
+
+      error = assert_raises(Hive::Recovery::Migration::Error) do
+        migration.send(:select_source_root!)
+      end
+
+      assert_includes error.message, "attempts/v2 and attempts/v3"
+    end
+  end
+
+  def test_permanent_proof_migration_rejects_non_records_and_wrong_storage_keys
+    with_tmp_dir do |state_home|
+      root = File.join(state_home, "attempts", "v4")
+      invalid = File.join(root, "proof", "attempt", "directory.json")
+      FileUtils.mkdir_p(invalid)
+      migration = Hive::Recovery::Migration.new(state_home: state_home)
+
+      error = assert_raises(Hive::Recovery::Migration::Error) do
+        migration.send(:migrate_permanent_proofs!, root)
+      end
+      assert_includes error.message, "non-record entry"
+    end
+
+    with_tmp_dir do |state_home|
+      root = File.join(state_home, "attempts", "v4")
+      wrong = File.join(root, "proof", "attempt", "wrong.json")
+      legacy = legacy_v3(terminal_attempt(current_attempt(attempt_id: "proof-key")))
+      write_json(wrong, Hive::Attempts::RecordMigration.convert_v3(legacy))
+      migration = Hive::Recovery::Migration.new(state_home: state_home)
+
+      error = assert_raises(Hive::Recovery::Migration::Error) do
+        migration.send(:migrate_permanent_proofs!, root)
+      end
+      assert_includes error.message, "key collision"
+    end
+  end
+
+  def test_corpus_summary_and_scan_parity_fail_closed
+    with_tmp_dir do |state_home|
+      root = File.join(state_home, "attempts", "v4")
+      record = legacy_v3(lost_attempt(current_attempt(attempt_id: "legacy")))
+      write_json(File.join(root, "records", "legacy.json"), record)
+      migration = Hive::Recovery::Migration.new(state_home: state_home)
+
+      error = assert_raises(Hive::Recovery::Migration::Error) do
+        migration.send(:corpus_summary, root)
+      end
+      assert_includes error.message, "only schema v4 can remain"
+
+      scan = Struct.new(:records, :invalid_records).new([], [])
+      error = assert_raises(Hive::Recovery::Migration::Error) do
+        migration.send(
+          :assert_scan_counts!,
+          { "source_valid_count" => 1, "source_invalid_count" => 0 },
+          scan
+        )
+      end
+      assert_includes error.message, "source corpus changed"
+    end
+  end
+
+  def test_legacy_recovery_payload_receives_provider_neutral_defaults
+    data = { "recovery" => {} }
+
+    Hive::Recovery::Migration.new(state_home: "/tmp").send(
+      :migrate_dispatch_request_recovery!, data
+    )
+
+    assert_equal({
+      "variant" => "marker", "policy_digest" => nil,
+      "source_receipt" => nil, "admission_observation" => nil
+    }, data.fetch("recovery"))
+  end
+
   def test_storage_health_failure_does_not_replace_migration_error
     with_tmp_dir do |state_home|
       write_v3_record(state_home, lost_attempt(current_attempt(attempt_id: "old")))

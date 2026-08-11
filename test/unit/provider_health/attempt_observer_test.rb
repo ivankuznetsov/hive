@@ -68,7 +68,128 @@ class ProviderHealthAttemptObserverTest < Minitest::Test
     assert_equal "closed", inspection.circuit.automatic_state
   end
 
+  def test_rejects_an_untyped_store_and_ignores_nonfinal_records
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      Hive::ProviderHealth::AttemptObserver.new(store: Object.new)
+    end
+    assert_equal :not_applicable, @observer.observe(nil)
+
+    running = terminal_record(evidence_scope: model_scope)
+    running.state = "running"
+    assert_equal :not_applicable, @observer.observe(running)
+  end
+
+  def test_probe_success_is_completed_before_matching_evidence_is_applied
+    binding = claim_probe(model_scope)
+    record = terminal_record(evidence_scope: model_scope)
+    record.receipt["outcome"] = "succeeded"
+    record.data["routing"]["probe_bindings"] = [ binding.to_h ]
+    bind(record)
+
+    assert_equal :acknowledged, @observer.observe(record)
+    inspection = @store.inspect_scope(model_scope)
+    assert_equal "open", inspection.circuit.automatic_state
+    assert_equal 4, inspection.generation
+  end
+
+  def test_lost_and_cancelled_probe_attempts_reopen_the_claim
+    %w[lost cancelled].each do |outcome|
+      reset_store
+      binding = claim_probe(provider_scope)
+      record = terminal_record(evidence_scope: nil)
+      record.data["routing"]["probe_bindings"] = [ binding.to_h ]
+      if outcome == "lost"
+        record.state = "lost"
+        record.receipt = nil
+      else
+        record.receipt["outcome"] = "cancelled"
+      end
+      bind(record)
+
+      assert_equal :acknowledged, @observer.observe(record)
+      assert_equal "open", @store.inspect_scope(provider_scope).circuit.automatic_state
+      assert_equal 3, @store.inspect_scope(provider_scope).generation
+    end
+  end
+
+  def test_probe_completion_fenced_by_operator_change_is_acknowledged_without_evidence
+    binding = claim_probe(model_scope)
+    record = terminal_record(evidence_scope: model_scope)
+    record.data["routing"]["probe_bindings"] = [ binding.to_h ]
+    bind(record)
+    @store.block(
+      scope: model_scope, expected_generation: binding.claim_generation,
+      actor: "uid:1000", reason: "operator maintenance"
+    )
+
+    assert_equal :acknowledged, @observer.observe(record)
+    assert_equal binding.claim_generation + 1, @store.inspect_scope(model_scope).generation
+  end
+
+  def test_evidence_without_an_enclosing_generation_is_rejected
+    record = terminal_record(evidence_scope: model_scope)
+    record.data["routing"]["circuit_generations"] = []
+    bind(record)
+
+    assert_raises(Hive::ProviderHealth::InvalidMutation) { @observer.observe(record) }
+  end
+
   private
+
+  def reset_store
+    FileUtils.remove_entry(@tmp)
+    FileUtils.mkdir_p(@tmp)
+    @attempts.clear
+    @store = Hive::ProviderHealth::Store.new(
+      root: File.join(@tmp, "health"),
+      clock: -> { Time.utc(2026, 8, 10, 12) },
+      attempt_reader: ->(id) { @attempts[id] }
+    )
+    @observer = Hive::ProviderHealth::AttemptObserver.new(store: @store)
+  end
+
+  def claim_probe(scope)
+    seed = terminal_record(evidence_scope: scope)
+    bind(seed)
+    signal = Hive::ProviderHealth::Evidence.new(
+      scope: scope,
+      failure_class: scope.model? ? "model_capacity" : "provider_outage",
+      provenance: "codex_jsonl_transport", route: route,
+      reset_hint_seconds: 0, source_reference: reference,
+      attempt_id: seed.attempt_id
+    )
+    @store.apply_evidence(
+      evidence: signal, attempt: observer_attempt,
+      terminal_receipt: seed.receipt.slice(
+        "attempt_id", "receipt_version", "terminal_lease_version"
+      ),
+      expected_generation: 0
+    )
+    evaluation = @store.evaluate_route(
+      account_id: route.account_id, model_id: route.model_id,
+      now: Time.utc(2026, 8, 10, 12)
+    )
+    requirement = evaluation.probe_requirements.find { |candidate| candidate.scope == scope }
+    intent = Hive::ProviderHealth::ProbeIntent.new(
+      intent_id: "intent-1", attempt_id: "attempt-1",
+      task_generation: "generation-1", ownership_fence: "generation-1",
+      requirements: [ requirement ]
+    )
+    binding = nil
+    @store.with_probe_intent(intent: intent) do |bindings|
+      binding = bindings.fetch(0)
+      @attempts["attempt-1"] = observer_attempt(probe_bindings: bindings)
+    end
+    binding
+  end
+
+  def observer_attempt(probe_bindings: [])
+    Hive::ProviderHealth::AttemptBinding.new(
+      attempt_id: "attempt-1", task_generation: "generation-1",
+      ownership_fence: "generation-1", route: route,
+      probe_bindings: probe_bindings
+    )
+  end
 
   def bind(record)
     @attempts[record.attempt_id] = {

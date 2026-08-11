@@ -1437,6 +1437,93 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_explicit_route_preflight_failure_is_account_attributed
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      context = explicit_context
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(
+          Hive::AgentRuntime, :prepare!, ->(*) { raise Hive::AgentError, "unavailable" }
+        ) do
+          result = Hive::Stages::Base.spawn_agent(
+            task,
+            prompt: "prompt",
+            max_budget_usd: nil,
+            timeout_sec: 5,
+            cfg: {},
+            status_mode: :exit_code_only
+          )
+
+          assert_equal :error, result.fetch(:status)
+          assert_equal "provider_route_preflight_failed", result.fetch(:error_reason)
+          assert_includes result.fetch(:error_message), "account-a"
+        end
+      end
+    end
+  end
+
+  def test_explicit_route_failure_requires_durable_evidence_delivery
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      writer = Object.new
+      writer.define_singleton_method(:write) { |_signal| false }
+      writer.define_singleton_method(:close) { true }
+      context = explicit_context(evidence_writer: writer)
+      agent = Object.new
+      agent.define_singleton_method(:run!) do
+        { status: :error, provider_signal: { "failure_class" => "model_capacity" } }
+      end
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+          with_replaced_singleton_method(Hive::Agent, :new, ->(**) { agent }) do
+            error = assert_raises(Hive::ProviderRouteFailed) do
+              Hive::Stages::Base.spawn_agent(
+                task,
+                prompt: "prompt",
+                max_budget_usd: nil,
+                timeout_sec: 5,
+                cfg: {},
+                status_mode: :exit_code_only
+              )
+            end
+
+            assert_includes error.message, "without durable evidence delivery"
+          end
+        end
+      end
+    end
+  end
+
+  def test_explicit_non_claude_route_bypasses_the_claude_launcher
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      context = explicit_context
+      captured = nil
+      spawn = lambda do |_task, **kwargs|
+        captured = kwargs
+        { status: :ok }
+      end
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          result = Hive::Stages::Base.spawn_claude!(
+            task,
+            {},
+            prompt: "prompt",
+            max_budget_usd: nil,
+            timeout_sec: 5,
+            session_name: "unused"
+          )
+
+          assert_equal :ok, result.fetch(:status)
+          assert_equal :codex, captured.fetch(:profile).name
+        end
+      end
+    end
+  end
+
   def explicit_context(binding: "default", evidence_writer: nil, effort: "high")
     provider_scope = {
       "kind" => "provider_account", "provider_account_id" => "account-a", "model" => nil

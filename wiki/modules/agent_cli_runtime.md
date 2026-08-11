@@ -3,7 +3,7 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-08-11
 tags: [agent, runtime, component, gem, cli]
 ---
 
@@ -33,7 +33,9 @@ or custom `Profile` objects, preserves `UnknownProvider` as a typed caller
 error, exposes custom CLI capabilities in static probe evidence, and rejects
 custom names that collide with the standard capability vocabulary. Missing
 usage stays `nil`; terminal events without counters do not become measured
-zero-token events.
+zero-token events. Observable results also carry an optional immutable
+`provider_signal` supplied by a trusted caller. The component does not classify
+that signal or own provider-health policy.
 
 For compatibility with Hive's trusted headless launches,
 `permission_mode: nil` still selects a provider's bypass flag. Independent

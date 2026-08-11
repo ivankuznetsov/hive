@@ -924,6 +924,19 @@ class OperationalStatusTest < Minitest::Test
     refute_includes JSON.generate(result), "secret-canary"
   end
 
+  def test_routing_projection_fails_closed_on_missing_fetch_and_unknown_values
+    raw = routing_decision
+    raw.define_singleton_method(:fetch) do |key, *defaults|
+      raise KeyError, key if key == "decision_id"
+
+      super(key, *defaults)
+    end
+    status = Hive::OperationalStatus.new(status_payload: status_payload)
+
+    assert_nil status.send(:routing_payload, { "routing" => raw }, nil)
+    refute status.send(:routing_value_safe?, Object.new)
+  end
+
   def test_invalid_hidden_archive_count_is_rejected_at_the_projection_boundary
     payload = status_payload(
       task(action: "ready_to_plan", slug: "invalid-hidden"),

@@ -431,6 +431,29 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_markerless_recovery_overlay_requires_the_exact_generation_and_no_failure_marker
+    with_tmp_dir do |dir|
+      _store, assembler, _reader = build(File.join(dir, "snapshot.json"))
+      task = {
+        "stage" => "4-execute", "marker" => "none", "marker_attrs" => {},
+        "task_generation" => "generation-1"
+      }
+      index = { [ "demo", "ship-it" ] => task }
+      markerless = {
+        "project" => "demo", "slug" => "ship-it",
+        "recovery_variant" => "admission_failure",
+        "task_generation" => "generation-1"
+      }
+
+      assert_same task, assembler.send(:find_recovery_task, index, markerless)
+      assert_nil assembler.send(
+        :find_recovery_task, index, markerless.merge("task_generation" => "generation-2")
+      )
+      task["marker"] = "error"
+      assert_nil assembler.send(:find_recovery_task, index, markerless)
+    end
+  end
+
   def test_provider_hold_without_stage_or_reason_still_matches_the_current_task
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")

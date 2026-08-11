@@ -114,6 +114,25 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
     end
   end
 
+  def test_admission_view_delegates_routing_decision_lookup_to_the_point_index
+    index = Object.new
+    index.define_singleton_method(:routing_decision) do |task_generation:, subject:|
+      { "task_generation" => task_generation, "subject" => subject }
+    end
+    store = Object.new
+    store.define_singleton_method(:decision_index) { index }
+    view = Hive::Attempts::AdmissionView.new(
+      store: store,
+      hot_scan: Hive::Attempts::Scan.new(records: [], invalid_records: [])
+    )
+    subject = { "kind" => "task_stage" }
+
+    assert_equal(
+      { "task_generation" => "generation-1", "subject" => subject },
+      view.routing_decision(task_generation: "generation-1", subject: subject)
+    )
+  end
+
   def test_find_forgets_a_cached_record_when_point_authority_is_missing
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)

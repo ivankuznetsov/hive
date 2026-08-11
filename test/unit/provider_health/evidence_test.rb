@@ -72,6 +72,42 @@ class ProviderHealthEvidenceTest < Minitest::Test
     refute_equal first, changed
   end
 
+  def test_serialized_evidence_rejects_shape_hint_fingerprint_and_scope_drift
+    valid = build_evidence.to_h
+    assert_raises(Hive::ProviderHealth::InvalidEvidence) do
+      Hive::ProviderHealth::Evidence.from_h(valid.merge("extra" => true))
+    end
+    assert_raises(Hive::ProviderHealth::InvalidEvidence) do
+      Hive::ProviderHealth::Evidence.from_h(
+        valid.merge("reset_hint_seconds" => Hive::ProviderHealth::MAX_RESET_HINT_SECONDS + 1)
+      )
+    end
+    assert_raises(Hive::ProviderHealth::InvalidEvidence) do
+      Hive::ProviderHealth::Evidence.from_h(valid.merge("fingerprint" => "0" * 64))
+    end
+    assert_raises(Hive::ProviderHealth::InvalidEvidence) do
+      Hive::ProviderHealth::Evidence.from_h(valid.merge("scope" => {}))
+    end
+  end
+
+  def test_receipt_route_and_constructor_hint_must_match
+    other_route = Hive::ProviderHealth::RouteIdentity.new(
+      route_id: "codex-primary/other-route", account_id: "codex-primary",
+      adapter: "codex", launch_binding_id: "default", model_id: "gpt-5.6-sol"
+    )
+    assert_raises(Hive::ProviderHealth::InvalidEvidence) do
+      Hive::ProviderHealth::Evidence.from_receipt(
+        build_evidence.to_h, route: other_route, attempt_id: "attempt-1"
+      )
+    end
+    assert_raises(Hive::ProviderHealth::InvalidEvidence) do
+      build_evidence(reset_hint_seconds: Hive::ProviderHealth::MAX_RESET_HINT_SECONDS + 1)
+    end
+    assert_raises(Hive::ProviderHealth::InvalidEvidence) do
+      build_evidence(reset_hint_seconds: "later")
+    end
+  end
+
   private
 
   def build_evidence(**overrides)

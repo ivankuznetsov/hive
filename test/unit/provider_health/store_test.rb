@@ -2,6 +2,8 @@ require_relative "../../test_helper"
 require "hive/provider_health/store"
 
 class ProviderHealthStoreTest < Minitest::Test
+  include HiveTestHelper
+
   def setup
     @tmp = Dir.mktmpdir("provider-health-store")
     @root = File.join(@tmp, "provider-health", "v1")
@@ -199,6 +201,347 @@ class ProviderHealthStoreTest < Minitest::Test
     refute_includes all_state_bytes, "secret-canary"
   end
 
+  def test_typed_mutation_receipt_and_cooldown_validation_fail_closed
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.apply_evidence(
+        evidence: Object.new, attempt: Object.new,
+        terminal_receipt: {}, expected_generation: 0
+      )
+    end
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.complete_probe(attempt: Object.new, terminal_receipt: {}, outcome: "success")
+    end
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.complete_probe(attempt: attempt, terminal_receipt: receipt, outcome: "unknown")
+    end
+
+    bind_attempt
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.apply_evidence(
+        evidence: evidence(provider_scope), attempt: attempt,
+        terminal_receipt: receipt.merge("extra" => true), expected_generation: 0
+      )
+    end
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.apply_evidence(
+        evidence: evidence(provider_scope), attempt: attempt,
+        terminal_receipt: receipt.merge("attempt_id" => "other-attempt"),
+        expected_generation: 0
+      )
+    end
+
+    incomplete = {}
+    incomplete.define_singleton_method(:keys) do
+      %w[attempt_id receipt_version terminal_lease_version]
+    end
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.send(:normalize_terminal_receipt, incomplete, attempt_id: attempt.attempt_id)
+    end
+
+    invalid_cooldown = build_store(cooldown_resolver: ->(_signal) { 99_999_999 })
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      invalid_cooldown.apply_evidence(
+        evidence: evidence(provider_scope), attempt: attempt,
+        terminal_receipt: receipt, expected_generation: 0
+      )
+    end
+  end
+
+  def test_route_admission_rejects_invalid_or_stale_probe_observations
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.with_route_admission(evaluation: Object.new) { flunk }
+    end
+
+    closed = @store.evaluate_route(
+      account_id: route.account_id, model_id: route.model_id, now: @clock
+    )
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.with_route_admission(evaluation: closed, intent: Object.new) { flunk }
+    end
+
+    bind_attempt
+    @store.apply_evidence(
+      evidence: evidence(provider_scope, reset_hint_seconds: 0), attempt: attempt,
+      terminal_receipt: receipt, expected_generation: 0
+    )
+    half_open = @store.evaluate_route(
+      account_id: route.account_id, model_id: route.model_id, now: @clock
+    )
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      @store.with_route_admission(evaluation: half_open) { flunk }
+    end
+
+    changed_requirement = Hive::ProviderHealth::ProbeRequirement.new(
+      scope: provider_scope, journal_epoch: 0, observed_generation: 0
+    )
+    mismatch = probe_intent(requirements: [ changed_requirement ])
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      @store.with_route_admission(evaluation: half_open, intent: mismatch) { flunk }
+    end
+
+    inspections = [ provider_scope, model_scope ].map { |scope| @store.inspect_scope(scope) }
+    provider = inspections.fetch(0)
+    stale_requirement = Hive::ProviderHealth::ProbeRequirement.new(
+      scope: provider_scope, journal_epoch: provider.journal_epoch,
+      observed_generation: provider.generation
+    )
+    @store.reset(
+      scope: provider_scope, expected_generation: provider.generation,
+      actor: "uid:1000", reason: "close circuit before stale snapshot proof"
+    )
+    closed_inspections = [ provider_scope, model_scope ].map { |scope| @store.inspect_scope(scope) }
+    false_requirement = Hive::ProviderHealth::ProbeRequirement.new(
+      scope: provider_scope,
+      journal_epoch: closed_inspections.fetch(0).journal_epoch,
+      observed_generation: closed_inspections.fetch(0).generation
+    )
+    invalid_evaluation = Hive::ProviderHealth::RouteEvaluation.new(
+      status: "eligible", inspections: closed_inspections, blockers: [],
+      probe_requirements: [ false_requirement ]
+    )
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      @store.with_route_admission(
+        evaluation: invalid_evaluation,
+        intent: probe_intent(requirements: [ false_requirement ])
+      ) { flunk }
+    end
+    assert_equal 1, stale_requirement.observed_generation
+  end
+
+  def test_unavailable_storage_and_corrupt_scope_evaluations_are_bounded
+    unsafe = build_store
+    unsafe.define_singleton_method(:with_mutation_lock) do |&block|
+      block
+      raise Hive::ManagedDirectory::UnsafeError, "unsafe"
+    end
+    inspection = unsafe.inspect_scope(provider_scope)
+    assert inspection.unavailable?
+    evaluation = unsafe.evaluate_route(
+      account_id: route.account_id, model_id: route.model_id
+    )
+    assert_equal %w[health_state_unavailable health_state_unavailable],
+                 evaluation.blockers.map { |entry| entry.fetch("reason") }
+
+    corruption_class = Hive::ProviderHealth::Store.const_get(:JournalCorruption, false)
+    corruption = corruption_class.new(
+      scope: provider_scope, bytes: "bad".b,
+      last_circuit: Hive::ProviderHealth::Circuit.closed(scope: provider_scope)
+    )
+    corrupting = build_store
+    corrupting.define_singleton_method(:with_mutation_lock) { |&_block| raise corruption }
+    failed = corrupting.evaluate_route(
+      account_id: route.account_id, model_id: route.model_id
+    )
+    assert_equal [ "health_state_unavailable" ],
+                 failed.blockers.map { |entry| entry.fetch("reason") }
+  end
+
+  def test_defensive_generation_and_attempt_reader_failures_are_nonmutating
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      @store.block(
+        scope: provider_scope, expected_generation: "invalid",
+        actor: "uid:1000", reason: "validate generation input"
+      )
+    end
+
+    failing_reader = build_store(attempt_reader: ->(_id) { raise "reader failure" })
+    rejected = failing_reader.apply_evidence(
+      evidence: evidence(provider_scope), attempt: attempt,
+      terminal_receipt: receipt, expected_generation: "invalid"
+    )
+    assert_equal "stale_generation", rejected.reason
+
+    rejected = failing_reader.apply_evidence(
+      evidence: evidence(model_scope, failure_class: "model_capacity"), attempt: attempt,
+      terminal_receipt: receipt, expected_generation: 0
+    )
+    assert_equal "fenced_attempt", rejected.reason
+  end
+
+  def test_unknown_operator_action_and_stale_corruption_token_are_rejected
+    replay = @store.send(
+      :load_replay, provider_scope, recover_torn: true, publish_projection: false
+    )
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.send(
+        :append_operator_transition, replay,
+        action: "future", actor: "uid:1000", reason: "unsupported action"
+      )
+    end
+
+    bind_attempt
+    @store.apply_evidence(
+      evidence: evidence(provider_scope), attempt: attempt,
+      terminal_receipt: receipt, expected_generation: 0
+    )
+    File.binwrite(journal_file(provider_scope), "invalid\n" + File.binread(journal_file(provider_scope)))
+    unavailable = @store.inspect_scope(provider_scope)
+    stale = Hive::ProviderHealth::CorruptionToken.new(
+      scope: provider_scope,
+      journal_epoch: unavailable.corruption_token.journal_epoch,
+      corruption_fingerprint: "b" * 64,
+      last_verified_generation: unavailable.corruption_token.last_verified_generation
+    )
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      @store.reset(
+        scope: provider_scope, corruption_token: stale,
+        actor: "uid:1000", reason: "reject stale corruption token"
+      )
+    end
+  end
+
+  def test_journal_parser_distinguishes_torn_tail_from_parseable_or_interior_corruption
+    bind_attempt
+    @store.apply_evidence(
+      evidence: evidence(provider_scope), attempt: attempt,
+      terminal_receipt: receipt, expected_generation: 0
+    )
+    valid = File.binread(journal_file(provider_scope))
+
+    File.binwrite(journal_file(provider_scope), valid.chomp)
+    assert @store.inspect_scope(provider_scope).unavailable?
+
+    File.binwrite(journal_file(provider_scope), valid + "{")
+    corruption_class = Hive::ProviderHealth::Store.const_get(:JournalCorruption, false)
+    assert_raises(corruption_class) do
+      @store.send(
+        :load_replay, provider_scope, recover_torn: false, publish_projection: false
+      )
+    end
+
+    event = JSON.parse(valid)
+    event["journal_epoch"] = 1
+    File.binwrite(journal_file(provider_scope), "#{JSON.generate(event)}\n")
+    assert @store.inspect_scope(provider_scope).unavailable?
+  end
+
+  def test_journal_reader_rethrows_configuration_and_sanitizes_unexpected_failures
+    directory = @store.instance_variable_get(:@directory)
+    with_replaced_singleton_method(
+      directory, :read, ->(*, **) { raise Hive::ConfigError, "configuration failure" }
+    ) do
+      assert_raises(Hive::ConfigError) do
+        @store.send(
+          :load_replay, provider_scope, recover_torn: true, publish_projection: false
+        )
+      end
+    end
+
+    corruption_class = Hive::ProviderHealth::Store.const_get(:JournalCorruption, false)
+    with_replaced_singleton_method(
+      directory, :read, ->(*, **) { raise "unexpected reader failure" }
+    ) do
+      error = assert_raises(corruption_class) do
+        @store.send(
+          :load_replay, provider_scope, recover_torn: true, publish_projection: false
+        )
+      end
+      assert_equal "provider-health journal is unavailable", error.message
+    end
+  end
+
+  def test_corrupt_single_scope_and_invalid_intent_files_fail_route_evaluation_closed
+    FileUtils.mkdir_p(File.dirname(journal_file(model_scope)))
+    File.binwrite(journal_file(model_scope), "invalid\n")
+    evaluation = @store.evaluate_route(
+      account_id: route.account_id, model_id: route.model_id
+    )
+    assert_equal [ "health_state_unavailable" ],
+                 evaluation.blockers.map { |entry| entry.fetch("reason") }
+
+    FileUtils.rm_f(journal_file(model_scope))
+    File.binwrite(File.join(@root, "intents", "bad.json"), "{")
+    unavailable = @store.evaluate_route(
+      account_id: route.account_id, model_id: route.model_id
+    )
+    assert_equal %w[health_state_unavailable health_state_unavailable],
+                 unavailable.blockers.map { |entry| entry.fetch("reason") }
+  end
+
+  def test_probe_intent_parser_rejects_every_untrusted_shape
+    requirement = {
+      "scope" => provider_scope.to_h,
+      "journal_epoch" => 0,
+      "observed_generation" => 0
+    }
+    binding = requirement.merge(
+      "claim_generation" => 1,
+      "attempt_id" => attempt.attempt_id,
+      "task_generation" => attempt.task_generation,
+      "ownership_fence" => attempt.ownership_fence
+    )
+    payload = {
+      "schema" => "hive-provider-health-probe-intent",
+      "schema_version" => 1,
+      "intent" => {
+        "intent_id" => "intent-1", "attempt_id" => attempt.attempt_id,
+        "task_generation" => attempt.task_generation,
+        "ownership_fence" => attempt.ownership_fence,
+        "requirements" => [ requirement ]
+      },
+      "bindings" => [ binding ]
+    }
+    parsed = @store.send(:parse_intent, JSON.generate(payload))
+    assert_equal "intent-1", parsed.fetch(:intent).intent_id
+
+    malformed = []
+    malformed << payload.merge("schema_version" => 2)
+    malformed << Marshal.load(Marshal.dump(payload)).tap do |copy|
+      copy.fetch("intent")["future"] = true
+    end
+    malformed << Marshal.load(Marshal.dump(payload)).tap do |copy|
+      copy.dig("intent", "requirements", 0)["future"] = true
+    end
+    malformed << payload.merge(
+      "bindings" => [ binding.merge("scope" => model_scope.to_h) ]
+    )
+    malformed << payload.merge(
+      "bindings" => [ binding.merge("future" => true) ]
+    )
+    malformed.each do |candidate|
+      assert_raises(Hive::ProviderHealth::InvalidMutation) do
+        @store.send(:parse_intent, JSON.generate(candidate))
+      end
+    end
+  end
+
+  def test_route_admission_rejects_an_open_scope_before_its_probe_window
+    bind_attempt
+    @store.apply_evidence(
+      evidence: evidence(provider_scope, reset_hint_seconds: 300), attempt: attempt,
+      terminal_receipt: receipt, expected_generation: 0
+    )
+    inspections = [ provider_scope, model_scope ].map { |scope| @store.inspect_scope(scope) }
+    requirement = Hive::ProviderHealth::ProbeRequirement.new(
+      scope: provider_scope, journal_epoch: inspections.fetch(0).journal_epoch,
+      observed_generation: inspections.fetch(0).generation
+    )
+    evaluation = Hive::ProviderHealth::RouteEvaluation.new(
+      status: "eligible", inspections: inspections, blockers: [],
+      probe_requirements: [ requirement ]
+    )
+
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      @store.with_route_admission(
+        evaluation: evaluation, intent: probe_intent(requirements: [ requirement ])
+      ) { flunk }
+    end
+  end
+
+  def test_mutation_lock_converts_journal_corruption_to_bounded_unavailability
+    bind_attempt
+    FileUtils.mkdir_p(File.dirname(journal_file(provider_scope)))
+    File.binwrite(journal_file(provider_scope), "invalid\n")
+
+    error = assert_raises(Hive::ProviderHealth::Unavailable) do
+      @store.apply_evidence(
+        evidence: evidence(provider_scope), attempt: attempt,
+        terminal_receipt: receipt, expected_generation: 0
+      )
+    end
+    assert_equal "health_state_unavailable", error.message
+  end
+
   private
 
   def build_store(**options)
@@ -248,13 +591,14 @@ class ProviderHealthStoreTest < Minitest::Test
     @attempts[value.attempt_id] = value
   end
 
-  def evidence(scope, failure_class: "provider_outage", source_reference: reference)
+  def evidence(scope, failure_class: "provider_outage", source_reference: reference,
+               reset_hint_seconds: 300)
     Hive::ProviderHealth::Evidence.new(
       scope: scope,
       failure_class: failure_class,
       provenance: "codex_jsonl_transport",
       route: route,
-      reset_hint_seconds: 300,
+      reset_hint_seconds: reset_hint_seconds,
       source_reference: source_reference,
       attempt_id: "attempt-1"
     )
@@ -266,6 +610,15 @@ class ProviderHealthStoreTest < Minitest::Test
 
   def receipt
     { "attempt_id" => "attempt-1", "receipt_version" => 1, "terminal_lease_version" => 3 }
+  end
+
+  def probe_intent(requirements:)
+    Hive::ProviderHealth::ProbeIntent.new(
+      intent_id: "intent-1", attempt_id: attempt.attempt_id,
+      task_generation: attempt.task_generation,
+      ownership_fence: attempt.ownership_fence,
+      requirements: requirements
+    )
   end
 
   def state_files

@@ -311,7 +311,6 @@ class WebProjectCaptureProviderTest < Minitest::Test
       File.write(executable, <<~'RUBY')
         #!/usr/bin/env ruby
         require "digest"
-        require "base64"
         require "json"
         require "rbconfig"
 
@@ -340,9 +339,7 @@ class WebProjectCaptureProviderTest < Minitest::Test
         write_png = lambda do |path|
           File.binwrite(
             path,
-            Base64.decode64(
-              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
-            )
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=".unpack1("m0")
           )
         end
 

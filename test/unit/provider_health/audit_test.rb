@@ -47,10 +47,54 @@ class ProviderHealthAuditTest < Minitest::Test
     end
   end
 
+  def test_receipt_parser_action_state_and_reference_fail_closed
+    valid = receipt.to_h
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      Hive::ProviderHealth::Audit::Receipt.from_h(valid.merge("extra" => true))
+    end
+
+    incomplete = valid.dup
+    incomplete.define_singleton_method(:fetch) do |key, *defaults|
+      raise KeyError, key if key == "actor"
+
+      super(key, *defaults)
+    end
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      Hive::ProviderHealth::Audit::Receipt.from_h(incomplete)
+    end
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      receipt(action: "probe")
+    end
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      Hive::ProviderHealth::Audit.validate_state("automatic_state" => "closed")
+    end
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      Hive::ProviderHealth::Audit.validate_state(
+        state(generation: 0, manual_blocked: false).merge("automatic_state" => "unknown")
+      )
+    end
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      Hive::ProviderHealth::Audit.validate_reference(
+        "path" => "safe.json", "size" => 1, "sha256" => "a" * 64,
+        "message" => "unsafe"
+      )
+    end
+  end
+
   private
 
   def scope
     @scope ||= Hive::ProviderHealth::Scope.provider_account(account_id: "codex-primary")
+  end
+
+  def receipt(action: "block")
+    Hive::ProviderHealth::Audit::Receipt.new(
+      actor: "uid:1000", reason: "planned provider maintenance", target: scope,
+      action: action, occurred_at: Time.utc(2026, 8, 10),
+      previous_state: state(generation: 0, manual_blocked: false),
+      new_state: state(generation: 1, manual_blocked: true),
+      generation: 1, event_id: "event-1"
+    )
   end
 
 

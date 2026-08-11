@@ -353,6 +353,18 @@ class ImplementationIdentityResolverTest < Minitest::Test
     assert_equal "route-attempt", selection.originating_attempt
   end
 
+  def test_explicit_route_rejects_untyped_input
+    error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      resolver(config).resolve_execute(
+        generation: 8,
+        attempt_id: "route-attempt",
+        route: Object.new
+      )
+    end
+
+    assert_equal "explicit execute route must be a ProviderRouting::Route", error.message
+  end
+
   private
 
   def resolver(cfg)

@@ -242,6 +242,27 @@ class ProviderRoutingPolicyStoreTest < Minitest::Test
     )
   end
 
+  def test_unsupported_storage_key_and_malformed_json_fail_closed
+    candidate = policy(model: "gpt-5.6-sol")
+    assert_raises(Hive::ProviderRouting::PolicyStore::InvalidSnapshot) do
+      @store.fetch_or_store(
+        ownership_generation: ownership_generation,
+        subject: subject.merge("unsupported" => Object.new),
+        policy: candidate
+      )
+    end
+
+    @store.fetch_or_store(
+      ownership_generation: ownership_generation, subject: subject, policy: candidate
+    )
+    File.binwrite(policy_path, "{")
+    assert_raises(Hive::ProviderRouting::PolicyStore::InvalidSnapshot) do
+      @store.fetch(
+        ownership_generation: ownership_generation, subject: subject, policy: candidate
+      )
+    end
+  end
+
   private
 
   def ownership_generation

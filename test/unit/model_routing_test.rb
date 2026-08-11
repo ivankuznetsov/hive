@@ -418,6 +418,31 @@ class ModelRoutingTest < Minitest::Test
     assert_equal "high", claude.effort
   end
 
+  def test_candidate_resolution_materializes_the_profile_default_with_project_context
+    observed = nil
+    profile = Object.new
+    profile.define_singleton_method(:name) { :fixture }
+    profile.define_singleton_method(:validate_routed_control!) { |_control, source:| source }
+    profile.define_singleton_method(:concrete_default_model) do |cfg:, project_root:|
+      observed = [ cfg, project_root ]
+      "fixture-default-model"
+    end
+    cfg = { "project_root" => "/tmp/routed-project" }
+
+    resolution = Hive::ModelRouting.resolve_candidate(
+      models: { "execute" => { "effort" => "high" } },
+      stage: "execute",
+      profile: profile,
+      current: {},
+      source: "execute.routing.pool[0]",
+      cfg: cfg
+    )
+
+    assert_equal "fixture-default-model", resolution.model
+    assert_equal "high", resolution.effort
+    assert_equal [ cfg, "/tmp/routed-project" ], observed
+  end
+
   private
 
   def assert_provenance(result, field, kind, key)

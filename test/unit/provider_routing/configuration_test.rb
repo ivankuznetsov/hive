@@ -294,6 +294,108 @@ class ProviderRoutingConfigurationTest < Minitest::Test
     end
   end
 
+  def test_pool_and_registry_shapes_fail_closed_at_the_opt_in_edge
+    assert_raises(Hive::ConfigError) do
+      Hive::ProviderRouting::Configuration.from(
+        cfg: {}, stage_name: "execute", routing: { "pool" => [] }
+      )
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::ProviderRouting::Configuration.from(
+        cfg: {}, stage_name: "execute",
+        routing: { "pool" => [ route("codex-primary", model: "gpt-5.6-sol") ] }
+      )
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::ProviderRouting::Configuration.normalize_accounts([], source: "fixture")
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::ProviderRouting::Configuration.normalize_accounts(
+        {
+          "Codex-A" => account("codex", binding: "default", models: %w[gpt-5.6-sol]),
+          "codex-a" => account("codex", binding: "team-a", models: %w[gpt-5.6-sol])
+        },
+        source: "fixture"
+      )
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::ProviderRouting::Configuration.normalize_accounts(
+        { "ghost" => account("ghost", binding: "default", models: %w[model-a]) },
+        source: "fixture"
+      )
+    end
+
+    cfg = Hive::Config.merge_defaults(
+      "execute" => {
+        "routing" => { "pool" => [ route("codex-primary", model: "gpt-5.6-sol") ] }
+      }
+    )
+    cfg[Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY] = {
+      "codex-primary" => account(
+        "codex", binding: "default", models: %w[gpt-5.6-sol]
+      )
+    }
+    assert Hive::ProviderRouting::Configuration.from(cfg: cfg, stage_name: "execute").explicit?
+  end
+
+  def test_account_and_capability_scalar_validation_covers_every_hard_limit
+    valid = account("codex", binding: "default", models: %w[gpt-5.6-sol])
+    normalized = Hive::ProviderRouting::Configuration.normalize_accounts(
+      { "codex-primary" => valid.merge("cooldown_sec" => { "account_quota" => 2 }) },
+      source: "fixture"
+    )
+    assert_equal 2, normalized.fetch("codex-primary").cooldown_sec.fetch("account_quota")
+
+    invalid_accounts = [
+      { "codex" => valid.merge("cooldown_sec" => { "account_quota" => 0 }) },
+      { "codex" => valid.merge("models" => []) },
+      { "codex" => valid.merge("launch_binding" => "Bad!") },
+      { "bad!" => valid },
+      { "codex" => valid.merge("max_concurrent" => 0) },
+      { "codex" => valid.merge("adapter" => nil) },
+      { "codex" => [] },
+      { "codex" => valid.merge(1 => true) },
+      { "codex" => valid.merge("future" => true) }
+    ]
+    invalid_accounts.each do |providers|
+      assert_raises(Hive::ConfigError) do
+        Hive::ProviderRouting::Configuration.normalize_accounts(providers, source: "fixture")
+      end
+    end
+
+    invalid_routes = [
+      route("codex-primary", model: "gpt-5.6-sol", tools: "shell"),
+      route("codex-primary", model: "gpt-5.6-sol", tools: %w[root]),
+      route("codex-primary", model: "gpt-5.6-sol", context: "enormous")
+    ]
+    invalid_routes.each do |candidate|
+      assert_raises(Hive::ConfigError) { configuration_for(pool: [ candidate ]) }
+    end
+  end
+
+  def test_missing_candidate_model_and_unknown_model_stage_are_configuration_errors
+    resolution = Struct.new(:model, :effort).new(nil, "high")
+    with_replaced_singleton_method(
+      Hive::ModelRouting, :resolve_candidate, ->(**) { resolution }
+    ) do
+      assert_raises(Hive::ConfigError) do
+        configuration_for(pool: [ route("codex-primary", model: "gpt-5.6-sol") ])
+      end
+    end
+
+    cfg = routed_config(
+      "execute" => {
+        "routing" => { "pool" => [ route("codex-primary", model: "gpt-5.6-sol") ] }
+      }
+    )
+    assert_raises(Hive::ConfigError) do
+      Hive::ProviderRouting::Configuration.from(
+        cfg: cfg, stage_name: "unknown.stage",
+        routing: cfg.dig("execute", "routing")
+      )
+    end
+  end
+
   private
 
   def configuration_for(pool:, required: nil, pin: nil)

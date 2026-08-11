@@ -176,6 +176,16 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
     assert_operator result.diagnostic.bytesize, :<=, AgentCliRuntime::DIAGNOSTIC_BYTES
   end
 
+  def test_observe_carries_an_optional_immutable_provider_signal
+    signal = { "failure_class" => "account_quota" }
+
+    result = AgentCliRuntime.observe(:codex, provider_signal: signal)
+
+    assert_equal signal, result.provider_signal
+    refute_same signal, result.provider_signal
+    assert_predicate result.provider_signal, :frozen?
+  end
+
   private
 
   def compile(provider, **options)

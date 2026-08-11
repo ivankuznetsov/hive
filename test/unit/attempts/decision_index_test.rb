@@ -94,6 +94,85 @@ class AttemptsDecisionIndexTest < Minitest::Test
     end
   end
 
+  def test_routing_decision_input_and_projection_limits_fail_closed
+    assert_raises(Hive::Attempts::StoreError) do
+      @index.record_routing_decision(
+        decision: Object.new, task_generation: "generation-1",
+        subject: subject, project: "demo"
+      )
+    end
+    assert_raises(Hive::Attempts::StoreError) do
+      @index.record_routing_decision(
+        decision: selected_decision("decision-1"),
+        task_generation: "other-generation", subject: subject,
+        project: "demo", attempt_id: "attempt-1"
+      )
+    end
+    [ nil, 0, Hive::Attempts::DecisionIndex::MAX_ROUTING_PROJECTIONS + 1 ].each do |limit|
+      assert_raises(Hive::Attempts::StoreError) { @index.routing_decisions(limit: limit) }
+    end
+  end
+
+  def test_enumerated_projection_rejects_missing_keys_malformed_json_and_unsortable_rows
+    assert_raises(Hive::Attempts::StoreError) do
+      @index.send(
+        :parse_enumerated_entry,
+        JSON.generate("key" => "not-an-object"),
+        expected_kind: Hive::Attempts::DecisionIndex::ROUTING_DECISION
+      )
+    end
+    assert_raises(Hive::Attempts::StoreError) do
+      @index.send(
+        :parse_enumerated_entry, "{",
+        expected_kind: Hive::Attempts::DecisionIndex::ROUTING_DECISION
+      )
+    end
+
+    2.times do |offset|
+      @index.record_routing_decision(
+        decision: selected_decision("decision-#{offset}"),
+        task_generation: "generation-1", subject: subject.merge("task_id" => offset.to_s),
+        project: "demo", attempt_id: "attempt-#{offset}"
+      )
+    end
+    @index.define_singleton_method(:parse_enumerated_entry) do |_bytes, expected_kind:|
+      raise "unexpected kind" unless expected_kind == Hive::Attempts::DecisionIndex::ROUTING_DECISION
+
+      { "value" => { "decision" => { "decided_at" => Object.new, "decision_id" => "id" } } }
+    end
+    assert_raises(Hive::Attempts::StoreError) { @index.routing_decisions }
+  end
+
+  def test_routing_projection_schema_rejects_each_cross_field_invariant
+    key = { "task_generation" => "generation-1", "subject" => subject }
+    base = {
+      "project" => "demo", "attempt_id" => "attempt-1",
+      "decision" => selected_decision("decision-1").to_h
+    }
+    mutations = [
+      ->(value) { value["future"] = true },
+      ->(value) { value["decision"]["future"] = true },
+      ->(value) { value["decision"]["task_generation"] = "other" },
+      ->(value) { value["decision"]["policy_digest"] = "invalid" },
+      ->(value) { value["decision"]["status"] = "unknown" },
+      ->(value) { value["attempt_id"] = nil },
+      ->(value) { value["decision"]["next_action_owner"] = "router" },
+      ->(value) { value["decision"]["policy"]["future"] = true },
+      ->(value) { value["decision"]["policy"]["pin"] = { "provider" => 1, "model" => nil } },
+      ->(value) { value["decision"]["policy"]["pin"] = { "provider" => "account-a", "model" => 1 } },
+      ->(value) { value["decision"]["policy"]["requirements"]["tools"] = "shell" },
+      ->(value) { value["decision"]["selected_route"] = nil }
+    ]
+
+    mutations.each do |mutation|
+      value = Marshal.load(Marshal.dump(base))
+      mutation.call(value)
+      assert_raises(Hive::Attempts::StoreError) do
+        @index.send(:validate_routing_decision_value!, value, key: key)
+      end
+    end
+  end
+
   private
 
   def selected_decision(id)

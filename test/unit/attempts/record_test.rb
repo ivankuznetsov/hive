@@ -96,6 +96,48 @@ class AttemptsRecordTest < Minitest::Test
     end
   end
 
+  def test_explicit_routing_rejects_every_bounded_vector_and_cross_reference_violation
+    base = Hive::Attempts::Record.launching(
+      **identity.merge(routing: explicit_routing(probe: true)), now: NOW, launch_timeout_sec: 30
+    ).to_h
+    mutations = [
+      ->(routing) { routing.replace("mode" => "future") },
+      ->(routing) { routing.fetch("decision")["exclusions"] = {} },
+      ->(routing) do
+        routing.fetch("decision").fetch("exclusions") <<
+          routing.fetch("decision").fetch("exclusions").first.dup
+      end,
+      ->(routing) do
+        routing.fetch("circuit_generations")[1] =
+          routing.fetch("circuit_generations")[0].dup
+      end,
+      ->(routing) { routing["probe_bindings"] = {} },
+      ->(routing) { routing.fetch("probe_bindings").first["journal_epoch"] = 99 },
+      ->(routing) do
+        routing.fetch("probe_bindings") << routing.fetch("probe_bindings").first.dup
+      end,
+      ->(routing) { routing.fetch("decision").fetch("exclusions").first["detail"] = "" },
+      ->(routing) { routing["policy_digest"] = "invalid" }
+    ]
+    mutations.each do |mutation|
+      candidate = Marshal.load(Marshal.dump(base))
+      mutation.call(candidate.fetch("routing"))
+      assert_raises(Hive::Attempts::InvalidRecord) do
+        Hive::Attempts::Record.new(candidate)
+      end
+    end
+
+    detailed = Marshal.load(Marshal.dump(base))
+    detailed.dig("routing", "decision", "exclusions", 0)["detail"] = "bounded detail"
+    assert_equal "bounded detail",
+                 Hive::Attempts::Record.new(detailed)
+                   .to_h.dig("routing", "decision", "exclusions", 0, "detail")
+
+    candidate = Marshal.load(Marshal.dump(base))
+    candidate["routing"] = nil
+    assert_raises(Hive::Attempts::InvalidRecord) { Hive::Attempts::Record.new(candidate) }
+  end
+
   def test_validate_rejects_unknown_state_and_terminal_fields_on_live_record
     invalid = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
     invalid["state"] = "maybe"
@@ -156,6 +198,19 @@ class AttemptsRecordTest < Minitest::Test
         attempt_id: "attempt-1", task_generation: "generation-1"
       )
     end
+    assert_raises(Hive::Attempts::InvalidReceipt) do
+      Hive::Attempts::Record.validate_receipt!(
+        valid.merge("receipt_version" => 99),
+        attempt_id: "attempt-1", task_generation: "generation-1"
+      )
+    end
+    assert_raises(Hive::Attempts::InvalidReceipt) do
+      Hive::Attempts::Record.validate_receipt!(
+        valid.merge("terminal_lease_version" => 1),
+        attempt_id: "attempt-1", task_generation: "generation-1",
+        terminal_lease_version: 0
+      )
+    end
   end
 
   def test_terminal_receipt_accepts_only_compatible_sanitized_provider_evidence
@@ -214,6 +269,51 @@ class AttemptsRecordTest < Minitest::Test
         terminal_lease_version: 0, routing: { "mode" => "legacy" }
       )
     end
+  end
+
+  def test_provider_evidence_rejects_class_hint_reference_and_scope_invariants
+    routing = explicit_routing
+    valid = provider_evidence(routing: routing)
+    protected = [ valid.fetch("source_reference") ]
+    mutations = [
+      valid.merge("failure_class" => "authentication"),
+      valid.merge("reset_hint_seconds" => -1),
+      valid.merge("scope" => valid.fetch("scope").merge("kind" => "future"))
+    ]
+    mutations.each do |candidate|
+      assert_raises(Hive::Attempts::InvalidReceipt) do
+        Hive::Attempts::Record.send(
+          :validate_provider_evidence!, candidate,
+          routing: routing, protected_references: protected
+        )
+      end
+    end
+
+    long_reference = valid.fetch("source_reference").merge("path" => "x" * 513)
+    assert_raises(Hive::Attempts::InvalidReceipt) do
+      Hive::Attempts::Record.send(
+        :validate_provider_evidence!, valid.merge("source_reference" => long_reference),
+        routing: routing, protected_references: [ long_reference ]
+      )
+    end
+    unprotected = valid.fetch("source_reference").merge("path" => "logs/other.frames")
+    assert_raises(Hive::Attempts::InvalidReceipt) do
+      Hive::Attempts::Record.send(
+        :validate_provider_evidence!, valid.merge("source_reference" => unprotected),
+        routing: routing, protected_references: protected
+      )
+    end
+    malformed = valid.fetch("source_reference").reject { |key, _| key == "sha256" }
+    assert_raises(Hive::Attempts::InvalidReceipt) do
+      Hive::Attempts::Record.send(
+        :validate_provider_evidence!, valid.merge("source_reference" => malformed),
+        routing: routing, protected_references: protected
+      )
+    end
+
+    assert_equal [ { "a" => 1 } ], Hive::Attempts::Record.send(
+      :canonical_value, [ { "a" => 1 } ]
+    )
   end
 
   def test_final_states_are_irreversible

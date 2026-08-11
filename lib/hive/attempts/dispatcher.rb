@@ -63,7 +63,10 @@ module Hive
           task: task,
           project: project,
           intended_stage: predecessor["intended_stage"],
-          progress_token: predecessor["progress_token"],
+          # A recovery successor retains the predecessor's logical generation
+          # (and therefore its frozen routing policy), while fencing its
+          # worker to the exact post-recovery-clear task bytes admitted now.
+          progress_token: Generation.artifact_token(task),
           task_generation: predecessor.task_generation,
           attempt_store: @store
         )
@@ -118,7 +121,8 @@ module Hive
         return dispatch_successor(
           predecessor: predecessor, task: task, project: request.project, argv: request.argv,
           request_id: request.request_id, provider: provider_for(task),
-          inherited_outputs: request.inherited_outputs, interactive: interactive,
+          inherited_outputs: request.inherited_outputs,
+          retry_charge: recovery_retry_charge(request), interactive: interactive,
           now: now, admission_view: admission_view
         ) if successor_predecessor?(predecessor)
 
@@ -424,6 +428,12 @@ module Hive
         return false unless record.explicit_routing?
 
         record.receipt&.fetch("provider_evidence", nil).is_a?(Hash)
+      end
+
+      def recovery_retry_charge(request)
+        return nil unless request.respond_to?(:recovery) && request.recovery.is_a?(Hash)
+
+        request.recovery["retry_count"]
       end
 
       def task_subject(generation)

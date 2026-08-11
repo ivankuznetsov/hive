@@ -848,6 +848,243 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_default_attempt_store_factory_is_host_state_scoped
+    with_tmp_dir do |state_home|
+      opened = Object.new
+      expected_state_home = state_home
+      test_case = self
+      with_replaced_singleton_method(
+        Hive::Attempts::Store, :open_default,
+        lambda { |state_home:|
+          test_case.assert_equal expected_state_home, state_home
+          opened
+        }
+      ) do
+        coordinator = Hive::Daemon::RecoveryCoordinator.new(state_home: state_home)
+        assert_same opened, coordinator.send(:attempts_store)
+      end
+    end
+  end
+
+  def test_provider_marker_without_an_immutable_receipt_stays_blocked
+    with_fixture(marker_attrs: {
+      "reason" => "provider_route_failed", "marker_id" => "provider-marker"
+    }) do |coordinator, row, _state_home|
+      result = coordinator.request(
+        row: row, requestor: "healer", request_id: "missing-provider-receipt", now: NOW
+      )
+
+      assert_equal "blocked", result.status
+      assert_equal "provider_receipt_unavailable", result.reason
+    end
+  end
+
+  def test_markerless_admission_rechecks_task_marker_id_and_generation_under_lock
+    changing_resolver = lambda do |task, _dir|
+      calls = 0
+      lambda do |**_kwargs|
+        calls += 1
+        calls == 1 ? task : task.with(id: 818)
+      end
+    end
+    with_fixture(
+      marker_name: "WAITING", marker_attrs: {},
+      task_resolver_builder: changing_resolver
+    ) do |coordinator, row, _state_home|
+      result = coordinator.request_admission_failure(
+        request: admission_request(row),
+        decision: routing_decision(row, status: :no_route), now: NOW
+      )
+      assert_equal "task_identity_conflict", result.reason
+    end
+
+    with_fixture do |coordinator, row, _state_home|
+      result = coordinator.request_admission_failure(
+        request: admission_request(row),
+        decision: routing_decision(row, status: :no_route), now: NOW
+      )
+      assert_equal "generation_conflict", result.reason
+    end
+
+    with_fixture(marker_name: "WAITING", marker_attrs: {}, task_id: nil) do |coordinator, row, _state_home|
+      request = admission_request(row)
+      request.task_id = nil
+      result = coordinator.request_admission_failure(
+        request: request, decision: routing_decision(row, status: :no_route), now: NOW
+      )
+      assert_equal "missing_task_id", result.reason
+    end
+
+    with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, _state_home|
+      result = coordinator.request_admission_failure(
+        request: admission_request(row),
+        decision: routing_decision(
+          row, status: :no_route, task_generation: "stale-generation"
+        ),
+        now: NOW
+      )
+      assert_equal "generation_conflict", result.reason
+    end
+  end
+
+  def test_unavailable_health_admission_is_operator_owned_and_explainable
+    with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, state_home|
+      decision = routing_decision(
+        row, status: :no_route, exclusion_reason: "health_state_unavailable"
+      )
+      result = coordinator.request_admission_failure(
+        request: admission_request(row), decision: decision, now: NOW
+      )
+      persisted = Q.fetch(result.request_id, state_home: state_home)
+
+      assert_equal "operator", persisted.recovery.fetch("owner")
+      assert_equal "health_state_unavailable", persisted.recovery.fetch("blocked_reason")
+      assert_includes persisted.recovery.fetch("blocked_remediation"), "repair"
+
+      observation = Hive::Attempts::DispatchResult.new(
+        status: :no_route, attempt: nil, receipt: nil,
+        attach_descriptor: nil, reason: decision.reason, decision: decision
+      )
+      coordinator.observe_admission_result(
+        request: persisted, result: observation, now: NOW + 1
+      )
+      updated = Q.fetch(result.request_id, state_home: state_home)
+      assert_includes updated.recovery.fetch("blocked_remediation"), "repair"
+    end
+  end
+
+  def test_admission_and_observation_storage_failures_return_bounded_receipts
+    with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, _state_home|
+      decision = routing_decision(row, status: :no_route)
+      with_replaced_singleton_method(Q, :fetch, ->(*, **) { nil }) do
+        result = coordinator.request_admission_failure(
+          request: admission_request(row), decision: decision, now: NOW
+        )
+        assert_equal "unavailable", result.status
+        assert_equal "request_disappeared_after_admission", result.reason
+      end
+
+      lock_error = Hive::ConcurrentRunError.new(
+        "busy", holder: { "attempt_id" => "attempt-live" }
+      )
+      with_replaced_singleton_method(
+        Hive::Lock, :with_task_lock, ->(*, **) { raise lock_error }
+      ) do
+        result = coordinator.request_admission_failure(
+          request: admission_request(row), decision: decision, now: NOW
+        )
+        assert_equal "running", result.status
+        assert_equal "attempt-live", result.attempt_id
+      end
+
+      invalid = routing_decision(row, status: :capacity_saturated)
+      result = coordinator.request_admission_failure(
+        request: admission_request(row), decision: invalid, now: NOW
+      )
+      assert_equal "unavailable", result.status
+      assert_equal "recovery_unavailable", result.reason
+    end
+
+    queue = Object.new
+    queue.define_singleton_method(:with_request_lock) do |*, **|
+      raise IOError, "queue unavailable"
+    end
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(
+      request_queue: queue, attempt_store: Object.new
+    )
+    request = request_for_helpers
+    decision = routing_decision(
+      Struct.new(:project, :stage).new("hive", "4-execute"), status: :no_route,
+      task_generation: "generation-1"
+    )
+    observation = Hive::Attempts::DispatchResult.new(
+      status: :no_route, attempt: nil, receipt: nil,
+      attach_descriptor: nil, reason: decision.reason, decision: decision
+    )
+    assert_equal "unavailable", coordinator.observe_admission_result(
+      request: request, result: observation, now: NOW
+    ).status
+  end
+
+  def test_terminal_admission_observation_replays_without_mutation
+    request = request_for_helpers(
+      recovery: {
+        "phase" => "terminal", "failure_origin" => "no_eligible_provider_route",
+        "next_eligible_at" => nil, "owner" => "none", "retry_count" => 1,
+        "terminal_outcome" => "failed"
+      }
+    )
+    queue = Object.new
+    queue.define_singleton_method(:with_request_lock) { |_id, **, &block| block.call }
+    queue.define_singleton_method(:fetch) { |_id, **| request }
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(
+      request_queue: queue, attempt_store: Object.new
+    )
+    decision = routing_decision(
+      Struct.new(:project, :stage).new("hive", "4-execute"), status: :no_route,
+      task_generation: "generation-1"
+    )
+    observation = Hive::Attempts::DispatchResult.new(
+      status: :no_route, attempt: nil, receipt: nil,
+      attach_descriptor: nil, reason: decision.reason, decision: decision
+    )
+
+    assert_equal "terminal", coordinator.observe_admission_result(
+      request: request, result: observation, now: NOW
+    ).phase
+  end
+
+  def test_source_receipt_proof_fallback_and_storage_errors_are_fail_closed
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      terminal = terminal_provider_attempt(store)
+      identity = {
+        "attempt_id" => terminal.attempt_id,
+        "receipt_version" => terminal.receipt.fetch("receipt_version"),
+        "terminal_lease_version" => terminal.receipt.fetch("terminal_lease_version")
+      }
+      store.permanent_proofs.publish(terminal)
+      File.unlink(store.record_path(terminal.attempt_id))
+      coordinator = Hive::Daemon::RecoveryCoordinator.new(attempt_store: store)
+      assert coordinator.send(:source_health_acknowledged?, identity)
+
+      failing = Object.new
+      failing.define_singleton_method(:fetch_hot) do |_id|
+        raise Hive::Attempts::StoreError, "unavailable"
+      end
+      coordinator = Hive::Daemon::RecoveryCoordinator.new(attempt_store: failing)
+      refute coordinator.send(:source_health_acknowledged?, identity)
+
+      failing.define_singleton_method(:fetch) do |_id|
+        raise Hive::Attempts::StoreError, "unavailable"
+      end
+      marker = Struct.new(:attrs).new({
+        "reason" => "provider_route_failed", "attempt_id" => terminal.attempt_id
+      })
+      task = FakeTask.new(
+        id: 817, slug: "demo-task", folder: root, state_file: File.join(root, "task.md"),
+        stage_index: 4, stage_name: "execute"
+      )
+      assert_nil coordinator.send(
+        :source_receipt_for, marker: marker, task: task, project: "hive"
+      )
+    end
+  end
+
+  def test_markerless_clear_validation_and_invalid_decisions_are_closed
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(attempt_store: Object.new)
+    marker = Struct.new(:name) do
+      def none? = name == :none
+    end.new(:waiting)
+    recovery = { "variant" => "admission_failure" }
+    assert coordinator.send(:cleared_marker_state_valid?, marker, recovery)
+    marker.name = :error
+    refute coordinator.send(:cleared_marker_state_valid?, marker, recovery)
+    assert_raises(ArgumentError) do
+      coordinator.send(:validate_admission_decision!, Object.new, expected_status: :no_route)
+    end
+  end
+
   private
 
   def request_for_helpers(recovery: nil)
@@ -877,10 +1114,12 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     )
   end
 
-  def routing_decision(row, status:, task_generation: nil, decided_at: NOW)
+  def routing_decision(row, status:, task_generation: nil, decided_at: NOW,
+                       exclusion_reason: nil)
     route = routing_route
-    reason = status == :capacity_saturated ?
-      "provider_concurrency_saturated" : "manual_block"
+    reason = exclusion_reason || (
+      status == :capacity_saturated ? "provider_concurrency_saturated" : "manual_block"
+    )
     observation = status == :capacity_saturated ?
       { "observed" => 1, "max" => 1 } : { "generation" => 2, "journal_epoch" => 0 }
     exclusion = Hive::ProviderRouting::Decision::Exclusion.new(
@@ -909,7 +1148,9 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     else
       Hive::ProviderRouting::Decision.no_route(
         request: request, considered: [ route ], exclusions: [ exclusion ],
-        candidates: [ candidate ], decided_at: decided_at
+        candidates: [ candidate ], decided_at: decided_at,
+        reason: exclusion_reason == "health_state_unavailable" ?
+          "health_state_unavailable" : "no_eligible_provider_route"
       )
     end
   end

@@ -96,6 +96,45 @@ class AttemptsContextTest < Minitest::Test
     end
   end
 
+  def test_explicit_environment_context_installs_the_dedicated_evidence_writer
+    routing = explicit_routing
+    routing["probe_bindings"] = []
+    with_running_attempt(routing: routing) do |store, _record|
+      resolver = Struct.new(:task) { def resolve = task }.new(
+        FakeTask.new(id: 42, slug: "task", stage_index: 4, stage_name: "execute")
+      )
+      evidence_reader, evidence_writer = IO.pipe
+      with_replaced_singleton_method(
+        Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }
+      ) do
+        with_env("HIVE_ATTEMPT_EVIDENCE_FD" => evidence_writer.fileno.to_s) do
+          with_context_environment(store, capability: CLAIM_CAPABILITY) do
+            context = Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
+            signal = {
+              "failure_class" => "model_capacity",
+              "scope" => {
+                "kind" => "model", "provider_account_id" => "codex-account-a",
+                "model" => "gpt-5.6-sol"
+              },
+              "provenance" => "codex_jsonl_transport",
+              "reset_hint_seconds" => 30
+            }
+            assert context.publish_provider_signal(signal)
+            assert_equal signal, Hive::Attempts::EvidenceChannel.read(
+              evidence_reader, route: routing.fetch("route")
+            )
+          end
+        end
+      end
+    ensure
+      [ evidence_reader, evidence_writer ].compact.each do |io|
+        io.close unless io.closed?
+      rescue Errno::EBADF
+        nil
+      end
+    end
+  end
+
   def test_forged_capability_and_cross_task_binding_fail_closed
     with_running_attempt do |store, _record|
       resolver = Struct.new(:task) { def resolve = task }.new(
@@ -198,6 +237,43 @@ class AttemptsContextTest < Minitest::Test
     )
     with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, ->(**) { current_epoch }) do
       assert_raises(Hive::ConcurrentRunError) { epoch_stale.validate_generation!(task) }
+    end
+
+    successor = Hive::Attempts::Context.send(
+      :new,
+      attempt_id: "attempt-successor",
+      task_generation: 2,
+      ownership_generation: "generation-predecessor",
+      project: "demo",
+      intended_stage: "4-execute",
+      progress_token: "post-clear-progress",
+      predecessor_attempt_id: "attempt-predecessor"
+    )
+    current_successor = Struct.new(
+      :ownership_generation, :task_input_epoch, :progress_token
+    ).new("generation-after-marker-clear", 2, "post-clear-progress")
+    with_replaced_singleton_method(
+      Hive::Attempts::Generation, :resolve, ->(**) { current_successor }
+    ) do
+      assert successor.validate_generation!(task)
+    end
+
+    stale_successor = Hive::Attempts::Context.send(
+      :new,
+      attempt_id: "attempt-successor-stale",
+      task_generation: 2,
+      ownership_generation: "generation-predecessor",
+      project: "demo",
+      intended_stage: "4-execute",
+      progress_token: "admitted-progress",
+      predecessor_attempt_id: "attempt-predecessor"
+    )
+    with_replaced_singleton_method(
+      Hive::Attempts::Generation, :resolve, ->(**) { current_successor }
+    ) do
+      assert_raises(Hive::ConcurrentRunError) do
+        stale_successor.validate_generation!(task)
+      end
     end
   end
 
@@ -335,7 +411,7 @@ class AttemptsContextTest < Minitest::Test
     }
   end
 
-  def with_running_attempt
+  def with_running_attempt(routing: { "mode" => "legacy" })
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
       record = store.create_launching(
@@ -345,7 +421,7 @@ class AttemptsContextTest < Minitest::Test
         progress_token: "progress", provider: "codex",
         worker_argv: WORKER_ARGV,
         claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
-        starting_revision: nil, retry_charge: 0, inherited_outputs: [],
+        starting_revision: nil, retry_charge: 0, inherited_outputs: [], routing: routing,
         launch_timeout_sec: 30, now: Time.now.utc
       )
       identity = {

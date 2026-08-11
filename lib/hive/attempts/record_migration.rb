@@ -57,7 +57,7 @@ module Hive
 
       def deep_copy(value)
         JSON.parse(JSON.generate(value))
-      rescue JSON::GeneratorError, TypeError => error
+      rescue JSON::GeneratorError, JSON::NestingError, TypeError => error
         raise InvalidRecord, "attempt record is not JSON-safe: #{error.message}"
       end
       private_class_method :deep_copy

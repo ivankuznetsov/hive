@@ -355,7 +355,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
         store = Hive::ImplementationIdentity::Store.new(
           task: task, cfg: execute_config("codex", "gpt-5.6-sol")
         )
-        assert_equal File.join(root, "attempts", "v3"),
+        assert_equal File.join(root, "attempts", "v4"),
                      store.instance_variable_get(:@attempt_store).root
       end
       assert File.file?(File.join(root, "attempts", "v2"))

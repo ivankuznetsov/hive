@@ -30,6 +30,16 @@ class AttemptsRecordMigrationTest < Minitest::Test
     end
   end
 
+  def test_non_json_safe_recursive_input_is_rejected_before_schema_interpretation
+    recursive = []
+    recursive << recursive
+
+    error = assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::RecordMigration.convert_v3(recursive)
+    end
+    assert_includes error.message, "not JSON-safe"
+  end
+
   private
 
   def v3_attempt

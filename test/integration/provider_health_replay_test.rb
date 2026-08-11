@@ -242,6 +242,142 @@ class ProviderHealthReplayTest < Minitest::Test
     assert_empty Dir.glob(File.join(@root, "intents", "*.json"))
   end
 
+  def test_unresolved_intent_blocks_selection_and_stale_probe_claims
+    open_scope(provider_scope, evidence(provider_scope, reset_hint_seconds: 0))
+    evaluation = @store.evaluate_route(
+      account_id: "codex-primary", model_id: "gpt-5.6-sol", now: @clock
+    )
+    intent = probe_intent(evaluation.probe_requirements)
+    crashing = store(
+      fault_injector: lambda do |phase, _context|
+        raise "simulated crash" if phase == :intent_persisted
+      end
+    )
+
+    assert_raises(RuntimeError) do
+      crashing.with_probe_intent(intent: intent) { flunk "attempt must not persist" }
+    end
+    blocked = store.evaluate_route(
+      account_id: "codex-primary", model_id: "gpt-5.6-sol", now: @clock
+    )
+    assert_equal [ "half_open_probe_owned" ],
+                 blocked.blockers.map { |entry| entry.fetch("reason") }
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      store.with_route_admission(evaluation: evaluation, intent: intent) { flunk }
+    end
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      store.with_probe_intent(intent: intent) { flunk }
+    end
+    competing = Hive::ProviderHealth::ProbeIntent.new(
+      intent_id: "intent-2", attempt_id: intent.attempt_id,
+      task_generation: intent.task_generation,
+      ownership_fence: intent.ownership_fence,
+      requirements: intent.requirements
+    )
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      store.with_probe_intent(intent: competing) { flunk }
+    end
+
+    store.reconcile!
+    stale = Hive::ProviderHealth::ProbeRequirement.new(
+      scope: provider_scope, journal_epoch: 0, observed_generation: 0
+    )
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      store.with_probe_intent(intent: probe_intent([ stale ])) { flunk }
+    end
+  end
+
+  def test_restart_reconciles_a_terminal_hash_attempt_and_reopens_its_claim
+    open_scope(provider_scope, evidence(provider_scope, reset_hint_seconds: 0))
+    evaluation = @store.evaluate_route(
+      account_id: "codex-primary", model_id: "gpt-5.6-sol", now: @clock
+    )
+    intent = probe_intent(evaluation.probe_requirements)
+    crashing = store(
+      fault_injector: lambda do |phase, _context|
+        raise "simulated crash" if phase == :claim_persisted
+      end
+    )
+    admitted = nil
+    assert_raises(RuntimeError) do
+      crashing.with_probe_intent(intent: intent) do |bindings|
+        admitted = build_attempt(probe_bindings: bindings)
+        @attempts[intent.attempt_id] = admitted
+      end
+    end
+    @attempts[intent.attempt_id] = {
+      "attempt_id" => admitted.attempt_id,
+      "task_generation" => admitted.task_generation,
+      "ownership_fence" => admitted.ownership_fence,
+      "probe_bindings" => admitted.probe_bindings.map(&:to_h),
+      "state" => "terminal"
+    }
+
+    result = store.reconcile!.fetch(0).fetch(0)
+
+    assert result.accepted?
+    assert_equal "probe_reconciled", result.reason
+    assert_equal "open", store.inspect_scope(provider_scope).circuit.automatic_state
+    assert_empty Dir.glob(File.join(@root, "intents", "*.json"))
+  end
+
+  def test_restart_recognizes_an_already_claimed_live_hash_attempt
+    open_scope(provider_scope, evidence(provider_scope, reset_hint_seconds: 0))
+    evaluation = @store.evaluate_route(
+      account_id: "codex-primary", model_id: "gpt-5.6-sol", now: @clock
+    )
+    intent = probe_intent(evaluation.probe_requirements)
+    crashing = store(
+      fault_injector: lambda do |phase, _context|
+        raise "simulated crash" if phase == :claim_persisted
+      end
+    )
+    admitted = nil
+    assert_raises(RuntimeError) do
+      crashing.with_probe_intent(intent: intent) do |bindings|
+        admitted = build_attempt(probe_bindings: bindings)
+        @attempts[intent.attempt_id] = admitted
+      end
+    end
+    @attempts[intent.attempt_id] = {
+      "attempt_id" => admitted.attempt_id,
+      "task_generation" => admitted.task_generation,
+      "ownership_fence" => admitted.ownership_fence,
+      "probe_bindings" => admitted.probe_bindings.map(&:to_h),
+      "state" => "running"
+    }
+
+    result = store.reconcile!.fetch(0).fetch(0)
+
+    assert result.duplicate?
+    assert_equal "probe_already_claimed", result.reason
+    assert_equal 2, store.inspect_scope(provider_scope).generation
+  end
+
+  def test_restart_fails_closed_when_a_live_intent_scope_advanced_without_its_claim
+    open_scope(provider_scope, evidence(provider_scope, reset_hint_seconds: 0))
+    evaluation = @store.evaluate_route(
+      account_id: "codex-primary", model_id: "gpt-5.6-sol", now: @clock
+    )
+    intent = probe_intent(evaluation.probe_requirements)
+    crashing = store(
+      fault_injector: lambda do |phase, _context|
+        raise "simulated crash" if phase == :intent_persisted
+      end
+    )
+    assert_raises(RuntimeError) do
+      crashing.with_probe_intent(intent: intent) { flunk }
+    end
+    bindings = store.send(:load_intents).fetch(0).fetch(:bindings)
+    @attempts[intent.attempt_id] = build_attempt(probe_bindings: bindings)
+    @store.block(
+      scope: provider_scope, expected_generation: 1,
+      actor: "uid:1000", reason: "advance scope before replay"
+    )
+
+    assert_raises(Hive::ProviderHealth::Unavailable) { store.reconcile! }
+  end
+
   private
 
   def store(**options)

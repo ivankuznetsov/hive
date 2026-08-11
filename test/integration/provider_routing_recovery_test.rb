@@ -95,6 +95,7 @@ class ProviderRoutingRecoveryTest < Minitest::Test
       assert_equal terminal.attempt_id, successor.attempt["predecessor_attempt_id"]
       assert_equal terminal.task_generation, successor.attempt.task_generation
       assert_equal policy.digest, successor.attempt["routing"].fetch("policy_digest")
+      assert_equal 1, successor.attempt["retry_charge"]
       assert_equal 2, attempts.scan.records.size
       assert_equal 1,
                    Hive::Daemon::DispatchRequestQueue.pending(state_home: root).size

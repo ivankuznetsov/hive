@@ -65,6 +65,35 @@ class AgentProfilesErrorNormalizersTest < Minitest::Test
     refute_includes JSON.generate(normalize(first)), "secret"
   end
 
+  def test_provider_diagnostic_channel_is_explicit_and_conservative
+    diagnostic = error("provider_outage", "provider_account").merge(
+      "type" => "provider_diagnostic"
+    )
+    signal = Hive::AgentProfiles::ErrorNormalizers.normalize_diagnostic(
+      diagnostic: diagnostic, route: ROUTE
+    )
+    assert_equal "provider_diagnostic", signal.fetch("provenance")
+    assert_nil Hive::AgentProfiles::ErrorNormalizers.normalize_diagnostic(
+      diagnostic: { "type" => "assistant" }, route: ROUTE
+    )
+
+    explosive = Object.new
+    explosive.define_singleton_method(:to_s) { raise ArgumentError, "invalid identifier" }
+    assert_nil Hive::AgentProfiles::ErrorNormalizers.normalize_diagnostic(
+      diagnostic: diagnostic, route: ROUTE.merge("provider_account_id" => explosive)
+    )
+  end
+
+  def test_transport_normalization_swallows_invalid_scalar_coercion
+    explosive = Object.new
+    explosive.define_singleton_method(:to_s) { raise TypeError, "invalid identifier" }
+
+    assert_nil Hive::AgentProfiles::ErrorNormalizers.normalize(
+      adapter: "codex", event: codex_event(error("provider_outage", "provider_account")),
+      route: ROUTE.merge("provider_account_id" => explosive)
+    )
+  end
+
   private
 
   def normalize(event)

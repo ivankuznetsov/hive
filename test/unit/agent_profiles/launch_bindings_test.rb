@@ -55,6 +55,11 @@ class AgentProfilesLaunchBindingsTest < Minitest::Test
         adapter: "unknown", binding_id: "default", environment: {}
       )
     end
+    assert_raises(Hive::ConfigError) do
+      Hive::AgentProfiles::LaunchBindings.resolve(
+        adapter: "codex", binding_id: "Invalid!", environment: {}
+      )
+    end
   end
 
   def test_preflight_environment_is_restored

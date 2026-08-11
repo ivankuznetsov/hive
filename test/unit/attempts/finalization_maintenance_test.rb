@@ -377,6 +377,19 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     assert_equal 47, resolver.call(evidence)
   end
 
+  def test_runtime_cooldown_resolver_falls_back_when_attempt_storage_is_unavailable
+    store = Object.new
+    store.define_singleton_method(:fetch) do |_attempt_id|
+      raise Hive::Attempts::StoreError, "attempt store unavailable"
+    end
+    evidence = Struct.new(:attempt_id).new("attempt-1")
+
+    resolver = Hive::Attempts::FinalizationMaintenance.cooldown_resolver(store)
+
+    assert_equal Hive::ProviderHealth::Store::DEFAULT_COOLDOWN_SECONDS,
+                 resolver.call(evidence)
+  end
+
   def test_promotion_rejects_a_mismatched_permanent_proof
     with_store do |store|
       terminal = terminal_attempt(store)

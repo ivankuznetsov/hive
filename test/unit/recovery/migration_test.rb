@@ -177,6 +177,39 @@ class RecoveryMigrationTest < Minitest::Test
     end
   end
 
+  def test_live_attempt_with_reused_pid_is_recoverable_as_an_identity_mismatch
+    running = current_attempt(
+      attempt_id: "reused-pid", accepted_at: NOW - 10
+    ).merge(
+      "state" => "running",
+      "lease_version" => 2,
+      "claim_deadline" => nil,
+      "heartbeat_deadline" => (NOW + 30).iso8601(6),
+      "wrapper" => {
+        "pid" => 1234,
+        "start_fingerprint" => "previous-process",
+        "session_id" => 1234,
+        "process_group_id" => 1234
+      },
+      "heartbeat_at" => (NOW - 1).iso8601(6),
+      "started_at" => (NOW - 5).iso8601(6)
+    )
+    identity = Object.new
+    identity.define_singleton_method(:status) { |_wrapper| :mismatched }
+    migration = Hive::Recovery::Migration.new(
+      state_home: "/unused", process_identity: identity
+    )
+
+    loss = migration.send(
+      :recoverable_prior_live_loss,
+      Hive::Attempts::Record.new(running),
+      now: NOW
+    )
+
+    assert_equal "owner_identity_mismatch", loss.fetch("reason")
+    assert_equal "mismatched", loss.fetch("owner_status")
+  end
+
   def test_refuses_mixed_roots_symlinks_and_fence_collisions
     with_tmp_dir do |state_home|
       write_v3_record(state_home, lost_attempt(current_attempt(attempt_id: "old")))
@@ -283,6 +316,18 @@ class RecoveryMigrationTest < Minitest::Test
 
       error = assert_raises(Hive::Recovery::Migration::Error) { migrate(state_home) }
       assert_includes error.message, "cutover checkpoint is incomplete"
+    end
+
+    with_tmp_dir do |state_home|
+      write_checkpoint(state_home, phase: "fenced")
+      path = File.join(state_home, "attempts", ".v4-cutover.json")
+      write_json(path, read_json(path).merge("recovered_live_count" => -1))
+      migration = Hive::Recovery::Migration.new(state_home: state_home)
+
+      error = assert_raises(Hive::Recovery::Migration::Error) do
+        migration.send(:read_checkpoint!)
+      end
+      assert_includes error.message, "cutover checkpoint is invalid"
     end
   end
 

@@ -99,6 +99,8 @@ class ProviderRoutingValueObjectsTest < Minitest::Test
 
   def test_request_decision_and_canonical_values_reject_invalid_inputs
     assert_equal %({"kind":"probe"}), Hive::ProviderRouting.canonical_json(kind: :probe)
+    assert_equal({ "tools" => [], "permissions" => [] },
+                 Hive::ProviderRouting.profile_capability_limits("future-agent"))
     assert_raises(ArgumentError) do
       Hive::ProviderRouting::Request.new(policy: Object.new, task_generation: "generation-1")
     end

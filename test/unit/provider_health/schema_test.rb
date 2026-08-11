@@ -50,6 +50,24 @@ class ProviderHealthSchemaTest < Minitest::Test
     refute_empty event_schema.validate(event).to_a
   end
 
+  def test_snapshot_event_rejects_an_unexpected_state_shape
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      Hive::ProviderHealth::Event.new(
+        event_id: "snapshot-1",
+        sequence: 1,
+        scope: scope,
+        journal_epoch: 0,
+        kind: "snapshot",
+        occurred_at: Time.utc(2026, 8, 10),
+        idempotency_key: "a" * 64,
+        expected_generation: 0,
+        previous_generation: 0,
+        resulting_generation: 0,
+        payload: { "state" => { "future" => true } }
+      )
+    end
+  end
+
   private
 
   def scope

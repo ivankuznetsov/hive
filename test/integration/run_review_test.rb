@@ -1246,13 +1246,35 @@ class RunReviewTest < Minitest::Test
 
           __orig_provider_mark_working(_task, phase: phase, pass: pass)
         end
+        context = Hive::Attempts::Context.send(
+          :new,
+          attempt_id: "attempt-route-failed",
+          task_generation: 1,
+          ownership_generation: "owner-route-failed",
+          routing: {
+            "mode" => "explicit",
+            "policy_digest" => "a" * 64,
+            "decision" => {},
+            "route" => {
+              "provider_account_id" => "codex-a",
+              "route_id" => "codex-a/codex-e2e-model"
+            },
+            "circuit_generations" => [],
+            "probe_bindings" => []
+          }
+        )
+        context.define_singleton_method(:validate_generation!) { |_task| true }
 
         begin
-          assert_raises(Hive::ProviderRouteFailed) { Hive::Commands::Run.new(folder).call }
+          with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+            assert_raises(Hive::ProviderRouteFailed) { Hive::Commands::Run.new(folder).call }
+          end
           marker = Hive::Markers.current(File.join(folder, "task.md"))
           assert_equal :review_error, marker.name
           assert_equal "ci", marker.attrs["phase"]
           assert_equal "provider_route_failed", marker.attrs["reason"]
+          assert_equal "codex-a", marker.attrs["provider_account_id"]
+          assert_equal "codex-a/codex-e2e-model", marker.attrs["route_id"]
           refute marker.attrs.key?("exception_class")
         ensure
           Hive::Stages::Review.singleton_class.alias_method(

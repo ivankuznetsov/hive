@@ -49,6 +49,26 @@ class ProviderRoutingPolicyStoreTest < Minitest::Test
     end
   end
 
+  def test_snapshot_can_be_point_read_without_the_original_candidate
+    candidate = policy(model: "gpt-5.6-sol")
+    @store.fetch_or_store(
+      ownership_generation: ownership_generation,
+      subject: subject,
+      policy: candidate
+    )
+
+    fetched = @store.fetch_snapshot(
+      ownership_generation: ownership_generation,
+      subject: subject
+    )
+
+    assert_equal candidate.to_h, fetched.to_h
+    assert_nil @store.fetch_snapshot(
+      ownership_generation: "missing-generation",
+      subject: subject
+    )
+  end
+
   def test_same_point_is_first_writer_wins_while_a_new_generation_can_change
     first = policy(model: "gpt-5.6-sol")
     changed = policy(model: "gpt-5.6-terra")

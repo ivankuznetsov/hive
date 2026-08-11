@@ -87,11 +87,13 @@ module Hive
       unless @error_class.is_a?(Class) && @error_class <= StandardError
         raise ArgumentError, "point storage error class must be an exception class"
       end
-      @directory = Hive::ManagedDirectory.new(root: @root, label: @label)
-      @directory.prepare! if create_directories
-    rescue Hive::ManagedDirectory::UnsafeError,
-           SystemCallError, IOError, ArgumentError, TypeError => error
-      unavailable!(error)
+      begin
+        @directory = Hive::ManagedDirectory.new(root: @root, label: @label)
+        @directory.prepare! if create_directories
+      rescue Hive::ManagedDirectory::UnsafeError,
+             SystemCallError, IOError, ArgumentError, TypeError => error
+        unavailable!(error)
+      end
     end
 
     def path_for(kind, key)

@@ -78,7 +78,10 @@ All other cataloged components depend only on explicitly allowed lower-level
 Hive primitives. Provider Health uses `Hive::OutputReference`, while Provider
 Routing Policy uses `Hive::PointStorage`; their compatibility names under
 `Hive::Attempts` remain for existing Attempts callers but do not create upward
-component edges. The source audit found no retained experimental facade outside
+component edges. `Hive::PointStorage` requires its caller-supplied domain error
+class to inherit from `StandardError`; invalid boundary configuration raises
+`ArgumentError` before managed-directory failures can be translated through it.
+The source audit found no retained experimental facade outside
 the catalog: each promoted facade is owned by a catalog row and used by Hive,
 while Provider Health, Provider Routing Policy, Provider Routing Operations,
 Attempts, and Patrol Effect Evidence are deliberately retained as guarded

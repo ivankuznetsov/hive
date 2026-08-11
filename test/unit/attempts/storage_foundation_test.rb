@@ -345,6 +345,11 @@ class AttemptsStorageFoundationTest < Minitest::Test
     assert_raises(Hive::Attempts::StoreError) do
       Hive::Attempts::StorageKey.string("\xFF".b)
     end
+    assert_raises(ArgumentError) do
+      Hive::PointStorage.new(
+        root: "/unused", label: "test point", error_class: Object
+      )
+    end
 
     replacement = ->(**) { raise ArgumentError, "bad root" }
     with_replaced_singleton_method(Hive::ManagedDirectory, :new, replacement) do

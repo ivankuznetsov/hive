@@ -197,6 +197,17 @@ class CommandsCircuitsTest < Minitest::Test
     end
   end
 
+  def test_human_inspection_renders_multiple_corrupt_probe_intent_tokens
+    File.binwrite(File.join(@health.root, "intents", "first.json"), "{")
+    File.binwrite(File.join(@health.root, "intents", "second.json"), "[")
+
+    stdout, = capture_io { command("list", json: false).call }
+
+    assert_includes stdout, "2 corrupt artifacts"
+    assert_includes stdout, "probe-intent first.json repair_fingerprint="
+    assert_includes stdout, "probe-intent second.json repair_fingerprint="
+  end
+
   def test_fractional_generation_and_model_without_provider_are_rejected
     assert_raises(Hive::Commands::Circuits::UsageError) do
       command(
@@ -242,6 +253,12 @@ class CommandsCircuitsTest < Minitest::Test
       command(
         "block", yes: true, reason: "maintenance", expected_generation: 0,
         journal_epoch: 0
+      ).call
+    end
+    assert_raises(Hive::Commands::Circuits::UsageError) do
+      command(
+        "block", yes: true, reason: "maintenance", expected_generation: 0,
+        intent_file: "bad.json"
       ).call
     end
     assert_raises(Hive::Commands::Circuits::UsageError) do

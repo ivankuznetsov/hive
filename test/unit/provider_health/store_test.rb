@@ -745,6 +745,224 @@ class ProviderHealthStoreTest < Minitest::Test
                  Dir.glob(File.join(@root, "idempotency", "**", "shards", "*.json")).size
   end
 
+  def test_probe_intent_repair_tokens_reject_invalid_stale_and_healthy_artifacts
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.reset_probe_intent(
+        intent_file: "../bad.json", corruption_fingerprint: "a" * 64,
+        actor: "uid:1000", reason: "reject unsafe token"
+      )
+    end
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.reset_probe_intent(
+        intent_file: "bad.json", corruption_fingerprint: "not-a-digest",
+        actor: "uid:1000", reason: "reject malformed fingerprint"
+      )
+    end
+
+    corrupt_path = File.join(@root, "intents", "bad.json")
+    File.binwrite(corrupt_path, "{")
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      @store.reset_probe_intent(
+        intent_file: "bad.json", corruption_fingerprint: "b" * 64,
+        actor: "uid:1000", reason: "reject stale fingerprint"
+      )
+    end
+
+    requirement = Hive::ProviderHealth::ProbeRequirement.new(
+      scope: provider_scope, journal_epoch: 0, observed_generation: 0
+    )
+    intent = probe_intent(requirements: [ requirement ])
+    binding = Hive::ProviderHealth::ProbeBinding.new(
+      scope: provider_scope, journal_epoch: 0, observed_generation: 0,
+      claim_generation: 1, attempt_id: intent.attempt_id,
+      task_generation: intent.task_generation, ownership_fence: intent.ownership_fence
+    )
+    @store.send(:persist_intent, intent, [ binding ])
+    healthy_name = File.basename(@store.send(:intent_path, intent.intent_id))
+    healthy_path = File.join(@root, "intents", healthy_name)
+    healthy_bytes = File.binread(healthy_path)
+
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.send(:parse_named_intent, "wrong-name.json", healthy_bytes)
+    end
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      @store.reset_probe_intent(
+        intent_file: healthy_name,
+        corruption_fingerprint: Hive::ProviderHealth.digest(healthy_bytes),
+        actor: "uid:1000", reason: "reject healthy artifact"
+      )
+    end
+  end
+
+  def test_route_inputs_and_unavailable_admission_observations_fail_closed
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.evaluate_routes(routes: [ Object.new ])
+    end
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      @store.evaluate_routes(routes: [ {} ])
+    end
+
+    evaluation = @store.evaluate_route(
+      account_id: route.account_id, model_id: route.model_id
+    )
+    @store.define_singleton_method(:validate_route_evaluation!) do |_evaluation|
+      raise Hive::ProviderHealth::Unavailable, "observation unavailable"
+    end
+
+    error = assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      @store.with_route_admission(evaluation: evaluation) { flunk }
+    end
+    assert_equal "provider-health route observation is unavailable", error.message
+  end
+
+  def test_probe_intent_scan_is_bounded_before_reading_an_extra_artifact
+    directory = @store.instance_variable_get(:@directory)
+    directory.define_singleton_method(:each_child) do |_relative, missing:, &block|
+      raise "expected missing-aware scan" unless missing
+
+      (Hive::ProviderHealth::Store::MAX_INTENT_FILES + 1).times do |index|
+        block.call("intent-#{index}.json")
+      end
+    end
+    directory.define_singleton_method(:read) { |*, **| "{" }
+
+    assert_raises(Hive::ProviderHealth::Unavailable) do
+      @store.send(:scan_intents)
+    end
+  end
+
+  def test_oversized_event_is_rejected_even_after_compaction
+    replay_class = Hive::ProviderHealth::Store.const_get(:Replay, false)
+    replay = replay_class.new(
+      circuit: Hive::ProviderHealth::Circuit.closed(scope: provider_scope),
+      events: [],
+      bytes: "x" * Hive::ProviderHealth::Store::MAX_JOURNAL_BYTES,
+      existed: false
+    )
+    event = Hive::ProviderHealth::Event.new(
+      event_id: "oversized-event", sequence: 1, scope: provider_scope,
+      journal_epoch: 0, kind: "evidence_rejected", occurred_at: @clock,
+      idempotency_key: "a" * 64, expected_generation: 0,
+      previous_generation: 0, resulting_generation: 0,
+      payload: { "reason" => "stale_generation" }
+    )
+    @store.define_singleton_method(:compact_replay) { |_candidate| replay }
+
+    assert_raises(Hive::ProviderHealth::Unavailable) do
+      @store.send(:persist_event, replay, event)
+    end
+  end
+
+  def test_compacted_journal_archive_rejects_a_digest_path_collision
+    replay_class = Hive::ProviderHealth::Store.const_get(:Replay, false)
+    replay = replay_class.new(
+      circuit: Hive::ProviderHealth::Circuit.closed(scope: provider_scope),
+      events: [], bytes: "verified-journal", existed: true
+    )
+    digest = Hive::ProviderHealth.digest(replay.bytes)
+    archive = File.join(
+      @root, "history", "provider-account", provider_scope.key,
+      "0-0-#{digest}.jsonl"
+    )
+    FileUtils.mkdir_p(File.dirname(archive))
+    File.binwrite(archive, "conflicting-journal")
+
+    assert_raises(Hive::ProviderHealth::Unavailable) do
+      @store.send(:archive_compacted_journal, replay)
+    end
+  end
+
+  def test_compacted_idempotency_indexes_reject_collisions_oversize_and_corruption
+    replay_class = Hive::ProviderHealth::Store.const_get(:Replay, false)
+    compacted_event = Struct.new(:idempotency_key, :event_id, :payload)
+    key = Hive::ProviderHealth.digest("collision")
+    first = replay_class.new(
+      circuit: Hive::ProviderHealth::Circuit.closed(scope: provider_scope),
+      events: [ compacted_event.new(key, "event-1", {}) ],
+      bytes: "first", existed: false
+    )
+    @store.send(:persist_compacted_idempotency, first)
+    conflicting = replay_class.new(
+      circuit: first.circuit,
+      events: [ compacted_event.new(key, "event-2", {}) ],
+      bytes: "second", existed: false
+    )
+    assert_raises(Hive::ProviderHealth::Unavailable) do
+      @store.send(:persist_compacted_idempotency, conflicting)
+    end
+
+    oversized = replay_class.new(
+      circuit: Hive::ProviderHealth::Circuit.closed(scope: model_scope),
+      events: [ compacted_event.new(Hive::ProviderHealth.digest("oversized"), "event-3", {}) ],
+      bytes: "oversized", existed: false
+    )
+    replacement = lambda do |_value|
+      "x" * Hive::ProviderHealth::Store::MAX_IDEMPOTENCY_SHARD_BYTES
+    end
+    with_replaced_singleton_method(Hive::ProviderHealth, :canonical_json, replacement) do
+      assert_raises(Hive::ProviderHealth::Unavailable) do
+        @store.send(:persist_compacted_idempotency, oversized)
+      end
+    end
+
+    legacy_key = Hive::ProviderHealth.digest("legacy")
+    legacy_directory = File.join(
+      @root, @store.send(:idempotency_directory, model_scope)
+    )
+    FileUtils.mkdir_p(legacy_directory)
+    legacy_path = File.join(legacy_directory, "#{legacy_key}.json")
+    File.binwrite(legacy_path, JSON.generate(
+      "idempotency_key" => legacy_key, "event_id" => "legacy-event"
+    ))
+    assert_equal "legacy-event",
+                 @store.send(:compacted_idempotency, model_scope, legacy_key).fetch("event_id")
+
+    File.binwrite(legacy_path, JSON.generate("idempotency_key" => legacy_key))
+    assert_raises(Hive::ProviderHealth::Unavailable) do
+      @store.send(:compacted_idempotency, model_scope, legacy_key)
+    end
+    File.binwrite(legacy_path, "{")
+    assert_raises(Hive::ProviderHealth::Unavailable) do
+      @store.send(:compacted_idempotency, model_scope, legacy_key)
+    end
+
+    shard_payloads = [
+      JSON.generate({}),
+      JSON.generate(
+        "schema" => Hive::ProviderHealth::Store::IDEMPOTENCY_SHARD_SCHEMA,
+        "schema_version" => 1,
+        "entries" => { "not-a-digest" => "event-1" }
+      ),
+      "{"
+    ]
+    shard_payloads.each do |payload|
+      assert_raises(Hive::ProviderHealth::Unavailable) do
+        @store.send(:parse_idempotency_shard, payload)
+      end
+    end
+  end
+
+  def test_live_probe_intent_is_fenced_when_its_observed_generation_has_moved
+    requirement = Hive::ProviderHealth::ProbeRequirement.new(
+      scope: provider_scope, journal_epoch: 0, observed_generation: 1
+    )
+    intent = probe_intent(requirements: [ requirement ])
+    binding = Hive::ProviderHealth::ProbeBinding.new(
+      scope: provider_scope, journal_epoch: 0, observed_generation: 1,
+      claim_generation: 2, attempt_id: intent.attempt_id,
+      task_generation: intent.task_generation, ownership_fence: intent.ownership_fence
+    )
+    @attempts[intent.attempt_id] = build_attempt(probe_bindings: [ binding ])
+
+    results = @store.send(
+      :reconcile_intent,
+      { intent: intent, bindings: [ binding ].freeze }.freeze
+    )
+
+    assert_equal "probe_intent_fenced", results.fetch(0).reason
+    assert_equal 0, results.fetch(0).generation
+  end
+
   private
 
   def build_store(**options)

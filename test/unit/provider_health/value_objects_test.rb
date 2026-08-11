@@ -97,6 +97,9 @@ class ProviderHealthValueObjectsTest < Minitest::Test
                  Hive::ProviderHealth.canonical_json(at: at, kind: :probe)
     assert_equal Hive::ProviderHealth.digest("raw-bytes"),
                  Hive::ProviderRouting.digest("raw-bytes")
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      Hive::ProviderHealth.circuit_observation(Object.new)
+    end
   end
 
   def test_default_factory_uses_the_typed_store

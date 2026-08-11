@@ -6,6 +6,12 @@ class AttemptsEntrypointTest < Minitest::Test
 
   FakeTask = Struct.new(:slug, :project_root, :project_name, keyword_init: true)
 
+  def test_state_home_falls_back_when_an_injected_store_has_no_root
+    entrypoint = Hive::Attempts::Entrypoint.new(store: Object.new)
+
+    assert_equal Hive::Paths.state_home, entrypoint.send(:state_home_for, Object.new)
+  end
+
   def test_dispatch_attaches_to_resolved_attempt
     task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
     attempt = Struct.new(:attempt_id).new("attempt-1")

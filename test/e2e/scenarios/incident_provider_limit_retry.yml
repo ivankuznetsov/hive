@@ -9,21 +9,21 @@ sibling_task_id: "#9770"
 pending: false
 
 steps:
-  - kind: cli
-    args: [new, "{project}", "provider route fallback"]
+  - kind: seed_state
+    stage: 3-plan
+    slug: provider-route-fallback
+    state_file: plan.md
+    content: "# Plan\n\nImplement provider fallback.\n\n<!-- COMPLETE -->\n"
+    files:
+      - path: meta.yml
+        content: |
+          id: 9770
+          slug: provider-route-fallback
+          display_name: Provider route fallback
 
   - kind: ruby_block
     description: Seed the implementation-ready boundary, opt it into an ordered Codex-to-Claude pool, and shorten the daemon poll for the hermetic incident.
     block: |
-      inbox = File.join(sandbox, ".hive-state", "stages", "1-inbox", slug)
-      plan = File.join(sandbox, ".hive-state", "stages", "3-plan", slug)
-      FileUtils.mkdir_p(File.dirname(plan))
-      FileUtils.mv(inbox, plan)
-      File.write(
-        File.join(plan, "plan.md"),
-        "# Plan\n\nImplement provider fallback.\n\n<!-- COMPLETE -->\n"
-      )
-
       global_path = File.join(run_home, "config.yml")
       global = YAML.safe_load(File.read(global_path)) || {}
       global["providers"] = {
@@ -52,6 +52,13 @@ steps:
       project_path = File.join(sandbox, ".hive-state", "config.yml")
       project = YAML.safe_load(File.read(project_path)) || {}
       project["daemon"] = (project["daemon"] || {}).merge("enabled" => true)
+      project["patrol"] = (project["patrol"] || {}).merge(
+        "mode" => "off",
+        "enabled" => false
+      )
+      project["refactor_patrol"] = (project["refactor_patrol"] || {}).merge(
+        "enabled" => false
+      )
       project.fetch("execute")["routing"] = {
         "pool" => [
           {

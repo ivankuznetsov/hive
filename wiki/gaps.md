@@ -171,13 +171,14 @@ stable class and scope.
   registry CI against a disposable package; that evidence must not merge,
   approve, or list the package automatically.
 - The built-in `bench` descriptor, packaged stage instructions, self-contained
-  runtime snapshot, and `hive init . --workflow bench` path are covered locally,
-  but they have not yet shipped in a Hive release or completed a live
-  paid-provider campaign from a fresh standalone benchmark project. Honeycomb
-  is not a dependency of this named-workflow path.
-- The packaged mixed Sol/Terra/Grok profiles, stage-specific Codex shim, sole
-  Sol `ce-code-review` policy, and combined Sol-runner selection are locally
-  test-pinned but still need their first paid end-to-end cell.
+  runtime snapshot, and `hive init . --workflow bench` path ship in Hive 0.7.0.
+  The live Opus/Fable campaign is now a task in the one registered `hive-bench`
+  project, but it has not completed a paid end-to-end cell. A separate
+  campaign-specific Hive project is no longer an intended validation target.
+  Honeycomb is not a dependency of this named-workflow path.
+- The packaged mixed Sol/Terra/Grok and Opus/Fable profiles, provider-neutral
+  model routes, explicit reviewer identities, and combined Sol-runner selection
+  are locally test-pinned but still need their first paid end-to-end cell.
 
 ## Internal component boundary gap
 

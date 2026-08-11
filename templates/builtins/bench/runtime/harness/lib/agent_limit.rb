@@ -24,6 +24,11 @@ module HiveBench
     ].freeze
 
     LIMIT = [
+      # Claude Code 2.1.220 emits a structured event rather than quota prose
+      # when a request is rejected at the account window. Require both the
+      # event type and rejected status so informational rate-limit events do
+      # not park healthy cells.
+      /"type"\s*:\s*"rate_limit_event"[^\n]*"status"\s*:\s*"rejected"/i,
       /(?:hit|reached) your (?:usage|session) limit/i,
       /stop and wait for limit to reset/i,
       /(?:out of|no remaining|purchase(?:\s+more)?) usage credits/i,

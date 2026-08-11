@@ -46,10 +46,11 @@ module HiveBench
           # counters (total_tokens), not billing buckets — both are skipped.
           next if %w[result system].include?(obj["type"])
 
-          usage = obj["usage"] || obj.dig("message", "usage")
+          message = obj["message"]
+          usage = obj["usage"] || (message["usage"] if message.is_a?(Hash))
           next unless usage.is_a?(Hash)
 
-          model = obj["model"] || obj.dig("message", "model") || stage_models[stage] || "unknown"
+          model = obj["model"] || (message["model"] if message.is_a?(Hash)) || stage_models[stage] || "unknown"
           next if model == "<synthetic>"
 
           add_usage(per_model[model], usage)

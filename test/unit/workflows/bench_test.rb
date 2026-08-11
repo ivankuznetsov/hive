@@ -81,6 +81,20 @@ class WorkflowsBenchTest < Minitest::Test
     assert_path_exists File.join(runtime, "Dockerfile.runner")
   end
 
+  def test_packaged_runtime_uses_hive_model_routing_for_flagship_candidates
+    runtime = Hive::Workflows::Bench::RUNTIME_DIR
+    config = File.read(File.join(runtime, "harness", "lib", "hive_config.rb"))
+    stages = File.read(File.join(runtime, "harness", "lib", "hive_stages.sh"))
+    candidates = File.read(File.join(runtime, "harness", "profiles", "candidates.rb"))
+
+    assert_includes config, 'config["models"] = models'
+    assert_includes config, '"review_reviewers"'
+    refute_includes stages, "HB_CODEX_MODEL_"
+    refute_includes stages, "HB_GROK_MODEL"
+    assert_includes candidates, "opus-5-plan@xhigh->sol-exec@high+sol-opus-review"
+    assert_includes candidates, "fable-5-plan@xhigh->sol-exec@high+sol-opus-review"
+  end
+
   def test_failed_rollback_warns_without_masking_the_original_install_error
     ops = Object.new
     ops.define_singleton_method(:hive_state_path) { "/unused/hive-state" }

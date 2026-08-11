@@ -79,7 +79,7 @@
       "type": "string",
       "enum": [
         "hard_pin_mismatch", "requirements_incompatible", "manual_block",
-        "circuit_cooldown", "half_open_probe_owned",
+        "circuit_open", "circuit_cooldown", "half_open_probe_owned",
         "provider_concurrency_saturated", "health_state_unavailable"
       ]
     },
@@ -185,7 +185,7 @@
         "exclusions": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 2,
+          "maxItems": 4,
           "items": { "$ref": "#/$defs/AdmissionExclusion" }
         },
         "capacity": {
@@ -279,7 +279,7 @@
         "exclusions": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 2048,
+          "maxItems": 4096,
           "items": { "$ref": "#/$defs/AdmissionExclusion" }
         },
         "circuit_generations": { "type": "array", "maxItems": 0 },

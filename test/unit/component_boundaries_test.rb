@@ -38,6 +38,10 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::ProviderHealth", provider_health.dig("entrypoint", "constant")
     assert_includes provider_health.dig("public_contract", "values"),
                     "Hive::ProviderHealth::Store"
+    assert_empty provider_health.fetch("component_dependencies")
+    assert_includes provider_health.fetch("allowed_hive_dependencies"),
+                    "hive/output_reference"
+    refute provider_health.fetch("allowed_hive_dependencies").any? { |path| path.start_with?("hive/attempts") }
     assert_empty provider_health.fetch("migration_exceptions")
 
     provider_routing = contract.component("provider-routing-policy")
@@ -46,6 +50,10 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::ProviderRouting", provider_routing.dig("entrypoint", "constant")
     assert_includes provider_routing.dig("public_contract", "values"),
                     "Hive::ProviderRouting::Policy"
+    assert_empty provider_routing.fetch("component_dependencies")
+    assert_includes provider_routing.fetch("allowed_hive_dependencies"),
+                    "hive/point_storage"
+    assert_match(/routing-policy snapshots/, provider_routing.fetch("mutation_authority"))
     assert_empty provider_routing.fetch("migration_exceptions")
 
     provider_operations = contract.component("provider-routing-operations")
@@ -102,8 +110,10 @@ class ComponentBoundariesTest < Minitest::Test
         ],
         "Hive::Attempts::LostOutcomeProcessor" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::LostOutcomeStore" => [ "lib/hive/commands/daemon.rb" ],
-        "Hive::Attempts::PointStorage" => [ "lib/hive/provider_routing/policy_store.rb" ],
-        "Hive::Attempts::ProcessIdentity" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::ProcessIdentity" => [
+          "lib/hive/commands/daemon.rb",
+          "lib/hive/recovery/migration.rb"
+        ],
         "Hive::Attempts::Reconciler" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::StorageHealth" => [ "lib/hive/recovery/migration.rb" ],
         "Hive::Attempts::Store" => [

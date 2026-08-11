@@ -112,7 +112,7 @@ class RecoveryMigrationTest < Minitest::Test
     end
   end
 
-  def test_refuses_a_live_attempt_or_held_writer_lock
+  def test_refuses_an_active_live_attempt_or_held_writer_lock
     with_tmp_dir do |state_home|
       write_v3_record(state_home, current_attempt(attempt_id: "live"))
       error = assert_raises(Hive::Recovery::Migration::Error) do
@@ -133,6 +133,47 @@ class RecoveryMigrationTest < Minitest::Test
         assert_includes error.message, "active attempt writer"
       end
       assert_path_exists File.join(state_home, "attempts", "v3", "records", "lost.json")
+    end
+  end
+
+  def test_reconciles_crashed_live_attempts_during_cutover
+    with_tmp_dir do |state_home|
+      expired_launch = current_attempt(
+        attempt_id: "expired-launch", accepted_at: NOW - 60
+      )
+      crashed_running = current_attempt(
+        attempt_id: "crashed-running", accepted_at: NOW - 10
+      ).merge(
+        "state" => "running",
+        "lease_version" => 2,
+        "claim_deadline" => nil,
+        "heartbeat_deadline" => (NOW + 30).iso8601(6),
+        "wrapper" => {
+          "pid" => 999_999_999,
+          "start_fingerprint" => "missing-process",
+          "session_id" => 999_999_999,
+          "process_group_id" => 999_999_999
+        },
+        "heartbeat_at" => (NOW - 1).iso8601(6),
+        "started_at" => (NOW - 5).iso8601(6)
+      )
+      write_v3_record(state_home, expired_launch)
+      write_v3_record(state_home, crashed_running)
+
+      result = migrate(state_home)
+      store = Hive::Attempts::Store.new(
+        root: File.join(state_home, "attempts", "v4")
+      )
+
+      expired = store.fetch_hot("expired-launch")
+      crashed = store.fetch_hot("crashed-running")
+      assert_equal "lost", expired.state
+      assert_equal "launch_timeout", expired["loss"].fetch("reason")
+      assert_equal "lost", crashed.state
+      assert_equal "owner_gone", crashed["loss"].fetch("reason")
+      assert_equal true, expired["diagnostics"].fetch("migration_reconciled")
+      assert_equal true, crashed["diagnostics"].fetch("migration_reconciled")
+      assert_equal 2, result.dig("attempts", "recovered_live")
     end
   end
 

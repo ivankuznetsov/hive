@@ -344,7 +344,7 @@ class OperationalStatusTest < Minitest::Test
     )
     snapshot["attempt_storage"] = {
       "status" => "degraded",
-      "layout" => { "generation" => 3, "migration" => "complete" },
+      "layout" => { "generation" => 4, "migration" => "complete" },
       "hot" => { "records" => 1, "invalid" => 0 },
       "maintenance" => {
         "last_started_at" => "2026-07-20T09:00:00.000000Z",
@@ -478,6 +478,7 @@ class OperationalStatusTest < Minitest::Test
     expectations = {
       "provider_hold" => [ "waiting_on_provider_or_scheduler", "provider" ],
       "dispatched" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
+      "attempt_capacity" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
       "retry_cooldown" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
       "retry_in_flight" => [ "running", "agent" ],
       "retry_safety_blocked" => [ "needs_repair", "scheduler" ],

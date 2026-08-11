@@ -9,16 +9,19 @@ tags: [gap, todo, release-proof, agent-skills]
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
-## Provider-routing trusted captures (2026-08-10)
+## Provider-routing trusted captures (updated 2026-08-11)
 
 The U1 provider-routing policy includes a sanitized provenance inventory for
-Claude, Codex, Pi, and Grok under `test/fixtures/provider_errors/`, but no
-retained real structured transport or provider-diagnostic capture currently
-proves a stable explicit Hive account or exact-model scope. Accordingly every
-listed provider/model failure class remains task-local. Do not promote prose,
-HTTP-like text, synthetic fixtures, final messages, stdout/stderr, or tool
-output into shared circuit evidence. Close this gap only with reviewed,
-sanitized real captures whose channel and explicit scope are stable.
+Claude, Codex, Pi, and Grok under `test/fixtures/provider_errors/`. A reviewed
+Claude subscription capture now proves that rejected `five_hour` and
+`seven_day` rate-limit events can be bound to the admitted account and safely
+classified as provider-account `account_quota`. Real Codex and Grok failures
+contain only message text, and no Pi subscription session is configured on the
+evidence host, so those adapters and every exact-model class remain task-local.
+Do not promote prose, HTTP-like text, synthetic fixtures, final messages,
+prompt-derived output, or tool output into shared circuit evidence. Expand the
+allowlist only after a reviewed, sanitized real subscription capture proves a
+stable class and scope.
 
 ## Current release gap
 
@@ -1058,17 +1061,16 @@ on every channel, run one disposable installed upgrade for brew, AUR, and bash
 and retain the updater plus migration output. This gap does not weaken the
 local command contract or its deterministic tests.
 
-## Provider transport contracts still need sanitized real captures (2026-08-10)
+## Provider transport coverage remains intentionally partial (2026-08-11)
 
-The explicit provider-health implementation accepts only exact structured
-adapter-contract envelopes and ships synthetic sanitized contract fixtures for
-Claude, Codex, Pi, and Grok. Those fixtures prove parser and channel behavior;
-they do not claim that a current upstream CLI emits every contract shape.
-Before enabling a transport class operationally, retain a sanitized real
-capture from that adapter's structured transport or separately authenticated
-provider-diagnostic channel, confirm stable account/model scope, and update
-`test/fixtures/provider_errors/inventory.yml`. Until then, unmatched provider
-output remains attempt-local and cannot open shared health.
+The explicit provider-health implementation now enables only the real Claude
+subscription rate-limit shape recorded in the provenance inventory. Synthetic
+Claude, Codex, Pi, and Grok contract envelopes were removed from positive
+tests because no current CLI emitted them. Before enabling another transport
+class, retain a sanitized real subscription capture from that adapter's
+structured transport or separately authenticated provider-diagnostic channel,
+confirm stable account/model scope, and update the inventory. Until then,
+unmatched provider output remains attempt-local and cannot open shared health.
 
 ## Live Workflow Creator still needs authorized exact-head evidence (2026-08-04)
 

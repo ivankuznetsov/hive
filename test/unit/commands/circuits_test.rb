@@ -155,6 +155,48 @@ class CommandsCircuitsTest < Minitest::Test
     end
   end
 
+  def test_corrupt_probe_intent_is_visible_and_requires_exact_approved_quarantine
+    intent = File.join(@health.root, "intents", "bad.json")
+    File.binwrite(intent, "{")
+
+    unavailable = invoke("list")
+    corruption = unavailable.fetch("intent_corruptions").fetch(0)
+    assert_equal "degraded", unavailable.fetch("status")
+    assert_equal "bad.json", corruption.fetch("intent_file")
+    assert_includes unavailable.fetch("issues").join(" "), "probe intent state is unavailable"
+    assert_empty schemer.validate(unavailable).to_a
+
+    repaired = invoke(
+      "reset-intent",
+      provider: nil,
+      yes: true,
+      reason: "quarantine corrupt global probe intent",
+      intent_file: corruption.fetch("intent_file"),
+      corruption_fingerprint: corruption.fetch("corruption_fingerprint")
+    )
+    assert_equal "available", repaired.fetch("status")
+    assert_empty repaired.fetch("intent_corruptions")
+    assert_equal "reset_intent", repaired.dig("mutation", "action")
+    assert_equal "probe_intent", repaired.dig("mutation", "target", "kind")
+    assert_nil repaired.dig("mutation", "generation")
+    assert File.file?(File.join(
+      @health.root,
+      repaired.dig("mutation", "audit", "artifact_reference", "path")
+    ))
+    assert_empty schemer.validate(repaired).to_a
+
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      command(
+        "reset-intent",
+        provider: nil,
+        yes: true,
+        reason: "repeat stale probe intent repair",
+        intent_file: corruption.fetch("intent_file"),
+        corruption_fingerprint: corruption.fetch("corruption_fingerprint")
+      ).call
+    end
+  end
+
   def test_fractional_generation_and_model_without_provider_are_rejected
     assert_raises(Hive::Commands::Circuits::UsageError) do
       command(
@@ -239,6 +281,18 @@ class CommandsCircuitsTest < Minitest::Test
     assert_raises(Hive::Commands::Circuits::UsageError) do
       command("list").send(:integer_option, -1, "--expected-generation")
     end
+    assert_raises(Hive::Commands::Circuits::UsageError) do
+      command(
+        "reset-intent", provider: nil, yes: true, reason: "repair",
+        corruption_fingerprint: "a" * 64
+      ).call
+    end
+    assert_raises(Hive::Commands::Circuits::UsageError) do
+      command(
+        "reset-intent", yes: true, reason: "repair", intent_file: "bad.json",
+        corruption_fingerprint: "a" * 64
+      ).call
+    end
   end
 
   def test_healthy_reset_and_human_mutation_render_the_audited_result
@@ -266,7 +320,8 @@ class CommandsCircuitsTest < Minitest::Test
         "source_reference" => { "path" => "outputs/safe.json" }
       },
       "corruption_token" => {
-        "journal_epoch" => 1, "corruption_fingerprint" => "b" * 64
+        "journal_epoch" => 1, "corruption_fingerprint" => "b" * 64,
+        "last_verified_generation" => 3
       }
     }
     summary = command("list").send(:circuit_summary, circuit)
@@ -274,6 +329,7 @@ class CommandsCircuitsTest < Minitest::Test
     assert_includes summary, "evidence=provider_outage:"
     assert_includes summary, "ref=outputs/safe.json"
     assert_includes summary, "repair_epoch=1"
+    assert_includes summary, "repair_last_verified_generation=3"
 
     @attempts = AttemptStore.new(decision_index: DecisionIndex.new([ decision_entry ]))
     entry = Marshal.load(Marshal.dump(invoke("list").fetch("decisions").fetch(0)))

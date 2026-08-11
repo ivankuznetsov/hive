@@ -102,7 +102,10 @@ module Hive
         default inherit none minimal low medium high xhigh max
       ],
       launcher_identity: "grok-cli/v1",
-      structured_output_protocol: :grok_end
+      structured_output_protocol: :grok_end,
+      credential_environment_keys: %w[GROK_AUTH_PATH XAI_API_KEY GROK_CODE_XAI_API_KEY],
+      configuration_environment_key: "GROK_HOME",
+      default_configuration_directory: ".grok"
     )
 
     register(:grok, GROK)

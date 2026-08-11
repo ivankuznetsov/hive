@@ -20,7 +20,7 @@ class AttemptsStorageHealthTest < Minitest::Test
       status = health.snapshot(hot_count: 2, invalid_hot_count: 1)
 
       assert_equal "healthy", status.fetch("status")
-      assert_equal 3, status.dig("layout", "generation")
+      assert_equal 4, status.dig("layout", "generation")
       assert_equal 2, status.dig("hot", "records")
       assert_equal 1, status.dig("hot", "invalid")
       assert_equal "2026-08-10T12:00:02.000000Z",

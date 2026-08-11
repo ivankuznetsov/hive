@@ -544,6 +544,33 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_admission_candidate_accepts_both_blockers_for_each_enclosing_scope
+    observation = admission_observation
+    route_id = observation.dig("candidates", 0, "route_id")
+    exclusions = %w[provider_account model].flat_map do |kind|
+      %w[circuit_open circuit_cooldown].map do |reason|
+        {
+          "route_id" => route_id,
+          "reason" => reason,
+          "detail" => nil,
+          "scope" => {
+            "kind" => kind,
+            "provider_account_id" => "account-a",
+            "model" => kind == "model" ? "model-a" : nil
+          },
+          "observation" => { "generation" => 2, "journal_epoch" => 0 }
+        }
+      end
+    end
+    observation.fetch("candidates").first["exclusions"] = exclusions
+    observation["exclusions"] = exclusions
+
+    Q.send(:validate_admission_observation!, observation)
+    assert_equal 4, Q.send(
+      :validate_admission_candidate!, observation.fetch("candidates").first
+    )
+  end
+
   def test_recovery_transition_lock_serializes_phase_cas_with_claim_and_prune
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       Q.write_request!(

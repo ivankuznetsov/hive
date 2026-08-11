@@ -48,6 +48,11 @@ module Hive
         allowed: "--allowedTools",
         disallowed: "--disallowedTools"
       },
+      credential_environment_keys: %w[
+        ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY
+      ],
+      configuration_environment_key: "CLAUDE_CONFIG_DIR",
+      default_configuration_directory: ".claude",
       raw_cli_arguments_supported: true,
       cli_capabilities: {
         safe_mode: [ "--safe-mode" ],

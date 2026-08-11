@@ -62,6 +62,11 @@ Hive owner instead of falsely claiming the scheduler will clear it.
 Disabling either the project daemon or global automatic retry restores the
 operator-owned `needs_repair` classification.
 
+Provider-account capacity saturation is recorded by the daemon as
+`attempt_capacity`. Operational status classifies that disposition as
+`waiting_on_provider_or_scheduler` with `blocker_owner: scheduler`; it cannot
+fall through to ready/idle while the durable provider-account slots are full.
+
 Semantic terminal errors are the deliberate exception to automatic error
 retry. `ERROR reason=terminal_outcome_blocked` and
 `ERROR reason=terminal_outcome_invalid` remain operator-owned `needs_repair`
@@ -81,7 +86,8 @@ from missing evidence.
 
 `hive-operational-status.v4` includes summary/state counts, daemon identity and
 phase, scheduler capacity/queue/provider holds, archive counts, typed issues,
-the required bounded `attempt_storage` cell, per-task liveness/freshness,
+the required bounded `attempt_storage` cell for the current physical
+`attempts/v4` layout, per-task liveness/freshness,
 blocker ownership and reasons, nullable retry
 evidence (`due`, `retry_at`, `safe`, `safety_reason`), and an optional closed
 action descriptor, the canonical durable recovery receipt, and a required

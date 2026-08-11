@@ -3,7 +3,7 @@ title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-08-10
+updated: 2026-08-11
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -257,21 +257,41 @@ headless path so a persistent tmux session cannot escape the enclosing
 attempt's account identity.
 
 `launch_binding: default` preserves the adapter's existing external session.
-A named binding such as `team-a` resolves only at launch from
+A named binding such as `team-a` is validated while an explicit routing policy
+is built and resolved again at launch from
 `HIVE_PROVIDER_BINDING_<ADAPTER>_<BINDING>` (uppercased, with hyphens mapped to
 underscores), for example `HIVE_PROVIDER_BINDING_CODEX_TEAM_A`. Its value must
 be an existing absolute adapter configuration directory. Hive passes the
 corresponding `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_DIR`, or
 `GROK_HOME` only to preflight and the child process. The path and credential
 contents never enter routing policy, attempts, health state, status, or logs.
+Hive obtains those override names and their default home-relative directories
+from the extracted `agent-cli-runtime` compatibility profiles. Configuration
+normalization canonicalizes an existing default session directory too, so a
+named binding cannot alias the same subscription session through a different
+path.
+For every named binding, Hive clears the adapter profile's
+`credential_environment_keys` before preflight and launch. That inventory is
+owned by the extracted `agent-cli-runtime` compatibility profile and kept
+parity-tested against Hive's temporary internal profile copy. Pi's inventory
+covers its supported ambient provider credentials and tokens, so the isolated
+directory's subscription session is authoritative; `launch_binding: default`
+continues to preserve the caller's ambient environment.
+Claude's inventory includes `ANTHROPIC_AUTH_TOKEN` as a defensive override to
+clear for named bindings; Hive does not provision or require that variable.
 
-`AgentProfiles::ErrorNormalizers` accepts only an exact allowlisted structured
-transport envelope from the selected adapter. It rejects final/assistant
-messages, prompt-derived stdout, tool output, vague 429/permission text,
-timeouts, network failures, missing scope, and mismatched account/model
-identity. The result contains only class, explicit scope, provenance, and a
-bounded reset hint; raw message fields are discarded before the attempt
-evidence channel.
+`AgentProfiles::ErrorNormalizers` enables a transport shape only after a
+sanitized real subscription capture proves a stable class and scope. The
+current transport allowlist contains Claude's rejected `rate_limit_event` for
+the `five_hour` and `seven_day` subscription windows. Because the admitted
+launch binding identifies the external account, those events normalize to
+provider-account `account_quota`. Current Codex and Grok failures expose only
+message text, and Pi has no reviewed subscription capture, so all three remain
+task-local. Final/assistant messages, prompt-derived output, tool output, vague
+429/permission text, timeouts, network failures, and every unreviewed shape are
+also rejected. The safe result contains only class, explicit scope,
+provenance, and a bounded reset hint; raw message fields are discarded before
+the attempt evidence channel.
 
 ## Tests
 
@@ -283,9 +303,9 @@ evidence channel.
 - `test/unit/agent_profile_modes_test.rb` — `:state_file_marker` / `:exit_code_only` / `:output_file_exists` branching in `Hive::Agent#handle_exit`.
 - `test/unit/agent_profiles_test.rb` — registry register / lookup / unknown.
 - `test/unit/spawn_agent_test.rb` — preflight ordering, isolation-warning trigger, default-profile fallback.
-- `test/unit/agent_profiles/error_normalizers_test.rb` — exact trusted
-  envelopes, closed taxonomy, task-local adversarial channels, and raw-message
-  independence.
+- `test/unit/agent_profiles/error_normalizers_test.rb` — captured Claude
+  subscription limits, closed diagnostic taxonomy, task-local unsupported
+  adapters/adversarial channels, and raw-message independence.
 - `test/unit/agent_profiles/launch_bindings_test.rb` — symbolic binding
   resolution, distinct same-adapter contexts, and preflight restoration.
 - `test/unit/workflow_package/runtime_policy_test.rb` — exact policy files,

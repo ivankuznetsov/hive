@@ -14,8 +14,8 @@ module Hive
     class Circuits
       include Hive::Schemas::EnvelopeEmitter
 
-      ACTIONS = %w[list inspect block unblock reset].freeze
-      MUTATIONS = %w[block unblock reset].freeze
+      ACTIONS = %w[list inspect block unblock reset reset-intent].freeze
+      MUTATIONS = %w[block unblock reset reset-intent].freeze
 
       class UsageError < Hive::Error
         attr_reader :error_kind
@@ -31,7 +31,7 @@ module Hive
       def initialize(action = "list", provider: nil, model: nil, reason: nil,
                      expected_generation: nil, journal_epoch: nil,
                      corruption_fingerprint: nil, last_verified_generation: nil,
-                     yes: false, json: false, accounts: nil, health_store: nil,
+                     intent_file: nil, yes: false, json: false, accounts: nil, health_store: nil,
                      attempt_store: nil, actor_resolver: nil, clock: -> { Time.now.utc })
         @action = action.to_s
         @provider = provider
@@ -41,6 +41,7 @@ module Hive
         @journal_epoch = journal_epoch
         @corruption_fingerprint = corruption_fingerprint
         @last_verified_generation = last_verified_generation
+        @intent_file = intent_file
         @yes = yes
         @json = json
         @accounts = accounts
@@ -74,13 +75,14 @@ module Hive
       def do_call
         validate_action!
         mutation = mutate if MUTATIONS.include?(@action)
+        intent_state = health_store.inspect_probe_intents
         projection = Hive::ProviderRouting::OperationalProjection.new(
           accounts: filtered_accounts,
           health_store: health_store,
           attempt_store: attempt_store,
           now: now
         ).to_h
-        payload = success_payload(projection, mutation)
+        payload = success_payload(projection, mutation, intent_state)
         if @json
           puts JSON.generate(payload)
           @stdout_written = true
@@ -107,6 +109,9 @@ module Hive
           raise UsageError, "hive circuits #{@action}: --reason is required"
         end
 
+        return reset_probe_intent if @action == "reset-intent"
+
+        reject_intent_options!
         scope = selected_scope
         result = case @action
         when "block"
@@ -136,6 +141,39 @@ module Hive
           "generation" => result.generation,
           "event_id" => result.event_id,
           "audit" => result.audit_receipt&.to_h
+        }
+      end
+
+      def reset_probe_intent
+        if [ @provider, @model, @expected_generation, @journal_epoch,
+             @last_verified_generation ].any?
+          raise UsageError,
+                "hive circuits reset-intent: use only --intent-file, " \
+                "--corruption-fingerprint, --reason, and --yes"
+        end
+        if @intent_file.nil? || @intent_file.to_s.strip.empty? || @corruption_fingerprint.nil?
+          raise UsageError,
+                "hive circuits reset-intent: --intent-file and " \
+                "--corruption-fingerprint are required"
+        end
+
+        result = health_store.reset_probe_intent(
+          intent_file: @intent_file,
+          corruption_fingerprint: @corruption_fingerprint,
+          actor: @actor_resolver.call,
+          reason: @reason
+        )
+        {
+          "action" => "reset_intent",
+          "status" => result.fetch("status"),
+          "reason" => result.fetch("reason"),
+          "target" => {
+            "kind" => "probe_intent",
+            "intent_file" => result.fetch("intent_file")
+          },
+          "generation" => nil,
+          "event_id" => result.fetch("event_id"),
+          "audit" => result.fetch("audit")
         }
       end
 
@@ -174,6 +212,12 @@ module Hive
         return unless [ @journal_epoch, @corruption_fingerprint, @last_verified_generation ].any?
 
         raise UsageError, "corruption-token options are valid only for hive circuits reset"
+      end
+
+      def reject_intent_options!
+        return if @intent_file.nil?
+
+        raise UsageError, "--intent-file is valid only for hive circuits reset-intent"
       end
 
       def required_generation
@@ -229,16 +273,23 @@ module Hive
         { selected.id => selected }.freeze
       end
 
-      def success_payload(projection, mutation)
+      def success_payload(projection, mutation, intent_state)
+        corruptions = intent_state.fetch("corruptions")
+        issues = projection.fetch("issues").dup
+        unless corruptions.empty?
+          issues << "provider-health probe intent state is unavailable " \
+                    "(#{corruptions.length} corrupt artifact#{'s' unless corruptions.length == 1})"
+        end
         {
           "schema" => "hive-circuits",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-circuits"),
           "ok" => true,
           "generated_at" => projection.fetch("generated_at"),
-          "status" => projection.fetch("status"),
-          "issues" => projection.fetch("issues"),
+          "status" => corruptions.empty? ? projection.fetch("status") : "degraded",
+          "issues" => issues.freeze,
           "accounts" => projection.fetch("accounts"),
           "decisions" => projection.fetch("decisions"),
+          "intent_corruptions" => corruptions,
           "mutation" => mutation
         }
       end
@@ -248,6 +299,10 @@ module Hive
              "#{payload.fetch('accounts').length} accounts · " \
              "#{payload.fetch('decisions').length} recent decisions"
         payload.fetch("issues").each { |issue| puts "  ! #{safe(issue)}" }
+        payload.fetch("intent_corruptions").each do |corruption|
+          puts "  ! probe-intent #{safe(corruption.fetch('intent_file'))} " \
+               "repair_fingerprint=#{safe(corruption.fetch('corruption_fingerprint'))}"
+        end
         payload.fetch("accounts").each { |account| render_account(account) }
         payload.fetch("decisions").each { |entry| render_decision(entry) }
         render_mutation(payload.fetch("mutation")) if payload["mutation"]
@@ -278,7 +333,9 @@ module Hive
         end
         if (token = circuit["corruption_token"])
           summary += " repair_epoch=#{token.fetch('journal_epoch')} " \
-                     "repair_fingerprint=#{token.fetch('corruption_fingerprint')}"
+                     "repair_fingerprint=#{token.fetch('corruption_fingerprint')} " \
+                     "repair_last_verified_generation=" \
+                     "#{token.fetch('last_verified_generation')}"
         end
         summary
       end
@@ -310,8 +367,10 @@ module Hive
       end
 
       def render_mutation(mutation)
+        generation = mutation["generation"]
+        generation_text = generation.nil? ? "n/a" : generation
         puts "MUTATION #{safe(mutation.fetch('action'))} #{safe(mutation.fetch('status'))} " \
-             "generation=#{mutation.fetch('generation')} event=#{safe(mutation.fetch('event_id'))}"
+             "generation=#{generation_text} event=#{safe(mutation.fetch('event_id'))}"
       end
 
       def safe(value)

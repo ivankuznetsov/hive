@@ -730,6 +730,56 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_markerless_admission_persists_both_blockers_for_each_health_scope
+    with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, state_home|
+      route = routing_route
+      exclusions = [
+        Hive::ProviderHealth::Scope.provider_account(account_id: route.account),
+        Hive::ProviderHealth::Scope.model(account_id: route.account, model_id: route.model)
+      ].flat_map do |scope|
+        %w[circuit_open circuit_cooldown].map do |reason|
+          Hive::ProviderRouting::Decision::Exclusion.new(
+            route_id: route.id,
+            reason: reason,
+            scope: scope.to_h,
+            observation: { "generation" => 2, "journal_epoch" => 0 }
+          )
+        end
+      end
+      candidate = Hive::ProviderRouting::Candidate.new(
+        route: route,
+        exclusions: exclusions,
+        observed_concurrency: 0,
+        max_concurrency: 1
+      )
+      request = Hive::ProviderRouting::Request.new(
+        policy: routing_policy,
+        task_generation: fixture_task_generation(row),
+        health: {},
+        capacity: {}
+      )
+      decision = Hive::ProviderRouting::Decision.no_route(
+        request: request,
+        considered: [ route ],
+        exclusions: exclusions,
+        candidates: [ candidate ],
+        decided_at: NOW,
+        reason: "no_eligible_provider_route"
+      )
+
+      receipt = coordinator.request_admission_failure(
+        request: admission_request(row), decision: decision, now: NOW
+      )
+      persisted = Q.pending(state_home: state_home).fetch(0)
+
+      assert_equal "cooldown", receipt.status
+      assert_equal 4,
+                   persisted.recovery.dig("admission_observation", "candidates", 0, "exclusions").length
+      assert_equal 4,
+                   persisted.recovery.dig("admission_observation", "exclusions").length
+    end
+  end
+
   def test_provider_and_marker_recovery_charge_once_with_the_same_due_time
     provider = nil
     with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, state_home|

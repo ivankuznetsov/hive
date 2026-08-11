@@ -225,6 +225,15 @@ class SecretPatternsTest < Minitest::Test
     assert_includes redacted, "[REDACTED:github_fine_grained_pat]"
   end
 
+  def test_hyphenated_openai_project_credential_is_detected_and_redacted
+    credential = "sk-proj-#{'AbC123_' * 6}"
+
+    assert_match_name("credential=#{credential}", :openai_api_key)
+    redacted = Hive::SecretPatterns.redact("credential=#{credential}")
+    refute_includes redacted, credential
+    assert_includes redacted, "[REDACTED:openai_api_key]"
+  end
+
   def test_scan_returns_empty_for_blank_input
     assert_empty Hive::SecretPatterns.scan("")
     assert_empty Hive::SecretPatterns.scan(nil)

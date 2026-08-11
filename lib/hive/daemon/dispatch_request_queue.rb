@@ -81,12 +81,14 @@ module Hive
       ].freeze
       ADMISSION_EXCLUSIONS = %w[
         hard_pin_mismatch requirements_incompatible manual_block
-        circuit_cooldown half_open_probe_owned provider_concurrency_saturated
+        circuit_open circuit_cooldown half_open_probe_owned provider_concurrency_saturated
         health_state_unavailable
       ].freeze
       NEXT_ACTION_OWNERS = %w[scheduler retry_authority operator].freeze
       MAX_ADMISSION_CANDIDATES = 1_024
-      MAX_ADMISSION_EXCLUSIONS = 2_048
+      MAX_ADMISSION_EXCLUSIONS_PER_CANDIDATE = 4
+      MAX_ADMISSION_EXCLUSIONS =
+        MAX_ADMISSION_CANDIDATES * MAX_ADMISSION_EXCLUSIONS_PER_CANDIDATE
 
       SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
       PROJECT_RE = /\A[A-Za-z0-9_.\-]+\z/
@@ -1165,7 +1167,8 @@ module Hive
           end
           validate_capacity!(candidate["capacity"])
           exclusions = candidate["exclusions"]
-          unless exclusions.is_a?(Array) && exclusions.length <= 2
+          unless exclusions.is_a?(Array) &&
+                 exclusions.length <= MAX_ADMISSION_EXCLUSIONS_PER_CANDIDATE
             raise ArgumentError, "admission candidate exclusions must be an array"
           end
           exclusions.each { |exclusion| validate_admission_exclusion!(exclusion) }

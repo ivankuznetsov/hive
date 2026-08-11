@@ -13,37 +13,21 @@ module Hive
       MODEL_CLASSES = %w[
         unavailable disabled deprecated model_quota model_rate model_capacity
       ].freeze
+      CLAUDE_ACCOUNT_LIMIT_TYPES = %w[five_hour seven_day].freeze
       ADAPTERS = {
         "claude" => {
           provenance: "claude_stream_json_transport",
-          extractor: lambda do |event|
-            event["type"] == "provider_error" && event["origin"] == "provider_transport" ?
-              event["error"] : nil
-          end
-        },
-        "codex" => {
-          provenance: "codex_jsonl_transport",
-          extractor: lambda do |event|
-            error = event["error"]
-            event["type"] == "turn.failed" && error.is_a?(Hash) &&
-              error["type"] == "provider_error" && error["origin"] == "provider_transport" ?
-              error : nil
-          end
-        },
-        "pi" => {
-          provenance: "pi_json_transport",
-          extractor: lambda do |event|
-            error = event["error"]
-            event["type"] == "agent_error" && error.is_a?(Hash) &&
-              error["type"] == "provider_error" && error["origin"] == "provider_transport" ?
-              error : nil
-          end
-        },
-        "grok" => {
-          provenance: "grok_streaming_json_transport",
-          extractor: lambda do |event|
-            event["type"] == "error" && event["origin"] == "provider_transport" ?
-              event["error"] : nil
+          extractor: lambda do |event, route|
+            info = event["rate_limit_info"]
+            next unless event["type"] == "rate_limit_event" && info.is_a?(Hash)
+            next unless info["status"] == "rejected"
+            next unless CLAUDE_ACCOUNT_LIMIT_TYPES.include?(info["rateLimitType"])
+
+            {
+              "class" => "account_quota",
+              "scope" => "provider_account",
+              "provider_account_id" => route["provider_account_id"]
+            }
           end
         }
       }.freeze
@@ -58,7 +42,7 @@ module Hive
         return nil unless contract && event.is_a?(Hash) && route.is_a?(Hash)
         return nil unless route["adapter"].to_s == adapter_name
 
-        error = contract.fetch(:extractor).call(event)
+        error = contract.fetch(:extractor).call(event, route)
         return nil unless error.is_a?(Hash)
 
         build_signal(

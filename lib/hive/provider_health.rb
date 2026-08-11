@@ -53,7 +53,7 @@ module Hive
       manual_unblocked
       reset
     ].freeze
-    NONMUTATING_EVENT_KINDS = %w[evidence_rejected].freeze
+    NONMUTATING_EVENT_KINDS = %w[evidence_rejected snapshot].freeze
     EVENT_KINDS = (MUTATING_EVENT_KINDS + NONMUTATING_EVENT_KINDS).freeze
 
     MAX_ID_BYTES = 128

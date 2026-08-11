@@ -7,6 +7,7 @@ require "hive/atomic_file"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/finalization_maintenance"
 require "hive/attempts/permanent_proof_store"
+require "hive/attempts/process_identity"
 require "hive/attempts/record"
 require "hive/attempts/record_migration"
 require "hive/attempts/storage_health"
@@ -70,8 +71,9 @@ module Hive
         new(state_home: state_home).call(now: now)
       end
 
-      def initialize(state_home:)
+      def initialize(state_home:, process_identity: Hive::Attempts::ProcessIdentity.new)
         @state_home = File.expand_path(state_home)
+        @process_identity = process_identity
       end
 
       def call(now: Time.now.utc)
@@ -149,7 +151,7 @@ module Hive
       end
 
       def migrate_attempts!(now:)
-        source = cut_over_layout!
+        source = cut_over_layout!(now: now)
         store = Hive::Attempts::Store.new(root: current_attempt_root)
         checkpoint = read_checkpoint!
 
@@ -186,11 +188,12 @@ module Hive
           "decision_digest" => checkpoint["decision_digest"],
           "promoted" => checkpoint.fetch("promoted_count"),
           "hot" => checkpoint.fetch("hot_count"),
-          "invalid" => checkpoint.fetch("invalid_count")
+          "invalid" => checkpoint.fetch("invalid_count"),
+          "recovered_live" => checkpoint.fetch("recovered_live_count", 0)
         }
       end
 
-      def cut_over_layout!
+      def cut_over_layout!(now:)
         validate_attempts_parent!
         checkpoint = read_checkpoint!
         source = checkpoint_source(checkpoint) if checkpoint && !phase_before?(checkpoint, "verified")
@@ -200,16 +203,20 @@ module Hive
           with_quiesced_source(source_root) do
             validate_attempt_tree!(source_root, normalize_modes: true)
             scan = migration_scan(source_root)
-            refuse_live_attempts!(scan)
+            live_losses = classify_prior_live_attempts!(scan, now: now)
             File.rename(source_root, current_attempt_root)
             Hive::AtomicFile.fsync_directory(attempts_parent)
             publish_all_fences!
-            migrate_attempt_corpus!(current_attempt_root)
+            migrate_attempt_corpus!(current_attempt_root, live_losses: live_losses, now: now)
           end
         elsif File.directory?(current_attempt_root)
           with_quiesced_source(current_attempt_root) do
             validate_current_root!(normalize_modes: phase_before?(checkpoint, "verified"))
-            migrate_attempt_corpus!(current_attempt_root) if phase_before?(checkpoint, "verified")
+            if phase_before?(checkpoint, "verified")
+              scan = migration_scan(current_attempt_root)
+              live_losses = classify_prior_live_attempts!(scan, now: now)
+              migrate_attempt_corpus!(current_attempt_root, live_losses: live_losses, now: now)
+            end
           end
         else
           Dir.mkdir(current_attempt_root, 0o700)
@@ -304,12 +311,34 @@ module Hive
         end
       end
 
-      def refuse_live_attempts!(scan)
-        live = scan.records.find(&:live?)
-        return unless live
+      def classify_prior_live_attempts!(scan, now:)
+        scan.records.each_with_object({}) do |record, losses|
+          next unless record.live?
 
-        raise Error,
-              "live attempt #{live.attempt_id} in the prior attempt store must finish before cutover"
+          loss = recoverable_prior_live_loss(record, now: now)
+          unless loss
+            raise Error,
+                  "live attempt #{record.attempt_id} in the prior attempt store must finish before cutover"
+          end
+          losses[record.attempt_id] = loss
+        end.freeze
+      end
+
+      def recoverable_prior_live_loss(record, now:)
+        if record.state == "launching"
+          return nil unless record.active_deadline && now > record.active_deadline
+
+          reason = record.claimed? ? "first_heartbeat_timeout" : "launch_timeout"
+          return { "reason" => reason, "owner_status" => "not_applicable" }.freeze
+        end
+
+        owner_status = @process_identity.status(record.wrapper)
+        case owner_status
+        when :missing
+          { "reason" => "owner_gone", "owner_status" => owner_status.to_s }.freeze
+        when :mismatched
+          { "reason" => "owner_identity_mismatch", "owner_status" => owner_status.to_s }.freeze
+        end
       end
 
       def migration_scan(root)
@@ -333,12 +362,12 @@ module Hive
         Hive::Attempts::Scan.new(records: records.freeze, invalid_records: invalid.freeze)
       end
 
-      def migrate_attempt_corpus!(root)
-        migrate_hot_records!(root)
+      def migrate_attempt_corpus!(root, live_losses: {}, now:)
+        migrate_hot_records!(root, live_losses: live_losses, now: now)
         migrate_permanent_proofs!(root)
       end
 
-      def migrate_hot_records!(root)
+      def migrate_hot_records!(root, live_losses:, now:)
         records_root = File.join(root, "records")
         return unless File.directory?(records_root)
 
@@ -349,11 +378,12 @@ module Hive
           begin
             data = JSON.parse(bytes)
             ensure_supported_attempt_object!(data, path: path)
-            next if data["schema_version"] == CURRENT_ATTEMPT_VERSION &&
-                    Hive::Attempts::Record.new(data)
-
-            converted = Hive::Attempts::RecordMigration.convert_v3(data)
-            write_json!(path, converted)
+            converted = Hive::Attempts::RecordMigration.current_or_convert(data)
+            record = Hive::Attempts::Record.new(converted)
+            if (loss = live_losses[record.attempt_id])
+              record = migration_lost_record(record, loss: loss, now: now)
+            end
+            write_json!(path, record.to_h) unless record.to_h == data
           rescue JSON::ParserError, Hive::Attempts::InvalidRecord, TypeError
             # Invalid hot bytes remain byte-for-byte reservations. Store#scan
             # will keep counting them after cutover instead of manufacturing
@@ -361,6 +391,25 @@ module Hive
             next
           end
         end
+      end
+
+      def migration_lost_record(record, loss:, now:)
+        record.with(
+          "state" => "lost",
+          "lease_version" => record.lease_version + 1,
+          "claim_deadline" => nil,
+          "first_heartbeat_deadline" => nil,
+          "heartbeat_deadline" => nil,
+          "ended_at" => Hive::Attempts::Record.iso8601(now),
+          "loss" => {
+            "reason" => loss.fetch("reason"),
+            "at" => Hive::Attempts::Record.iso8601(now)
+          },
+          "diagnostics" => record["diagnostics"].merge(
+            "migration_reconciled" => true,
+            "owner_status" => loss.fetch("owner_status")
+          )
+        )
       end
 
       def migrate_permanent_proofs!(root)
@@ -542,8 +591,24 @@ module Hive
           "source_count" => count,
           "source_valid_count" => valid,
           "source_invalid_count" => invalid,
-          "source_digest" => digest.hexdigest
+          "source_digest" => digest.hexdigest,
+          "recovered_live_count" => migration_recovered_count(root)
         }
+      end
+
+      def migration_recovered_count(root)
+        records_root = File.join(root, "records")
+        return 0 unless File.directory?(records_root)
+
+        Dir.children(records_root).count do |basename|
+          path = File.join(records_root, basename)
+          begin
+            data = JSON.parse(bounded_read(path, MAX_RECORD_BYTES))
+            data.is_a?(Hash) && data.dig("diagnostics", "migration_reconciled") == true
+          rescue JSON::ParserError, Error, SystemCallError
+            false
+          end
+        end
       end
 
       def assert_scan_counts!(source, scan)
@@ -565,7 +630,7 @@ module Hive
       def checkpoint_source(checkpoint)
         checkpoint.slice(
           "source_count", "source_valid_count", "source_invalid_count", "source_digest"
-        )
+        ).merge("recovered_live_count" => checkpoint.fetch("recovered_live_count", 0))
       end
 
       def read_checkpoint!(minimum_phase: nil)
@@ -583,6 +648,10 @@ module Hive
           %w[source_count source_valid_count source_invalid_count].all? do |key|
             data[key].is_a?(Integer) && data[key] >= 0
           end && /\A[0-9a-f]{64}\z/.match?(data["source_digest"].to_s)
+        if data.key?("recovered_live_count") &&
+           (!data["recovered_live_count"].is_a?(Integer) || data["recovered_live_count"].negative?)
+          valid = false
+        end
         raise Error, "attempt layout cutover checkpoint is invalid" unless valid
         if minimum_phase && CHECKPOINT_PHASES.fetch(data["phase"]) < CHECKPOINT_PHASES.fetch(minimum_phase)
           raise Error, "attempt layout cutover checkpoint is incomplete"

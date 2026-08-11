@@ -12,7 +12,7 @@
       "type": "string",
       "enum": [
         "hard_pin_mismatch", "requirements_incompatible", "manual_block",
-        "circuit_cooldown", "half_open_probe_owned",
+        "circuit_open", "circuit_cooldown", "half_open_probe_owned",
         "provider_concurrency_saturated", "health_state_unavailable"
       ]
     },
@@ -35,6 +35,16 @@
         "path": { "type": "string", "minLength": 1 },
         "size": { "type": "integer", "minimum": 0 },
         "sha256": { "$ref": "#/$defs/Sha256" }
+      }
+    },
+    "IntentCorruption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent_file", "corruption_fingerprint", "artifact_reference"],
+      "properties": {
+        "intent_file": { "type": "string", "minLength": 1, "maxLength": 132 },
+        "corruption_fingerprint": { "$ref": "#/$defs/Sha256" },
+        "artifact_reference": { "$ref": "#/$defs/Reference" }
       }
     },
     "CorruptionToken": {
@@ -211,7 +221,7 @@
         "model": { "$ref": "#/$defs/Identifier" },
         "effort": { "type": ["string", "null"] },
         "eligible": { "type": "boolean" },
-        "exclusions": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/Exclusion" } },
+        "exclusions": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/Exclusion" } },
         "capacity": {
           "oneOf": [
             { "type": "null" },
@@ -246,7 +256,7 @@
         "policy": { "type": "object", "additionalProperties": false, "required": ["stage", "pin", "requirements"], "properties": { "stage": { "type": "string" }, "pin": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Pin" }] }, "requirements": { "$ref": "#/$defs/Requirements" } } },
         "selected_route": { "type": ["string", "null"] },
         "candidates": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/Candidate" } },
-        "exclusions": { "type": "array", "maxItems": 2048, "items": { "$ref": "#/$defs/Exclusion" } },
+        "exclusions": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/Exclusion" } },
         "circuit_generations": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/CircuitGeneration" } },
         "probe_requirements": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/CircuitGeneration" } }
       }
@@ -280,7 +290,7 @@
         "artifact_reference": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Reference" }] }
       }
     },
-    "Mutation": {
+    "CircuitMutation": {
       "type": "object",
       "additionalProperties": false,
       "required": ["action", "status", "reason", "target", "generation", "event_id", "audit"],
@@ -294,10 +304,51 @@
         "audit": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Audit" }] }
       }
     },
+    "IntentAudit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actor", "reason", "action", "occurred_at", "event_id", "artifact_reference"],
+      "properties": {
+        "actor": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "action": { "const": "reset_probe_intent" },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "event_id": { "$ref": "#/$defs/Identifier" },
+        "artifact_reference": { "$ref": "#/$defs/Reference" }
+      }
+    },
+    "IntentMutation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "status", "reason", "target", "generation", "event_id", "audit"],
+      "properties": {
+        "action": { "const": "reset_intent" },
+        "status": { "type": "string" },
+        "reason": { "const": "reset_probe_intent" },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "intent_file"],
+          "properties": {
+            "kind": { "const": "probe_intent" },
+            "intent_file": { "type": "string", "minLength": 1, "maxLength": 132 }
+          }
+        },
+        "generation": { "type": "null" },
+        "event_id": { "$ref": "#/$defs/Identifier" },
+        "audit": { "$ref": "#/$defs/IntentAudit" }
+      }
+    },
+    "Mutation": {
+      "oneOf": [
+        { "$ref": "#/$defs/CircuitMutation" },
+        { "$ref": "#/$defs/IntentMutation" }
+      ]
+    },
     "SuccessPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "ok", "generated_at", "status", "issues", "accounts", "decisions", "mutation"],
+      "required": ["schema", "schema_version", "ok", "generated_at", "status", "issues", "accounts", "decisions", "intent_corruptions", "mutation"],
       "properties": {
         "schema": { "const": "hive-circuits" },
         "schema_version": { "const": 1 },
@@ -307,6 +358,7 @@
         "issues": { "type": "array", "items": { "type": "string" } },
         "accounts": { "type": "array", "items": { "$ref": "#/$defs/Account" } },
         "decisions": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/Decision" } },
+        "intent_corruptions": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/IntentCorruption" } },
         "mutation": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Mutation" }] }
       }
     },

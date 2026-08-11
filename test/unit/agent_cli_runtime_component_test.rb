@@ -86,6 +86,32 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     end
   end
 
+  def test_builtin_credential_environment_inventory_matches_hive_boundary
+    %i[claude codex pi grok].each do |provider|
+      assert_equal(
+        Hive::AgentProfiles.lookup(provider).credential_environment_keys,
+        AgentCliRuntime::Profiles.fetch(provider).credential_environment_keys,
+        provider
+      )
+    end
+  end
+
+  def test_builtin_configuration_directory_inventory_matches_hive_boundary
+    %i[claude codex pi grok].each do |provider|
+      hive = Hive::AgentProfiles.lookup(provider)
+      public_profile = AgentCliRuntime::Profiles.fetch(provider)
+      assert_equal hive.configuration_environment_key,
+                   public_profile.configuration_environment_key,
+                   provider
+      assert_equal hive.default_configuration_directory,
+                   public_profile.default_configuration_directory,
+                   provider
+      assert_equal hive.configuration_directory(home: "/runtime", environment: {}),
+                   public_profile.configuration_directory(home: "/runtime", env: {}),
+                   provider
+    end
+  end
+
   def test_builtin_usage_variants_match_hive_boundary
     events = {
       claude: [

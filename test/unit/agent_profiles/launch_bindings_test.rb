@@ -80,7 +80,7 @@ class AgentProfilesLaunchBindingsTest < Minitest::Test
     end
   end
 
-  def test_named_claude_binding_clears_both_ambient_api_key_aliases
+  def test_named_claude_binding_clears_ambient_override_credentials
     with_tmp_dir do |root|
       binding = Hive::AgentProfiles::LaunchBindings.resolve(
         adapter: "claude",
@@ -89,7 +89,35 @@ class AgentProfilesLaunchBindingsTest < Minitest::Test
       )
 
       assert_nil binding.environment.fetch("ANTHROPIC_API_KEY")
+      assert_nil binding.environment.fetch("ANTHROPIC_AUTH_TOKEN")
       assert_nil binding.environment.fetch("CLAUDE_API_KEY")
     end
+  end
+
+  def test_named_pi_binding_clears_every_ambient_provider_credential
+    with_tmp_dir do |root|
+      environment = { "HIVE_PROVIDER_BINDING_PI_TEAM" => root }
+      Hive::AgentProfiles.lookup(:pi).credential_environment_keys.each do |key|
+        environment[key] = "ambient-credential"
+      end
+
+      binding = Hive::AgentProfiles::LaunchBindings.resolve(
+        adapter: "pi", binding_id: "team", environment: environment
+      )
+
+      assert_equal root, binding.environment.fetch("PI_CODING_AGENT_DIR")
+      Hive::AgentProfiles.lookup(:pi).credential_environment_keys.each do |key|
+        assert_nil binding.environment.fetch(key), "expected named Pi binding to clear #{key}"
+      end
+    end
+  end
+
+  def test_default_pi_binding_preserves_ambient_subscription_environment
+    binding = Hive::AgentProfiles::LaunchBindings.resolve(
+      adapter: "pi", binding_id: "default",
+      environment: { "OPENAI_API_KEY" => "ambient-credential" }
+    )
+
+    refute binding.environment.key?("OPENAI_API_KEY")
   end
 end

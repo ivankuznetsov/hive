@@ -93,7 +93,8 @@ class ProviderHealthStoreTest < Minitest::Test
 
     same_model = @store.evaluate_route(account_id: "codex-primary", model_id: "gpt-5.6-sol")
     sibling = @store.evaluate_route(account_id: "codex-primary", model_id: "gpt-5.6-terra")
-    assert_equal [ "circuit_cooldown" ], same_model.blockers.map { |entry| entry.fetch("reason") }
+    assert_equal %w[circuit_open circuit_cooldown],
+                 same_model.blockers.map { |entry| entry.fetch("reason") }
     assert sibling.eligible?
 
     blocked = @store.block(
@@ -122,6 +123,42 @@ class ProviderHealthStoreTest < Minitest::Test
     assert_equal "closed", reset_model.current.automatic_state
     assert_equal 2, reset_model.generation
     assert_equal 2, @store.inspect_scope(provider_scope).generation
+  end
+
+  def test_route_batch_scans_intents_and_replays_each_unique_scope_once
+    lock_count = 0
+    intent_scan_count = 0
+    replayed_scopes = []
+    original_lock = @store.method(:with_mutation_lock)
+    original_intents = @store.method(:load_intents)
+    original_replay = @store.method(:load_replay)
+    @store.define_singleton_method(:with_mutation_lock) do |&block|
+      lock_count += 1
+      original_lock.call(&block)
+    end
+    @store.define_singleton_method(:load_intents) do
+      intent_scan_count += 1
+      original_intents.call
+    end
+    @store.define_singleton_method(:load_replay) do |scope, **options|
+      replayed_scopes << scope
+      original_replay.call(scope, **options)
+    end
+
+    evaluations = @store.evaluate_routes(
+      routes: [
+        { account_id: "codex-primary", model_id: "gpt-5.6-sol" },
+        { account_id: "codex-primary", model_id: "gpt-5.6-terra" },
+        { account_id: "claude-secondary", model_id: "claude-opus-5" }
+      ]
+    )
+
+    assert_equal 1, lock_count
+    assert_equal 1, intent_scan_count
+    assert_equal 5, replayed_scopes.uniq.length
+    assert_equal replayed_scopes.uniq, replayed_scopes
+    assert_equal 3, evaluations.length
+    assert evaluations.all?(&:eligible?)
   end
 
   def test_operator_generation_cas_serializes_concurrent_mutations_once
@@ -332,7 +369,7 @@ class ProviderHealthStoreTest < Minitest::Test
     failed = corrupting.evaluate_route(
       account_id: route.account_id, model_id: route.model_id
     )
-    assert_equal [ "health_state_unavailable" ],
+    assert_equal %w[health_state_unavailable health_state_unavailable],
                  failed.blockers.map { |entry| entry.fetch("reason") }
   end
 
@@ -390,7 +427,7 @@ class ProviderHealthStoreTest < Minitest::Test
     end
   end
 
-  def test_journal_parser_distinguishes_torn_tail_from_parseable_or_interior_corruption
+  def test_journal_parser_transparently_replays_complete_and_partial_torn_tail
     bind_attempt
     @store.apply_evidence(
       evidence: evidence(provider_scope), attempt: attempt,
@@ -407,22 +444,28 @@ class ProviderHealthStoreTest < Minitest::Test
     valid = File.binread(journal_file(provider_scope))
 
     File.binwrite(journal_file(provider_scope), valid.chomp)
-    unavailable = @store.inspect_scope(provider_scope)
-    assert unavailable.unavailable?
-    assert_equal 2, unavailable.corruption_token.last_verified_generation
-    repaired = @store.reset(
-      scope: provider_scope, corruption_token: unavailable.corruption_token,
-      actor: "uid:1000", reason: "repair parseable torn record"
+    available = @store.inspect_scope(provider_scope)
+    assert available.available?
+    assert_equal 3, available.generation
+    repaired = @store.block(
+      scope: provider_scope, expected_generation: 3,
+      actor: "uid:1000", reason: "repair complete torn record"
     )
     assert repaired.current.blocked?
+    assert File.binread(journal_file(provider_scope)).end_with?("\n")
 
     File.binwrite(journal_file(provider_scope), valid + "{")
-    corruption_class = Hive::ProviderHealth::Store.const_get(:JournalCorruption, false)
-    assert_raises(corruption_class) do
-      @store.send(
-        :load_replay, provider_scope, recover_torn: false, publish_projection: false
-      )
-    end
+    replay = @store.send(
+      :load_replay, provider_scope, recover_torn: false, publish_projection: false
+    )
+    assert_equal 3, replay.circuit.generation
+    assert File.binread(journal_file(provider_scope)).end_with?("{")
+    repaired = @store.reset(
+      scope: provider_scope, expected_generation: 3,
+      actor: "uid:1000", reason: "repair partial torn record"
+    )
+    assert_equal 4, repaired.generation
+    refute File.binread(journal_file(provider_scope)).end_with?("{")
 
     event = JSON.parse(valid.lines.first)
     event["journal_epoch"] = 1
@@ -471,6 +514,38 @@ class ProviderHealthStoreTest < Minitest::Test
     )
     assert_equal %w[health_state_unavailable health_state_unavailable],
                  unavailable.blockers.map { |entry| entry.fetch("reason") }
+
+    inspection = @store.inspect_probe_intents
+    assert_equal "unavailable", inspection.fetch("status")
+    corruption = inspection.fetch("corruptions").fetch(0)
+    assert_equal "bad.json", corruption.fetch("intent_file")
+    assert_equal corruption.fetch("corruption_fingerprint"),
+                 corruption.dig("artifact_reference", "sha256")
+
+    repaired = @store.reset_probe_intent(
+      intent_file: corruption.fetch("intent_file"),
+      corruption_fingerprint: corruption.fetch("corruption_fingerprint"),
+      actor: "uid:1000",
+      reason: "quarantine corrupt probe intent"
+    )
+    assert_equal "accepted", repaired.fetch("status")
+    assert_equal "reset_probe_intent", repaired.fetch("reason")
+    assert File.file?(File.join(@root, repaired.dig("audit", "artifact_reference", "path")))
+    assert_equal "available", @store.inspect_probe_intents.fetch("status")
+    recovered = @store.evaluate_route(
+      account_id: route.account_id, model_id: route.model_id
+    )
+    assert recovered.eligible?
+    assert_empty recovered.blockers
+
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      @store.reset_probe_intent(
+        intent_file: corruption.fetch("intent_file"),
+        corruption_fingerprint: corruption.fetch("corruption_fingerprint"),
+        actor: "uid:1000",
+        reason: "repeat stale probe intent repair"
+      )
+    end
   end
 
   def test_probe_intent_parser_rejects_every_untrusted_shape
@@ -557,9 +632,11 @@ class ProviderHealthStoreTest < Minitest::Test
     assert_equal "health_state_unavailable", error.message
   end
 
-  def test_writer_rejects_the_event_after_the_reader_limit
+  def test_writer_rotates_the_active_journal_at_the_reader_limit
     replay_class = Hive::ProviderHealth::Store.const_get(:Replay, false)
-    existing = Struct.new(:idempotency_key).new("b" * 64)
+    existing = Struct.new(:idempotency_key, :event_id, :payload).new(
+      "b" * 64, "compacted-event", {}
+    )
     replay = replay_class.new(
       circuit: Hive::ProviderHealth::Circuit.closed(scope: provider_scope),
       events: Array.new(Hive::ProviderHealth::Store::MAX_JOURNAL_EVENTS, existing),
@@ -580,10 +657,92 @@ class ProviderHealthStoreTest < Minitest::Test
       resulting_generation: 0,
       payload: { "reason" => "stale_generation" }
     )
-    error = assert_raises(Hive::ProviderHealth::Unavailable) do
-      @store.send(:persist_event, replay, event)
+    result = @store.send(
+      :persist_event, replay, event,
+      status: "rejected", reason: "stale_generation"
+    )
+
+    assert_equal "rejected", result.status
+    events = journal_events(provider_scope)
+    assert_equal %w[snapshot evidence_rejected], events.map { |entry| entry.fetch("kind") }
+    assert_equal [ 1, 2 ], events.map { |entry| entry.fetch("sequence") }
+    assert_equal 1, Dir.glob(File.join(@root, "history", "**", "*.jsonl")).size
+    assert_equal 1, Dir.glob(File.join(@root, "idempotency", "**", "*.json")).size
+  end
+
+  def test_compaction_batches_idempotency_writes_while_route_reads_wait_safely
+    replay_class = Hive::ProviderHealth::Store.const_get(:Replay, false)
+    compacted_event = Struct.new(:idempotency_key, :event_id, :payload)
+    events = Array.new(Hive::ProviderHealth::Store::MAX_JOURNAL_EVENTS) do |index|
+      compacted_event.new(
+        Hive::ProviderHealth.digest("compacted-#{index}"),
+        "compacted-#{index}",
+        {}
+      )
     end
-    assert_equal "provider-health journal is full", error.message
+    replay = replay_class.new(
+      circuit: Hive::ProviderHealth::Circuit.closed(scope: provider_scope),
+      events: events,
+      bytes: "".b,
+      existed: false
+    )
+    event = Hive::ProviderHealth::Event.new(
+      event_id: "event-over-limit",
+      sequence: Hive::ProviderHealth::Store::MAX_JOURNAL_EVENTS + 1,
+      scope: provider_scope,
+      journal_epoch: 0,
+      kind: "evidence_rejected",
+      occurred_at: @clock,
+      idempotency_key: Hive::ProviderHealth.digest("event-over-limit"),
+      expected_generation: 0,
+      previous_generation: 0,
+      resulting_generation: 0,
+      payload: { "reason" => "stale_generation" }
+    )
+
+    directory = @store.instance_variable_get(:@directory)
+    original_write = directory.method(:atomic_write)
+    first_shard_write = Queue.new
+    release_first_write = Queue.new
+    shard_writes = 0
+    directory.define_singleton_method(:atomic_write) do |relative, *args, **kwargs|
+      if relative.include?("/shards/")
+        shard_writes += 1
+        if shard_writes == 1
+          first_shard_write << true
+          release_first_write.pop
+        end
+      end
+      original_write.call(relative, *args, **kwargs)
+    end
+
+    rotation = Thread.new do
+      @store.send(:with_mutation_lock) do
+        @store.send(
+          :persist_event, replay, event,
+          status: "rejected", reason: "stale_generation"
+        )
+      end
+    end
+    first_shard_write.pop
+    route_read = Thread.new do
+      @store.evaluate_route(
+        account_id: route.account_id,
+        model_id: route.model_id,
+        now: @clock
+      )
+    end
+    release_first_write << true
+
+    result = rotation.value
+    evaluation = route_read.value
+
+    assert_equal "rejected", result.status
+    assert evaluation.eligible?
+    assert_operator shard_writes, :<=,
+                    Hive::ProviderHealth::Store::IDEMPOTENCY_SHARD_COUNT
+    assert_equal Hive::ProviderHealth::Store::IDEMPOTENCY_SHARD_COUNT,
+                 Dir.glob(File.join(@root, "idempotency", "**", "shards", "*.json")).size
   end
 
   private

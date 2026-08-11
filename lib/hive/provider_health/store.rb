@@ -13,13 +13,22 @@ module Hive
     class Store
       MAX_JOURNAL_BYTES = 2 * 1024 * 1024
       MAX_JOURNAL_EVENTS = 4096
+      IDEMPOTENCY_SHARD_COUNT = 64
+      MAX_IDEMPOTENCY_SHARD_BYTES = 2 * 1024 * 1024
+      IDEMPOTENCY_SHARD_SCHEMA = "hive-provider-health-idempotency-shard"
       MAX_INTENT_BYTES = 64 * 1024
+      MAX_INTENT_FILES = 1024
+      INTENT_FILE_PATTERN = /\A[a-zA-Z0-9][a-zA-Z0-9._-]{0,126}\.json\z/
       DEFAULT_COOLDOWN_SECONDS = 300
       TERMINAL_RECEIPT_FIELDS = %w[
         attempt_id receipt_version terminal_lease_version
       ].freeze
 
-      Replay = Data.define(:circuit, :events, :bytes, :existed) do
+      Replay = Data.define(:circuit, :events, :bytes, :existed, :source_bytes) do
+        def initialize(circuit:, events:, bytes:, existed:, source_bytes: bytes)
+          super
+        end
+
         def sequence = events.length
       end
       private_constant :Replay
@@ -49,7 +58,10 @@ module Hive
           root: @root,
           label: "provider-health store"
         ).prepare!
-        %w[scopes/provider-account scopes/model intents quarantine].each do |relative|
+        %w[
+          scopes/provider-account scopes/model intents quarantine quarantine/intents
+          history/provider-account history/model idempotency/provider-account idempotency/model
+        ].each do |relative|
           @directory.ensure_directory(relative)
         end
       end
@@ -84,16 +96,24 @@ module Hive
       end
 
       def evaluate_route(account_id:, model_id:, now: current_time)
-        scopes = [
-          Scope.provider_account(account_id: account_id),
-          Scope.model(account_id: account_id, model_id: model_id)
-        ]
+        evaluate_routes(
+          routes: [ { account_id: account_id, model_id: model_id } ],
+          now: now
+        ).first
+      end
+
+      # One immutable admission snapshot for an ordered route set. Probe
+      # intents are scanned once and every unique enclosing scope is replayed
+      # once under one host-global lock, even when many models share an
+      # account. Results preserve the input route order.
+      def evaluate_routes(routes:, now: current_time)
+        route_scopes = normalize_route_scopes(routes)
         with_mutation_lock do
           intents = load_intents
-          inspections = scopes.map do |scope|
+          inspections_by_scope = route_scopes.flatten.uniq.to_h do |scope|
             begin
               replay = load_replay(scope, recover_torn: false, publish_projection: false)
-              Inspection.new(
+              inspection = Inspection.new(
                 status: "available",
                 scope: scope,
                 circuit: replay.circuit,
@@ -101,67 +121,97 @@ module Hive
                 journal_epoch: replay.circuit.journal_epoch
               )
             rescue JournalCorruption => corruption
-              unavailable_inspection(corruption)
+              inspection = unavailable_inspection(corruption)
             end
+            [ scope, inspection ]
           end
-          blockers = []
-          requirements = []
-          inspections.each do |inspection|
-            unless inspection.available?
-              blockers << blocker(inspection.scope, "health_state_unavailable", inspection)
-              next
-            end
-            circuit = inspection.circuit
-            if unresolved_intent?(inspection.scope, intents)
-              blockers << blocker(inspection.scope, "half_open_probe_owned", inspection)
-            elsif circuit.blocked?
-              blockers << blocker(inspection.scope, "manual_block", inspection)
-            elsif circuit.probe_owned?
-              blockers << blocker(inspection.scope, "half_open_probe_owned", inspection)
-            elsif circuit.half_open?(now: now)
-              requirements << ProbeRequirement.new(
-                scope: inspection.scope,
-                journal_epoch: inspection.journal_epoch,
-                observed_generation: inspection.generation
-              )
-            elsif circuit.automatic_state == "open"
-              blockers << blocker(inspection.scope, "circuit_cooldown", inspection)
-            end
+          route_scopes.map do |scopes|
+            route_evaluation(
+              inspections: scopes.map { |scope| inspections_by_scope.fetch(scope) },
+              intents: intents,
+              now: now
+            )
           end
-          RouteEvaluation.new(
-            status: blockers.empty? ? "eligible" : "excluded",
-            inspections: inspections,
-            blockers: blockers,
-            probe_requirements: blockers.empty? ? requirements : []
-          )
-        end
+        end.freeze
       rescue JournalCorruption => corruption
-        inspection = unavailable_inspection(corruption)
-        RouteEvaluation.new(
-          status: "excluded",
-          inspections: [ inspection ],
-          blockers: [ blocker(corruption.scope, "health_state_unavailable", inspection) ],
-          probe_requirements: []
-        )
+        unavailable_route_evaluations(route_scopes, corruption: corruption)
       rescue Unavailable, Hive::ManagedDirectory::UnsafeError
-        inspections = scopes.map do |scope|
-          Inspection.new(
-            status: "unavailable",
-            scope: scope,
-            circuit: nil,
-            generation: 0,
-            journal_epoch: 0,
-            unavailable_reason: "health_state_unavailable"
-          )
+        unavailable_route_evaluations(route_scopes)
+      end
+
+      # Read-only bounded inspection for the global probe-intent substrate.
+      # Corrupt files cannot be attributed to a scope safely, so routing stays
+      # fail-closed until an operator quarantines the exact digest-addressed
+      # artifact through reset_probe_intent.
+      def inspect_probe_intents
+        with_mutation_lock do
+          entries, corruptions = scan_intents
+          {
+            "status" => corruptions.empty? ? "available" : "unavailable",
+            "valid_count" => entries.length,
+            "corruptions" => corruptions
+          }.freeze
         end
-        RouteEvaluation.new(
-          status: "excluded",
-          inspections: inspections,
-          blockers: inspections.map do |inspection|
-            blocker(inspection.scope, "health_state_unavailable", inspection)
-          end,
-          probe_requirements: []
-        )
+      end
+
+      def reset_probe_intent(intent_file:, corruption_fingerprint:, actor:, reason:)
+        name = validate_intent_file!(intent_file)
+        fingerprint = corruption_fingerprint.to_s
+        unless fingerprint.match?(SHA256_PATTERN)
+          raise InvalidMutation, "probe-intent corruption fingerprint is invalid"
+        end
+        actor_value = Audit.validate_actor(actor)
+        reason_value = Audit.validate_reason(reason)
+
+        with_mutation_lock do
+          relative = "intents/#{name}"
+          bytes = @directory.read(relative, max_bytes: MAX_INTENT_BYTES, missing: true)
+          raise StaleGeneration, "probe-intent corruption token is stale" unless bytes
+          unless ProviderHealth.digest(bytes) == fingerprint
+            raise StaleGeneration, "probe-intent corruption token is stale"
+          end
+          begin
+            parse_named_intent(name, bytes)
+          rescue JSON::ParserError, KeyError, InvalidMutation, InvalidScope, TypeError
+            # Expected: only an artifact that is still corrupt may be reset.
+          else
+            raise StaleGeneration, "probe-intent artifact is no longer corrupt"
+          end
+
+          event_id = SecureRandom.uuid
+          quarantine = "quarantine/intents/#{name.delete_suffix('.json')}/#{fingerprint}.json"
+          reference = {
+            "path" => quarantine,
+            "size" => bytes.bytesize,
+            "sha256" => fingerprint
+          }.freeze
+          audit = {
+            "actor" => actor_value,
+            "reason" => reason_value,
+            "action" => "reset_probe_intent",
+            "occurred_at" => current_time.iso8601(6),
+            "event_id" => event_id,
+            "artifact_reference" => reference
+          }.freeze
+          @directory.atomic_write(quarantine, bytes, mode: 0o600)
+          @directory.atomic_write(
+            "#{quarantine}.receipt.json",
+            "#{ProviderHealth.canonical_json(audit)}\n",
+            mode: 0o600
+          )
+          @directory.unlink(
+            relative,
+            expected_digest: fingerprint,
+            max_bytes: MAX_INTENT_BYTES
+          )
+          {
+            "status" => "accepted",
+            "reason" => "reset_probe_intent",
+            "intent_file" => name,
+            "event_id" => event_id,
+            "audit" => audit
+          }.freeze
+        end
       end
 
       def apply_evidence(evidence:, attempt:, terminal_receipt:, expected_generation:)
@@ -350,6 +400,7 @@ module Hive
           enforce_generation!(replay.circuit, expected_generation)
           reconcile_intents_for_scope(scope)
           replay = load_replay(scope, recover_torn: true, publish_projection: true)
+          enforce_generation!(replay.circuit, expected_generation)
           append_operator_transition(
             replay,
             action: "reset",
@@ -473,30 +524,36 @@ module Hive
       def load_replay(scope, recover_torn:, publish_projection:)
         relative = journal_path(scope)
         bytes = @directory.read(relative, max_bytes: MAX_JOURNAL_BYTES, missing: true)
-        return fresh_replay(scope, publish_projection: publish_projection) if bytes.nil? || bytes.empty?
+        return fresh_replay(scope, publish_projection: publish_projection) if bytes.nil?
 
         original = bytes
-        corrupt_suffix = false
+        if bytes.empty?
+          raise JournalCorruption.new(
+            scope: scope,
+            bytes: original,
+            last_circuit: Circuit.closed(scope: scope)
+          )
+        end
+        # A final record without its newline, or a partial final record after
+        # the last newline, is a recoverable append tear. Replay a complete
+        # record with a virtual newline or discard only the malformed suffix.
+        # The original bytes remain the CAS source so the next mutation
+        # replaces the torn journal and appends its event in one atomic write.
         unless bytes.end_with?("\n")
           prefix_end = bytes.rindex("\n")
           suffix = prefix_end ? bytes.byteslice((prefix_end + 1)..) : bytes
           begin
             JSON.parse(suffix)
-            corrupt_suffix = true
-            bytes = prefix_end ? bytes.byteslice(0..prefix_end) : "".b
+            bytes = "#{bytes}\n"
           rescue JSON::ParserError
-            bytes = prefix_end ? bytes.byteslice(0..prefix_end) : "".b
-            if recover_torn
-              @directory.atomic_write(
-                relative,
-                bytes,
-                mode: 0o600,
-                expected_digest: ProviderHealth.digest(original),
-                max_existing_bytes: MAX_JOURNAL_BYTES
+            unless prefix_end
+              raise JournalCorruption.new(
+                scope: scope,
+                bytes: original,
+                last_circuit: Circuit.closed(scope: scope)
               )
-            else
-              corrupt_suffix = true
             end
+            bytes = bytes.byteslice(0..prefix_end)
           end
         end
 
@@ -515,7 +572,8 @@ module Hive
               raise Unavailable, "duplicate or excessive journal event"
             end
             if circuit.nil?
-              if event.kind != "reset" && (event.journal_epoch != 0 || event.previous_generation != 0)
+              unless %w[reset snapshot].include?(event.kind) ||
+                     (event.journal_epoch == 0 && event.previous_generation == 0)
                 raise Unavailable, "invalid journal genesis"
               end
               circuit = Circuit.closed(
@@ -537,18 +595,12 @@ module Hive
           end
         end
         circuit ||= Circuit.closed(scope: scope)
-        if corrupt_suffix
-          raise JournalCorruption.new(
-            scope: scope,
-            bytes: original,
-            last_circuit: circuit
-          )
-        end
         replay = Replay.new(
           circuit: circuit,
           events: events.freeze,
           bytes: bytes.freeze,
-          existed: true
+          existed: true,
+          source_bytes: original.freeze
         )
         publish_projection(replay) if publish_projection
         replay
@@ -569,7 +621,8 @@ module Hive
           circuit: Circuit.closed(scope: scope),
           events: [].freeze,
           bytes: "".b.freeze,
-          existed: false
+          existed: false,
+          source_bytes: "".b.freeze
         )
         publish_projection(replay) if publish_projection
         replay
@@ -622,26 +675,32 @@ module Hive
       end
 
       def persist_event(replay, event, status: "accepted", reason: nil)
-        if replay.sequence >= MAX_JOURNAL_EVENTS
-          raise Unavailable, "provider-health journal is full"
-        end
-        circuit = event.apply(replay.circuit)
         line = "#{ProviderHealth.canonical_json(event.to_h)}\n"
         bytes = replay.bytes + line
-        raise Unavailable, "provider-health journal is full" if bytes.bytesize > MAX_JOURNAL_BYTES
+        if replay.sequence >= MAX_JOURNAL_EVENTS || bytes.bytesize > MAX_JOURNAL_BYTES
+          replay = compact_replay(replay)
+          event = resequence_event(event, replay.sequence + 1)
+          line = "#{ProviderHealth.canonical_json(event.to_h)}\n"
+          bytes = replay.bytes + line
+        end
+        if replay.sequence >= MAX_JOURNAL_EVENTS || bytes.bytesize > MAX_JOURNAL_BYTES
+          raise Unavailable, "provider-health journal event exceeds the bounded active journal"
+        end
+        circuit = event.apply(replay.circuit)
 
         @directory.atomic_write(
           journal_path(event.scope),
           bytes,
           mode: 0o600,
-          expected_digest: replay.existed ? ProviderHealth.digest(replay.bytes) : nil,
+          expected_digest: replay.existed ? ProviderHealth.digest(replay.source_bytes) : nil,
           max_existing_bytes: MAX_JOURNAL_BYTES
         )
         next_replay = Replay.new(
           circuit: circuit,
           events: (replay.events + [ event ]).freeze,
           bytes: bytes.freeze,
-          existed: true
+          existed: true,
+          source_bytes: bytes.freeze
         )
         publish_projection(next_replay)
         audit = event.payload["audit"] && Audit::Receipt.from_h(event.payload.fetch("audit"))
@@ -658,7 +717,11 @@ module Hive
 
       def duplicate_result(replay, idempotency_key)
         event = replay.events.find { |candidate| candidate.idempotency_key == idempotency_key }
-        return nil unless event
+        compacted = nil
+        unless event
+          compacted = compacted_idempotency(replay.circuit.scope, idempotency_key)
+          return nil unless compacted
+        end
 
         MutationResult.new(
           status: "duplicate",
@@ -666,9 +729,199 @@ module Hive
           previous: replay.circuit,
           current: replay.circuit,
           generation: replay.circuit.generation,
-          event_id: event.event_id,
-          audit_receipt: event.payload["audit"] && Audit::Receipt.from_h(event.payload.fetch("audit"))
+          event_id: event&.event_id || compacted.fetch("event_id"),
+          audit_receipt: event&.payload&.fetch("audit", nil) &&
+            Audit::Receipt.from_h(event.payload.fetch("audit"))
         )
+      end
+
+      def compact_replay(replay)
+        scope = replay.circuit.scope
+        persist_compacted_idempotency(replay)
+        archive_compacted_journal(replay)
+        snapshot = Event.new(
+          event_id: SecureRandom.uuid,
+          sequence: 1,
+          scope: scope,
+          journal_epoch: replay.circuit.journal_epoch,
+          kind: "snapshot",
+          occurred_at: current_time,
+          idempotency_key: ProviderHealth.digest(
+            "snapshot" => ProviderHealth.digest(replay.bytes),
+            "scope" => scope.to_h,
+            "generation" => replay.circuit.generation
+          ),
+          expected_generation: replay.circuit.generation,
+          previous_generation: replay.circuit.generation,
+          resulting_generation: replay.circuit.generation,
+          payload: { "state" => snapshot_state(replay.circuit) }
+        )
+        line = "#{ProviderHealth.canonical_json(snapshot.to_h)}\n"
+        @directory.atomic_write(
+          journal_path(scope),
+          line,
+          mode: 0o600,
+          expected_digest: replay.existed ? ProviderHealth.digest(replay.source_bytes) : nil,
+          max_existing_bytes: MAX_JOURNAL_BYTES
+        )
+        circuit = snapshot.apply(
+          Circuit.closed(
+            scope: scope,
+            generation: replay.circuit.generation,
+            journal_epoch: replay.circuit.journal_epoch
+          )
+        )
+        Replay.new(
+          circuit: circuit,
+          events: [ snapshot ].freeze,
+          bytes: line.freeze,
+          existed: true,
+          source_bytes: line.freeze
+        )
+      end
+
+      def snapshot_state(circuit)
+        {
+          "automatic_state" => circuit.automatic_state,
+          "eligible_at" => circuit.eligible_at,
+          "evidence" => circuit.evidence,
+          "last_event_id" => circuit.last_event_id,
+          "manual_block" => circuit.manual_block,
+          "probe" => circuit.probe
+        }
+      end
+
+      def resequence_event(event, sequence)
+        Event.new(
+          event_id: event.event_id,
+          sequence: sequence,
+          scope: event.scope,
+          journal_epoch: event.journal_epoch,
+          kind: event.kind,
+          occurred_at: event.occurred_at,
+          idempotency_key: event.idempotency_key,
+          expected_generation: event.expected_generation,
+          previous_generation: event.previous_generation,
+          resulting_generation: event.resulting_generation,
+          payload: event.payload
+        )
+      end
+
+      def persist_compacted_idempotency(replay)
+        directory = idempotency_directory(replay.circuit.scope)
+        shard_directory = "#{directory}/shards"
+        @directory.ensure_directory(shard_directory)
+        replay.events.group_by do |event|
+          idempotency_shard_path(replay.circuit.scope, event.idempotency_key)
+        end.each do |relative, events|
+          existing = @directory.read(
+            relative,
+            max_bytes: MAX_IDEMPOTENCY_SHARD_BYTES,
+            missing: true
+          )
+          entries = existing ? parse_idempotency_shard(existing) : {}
+          events.each do |event|
+            prior = entries[event.idempotency_key]
+            if prior && prior != event.event_id
+              raise Unavailable, "provider-health compacted idempotency index is unavailable"
+            end
+            entries[event.idempotency_key] = event.event_id
+          end
+          content = "#{ProviderHealth.canonical_json(
+            "schema" => IDEMPOTENCY_SHARD_SCHEMA,
+            "schema_version" => 1,
+            "entries" => entries.sort.to_h
+          )}\n"
+          if content.bytesize > MAX_IDEMPOTENCY_SHARD_BYTES
+            raise Unavailable, "provider-health compacted idempotency shard is full"
+          end
+          next if existing == content
+
+          @directory.atomic_write(
+            relative,
+            content,
+            mode: 0o600,
+            expected_digest: existing && ProviderHealth.digest(existing),
+            max_existing_bytes: MAX_IDEMPOTENCY_SHARD_BYTES
+          )
+        end
+      end
+
+      def compacted_idempotency(scope, idempotency_key)
+        value = idempotency_key.to_s
+        return nil unless SHA256_PATTERN.match?(value)
+
+        shard = @directory.read(
+          idempotency_shard_path(scope, value),
+          max_bytes: MAX_IDEMPOTENCY_SHARD_BYTES,
+          missing: true
+        )
+        if shard
+          event_id = parse_idempotency_shard(shard)[value]
+          if event_id
+            return {
+              "idempotency_key" => value,
+              "event_id" => event_id
+            }.freeze
+          end
+        end
+
+        bytes = @directory.read(
+          "#{idempotency_directory(scope)}/#{value}.json",
+          max_bytes: 512,
+          missing: true
+        )
+        return nil unless bytes
+
+        data = JSON.parse(bytes)
+        unless data.is_a?(Hash) && data.keys.sort == %w[event_id idempotency_key] &&
+               data.fetch("idempotency_key") == value
+          raise Unavailable, "provider-health compacted idempotency index is unavailable"
+        end
+        ProviderHealth.identifier(data.fetch("event_id"), "compacted event")
+        data.freeze
+      rescue JSON::ParserError, KeyError, InvalidMutation
+        raise Unavailable, "provider-health compacted idempotency index is unavailable"
+      end
+
+      def parse_idempotency_shard(bytes)
+        data = JSON.parse(bytes)
+        unless data.is_a?(Hash) && data.keys.sort == %w[entries schema schema_version] &&
+               data.fetch("schema") == IDEMPOTENCY_SHARD_SCHEMA &&
+               data.fetch("schema_version") == 1 && data.fetch("entries").is_a?(Hash)
+          raise Unavailable, "provider-health compacted idempotency index is unavailable"
+        end
+        data.fetch("entries").each_with_object({}) do |(key, event_id), entries|
+          unless SHA256_PATTERN.match?(key.to_s)
+            raise Unavailable, "provider-health compacted idempotency index is unavailable"
+          end
+          entries[key] = ProviderHealth.identifier(event_id, "compacted event")
+        end
+      rescue JSON::ParserError, KeyError, InvalidMutation
+        raise Unavailable, "provider-health compacted idempotency index is unavailable"
+      end
+
+      def archive_compacted_journal(replay)
+        scope = replay.circuit.scope
+        directory = "history/#{scope_kind_directory(scope)}/#{scope.key}"
+        @directory.ensure_directory(directory)
+        digest = ProviderHealth.digest(replay.bytes)
+        relative = "#{directory}/#{replay.circuit.journal_epoch}-" \
+                   "#{replay.circuit.generation}-#{digest}.jsonl"
+        existing = @directory.read(relative, max_bytes: MAX_JOURNAL_BYTES, missing: true)
+        if existing && existing != replay.bytes
+          raise Unavailable, "provider-health compacted journal archive is unavailable"
+        end
+        @directory.atomic_write(relative, replay.bytes, mode: 0o600) unless existing
+      end
+
+      def idempotency_directory(scope)
+        "idempotency/#{scope_kind_directory(scope)}/#{scope.key}"
+      end
+
+      def idempotency_shard_path(scope, idempotency_key)
+        shard = idempotency_key.to_s.byteslice(0, 2).to_i(16) % IDEMPOTENCY_SHARD_COUNT
+        "#{idempotency_directory(scope)}/shards/#{format('%02x', shard)}.json"
       end
 
       def evidence_rejection(evidence:, attempt:, expected_generation:, circuit:)
@@ -731,6 +984,72 @@ module Hive
           circuit.probe == binding.to_h
       end
 
+      def normalize_route_scopes(routes)
+        values = Array(routes)
+        raise InvalidMutation, "provider-health route set is empty" if values.empty?
+
+        values.map do |route|
+          unless route.is_a?(Hash)
+            raise InvalidMutation, "provider-health route must contain account_id and model_id"
+          end
+          account_id = route.key?(:account_id) ? route.fetch(:account_id) : route.fetch("account_id")
+          model_id = route.key?(:model_id) ? route.fetch(:model_id) : route.fetch("model_id")
+          [
+            Scope.provider_account(account_id: account_id),
+            Scope.model(account_id: account_id, model_id: model_id)
+          ].freeze
+        end.freeze
+      rescue KeyError
+        raise InvalidMutation, "provider-health route must contain account_id and model_id"
+      end
+
+      def route_evaluation(inspections:, intents:, now:)
+        blockers = []
+        requirements = []
+        inspections.each do |inspection|
+          unless inspection.available?
+            blockers << blocker(inspection.scope, "health_state_unavailable", inspection)
+            next
+          end
+          circuit = inspection.circuit
+          if unresolved_intent?(inspection.scope, intents)
+            blockers << blocker(inspection.scope, "half_open_probe_owned", inspection)
+          elsif circuit.blocked?
+            blockers << blocker(inspection.scope, "manual_block", inspection)
+          elsif circuit.probe_owned?
+            blockers << blocker(inspection.scope, "half_open_probe_owned", inspection)
+          elsif circuit.half_open?(now: now)
+            requirements << ProbeRequirement.new(
+              scope: inspection.scope,
+              journal_epoch: inspection.journal_epoch,
+              observed_generation: inspection.generation
+            )
+          elsif circuit.automatic_state == "open"
+            blockers << blocker(inspection.scope, "circuit_open", inspection)
+            blockers << blocker(inspection.scope, "circuit_cooldown", inspection)
+          end
+        end
+        RouteEvaluation.new(
+          status: blockers.empty? ? "eligible" : "excluded",
+          inspections: inspections,
+          blockers: blockers,
+          probe_requirements: blockers.empty? ? requirements : []
+        )
+      end
+
+      def unavailable_route_evaluations(route_scopes, corruption: nil)
+        route_scopes.map do |scopes|
+          inspections = scopes.map do |scope|
+            if corruption && corruption.scope == scope
+              unavailable_inspection(corruption)
+            else
+              unavailable_scope_inspection(scope)
+            end
+          end
+          route_evaluation(inspections: inspections, intents: [], now: current_time)
+        end.freeze
+      end
+
       def blocker(scope, reason, inspection)
         {
           "scope" => scope.to_h,
@@ -784,6 +1103,7 @@ module Hive
           enforce_generation!(replay.circuit, expected_generation)
           reconcile_intents_for_scope(scope)
           replay = load_replay(scope, recover_torn: true, publish_projection: true)
+          enforce_generation!(replay.circuit, expected_generation)
           append_operator_transition(
             replay,
             action: action,
@@ -950,7 +1270,8 @@ module Hive
           ),
           events: [ event ].freeze,
           bytes: line.freeze,
-          existed: true
+          existed: true,
+          source_bytes: line.freeze
         )
         publish_projection(replay)
         MutationResult.new(
@@ -999,16 +1320,62 @@ module Hive
       end
 
       def load_intents
+        entries, corruptions = scan_intents
+        unless corruptions.empty?
+          raise Unavailable, "provider-health probe intent state is unavailable"
+        end
+        entries
+      end
+
+      def scan_intents
         entries = []
+        corruptions = []
         @directory.each_child("intents", missing: true) do |name|
           next unless name.end_with?(".json")
+          if entries.length + corruptions.length >= MAX_INTENT_FILES
+            raise Unavailable, "provider-health probe intent state is unavailable"
+          end
 
           bytes = @directory.read("intents/#{name}", max_bytes: MAX_INTENT_BYTES)
-          entries << parse_intent(bytes)
+          begin
+            entries << parse_named_intent(name, bytes)
+          rescue JSON::ParserError, KeyError, InvalidMutation, InvalidScope, TypeError
+            corruptions << intent_corruption(name, bytes)
+          end
         end
-        entries.sort_by { |entry| entry.fetch(:intent).intent_id }.freeze
-      rescue JSON::ParserError, KeyError, InvalidMutation, InvalidScope, TypeError
-        raise Unavailable, "provider-health probe intent state is unavailable"
+        [
+          entries.sort_by { |entry| entry.fetch(:intent).intent_id }.freeze,
+          corruptions.sort_by { |entry| entry.fetch("intent_file") }.freeze
+        ].freeze
+      end
+
+      def parse_named_intent(name, bytes)
+        parsed = parse_intent(bytes)
+        unless name == File.basename(intent_path(parsed.fetch(:intent).intent_id))
+          raise InvalidMutation, "probe intent filename does not match its identity"
+        end
+        parsed
+      end
+
+      def intent_corruption(name, bytes)
+        fingerprint = ProviderHealth.digest(bytes)
+        {
+          "intent_file" => name.freeze,
+          "corruption_fingerprint" => fingerprint.freeze,
+          "artifact_reference" => {
+            "path" => "intents/#{name}".freeze,
+            "size" => bytes.bytesize,
+            "sha256" => fingerprint.freeze
+          }.freeze
+        }.freeze
+      end
+
+      def validate_intent_file!(value)
+        name = value.to_s
+        unless name.match?(INTENT_FILE_PATTERN) && name != "." && name != ".."
+          raise InvalidMutation, "probe-intent file token is invalid"
+        end
+        name.freeze
       end
 
       def parse_intent(bytes)

@@ -9,7 +9,8 @@ tags: [provider-accounts, models, circuits, journals, probes, audit]
 
 **TLDR**: `Hive::ProviderHealth` is Hive's owner-private, host-global
 eligibility store for explicitly routed provider accounts and exact models. It
-accepts only typed evidence from allowlisted structured adapter channels,
+accepts only typed evidence from reviewed structured adapter channels or an
+explicitly separated provider diagnostic,
 serializes scoped generation-CAS mutations under one health lock, and rebuilds
 `current.json` from authoritative per-scope journals only on mutation paths.
 Read-only inspection samples journals without repair or projection writes. It never schedules a
@@ -49,6 +50,18 @@ message or artifact path cannot create a new shared-health identity. Untrusted,
 ambiguous, wrongly scoped, stale-generation, late, or fenced evidence cannot
 advance a circuit generation.
 
+Integrity-reference shape validation comes from the lower-level
+`Hive::OutputReference` custody primitive. Provider Health does not import or
+depend on the Attempts component merely to validate that metadata.
+
+The current adapter transport allowlist is deliberately narrow: a real Claude
+subscription `rate_limit_event` with rejected `five_hour` or `seven_day`
+status can produce provider-account `account_quota` evidence when it arrives
+from the admitted launch binding. Current Codex, Grok, and Pi transport shapes
+cannot produce shared-health evidence. Their historical provenance identifiers
+remain readable for durable-record compatibility, but the runtime normalizer
+does not emit them.
+
 ## Storage and replay
 
 State lives below `provider-health/v1` with owner-only directory and file
@@ -59,6 +72,8 @@ provider-health/v1/
 ├── mutation.lock
 ├── scopes/provider-account/<scope-digest>/{journal.jsonl,current.json}
 ├── scopes/model/<scope-digest>/{journal.jsonl,current.json}
+├── history/<scope-kind>/<scope-digest>/*.jsonl
+├── idempotency/<scope-kind>/<scope-digest>/shards/<00..3f>.json
 ├── intents/<intent-digest>.json
 └── quarantine/<scope-kind>/<scope-digest>/...
 ```
@@ -69,11 +84,27 @@ closed sanitized payload. Operator block, unblock, and reset events embed the
 audit receipt in the same journal write; audit is not a best-effort second
 append. `current.json` is disposable and repaired from replay by mutation paths.
 
-Only a malformed, unterminated final suffix encountered by a mutation is
-trimmed automatically. Inspection and route evaluation never trim a journal or
-publish a projection. An
-interior parse failure, schema-invalid event, sequence or generation gap,
-duplicate event identity, or impossible transition returns the scoped
+Before an append would exceed 4,096 active events or 2 MiB, the store archives
+the verified active journal, records its idempotency receipts across at most 64
+bounded shards, and atomically replaces it with a non-mutating `snapshot`
+event. Each shard is written at most once per compaction; readers retain the
+legacy point-receipt fallback for previously compacted state.
+The snapshot preserves circuit state, generation, epoch, manual block,
+evidence, and live probe ownership; the pending event is then appended at the
+new active sequence. Archived idempotency receipts keep old evidence replay a
+no-op after restart, while the active replay cost remains bounded.
+
+An unterminated final record after a verified record is replayed transparently
+without changing the journal: a complete JSON record receives a virtual
+newline, while a malformed suffix after the final newline is ignored.
+An existing empty journal or malformed first record has no verified genesis
+and therefore fails closed without being rewritten. Inspection and route
+evaluation remain read-only. The next mutation after a verified torn tail uses
+the exact original bytes as its compare-and-swap source and replaces the tail
+while appending the new event in one atomic journal write. An interior parse
+failure, schema-invalid event, sequence or generation gap, duplicate event
+identity, probe outcome without an owned probe, mismatched probe binding, or
+other impossible transition returns the scoped
 `health_state_unavailable` blocker without parser content. Inspection exposes
 a bounded repair token containing scope, journal epoch, corruption
 fingerprint, and last verified generation.
@@ -99,11 +130,21 @@ missing claims for the exact live attempt, rolls back an intent with no
 admitted attempt, or conservatively reopens claims for terminal/lost/fenced
 ownership. There is no probe timer or second lease store.
 
-Operator block, unblock, and reset first reconcile an unresolved intent at the
-operator's observed generation, then apply the operator transition to the
-current generation and retire any probe on the target scope. An already
-advanced live-intent scope is treated as a fenced rollback rather than making
-the whole health store unavailable.
+A malformed intent cannot be scoped reliably, so route evaluation remains
+globally fail-closed. `Store#inspect_probe_intents` exposes a bounded token for
+each exact corrupt artifact. The approved `hive circuits reset-intent` path
+revalidates its filename and digest, refuses a valid or stale artifact,
+quarantines the bytes with an audit receipt, and removes only that exact source
+file. This gives operator recovery without silently discarding possible
+in-flight ownership.
+
+Operator block, unblock, and reset first reconcile an unresolved intent, then
+repeat the operator's generation compare-and-swap against the replayed scope.
+If reconciliation accepted a live probe claim, the operator action is rejected
+as stale and requires fresh inspection; the claim and action can never both be
+accepted from one observed generation. An already advanced live-intent scope
+is treated as a fenced rollback rather than making the whole health store
+unavailable.
 
 `Store#with_route_admission` is the admission-side CAS seam. It replays and
 checks every enclosing scope against the router's immutable observation while
@@ -113,6 +154,12 @@ and unresolved intents are all revalidated. The yielded callback persists the
 attempt while the health lock remains innermost; multi-scope claims then use
 the existing intent protocol. A stale observation performs no attempt or
 health mutation and asks the dispatcher to select again.
+
+Preselection uses `Store#evaluate_routes` for the complete ordered pool. One
+host-global lock hold scans probe intents once and replays each unique account
+or model journal once, then returns route evaluations in input order. The
+single-route API delegates to that batch path, so large pools do not multiply
+intent scans or replay shared account journals.
 
 ## Terminal attempt observation
 
@@ -133,10 +180,16 @@ acknowledgement without changing a generation, preventing recovery deadlock.
 ## Operator controls
 
 `hive circuits` is the only public administration surface for provider health.
-Provider-account and exact-model `block`, `unblock`, and `reset` require
+Provider-account and exact-model `block`, `unblock`, and `reset`, plus global
+`reset-intent`, require
 explicit `--yes`, a bounded validated reason, trusted local actor identity, and
 either the fresh healthy generation or the complete scoped corruption token.
-The mutation and typed audit receipt are one journal operation.
+Probe-intent reset instead requires its exact inspection file token and digest.
+Credential-shaped text, including hyphenated `sk-proj-...` forms, is rejected
+before an audit event can be written.
+Circuit mutation and its typed audit receipt are one journal operation;
+probe-intent repair stores its quarantine artifact and audit receipt before
+removing the corrupt source.
 
 Unblock removes the manual block and any probe ownership fenced by the operator
 generation change. Ordinary reset clears automatic health

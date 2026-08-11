@@ -35,9 +35,9 @@ module Hive
     end
 
     # Owner-private, versioned durable task-attempt state. RecoveryMigration
-    # moves the physical v2 tree here before current readers may open it.
+    # moves the physical v3 tree here before current readers may open it.
     def attempts_root
-      File.join(state_home, "attempts", "v3")
+      File.join(state_home, "attempts", "v4")
     end
 
     def attempt_records_root

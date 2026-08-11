@@ -27,17 +27,17 @@ steps:
       global_path = File.join(run_home, "config.yml")
       global = YAML.safe_load(File.read(global_path)) || {}
       global["providers"] = {
-        "codex-a" => {
-          "adapter" => "codex",
-          "launch_binding" => "default",
-          "models" => ["codex-e2e-model"],
-          "max_concurrent" => 1,
-          "cooldown_sec" => { "account_quota" => 3_600 }
-        },
-        "claude-b" => {
+        "claude-a" => {
           "adapter" => "claude",
           "launch_binding" => "default",
           "models" => ["claude-e2e-model"],
+          "max_concurrent" => 1,
+          "cooldown_sec" => { "account_quota" => 3_600 }
+        },
+        "codex-b" => {
+          "adapter" => "codex",
+          "launch_binding" => "default",
+          "models" => ["codex-e2e-model"],
           "max_concurrent" => 1
         }
       }
@@ -55,13 +55,13 @@ steps:
       project.fetch("execute")["routing"] = {
         "pool" => [
           {
-            "provider" => "codex-a",
-            "model" => "codex-e2e-model",
+            "provider" => "claude-a",
+            "model" => "claude-e2e-model",
             "effort" => "high"
           },
           {
-            "provider" => "claude-b",
-            "model" => "claude-e2e-model",
+            "provider" => "codex-b",
+            "model" => "codex-e2e-model",
             "effort" => "high"
           }
         ]
@@ -73,7 +73,7 @@ steps:
     args: [develop, "{slug}", --from, 3-plan]
     expect_exit: null
     env:
-      HIVE_FAKE_CLAUDE_OUTPUT: '{"type":"turn.failed","error":{"type":"provider_error","origin":"provider_transport","class":"account_quota","scope":"provider_account","provider_account_id":"codex-a","reset_hint_seconds":3600}}'
+      HIVE_FAKE_CLAUDE_OUTPUT: '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}'
       HIVE_FAKE_CLAUDE_COMMIT_FILE: provider-routing.txt
       HIVE_FAKE_CLAUDE_COMMIT_CONTENT: "implemented through the routed attempt\n"
       HIVE_FAKE_CLAUDE_COMMIT_MESSAGE: "test: implement provider route fixture"
@@ -96,7 +96,7 @@ steps:
       first = first.fetch(0)
       route = first["routing"].fetch("route")
       evidence = first.receipt.fetch("provider_evidence")
-      raise "preferred route was not selected" unless route.fetch("route_id") == "codex-a/codex-e2e-model"
+      raise "preferred route was not selected" unless route.fetch("route_id") == "claude-a/claude-e2e-model"
       raise "initial route was not terminal failed" unless first.state == "terminal" && first.outcome == "failed"
       raise "initial attempt consumed a retry charge" unless first["retry_charge"] == 0
       raise "unsafe or wrong evidence was persisted" unless evidence.fetch("failure_class") == "account_quota" && evidence.dig("scope", "kind") == "provider_account"
@@ -108,7 +108,7 @@ steps:
     env:
       HIVE_DAEMON_NO_AUTO_REEXEC: "1"
       HIVE_LIMITS_RETRY_COOLDOWN_SEC: "1"
-      HIVE_FAKE_CLAUDE_OUTPUT: '{"type":"turn.failed","error":{"type":"provider_error","origin":"provider_transport","class":"account_quota","scope":"provider_account","provider_account_id":"codex-a","reset_hint_seconds":3600}}'
+      HIVE_FAKE_CLAUDE_OUTPUT: '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}'
       HIVE_FAKE_CLAUDE_COMMIT_FILE: provider-routing.txt
       HIVE_FAKE_CLAUDE_COMMIT_CONTENT: "implemented through the routed attempt\n"
       HIVE_FAKE_CLAUDE_COMMIT_MESSAGE: "test: implement provider route fixture"
@@ -178,13 +178,13 @@ steps:
       first = execute.find { |record| record.attempt_id == first_id }
       second = execute.find { |record| record.attempt_id == second_id }
       raise "recovery receipt did not identify both attempts" unless first && second
-      raise "attempt routes were not A then B" unless [first, second].map { |record| record["routing"].dig("route", "route_id") } == ["codex-a/codex-e2e-model", "claude-b/claude-e2e-model"]
+      raise "attempt routes were not A then B" unless [first, second].map { |record| record["routing"].dig("route", "route_id") } == ["claude-a/claude-e2e-model", "codex-b/codex-e2e-model"]
       raise "retry charges were not exactly zero then one" unless [first["retry_charge"], second["retry_charge"]] == [0, 1]
       raise "successor lost predecessor ownership" unless second["predecessor_attempt_id"] == first.attempt_id
       raise "successor changed frozen generation policy" unless second.task_generation == first.task_generation && second["routing"].fetch("policy_digest") == first["routing"].fetch("policy_digest")
       raise "attempt outcomes were not failed then succeeded" unless [first.outcome, second.outcome] == %w[failed succeeded]
       exclusions = second["routing"].dig("decision", "exclusions")
-      raise "successor did not explain the preferred-route exclusion" unless exclusions == [{"route_id" => "codex-a/codex-e2e-model", "reason" => "circuit_cooldown", "detail" => nil}]
+      raise "successor did not explain the preferred-route exclusion" unless exclusions == [{"route_id" => "claude-a/claude-e2e-model", "reason" => "circuit_open", "detail" => nil}]
 
       raise "recovery did not preserve the provider-neutral failure" unless recovery.fetch("failure_origin") == "provider_route_failed"
       raise "recovery was not charged exactly once" unless recovery.fetch("retry_count") == 1
@@ -198,14 +198,14 @@ steps:
         root: File.join(run_home, "provider-health", "v1")
       )
       scopes = {
-        "codex-provider" => Hive::ProviderHealth::Scope.provider_account(account_id: "codex-a"),
-        "codex-model" => Hive::ProviderHealth::Scope.model(account_id: "codex-a", model_id: "codex-e2e-model"),
-        "claude-provider" => Hive::ProviderHealth::Scope.provider_account(account_id: "claude-b"),
-        "claude-model" => Hive::ProviderHealth::Scope.model(account_id: "claude-b", model_id: "claude-e2e-model")
+        "claude-provider" => Hive::ProviderHealth::Scope.provider_account(account_id: "claude-a"),
+        "claude-model" => Hive::ProviderHealth::Scope.model(account_id: "claude-a", model_id: "claude-e2e-model"),
+        "codex-provider" => Hive::ProviderHealth::Scope.provider_account(account_id: "codex-b"),
+        "codex-model" => Hive::ProviderHealth::Scope.model(account_id: "codex-b", model_id: "codex-e2e-model")
       }.transform_values { |scope| health.inspect_scope(scope) }
-      codex = scopes.fetch("codex-provider")
-      raise "Codex account circuit changed more than once" unless codex.generation == 1 && codex.circuit.automatic_state == "open"
-      scopes.except("codex-provider").each do |name, inspection|
+      claude = scopes.fetch("claude-provider")
+      raise "Claude account circuit changed more than once" unless claude.generation == 1 && claude.circuit.automatic_state == "open"
+      scopes.except("claude-provider").each do |name, inspection|
         raise "#{name} circuit changed unexpectedly" unless inspection.generation == 0 && inspection.circuit.automatic_state == "closed"
       end
 
@@ -260,7 +260,7 @@ steps:
 
       health = Hive::ProviderHealth.open(root: File.join(run_home, "provider-health", "v1"))
       codex = health.inspect_scope(
-        Hive::ProviderHealth::Scope.provider_account(account_id: "codex-a")
+        Hive::ProviderHealth::Scope.provider_account(account_id: "claude-a")
       )
       raise "legacy failure mutated the existing routed circuit" unless codex.generation == 1
       requests = Hive::Daemon::DispatchRequestQueue.pending(state_home: run_home)

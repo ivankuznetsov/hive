@@ -1,5 +1,5 @@
 require "hive/provider_health"
-require "hive/attempts/output_reference"
+require "hive/output_reference"
 
 module Hive
   module ProviderHealth
@@ -27,7 +27,7 @@ module Hive
         unless hint.nil? || (hint.is_a?(Integer) && hint.between?(0, MAX_RESET_HINT_SECONDS))
           raise InvalidEvidence, "reset hint is outside the allowed bound"
         end
-        Hive::Attempts::OutputReference.validate_shape!(data.fetch("source_reference"))
+        Hive::OutputReference.validate_shape!(data.fetch("source_reference"))
         expected = ProviderHealth.digest(
           "failure_class" => klass,
           "scope" => scope.to_h,
@@ -39,7 +39,7 @@ module Hive
           raise InvalidEvidence, "provider evidence fingerprint does not match safe fields"
         end
         ProviderHealth.deep_freeze(ProviderHealth.deep_copy(data))
-      rescue KeyError, InvalidScope, InvalidMutation => e
+      rescue KeyError, InvalidScope, InvalidMutation, Hive::InvalidOutputReference => e
         raise InvalidEvidence, "provider evidence failed validation: #{e.class}"
       end
 
@@ -90,7 +90,7 @@ module Hive
         @attempt_id = ProviderHealth.identifier(attempt_id, "attempt")
         @fingerprint = ProviderHealth.digest(fingerprint_fields).freeze
         freeze
-      rescue Hive::Attempts::InvalidOutputReference => e
+      rescue Hive::InvalidOutputReference => e
         raise InvalidEvidence, e.message
       end
 
@@ -139,7 +139,7 @@ module Hive
       end
 
       def normalize_reference(value)
-        Hive::Attempts::OutputReference.validate_shape!(value)
+        Hive::OutputReference.validate_shape!(value)
         ProviderHealth.deep_freeze(ProviderHealth.deep_copy(value))
       end
     end

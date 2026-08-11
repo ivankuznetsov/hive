@@ -57,7 +57,10 @@ module Hive
       },
       routed_effort_values: %w[default inherit none minimal low medium high xhigh],
       routing_argument_placement: :global,
-      launcher_identity: "codex-cli/v1"
+      launcher_identity: "codex-cli/v1",
+      credential_environment_keys: %w[OPENAI_API_KEY],
+      configuration_environment_key: "CODEX_HOME",
+      default_configuration_directory: ".codex"
     )
 
     register(:codex, CODEX)

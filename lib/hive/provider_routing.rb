@@ -122,6 +122,7 @@ module Hive
     autoload :Configuration, File.expand_path("provider_routing/configuration.rb", __dir__)
     autoload :Candidate, File.expand_path("provider_routing/candidate.rb", __dir__)
     autoload :Policy, File.expand_path("provider_routing/policy.rb", __dir__)
+    autoload :PolicyStore, File.expand_path("provider_routing/policy_store.rb", __dir__)
     autoload :Request, File.expand_path("provider_routing/request.rb", __dir__)
     autoload :Decision, File.expand_path("provider_routing/decision.rb", __dir__)
     autoload :OperationalProjection,

@@ -4,12 +4,13 @@ require "fileutils"
 require "hive/atomic_file"
 require "hive/attempts/capability"
 require "hive/attempts/record"
+require "hive/point_storage"
 require "hive/stringify_keys"
 require "hive/paths"
 
 module Hive
   module Attempts
-    class StoreError < Hive::Error; end
+    class StoreError < Hive::PointStorageError; end
     class CompareAndSwapFailed < StoreError; end
 
     # Invalid records are deliberately retained by scans and count as a

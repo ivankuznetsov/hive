@@ -181,7 +181,7 @@
           "additionalProperties": false,
           "required": ["generation", "migration"],
           "properties": {
-            "generation": { "const": 3 },
+            "generation": { "const": 4 },
             "migration": { "type": "string", "enum": ["complete", "failed", "unknown"] },
             "last_migrated_at": { "type": ["string", "null"], "format": "date-time" },
             "last_result": { "type": ["object", "null"], "additionalProperties": { "type": "integer", "minimum": 0 } }
@@ -412,7 +412,7 @@
       "type": "string",
       "enum": [
         "hard_pin_mismatch", "requirements_incompatible", "manual_block",
-        "circuit_cooldown", "half_open_probe_owned",
+        "circuit_open", "circuit_cooldown", "half_open_probe_owned",
         "provider_concurrency_saturated", "health_state_unavailable"
       ]
     },
@@ -508,7 +508,7 @@
         "model": { "$ref": "#/$defs/RoutingIdentifier" },
         "effort": { "type": ["string", "null"] },
         "eligible": { "type": "boolean" },
-        "exclusions": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/RoutingExclusion" } },
+        "exclusions": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/RoutingExclusion" } },
         "capacity": {
           "oneOf": [
             { "type": "null" },
@@ -547,7 +547,7 @@
         "policy": { "type": "object", "additionalProperties": false, "required": ["stage", "pin", "requirements"], "properties": { "stage": { "type": "string" }, "pin": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RoutingPin" }] }, "requirements": { "$ref": "#/$defs/RoutingRequirements" } } },
         "selected_route": { "type": ["string", "null"] },
         "candidates": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RoutingCandidate" } },
-        "exclusions": { "type": "array", "maxItems": 2048, "items": { "$ref": "#/$defs/RoutingExclusion" } },
+        "exclusions": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/RoutingExclusion" } },
         "circuit_generations": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/RoutingCircuitGeneration" } },
         "probe_requirements": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/RoutingCircuitGeneration" } }
       }

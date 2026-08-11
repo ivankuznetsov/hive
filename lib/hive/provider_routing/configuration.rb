@@ -117,16 +117,23 @@ module Hive
         private
 
         def effective_binding_identity(account)
-          return "default" if account.launch_binding == "default"
+          profile = Hive::AgentProfiles.lookup(account.adapter)
+          directory = if account.launch_binding == "default"
+            profile.configuration_directory
+          else
+            binding = Hive::AgentProfiles::LaunchBindings.resolve(
+              adapter: account.adapter,
+              binding_id: account.launch_binding
+            )
+            binding.environment.fetch(profile.configuration_environment_key)
+          end
+          return "default" unless directory && File.directory?(directory)
 
-          binding = Hive::AgentProfiles::LaunchBindings.resolve(
-            adapter: account.adapter,
-            binding_id: account.launch_binding
-          )
-          key = Hive::AgentProfiles::LaunchBindings::ENVIRONMENT_KEYS.fetch(account.adapter)
-          File.realpath(binding.environment.fetch(key))
-        rescue Hive::ConfigError, Errno::ENOENT, Errno::EACCES
-          account.launch_binding
+          File.realpath(directory)
+        rescue ArgumentError, Errno::ENOENT, Errno::EACCES
+          raise ConfigError,
+                "providers.#{account.id}.launch_binding #{account.launch_binding.inspect} " \
+                "became unavailable during validation"
         end
 
         def build_explicit(cfg:, stage:, routing:, accounts:, source:)

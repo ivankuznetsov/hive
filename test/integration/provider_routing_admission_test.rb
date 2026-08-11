@@ -37,8 +37,8 @@ class ProviderRoutingAdmissionTest < Minitest::Test
 
     def reconcile! = @store.reconcile!
 
-    def evaluate_route(**attributes)
-      @store.evaluate_route(**attributes)
+    def evaluate_routes(**attributes)
+      @store.evaluate_routes(**attributes)
     end
 
     def with_route_admission(**attributes, &block)
@@ -105,6 +105,30 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     assert_equal result.decision.to_h, @store.decision_index.routing_decision(
       task_generation: result.attempt.task_generation,
       subject: result.attempt.subject
+    )
+  end
+
+  def test_admission_requests_one_health_batch_for_the_complete_route_pool
+    calls = []
+    original_batch = @health.method(:evaluate_routes)
+    @health.define_singleton_method(:evaluate_routes) do |**attributes|
+      calls << attributes.fetch(:routes)
+      original_batch.call(**attributes)
+    end
+    @health.define_singleton_method(:evaluate_route) do |**|
+      raise "dispatcher must use the batch health snapshot"
+    end
+
+    result = dispatch(task("batch-health", 16), policy: policy)
+
+    assert_equal :accepted, result.status
+    assert_equal 1, calls.length
+    assert_equal(
+      [
+        { account_id: "account-a", model_id: "model-a" },
+        { account_id: "account-b", model_id: "model-b" }
+      ],
+      calls.first
     )
   end
 
@@ -186,7 +210,7 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     failing_health.define_singleton_method(:reconcile!) do
       raise Hive::ProviderHealth::Unavailable, "health_state_unavailable"
     end
-    failing_health.define_singleton_method(:evaluate_route) { |**| raise "must not evaluate" }
+    failing_health.define_singleton_method(:evaluate_routes) { |**| raise "must not evaluate" }
     dispatcher = build_dispatcher(health_store: failing_health)
 
     result = dispatcher.dispatch(
@@ -199,6 +223,37 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     assert_equal "operator", result.decision.next_action_owner
     assert_equal [ "health_state_unavailable" ], result.decision.exclusions.map(&:reason).uniq
     assert_nil result.attempt
+  end
+
+  def test_health_store_construction_failure_is_a_durable_typed_no_route_decision
+    factory_calls = 0
+    errors = [ Hive::ProviderHealth::Unavailable, Hive::ManagedDirectory::UnsafeError ]
+
+    results = errors.each_with_index.map do |error_class, index|
+      dispatcher = build_dispatcher(
+        health_store: nil,
+        health_store_factory: lambda do
+          factory_calls += 1
+          raise error_class, "unsafe health root"
+        end
+      )
+      dispatcher.dispatch(
+        **dispatch_attributes(task("health-construction-unavailable-#{index}", 14 + index)),
+        routing_policy: policy
+      )
+    end
+
+    assert_equal 2, factory_calls
+    results.each do |result|
+      assert_equal :no_route, result.status
+      assert_equal "health_state_unavailable", result.reason
+      assert_equal "operator", result.decision.next_action_owner
+      assert_equal [ "health_state_unavailable" ], result.decision.exclusions.map(&:reason).uniq
+      assert_nil result.attempt
+    end
+    assert_equal results.map { |result| result.decision.to_h }.sort_by { |decision| decision["decision_id"] },
+                 @store.decision_index.routing_decisions.map { |entry| entry.fetch("decision") }
+                   .sort_by { |decision| decision["decision_id"] }
   end
 
   def test_one_admission_claims_both_half_open_scopes_and_concurrent_work_uses_b

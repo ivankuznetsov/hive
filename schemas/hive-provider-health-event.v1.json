@@ -12,7 +12,7 @@
     "sequence": { "type": "integer", "minimum": 1 },
     "scope": { "$ref": "#/$defs/scope" },
     "journal_epoch": { "type": "integer", "minimum": 0 },
-    "kind": { "enum": ["evidence_opened", "evidence_rejected", "probe_claimed", "probe_closed", "probe_reopened", "probe_reconciled", "manual_blocked", "manual_unblocked", "reset"] },
+    "kind": { "enum": ["evidence_opened", "evidence_rejected", "probe_claimed", "probe_closed", "probe_reopened", "probe_reconciled", "manual_blocked", "manual_unblocked", "reset", "snapshot"] },
     "occurred_at": { "type": "string", "format": "date-time" },
     "idempotency_key": { "$ref": "#/$defs/sha256" },
     "expected_generation": { "type": "integer", "minimum": 0 },
@@ -48,6 +48,10 @@
     {
       "if": { "properties": { "kind": { "enum": ["manual_unblocked", "reset"] } } },
       "then": { "properties": { "payload": { "$ref": "#/$defs/manual_unblocked" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "snapshot" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/snapshot" } } }
     }
   ],
   "$defs": {
@@ -216,6 +220,25 @@
         "audit": { "$ref": "#/$defs/audit" },
         "manual_block": { "oneOf": [{ "$ref": "#/$defs/manual_block" }, { "type": "null" }] }
       }
+    },
+    "snapshot_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["automatic_state", "eligible_at", "evidence", "last_event_id", "manual_block", "probe"],
+      "properties": {
+        "automatic_state": { "enum": ["closed", "open"] },
+        "eligible_at": { "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] },
+        "evidence": { "oneOf": [{ "$ref": "#/$defs/evidence" }, { "type": "null" }] },
+        "last_event_id": { "oneOf": [{ "$ref": "#/$defs/identifier" }, { "type": "null" }] },
+        "manual_block": { "oneOf": [{ "$ref": "#/$defs/manual_block" }, { "type": "null" }] },
+        "probe": { "oneOf": [{ "$ref": "#/$defs/probe" }, { "type": "null" }] }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": { "state": { "$ref": "#/$defs/snapshot_state" } }
     }
   }
 }

@@ -15,14 +15,15 @@ class ProviderHealthReplayTest < Minitest::Test
     FileUtils.remove_entry(@tmp)
   end
 
-  def test_read_only_inspection_does_not_repair_torn_or_interior_corruption
+  def test_read_only_inspection_replays_torn_tail_without_writing_and_mutation_repairs_it
     open_scope(provider_scope, evidence(provider_scope))
     path = journal_file(provider_scope)
     valid = File.binread(path)
     File.binwrite(path, valid + %({"message":"secret-canary"))
 
-    unavailable_tail = store.inspect_scope(provider_scope)
-    assert unavailable_tail.unavailable?
+    available_tail = store.inspect_scope(provider_scope)
+    assert available_tail.available?
+    assert_equal 1, available_tail.generation
     assert_includes File.binread(path), "secret-canary"
 
     repaired = store.block(
@@ -31,6 +32,7 @@ class ProviderHealthReplayTest < Minitest::Test
     )
     assert_equal 2, repaired.generation
     refute_includes File.binread(path), "secret-canary"
+    assert File.binread(path).end_with?("\n")
 
     File.binwrite(path, "not-json\n#{valid}")
     unavailable = store.inspect_scope(provider_scope)
@@ -40,6 +42,55 @@ class ProviderHealthReplayTest < Minitest::Test
     refute_includes unavailable.unavailable_reason, "not-json"
   end
 
+  def test_empty_or_truncated_genesis_is_unavailable_and_preserved
+    path = journal_file(provider_scope)
+    FileUtils.mkdir_p(File.dirname(path))
+
+    [ "".b, %({"schema":"hive-provider-health-event") ].each do |corrupt|
+      File.binwrite(path, corrupt)
+      unavailable = store.inspect_scope(provider_scope)
+
+      assert unavailable.unavailable?
+      assert_equal "health_state_unavailable", unavailable.unavailable_reason
+      assert_equal Hive::ProviderHealth.digest(corrupt),
+                   unavailable.corruption_token.corruption_fingerprint
+      assert_equal corrupt, File.binread(path)
+      evaluation = store.evaluate_route(
+        account_id: "codex-primary", model_id: "gpt-5.6-sol", now: @clock
+      )
+      assert_includes evaluation.blockers.map { |blocker| blocker.fetch("reason") },
+                      "health_state_unavailable"
+    end
+  end
+
+  def test_generation_correct_probe_outcome_without_owner_is_corruption
+    open_scope(provider_scope, evidence(provider_scope))
+    path = journal_file(provider_scope)
+    open = store.inspect_scope(provider_scope).circuit
+    impossible = Hive::ProviderHealth::Event.new(
+      event_id: "impossible-close",
+      sequence: 2,
+      scope: provider_scope,
+      journal_epoch: open.journal_epoch,
+      kind: "probe_closed",
+      occurred_at: @clock,
+      idempotency_key: Hive::ProviderHealth.digest("impossible-close"),
+      expected_generation: open.generation,
+      previous_generation: open.generation,
+      resulting_generation: open.generation + 1,
+      payload: { "receipt_identity" => Hive::ProviderHealth.digest("receipt") }
+    )
+    File.open(path, "ab") do |file|
+      file.write("#{Hive::ProviderHealth.canonical_json(impossible.to_h)}\n")
+    end
+
+    unavailable = store.inspect_scope(provider_scope)
+
+    assert unavailable.unavailable?
+    assert_equal "health_state_unavailable", unavailable.unavailable_reason
+    assert_equal 1, unavailable.corruption_token.last_verified_generation
+  end
+
   def test_read_only_inspection_does_not_rebuild_projection
     open_scope(provider_scope, evidence(provider_scope))
     projection = projection_file(provider_scope)
@@ -47,7 +98,6 @@ class ProviderHealthReplayTest < Minitest::Test
 
     inspected = store.inspect_scope(provider_scope)
 
-    assert inspected.available?
     assert inspected.available?
     assert_equal({ "message" => "secret-canary" }, JSON.parse(File.read(projection)))
   end
@@ -134,6 +184,45 @@ class ProviderHealthReplayTest < Minitest::Test
     end
   end
 
+  def test_compaction_preserves_state_duplicate_evidence_and_later_mutation_after_restart
+    signal = evidence(provider_scope)
+    opened = open_scope(provider_scope, signal)
+    blocked = @store.block(
+      scope: provider_scope,
+      expected_generation: opened.generation,
+      actor: "uid:1000",
+      reason: "preserve maintenance across compaction"
+    )
+    before = blocked.current.to_h
+    replay = @store.send(
+      :load_replay, provider_scope, recover_torn: true, publish_projection: false
+    )
+
+    compacted = @store.send(:compact_replay, replay)
+    restarted = store
+    after = restarted.inspect_scope(provider_scope)
+    duplicate = restarted.apply_evidence(
+      evidence: signal,
+      attempt: attempt,
+      terminal_receipt: receipt,
+      expected_generation: 0
+    )
+    unblocked = restarted.unblock(
+      scope: provider_scope,
+      expected_generation: blocked.generation,
+      actor: "uid:1000",
+      reason: "continue normally after compaction"
+    )
+
+    assert_equal before, compacted.circuit.to_h
+    assert_equal before, after.circuit.to_h
+    assert duplicate.duplicate?
+    assert_equal opened.event_id, duplicate.event_id
+    assert_equal blocked.generation + 1, unblocked.generation
+    refute unblocked.current.blocked?
+    assert_equal 1, Dir.glob(File.join(@root, "history", "**", "*.jsonl")).size
+  end
+
   def test_multi_scope_probe_claim_restart_and_success_are_exactly_once
     open_scope(provider_scope, evidence(provider_scope, reset_hint_seconds: 0))
     open_scope(model_scope, evidence(model_scope, failure_class: "model_capacity", reset_hint_seconds: 0))
@@ -171,6 +260,14 @@ class ProviderHealthReplayTest < Minitest::Test
     assert store.evaluate_route(
       account_id: "codex-primary", model_id: "gpt-5.6-sol", now: @clock
     ).eligible?
+  end
+
+  def test_operator_block_rechecks_generation_after_reconciling_live_intent
+    assert_operator_intent_race_fenced(:block)
+  end
+
+  def test_operator_reset_rechecks_generation_after_reconciling_live_intent
+    assert_operator_intent_race_fenced(:reset)
   end
 
   def test_restart_finalizes_partial_multi_scope_claim_from_durable_attempt
@@ -360,7 +457,7 @@ class ProviderHealthReplayTest < Minitest::Test
     assert_equal 2, store.inspect_scope(provider_scope).generation
   end
 
-  def test_operator_mutation_reconciles_and_retires_a_live_probe_intent
+  def test_operator_mutation_reconciles_live_intent_then_requires_fresh_generation
     open_scope(provider_scope, evidence(provider_scope, reset_hint_seconds: 0))
     evaluation = @store.evaluate_route(
       account_id: "codex-primary", model_id: "gpt-5.6-sol", now: @clock
@@ -376,11 +473,20 @@ class ProviderHealthReplayTest < Minitest::Test
     end
     bindings = store.send(:load_intents).fetch(0).fetch(:bindings)
     @attempts[intent.attempt_id] = build_attempt(probe_bindings: bindings)
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      @store.block(
+        scope: provider_scope, expected_generation: 1,
+        actor: "uid:1000", reason: "advance scope before replay"
+      )
+    end
+    reconciled = @store.inspect_scope(provider_scope)
     blocked = @store.block(
-      scope: provider_scope, expected_generation: 1,
-      actor: "uid:1000", reason: "advance scope before replay"
+      scope: provider_scope, expected_generation: reconciled.generation,
+      actor: "uid:1000", reason: "advance scope after fresh inspection"
     )
 
+    assert_equal 2, reconciled.generation
+    assert reconciled.circuit.probe_owned?
     assert blocked.current.blocked?
     assert_nil blocked.current.probe
     assert_equal 3, blocked.generation
@@ -389,6 +495,43 @@ class ProviderHealthReplayTest < Minitest::Test
   end
 
   private
+
+  def assert_operator_intent_race_fenced(action)
+    open_scope(provider_scope, evidence(provider_scope, reset_hint_seconds: 0))
+    evaluation = @store.evaluate_route(
+      account_id: "codex-primary", model_id: "gpt-5.6-sol", now: @clock
+    )
+    intent = probe_intent(evaluation.probe_requirements)
+    crashing = store(
+      fault_injector: lambda do |phase, _context|
+        raise "simulated crash" if phase == :attempt_persisted
+      end
+    )
+    assert_raises(RuntimeError) do
+      crashing.with_probe_intent(intent: intent) do |bindings|
+        @attempts[intent.attempt_id] = build_attempt(probe_bindings: bindings)
+      end
+    end
+
+    assert_raises(Hive::ProviderHealth::StaleGeneration) do
+      @store.public_send(
+        action,
+        scope: provider_scope,
+        expected_generation: 1,
+        actor: "uid:1000",
+        reason: "operator must re-inspect after intent reconciliation"
+      )
+    end
+
+    inspection = @store.inspect_scope(provider_scope)
+    assert_equal 2, inspection.generation
+    assert inspection.circuit.probe_owned?
+    kinds = File.readlines(journal_file(provider_scope)).map do |line|
+      JSON.parse(line).fetch("kind")
+    end
+    assert_equal %w[evidence_opened probe_claimed], kinds
+    assert_empty Dir.glob(File.join(@root, "intents", "*.json"))
+  end
 
   def store(**options)
     Hive::ProviderHealth::Store.new(

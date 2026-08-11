@@ -71,7 +71,7 @@
       "type": "string",
       "enum": [
         "hard_pin_mismatch", "requirements_incompatible", "manual_block",
-        "circuit_cooldown", "half_open_probe_owned",
+        "circuit_open", "circuit_cooldown", "half_open_probe_owned",
         "provider_concurrency_saturated", "health_state_unavailable"
       ]
     },

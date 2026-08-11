@@ -4,6 +4,53 @@ require "hive/agent_profiles/usage_extractors"
 
 module Hive
   module AgentProfiles
+    PI_CREDENTIAL_ENVIRONMENT_KEYS = %w[
+      AI_GATEWAY_API_KEY
+      ANTHROPIC_API_KEY
+      ANTHROPIC_AUTH_TOKEN
+      ANTHROPIC_OAUTH_TOKEN
+      ANT_LING_API_KEY
+      AWS_ACCESS_KEY_ID
+      AWS_BEARER_TOKEN_BEDROCK
+      AWS_CONTAINER_CREDENTIALS_FULL_URI
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
+      AWS_PROFILE
+      AWS_SECRET_ACCESS_KEY
+      AWS_SESSION_TOKEN
+      AWS_WEB_IDENTITY_TOKEN_FILE
+      AZURE_OPENAI_API_KEY
+      BASETEN_API_KEY
+      CEREBRAS_API_KEY
+      CLOUDFLARE_API_KEY
+      COPILOT_GITHUB_TOKEN
+      DEEPSEEK_API_KEY
+      FIREWORKS_API_KEY
+      GEMINI_API_KEY
+      GOOGLE_APPLICATION_CREDENTIALS
+      GOOGLE_CLOUD_API_KEY
+      GROQ_API_KEY
+      HF_TOKEN
+      KIMI_API_KEY
+      MINIMAX_API_KEY
+      MINIMAX_CN_API_KEY
+      MISTRAL_API_KEY
+      MOONSHOT_API_KEY
+      NVIDIA_API_KEY
+      OPENCODE_API_KEY
+      OPENAI_API_KEY
+      OPENROUTER_API_KEY
+      QWEN_TOKEN_PLAN_API_KEY
+      RADIUS_API_KEY
+      TOGETHER_API_KEY
+      XAI_API_KEY
+      XIAOMI_API_KEY
+      XIAOMI_TOKEN_PLAN_AMS_API_KEY
+      XIAOMI_TOKEN_PLAN_CN_API_KEY
+      XIAOMI_TOKEN_PLAN_SGP_API_KEY
+      ZAI_API_KEY
+      ZAI_CODING_CN_API_KEY
+    ].freeze
+
     # Pi (mariozechner/pi-coding-agent) profile. Headless via -p / --print.
     #
     # Two ADR-008 boundary gaps documented in U11's matrix:
@@ -98,7 +145,10 @@ module Hive
       routed_model_argument_builder: ->(model) {
         %w[default inherit].include?(model) ? [] : [ "--model", model ]
       },
-      launcher_identity: "pi-coding-agent/v1"
+      launcher_identity: "pi-coding-agent/v1",
+      credential_environment_keys: PI_CREDENTIAL_ENVIRONMENT_KEYS,
+      configuration_environment_key: "PI_CODING_AGENT_DIR",
+      default_configuration_directory: ".pi/agent"
     )
 
     register(:pi, PI)

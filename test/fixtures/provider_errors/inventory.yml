@@ -2,30 +2,30 @@ schema: hive-provider-error-provenance-inventory/v1
 sanitization: raw prompts, messages, stdout, stderr, tool output, and credentials are excluded
 adapters:
   claude:
-    fixture: claude_transport_contract.json
     real_capture: claude.json
     trusted_channels: [stream_json_transport]
-    stable_explicit_scopes: [provider_account, model]
-    task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, model_unavailable, model_quota, model_rate, model_capacity]
-    note: The allowlisted fixture is a sanitized adapter-contract envelope, not a claimed upstream capture. Upstream shapes outside it remain task-local; claude.json records the real-capture gap.
+    stable_explicit_scopes: [provider_account]
+    trusted_classes: [account_quota]
+    task_local_classes: [authentication, billing_configuration, exhausted_credits, provider_rate_limit, provider_outage, unavailable, disabled, deprecated, model_quota, model_rate, model_capacity]
+    note: A real rejected subscription rate-limit event is account-scoped by the admitted launch binding. No Claude model-scoped failure is trusted.
   codex:
-    fixture: codex_transport_contract.json
     real_capture: codex.json
-    trusted_channels: [jsonl_transport]
-    stable_explicit_scopes: [provider_account, model]
-    task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, model_unavailable, model_quota, model_rate, model_capacity]
-    note: The allowlisted fixture is a sanitized adapter-contract envelope, not a claimed upstream capture. Prose limit text and other JSONL shapes remain task-local; codex.json records the real-capture gap.
+    trusted_channels: []
+    stable_explicit_scopes: []
+    trusted_classes: []
+    task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, unavailable, disabled, deprecated, model_quota, model_rate, model_capacity]
+    note: Real subscription failures expose only message text, so every Codex transport failure remains task-local.
   pi:
-    fixture: pi_transport_contract.json
     real_capture: pi.json
-    trusted_channels: [json_transport]
-    stable_explicit_scopes: [provider_account, model]
-    task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, model_unavailable, model_quota, model_rate, model_capacity]
-    note: The allowlisted fixture is a sanitized adapter-contract envelope, not a claimed upstream capture. Multiplexed or differently shaped Pi errors remain task-local; pi.json records the real-capture gap.
+    trusted_channels: []
+    stable_explicit_scopes: []
+    trusted_classes: []
+    task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, unavailable, disabled, deprecated, model_quota, model_rate, model_capacity]
+    note: No Pi subscription session is configured on the evidence host. Pi remains task-local until a sanitized real subscription capture is reviewed.
   grok:
-    fixture: grok_transport_contract.json
     real_capture: grok.json
-    trusted_channels: [streaming_json_transport]
-    stable_explicit_scopes: [provider_account, model]
-    task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, model_unavailable, model_quota, model_rate, model_capacity]
-    note: The allowlisted fixture is a sanitized adapter-contract envelope, not a claimed upstream capture. HTTP-like prose and other streaming-json shapes remain task-local; grok.json records the real-capture gap.
+    trusted_channels: []
+    stable_explicit_scopes: []
+    trusted_classes: []
+    task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, unavailable, disabled, deprecated, model_quota, model_rate, model_capacity]
+    note: Real subscription failures expose only message text, so every Grok transport failure remains task-local.

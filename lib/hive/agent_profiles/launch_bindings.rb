@@ -7,18 +7,6 @@ module Hive
     # process environment binding and are never returned to durable routing
     # state, status, or logs.
     module LaunchBindings
-      ENVIRONMENT_KEYS = {
-        "claude" => "CLAUDE_CONFIG_DIR",
-        "codex" => "CODEX_HOME",
-        "pi" => "PI_CODING_AGENT_DIR",
-        "grok" => "GROK_HOME"
-      }.freeze
-      CLEARED_CREDENTIAL_KEYS = {
-        "claude" => %w[ANTHROPIC_API_KEY CLAUDE_API_KEY],
-        "codex" => %w[OPENAI_API_KEY],
-        "pi" => [],
-        "grok" => %w[GROK_AUTH_PATH XAI_API_KEY GROK_CODE_XAI_API_KEY]
-      }.freeze
       IDENTIFIER = /\A[a-z][a-z0-9_-]{0,63}\z/
       PREFLIGHT_MUTEX = Mutex.new
 
@@ -41,7 +29,8 @@ module Hive
       def resolve(adapter:, binding_id:, environment: ENV)
         adapter_name = adapter.to_s
         binding = binding_id.to_s
-        key = ENVIRONMENT_KEYS[adapter_name]
+        profile = Hive::AgentProfiles.lookup(adapter_name)
+        key = profile.configuration_environment_key
         raise Hive::ConfigError, "provider route uses an unsupported adapter" unless key
         unless IDENTIFIER.match?(binding)
           raise Hive::ConfigError, "provider route launch binding is invalid"
@@ -66,7 +55,7 @@ module Hive
                 "configure #{selector} as an existing absolute directory"
         end
         launch_environment = selector_scrub.merge(key => File.expand_path(path))
-        CLEARED_CREDENTIAL_KEYS.fetch(adapter_name).each { |name| launch_environment[name] = nil }
+        profile.credential_environment_keys.each { |name| launch_environment[name] = nil }
         Binding.new(
           adapter: adapter_name,
           id: binding,

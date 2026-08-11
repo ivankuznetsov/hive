@@ -1387,30 +1387,20 @@ class SpawnAgentTest < Minitest::Test
   def test_explicit_transport_failure_publishes_once_and_escapes_embedded_loop
     with_tmp_dir do |dir|
       task = make_task(dir, "4-execute")
-      fake = File.join(dir, "codex")
       event = {
-        "type" => "turn.failed",
-        "error" => {
-          "type" => "provider_error", "origin" => "provider_transport",
-          "class" => "model_capacity", "scope" => "model",
-          "provider_account_id" => "account-a", "model" => "model-a",
-          "reset_hint_seconds" => 30, "message" => "secret-canary"
+        "type" => "rate_limit_event",
+        "rate_limit_info" => {
+          "status" => "rejected", "rateLimitType" => "five_hour"
         }
       }
-      File.write(fake, <<~SH)
-        #!/usr/bin/env bash
-        if [ "$1" = "--version" ]; then echo "codex-cli 1.0.0"; exit 0; fi
-        cat > /dev/null
-        printf '%s\n' '#{JSON.generate(event)}'
-        exit 0
-      SH
-      File.chmod(0o755, fake)
-      ENV["HIVE_CODEX_BIN"] = fake
+      event["message"] = "secret-canary"
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(event)
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = dir
       published = []
       writer = Object.new
       writer.define_singleton_method(:write) { |signal| published << signal; true }
       writer.define_singleton_method(:close) { true }
-      context = explicit_context(evidence_writer: writer)
+      context = explicit_context(adapter: "claude", evidence_writer: writer)
 
       error = with_replaced_singleton_method(
         Hive::Attempts::Context, :current, -> { context }
@@ -1429,7 +1419,8 @@ class SpawnAgentTest < Minitest::Test
 
       assert_equal "admitted provider route failed", error.message
       assert_equal 1, published.length
-      assert_equal "model_capacity", published.first.fetch("failure_class")
+      assert_equal "account_quota", published.first.fetch("failure_class")
+      assert_equal "provider_account", published.first.dig("scope", "kind")
       refute_includes JSON.generate(published), "secret-canary"
       marker = Hive::Markers.current(task.state_file)
       assert_equal :error, marker.name
@@ -1524,7 +1515,7 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
-  def explicit_context(binding: "default", evidence_writer: nil, effort: "high")
+  def explicit_context(binding: "default", evidence_writer: nil, effort: "high", adapter: "codex")
     provider_scope = {
       "kind" => "provider_account", "provider_account_id" => "account-a", "model" => nil
     }
@@ -1546,7 +1537,7 @@ class SpawnAgentTest < Minitest::Test
         },
         "route" => {
           "route_id" => "account-a/model-a", "provider_account_id" => "account-a",
-          "adapter" => "codex", "launch_binding_id" => binding,
+          "adapter" => adapter, "launch_binding_id" => binding,
           "model" => "model-a", "effort" => effort
         },
         "circuit_generations" => [

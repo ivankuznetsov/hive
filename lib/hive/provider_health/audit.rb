@@ -1,5 +1,5 @@
 require "hive/provider_health"
-require "hive/attempts/output_reference"
+require "hive/output_reference"
 require "hive/secret_patterns"
 
 module Hive
@@ -119,9 +119,9 @@ module Hive
       def validate_reference(value)
         return nil if value.nil?
 
-        Hive::Attempts::OutputReference.validate_shape!(value)
+        Hive::OutputReference.validate_shape!(value)
         ProviderHealth.deep_freeze(ProviderHealth.deep_copy(value))
-      rescue Hive::Attempts::InvalidOutputReference => e
+      rescue Hive::InvalidOutputReference => e
         raise InvalidMutation, e.message
       end
     end

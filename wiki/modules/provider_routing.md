@@ -15,7 +15,9 @@ binding, model, effort, compatibility metadata, hard requirements, strict pin,
 and a canonical digest. Health, admission, capacity, attempts, retry, and
 recovery are not owned here. `Router` consumes immutable health and durable
 capacity observations and returns an explainable decision without reserving a
-route.
+route. The public `require "hive/provider_routing"` entrypoint resolves both
+the immutable values and `ProviderRouting::PolicyStore` without relying on an
+Attempts require to have run first.
 
 ## Global provider accounts
 
@@ -38,14 +40,31 @@ providers:
 it is never a token, credential path, or environment value. Account IDs are
 normalized. Models are an explicit allowlist. Two accounts using one adapter
 must resolve to distinct launch-binding identities, including after named
-credential-directory paths are canonicalized, and only one can therefore use
-`default`.
+credential-directory paths and an existing default session directory are
+canonicalized, and only one can therefore use `default`. An explicit policy validates every named binding as an existing
+absolute directory before it can enter a route. Missing or inaccessible named
+bindings are configuration errors rather than eligible candidates that fail
+after commitment.
+Named bindings additionally remove the selected agent-compatibility profile's
+recognized ambient credential variables for the child process. For Pi this
+ensures route identity comes from the selected subscription/session directory
+rather than an inherited API key or token. The variable inventory belongs to
+`agent-cli-runtime` and is parity-tested against Hive's temporary internal
+profile copy.
 Cooldown values are bounded and keyed by the closed account-health taxonomy.
 
 The registry is dormant unless a project declares an explicit pool. A malformed
 global `providers:` value cannot break a project that has no pool.
 
 ## Per-stage policy
+
+Provider routing is configured at a durable stage boundary. In particular,
+`review.routing` selects the route for the complete review attempt and
+`patrol.routing` selects the route for the complete Patrol attempt. Nested
+`review.{ci,triage,fix,browser_test}.routing`, per-reviewer routing, and Patrol
+per-reviewer routing are rejected because those actors do not own independent
+durable attempts. Their existing model/effort and permission controls remain
+available.
 
 ```yaml
 execute:
@@ -104,9 +123,20 @@ strict pin excluded by saturation is instead `no_eligible_provider_route` with
 the exact `provider_concurrency_saturated` exclusion, like every other
 strict-pin exclusion. Health or policy exhaustion is also
 `no_eligible_provider_route`, while unavailable health fails closed with an
-operator owner. Decisions retain ordered candidates,
+operator owner. Store construction and preselection reconciliation failures
+use that same typed path, so even an unavailable health root leaves a durable
+decision instead of escaping admission as an exception. Decisions retain ordered candidates,
 typed exclusions, observed/max capacity, both circuit generations, optional
 probe requirements, and a caller-supplied observation identity/time.
+One candidate can carry all four enclosing health blockers (provider and model
+scopes, each with `circuit_open` plus `circuit_cooldown`), while the complete
+1,024-candidate decision remains bounded to 4,096 exclusions.
+
+An automatically open circuit that is still waiting for its eligibility time
+emits both `circuit_open` (the durable health state) and `circuit_cooldown` (the
+current time gate), in that order. Once the time arrives, the scope is
+half-open and ordinary admission may claim its probe instead of emitting either
+exclusion.
 
 Before the first explicit selection for a durable subject generation,
 `ProviderRouting::PolicyStore` records the complete normalized policy under
@@ -116,6 +146,20 @@ first-writer-wins. Reads reconstruct the policy and recompute its canonical
 digest; schema-valid tampering therefore still fails closed. Only symbolic
 launch-binding identity is stored. Legacy policies return before key validation,
 schema loading, directory creation, or any policy-store I/O.
+
+The routing-policy component owns those first-writer-wins snapshot mutations;
+it uses the lower-level `Hive::PointStorage` custody primitive rather than an
+Attempts-internal store. Attempts owns admission and supplies the root and lock
+ordering, but it is not a hidden dependency of policy normalization or
+persistence.
+
+Release incident coverage uses that same production admission boundary. The
+AE2-AE8 matrix admits routed work through `Attempts::Dispatcher`, derives
+provider capacity from live v4 attempt records, binds health observations to
+immutable terminal receipts, and reopens both Attempts and Provider Health
+stores at restart points. At least one accepted route is claimed, run, and
+terminalized by `Attempts::Supervisor`; impossible requirement/pin policies
+fail at frozen-policy validation before an attempt can be created.
 
 The selected route remains separate and attempt-scoped. Attempt schema v4
 stores the adapter/profile in its existing `provider` field and stores account,
@@ -135,6 +179,11 @@ holding its existing admission and task-generation locks. It then asks health
 to revalidate the selected route's complete generation vector. Any concurrent
 health mutation causes a bounded re-selection; only a still-current decision
 may be persisted with a launching attempt.
+
+Each selection pass obtains one immutable health batch for the complete
+statically eligible pool. Provider Health scans intents once and replays unique
+enclosing scopes once under its lock; the dispatcher never performs one locked
+health read per candidate.
 
 ## Durable operational projection
 
@@ -161,9 +210,12 @@ admission and reconciliation remain digest-addressed point reads and writes.
 `hive-circuits.v1` JSON form. See [[commands/circuits]].
 
 Sanitized adapter-channel inventory lives under
-`test/fixtures/provider_errors/`. The allowlisted files are explicitly marked
-as sanitized adapter-contract fixtures, not upstream captures. Only those
-exact structured envelopes with matching configured account/model identity
-can become shared evidence; prose and other shapes remain task-local. The
-adjacent `real_capture_pending` files preserve the operational proof gap rather
-than overstating fixture provenance.
+`test/fixtures/provider_errors/`. Each retained file records a sanitized real
+capture or an explicit unavailable status, adapter version, observed channel,
+and source-artifact digest without retaining raw messages. Claude's rejected
+subscription `rate_limit_event` is the only currently enabled transport shape;
+the admitted launch binding supplies its provider-account scope and the event
+maps to `account_quota`. Real Codex and Grok failure events contain only
+message text, while Pi has no configured subscription session on the evidence
+host, so those adapters remain task-local rather than trusting synthetic
+envelopes.

@@ -119,8 +119,11 @@ Runtime recovery supports only the current shapes: attempt v4, dispatch request
 v4, and dispatch result v2. `Hive::Recovery::Migration` performs a forward-only
 physical cutover from `$HIVE_HOME/attempts/v3` to `attempts/v4` (and accepts a
 remaining supported v2 source). It takes the shared recovery lock and every
-source writer lock, rejects live attempts, validates the complete source tree,
-atomically renames it, converts valid schema-v3 hot/proof records to explicit
+source writer lock, rejects attempts whose owners may still be active, and
+converts definitively crashed attempts to ordinary lost records. Only expired
+pre-heartbeat launches and running records with missing/mismatched process
+identity qualify for that automatic reconciliation. It validates the complete
+source tree, atomically renames it, converts valid schema-v3 hot/proof records to explicit
 legacy routing mode, and replaces prior paths with owner-private old-binary
 fences. Malformed hot bytes remain exact reservations; a malformed permanent
 proof fails the migration.
@@ -129,12 +132,12 @@ The durable `.v4-cutover.json` checkpoint advances through `fenced`, `verified`,
 and `complete`. Before completion Hive compares the exact source corpus and
 scan counts, proves decision-index and capacity parity, and promotes historical
 final records into permanent proof. Only then does it write
-`recovery-migration-v5.json`, migrate pending request v1-v3 and result v1
+`recovery-migration-v6.json`, migrate pending request v1-v4 and result v1
 documents, and remove superseded recovery receipts.
 
 Runtime opens only v4: there is no dual reader, reverse migration, or hydration
-back into v2/v3. An obsolete v1 tree, material competing-root collision, live writer or
-attempt, unsupported attempt schema, unsafe tree entry, changed corpus, or
+back into v2/v3. An obsolete v1 tree, material competing-root collision, live
+writer or possibly active attempt, unsupported attempt schema, unsafe tree entry, changed corpus, or
 invalid checkpoint/fence fails closed with the evidence preserved. Re-running
 after a completed receipt validates the fences, v4 directory, and complete
 checkpoint, then returns the same receipt rather than repeating the cutover.

@@ -1,23 +1,51 @@
 require "digest"
 require "fileutils"
+require "stringio"
 require "time"
 require "hive/attempts/contracts"
+require "hive/attempts/dispatcher"
+require "hive/attempts/evidence_channel"
+require "hive/attempts/store"
+require "hive/attempts/supervisor"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/recovery_coordinator"
+require "hive/lock"
 require "hive/markers"
+require "hive/provider_health/attempt_observer"
 require "hive/provider_health/store"
-require "hive/provider_routing/router"
+require "hive/provider_routing"
 
 module Hive
   module E2E
     # Durable, hermetic AE2-AE8 companion to the real-process AE1 incident.
-    # Each assertion raises into the scenario runner so the ordinary E2E
-    # forensic bundle captures the exact durable state on failure.
+    # Every route decision crosses Dispatcher and the durable attempt ledger;
+    # terminal observations are backed by immutable v4 receipts, and restart
+    # cells reopen both ownership stores before making their next decision.
     class ProviderRoutingIncidentMatrix
       NOW = Time.utc(2026, 8, 11, 12)
-      Actor = "uid:1000"
+      ACTOR = "uid:1000"
+      CLAIM_CAPABILITY = "c" * 64
       FakeGeneration = Data.define(:progress_token, :task_generation)
       FakeTask = Data.define(:id, :slug, :folder, :state_file, :stage_index, :stage_name)
+
+      class Launcher
+        attr_reader :launched
+
+        def initialize
+          @launched = {}
+        end
+
+        def preflight! = true
+
+        def launch(record, claim_capability:)
+          @launched[record.attempt_id] = claim_capability
+          { "claimed" => true }
+        end
+
+        def capability(attempt_id)
+          @launched.fetch(attempt_id)
+        end
+      end
 
       def initialize(root:)
         @root = File.expand_path(root)
@@ -36,75 +64,69 @@ module Hive
       private
 
       def half_open_restart_and_fencing!
-        attempts = {}
-        root = cell("ae2-ae3")
-        store = health_store(root, attempts)
-        open_scope(store, attempts, provider_scope, "account_quota", "provider-open", reset: 0)
-        open_scope(store, attempts, model_scope, "model_capacity", "model-open", reset: 0)
-        evaluation = store.evaluate_route(account_id: "account-a", model_id: "model-a", now: NOW)
-        assert!(evaluation.probe_requirements.size == 2, "AE2 did not require both enclosing probes")
-
-        owner = claim_probe(store, attempts, evaluation, "probe-success")
-        restarted = health_store(root, attempts)
-        blocked = restarted.evaluate_route(account_id: "account-a", model_id: "model-a", now: NOW)
+        start_cell("ae2-ae3")
+        open_scopes(
+          [
+            [ provider_scope, "account_quota", 0 ],
+            [ model_scope, "model_capacity", 0 ]
+          ]
+        )
+        probe = dispatch("probe-success", policy: policy)
+        assert!(probe.accepted?, "AE2 probe was not durably admitted")
         assert!(
-          blocked.blockers.map { |entry| entry.fetch("reason") } ==
-            %w[half_open_probe_owned half_open_probe_owned],
+          probe.attempt["routing"].fetch("probe_bindings").size == 2,
+          "AE2 did not claim both enclosing probes"
+        )
+
+        restart_cell!
+        fallback = dispatch("probe-follower", policy: policy)
+        assert!(fallback.accepted?, "AE2 follower was not durably admitted after restart")
+        assert!(fallback.decision.route.id == "account-b/model-b", "AE2 restart did not select B")
+        assert!(
+          fallback.decision.exclusions.map(&:reason).uniq == [ "half_open_probe_owned" ],
           "AE2 restart did not preserve the multi-scope probe owner"
         )
-        completed = restarted.complete_probe(
-          attempt: owner, terminal_receipt: receipt(owner.attempt_id), outcome: "success"
-        )
-        duplicate = restarted.complete_probe(
-          attempt: owner, terminal_receipt: receipt(owner.attempt_id), outcome: "success"
-        )
-        assert!(completed.all?(&:accepted?), "AE2 owning success did not close every scope")
-        assert!(duplicate.all?(&:duplicate?), "AE3 duplicate completion advanced health")
+        completed = supervise(probe)
+        generations = [ provider_scope, model_scope ].map do |scope|
+          @health.inspect_scope(scope).generation
+        end
+        duplicate = @observer.observe(completed)
+        assert!(duplicate == :acknowledged, "AE3 duplicate completion was not acknowledged")
+        assert!(generations == [ 3, 3 ], "AE2 owning success did not close every scope")
         assert!(
-          [ provider_scope, model_scope ].map { |scope| restarted.inspect_scope(scope).generation } == [ 3, 3 ],
-          "AE3 restart/duplicate generations diverged"
+          [ provider_scope, model_scope ].map { |scope| @health.inspect_scope(scope).generation } == generations,
+          "AE3 duplicate completion advanced health"
         )
+        finish(fallback, outcome: "succeeded")
         assert!(
-          restarted.evaluate_route(account_id: "account-a", model_id: "model-a", now: NOW).eligible?,
+          @health.evaluate_route(account_id: "account-a", model_id: "model-a", now: NOW).eligible?,
           "AE2 success did not restore configured preference"
         )
 
-        failure_attempts = {}
-        failure = health_store(cell("ae2-failure"), failure_attempts)
-        open_scope(failure, failure_attempts, provider_scope, "account_quota", "failure-open", reset: 0)
-        failure_owner = claim_probe(
-          failure,
-          failure_attempts,
-          failure.evaluate_route(account_id: "account-a", model_id: "model-a", now: NOW),
-          "probe-failure"
+        start_cell("ae2-failure")
+        open_scopes([ [ provider_scope, "account_quota", 0 ] ])
+        failed_probe = dispatch("probe-failure", policy: policy)
+        terminal = finish(failed_probe, outcome: "failed")
+        assert!(terminal.outcome == "failed", "AE2 failed probe lost its terminal outcome")
+        assert!(
+          @health.inspect_scope(provider_scope).circuit.automatic_state == "open",
+          "AE2 failed probe did not reopen"
         )
-        failed = failure.complete_probe(
-          attempt: failure_owner,
-          terminal_receipt: receipt(failure_owner.attempt_id),
-          outcome: "failure"
-        ).fetch(0)
-        assert!(failed.current.automatic_state == "open", "AE2 failed probe did not reopen")
-        assert!(failure.inspect_scope(model_scope).generation.zero?, "AE2 changed a sibling scope")
+        assert!(@health.inspect_scope(model_scope).generation.zero?, "AE2 changed a sibling scope")
 
-        fenced_attempts = {}
-        fenced = health_store(cell("ae3-fenced"), fenced_attempts)
-        open_scope(fenced, fenced_attempts, provider_scope, "account_quota", "fenced-open", reset: 0)
-        fenced_owner = claim_probe(
-          fenced,
-          fenced_attempts,
-          fenced.evaluate_route(account_id: "account-a", model_id: "model-a", now: NOW),
-          "probe-fenced"
-        )
-        blocked_result = fenced.block(
+        start_cell("ae3-fenced")
+        open_scopes([ [ provider_scope, "account_quota", 0 ] ])
+        fenced_probe = dispatch("probe-fenced", policy: policy)
+        blocked = @health.block(
           scope: provider_scope, expected_generation: 2,
-          actor: Actor, reason: "fence the live probe"
+          actor: ACTOR, reason: "fence the live probe"
         )
-        late = fenced.complete_probe(
-          attempt: fenced_owner,
-          terminal_receipt: receipt(fenced_owner.attempt_id),
-          outcome: "success"
+        terminal = finish(fenced_probe, outcome: "succeeded", observe: false)
+        late = @health.complete_probe(
+          attempt: attempt_binding(terminal),
+          terminal_receipt: receipt_identity(terminal), outcome: "success"
         ).fetch(0)
-        assert!(blocked_result.current.probe.nil?, "AE3 operator fence retained probe ownership")
+        assert!(blocked.current.probe.nil?, "AE3 operator fence retained probe ownership")
         assert!(late.reason == "fenced_attempt", "AE3 late completion was not fenced")
       end
 
@@ -113,78 +135,71 @@ module Hive
           circuit_cooldown manual_block requirements_incompatible
           half_open_probe_owned provider_concurrency_saturated
         ].each do |reason|
-          attempts = {}
-          store = health_store(cell("ae4-#{reason}"), attempts)
+          start_cell("ae4-#{reason}")
           requirements = Hive::ProviderRouting::Requirements.empty
-          capacity = capacity_snapshot
           case reason
           when "circuit_cooldown"
-            open_scope(store, attempts, model_scope, "model_capacity", "pin-open", reset: 300)
+            open_scopes([ [ model_scope, "model_capacity", 300 ] ])
           when "manual_block"
-            store.block(
+            @health.block(
               scope: model_scope, expected_generation: 0,
-              actor: Actor, reason: "strict pin maintenance"
+              actor: ACTOR, reason: "strict pin maintenance"
             )
           when "requirements_incompatible"
             requirements = Hive::ProviderRouting::Requirements.new(tools: %w[browser])
           when "half_open_probe_owned"
-            open_scope(store, attempts, model_scope, "model_capacity", "pin-probe", reset: 0)
-            claim_probe(
-              store,
-              attempts,
-              store.evaluate_route(account_id: "account-a", model_id: "model-a", now: NOW),
-              "strict-pin-owner"
-            )
+            open_scopes([ [ model_scope, "model_capacity", 0 ] ])
+            dispatch("strict-pin-owner", policy: policy(routes: [ routes.first ]))
           when "provider_concurrency_saturated"
-            capacity = capacity_snapshot("account-a" => 1)
+            dispatch("strict-pin-capacity-owner", policy: policy(routes: [ routes.first ]))
           end
 
-          decision = decide(
-            store: store,
-            policy: policy(
-              pin: Hive::ProviderRouting::Pin.new(account: "account-a", model: "model-a"),
-              requirements: requirements
-            ),
-            decision_id: "ae4-#{reason}",
-            capacity: capacity
+          strict_policy = policy(
+            pin: Hive::ProviderRouting::Pin.new(account: "account-a", model: "model-a"),
+            requirements: requirements
           )
-          pinned = decision.candidates.find { |candidate| candidate.route.account == "account-a" }
-          outside = decision.candidates.find { |candidate| candidate.route.account == "account-b" }
-          assert!(!decision.selected?, "AE4 #{reason} selected outside a strict pin")
-          assert!(decision.reason == "no_eligible_provider_route", "AE4 #{reason} returned wrong disposition")
-          assert!(pinned.exclusions.map(&:reason) == [ reason ], "AE4 #{reason} lost its exact exclusion")
+          if reason == "requirements_incompatible"
+            begin
+              dispatch("strict-pin-#{reason}", policy: strict_policy)
+            rescue Hive::ProviderRouting::PolicyStore::InvalidSnapshot
+              assert!(@store.scan.records.empty?, "AE4 invalid requirements created an attempt")
+              next
+            end
+            raise "AE4 impossible pinned requirements crossed durable policy validation"
+          end
+
+          result = dispatch("strict-pin-#{reason}", policy: strict_policy)
+          pinned = result.decision.candidates.find { |candidate| candidate.route.account == "account-a" }
+          outside = result.decision.candidates.find { |candidate| candidate.route.account == "account-b" }
+          assert!(result.status == :no_route, "AE4 #{reason} selected outside a strict pin")
+          assert!(result.reason == "no_eligible_provider_route", "AE4 #{reason} returned wrong disposition")
+          expected = reason == "circuit_cooldown" ? %w[circuit_open circuit_cooldown] : [ reason ]
+          assert!(pinned.exclusions.map(&:reason) == expected, "AE4 #{reason} lost its exact exclusion")
           assert!(outside.exclusions.map(&:reason).include?("hard_pin_mismatch"), "AE4 crossed pin boundary")
+          assert_decision_persisted!(result)
         end
 
-        store = health_store(cell("ae5-capacity"), {})
-        before = all_scopes.map { |scope| store.inspect_scope(scope).generation }
-        partial = decide(
-          store: store, policy: policy, decision_id: "ae5-partial",
-          capacity: capacity_snapshot("account-a" => 1)
-        )
-        total = decide(
-          store: store, policy: policy, decision_id: "ae5-total",
-          capacity: capacity_snapshot("account-a" => 1, "account-b" => 1)
-        )
-        assert!(partial.route.id == "account-b/model-b", "AE5 partial saturation did not select B")
-        assert!(total.capacity_saturated?, "AE5 total saturation was not scheduler-owned")
-        assert!(total.next_action_owner == "scheduler", "AE5 total saturation owner changed")
+        start_cell("ae5-capacity")
+        before = all_scopes.map { |scope| @health.inspect_scope(scope).generation }
+        owner_a = dispatch("capacity-owner-a", policy: policy(routes: [ routes.first ]))
+        partial = dispatch("capacity-partial", policy: policy)
+        total = dispatch("capacity-total", policy: policy)
+        assert!(owner_a.accepted?, "AE5 did not create the durable A reservation")
+        assert!(partial.attempt["routing"].dig("route", "route_id") == "account-b/model-b",
+                "AE5 partial saturation did not select B")
+        assert!(total.status == :deferred && total.decision.capacity_saturated?,
+                "AE5 total saturation was not scheduler-owned")
+        assert!(total.decision.next_action_owner == "scheduler", "AE5 total saturation owner changed")
         assert!(
-          all_scopes.map { |scope| store.inspect_scope(scope).generation } == before,
+          all_scopes.map { |scope| @health.inspect_scope(scope).generation } == before,
           "AE5 capacity mutated health"
         )
+        assert_decision_persisted!(total)
       end
 
       def exhaustion_reuses_recovery!
-        root = cell("ae6-recovery")
-        folder = File.join(root, "task")
-        FileUtils.mkdir_p(folder)
-        state_file = File.join(folder, "task.md")
-        File.binwrite(state_file, "# Task\n\n<!-- WAITING -->\n")
-        task = FakeTask.new(
-          id: 817, slug: "route-exhausted", folder: folder,
-          state_file: state_file, stage_index: 4, stage_name: "execute"
-        )
+        root = start_cell("ae6-recovery")
+        task = build_task("route-exhausted")
         generation_resolver = lambda do |resolved, project:, intended_stage:, state_file_content:|
           progress = Digest::SHA256.hexdigest([ resolved.state_file, state_file_content ].join("\0"))
           FakeGeneration.new(
@@ -196,28 +211,24 @@ module Hive
         end
         generation = generation_resolver.call(
           task, project: "demo", intended_stage: "4-execute",
-          state_file_content: File.binread(state_file)
+          state_file_content: File.binread(task.state_file)
         )
-        attempts = {}
-        health = health_store(File.join(root, "health"), attempts)
         routes.each do |route|
-          health.block(
+          @health.block(
             scope: provider_scope(route.account), expected_generation: 0,
-            actor: Actor, reason: "exhaust every route"
+            actor: ACTOR, reason: "exhaust every route"
           )
         end
-        decision = decide(
-          store: health,
-          policy: policy,
-          decision_id: "ae6-exhausted",
-          capacity: capacity_snapshot,
-          task_generation: generation.task_generation
-        )
+        routed = dispatch_task(task, policy: policy, generation: generation.task_generation)
+        assert!(routed.status == :no_route, "AE6 exhaustion did not cross durable admission")
+        assert_decision_persisted!(routed)
+
         coordinator = Hive::Daemon::RecoveryCoordinator.new(
           state_home: root,
           task_resolver: ->(**) { task },
           safety: ->(_row) { [ true, "safe" ] },
-          generation_resolver: generation_resolver
+          generation_resolver: generation_resolver,
+          attempt_store: @store
         )
         request = Hive::Daemon::DispatchRequestQueue::Request.new(
           request_id: "initial-route-admission", created_at: NOW,
@@ -226,14 +237,12 @@ module Hive
           requestor: "daemon", trigger: "auto_advance", task_id: task.id,
           inherited_outputs: []
         )
-        first = coordinator.request_admission_failure(request: request, decision: decision, now: NOW)
-        persisted = Hive::Daemon::DispatchRequestQueue.pending(state_home: root).fetch(0)
-        result = Hive::Attempts::DispatchResult.new(
-          status: :no_route, attempt: nil, receipt: nil, attach_descriptor: nil,
-          reason: decision.reason, decision: decision
+        first = coordinator.request_admission_failure(
+          request: request, decision: routed.decision, now: NOW
         )
+        persisted = Hive::Daemon::DispatchRequestQueue.pending(state_home: root).fetch(0)
         observed = coordinator.observe_admission_result(
-          request: persisted, result: result, now: NOW + 1
+          request: persisted, result: routed, now: NOW + 1
         )
         pending = Hive::Daemon::DispatchRequestQueue.pending(state_home: root)
         assert!(first.retry_count == 1 && observed.retry_count == 1, "AE6 charged exhaustion twice")
@@ -246,128 +255,285 @@ module Hive
       end
 
       def operator_and_corruption!
-        store = health_store(cell("ae7-operators"), {})
+        start_cell("ae7-operators")
         [ provider_scope, model_scope ].each do |scope|
-          blocked = store.block(
+          blocked = @health.block(
             scope: scope, expected_generation: 0,
-            actor: Actor, reason: "planned maintenance"
+            actor: ACTOR, reason: "planned maintenance"
           )
-          unblocked = store.unblock(
+          unblocked = @health.unblock(
             scope: scope, expected_generation: blocked.generation,
-            actor: Actor, reason: "maintenance complete"
+            actor: ACTOR, reason: "maintenance complete"
           )
-          reset = store.reset(
+          reset = @health.reset(
             scope: scope, expected_generation: unblocked.generation,
-            actor: Actor, reason: "clear stale observations"
+            actor: ACTOR, reason: "clear stale observations"
           )
           assert!(reset.generation == 3, "AE7 operator generations did not advance exactly")
           assert!(
-            [ blocked, unblocked, reset ].all? { |entry| entry.audit_receipt },
+            [ blocked, unblocked, reset ].all?(&:audit_receipt),
             "AE7 operator mutation omitted an audit receipt"
           )
         end
+        eligible = dispatch("operator-restored", policy: policy(routes: [ routes.first ]))
+        assert!(eligible.accepted?, "AE7 operator reset did not restore durable admission")
 
-        corrupt = health_store(cell("ae7-corruption"), {})
-        blocked = corrupt.block(
+        start_cell("ae7-corruption")
+        blocked = @health.block(
           scope: provider_scope, expected_generation: 0,
-          actor: Actor, reason: "preserve this block"
+          actor: ACTOR, reason: "preserve this block"
         )
-        journal = corrupt.send(:journal_path, provider_scope)
-        path = File.join(corrupt.root, journal)
+        journal = @health.send(:journal_path, provider_scope)
+        path = File.join(@health.root, journal)
         File.binwrite(path, File.binread(path) + "corrupt-interior\n")
-        unavailable = corrupt.inspect_scope(provider_scope)
-        repaired = corrupt.reset(
+        unavailable_route = dispatch("corrupt-health", policy: policy(routes: [ routes.first ]))
+        unavailable = @health.inspect_scope(provider_scope)
+        repaired = @health.reset(
           scope: provider_scope, corruption_token: unavailable.corruption_token,
-          actor: Actor, reason: "repair corrupt health scope"
+          actor: ACTOR, reason: "repair corrupt health scope"
         )
+        assert!(unavailable_route.reason == "health_state_unavailable",
+                "AE7 corrupt health did not fail closed at admission")
         assert!(unavailable.unavailable?, "AE7 corruption did not fail closed")
         assert!(repaired.generation == blocked.generation + 1, "AE7 repair lost verified generation")
         assert!(repaired.current.blocked?, "AE7 repair lost the verified manual block")
       end
 
       def implicit_and_explicit_one_route!
-        store = health_store(cell("ae8-one-route"), {})
-        store.block(
+        start_cell("ae8-one-route")
+        @health.block(
           scope: provider_scope, expected_generation: 0,
-          actor: Actor, reason: "exclude explicit route"
+          actor: ACTOR, reason: "exclude explicit route"
         )
-        legacy = Hive::ProviderRouting::Router.new.call(
-          request: Hive::ProviderRouting::Request.new(
-            policy: Hive::ProviderRouting::Policy.legacy(stage: "execute"),
-            task_generation: "legacy-generation"
-          )
+        legacy_dispatcher = build_dispatcher(
+          health_store: nil,
+          health_store_factory: -> { raise "AE8 legacy admission touched provider health" }
         )
-        explicit = decide(
-          store: store,
-          policy: policy(routes: [ routes.first ], accounts: [ "account-a" ]),
-          decision_id: "ae8-explicit-one",
-          capacity: capacity_snapshot
+        legacy = dispatch(
+          "legacy-one-route",
+          policy: Hive::ProviderRouting::Policy.legacy(stage: "execute"),
+          dispatcher: legacy_dispatcher,
+          argv: [ "/bin/true" ]
         )
-        assert!(legacy.legacy? && legacy.reason == "legacy_bypass", "AE8 implicit route touched health")
-        assert!(!explicit.selected?, "AE8 explicit one-route pool ignored shared health")
-        assert!(explicit.exclusions.map(&:reason) == [ "manual_block" ], "AE8 explicit exclusion drifted")
+        assert!(legacy.accepted?, "AE8 implicit route did not create a durable attempt")
+        assert!(legacy.attempt["routing"] == { "mode" => "legacy" }, "AE8 implicit route touched health")
+        supervise(legacy)
+
+        explicit = dispatch(
+          "explicit-one-route",
+          policy: policy(routes: [ routes.first ]),
+          argv: [ "/bin/true" ]
+        )
+        assert!(explicit.status == :no_route, "AE8 explicit one-route pool ignored shared health")
+        assert!(explicit.decision.exclusions.map(&:reason) == [ "manual_block" ],
+                "AE8 explicit exclusion drifted")
+        assert_decision_persisted!(explicit)
       end
 
-      def claim_probe(store, attempts, evaluation, attempt_id)
-        intent = Hive::ProviderHealth::ProbeIntent.new(
-          intent_id: "intent-#{attempt_id}", attempt_id: attempt_id,
-          task_generation: "generation-1", ownership_fence: "fence-1",
-          requirements: evaluation.probe_requirements
+      def start_cell(name)
+        @cell_name = name
+        @cell_root = cell(name)
+        @attempt_counter = 0
+        @decision_counter = 0
+        @task_counter = 0
+        @launcher = Launcher.new
+        restart_cell!
+        @cell_root
+      end
+
+      def restart_cell!
+        @store = Hive::Attempts::Store.new(root: File.join(@cell_root, "attempts"))
+        @health = Hive::ProviderHealth::Store.new(
+          root: File.join(@cell_root, "health"), clock: -> { NOW },
+          attempt_reader: method(:read_health_attempt)
         )
-        owner = nil
-        store.with_probe_intent(intent: intent) do |bindings|
-          owner = Hive::ProviderHealth::AttemptBinding.new(
-            attempt_id: attempt_id, task_generation: intent.task_generation,
-            ownership_fence: intent.ownership_fence, route: route_identity("account-a"),
-            probe_bindings: bindings
-          )
-          attempts[attempt_id] = owner
+        @observer = Hive::ProviderHealth::AttemptObserver.new(store: @health)
+        @dispatcher = build_dispatcher
+      end
+
+      def build_dispatcher(health_store: @health, health_store_factory: nil)
+        Hive::Attempts::Dispatcher.new(
+          store: @store, launcher: @launcher,
+          limits: { max_global: 50, max_per_project: 50, max_daily: 100 },
+          clock: -> { NOW },
+          id_generator: -> { next_attempt_id },
+          decision_id_generator: -> { next_decision_id },
+          capability_generator: -> { CLAIM_CAPABILITY },
+          health_store: health_store,
+          health_store_factory: health_store_factory
+        )
+      end
+
+      def dispatch(slug, policy:, generation: nil, dispatcher: @dispatcher,
+                   argv: [ "/bin/true" ])
+        dispatch_task(
+          build_task(slug), policy: policy, generation: generation,
+          dispatcher: dispatcher, argv: argv
+        )
+      end
+
+      def dispatch_task(task, policy:, generation: nil, dispatcher: @dispatcher,
+                        argv: [ "/bin/true" ])
+        dispatcher.dispatch(
+          task: task, project: "demo", intended_stage: "4-execute",
+          argv: argv, request_id: "request-#{task.slug}", provider: "codex",
+          generation: generation, routing_policy: policy, now: NOW
+        )
+      end
+
+      def build_task(slug)
+        @task_counter += 1
+        folder = File.join(@cell_root, "tasks", slug)
+        FileUtils.mkdir_p(folder)
+        state_file = File.join(folder, "task.md")
+        File.binwrite(state_file, "# Task\n\n<!-- WAITING -->\n")
+        FakeTask.new(
+          id: @task_counter, slug: slug, folder: folder,
+          state_file: state_file, stage_index: 4, stage_name: "execute"
+        )
+      end
+
+      def open_scopes(entries)
+        setup_policy = policy(routes: [ routes.first ], max_concurrent: entries.size)
+        admitted = entries.each_with_index.map do |(_scope, _failure_class, _reset), index|
+          result = dispatch("open-scope-#{index}", policy: setup_policy)
+          assert!(result.accepted?, "incident setup did not durably admit evidence attempt #{index}")
+          result
         end
-        owner
-      end
-
-      def open_scope(store, attempts, scope, failure_class, attempt_id, reset:)
-        attempt = Hive::ProviderHealth::AttemptBinding.new(
-          attempt_id: attempt_id, task_generation: "generation-1",
-          ownership_fence: "fence-1", route: route_identity(scope.account_id)
-        )
-        attempts[attempt_id] = attempt
-        evidence = Hive::ProviderHealth::Evidence.new(
-          scope: scope, failure_class: failure_class,
-          provenance: "provider_diagnostic", route: attempt.route,
-          reset_hint_seconds: reset,
-          source_reference: {
-            "path" => "logs/#{attempt_id}.frames", "size" => 0,
-            "sha256" => Digest::SHA256.hexdigest("")
-          },
-          attempt_id: attempt_id
-        )
-        result = store.apply_evidence(
-          evidence: evidence, attempt: attempt,
-          terminal_receipt: receipt(attempt_id), expected_generation: 0
-        )
-        assert!(result.accepted?, "incident setup could not open #{scope.key}")
-      end
-
-      def decide(store:, policy:, decision_id:, capacity:, task_generation: "generation-1")
-        health = policy.routes.to_h do |route|
-          [
-            route.id,
-            store.evaluate_route(account_id: route.account, model_id: route.model, now: NOW)
-          ]
+        admitted.zip(entries).each do |result, (scope, failure_class, reset)|
+          terminal = finish(
+            result, outcome: "failed", observe: false,
+            evidence: evidence_signal(scope, failure_class, reset)
+          )
+          assert!(@observer.observe(terminal) == :acknowledged,
+                  "incident setup could not open #{scope.key}")
         end
-        Hive::ProviderRouting::Router.new.call(
-          request: Hive::ProviderRouting::Request.new(
-            policy: policy, task_generation: task_generation,
-            health: health, capacity: capacity
+      end
+
+      def finish(result, outcome:, observe: true, evidence: nil)
+        record = @store.fetch_hot(result.attempt.attempt_id)
+        capability = @launcher.capability(record.attempt_id)
+        owner = {
+          "pid" => Process.pid,
+          "start_fingerprint" => Hive::Lock.process_start_time(Process.pid),
+          "session_id" => Process.getsid(Process.pid),
+          "process_group_id" => Process.getpgrp
+        }
+        running = @store.claim(
+          record, owner: owner, claim_capability: capability,
+          first_heartbeat_timeout_sec: 30, now: NOW
+        )
+        running = @store.first_heartbeat(running, stale_sec: 30, now: NOW)
+        log_reference = output_reference(record.attempt_id)
+        provider_evidence = Hive::Attempts::EvidenceChannel.materialize(
+          evidence, record: running, source_reference: log_reference
+        )
+        terminal = @store.terminalize(
+          running, outcome: outcome,
+          exit_status: outcome == "succeeded" ? 0 : 1,
+          final_checkpoint: running.checkpoint,
+          output_references: running["current_outputs"],
+          log_reference: log_reference,
+          provider_evidence: provider_evidence,
+          now: NOW + 1
+        )
+        @observer.observe(terminal) if observe
+        terminal
+      end
+
+      def supervise(result)
+        capability = @launcher.capability(result.attempt.attempt_id)
+        status = Hive::Attempts::Supervisor.new(
+          store: @store, attempt_id: result.attempt.attempt_id,
+          claim_io: StringIO.new(capability), heartbeat_sec: 0.01,
+          stale_sec: 1, first_heartbeat_timeout_sec: 1,
+          clock: -> { NOW + 1 }
+        ).run
+        terminal = @store.fetch_hot(result.attempt.attempt_id)
+        assert!(status.zero?, "durable supervisor worker failed")
+        assert!(terminal&.state == "terminal", "durable supervisor did not terminalize")
+        @observer.observe(terminal)
+        terminal
+      end
+
+      def evidence_signal(scope, failure_class, reset_hint_seconds)
+        {
+          "failure_class" => failure_class,
+          "scope" => scope.to_h,
+          "provenance" => "provider_diagnostic",
+          "reset_hint_seconds" => reset_hint_seconds
+        }
+      end
+
+      def output_reference(attempt_id)
+        {
+          "path" => "logs/#{attempt_id}.frames",
+          "size" => 0,
+          "sha256" => Digest::SHA256.hexdigest("")
+        }
+      end
+
+      def read_health_attempt(attempt_id)
+        record = @store.fetch_hot(attempt_id)
+        return nil unless record
+
+        {
+          "attempt_id" => record.attempt_id,
+          "task_generation" => record.task_generation,
+          "ownership_fence" => record.ownership_generation,
+          "state" => record.state,
+          "probe_bindings" => record["routing"].fetch("probe_bindings", [])
+        }
+      rescue Hive::Attempts::StoreError
+        nil
+      end
+
+      def attempt_binding(record)
+        route = record["routing"].fetch("route")
+        Hive::ProviderHealth::AttemptBinding.new(
+          attempt_id: record.attempt_id,
+          task_generation: record.task_generation,
+          ownership_fence: record.ownership_generation,
+          route: Hive::ProviderHealth::RouteIdentity.new(
+            route_id: route.fetch("route_id"),
+            account_id: route.fetch("provider_account_id"),
+            adapter: route.fetch("adapter"),
+            launch_binding_id: route.fetch("launch_binding_id"),
+            model_id: route.fetch("model")
           ),
-          decision_id: decision_id,
-          decided_at: NOW
+          probe_bindings: record["routing"].fetch("probe_bindings").map do |binding|
+            Hive::ProviderHealth::ProbeBinding.new(
+              scope: Hive::ProviderHealth.scope_from_h(binding.fetch("scope")),
+              journal_epoch: binding.fetch("journal_epoch"),
+              observed_generation: binding.fetch("observed_generation"),
+              claim_generation: binding.fetch("claim_generation"),
+              attempt_id: binding.fetch("attempt_id"),
+              task_generation: binding.fetch("task_generation"),
+              ownership_fence: binding.fetch("ownership_fence")
+            )
+          end
         )
       end
 
-      def policy(routes: self.routes, accounts: %w[account-a account-b], pin: nil,
-                 requirements: Hive::ProviderRouting::Requirements.empty)
+      def receipt_identity(record)
+        {
+          "attempt_id" => record.receipt.fetch("attempt_id"),
+          "receipt_version" => record.receipt.fetch("receipt_version"),
+          "terminal_lease_version" => record.receipt.fetch("terminal_lease_version")
+        }
+      end
+
+      def assert_decision_persisted!(result)
+        persisted = @store.decision_index.routing_decisions.find do |entry|
+          entry.fetch("decision").fetch("decision_id") == result.decision.decision_id
+        end&.fetch("decision")
+        assert!(persisted == result.decision.to_h, "routing decision was not durably indexed")
+      end
+
+      def policy(routes: self.routes, accounts: nil, pin: nil,
+                 requirements: Hive::ProviderRouting::Requirements.empty,
+                 max_concurrent: 1)
+        accounts ||= routes.map(&:account).uniq
         Hive::ProviderRouting::Policy.explicit(
           stage: "execute", routes: routes, requirements: requirements, pin: pin,
           account_policy: accounts.to_h do |account|
@@ -378,7 +544,7 @@ module Hive
                 "adapter" => route.adapter,
                 "launch_binding" => route.launch_binding,
                 "models" => [ route.model ],
-                "max_concurrent" => 1,
+                "max_concurrent" => max_concurrent,
                 "cooldown_sec" => Hive::ProviderRouting::DEFAULT_COOLDOWN_SEC
               }
             ]
@@ -404,27 +570,6 @@ module Hive
         )
       end
 
-      def route_identity(account)
-        route = routes.find { |candidate| candidate.account == account }
-        Hive::ProviderHealth::RouteIdentity.new(
-          route_id: route.id, account_id: route.account, adapter: route.adapter,
-          launch_binding_id: route.launch_binding, model_id: route.model
-        )
-      end
-
-      def health_store(root, attempts)
-        Hive::ProviderHealth::Store.new(
-          root: root, clock: -> { NOW },
-          attempt_reader: ->(attempt_id) { attempts[attempt_id] }
-        )
-      end
-
-      def capacity_snapshot(overrides = {})
-        { "account-a" => 0, "account-b" => 0 }.merge(overrides).to_h do |account, observed|
-          [ account, { "observed" => observed, "max" => 1 } ]
-        end
-      end
-
       def provider_scope(account = "account-a")
         Hive::ProviderHealth::Scope.provider_account(account_id: account)
       end
@@ -434,15 +579,19 @@ module Hive
       end
 
       def all_scopes
-        routes.flat_map { |route| [ provider_scope(route.account), model_scope(route.account, route.model) ] }
+        routes.flat_map do |route|
+          [ provider_scope(route.account), model_scope(route.account, route.model) ]
+        end
       end
 
-      def receipt(attempt_id)
-        {
-          "attempt_id" => attempt_id,
-          "receipt_version" => 1,
-          "terminal_lease_version" => 2
-        }
+      def next_attempt_id
+        @attempt_counter += 1
+        "#{@cell_name}-attempt-#{@attempt_counter}"
+      end
+
+      def next_decision_id
+        @decision_counter += 1
+        "#{@cell_name}-decision-#{@decision_counter}"
       end
 
       def cell(name)

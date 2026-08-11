@@ -20,6 +20,15 @@ The package lives at `components/agent-cli-runtime/`, loads with
 Its built-in profiles are ordered `claude`, `codex`, `pi`, `grok`. Callers
 construct immutable requests and receive immutable compiled invocations,
 capability evidence, probe results, and observable results.
+Each profile also exposes an immutable `credential_environment_keys`
+inventory. This is compatibility metadata for an orchestrator that needs to
+remove ambient credentials when selecting a named subscription/session; it
+contains names only and does not move credential values into the package.
+The companion `configuration_environment_key`,
+`default_configuration_directory`, and `configuration_directory` contract
+describes the CLI-owned subscription/session directory. The extracted package
+owns these provider-specific names; it does not provision API keys or choose an
+authentication mode.
 
 Compilation returns argv and optional stdin without executing a process.
 Requested controls fail closed with `UnsupportedCapability` when a profile
@@ -68,6 +77,10 @@ inside Hive and focused parity tests compare the package against it. This
 temporary duplication is bounded to the publish-first window; the held cutover
 will preserve promised Hive constants as forwarding adapters and remove the
 internal copy only after RubyGems verification and separate merge authority.
+The parity boundary includes the built-in credential-environment inventories
+and configuration-directory metadata, so Hive launch binding isolation and
+session-alias detection cannot drift from the extracted compatibility profiles
+during that window.
 
 ## Development and release
 

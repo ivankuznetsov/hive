@@ -226,8 +226,7 @@ module Hive
             end
 
             if frozen_policy.explicit?
-              health = provider_health_store
-              health_available = reconcile_provider_health(health)
+              health, health_available = resolve_provider_health
               stale_retries = 0
               loop do
                 route_decision = select_provider_route(
@@ -583,6 +582,13 @@ module Hive
         @health_store ||= @health_store_factory.call
       end
 
+      def resolve_provider_health
+        health = provider_health_store
+        [ health, reconcile_provider_health(health) ]
+      rescue Hive::ProviderHealth::Unavailable, Hive::ManagedDirectory::UnsafeError
+        [ nil, false ]
+      end
+
       def reconcile_provider_health(health)
         health.reconcile!
         true
@@ -611,19 +617,19 @@ module Hive
 
       def select_provider_route(policy:, health:, snapshot:, records:, generation:, now:,
                                 health_available: true)
-        evaluations = policy.eligible_routes.to_h do |route|
-          [
-            route.id,
-            if health_available
-              health.evaluate_route(
-                account_id: route.account,
-                model_id: route.model,
-                now: now
-              )
-            else
-              unavailable_route_evaluation(route)
-            end
-          ]
+        routes = policy.eligible_routes
+        route_evaluations = if health_available
+          health.evaluate_routes(
+            routes: routes.map do |route|
+              { account_id: route.account, model_id: route.model }
+            end,
+            now: now
+          )
+        else
+          routes.map { |route| unavailable_route_evaluation(route) }
+        end
+        evaluations = routes.each_with_index.to_h do |route, index|
+          [ route.id, route_evaluations.fetch(index) ]
         end
         capacity = snapshot.provider_account_capacity(
           policy: policy,

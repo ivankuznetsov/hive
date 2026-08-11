@@ -1120,12 +1120,15 @@ module Hive
       exact-model circuit state/generation, probe ownership, protected evidence
       references, and recent deterministic route decisions.
 
-      Administrative actions are `block`, `unblock`, and `reset`. They require
+      Administrative actions are `block`, `unblock`, `reset`, and
+      `reset-intent`. Circuit actions require
       an exact configured --provider, optional exact --model, a bounded
       single-line --reason, a fresh --expected-generation, and explicit --yes.
       A reset of corrupt state instead takes the complete repair token emitted
       by inspection: --journal-epoch, --corruption-fingerprint, and
-      --last-verified-generation. Actor identity comes from the trusted local
+      --last-verified-generation. A corrupt global probe intent is listed with
+      an opaque file token and fingerprint; repair it with `reset-intent`,
+      --intent-file, --corruption-fingerprint, --reason, and --yes. Actor identity comes from the trusted local
       execution context; it cannot be supplied on the command line.
 
       These commands mutate provider health only. They never clear a task
@@ -1144,6 +1147,8 @@ module Hive
                                     desc: "corrupt-state repair token SHA-256"
     option :last_verified_generation, type: :numeric,
                                       desc: "corrupt-state repair token generation"
+    option :intent_file, type: :string,
+                         desc: "corrupt probe-intent file token from inspection"
     option :yes, type: :boolean, default: false,
                  desc: "approve one generation-fenced administrative mutation"
     def circuits(action = "list")
@@ -1157,6 +1162,7 @@ module Hive
         journal_epoch: options[:journal_epoch],
         corruption_fingerprint: options[:corruption_fingerprint],
         last_verified_generation: options[:last_verified_generation],
+        intent_file: options[:intent_file],
         yes: options[:yes],
         json: options[:json]
       ).call

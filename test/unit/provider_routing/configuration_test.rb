@@ -160,16 +160,38 @@ class ProviderRoutingConfigurationTest < Minitest::Test
 
     assert_match(/indistinguishable launch binding/, error.message)
 
-    accounts = Hive::ProviderRouting::Configuration.normalize_accounts(
-      {
-        "codex-a" => account("codex", binding: "default", models: %w[gpt-5.6-sol]),
-        "codex-b" => account("codex", binding: "team-b", models: %w[gpt-5.6-terra])
-      },
-      source: "global providers"
-    )
+    with_tmp_dir do |binding_root|
+      with_env("HIVE_PROVIDER_BINDING_CODEX_TEAM_B" => binding_root) do
+        accounts = Hive::ProviderRouting::Configuration.normalize_accounts(
+          {
+            "codex-a" => account("codex", binding: "default", models: %w[gpt-5.6-sol]),
+            "codex-b" => account("codex", binding: "team-b", models: %w[gpt-5.6-terra])
+          },
+          source: "global providers"
+        )
 
-    assert_equal %w[default team-b], accounts.values.map(&:launch_binding)
-    assert accounts.frozen?
+        assert_equal %w[default team-b], accounts.values.map(&:launch_binding)
+        assert accounts.frozen?
+      end
+    end
+  end
+
+  def test_named_launch_binding_must_be_available_during_configuration
+    error = with_env("HIVE_PROVIDER_BINDING_CODEX_TEAM_B" => nil) do
+      assert_raises(Hive::ConfigError) do
+        Hive::ProviderRouting::Configuration.normalize_accounts(
+          {
+            "codex-primary" => account(
+              "codex", binding: "team-b", models: %w[gpt-5.6-sol]
+            )
+          },
+          source: "global providers"
+        )
+      end
+    end
+
+    assert_match(/launch binding "team-b".*unavailable/, error.message)
+    assert_match(/HIVE_PROVIDER_BINDING_CODEX_TEAM_B/, error.message)
   end
 
   def test_effective_launch_binding_aliases_are_rejected
@@ -193,6 +215,46 @@ class ProviderRoutingConfigurationTest < Minitest::Test
         end
         assert_match(/indistinguishable launch binding/, error.message)
       end
+    end
+  end
+
+  def test_default_and_named_launch_binding_aliases_are_rejected
+    with_tmp_dir do |root|
+      with_env(
+        "CODEX_HOME" => root,
+        "HIVE_PROVIDER_BINDING_CODEX_TEAM_A" => root
+      ) do
+        error = assert_raises(Hive::ConfigError) do
+          Hive::ProviderRouting::Configuration.normalize_accounts(
+            {
+              "codex-default" => account(
+                "codex", binding: "default", models: %w[gpt-5.6-sol]
+              ),
+              "codex-named" => account(
+                "codex", binding: "team-a", models: %w[gpt-5.6-terra]
+              )
+            },
+            source: "global providers"
+          )
+        end
+        assert_match(/indistinguishable launch binding/, error.message)
+      end
+    end
+  end
+
+  def test_invalid_default_configuration_directory_is_a_typed_configuration_error
+    with_env("CODEX_HOME" => "relative/codex-home") do
+      error = assert_raises(Hive::ConfigError) do
+        Hive::ProviderRouting::Configuration.normalize_accounts(
+          {
+            "codex-default" => account(
+              "codex", binding: "default", models: %w[gpt-5.6-sol]
+            )
+          },
+          source: "global providers"
+        )
+      end
+      assert_match(/became unavailable during validation/, error.message)
     end
   end
 
@@ -326,18 +388,30 @@ class ProviderRoutingConfigurationTest < Minitest::Test
 
     assert_equal %w[claude codex grok pi], inventory.fetch("adapters").keys.sort
     inventory.fetch("adapters").each do |adapter, entry|
-      contract = JSON.parse(File.read(File.join(root, entry.fetch("fixture"))))
       capture = JSON.parse(File.read(File.join(root, entry.fetch("real_capture"))))
 
       assert_equal adapter, capture.fetch("adapter")
-      assert_equal "real_capture_pending", capture.fetch("capture_status")
-      assert_equal "task_local", capture.fetch("classification")
-      assert_nil capture.fetch("trusted_scope")
-      assert_equal %w[provider_account model], entry.fetch("stable_explicit_scopes")
-      [ contract, capture ].each do |fixture|
-        refute_match(/token|credential|prompt|stderr|stdout/i, JSON.generate(fixture))
+      refute_match(/token|credential|prompt|stderr|stdout/i, JSON.generate(capture))
+
+      if adapter == "claude"
+        assert_equal "sanitized_real_capture", capture.fetch("capture_status")
+        assert_equal "shared_health", capture.fetch("classification")
+        assert_equal "provider_account", capture.fetch("trusted_scope")
+        assert_equal "account_quota", capture.fetch("trusted_class")
+        assert_equal [ "provider_account" ], entry.fetch("stable_explicit_scopes")
+        assert_equal [ "account_quota" ], entry.fetch("trusted_classes")
+      else
+        expected_status = adapter == "pi" ?
+          "subscription_capture_unavailable" : "sanitized_real_capture"
+        assert_equal expected_status, capture.fetch("capture_status")
+        assert_equal "task_local", capture.fetch("classification")
+        assert_nil capture.fetch("trusted_scope")
+        assert_empty entry.fetch("stable_explicit_scopes")
+        assert_empty entry.fetch("trusted_classes")
       end
     end
+
+    assert_equal %w[claude.json codex.json grok.json inventory.yml pi.json], Dir.children(root).sort
   end
 
   def test_pool_and_registry_shapes_fail_closed_at_the_opt_in_edge

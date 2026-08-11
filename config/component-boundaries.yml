@@ -59,14 +59,14 @@ components:
     component_dependencies: []
     allowed_hive_dependencies:
       - hive
-      - hive/attempts/output_reference
       - hive/canonical_json
       - hive/managed_directory
+      - hive/output_reference
       - hive/paths
       - hive/secret_patterns
     internal_collaborators:
-      - Hive::Attempts::OutputReference
       - Hive::ManagedDirectory
+      - Hive::OutputReference
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
@@ -111,6 +111,8 @@ components:
         - Hive::ProviderRouting::Router
       errors:
         - Hive::ConfigError
+        - Hive::ProviderRouting::PolicyStore::InvalidSnapshot
+        - Hive::ProviderRouting::PolicyStore::StoreError
     owned_paths:
       - lib/hive/provider_routing.rb
       - lib/hive/provider_routing/configuration.rb
@@ -139,12 +141,13 @@ components:
       - hive
       - hive/agent_profiles
       - hive/agent_profiles/launch_bindings
-      - hive/attempts/point_storage
       - hive/canonical_json
       - hive/implementation_identity
       - hive/model_routing
+      - hive/point_storage
     internal_collaborators:
       - Hive::ModelRouting
+      - Hive::PointStorage
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
@@ -159,7 +162,7 @@ components:
       - lib/hive/daemon/recovery_coordinator.rb
       - lib/hive/implementation_identity/resolver.rb
       - lib/hive/provider_routing/operational_projection.rb
-    mutation_authority: "None; configuration normalization and decisions are pure immutable values."
+    mutation_authority: "First-writer-wins routing-policy snapshots below attempts/v4/routing-policies/v1 only; configuration normalization and route decisions remain pure immutable values."
     recovery_surface: "No retry or recovery surface; invalid configuration fails before dispatch and legacy mode bypasses the domain."
     wiki_page: wiki/modules/provider_routing.md
     focused_tests:
@@ -544,7 +547,9 @@ components:
       - hive/lock
       - hive/managed_directory
       - hive/markers
+      - hive/output_reference
       - hive/paths
+      - hive/point_storage
       - hive/provider_health
       - hive/provider_health/attempt_observer
       - hive/provider_health/evidence
@@ -624,7 +629,8 @@ components:
       - constant: Hive::Attempts::ProcessIdentity
         files:
           - lib/hive/commands/daemon.rb
-        reason: "The daemon composition root shares one process-identity verifier across reconciliation and loss handling."
+          - lib/hive/recovery/migration.rb
+        reason: "The daemon composition root and v3-to-v4 migration share the process-identity verifier needed to classify persisted live workers safely."
       - constant: Hive::Attempts::LostOutcomeStore
         files:
           - lib/hive/commands/daemon.rb
@@ -642,10 +648,6 @@ components:
         files:
           - lib/hive/recovery/migration.rb
         reason: "Store and the one-off migration publish the bounded storage-health cell."
-      - constant: Hive::Attempts::PointStorage
-        files:
-          - lib/hive/provider_routing/policy_store.rb
-        reason: "The admission-owned routing policy store reuses point-addressed owner-private persistence without acquiring attempt lifecycle authority."
       - constant: Hive::Attempts::AdmissionView
         files:
           - lib/hive/recovery/migration.rb

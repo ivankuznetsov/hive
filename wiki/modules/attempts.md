@@ -175,6 +175,13 @@ adapter maps unambiguously; legacy admission itself never consults that cap.
 All-compatible provider saturation creates no attempt or probe and returns a
 scheduler-owned observation.
 
+Opening and reconciling provider health are both inside the same fail-closed
+admission boundary. If the health store cannot be constructed because its
+state is unavailable or its managed directory is unsafe, admission evaluates
+every candidate as `health_state_unavailable`, persists the operator-owned
+no-route decision, and starts no attempt. Legacy admission still returns
+before constructing provider health.
+
 When a selected route is half-open at one or both scopes, admission persists a
 health intent, creates the launching attempt with every resulting probe
 binding, finalizes each claim, and only then launches. Restart reconciliation
@@ -232,8 +239,12 @@ Condition projection adds an explicit numeric `task_input_epoch` to attempt
 records/context while retaining the prerequisite's opaque ownership generation
 as `ownership_generation`. `hive-attempt` v4 remains the sole runtime record
 shape. `Hive::Recovery::Migration` performs the physical v3-to-v4 cutover and
-also accepts a still-supported v2 source: it refuses live writers and attempts,
-renames the validated tree, converts valid v3 records/proofs, publishes old-
+also accepts a still-supported v2 source. It refuses live writers and any
+attempt whose owner may still be active. Under the quiesced writer locks it
+reconciles only expired pre-heartbeat launches and running attempts whose
+recorded process identity is definitively missing or mismatched, preserving
+them as ordinary lost records instead of blocking the cutover. It then renames
+the validated tree, converts valid v3 records/proofs, publishes old-
 binary fences, verifies the converted corpus and decision parity, promotes
 historical finals, and writes the v6 recovery receipt only after its durable
 checkpoint reaches `complete`. Runtime code opens v4 only; there is no reverse

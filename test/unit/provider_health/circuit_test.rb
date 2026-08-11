@@ -87,6 +87,58 @@ class ProviderHealthCircuitTest < Minitest::Test
     assert_nil closed.probe
   end
 
+  def test_probe_events_require_matching_binding_and_owned_source_state
+    closed = Hive::ProviderHealth::Circuit.closed(scope: provider_scope)
+    open = open_event(closed, id: "open", eligible_at: fixture_time(0)).apply(closed)
+    binding = Hive::ProviderHealth::ProbeBinding.new(
+      scope: provider_scope,
+      journal_epoch: 0,
+      observed_generation: 1,
+      claim_generation: 2,
+      attempt_id: "attempt-1",
+      task_generation: "task-generation-1",
+      ownership_fence: "fence-1"
+    )
+
+    wrong_scope = binding.to_h.merge("scope" => model_scope.to_h)
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      event(open, kind: "probe_claimed", id: "wrong-scope", payload: {
+        "probe" => wrong_scope
+      })
+    end
+
+    premature = Hive::ProviderHealth::ProbeBinding.new(
+      scope: provider_scope,
+      journal_epoch: 0,
+      observed_generation: 0,
+      claim_generation: 1,
+      attempt_id: "attempt-1",
+      task_generation: "task-generation-1",
+      ownership_fence: "fence-1"
+    )
+    assert_raises(Hive::ProviderHealth::Unavailable) do
+      event(closed, kind: "probe_claimed", id: "closed-claim", payload: {
+        "probe" => premature.to_h
+      }).apply(closed)
+    end
+
+    {
+      "probe_closed" => { "receipt_identity" => digest("close") },
+      "probe_reopened" => {
+        "eligible_at" => fixture_time(4).iso8601(6),
+        "receipt_identity" => digest("reopen")
+      },
+      "probe_reconciled" => {
+        "eligible_at" => fixture_time(4).iso8601(6),
+        "receipt_identity" => digest("reconcile")
+      }
+    }.each do |kind, payload|
+      assert_raises(Hive::ProviderHealth::Unavailable, kind) do
+        event(open, kind: kind, id: kind, payload: payload).apply(open)
+      end
+    end
+  end
+
   def test_nonmutating_rejection_preserves_generation
     circuit = Hive::ProviderHealth::Circuit.closed(scope: provider_scope)
     rejected = Hive::ProviderHealth::Event.new(

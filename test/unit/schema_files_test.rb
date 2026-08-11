@@ -53,6 +53,22 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
+  def test_provider_routing_public_schemas_allow_two_blockers_per_health_scope
+    {
+      "hive-dispatch-request.v5.json" => [ "AdmissionCandidate", "AdmissionObservation" ],
+      "hive-circuits.v1.json" => [ "Candidate", "RoutingDecision" ],
+      "hive-operational-status.v4.json" => [ "RoutingCandidate", "RoutingDecision" ]
+    }.each do |name, (candidate_name, decision_name)|
+      document = JSON.parse(File.read(File.join(Hive::Schemas.schema_dir, name)))
+      assert_equal 4,
+                   document.dig("$defs", candidate_name, "properties", "exclusions", "maxItems"),
+                   name
+      assert_equal 4_096,
+                   document.dig("$defs", decision_name, "properties", "exclusions", "maxItems"),
+                   name
+    end
+  end
+
   def test_provider_failure_and_provenance_vocabularies_do_not_drift
     assert_equal Hive::ProviderHealth::PROVIDER_FAILURE_CLASSES,
                  Hive::Attempts::Record::PROVIDER_FAILURE_CLASSES

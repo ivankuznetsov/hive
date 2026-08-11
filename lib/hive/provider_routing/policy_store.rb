@@ -1,7 +1,7 @@
 require "json"
 require "json_schemer"
 require "pathname"
-require "hive/attempts/point_storage"
+require "hive/point_storage"
 require "hive/provider_routing/policy"
 
 module Hive
@@ -17,7 +17,8 @@ module Hive
       KIND = "routing-policy".freeze
       MAX_SNAPSHOT_BYTES = 1024 * 1024
 
-      class InvalidSnapshot < Hive::Attempts::StoreError; end
+      class StoreError < Hive::PointStorageError; end
+      class InvalidSnapshot < StoreError; end
 
       attr_reader :root
 
@@ -79,10 +80,11 @@ module Hive
         return @storage if defined?(@storage)
 
         @storage_mutex.synchronize do
-          @storage ||= Hive::Attempts::PointStorage.new(
+          @storage ||= Hive::PointStorage.new(
             root: root,
             label: "provider routing policy store",
-            create_directories: @create_directories
+            create_directories: @create_directories,
+            error_class: StoreError
           )
         end
       end
@@ -111,10 +113,16 @@ module Hive
           normalized[key] = value
         end
         {
-          "ownership_generation" => Hive::Attempts::StorageKey.string(ownership_generation),
-          "subject" => Hive::Attempts::StorageKey.normalize(normalized_subject)
+          "ownership_generation" => Hive::StorageKey.string(
+            ownership_generation,
+            error_class: StoreError
+          ),
+          "subject" => Hive::StorageKey.normalize(
+            normalized_subject,
+            error_class: StoreError
+          )
         }.freeze
-      rescue Hive::Attempts::StoreError
+      rescue StoreError
         invalid!
       end
 

@@ -30,6 +30,7 @@ class ProviderHealthAuditTest < Minitest::Test
       "api_key=secret-canary",
       "Bearer secret-canary",
       "sk-ant-abcdefghijklmnopqrstuvwx",
+      "sk-proj-abcdefghijklmnopqrstuvwx",
       "x" * (Hive::ProviderHealth::MAX_REASON_BYTES + 1)
     ]
 

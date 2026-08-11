@@ -78,6 +78,7 @@ module Hive
           generation: resulting_generation,
           last_event_id: event_id
         }
+        validate_source_transition!(circuit)
         case kind
         when "evidence_opened"
           changes.merge!(
@@ -107,6 +108,16 @@ module Hive
             evidence: nil,
             probe: nil,
             manual_block: payload.fetch("manual_block")
+          )
+        when "snapshot"
+          state = payload.fetch("state")
+          changes.merge!(
+            automatic_state: state.fetch("automatic_state"),
+            eligible_at: state.fetch("eligible_at"),
+            evidence: state.fetch("evidence"),
+            manual_block: state.fetch("manual_block"),
+            probe: state.fetch("probe"),
+            last_event_id: state.fetch("last_event_id")
           )
         when "evidence_rejected"
           nil
@@ -171,6 +182,7 @@ module Hive
         when "manual_blocked" then %w[audit manual_block]
         when "manual_unblocked", "reset" then %w[audit manual_block]
         when "evidence_rejected" then %w[reason]
+        when "snapshot" then %w[state]
         end
         unless payload.keys.sort == required.sort
           raise InvalidMutation, "provider-health event payload has unexpected fields"
@@ -182,7 +194,12 @@ module Hive
           Evidence.from_h(payload.fetch("evidence"))
           ProviderHealth.parse_time(payload.fetch("eligible_at"), "eligible_at")
         when "probe_claimed"
-          validate_probe!(payload.fetch("probe"))
+          binding = validate_probe!(payload.fetch("probe"))
+          unless binding.scope == scope && binding.journal_epoch == journal_epoch &&
+                 binding.observed_generation == previous_generation &&
+                 binding.claim_generation == resulting_generation
+            raise InvalidMutation, "probe binding does not match its journal transition"
+          end
         when "probe_closed"
           validate_digest(payload.fetch("receipt_identity"), "receipt identity")
         when "probe_reopened", "probe_reconciled"
@@ -205,6 +222,43 @@ module Hive
             payload.fetch("reason")
           )
             raise InvalidMutation, "invalid evidence rejection reason"
+          end
+        when "snapshot"
+          validate_snapshot!(payload.fetch("state"))
+        end
+      end
+
+      def validate_snapshot!(data)
+        fields = %w[automatic_state eligible_at evidence last_event_id manual_block probe]
+        unless data.is_a?(Hash) && data.keys.sort == fields.sort
+          raise InvalidMutation, "provider-health snapshot has unexpected fields"
+        end
+        Circuit.new(
+          scope: scope,
+          automatic_state: data.fetch("automatic_state"),
+          generation: previous_generation,
+          journal_epoch: journal_epoch,
+          eligible_at: data.fetch("eligible_at"),
+          evidence: data.fetch("evidence"),
+          manual_block: data.fetch("manual_block"),
+          probe: data.fetch("probe"),
+          last_event_id: data.fetch("last_event_id")
+        )
+      end
+
+      def validate_source_transition!(circuit)
+        case kind
+        when "probe_claimed"
+          occurred = ProviderHealth.parse_time(occurred_at, "event time")
+          eligible = circuit.eligible_at &&
+            ProviderHealth.parse_time(circuit.eligible_at, "eligible_at")
+          unless circuit.automatic_state == "open" && !circuit.blocked? &&
+                 !circuit.probe_owned? && eligible && occurred >= eligible
+            raise Unavailable, "provider-health journal probe claim has no eligible source"
+          end
+        when "probe_closed", "probe_reopened", "probe_reconciled"
+          unless circuit.probe_owned?
+            raise Unavailable, "provider-health journal probe outcome has no owner"
           end
         end
       end

@@ -545,7 +545,8 @@ module Hive
         [ "waiting_on_provider_or_scheduler", "provider" ]
       when "global_cap", "project_cap", "daily_cap", "cooldown", "in_flight",
            "dispatched", "wait_for_debounce", "record_baseline", "poll_for_merge",
-           "merge_watch", "blocked_on_dependency", "retry_cooldown", "retry_pending"
+           "merge_watch", "blocked_on_dependency", "retry_cooldown", "retry_pending",
+           "attempt_capacity"
         [ "waiting_on_provider_or_scheduler", "scheduler" ]
       when "retry_in_flight"
         [ "running", "agent" ]

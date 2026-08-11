@@ -39,7 +39,7 @@ class ProviderRoutingReplayTest < Minitest::Test
     assert duplicate.duplicate?
     assert_equal 1, restarted.inspect_scope(provider_scope("account-a")).generation
     assert_equal "account-b/model-b", after_failure.route.id
-    assert_equal [ "circuit_cooldown" ], after_failure.exclusions.map(&:reason)
+    assert_equal %w[circuit_open circuit_cooldown], after_failure.exclusions.map(&:reason)
     assert_equal after_failure.to_h, replay.to_h
   end
 
@@ -60,7 +60,8 @@ class ProviderRoutingReplayTest < Minitest::Test
       refute decision.selected?, reason
       assert_equal "no_eligible_provider_route", decision.reason, reason
       pinned_candidate = decision.candidates.find { |candidate| candidate.route.account == "account-a" }
-      assert_equal [ reason ], pinned_candidate.exclusions.map(&:reason), reason
+      expected = reason == "circuit_cooldown" ? %w[circuit_open circuit_cooldown] : [ reason ]
+      assert_equal expected, pinned_candidate.exclusions.map(&:reason), reason
       assert_includes(
         decision.candidates.find { |candidate| candidate.route.account == "account-b" }
           .exclusions.map(&:reason),
@@ -119,7 +120,8 @@ class ProviderRoutingReplayTest < Minitest::Test
     refute @health.inspect_scope(provider_scope("account-a")).circuit.blocked?
     assert_equal "open",
                  @health.inspect_scope(model_scope("account-a", "model-a")).circuit.automatic_state
-    assert_equal [ "circuit_cooldown" ], evaluation.blockers.map { |entry| entry.fetch("reason") }
+    assert_equal %w[circuit_open circuit_cooldown],
+                 evaluation.blockers.map { |entry| entry.fetch("reason") }
   end
 
   def test_ae8_legacy_bypasses_health_while_explicit_one_route_is_excludable

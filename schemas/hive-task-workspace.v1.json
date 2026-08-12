@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:task-workspace:v1",
+  "title": "Hive task workspace snapshot (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "generated_at", "task", "status",
+    "decision", "panels"
+  ],
+  "properties": {
+    "schema": { "const": "hive-task-workspace" },
+    "schema_version": { "const": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "task": { "$ref": "#/$defs/Task" },
+    "status": { "$ref": "#/$defs/Status" },
+    "decision": { "$ref": "#/$defs/Decision" },
+    "panels": { "$ref": "#/$defs/Panels" }
+  },
+  "$defs": {
+    "State": {
+      "type": "string",
+      "enum": [
+        "current", "stale", "partial", "missing", "conflicting",
+        "unavailable", "estimated", "exhausted", "retry-after"
+      ]
+    },
+    "Source": {
+      "type": "string",
+      "enum": [
+        "task_projection", "task_journal", "attempt_record",
+        "controller_receipt", "agent_receipt", "runtime_receipt", "usage_db",
+        "dependency_snapshot", "worktree_receipt", "local_git",
+        "publication_cache", "github", "artifact", "event_stream",
+        "current_observation", "legacy", "canonical_action", "status_snapshot",
+        "operator", "bounded_reader", "workspace", "unknown"
+      ]
+    },
+    "SafeString": {
+      "type": "string",
+      "maxLength": 262144,
+      "pattern": "^(?!/)(?!\\\\)(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$))[\\s\\S]*$"
+    },
+    "SafeValue": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "$ref": "#/$defs/SafeString" },
+        { "$ref": "#/$defs/SafeArray" },
+        { "$ref": "#/$defs/SafeObject" }
+      ]
+    },
+    "SafeArray": {
+      "type": "array",
+      "maxItems": 2000,
+      "items": { "$ref": "#/$defs/SafeValue" }
+    },
+    "SafeObject": {
+      "type": "object",
+      "maxProperties": 100,
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "capability", "capability_token", "observation_token", "raw_argv",
+            "argv", "prompt", "prompts", "credential", "credentials",
+            "secret", "secrets"
+          ]
+        }
+      },
+      "additionalProperties": { "$ref": "#/$defs/SafeValue" }
+    },
+    "Field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value", "state", "source", "evidence_ref", "observed_at", "quality",
+        "conflicts", "truncated"
+      ],
+      "properties": {
+        "value": { "$ref": "#/$defs/SafeValue" },
+        "state": { "$ref": "#/$defs/State" },
+        "source": { "$ref": "#/$defs/Source" },
+        "evidence_ref": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "maxLength": 1024,
+              "pattern": "^(?!/)(?!\\\\)(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).*$" }
+          ]
+        },
+        "observed_at": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "format": "date-time" }
+          ]
+        },
+        "quality": { "type": ["string", "null"], "maxLength": 128 },
+        "conflicts": {
+          "type": "array", "maxItems": 20,
+          "items": { "$ref": "#/$defs/SafeObject" }
+        },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "Task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "slug", "id", "stage", "generation"],
+      "properties": {
+        "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "id": { "type": ["integer", "string", "null"] },
+        "stage": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "generation": { "type": ["integer", "string", "null"] }
+      }
+    },
+    "Status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "freshness", "observed_at", "diagnostics"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "freshness": { "type": "string", "enum": ["fresh", "stale", "partial", "unavailable"] },
+        "observed_at": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "format": "date-time" }
+          ]
+        },
+        "diagnostics": {
+          "type": "array", "maxItems": 100,
+          "items": { "$ref": "#/$defs/SafeObject" }
+        }
+      }
+    },
+    "Decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["posture", "reason", "action"],
+      "properties": {
+        "posture": { "type": "string", "enum": ["wait", "answer", "approve", "retry", "investigate"] },
+        "reason": { "type": ["string", "null"], "maxLength": 4096 },
+        "action": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "label", "enabled", "reason"],
+          "properties": {
+            "kind": { "type": ["string", "null"], "maxLength": 128 },
+            "label": { "type": ["string", "null"], "maxLength": 512 },
+            "enabled": { "type": "boolean" },
+            "reason": { "type": ["string", "null"], "maxLength": 4096 }
+          }
+        }
+      }
+    },
+    "Panel": {
+      "type": "object",
+      "required": ["state", "records", "diagnostics", "truncated"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "records": {
+          "type": "array", "maxItems": 2000,
+          "items": { "$ref": "#/$defs/SafeValue" }
+        },
+        "diagnostics": {
+          "type": "array", "maxItems": 100,
+          "items": { "$ref": "#/$defs/SafeObject" }
+        },
+        "truncated": { "type": "boolean" }
+      },
+      "additionalProperties": { "$ref": "#/$defs/SafeValue" }
+    },
+    "Panels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provenance", "attempts", "resources", "timeline", "dependencies",
+        "publication", "artifacts"
+      ],
+      "properties": {
+        "provenance": { "$ref": "#/$defs/Panel" },
+        "attempts": { "$ref": "#/$defs/Panel" },
+        "resources": { "$ref": "#/$defs/Panel" },
+        "timeline": { "$ref": "#/$defs/Panel" },
+        "dependencies": { "$ref": "#/$defs/Panel" },
+        "publication": { "$ref": "#/$defs/Panel" },
+        "artifacts": { "$ref": "#/$defs/Panel" }
+      }
+    }
+  }
+}

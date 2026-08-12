@@ -5,18 +5,38 @@ require "hive/attempts/store"
 require "hive/paths"
 require "hive/task_projection"
 require "hive/task_journal"
+require "hive/task_workspace/limits"
 
 module Hive
   class TaskProjection
     class Store
       SNAPSHOT_BASENAME = "task-projection.json".freeze
+      CHECKPOINT_BASENAME = "task-projection.checkpoint.json".freeze
+      CHECKPOINT_SCHEMA = "hive-task-projection-checkpoint".freeze
+      CHECKPOINT_SCHEMA_VERSION = 1
+      PREFIX_SENTINEL_BYTES = 4 * 1024
 
-      attr_reader :task_folder, :journal_path, :snapshot_path, :attempt_store
+      BoundedRead = Data.define(
+        :projection, :state, :diagnostics, :truncated, :journal_cursor
+      ) do
+        def initialize(projection:, state:, diagnostics:, truncated:, journal_cursor:)
+          super(
+            projection: projection,
+            state: state.to_s.freeze,
+            diagnostics: JSON.parse(JSON.generate(diagnostics), freeze: true),
+            truncated: truncated == true,
+            journal_cursor: Integer(journal_cursor || 0)
+          )
+        end
+      end
+
+      attr_reader :task_folder, :journal_path, :snapshot_path, :checkpoint_path, :attempt_store
 
       def initialize(task_folder:, projector: Hive::TaskProjection, attempt_store: default_attempt_store)
         @task_folder = File.expand_path(task_folder)
         @journal_path = File.join(@task_folder, Hive::TaskJournal::JOURNAL_BASENAME)
         @snapshot_path = File.join(@task_folder, SNAPSHOT_BASENAME)
+        @checkpoint_path = File.join(@task_folder, CHECKPOINT_BASENAME)
         @projector = projector
         @attempt_store = attempt_store
       end
@@ -45,7 +65,39 @@ module Hive
         binding = journal_binding(bytes)
         projection = replay(binding, marker: marker)
         publish(projection)
+        publish_checkpoint(binding: binding, bytes: bytes, projection: projection)
         projection
+      end
+
+      # Workspace reads use a separately bounded checkpoint and only replay
+      # the append-only suffix. The lifecycle-facing #read and #rebuild!
+      # methods intentionally retain their historical behavior.
+      def read_bounded(marker: nil, limits: Hive::TaskWorkspace::Limits.new,
+                       snapshot_max_bytes: nil, journal_suffix_max_bytes: nil,
+                       journal_event_limit: nil)
+        snapshot_limit = snapshot_max_bytes || limits.fetch(:projection_snapshot_bytes)
+        suffix_limit = journal_suffix_max_bytes || limits.fetch(:journal_suffix_bytes)
+        event_limit = journal_event_limit || limits.fetch(:journal_events)
+
+        with_journal_read_lock do
+          checkpoint = read_checkpoint(snapshot_limit)
+          return read_without_checkpoint(
+            marker: marker, suffix_limit: suffix_limit, event_limit: event_limit,
+            snapshot_limit: snapshot_limit, checkpoint_reason: checkpoint.fetch("reason")
+          ) unless checkpoint.fetch("valid")
+
+          read_from_checkpoint(
+            checkpoint.fetch("document"), marker: marker,
+            suffix_limit: suffix_limit, event_limit: event_limit
+          )
+        end
+      rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
+             JSON::ParserError, KeyError, TypeError, ArgumentError,
+             SystemCallError, IOError => e
+        degraded_bounded_read(
+          reason: "bounded_projection_failed", state: "partial", error: e,
+          snapshot_limit: snapshot_limit || Hive::TaskWorkspace::Limits.new.fetch(:projection_snapshot_bytes)
+        )
       end
 
       def publish(projection)
@@ -68,6 +120,304 @@ module Hive
       end
 
       private
+
+      def publish_checkpoint(binding:, bytes:, projection:)
+        records = binding.fetch("records").map do |record|
+          record.reject { |key, _| key.to_s.start_with?("__") }
+        end
+        stat = File.stat(journal_path) if File.exist?(journal_path)
+        cursor = binding.fetch("cursor")
+        document = {
+          "schema" => CHECKPOINT_SCHEMA,
+          "schema_version" => CHECKPOINT_SCHEMA_VERSION,
+          "state" => "current",
+          "journal" => {
+            "cursor" => cursor,
+            "hash" => binding.fetch("hash"),
+            "event_id" => binding.fetch("event_id"),
+            "device" => stat&.dev,
+            "inode" => stat&.ino,
+            "head_hash" => sentinel_hash(bytes, 0, [ cursor, PREFIX_SENTINEL_BYTES ].min),
+            "tail_hash" => sentinel_hash(
+              bytes, [ cursor - PREFIX_SENTINEL_BYTES, 0 ].max,
+              [ cursor, PREFIX_SENTINEL_BYTES ].min
+            )
+          },
+          "snapshot" => projection.to_h,
+          "records" => records
+        }
+        body = "#{Hive::TaskProjection.canonical_json(document)}\n"
+        limit = Hive::TaskWorkspace::Limits.new.fetch(:projection_snapshot_bytes)
+        if body.bytesize > limit
+          document = {
+            "schema" => CHECKPOINT_SCHEMA,
+            "schema_version" => CHECKPOINT_SCHEMA_VERSION,
+            "state" => "oversized",
+            "observed_bytes" => body.bytesize,
+            "cap" => "projection_snapshot_bytes"
+          }
+          body = "#{Hive::TaskProjection.canonical_json(document)}\n"
+        end
+        Hive::AtomicFile.write(checkpoint_path, body, mode: 0o644)
+        Hive::AtomicFile.fsync_directory(task_folder)
+      rescue SystemCallError, IOError, JSON::GeneratorError
+        # A checkpoint is a read optimization, never lifecycle authority.
+        nil
+      end
+
+      def read_checkpoint(limit)
+        document = read_json_descriptor(checkpoint_path, limit)
+        unless document["schema"] == CHECKPOINT_SCHEMA &&
+               document["schema_version"] == CHECKPOINT_SCHEMA_VERSION
+          return { "valid" => false, "reason" => "checkpoint_invalid" }
+        end
+        return { "valid" => false, "reason" => "checkpoint_oversized" } unless
+          document["state"] == "current"
+        unless document["snapshot"].is_a?(Hash) && document["records"].is_a?(Array) &&
+               document["journal"].is_a?(Hash)
+          return { "valid" => false, "reason" => "checkpoint_invalid" }
+        end
+
+        Hive::TaskProjection.from_data(document.fetch("snapshot"))
+        { "valid" => true, "document" => document }
+      rescue Errno::ENOENT
+        { "valid" => false, "reason" => "checkpoint_missing" }
+      rescue JSON::ParserError, KeyError, TypeError, ArgumentError,
+             Hive::TaskProjection::Error, SystemCallError, IOError
+        { "valid" => false, "reason" => "checkpoint_invalid" }
+      end
+
+      def read_from_checkpoint(checkpoint, marker:, suffix_limit:, event_limit:)
+        journal = checkpoint.fetch("journal")
+        cursor = Integer(journal.fetch("cursor"))
+        base_projection = Hive::TaskProjection.from_data(checkpoint.fetch("snapshot"))
+        return degraded_from_projection(
+          base_projection, reason: "checkpoint_prefix_changed", state: "stale", cursor: cursor
+        ) unless checkpoint_prefix_valid?(journal, cursor)
+
+        suffix, current_size, over_limit = journal_suffix(cursor, suffix_limit)
+        if over_limit
+          return degraded_from_projection(
+            base_projection, reason: "suffix_limit_exceeded", state: "partial",
+            cursor: cursor, truncated: true,
+            details: {
+              "cap" => "journal_suffix_bytes", "observed_bytes" => current_size - cursor,
+              "limit" => suffix_limit
+            }
+          )
+        end
+        unless suffix.empty? || suffix.end_with?("\n")
+          return degraded_from_projection(
+            base_projection, reason: "journal_suffix_torn", state: "partial",
+            cursor: cursor
+          )
+        end
+        event_count = suffix.lines.count { |line| !line.strip.empty? }
+        if event_count > event_limit
+          return degraded_from_projection(
+            base_projection, reason: "suffix_event_limit_exceeded", state: "partial",
+            cursor: cursor, truncated: true,
+            details: {
+              "cap" => "journal_events", "observed_count" => event_count,
+              "limit" => event_limit
+            }
+          )
+        end
+
+        encoded_prefix = checkpoint.fetch("records").map { |record| JSON.generate(record) }.join("\n")
+        encoded_prefix = "#{encoded_prefix}\n" unless encoded_prefix.empty?
+        replayed = Hive::TaskProjection.replay_journal(
+          "#{encoded_prefix}#{suffix}", attempt_store: @attempt_store
+        )
+        projection = @projector.project(
+          records: replayed.records,
+          cursor: current_size,
+          # The exact full-file digest belongs to the checkpoint at its
+          # cursor. A suffix replay does not fabricate a replacement digest.
+          journal_hash: suffix.empty? ? journal["hash"] : nil,
+          marker: marker
+        )
+        BoundedRead.new(
+          projection: projection, state: "current", diagnostics: [],
+          truncated: false, journal_cursor: current_size
+        )
+      end
+
+      def read_without_checkpoint(marker:, suffix_limit:, event_limit:, snapshot_limit:,
+                                  checkpoint_reason:)
+        size = File.size(journal_path)
+        if size > suffix_limit
+          return degraded_bounded_read(
+            reason: checkpoint_reason, state: "partial", snapshot_limit: snapshot_limit,
+            truncated: true,
+            details: {
+              "cap" => "journal_suffix_bytes", "observed_bytes" => size,
+              "limit" => suffix_limit
+            }
+          )
+        end
+        bytes = read_binary_descriptor(journal_path, suffix_limit)
+        unless bytes.empty? || bytes.end_with?("\n")
+          return degraded_bounded_read(
+            reason: "journal_suffix_torn", state: "partial", snapshot_limit: snapshot_limit
+          )
+        end
+        count = bytes.lines.count { |line| !line.strip.empty? }
+        if count > event_limit
+          return degraded_bounded_read(
+            reason: "journal_event_limit_exceeded", state: "partial",
+            snapshot_limit: snapshot_limit, truncated: true,
+            details: { "cap" => "journal_events", "observed_count" => count, "limit" => event_limit }
+          )
+        end
+
+        binding = journal_binding(bytes)
+        projection = replay(binding, marker: marker)
+        BoundedRead.new(
+          projection: projection, state: "partial",
+          diagnostics: [ bounded_diagnostic(checkpoint_reason) ],
+          truncated: false, journal_cursor: binding.fetch("cursor")
+        )
+      rescue Errno::ENOENT
+        projection = @projector.project(records: [], cursor: 0,
+                                        journal_hash: ::Digest::SHA256.hexdigest(""), marker: marker)
+        BoundedRead.new(
+          projection: projection, state: "partial",
+          diagnostics: [ bounded_diagnostic(checkpoint_reason) ],
+          truncated: false, journal_cursor: 0
+        )
+      end
+
+      def checkpoint_prefix_valid?(journal, cursor)
+        path_stat = File.lstat(journal_path)
+        return false unless path_stat.file? && !path_stat.symlink?
+
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        File.open(journal_path, flags) do |io|
+          stat = io.stat
+          return false unless stat.file? && stat.size >= cursor &&
+            stat.dev == path_stat.dev && stat.ino == path_stat.ino
+          return false unless journal["device"].nil? || stat.dev == journal["device"]
+          return false unless journal["inode"].nil? || stat.ino == journal["inode"]
+
+          head_length = [ cursor, PREFIX_SENTINEL_BYTES ].min
+          tail_offset = [ cursor - PREFIX_SENTINEL_BYTES, 0 ].max
+          head = io.pread(head_length, 0)
+          tail = io.pread(head_length, tail_offset)
+          ::Digest::SHA256.hexdigest(head) == journal["head_hash"] &&
+            ::Digest::SHA256.hexdigest(tail) == journal["tail_hash"]
+        end
+      rescue SystemCallError, IOError
+        false
+      end
+
+      def journal_suffix(cursor, limit)
+        path_stat = File.lstat(journal_path)
+        raise IOError, "journal is not a regular file" unless path_stat.file? && !path_stat.symlink?
+
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        File.open(journal_path, flags) do |io|
+          before = io.stat
+          raise IOError, "journal descriptor changed" unless
+            before.dev == path_stat.dev && before.ino == path_stat.ino
+          return [ "", before.size, true ] if before.size < cursor
+
+          suffix = io.pread(limit + 1, cursor)
+          after = io.stat
+          raise IOError, "journal changed during bounded read" unless
+            before.dev == after.dev && before.ino == after.ino && before.size == after.size &&
+              before.mtime == after.mtime
+          over = suffix.bytesize > limit || before.size - cursor > limit
+          [ suffix.byteslice(0, limit).to_s, before.size, over ]
+        end
+      end
+
+      def degraded_from_projection(projection, reason:, state:, cursor:, truncated: false, details: {})
+        BoundedRead.new(
+          projection: projection, state: state,
+          diagnostics: [ bounded_diagnostic(reason, details) ],
+          truncated: truncated, journal_cursor: cursor
+        )
+      end
+
+      def degraded_bounded_read(reason:, state:, snapshot_limit:, error: nil,
+                                truncated: false, details: {})
+        projection = bounded_snapshot_projection(snapshot_limit)
+        safe_details = details.dup
+        safe_details["error_class"] = error.class.name if error
+        BoundedRead.new(
+          projection: projection, state: state,
+          diagnostics: [ bounded_diagnostic(reason, safe_details) ],
+          truncated: truncated,
+          journal_cursor: projection&.dig("journal", "cursor") || 0
+        )
+      end
+
+      def bounded_snapshot_projection(limit)
+        document = read_json_descriptor(snapshot_path, limit)
+        Hive::TaskProjection.from_data(document)
+      rescue JSON::ParserError, Hive::TaskProjection::Error, SystemCallError, IOError, ArgumentError
+        nil
+      end
+
+      def bounded_diagnostic(reason, details = {})
+        {
+          "source" => "task_projection",
+          "reason" => reason.to_s,
+          "message" => "bounded task projection is #{reason.to_s.tr('_', ' ')}",
+          "details" => details
+        }
+      end
+
+      def read_json_descriptor(path, limit)
+        JSON.parse(read_binary_descriptor(path, limit))
+      end
+
+      def read_binary_descriptor(path, limit)
+        path_stat = File.lstat(path)
+        raise IOError, "source is not a regular file" unless path_stat.file? && !path_stat.symlink?
+
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        File.open(path, flags) do |io|
+          before = io.stat
+          raise IOError, "source descriptor changed" unless
+            before.file? && before.dev == path_stat.dev && before.ino == path_stat.ino
+          raise IOError, "source exceeds bounded read limit" if before.size > limit
+
+          bytes = io.read(limit + 1).to_s
+          after = io.stat
+          raise IOError, "source changed during bounded read" unless
+            before.dev == after.dev && before.ino == after.ino && before.size == after.size &&
+              before.mtime == after.mtime
+          raise IOError, "source exceeds bounded read limit" if bytes.bytesize > limit
+
+          bytes
+        end
+      end
+
+      def with_journal_read_lock
+        lock_path = File.join(task_folder, Hive::TaskJournal::LOCK_BASENAME)
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        lock = File.open(lock_path, flags)
+      rescue Errno::ENOENT
+        yield
+      else
+        begin
+          lock.flock(File::LOCK_SH)
+          yield
+        ensure
+          lock&.flock(File::LOCK_UN)
+          lock&.close
+        end
+      end
+
+      def sentinel_hash(bytes, offset, length)
+        ::Digest::SHA256.hexdigest(bytes.byteslice(offset, length).to_s)
+      end
 
       def replay(binding, marker:)
         @projector.project(

@@ -128,6 +128,9 @@ module Hive
       # task-local authorities, not agent-callable command envelopes.
       "hive-task-closure-input" => 1,
       "hive-task-closure" => 1,
+      # Bounded, read-only detail projection shared by authenticated Web HTML
+      # and JSON. It is intentionally independent from fleet-wide status v7.
+      "hive-task-workspace" => 1,
       # Project-local daemon ledger for task-bound merged-PR reconciliation.
       "hive-pr-merge-reconciliation" => 1
     }.freeze

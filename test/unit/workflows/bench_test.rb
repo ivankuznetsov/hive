@@ -375,8 +375,42 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes instruction, "write_limits_reached()"
     assert_includes instruction, "exit(quota_only ? 75 : 2)"
     assert_includes instruction, 'if [ "$outcome_status" -eq 75 ]'
-    assert_includes instruction, "<!-- ERROR reason=limits_reached"
-    assert_includes instruction, 'retry_after="%s"'
+    assert_includes instruction, "Hive::Markers.set("
+    assert_includes instruction, '"reason" => "limits_reached"'
+    assert_includes instruction, '"retry_after" => ARGV.fetch(1)'
+  end
+
+  def test_generate_quota_marker_has_canonical_recovery_identity
+    instruction = File.read(stages_by_name.fetch("generate").instruction)
+    function = instruction.match(
+      /(?<body>write_limits_reached\(\) \{.*?\n\})\n\nwrite_complete\(\)/m
+    )&.[](:body)
+    refute_nil function, "generate instruction must expose write_limits_reached"
+
+    Dir.mktmpdir("hive-bench-quota-marker") do |dir|
+      state_file = File.join(dir, "generate.md")
+      File.write(state_file, "# Generate\n<!-- AGENT_WORKING -->\n")
+      ruby_lib = [ File.expand_path("../../../lib", __dir__), ENV["RUBYLIB"] ].compact
+        .join(File::PATH_SEPARATOR)
+      shell = <<~BASH
+        set -euo pipefail
+        STATE_FILE="$1"
+        #{function}
+        write_limits_reached "provider limit"
+      BASH
+
+      _out, err, status = Open3.capture3(
+        { "RUBYLIB" => ruby_lib, "HIVE_LIMITS_RETRY_COOLDOWN_SEC" => "60" },
+        "bash", "-c", shell, "--", state_file
+      )
+
+      assert status.success?, err
+      marker = Hive::Markers.current(state_file)
+      assert_equal :error, marker.name
+      assert_equal "limits_reached", marker.attrs.fetch("reason")
+      assert_match(/\A[0-9a-f]{16}\z/, marker.attrs.fetch("marker_id"))
+      refute_nil Hive::Markers.recovery_match_attr(marker.attrs)
+    end
   end
 
   def test_judge_validation_rejects_a_missing_round_two_verdict

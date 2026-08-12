@@ -60,6 +60,11 @@ class GemPackageScriptsTest < Minitest::Test
              "gem build failed\nstdout:\n#{build_out}\nstderr:\n#{build_err}"
 
       gem_home = File.join(dir, "gems")
+      # RubyGems' ensure_writable_dir mkdirs --bindir NON-recursively, and the
+      # suite runs under `bundle exec`, where Bundler overrides Gem.dir so the
+      # GEM_HOME below is never created for us. Without this the first install
+      # dies with ENOENT on <gem_home>/bin.
+      FileUtils.mkdir_p(File.join(gem_home, "bin"))
       install_env = {
         "GEM_HOME" => gem_home,
         "GEM_PATH" => [ gem_home, *Gem.path ].uniq.join(File::PATH_SEPARATOR)

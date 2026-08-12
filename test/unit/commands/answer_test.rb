@@ -667,4 +667,175 @@ class HiveCommandsAnswerTest < Minitest::Test
       assert_equal before, File.binread(path)
     end
   end
+
+  # An answer larger than the cap is refused before any file is touched, so a
+  # runaway paste can never grow brainstorm.md without bound.
+  def test_answer_larger_than_the_cap_is_refused_without_writing
+    with_project do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      before = File.binread(path)
+      oversized = "x" * (Hive::Commands::Answer::MAX_ANSWER_BYTES + 1)
+
+      error = assert_raises(Hive::Commands::Answer::InvalidAnswer) do
+        call_answer(binding: token, answer: oversized)
+      end
+
+      assert_match(/exceeds #{Hive::Commands::Answer::MAX_ANSWER_BYTES} bytes/, error.message)
+      assert_equal before, File.binread(path)
+    end
+  end
+
+  # A vanished brainstorm.md under the lock is a moved/archived task, not a
+  # corrupt one: report it as stale rather than recreating the file.
+  def test_deleted_brainstorm_under_the_lock_is_reported_stale
+    with_project do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      File.delete(path)
+
+      payload = call_answer(binding: token, answer: "too late")
+
+      assert_equal "stale", payload.fetch("outcome")
+      assert_equal "task_missing", payload.fetch("reason")
+      refute File.exist?(path), "a stale write must not recreate brainstorm.md"
+      assert_schema(payload)
+    end
+  end
+
+  # The task folder disappearing between identity observation and lock
+  # acquisition surfaces as ENOENT from the lock itself. Report task_moved.
+  def test_task_folder_vanishing_at_lock_time_is_reported_as_moved
+    with_project do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      raiser = ->(*_args, **_kwargs) { raise Errno::ENOENT, "task folder" }
+
+      payload = with_replaced_singleton_method(Hive::Lock, :with_task_lock, raiser) do
+        call_answer(binding: token, answer: "too late")
+      end
+
+      assert_equal "stale", payload.fetch("outcome")
+      assert_equal "task_moved", payload.fetch("reason")
+      assert_nil Hive::BrainstormParser.parse(path).first.answer
+      assert_schema(payload)
+    end
+  end
+
+  # A renumbered question that is ALSO already answered has exactly one
+  # fingerprint match, so it relocates — and then fails closed on the
+  # occupied slot instead of overwriting somebody else's answer.
+  def test_relocated_but_already_answered_slot_conflicts_without_overwriting
+    content = "## Round 1\n### Q1. Keep?\n### A1.\n<!-- WAITING -->\n"
+    with_project(content) do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      File.write(path, "## Round 1\n### Q9. Keep?\n### A9.\nPrior answer\n<!-- WAITING -->\n")
+
+      payload = call_answer(binding: token, answer: "my answer")
+
+      assert_equal "conflict", payload.fetch("outcome")
+      assert_equal "already_answered_different", payload.fetch("reason")
+      assert_equal true, payload.fetch("relocated")
+      assert_equal "Prior answer", Hive::BrainstormParser.parse(path).first.answer
+      assert_schema(payload)
+    end
+  end
+
+  # Same relocation, same answer text: idempotent rather than a conflict, so a
+  # retried delivery of the same answer is not reported as somebody else's write.
+  def test_relocated_slot_holding_the_same_answer_is_idempotent
+    content = "## Round 1\n### Q1. Keep?\n### A1.\n<!-- WAITING -->\n"
+    with_project(content) do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      File.write(path, "## Round 1\n### Q9. Keep?\n### A9.\nSame answer\n<!-- WAITING -->\n")
+
+      payload = call_answer(binding: token, answer: "Same answer")
+
+      assert_equal "idempotent", payload.fetch("outcome")
+      assert_equal "already_answered_same", payload.fetch("reason")
+      assert_equal true, payload.fetch("relocated")
+      assert_equal "Same answer", Hive::BrainstormParser.parse(path).first.answer
+      assert_schema(payload)
+    end
+  end
+
+  # The writer's result vocabulary is a contract. An unrecognized symbol must
+  # raise rather than be reported to the operator as a successful write.
+  def test_unrecognized_writer_result_raises_internal_error
+    with_project do |_project, _folder, _path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      surprise = ->(*_args, **_kwargs) { :teleported }
+
+      with_replaced_singleton_method(
+        Hive::Bot::BrainstormAnswerWriter, :write_at_ordinal_under_lock!, surprise
+      ) do
+        error = assert_raises(Hive::InternalError) { call_answer(binding: token, answer: "hi") }
+        assert_match(/writer returned :teleported/, error.message)
+      end
+    end
+  end
+
+  # Path-shaped invocations are compared canonically, so an equivalent
+  # spelling of the bound folder (trailing slash, `.` segment) still matches.
+  def test_path_invocation_matches_the_binding_after_canonicalization
+    with_project do |_project, folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+
+      payload = call_answer(target: File.join(folder, "."), binding: token, answer: "by path")
+
+      assert_equal "written", payload.fetch("outcome")
+      assert_equal "by path", Hive::BrainstormParser.parse(path).first.answer
+      assert_schema(payload)
+    end
+  end
+
+  # An unresolvable path target cannot be canonicalized at all. Treat it as an
+  # identity mismatch and refuse the write — never fall through to the slug.
+  def test_unresolvable_path_invocation_fails_closed_as_identity_changed
+    with_project do |_project, folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+
+      payload = call_answer(target: File.join(folder, "not-here"), binding: token, answer: "nope")
+
+      assert_equal "stale", payload.fetch("outcome")
+      assert_equal "identity_changed", payload.fetch("reason")
+      assert_nil Hive::BrainstormParser.parse(path).first.answer
+      assert_schema(payload)
+    end
+  end
+
+  # Unexpected non-Hive errors are wrapped so the JSON envelope still carries a
+  # machine-readable kind instead of the bare Ruby class leaking to callers.
+  def test_unexpected_internal_error_is_wrapped_and_emitted_as_internal
+    with_project do |_project, _folder, _path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      exploding_input = Object.new
+      exploding_input.define_singleton_method(:read) { |*| raise "disk on fire" }
+      output = StringIO.new
+
+      error = assert_raises(Hive::InternalError) do
+        Hive::Commands::Answer.new(
+          SLUG, project: "demo", binding: token, json: true,
+          input: exploding_input, output: output
+        ).call
+      end
+
+      assert_match(/internal error: RuntimeError: disk on fire/, error.message)
+      payload = JSON.parse(output.string)
+      assert_equal "internal", payload.fetch("error_kind")
+      assert_schema(payload)
+    end
+  end
+
+  # Fail-closed guard behind the under-lock re-observation: if either folder no
+  # longer resolves, the two tasks are NOT the same path. Answering "true" here
+  # would let a write land in a task that had already moved.
+  def test_same_task_path_is_false_when_a_folder_no_longer_resolves
+    with_tmp_dir do |root|
+      present = Struct.new(:folder).new(root)
+      missing = Struct.new(:folder).new(File.join(root, "gone"))
+      command = Hive::Commands::Answer.new(SLUG, output: StringIO.new)
+
+      assert_equal true, command.send(:same_task_path?, present, present)
+      assert_equal false, command.send(:same_task_path?, present, missing)
+      assert_equal false, command.send(:same_task_path?, missing, present)
+    end
+  end
 end

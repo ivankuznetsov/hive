@@ -3,6 +3,7 @@ require "json"
 require "hive/bot/supervisor"
 require "hive/bot/telegram"
 require "hive/bot/brainstorm_parser"
+require "hive/bot/status_watcher"
 require "hive/daemon/dispatch_request_queue"
 
 class HiveBotScenarioBrainstormTest < Minitest::Test
@@ -52,7 +53,12 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
       "bot" => { "chat_id_allowlist" => [ 12345 ] }
     }.to_yaml)
 
-    supervisor = supervisor_for
+    supervisor = supervisor_for(rows: [ status_row(slug: slug) ])
+    # /answer resolves its target through the cached status snapshot so the
+    # bound write carries the exact project identity. Tick once first — the
+    # real bot's status_loop ticks on start, but a scenario that only feeds
+    # updates would otherwise get "Status is still loading".
+    supervisor.status_tick
     supervisor.process_update(update(text: "/answer #{slug}", update_id: 1))
     4.times do |idx|
       supervisor.process_update(update(text: "Answer #{idx + 1}", update_id: idx + 2))
@@ -78,7 +84,14 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
 
   private
 
-  def supervisor_for
+  def status_row(slug:, project: "hive")
+    Hive::Bot::StatusWatcher::Row.new(
+      project: project, slug: slug, stage: "2-brainstorm", workflow: "coding",
+      marker: "waiting", action: "needs_input", action_label: "needs input", attrs: {}
+    )
+  end
+
+  def supervisor_for(rows: [])
     @telegram = FakeTelegram.new
     @child = FakeChildSupervisor.new
     Hive::Bot::Supervisor.new(
@@ -86,7 +99,7 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
       token: "token",
       logger: FakeLogger.new,
       telegram: @telegram,
-      status_watcher: FakeStatusWatcher.new,
+      status_watcher: FakeStatusWatcher.new(rows),
       notification_dispatcher: FakeNotificationDispatcher.new,
       child_supervisor: @child,
       dispatch_request_writer: QueueOnlyDispatchRequestWriter,
@@ -132,7 +145,8 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
 
   class FakeStatusWatcher
     Result = Struct.new(:ok, :rows, :error, keyword_init: true)
-    def fetch = Result.new(ok: true, rows: [], error: nil)
+    def initialize(rows = []) = @rows = rows
+    def fetch = Result.new(ok: true, rows: @rows, error: nil)
   end
 
   class FakeNotificationDispatcher

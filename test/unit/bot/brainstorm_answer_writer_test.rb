@@ -601,6 +601,41 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
+  # Ordinals arrive from a decoded binding token, so a corrupt or
+  # hand-forged token can carry a non-integer. Refuse it as
+  # question_not_found instead of letting Integer() escape as an
+  # ArgumentError from inside the caller's lock.
+  def test_exact_writer_rejects_a_non_integer_ordinal
+    with_brainstorm(sample) do |path|
+      before = File.binread(path)
+
+      [ "not-a-number", nil, 1.5.to_s + "x" ].each do |bad|
+        result = Hive::Bot::BrainstormAnswerWriter.write_at_ordinal_under_lock!(
+          brainstorm_path: path, ordinal: bad, answer_text: "never written"
+        )
+
+        assert_equal :question_not_found, result, "ordinal #{bad.inspect} must be refused"
+      end
+      assert_equal before, File.binread(path), "a refused ordinal must not touch the file"
+    end
+  end
+
+  # Defensive guard behind the ordinal write: the parse and the physical
+  # line scan agree today (they share QUESTION_RE), so this is only
+  # reachable directly. Pinning it keeps the "no locatable Q line" arm
+  # returning nil — which the caller maps to question_not_found — rather
+  # than drifting into an out-of-range index or a silent wrong-slot write.
+  def test_question_line_lookup_returns_nil_when_the_ordinal_overruns_the_document
+    lines = [ "## Round 1\n", "### Q1. Only one?\n", "### A1.\n" ]
+
+    assert_equal 1, Hive::Bot::BrainstormAnswerWriter
+      .send(:question_line_index_for_ordinal, lines, 1)
+    assert_nil Hive::Bot::BrainstormAnswerWriter
+      .send(:question_line_index_for_ordinal, lines, 2)
+    assert_nil Hive::Bot::BrainstormAnswerWriter
+      .send(:question_line_index_for_ordinal, [ "## Round 1\n" ], 1)
+  end
+
   def test_marker_answer_without_a_real_stage_marker_does_not_forge_one
     with_brainstorm("## Round 1\n### Q1. Marker?\n### A1.\n") do |path|
       result = Hive::Bot::BrainstormAnswerWriter.append!(

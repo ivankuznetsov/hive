@@ -2936,6 +2936,57 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_match(/already moved on/, @telegram.messages.last.fetch(:text))
     assert_nil @conversation_store.get(chat_id: 42, slug: "task")
   end
+
+  # Same stage-movement race as above, but with questions still outstanding.
+  # The write landed, so the operator must be told it was recorded — the
+  # bot just cannot present the next question from a task that moved.
+  def test_execute_answer_write_confirms_the_write_when_stage_movement_hides_the_next_question
+    result = FakeRouter::Result.new(
+      action: :write_answer_then_reply, slug: "task", project: "hive",
+      question_n: 1, binding: "bound", answer_text: "done"
+    )
+    @conversation_store.start(
+      chat_id: 42, slug: "task", question_n: 1,
+      binding: "bound", mode: :path_b, project: "hive"
+    )
+    receipt = {
+      "outcome" => "written", "reason" => "exact_match", "complete" => false,
+      "slot" => { "question_number" => 1 }, "task" => { "project" => "hive" }
+    }
+    inventory = ->(*_args, **_kwargs) { raise Hive::WrongStage.new("moved") }
+
+    with_replaced_singleton_method(Hive::Commands::Answer, :write, ->(*_args, **_kwargs) { receipt }) do
+      with_replaced_singleton_method(Hive::Commands::Answer, :inventory, inventory) do
+        @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 16))
+      end
+    end
+
+    assert_equal "Recorded Q1. The task moved on before I could present the next question.",
+                 @telegram.messages.last.fetch(:text)
+    assert_nil @conversation_store.get(chat_id: 42, slug: "task")
+  end
+
+  # The outcome vocabulary is a contract between the answer command and the
+  # bot. A new outcome must fail loudly rather than be silently swallowed as
+  # "nothing to say" — the operator would be left with no reply at all.
+  def test_execute_answer_write_raises_on_an_unknown_outcome
+    result = FakeRouter::Result.new(
+      action: :write_answer_then_reply, slug: "task", project: "hive",
+      question_n: 1, binding: "bound", answer_text: "done"
+    )
+    receipt = {
+      "outcome" => "teleported", "slot" => { "question_number" => 1 },
+      "task" => { "project" => "hive" }
+    }
+
+    error = with_replaced_singleton_method(Hive::Commands::Answer, :write, ->(*_args, **_kwargs) { receipt }) do
+      assert_raises(Hive::InternalError) do
+        @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 17))
+      end
+    end
+
+    assert_match(/unknown brainstorm answer outcome "teleported"/, error.message)
+  end
   def test_request_shutdown_and_reload_set_loop_flags
     @supervisor.request_shutdown!
     @supervisor.request_reload!

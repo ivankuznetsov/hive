@@ -1,6 +1,7 @@
 require "test_helper"
 require "fileutils"
 require "hive/bot/supervisor"
+require "hive/bot/status_watcher"
 require "hive/commands/init"
 
 class HiveBotScenarioVoiceIdeaTest < Minitest::Test
@@ -68,7 +69,14 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
     end
   end
 
-  def supervisor(transcriber:, telegram:)
+  def status_row(slug:, project:)
+    Hive::Bot::StatusWatcher::Row.new(
+      project: project, slug: slug, stage: "2-brainstorm", workflow: "coding",
+      marker: "waiting", action: "needs_input", action_label: "needs input", attrs: {}
+    )
+  end
+
+  def supervisor(transcriber:, telegram:, rows: [])
     Hive::Bot::Supervisor.new(
       config: {
         "chat_id_allowlist" => [ 12345 ],
@@ -82,7 +90,7 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
       token: "test-token",
       logger: StubLogger.new,
       telegram: telegram,
-      status_watcher: Struct.new(:ok) { def fetch = Struct.new(:ok, :rows).new(true, []) }.new,
+      status_watcher: Struct.new(:rows) { def fetch = Struct.new(:ok, :rows).new(true, rows) }.new(rows),
       notification_dispatcher: Struct.new(:processed) { def process_rows(_rows); end }.new,
       child_supervisor: Struct.new(:in_flight_count) do
         def reap_all = []
@@ -235,7 +243,7 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
   end
 
   def test_voice_answer_writes_transcript_to_current_brainstorm_question
-    setup_project do |dir, _project|
+    setup_project do |dir, project|
       slug = "voice-answer-260606-e2e"
       brainstorm = write_brainstorm(dir, slug)
       telegram = FakeTelegram.new
@@ -243,7 +251,11 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
         results: [ TranscriptionResult.new(status: :ok, text: "spoken answer", language: "en") ],
         calls: []
       )
-      bot = supervisor(transcriber: transcriber, telegram: telegram)
+      bot = supervisor(transcriber: transcriber, telegram: telegram,
+                       rows: [ status_row(slug: slug, project: project) ])
+      # /answer resolves through the cached status snapshot to bind the exact
+      # project identity, so the snapshot has to be warm before the command.
+      bot.status_tick
 
       bot.process_update(message_update(text: "/answer #{slug}"))
       bot.process_update(message_update(voice: voice_payload))

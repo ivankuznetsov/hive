@@ -1,4 +1,5 @@
 require "test_helper"
+require "base64"
 require "hive/bot/brainstorm_parser"
 
 class HiveBotBrainstormParserTest < Minitest::Test
@@ -341,5 +342,47 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_equal 2, questions.size
     assert_nil questions[0].answer, "Q1 with no A line must stay unanswered"
     assert_equal "yes", questions[1].answer
+  end
+
+  # The canonical heading helpers are the single source of truth shared by
+  # the supervisor copy and the writer's slot-repair fallback.
+  def test_canonical_question_and_answer_headers
+    assert_equal "### Q3.", Hive::BrainstormParser.question_header(3)
+    assert_equal "### A3.", Hive::BrainstormParser.answer_header(3)
+  end
+
+  # Inside a v1-encoded answer body, an escaped line whose payload is not
+  # valid Base64 must survive verbatim rather than raising. A hand-edited
+  # brainstorm.md is operator data, so the safe direction is to show exactly
+  # what is on disk instead of losing the line to a decode error.
+  def test_undecodable_escaped_line_in_a_v1_answer_is_preserved_verbatim
+    line = "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}not!valid!base64"
+    questions = Hive::BrainstormParser.parse_text(<<~MARKDOWN)
+      ## Round 1
+
+      ### Q1. First?
+      #{Hive::BrainstormParser.encoded_answer_header(1)}
+      #{line}
+    MARKDOWN
+
+    assert_equal 1, questions.size
+    assert_equal line, questions[0].answer
+  end
+
+  # The round-trip the escape exists for: a v1 answer body line that WOULD
+  # look like a heading is stored Base64-escaped and comes back verbatim.
+  def test_escaped_line_in_a_v1_answer_round_trips
+    payload = "### Q9. not really a question"
+    escaped = "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}#{Base64.urlsafe_encode64(payload)}"
+    questions = Hive::BrainstormParser.parse_text(<<~MARKDOWN)
+      ## Round 1
+
+      ### Q1. First?
+      #{Hive::BrainstormParser.encoded_answer_header(1)}
+      #{escaped}
+    MARKDOWN
+
+    assert_equal 1, questions.size
+    assert_equal payload, questions[0].answer
   end
 end

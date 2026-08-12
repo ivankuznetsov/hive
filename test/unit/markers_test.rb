@@ -624,4 +624,19 @@ class MarkersTest < Minitest::Test
       assert_raises(ArgumentError) { Hive::Markers.set(file, :review_typo) }
     end
   end
+
+  # `create: false` is the bound-answer caller's mode: it must never
+  # materialize a task folder that has already moved or been archived. A
+  # vanished folder is ENOENT, which the caller maps to a "task moved"
+  # outcome rather than silently writing into a recreated directory.
+  def test_with_markers_lock_refuses_to_create_a_missing_task_folder
+    with_tmp_dir do |dir|
+      missing = File.join(dir, "gone", "task.md")
+
+      assert_raises(Errno::ENOENT) do
+        Hive::Markers.with_markers_lock(missing, create: false) { flunk "must not enter the block" }
+      end
+      refute Dir.exist?(File.dirname(missing)), "create: false must not materialize the folder"
+    end
+  end
 end

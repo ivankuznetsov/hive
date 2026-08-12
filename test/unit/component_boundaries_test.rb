@@ -127,6 +127,7 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/provider_routing/operational_projection.rb",
           "lib/hive/daemon/recovery_coordinator.rb",
           "lib/hive/recovery/migration.rb",
+          "lib/hive/task_activity.rb",
           "lib/hive/task_closure.rb",
           "lib/hive/task_projection/store.rb"
         ],

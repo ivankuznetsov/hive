@@ -685,18 +685,9 @@ module Hive
         context = Hive::Attempts::Context.current
         return false unless context && context.attempt_id && context.task_generation
 
-        workflow = task.respond_to?(:workflow) ? task.workflow : nil
-        workflow = workflow.id if workflow.respond_to?(:id)
-        activity = Hive::TaskActivity.new(
-          task_folder: task.folder,
-          task: { "id" => task.respond_to?(:id) ? task.id : nil, "slug" => task.slug },
-          workflow: workflow.to_s.empty? ? "coding" : workflow.to_s,
-          stage: context.intended_stage.to_s.empty? ? (stage || stage_label(task)) : context.intended_stage,
-          attempt_id: context.attempt_id,
-          task_generation: context.task_generation,
-          ownership_generation: context.ownership_generation,
-          attempt_store: Hive::Attempts::Store.new
-        )
+        activity = Hive::TaskActivity.for_context(task, context: context)
+        return false unless activity
+
         activity.record(
           kind: kind, operation_id: operation_id,
           correlation_id: correlation_id,

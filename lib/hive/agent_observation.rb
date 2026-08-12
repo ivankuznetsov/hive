@@ -1,5 +1,4 @@
 require "time"
-require "hive/attempts/store"
 require "hive/task_activity"
 
 module Hive
@@ -110,17 +109,8 @@ module Hive
     def build_activity
       return nil unless compatible_context?
 
-      workflow = @task.respond_to?(:workflow) ? @task.workflow : nil
-      workflow = workflow.id if workflow.respond_to?(:id)
-      Hive::TaskActivity.new(
-        task_folder: @task.folder,
-        task: { "id" => @task.respond_to?(:id) ? @task.id : nil, "slug" => @task.slug },
-        workflow: workflow.to_s.empty? ? "coding" : workflow.to_s,
-        stage: @context.intended_stage, attempt_id: @context.attempt_id,
-        task_generation: @context.task_generation,
-        ownership_generation: @context.ownership_generation,
-        attempt_store: @attempt_store || Hive::Attempts::Store.new,
-        clock: @clock
+      Hive::TaskActivity.for_context(
+        @task, context: @context, attempt_store: @attempt_store, clock: @clock
       )
     rescue Hive::TaskActivity::Error, SystemCallError
       nil

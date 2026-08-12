@@ -527,6 +527,7 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal :accepted, successor.status
       refute_equal lost.attempt_id, successor.attempt.attempt_id
       assert_equal lost.task_generation, successor.attempt.task_generation
+      assert_equal lost.task_input_epoch, successor.attempt.task_input_epoch
       assert_equal lost.attempt_id, successor.attempt["predecessor_attempt_id"]
       assert_equal [ capture ], successor.attempt["inherited_outputs"]
       assert_equal 2, successor.attempt["retry_charge"]

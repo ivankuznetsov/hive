@@ -71,6 +71,7 @@ module Hive
           # worker to the exact post-recovery-clear task bytes admitted now.
           progress_token: Generation.artifact_token(task),
           task_generation: predecessor.task_generation,
+          task_input_epoch: predecessor.task_input_epoch,
           attempt_store: @store
         )
         inherited = if inherited_outputs.nil? || inherited_outputs.empty?

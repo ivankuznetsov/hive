@@ -1,9 +1,7 @@
 require "digest"
 require "json"
 require "time"
-require "hive/attempts/store"
 require "hive/markers"
-require "hive/paths"
 require "hive/secret_patterns"
 require "hive/task_projection/store"
 require "hive/task_workspace"
@@ -125,18 +123,17 @@ module Hive
       end
 
       def projection_store
-        @projection_store ||= Hive::TaskProjection::Store.new(
-          task_folder: @native_task.folder, attempt_store: attempt_store
-        )
+        @projection_store ||= if @attempt_store
+          Hive::TaskProjection::Store.new(
+            task_folder: @native_task.folder, attempt_store: @attempt_store
+          )
+        else
+          Hive::TaskProjection::Store.new(task_folder: @native_task.folder)
+        end
       end
 
       def attempt_store
-        @attempt_store ||= begin
-          configured = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
-          root = configured.empty? ?
-            File.join(Hive::Paths.state_home, "attempts", "v4") : configured
-          Hive::Attempts::Store.new(root: root, create_directories: false)
-        end
+        @attempt_store ||= projection_store.attempt_store
       end
 
       def marker

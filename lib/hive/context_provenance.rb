@@ -6,7 +6,6 @@ require "time"
 require "hive/context_provenance/context_receipt"
 require "hive/context_provenance/repository_snapshot"
 require "hive/context_provenance/wiki_snapshot"
-require "hive/attempts/store"
 require "hive/task_activity"
 
 module Hive
@@ -168,22 +167,24 @@ module Hive
     end
 
     def binding_for(task, attempt, generation: nil)
+      task_generation = if attempt.respond_to?(:task_input_epoch)
+        attempt.task_input_epoch
+      else
+        generation&.task_generation || 0
+      end
+      ownership_generation = if attempt.respond_to?(:ownership_generation)
+        attempt.ownership_generation&.to_s
+      else
+        generation&.ownership_generation&.to_s
+      end
       {
         "project" => attempt["project"].to_s,
         "task_slug" => attempt["task_slug"].to_s,
         "task_id" => attempt["task_id"]&.to_s,
         "stage" => attempt["intended_stage"].to_s,
         "attempt_id" => attempt.attempt_id.to_s,
-        "task_generation" => if attempt.respond_to?(:task_input_epoch)
-          attempt.task_input_epoch
-        else
-          generation&.task_generation || 0
-        end,
-        "ownership_generation" => if attempt.respond_to?(:ownership_generation)
-          attempt.ownership_generation&.to_s
-        else
-          generation&.ownership_generation&.to_s
-        end
+        "task_generation" => task_generation,
+        "ownership_generation" => ownership_generation
       }
     end
 
@@ -200,16 +201,7 @@ module Hive
     end
 
     def activity_for_context(task, context, clock:)
-      Hive::TaskActivity.new(
-        task_folder: task.folder,
-        task: { "id" => task.id, "slug" => task.slug },
-        workflow: workflow_id(task), stage: context.intended_stage,
-        attempt_id: context.attempt_id,
-        task_generation: context.task_generation,
-        ownership_generation: context.ownership_generation,
-        attempt_store: Hive::Attempts::Store.new,
-        clock: clock
-      )
+      Hive::TaskActivity.for_context(task, context: context, clock: clock)
     end
 
     def workflow_id(task)

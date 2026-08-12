@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-08-10
+updated: 2026-08-12
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -185,6 +185,16 @@ Attempts intentionally remains the guarded reference instead of claiming that
 its full lifecycle is a supported component boundary: the slice does not
 publish raw storage, reconciliation, supervision, capacity, loss-policy,
 cancellation, export, or generic lifecycle operations.
+
+`Hive::TaskActivity` is the single authorized task-audit validation facade that
+constructs the canonical attempt store outside the Attempts-owned tree. Runtime
+session, provenance, and stage collectors pass their authenticated attempt
+context to `TaskActivity.for_context`; they do not construct the internal store
+or append task journals independently. Read-only task workspace composition
+reuses the store already owned by `TaskProjection::Store`. This keeps forward
+workspace capture inside the existing Attempts construction boundary without
+turning audit projection into another admission or lifecycle surface. See
+[[modules/task_workspace]].
 
 `Workflow Creator Values` is the boundary-ready values-and-projection seam. Its
 singular entry point is

@@ -40,8 +40,8 @@ module Hive
     # the canonical task projection has an exact durable attempt binding.
     # Legacy tasks deliberately return nil rather than acquiring guessed
     # authority from timestamps, markers, or process state.
-    def self.for_task(task, attempt_store: Hive::Attempts::Store.new,
-                      clock: -> { Time.now.utc })
+    def self.for_task(task, attempt_store: nil, clock: -> { Time.now.utc })
+      attempt_store ||= Hive::Attempts::Store.new
       projection = Hive::TaskProjection::Store.new(
         task_folder: task.folder, attempt_store: attempt_store
       ).read.to_h
@@ -65,6 +65,34 @@ module Hive
       )
     rescue Hive::Error, SystemCallError, IOError, JSON::ParserError
       nil
+    end
+
+    # Runtime observers already hold an authenticated durable attempt context.
+    # Centralize the one default attempt-store construction here so callers
+    # cannot grow alternate attempt composition roots merely to validate a
+    # task-journal append.
+    def self.for_context(task, context:, attempt_store: nil,
+                         clock: -> { Time.now.utc })
+      return nil unless context && !context.attempt_id.to_s.empty? &&
+                        !context.task_generation.nil?
+
+      attempt_store ||= Hive::Attempts::Store.new
+      workflow = task.respond_to?(:workflow) ? task.workflow : nil
+      workflow = workflow.id if workflow.respond_to?(:id)
+      new(
+        task_folder: task.folder,
+        task: {
+          "id" => task.respond_to?(:id) ? task.id : nil,
+          "slug" => task.slug
+        },
+        workflow: workflow.to_s.empty? ? "coding" : workflow.to_s,
+        stage: context.intended_stage,
+        attempt_id: context.attempt_id,
+        task_generation: context.task_generation,
+        ownership_generation: context.ownership_generation,
+        attempt_store: attempt_store,
+        clock: clock
+      )
     end
 
     def self.fingerprint(value)

@@ -146,14 +146,28 @@ module Hive
           permitted_writable_roots: [ task.folder, worktree_path ]
         )
         custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
+        custody_report = nil
         begin
-          impl_result = spawn_implementation(
-            task, cfg, worktree_path, identity: identity
-          )
-        ensure
-          custody_report = Hive::ArtifactFirewall.validate_and_restore(
-            custody_manifest, custody_snapshot
-          )
+          begin
+            impl_result = spawn_implementation(
+              task, cfg, worktree_path, identity: identity
+            )
+          ensure
+            custody_report = Hive::ArtifactFirewall.validate_and_restore(
+              custody_manifest, custody_snapshot
+            )
+          end
+        rescue Hive::ProviderRouteFailed
+          if custody_report&.tampered?
+            record_tamper(
+              task, custody_report.tampered_labels, who: "implementer",
+              restored: custody_report.restored?,
+              restore_error: custody_report.restore_diagnostic
+            )
+          else
+            mark_provider_route_failure(task)
+          end
+          raise
         end
         append_implementation_output(task, impl_result)
 
@@ -302,6 +316,21 @@ module Hive
           commit: "implementer_failed", status: :error,
           waiting_reason: "agent_failure"
         )
+      end
+
+      # ProviderRouteFailed must continue out to the durable supervisor so its
+      # trusted evidence pipe terminalizes the attempt. Before propagating it,
+      # replace Execute's orchestrator-owned AGENT_WORKING placeholder with the
+      # recoverable marker consumed by RecoveryCoordinator. Markers.set adds
+      # the current durable attempt/generation fence from Attempts::Context.
+      def mark_provider_route_failure(task)
+        route = Hive::Attempts::Context.current&.admitted_route
+        attrs = { reason: "provider_route_failed" }
+        if route
+          attrs[:provider_account_id] = route.fetch("provider_account_id")
+          attrs[:route_id] = route.fetch("route_id")
+        end
+        Hive::Markers.set(task.state_file, :error, attrs)
       end
 
       def implementer_hit_limit?(impl_result)

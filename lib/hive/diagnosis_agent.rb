@@ -381,15 +381,18 @@ module Hive
     # Hive::Tui::Subprocess#bounded_capture3.
     def spawn_profile(profile:, prompt:, cwd:, add_dirs:, timeout_sec:, max_budget_usd:)
       invocation = compiled_invocation(profile, prompt, add_dirs, max_budget_usd)
-      run_with_timeout(invocation.argv, cwd, invocation.stdin_data, timeout_sec)
+      run_with_timeout(
+        invocation.argv, cwd, invocation.stdin_data, timeout_sec,
+        profile.subscription_environment
+      )
     end
 
-    def run_with_timeout(cmd, cwd, stdin_data, timeout_sec)
+    def run_with_timeout(cmd, cwd, stdin_data, timeout_sec, environment = {})
       # Queue (not Mutex+Array) because terminate_process_group runs
       # from trap("INT") / trap("TERM") handlers and Mutex#synchronize
       # raises ThreadError in trap context. Queue#<< is trap-safe.
       @kill_threads_queue = Queue.new
-      Open3.popen3(*cmd, chdir: cwd, pgroup: true) do |stdin, stdout, stderr, wait_thr|
+      Open3.popen3(environment, *cmd, chdir: cwd, pgroup: true) do |stdin, stdout, stderr, wait_thr|
         feed_stdin(stdin, stdin_data)
         out_reader = Thread.new { read_stream(stdout) }
         err_reader = Thread.new { read_stream(stderr) }

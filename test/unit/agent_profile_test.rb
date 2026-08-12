@@ -35,6 +35,50 @@ class AgentProfileTest < Minitest::Test
     assert_raises(ArgumentError) { make_profile(structured_output_protocol: :unknown) }
   end
 
+  def test_credential_environment_keys_are_optional_validated_and_frozen
+    assert_empty make_profile.credential_environment_keys
+
+    profile = make_profile(credential_environment_keys: %w[CUSTOM_TOKEN])
+    assert_equal %w[CUSTOM_TOKEN], profile.credential_environment_keys
+    assert_predicate profile.credential_environment_keys, :frozen?
+    assert_equal({ "CUSTOM_TOKEN" => nil }, profile.subscription_environment)
+    assert_equal({ "CUSTOM_TOKEN" => "" },
+                 profile.subscription_environment(unset_value: ""))
+    assert_predicate profile.subscription_environment, :frozen?
+
+    session_path = make_profile(
+      credential_environment_keys: %w[CUSTOM_API_KEY CUSTOM_AUTH_PATH]
+    )
+    assert_equal({ "CUSTOM_API_KEY" => nil },
+                 session_path.subscription_environment)
+
+    assert_raises(ArgumentError) do
+      make_profile(credential_environment_keys: [ "not-valid" ])
+    end
+    assert_raises(ArgumentError) do
+      make_profile(credential_environment_keys: %w[CUSTOM_TOKEN CUSTOM_TOKEN])
+    end
+  end
+
+  def test_configuration_directory_metadata_is_optional_and_validated
+    profile = make_profile(
+      configuration_environment_key: "CUSTOM_HOME",
+      default_configuration_directory: ".custom"
+    )
+    assert_equal "/runtime/.custom",
+                 profile.configuration_directory(home: "/runtime", environment: {})
+    assert_equal "/configured", profile.configuration_directory(
+      home: "/runtime", environment: { "CUSTOM_HOME" => "/configured" }
+    )
+
+    assert_raises(ArgumentError) do
+      make_profile(configuration_environment_key: "bad-key")
+    end
+    assert_raises(ArgumentError) do
+      make_profile(default_configuration_directory: "/absolute")
+    end
+  end
+
   include HiveTestHelper
 
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)
@@ -67,6 +111,20 @@ class AgentProfileTest < Minitest::Test
   def test_freezes_at_construction
     profile = make_profile
     assert profile.frozen?
+  end
+
+  def test_constructor_rejects_incomplete_and_untyped_runtime_profiles
+    assert_raises(ArgumentError) { make_profile(bin_default: nil) }
+
+    untyped_runtime = Struct.new(:name).new(:custom)
+    error = assert_raises(ArgumentError) do
+      Hive::AgentProfile.new(
+        runtime_profile: untyped_runtime,
+        skill_syntax_format: "/%{skill}"
+      )
+    end
+
+    assert_match(/must be an AgentCliRuntime::Profile/, error.message)
   end
 
   def test_rejects_unknown_prompt_style
@@ -169,6 +227,28 @@ class AgentProfileTest < Minitest::Test
     end
 
     assert_match(/cannot pin model/, error.message)
+  end
+
+  def test_identity_arguments_preserve_other_package_capability_diagnostics
+    runtime = AgentCliRuntime::Profile.new(
+      name: :custom,
+      bin_default: "custom-agent",
+      headless_flag: "-p",
+      version_flag: "--version",
+      model_argument_builder: lambda do |_model|
+        raise AgentCliRuntime::UnsupportedCapability, "synthetic package refusal"
+      end
+    )
+    profile = Hive::AgentProfile.new(
+      runtime_profile: runtime,
+      skill_syntax_format: "/%{skill}"
+    )
+
+    error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      profile.identity_arguments(model: "provider/model", effort: nil)
+    end
+
+    assert_equal "synthetic package refusal", error.message
   end
 
   def test_routed_effort_rejects_profiles_without_native_effort_support
@@ -500,7 +580,6 @@ class AgentProfileTest < Minitest::Test
     err = assert_raises(Hive::AgentError) { profile.check_version! }
 
     assert_match(/could not parse/, err.message)
-    assert_match(/version unavailable/, err.message)
   end
 
   def test_check_version_raises_when_binary_not_runnable
@@ -710,64 +789,18 @@ class AgentProfileTest < Minitest::Test
       end
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
 
-      assert_includes error.message, "capability check timed out"
+      assert_includes error.message, "capability check could not run"
       assert_operator elapsed, :<, 1.0
       pid = Integer(File.read(pid_path), 10)
       assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
     end
   end
 
-  def test_bounded_capture_tolerates_pipe_close_races
-    profile = make_profile
-    stdin_closed = false
-    stdin = Object.new
-    stdin.define_singleton_method(:close) { stdin_closed = true }
-    stdin.define_singleton_method(:closed?) { stdin_closed }
-    pipe = lambda do
-      Object.new.tap do |io|
-        io.define_singleton_method(:read) { "" }
-        io.define_singleton_method(:closed?) { false }
-        io.define_singleton_method(:close) { raise IOError, "already closed" }
-      end
-    end
-    waiter = Object.new
-    waiter.define_singleton_method(:alive?) { false }
-    waiter.define_singleton_method(:value) { :status }
-    replacement = lambda do |*_argv, **_options|
-      [ stdin, pipe.call, pipe.call, waiter ]
-    end
-
-    result = with_replaced_singleton_method(Open3, :popen3, replacement) do
-      profile.send(:bounded_capture3, "fake", timeout_sec: 0.1)
-    end
-
-    assert_equal [ "", "", :status ], result
-  end
-
-  def test_capture_cleanup_tolerates_concurrent_pipe_closure
-    profile = make_profile
-    unreadable = Object.new
-    unreadable.define_singleton_method(:read) { raise IOError, "closed" }
-    assert_equal "", profile.send(:capture_reader, unreadable).value
-
-    closing = Object.new
-    closing.define_singleton_method(:closed?) { false }
-    closing.define_singleton_method(:close) { raise IOError, "closed" }
-    assert_empty profile.send(:stop_capture_readers, [], closing)
-  end
-
-  def test_process_group_probes_handle_exit_and_permission_races
-    profile = make_profile
-    missing = lambda { |_signal, _pid| raise Errno::ESRCH }
-    with_replaced_singleton_method(Process, :kill, missing) do
-      assert_nil profile.send(:signal_capture_process_group, "TERM", 123)
-      refute profile.send(:capture_process_group_alive?, 123)
-    end
-
-    denied = lambda { |_signal, _pid| raise Errno::EPERM }
-    with_replaced_singleton_method(Process, :kill, denied) do
-      assert profile.send(:capture_process_group_alive?, 123)
-    end
+  def test_process_probe_implementation_is_not_duplicated_in_hive_profile
+    refute_includes Hive::AgentProfile.private_instance_methods,
+                    :bounded_capture3
+    assert_includes AgentCliRuntime::Profile.private_instance_methods,
+                    :bounded_capture3
   end
 
   def test_cli_capability_binary_disappearing_after_version_check_is_explicit
@@ -893,8 +926,62 @@ class AgentProfileTest < Minitest::Test
     overridden = profile.with_overrides("bin" => "/x")
     assert overridden.frozen?
   end
+
+  def test_runtime_override_probes_binary_paths_path_entries_and_capabilities
+    with_tmp_dir do |dir|
+      binary = capability_binary(dir, help: "--safe-mode")
+      profile = make_profile(
+        bin_default: binary,
+        env_bin_override_key: nil,
+        cli_capabilities: { safe_mode: [ "--safe-mode" ] }
+      ).with_overrides("min_version" => "1.0.0")
+      runtime = profile.runtime_profile
+
+      assert runtime.binary_installed?(env: { "PATH" => "" })
+      assert_equal "2.1.179", runtime.check_version!(env: {})
+      assert_equal [ "--safe-mode" ], runtime.require_cli_capability!(:safe_mode)
+
+      command = File.join(dir, "custom-agent")
+      FileUtils.cp(binary, command)
+      command_profile = profile.with_overrides("bin" => "custom-agent")
+      assert command_profile.runtime_profile.binary_installed?(
+        env: { "PATH" => dir }
+      )
+
+      malformed_environment = Object.new
+      malformed_environment.define_singleton_method(:[]) { |_key| "set" }
+      malformed_environment.define_singleton_method(:fetch) do |*_args|
+        raise ArgumentError, "synthetic malformed environment"
+      end
+      overridden = profile.with_overrides("env_override" => "CUSTOM_BIN")
+      refute overridden.runtime_profile.binary_installed?(
+        env: malformed_environment
+      )
+    end
+  end
+
   def test_usage_extractor_errors_are_ignored
     profile = make_profile(usage_extractor: ->(_event) { raise "bad usage payload" })
+
+    assert_nil profile.extract_usage_event({ "type" => "result" })
+  end
+
+  def test_runtime_adapter_contains_usage_extractor_failures
+    runtime_class = Class.new(AgentCliRuntime::Profile) do
+      def extract_usage_event(_event)
+        raise "synthetic package usage failure"
+      end
+    end
+    runtime = runtime_class.new(
+      name: :custom,
+      bin_default: "custom-agent",
+      headless_flag: "-p",
+      version_flag: "--version"
+    )
+    profile = Hive::AgentProfile.new(
+      runtime_profile: runtime,
+      skill_syntax_format: "/%{skill}"
+    )
 
     assert_nil profile.extract_usage_event({ "type" => "result" })
   end
@@ -918,13 +1005,13 @@ class AgentProfileTest < Minitest::Test
   end
 
   def with_version_check_timeout(seconds)
-    original = Hive::AgentProfile::VERSION_CHECK_TIMEOUT_SEC
-    Hive::AgentProfile.send(:remove_const, :VERSION_CHECK_TIMEOUT_SEC)
-    Hive::AgentProfile.const_set(:VERSION_CHECK_TIMEOUT_SEC, seconds)
+    original = AgentCliRuntime::Profile::CAPTURE_TIMEOUT_SECONDS
+    AgentCliRuntime::Profile.send(:remove_const, :CAPTURE_TIMEOUT_SECONDS)
+    AgentCliRuntime::Profile.const_set(:CAPTURE_TIMEOUT_SECONDS, seconds)
     yield
   ensure
-    Hive::AgentProfile.send(:remove_const, :VERSION_CHECK_TIMEOUT_SEC)
-    Hive::AgentProfile.const_set(:VERSION_CHECK_TIMEOUT_SEC, original)
+    AgentCliRuntime::Profile.send(:remove_const, :CAPTURE_TIMEOUT_SECONDS)
+    AgentCliRuntime::Profile.const_set(:CAPTURE_TIMEOUT_SECONDS, original)
   end
 
   def test_verify_skill_reports_not_applicable_or_delegates

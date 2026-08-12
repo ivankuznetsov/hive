@@ -38,7 +38,7 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     script = <<~'RUBY'
       require "agent_cli_runtime"
       abort "loaded Hive unexpectedly" if defined?(Hive)
-      abort "wrong version" unless AgentCliRuntime::VERSION == "0.1.0"
+      abort "wrong version" unless AgentCliRuntime::VERSION == "0.1.1"
       puts AgentCliRuntime::Profiles.names.join(",")
     RUBY
     out, err, status = Bundler.with_unbundled_env do
@@ -82,6 +82,32 @@ class AgentCliRuntimeComponentTest < Minitest::Test
       assert_equal hive_invocation.provider, public_invocation.provider, provider
       assert_equal hive_invocation.launcher_identity,
                    public_invocation.launcher_identity,
+                   provider
+    end
+  end
+
+  def test_builtin_credential_environment_inventory_matches_hive_boundary
+    %i[claude codex pi grok].each do |provider|
+      assert_equal(
+        Hive::AgentProfiles.lookup(provider).credential_environment_keys,
+        AgentCliRuntime::Profiles.fetch(provider).credential_environment_keys,
+        provider
+      )
+    end
+  end
+
+  def test_builtin_configuration_directory_inventory_matches_hive_boundary
+    %i[claude codex pi grok].each do |provider|
+      hive = Hive::AgentProfiles.lookup(provider)
+      public_profile = AgentCliRuntime::Profiles.fetch(provider)
+      assert_equal hive.configuration_environment_key,
+                   public_profile.configuration_environment_key,
+                   provider
+      assert_equal hive.default_configuration_directory,
+                   public_profile.default_configuration_directory,
+                   provider
+      assert_equal hive.configuration_directory(home: "/runtime", environment: {}),
+                   public_profile.configuration_directory(home: "/runtime", env: {}),
                    provider
     end
   end
@@ -198,17 +224,18 @@ class AgentCliRuntimeComponentTest < Minitest::Test
 
   def test_local_builtin_probe_outcomes_match_hive_boundary
     with_tmp_dir do |home|
-      FileUtils.mkdir_p(File.join(home, ".pi", "agent"))
-      File.write(
-        File.join(home, ".pi", "agent", "auth.json"),
-        '{"provider":"configured"}'
-      )
-      overrides = {
-        "HOME" => home,
-        "ANTHROPIC_API_KEY" => "configured",
-        "OPENAI_API_KEY" => "configured",
-        "XAI_API_KEY" => "configured"
-      }
+      credential_paths = %w[
+        .claude/.credentials.json
+        .codex/auth.json
+        .pi/agent/auth.json
+        .grok/auth.json
+      ]
+      credential_paths.each do |relative_path|
+        path = File.join(home, relative_path)
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, '{"provider":"configured"}')
+      end
+      overrides = { "HOME" => home }
       {
         claude: "HIVE_CLAUDE_BIN",
         codex: "HIVE_CODEX_BIN",
@@ -296,15 +323,19 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     end
   end
 
-  def test_package_only_change_does_not_enter_hive_dependency_graph
+  def test_hive_cutover_uses_the_released_dependency_and_package_profiles
     spec = Gem::Specification.load(File.expand_path("../../hive.gemspec", __dir__))
+    dependency = spec.runtime_dependencies.find do |candidate|
+      candidate.name == "agent-cli-runtime"
+    end
 
-    refute(
-      spec.runtime_dependencies.any? do |dependency|
-        dependency.name == "agent-cli-runtime"
-      end
-    )
-    refute File.read(File.expand_path("../../lib/hive.rb", __dir__))
+    refute_nil dependency
+    assert dependency.requirement.satisfied_by?(Gem::Version.new("0.1.1"))
+    assert File.read(File.expand_path("../../lib/hive.rb", __dir__))
                .include?('require "agent_cli_runtime"')
+    %i[claude codex pi grok].each do |provider|
+      assert_same AgentCliRuntime::Profiles.fetch(provider),
+                  Hive::AgentProfiles.lookup(provider).runtime_profile
+    end
   end
 end

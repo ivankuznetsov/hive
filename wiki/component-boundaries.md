@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-08-05
+updated: 2026-08-10
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -17,6 +17,9 @@ the first and primary consumer.
 
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
+| Provider Health | `candidate` | `require "hive/provider_health"` → `Hive::ProviderHealth` | [[modules/provider_health]] |
+| Provider Routing Policy | `candidate` | `require "hive/provider_routing"` → `Hive::ProviderRouting` | [[modules/provider_routing]] |
+| Provider Routing Operations | `candidate` | `require "hive/provider_routing/operational_projection"` → `Hive::ProviderRouting::OperationalProjection` | [[modules/provider_routing]] |
 | Patrol Effect Evidence | `candidate` (U3a protocol complete; reduced installed/live smoke source-pinned; full U3b/U3c proof pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | Workflow Creator Values | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_text_safety"` → `HiveLiveAgentProof::WorkflowCreator::TextSafety` | [[component-boundaries]] |
@@ -24,7 +27,7 @@ the first and primary consumer.
 | Workflow Creator Execution | `boundary-ready` (deterministic U14 substrate) | `require "./packaging/live_agent_skills/workflow_creator_execution"` → `HiveLiveAgentProof::WorkflowCreatorExecution` | [[component-boundaries]] |
 | Workflow Creator Live Orchestration | `boundary-ready` (U15 runner; authenticated exact-head proof remains optional and authorization-gated) | `require "./packaging/live_agent_skills/workflow_creator_live_setup"` → `HiveLiveAgentProof::WorkflowCreatorLiveSetup` | [[component-boundaries]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
-| Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
+| Agent ABI | `boundary-ready`; consumes published `agent-cli-runtime` | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
 | Skillpack | `boundary-ready` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
 | Safe Agent Git Gate | `boundary-ready` | `require "hive/agent_git_gate"` → `Hive::AgentGitGate` | [[modules/agent_git_gate]] |
@@ -38,8 +41,9 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The catalog on 2026-08-04 retains twelve components: ten are
-`boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
+The catalog retains fifteen components: ten are `boundary-ready`; Provider
+Health, Provider Routing Policy, Provider Routing Operations, Attempts, and
+Patrol Effect Evidence remain `candidate`.
 Patrol retains one bounded U3 exception for deterministic public-path and
 independently authorized installed/live proof. Workflow Creator is composed
 through its U1b typed publication facade, Workflow Creator Execution supplies
@@ -49,7 +53,7 @@ Every retained entry point has focused clean-process load proof, every
 catalog-owned path and focused test resolves inside this repository, and the
 direct-construction guards pass against all production Ruby sources.
 
-The component dependency graph has five edges:
+The component dependency graph has ten edges:
 
 ```mermaid
 flowchart LR
@@ -59,7 +63,11 @@ flowchart LR
   workflow_live --> workflow_core
   workflow_core[Workflow Creator] --> workflow_values[Workflow Creator Values]
   patrol_effects[Patrol Effect Evidence - candidate]
-  attempts[Attempts admission - candidate]
+  attempts[Attempts admission - candidate] --> provider_health[Provider Health - candidate]
+  attempts --> provider_routing[Provider Routing Policy - candidate]
+  routing_operations[Provider Routing Operations - candidate] --> attempts
+  routing_operations --> provider_health
+  routing_operations --> provider_routing
   user_service[UserService]
   artifact_firewall[Agent Artifact Firewall]
   git_gate[Safe Agent Git Gate]
@@ -67,9 +75,16 @@ flowchart LR
 ```
 
 All other cataloged components depend only on explicitly allowed lower-level
-Hive primitives. The source audit found no retained experimental facade outside
+Hive primitives. Provider Health uses `Hive::OutputReference`, while Provider
+Routing Policy uses `Hive::PointStorage`; their compatibility names under
+`Hive::Attempts` remain for existing Attempts callers but do not create upward
+component edges. `Hive::PointStorage` requires its caller-supplied domain error
+class to inherit from `StandardError`; invalid boundary configuration raises
+`ArgumentError` before managed-directory failures can be translated through it.
+The source audit found no retained experimental facade outside
 the catalog: each promoted facade is owned by a catalog row and used by Hive,
-while Attempts and Patrol Effect Evidence are deliberately retained as guarded
+while Provider Health, Provider Routing Policy, Provider Routing Operations,
+Attempts, and Patrol Effect Evidence are deliberately retained as guarded
 candidates rather than being promoted ahead of their remaining lifecycle or
 qualification proof.
 
@@ -341,13 +356,17 @@ finalizes the U1b primary receipt. The workflow and smoke remain adapters. An au
 passing artifact is still exact-head and explicit-authorization evidence; the
 catalog row does not make that optional network proof a normal CI gate.
 
-The `Agent ABI` is boundary-ready below orchestration. `AgentRuntime` exposes
-immutable request, compiled invocation, capability/probe evidence, and
-observable-result values while preserving `AgentProfile.new(...)` and
-`AgentProfiles.register` as extension points. Claude, Codex, Pi, Grok, and
-custom profiles remain adapters inside the boundary. Hive owns process
-lifetime, timeouts, retries, workflow selection, artifact acceptance, and
-stage success.
+The `Agent ABI` is boundary-ready below orchestration. The published
+`agent-cli-runtime` gem owns provider profiles, compilation, bounded probes,
+capability checks, usage decoding, redaction, and observable-result values.
+`Hive::AgentRuntime` forwards those mechanisms while preserving its request,
+probe, error, and result constants; `AgentProfile.new(...)` and
+`AgentProfiles.register` remain extension points. Hive's adapters own model
+routing, skills, defaults, subscription bindings, status detection, process
+lifetime, retries, artifact acceptance, and stage success. Hive derives its
+subscription-only child-environment scrub from the package profile inventory;
+the package itself remains neutral about which supported authentication mode a
+consumer selects.
 
 The `Agent Artifact Firewall` is boundary-ready below stage policy. Its
 immutable manifest declares protected anchors, permitted writable roots,
@@ -363,16 +382,17 @@ custody only: it is not an OS sandbox, a write monitor, a multi-file
 transaction, or the Safe Agent Git Gate.
 
 `Hive::SecretPatterns` remains shared lower-level Hive infrastructure rather
-than component-owned state. Both the Agent ABI and Artifact Firewall use it for
-bounded diagnostics, while the firewall also accepts an injected redactor.
+than component-owned state. The Artifact Firewall uses it for bounded
+diagnostics and accepts an injected redactor; the Agent ABI now uses the
+package-owned redactor.
 
-The package-only extraction lives at `components/agent-cli-runtime/` and
+The canonical package source lives at `components/agent-cli-runtime/` and
 publishes the neutral `AgentCliRuntime` namespace plus the bounded
-`agent-runtime` diagnostic executable. Until the separately held Hive cutover,
-`Hive::AgentRuntime` remains Hive's authoritative implementation and package
-parity tests prevent the temporary publication-window copy from drifting.
-Landing the package does not change Hive's gem dependency graph. See
-[[modules/agent_cli_runtime]] for the public surface and release boundary.
+`agent-runtime` diagnostic executable. Hive declares the compatible 0.1.1
+dependency, resolves the component path in monorepo development, resolves the
+RubyGems release in packaged Web installs, and contains no second provider
+runtime implementation. See [[modules/agent_cli_runtime]] for the public
+surface and release boundary.
 
 Its public standalone repository is deliberately a one-way distribution
 projection. Scheduled main snapshots and manually requested release snapshots

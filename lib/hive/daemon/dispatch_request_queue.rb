@@ -8,6 +8,8 @@ require "hive/atomic_file"
 require "hive/paths"
 require "hive/attempts/output_reference"
 require "hive/daemon/queue_directory"
+require "hive/provider_health"
+require "hive/provider_routing"
 require "hive/recovery"
 
 module Hive
@@ -18,7 +20,7 @@ module Hive
       module_function
 
       SCHEMA = "hive-dispatch-request".freeze
-      SCHEMA_VERSION = 4
+      SCHEMA_VERSION = 5
       REQUESTORS = %w[
         bot healer web tui cli action daemon recorder operator
       ].freeze
@@ -46,13 +48,47 @@ module Hive
       QUARANTINE_DIRNAME = "quarantine".freeze
 
       RECOVERY_PHASES = %w[admitted cleared dispatched terminal].freeze
+      RECOVERY_VARIANTS = %w[marker admission_failure].freeze
       RECOVERY_KEYS = %w[
-        phase observed_marker_generation expected_marker_attrs
+        variant phase observed_marker_generation expected_marker_attrs
         canonical_task_folder expected_post_clear_progress_fingerprint
         dispatch_generation failure_origin next_eligible_at owner
         blocked_reason blocked_remediation provider_hint attempt_id
-        terminal_outcome terminal_at retry_count
+        terminal_outcome terminal_at retry_count policy_digest source_receipt
+        admission_observation
       ].freeze
+      SOURCE_RECEIPT_KEYS = %w[
+        attempt_id receipt_version terminal_lease_version
+      ].freeze
+      ADMISSION_OBSERVATION_KEYS = %w[
+        candidates circuit_generations decided_at decision_id exclusions next_action_owner
+        policy policy_digest probe_requirements reason selected_route status task_generation
+      ].freeze
+      ADMISSION_POLICY_KEYS = %w[pin requirements stage].freeze
+      ADMISSION_PIN_KEYS = %w[model provider].freeze
+      ADMISSION_REQUIREMENT_KEYS = %w[context permissions quality tools].freeze
+      ADMISSION_CANDIDATE_KEYS = %w[
+        adapter capacity circuits effort eligible exclusions model provider_account_id route_id
+      ].freeze
+      ADMISSION_EXCLUSION_KEYS = %w[detail observation reason route_id scope].freeze
+      ADMISSION_CIRCUIT_KEYS = Hive::ProviderHealth::CIRCUIT_OBSERVATION_KEYS
+      ADMISSION_PROBE_KEYS = %w[
+        attempt_id claim_generation journal_epoch observed_generation ownership_fence scope
+        task_generation
+      ].freeze
+      ADMISSION_REASONS = %w[
+        capacity_saturated health_state_unavailable no_eligible_provider_route
+      ].freeze
+      ADMISSION_EXCLUSIONS = %w[
+        hard_pin_mismatch requirements_incompatible manual_block
+        circuit_open circuit_cooldown half_open_probe_owned provider_concurrency_saturated
+        health_state_unavailable
+      ].freeze
+      NEXT_ACTION_OWNERS = %w[scheduler retry_authority operator].freeze
+      MAX_ADMISSION_CANDIDATES = 1_024
+      MAX_ADMISSION_EXCLUSIONS_PER_CANDIDATE = 4
+      MAX_ADMISSION_EXCLUSIONS =
+        MAX_ADMISSION_CANDIDATES * MAX_ADMISSION_EXCLUSIONS_PER_CANDIDATE
 
       SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
       PROJECT_RE = /\A[A-Za-z0-9_.\-]+\z/
@@ -105,6 +141,7 @@ module Hive
         rescue Hive::Attempts::InvalidOutputReference => e
           raise ArgumentError, e.message
         end
+        recovery = normalize_recovery_for_write(recovery)
         validate_recovery!(recovery) unless recovery.nil?
 
         created_at = now.utc
@@ -519,6 +556,26 @@ module Hive
         nil
       end
 
+      # Markerless admission failures are keyed by the immutable task
+      # generation and frozen routing-policy digest. This is deliberately
+      # separate from +find_recovery+: no synthetic marker identity is
+      # invented merely to reuse the marker-bound lookup.
+      def find_admission_recovery(project:, slug:, task_generation:, policy_digest:,
+                                  state_home: Hive::Paths.state_home)
+        request_files(directory(state_home: state_home)).filter_map do |path|
+          parsed = parse_file(path)
+          next if parsed.is_a?(Symbol) || !parsed.recovery.is_a?(Hash)
+          next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
+          next unless parsed.recovery["variant"] == "admission_failure"
+          next unless parsed.task_generation.to_s == task_generation.to_s
+          next unless parsed.recovery["policy_digest"].to_s == policy_digest.to_s
+
+          parsed
+        end.min_by { |request| [ request.created_at, request.request_id ] }
+      rescue Errno::ENOENT
+        nil
+      end
+
       # Highest durable retry count already recorded for this task. The
       # coordinator uses this ledger value when admitting a fresh marker
       # generation; adapters cannot supply or reset recovery history.
@@ -880,10 +937,11 @@ module Hive
           raise ArgumentError, "recovery must be an object" unless recovery.is_a?(Hash)
 
           required = %w[
-            phase observed_marker_generation expected_marker_attrs
+            variant phase observed_marker_generation expected_marker_attrs
             canonical_task_folder expected_post_clear_progress_fingerprint
             dispatch_generation failure_origin next_eligible_at owner
-            blocked_reason blocked_remediation
+            blocked_reason blocked_remediation policy_digest source_receipt
+            admission_observation
           ]
           missing = required.reject { |key| recovery.key?(key) }
           raise ArgumentError, "recovery missing #{missing.join(', ')}" unless missing.empty?
@@ -892,6 +950,10 @@ module Hive
           unless RECOVERY_PHASES.include?(recovery["phase"]) &&
                  recovery["phase"].is_a?(String)
             raise ArgumentError, "invalid recovery phase"
+          end
+          unless RECOVERY_VARIANTS.include?(recovery["variant"]) &&
+                 recovery["variant"].is_a?(String)
+            raise ArgumentError, "invalid recovery variant"
           end
           unless recovery["expected_marker_attrs"].is_a?(Hash)
             raise ArgumentError, "expected_marker_attrs must be an object"
@@ -903,14 +965,8 @@ module Hive
                  }
             raise ArgumentError, "expected_marker_attrs must contain JSON scalar values"
           end
-          marker_id = recovery["expected_marker_attrs"]["marker_id"]
-          unless marker_id.is_a?(String) && !marker_id.empty?
-            raise ArgumentError, "expected_marker_attrs.marker_id must be a non-empty string"
-          end
-          %w[
-            observed_marker_generation expected_post_clear_progress_fingerprint
-            dispatch_generation
-          ].each do |key|
+          validate_recovery_variant!(recovery)
+          %w[expected_post_clear_progress_fingerprint dispatch_generation].each do |key|
             value = recovery[key].to_s
             unless Hive::Attempts::OutputReference::SHA256_PATTERN.match?(value)
               raise ArgumentError, "#{key} must be a sha256"
@@ -940,6 +996,285 @@ module Hive
           end
           validate_nullable_time!(recovery["terminal_at"], "terminal_at")
           validate_provider_hint!(recovery["provider_hint"]) if recovery.key?("provider_hint")
+          validate_source_receipt!(recovery["source_receipt"])
+          validate_admission_observation!(recovery["admission_observation"])
+          if recovery["variant"] == "admission_failure"
+            unless recovery["source_receipt"].nil? && recovery["admission_observation"].is_a?(Hash)
+              raise ArgumentError, "admission-failure recovery requires only admission evidence"
+            end
+            unless recovery.dig("admission_observation", "policy_digest") ==
+                   recovery["policy_digest"]
+              raise ArgumentError, "admission-failure policy digest does not match observation"
+            end
+          elsif recovery["failure_origin"] == "provider_route_failed" &&
+                recovery["source_receipt"].nil?
+            raise ArgumentError, "provider-route recovery requires a source receipt"
+          end
+        end
+
+        def normalize_recovery_for_write(recovery)
+          return nil if recovery.nil?
+          return recovery unless recovery.is_a?(Hash)
+
+          normalized = recovery.to_h.transform_keys(&:to_s)
+          normalized["variant"] ||= "marker"
+          normalized["policy_digest"] = nil unless normalized.key?("policy_digest")
+          normalized["source_receipt"] = nil unless normalized.key?("source_receipt")
+          normalized["admission_observation"] = nil unless normalized.key?("admission_observation")
+          normalized
+        end
+
+        def validate_recovery_variant!(recovery)
+          marker = recovery["variant"] == "marker"
+          generation = recovery["observed_marker_generation"]
+          attrs = recovery["expected_marker_attrs"]
+          policy_digest = recovery["policy_digest"]
+
+          if marker
+            unless Hive::Attempts::OutputReference::SHA256_PATTERN.match?(generation.to_s)
+              raise ArgumentError, "observed_marker_generation must be a sha256"
+            end
+            marker_id = attrs["marker_id"]
+            unless marker_id.is_a?(String) && !marker_id.empty?
+              raise ArgumentError, "expected_marker_attrs.marker_id must be a non-empty string"
+            end
+            unless policy_digest.nil?
+              raise ArgumentError, "marker recovery cannot carry policy_digest"
+            end
+          else
+            unless generation.nil? && attrs.empty?
+              raise ArgumentError, "admission-failure recovery cannot carry marker identity"
+            end
+            unless Hive::Attempts::OutputReference::SHA256_PATTERN.match?(policy_digest.to_s)
+              raise ArgumentError, "admission-failure policy_digest must be a sha256"
+            end
+          end
+        end
+
+        def validate_source_receipt!(receipt)
+          return if receipt.nil?
+          unless receipt.is_a?(Hash) && receipt.keys.sort == SOURCE_RECEIPT_KEYS.sort
+            raise ArgumentError, "source_receipt has invalid fields"
+          end
+          unless valid_request_id?(receipt["attempt_id"])
+            raise ArgumentError, "source_receipt attempt_id is invalid"
+          end
+          %w[receipt_version terminal_lease_version].each do |key|
+            unless receipt[key].is_a?(Integer) && receipt[key].positive?
+              raise ArgumentError, "source_receipt #{key} must be a positive integer"
+            end
+          end
+        end
+
+        def validate_admission_observation!(observation)
+          return if observation.nil?
+          unless observation.is_a?(Hash) &&
+                 observation.keys.sort == ADMISSION_OBSERVATION_KEYS.sort
+            raise ArgumentError, "admission_observation has invalid fields"
+          end
+          unless %w[capacity_saturated no_route].include?(observation["status"]) &&
+                 ADMISSION_REASONS.include?(observation["reason"]) &&
+                 NEXT_ACTION_OWNERS.include?(observation["next_action_owner"])
+            raise ArgumentError, "admission_observation vocabulary is invalid"
+          end
+          if (observation["status"] == "capacity_saturated") !=
+             (observation["reason"] == "capacity_saturated")
+            raise ArgumentError, "admission_observation status and reason disagree"
+          end
+          %w[decision_id policy_digest].each do |key|
+            unless Hive::Attempts::OutputReference::SHA256_PATTERN.match?(observation[key].to_s) ||
+                   (key == "decision_id" && valid_request_id?(observation[key]))
+              raise ArgumentError, "admission_observation #{key} is invalid"
+            end
+          end
+          if observation["decided_at"].nil?
+            raise ArgumentError, "admission_observation.decided_at must be a timestamp"
+          end
+          validate_nullable_time!(observation["decided_at"], "admission_observation.decided_at")
+          unless valid_admission_value?(observation["task_generation"], max_bytes: 4_096)
+            raise ArgumentError, "admission_observation task_generation is invalid"
+          end
+          validate_admission_policy!(observation["policy"])
+          unless observation["selected_route"].nil?
+            raise ArgumentError, "admission_observation cannot carry a selected route"
+          end
+          unless observation["circuit_generations"] == [] &&
+                 observation["probe_requirements"] == []
+            raise ArgumentError, "admission_observation cannot carry probe ownership"
+          end
+          candidates = observation["candidates"]
+          unless candidates.is_a?(Array) && !candidates.empty? &&
+                 candidates.length <= MAX_ADMISSION_CANDIDATES
+            raise ArgumentError, "admission_observation candidates are invalid"
+          end
+          exclusion_count = candidates.sum { |candidate| validate_admission_candidate!(candidate) }
+          if exclusion_count > MAX_ADMISSION_EXCLUSIONS
+            raise ArgumentError, "admission_observation has too many exclusions"
+          end
+          exclusions = observation["exclusions"]
+          unless exclusions.is_a?(Array) && exclusions.length <= MAX_ADMISSION_EXCLUSIONS
+            raise ArgumentError, "admission_observation exclusions are invalid"
+          end
+          exclusions.each { |exclusion| validate_admission_exclusion!(exclusion) }
+          unless exclusions == candidates.flat_map { |candidate| candidate.fetch("exclusions") }
+            raise ArgumentError, "admission_observation exclusions disagree with candidates"
+          end
+          if candidates.any? { |candidate| candidate.fetch("eligible") }
+            raise ArgumentError, "admission_observation cannot contain an eligible candidate"
+          end
+        end
+
+        def validate_admission_policy!(policy)
+          unless policy.is_a?(Hash) && policy.keys.sort == ADMISSION_POLICY_KEYS.sort &&
+                 valid_admission_id?(policy["stage"])
+            raise ArgumentError, "admission_observation policy is invalid"
+          end
+          pin = policy["pin"]
+          unless pin.nil? || (pin.is_a?(Hash) && pin.keys.sort == ADMISSION_PIN_KEYS.sort &&
+            valid_admission_id?(pin["provider"]) &&
+            (pin["model"].nil? || valid_admission_id?(pin["model"])))
+            raise ArgumentError, "admission_observation pin is invalid"
+          end
+          required = policy["requirements"]
+          unless required.is_a?(Hash) &&
+                 required.keys.sort == ADMISSION_REQUIREMENT_KEYS.sort &&
+                 (required["context"].nil? || Hive::ProviderRouting::CONTEXT_LEVELS.include?(required["context"])) &&
+                 (required["quality"].nil? || Hive::ProviderRouting::QUALITY_LEVELS.include?(required["quality"]))
+            raise ArgumentError, "admission_observation requirements are invalid"
+          end
+          validate_admission_set!(required["tools"], Hive::ProviderRouting::TOOL_CAPABILITIES)
+          validate_admission_set!(
+            required["permissions"], Hive::ProviderRouting::PERMISSION_CAPABILITIES
+          )
+        end
+
+        def validate_admission_set!(values, allowed)
+          unless values.is_a?(Array) && values.length == values.uniq.length &&
+                 (values - allowed).empty?
+            raise ArgumentError, "admission_observation requirements are invalid"
+          end
+        end
+
+        def validate_admission_candidate!(candidate)
+          unless candidate.is_a?(Hash) && candidate.keys.sort == ADMISSION_CANDIDATE_KEYS.sort &&
+                 %w[route_id provider_account_id adapter model].all? do |key|
+                   valid_admission_id?(candidate[key])
+                 end
+            raise ArgumentError, "admission candidate is invalid"
+          end
+          unless candidate["effort"].nil? || valid_admission_id?(candidate["effort"])
+            raise ArgumentError, "admission candidate effort is invalid"
+          end
+          validate_capacity!(candidate["capacity"])
+          exclusions = candidate["exclusions"]
+          unless exclusions.is_a?(Array) &&
+                 exclusions.length <= MAX_ADMISSION_EXCLUSIONS_PER_CANDIDATE
+            raise ArgumentError, "admission candidate exclusions must be an array"
+          end
+          exclusions.each { |exclusion| validate_admission_exclusion!(exclusion) }
+          unless [ true, false ].include?(candidate["eligible"]) &&
+                 candidate["eligible"] == exclusions.empty?
+            raise ArgumentError, "admission candidate eligibility is invalid"
+          end
+          circuits = candidate["circuits"]
+          unless circuits.is_a?(Array) && circuits.length <= 2
+            raise ArgumentError, "admission candidate circuits are invalid"
+          end
+          circuits.each { |circuit| validate_admission_circuit!(circuit) }
+          exclusions.length
+        end
+
+        def validate_admission_circuit!(circuit)
+          unless circuit.is_a?(Hash) && circuit.keys.sort == ADMISSION_CIRCUIT_KEYS.sort &&
+                 %w[available unavailable].include?(circuit["status"]) &&
+                 circuit["generation"].is_a?(Integer) && circuit["generation"] >= 0 &&
+                 circuit["journal_epoch"].is_a?(Integer) && circuit["journal_epoch"] >= 0
+            raise ArgumentError, "admission circuit observation is invalid"
+          end
+          validate_scope!(circuit["scope"])
+          unless %w[
+            closed open half_open manual_block probe_owned health_state_unavailable
+          ].include?(circuit["state"])
+            raise ArgumentError, "admission circuit state is invalid"
+          end
+          unless circuit["manual_block"].nil? || [ true, false ].include?(circuit["manual_block"])
+            raise ArgumentError, "admission circuit manual block is invalid"
+          end
+          validate_nullable_time!(circuit["eligible_at"], "admission circuit eligible_at")
+          validate_admission_probe!(circuit["probe_owner"])
+        end
+
+        def validate_admission_probe!(probe)
+          return if probe.nil?
+          unless probe.is_a?(Hash) && probe.keys.sort == ADMISSION_PROBE_KEYS.sort
+            raise ArgumentError, "admission circuit probe is invalid"
+          end
+          validate_scope!(probe["scope"])
+          %w[journal_epoch observed_generation claim_generation].each do |key|
+            value = probe[key]
+            unless value.is_a?(Integer) && value >= 0
+              raise ArgumentError, "admission circuit probe is invalid"
+            end
+          end
+          unless probe["claim_generation"] == probe["observed_generation"] + 1 &&
+                 %w[attempt_id task_generation ownership_fence].all? do |key|
+                   valid_admission_value?(probe[key], max_bytes: 4_096)
+                 end
+            raise ArgumentError, "admission circuit probe is invalid"
+          end
+        end
+
+        def validate_admission_exclusion!(exclusion)
+          unless exclusion.is_a?(Hash) &&
+                 exclusion.keys.sort == ADMISSION_EXCLUSION_KEYS.sort &&
+                 valid_admission_id?(exclusion["route_id"]) &&
+                 ADMISSION_EXCLUSIONS.include?(exclusion["reason"])
+            raise ArgumentError, "admission exclusion is invalid"
+          end
+          detail = exclusion["detail"]
+          unless detail.nil? || (detail.is_a?(String) && detail.bytesize <= 240 && detail.valid_encoding?)
+            raise ArgumentError, "admission exclusion detail is invalid"
+          end
+          validate_scope!(exclusion["scope"])
+          observation = exclusion["observation"]
+          return if observation.nil?
+          unless observation.is_a?(Hash) &&
+                 (observation.keys - %w[generation journal_epoch max observed]).empty? &&
+                 observation.values.all? { |value| value.is_a?(Integer) && value >= 0 }
+            raise ArgumentError, "admission exclusion observation is invalid"
+          end
+        end
+
+        def validate_scope!(scope)
+          return if scope.nil?
+          unless scope.is_a?(Hash) && scope.keys.sort == %w[kind model provider_account_id] &&
+                 %w[provider_account model].include?(scope["kind"]) &&
+                 valid_admission_id?(scope["provider_account_id"])
+            raise ArgumentError, "admission exclusion scope is invalid"
+          end
+          if scope["kind"] == "model"
+            raise ArgumentError, "model scope requires model" unless valid_admission_id?(scope["model"])
+          elsif !scope["model"].nil?
+            raise ArgumentError, "provider scope cannot carry model"
+          end
+        end
+
+        def validate_capacity!(capacity)
+          return if capacity.nil?
+          unless capacity.is_a?(Hash) && capacity.keys.sort == %w[max observed] &&
+                 capacity["observed"].is_a?(Integer) && capacity["observed"] >= 0 &&
+                 capacity["max"].is_a?(Integer) && capacity["max"].positive?
+            raise ArgumentError, "admission candidate capacity is invalid"
+          end
+        end
+
+        def valid_admission_id?(value)
+          valid_admission_value?(value, max_bytes: 128)
+        end
+
+        def valid_admission_value?(value, max_bytes:)
+          value.is_a?(String) && !value.empty? && value.bytesize <= max_bytes &&
+            value.valid_encoding? && !value.match?(/[\u0000-\u001f\u007f]/)
         end
 
         def validate_nullable_time!(value, key)

@@ -318,6 +318,78 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_runtime_provider_health_factory_binds_reads_to_the_attempt_store
+    with_store do |store|
+      terminal = terminal_attempt(store)
+      with_tmp_dir do |state_home|
+        runtime = Hive::Attempts::FinalizationMaintenance.runtime(
+          store: store, state_home: state_home
+        )
+        observer = runtime.instance_variable_get(:@provider_health_observer_factory).call
+        health_store = observer.instance_variable_get(:@store)
+        current = health_store.instance_variable_get(:@attempt_reader).call(terminal.attempt_id)
+
+        assert_equal terminal.attempt_id, current.fetch("attempt_id")
+        assert_equal terminal.task_generation, current.fetch("task_generation")
+        assert_equal terminal.ownership_generation, current.fetch("ownership_fence")
+        assert_equal "terminal", current.fetch("state")
+      end
+    end
+  end
+
+  def test_provider_health_acknowledgement_is_isolated_per_terminal_record
+    with_store do |store|
+      observer = Object.new
+      observer.define_singleton_method(:observe) do |_record|
+        raise Hive::ProviderHealth::Unavailable, "health_state_unavailable"
+      end
+      service = maintenance(
+        store,
+        provider_health_observer_factory: -> { observer }
+      )
+      record = Struct.new(:explicit_routing?).new(true)
+
+      refute service.acknowledge_provider_health(record)
+    end
+  end
+
+  def test_runtime_cooldown_resolver_uses_the_frozen_account_policy
+    policy = Struct.new(:account_policy).new({
+      "account-a" => {
+        "cooldown_sec" => { "provider_rate_limit" => 47 }
+      }
+    })
+    policy_store = Object.new
+    policy_store.define_singleton_method(:fetch_snapshot) { |**_kwargs| policy }
+    record = Struct.new(:ownership_generation, :subject).new(
+      "generation-1", { "kind" => "task_stage" }
+    )
+    store = Object.new
+    store.define_singleton_method(:fetch) { |_attempt_id| record }
+    store.define_singleton_method(:routing_policies) { policy_store }
+    route = Struct.new(:account_id).new("account-a")
+    evidence = Struct.new(:attempt_id, :route, :failure_class).new(
+      "attempt-1", route, "provider_rate_limit"
+    )
+
+    resolver = Hive::Attempts::FinalizationMaintenance.cooldown_resolver(store)
+
+    assert_equal 47, resolver.call(evidence)
+  end
+
+  def test_runtime_cooldown_resolver_falls_back_when_attempt_storage_is_unavailable
+    store = Object.new
+    store.define_singleton_method(:fetch) do |_attempt_id|
+      raise Hive::Attempts::StoreError, "attempt store unavailable"
+    end
+    evidence = Struct.new(:attempt_id).new("attempt-1")
+
+    resolver = Hive::Attempts::FinalizationMaintenance.cooldown_resolver(store)
+
+    assert_equal Hive::ProviderHealth::Store::DEFAULT_COOLDOWN_SECONDS,
+                 resolver.call(evidence)
+  end
+
   def test_promotion_rejects_a_mismatched_permanent_proof
     with_store do |store|
       terminal = terminal_attempt(store)

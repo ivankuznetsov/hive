@@ -3,6 +3,8 @@ require "hive/attempts/contracts"
 require "hive/attempts/capability"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/generation"
+require "hive/provider_health"
+require "hive/provider_routing"
 require "hive/task_resolver"
 require "hive/workflows"
 
@@ -16,7 +18,10 @@ module Hive
       def initialize(store:, launcher:, limits: DEFAULT_LIMITS, clock: -> { Time.now.utc },
                      id_generator: -> { SecureRandom.uuid }, task_resolver: nil,
                      capability_generator: Capability.method(:generate),
-                     launch_timeout_sec: 30)
+                     launch_timeout_sec: 30, routing_policy_resolver: nil,
+                     health_store: nil, health_store_factory: nil,
+                     router: Hive::ProviderRouting::Router.new,
+                     decision_id_generator: -> { SecureRandom.uuid })
         @store = store
         @launcher = launcher
         @limits = DEFAULT_LIMITS.merge(limits)
@@ -25,12 +30,17 @@ module Hive
         @capability_generator = capability_generator
         @task_resolver = task_resolver || method(:resolve_request_task)
         @launch_timeout_sec = launch_timeout_sec
+        @routing_policy_resolver = routing_policy_resolver || method(:legacy_policy_for)
+        @health_store = health_store
+        @health_store_factory = health_store_factory || method(:open_health_store)
+        @router = router
+        @decision_id_generator = decision_id_generator
       end
 
       def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider:,
                    interactive: false, generation: nil, predecessor_attempt_id: nil,
                    inherited_outputs: [], retry_charge: 0, now: @clock.call,
-                   admission_view: nil)
+                   admission_view: nil, routing_policy: nil)
         @launcher.preflight!
         generation = normalize_generation(
           generation, task: task, project: project, intended_stage: intended_stage
@@ -40,19 +50,23 @@ module Hive
           provider: provider, interactive: interactive,
           predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
-          successor_of: nil, now: now, admission_view: admission_view
+          successor_of: nil, now: now, admission_view: admission_view,
+          routing_policy: routing_policy || resolve_routing_policy(task, intended_stage)
         )
       end
 
       def dispatch_successor(predecessor:, task:, project:, argv:, request_id:, provider:,
                              inherited_outputs: nil, retry_charge: nil, interactive: false,
-                             now: @clock.call, admission_view: nil)
+                             now: @clock.call, admission_view: nil, routing_policy: nil)
         @launcher.preflight!
         generation = Generation.resolve(
           task: task,
           project: project,
           intended_stage: predecessor["intended_stage"],
-          progress_token: predecessor["progress_token"],
+          # A recovery successor retains the predecessor's logical generation
+          # (and therefore its frozen routing policy), while fencing its
+          # worker to the exact post-recovery-clear task bytes admitted now.
+          progress_token: Generation.artifact_token(task),
           task_generation: predecessor.task_generation,
           attempt_store: @store
         )
@@ -68,7 +82,8 @@ module Hive
           inherited_outputs: inherited,
           retry_charge: retry_charge.nil? ? predecessor["retry_charge"] : retry_charge,
           successor_of: predecessor.attempt_id, now: now,
-          admission_view: admission_view
+          admission_view: admission_view,
+          routing_policy: routing_policy || resolve_routing_policy(task, predecessor["intended_stage"])
         )
       end
 
@@ -79,7 +94,7 @@ module Hive
       def dispatch_module_hook(generation:, subject:, argv:, request_id:, provider:,
                                interactive: false, predecessor_attempt_id: nil,
                                inherited_outputs: [], retry_charge: 0, now: @clock.call,
-                               project_root: nil, admission_view: nil)
+                               project_root: nil, admission_view: nil, routing_policy: nil)
         @launcher.preflight!
         admit(
           task: nil, generation: generation, argv: argv, request_id: request_id,
@@ -87,7 +102,8 @@ module Hive
           predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
           successor_of: nil, subject: subject, now: now,
-          admission_view: admission_view
+          admission_view: admission_view,
+          routing_policy: routing_policy || resolve_routing_policy(nil, generation.intended_stage)
         )
       end
 
@@ -105,9 +121,10 @@ module Hive
         return dispatch_successor(
           predecessor: predecessor, task: task, project: request.project, argv: request.argv,
           request_id: request.request_id, provider: provider_for(task),
-          inherited_outputs: request.inherited_outputs, interactive: interactive,
+          inherited_outputs: request.inherited_outputs,
+          retry_charge: recovery_retry_charge(request), interactive: interactive,
           now: now, admission_view: admission_view
-        ) if predecessor&.state == "lost"
+        ) if successor_predecessor?(predecessor)
 
         dispatch(
           task: task, project: request.project, intended_stage: intended_stage,
@@ -122,10 +139,11 @@ module Hive
 
       def admit(task:, generation:, argv:, request_id:, provider:, interactive:,
                 predecessor_attempt_id:, inherited_outputs:, retry_charge:, successor_of:, now:,
-                subject: nil, admission_view: nil)
+                subject: nil, admission_view: nil, routing_policy:)
         result = nil
         created = nil
         claim_capability = nil
+        route_decision = nil
         view = admission_view
         # Fixed lock order: global admission, then task generation. The outer
         # lock makes the capacity snapshot and reservation one host-wide
@@ -141,10 +159,12 @@ module Hive
             end
 
             exact = records.select { |record| record.task_generation == generation.task_generation }
-            terminal = replayable_terminal(
-              exact, request_id, task: task, admission_view: view,
-              generation: generation, subject: subject
-            )
+            terminal = if successor_of.nil?
+              replayable_terminal(
+                exact, request_id, task: task, admission_view: view,
+                generation: generation, subject: subject
+              )
+            end
             if terminal
               result = DispatchResult.new(
                 status: :terminal_replay, attempt: terminal, receipt: terminal.receipt,
@@ -158,7 +178,7 @@ module Hive
             )
             predecessor = successor_of &&
                           view.find(successor_of)
-            if successor_of && (!predecessor || predecessor.state != "lost")
+            if successor_of && !successor_predecessor?(predecessor)
               result = DispatchResult.new(
                 status: :deferred, attempt: predecessor, receipt: nil,
                 attach_descriptor: nil, reason: "invalid_predecessor"
@@ -183,6 +203,13 @@ module Hive
               next
             end
 
+            durable_subject = subject || task_subject(generation)
+            frozen_policy = @store.routing_policies.fetch_or_store(
+              ownership_generation: generation.ownership_generation,
+              subject: durable_subject,
+              policy: routing_policy
+            )
+
             snapshot = view.capacity(now: now, records: records)
             utc_date = now.utc.to_date
             if snapshot.at_limit?(
@@ -198,37 +225,109 @@ module Hive
               next
             end
 
-            claim_capability = @capability_generator.call
-            attempt_id = @id_generator.call
-            view.reserve_live(
-              attempt_id: attempt_id,
-              project: generation.project,
-              task_slug: generation.task_slug
-            )
-            created = @store.create_launching(
-              attempt_id: attempt_id,
-              request_id: request_id,
-              predecessor_attempt_id: predecessor_attempt_id,
-              task_id: generation.task_id&.to_s,
-              project: generation.project,
-              task_slug: generation.task_slug,
-              intended_stage: generation.intended_stage,
-              task_generation: generation.task_generation,
-              ownership_generation: generation.ownership_generation,
-              task_input_epoch: generation.task_input_epoch,
-              progress_token: generation.progress_token,
-              provider: provider.to_s,
-              worker_argv: argv,
-              claim_capability_digest: Capability.digest(claim_capability),
-              starting_revision: starting_revision(task),
-              retry_charge: retry_charge,
-              inherited_outputs: inherited_outputs || [],
-              subject: subject,
-              launch_timeout_sec: @launch_timeout_sec,
-              now: now
-            )
-            view.confirm_live(created)
-            view.record(created)
+            if frozen_policy.explicit?
+              health, health_available = resolve_provider_health
+              stale_retries = 0
+              loop do
+                route_decision = select_provider_route(
+                  policy: frozen_policy,
+                  health: health,
+                  snapshot: snapshot,
+                  records: records,
+                  generation: generation,
+                  now: now,
+                  health_available: health_available
+                )
+                unless route_decision.selected?
+                  view.record_routing_decision(
+                    decision: route_decision,
+                    task_generation: generation.task_generation,
+                    subject: durable_subject,
+                    project: generation.project
+                  )
+                  result = DispatchResult.new(
+                    status: route_decision.capacity_saturated? ? :deferred : :no_route,
+                    attempt: nil,
+                    receipt: nil,
+                    attach_descriptor: nil,
+                    reason: route_decision.reason,
+                    decision: route_decision
+                  )
+                  break
+                end
+
+                claim_capability = @capability_generator.call
+                attempt_id = @id_generator.call
+                selected = route_decision.candidates.find(&:eligible?)
+                intent = if route_decision.probe_requirements.empty?
+                  nil
+                else
+                  Hive::ProviderHealth::ProbeIntent.new(
+                    intent_id: route_decision.decision_id,
+                    attempt_id: attempt_id,
+                    task_generation: generation.task_generation,
+                    ownership_fence: generation.ownership_generation,
+                    requirements: route_decision.probe_requirements
+                  )
+                end
+                created = health.with_route_admission(
+                  evaluation: selected.health,
+                  intent: intent
+                ) do |probe_bindings|
+                  persist_launching_attempt(
+                    view: view,
+                    attempt_id: attempt_id,
+                    request_id: request_id,
+                    predecessor_attempt_id: predecessor_attempt_id,
+                    task: task,
+                    generation: generation,
+                    argv: argv,
+                    provider: route_decision.adapter,
+                    routing: explicit_routing(route_decision, probe_bindings),
+                    claim_capability: claim_capability,
+                    retry_charge: retry_charge,
+                    inherited_outputs: inherited_outputs,
+                    subject: subject,
+                    now: now
+                  )
+                end
+                view.record_routing_decision(
+                  decision: route_decision,
+                  task_generation: generation.task_generation,
+                  subject: durable_subject,
+                  project: generation.project,
+                  attempt_id: created.attempt_id
+                )
+                break
+              rescue Hive::ProviderHealth::StaleGeneration
+                raise if created
+
+                stale_retries += 1
+                raise if stale_retries >= 3
+
+                health_available = reconcile_provider_health(health)
+              end
+              next if result
+            else
+              claim_capability = @capability_generator.call
+              attempt_id = @id_generator.call
+              created = persist_launching_attempt(
+                view: view,
+                attempt_id: attempt_id,
+                request_id: request_id,
+                predecessor_attempt_id: predecessor_attempt_id,
+                task: task,
+                generation: generation,
+                argv: argv,
+                provider: provider.to_s,
+                routing: { "mode" => "legacy" },
+                claim_capability: claim_capability,
+                retry_charge: retry_charge,
+                inherited_outputs: inherited_outputs,
+                subject: subject,
+                now: now
+              )
+            end
           end
         end
 
@@ -236,7 +335,7 @@ module Hive
 
         handoff = @launcher.launch(created, claim_capability: claim_capability)
         if handoff.is_a?(Hash) && (handoff["claimed"] == true || handoff["state"] == "launching")
-          return accepted_result(created, interactive: interactive)
+          return accepted_result(created, interactive: interactive, decision: route_decision)
         end
 
         resolve_failed_handoff(
@@ -322,6 +421,21 @@ module Hive
         unresolved ? [ unresolved ] : []
       end
 
+      def successor_predecessor?(record)
+        return false unless record
+        return true if record.state == "lost"
+        return false unless record.state == "terminal" && record.outcome == "failed"
+        return false unless record.explicit_routing?
+
+        record.receipt&.fetch("provider_evidence", nil).is_a?(Hash)
+      end
+
+      def recovery_retry_charge(request)
+        return nil unless request.respond_to?(:recovery) && request.recovery.is_a?(Hash)
+
+        request.recovery["retry_count"]
+      end
+
       def task_subject(generation)
         Record.task_stage_subject(
           task_id: generation.task_id&.to_s,
@@ -359,11 +473,11 @@ module Hive
         )
       end
 
-      def accepted_result(record, interactive:)
+      def accepted_result(record, interactive:, decision: nil)
         DispatchResult.new(
           status: :accepted, attempt: record, receipt: nil,
           attach_descriptor: interactive ? attach_descriptor(record) : nil,
-          reason: nil
+          reason: nil, decision: decision
         )
       end
 
@@ -445,6 +559,175 @@ module Hive
       def provider_for(task)
         stage = task.stage_name.to_s.tr("-", "_")
         Hive::Config.load(task.project_root).dig(stage, "agent") || "claude"
+      end
+
+      def resolve_routing_policy(task, intended_stage)
+        policy = @routing_policy_resolver.call(task, intended_stage)
+        unless policy.is_a?(Hive::ProviderRouting::Policy)
+          raise Hive::ConfigError, "routing policy resolver returned an invalid policy"
+        end
+
+        policy
+      end
+
+      def legacy_policy_for(_task, intended_stage)
+        Hive::ProviderRouting::Policy.legacy(stage: routing_stage_name(intended_stage))
+      end
+
+      def routing_stage_name(intended_stage)
+        intended_stage.to_s.sub(/\A\d+-/, "").tr("-", "_")
+      end
+
+      def provider_health_store
+        @health_store ||= @health_store_factory.call
+      end
+
+      def resolve_provider_health
+        health = provider_health_store
+        [ health, reconcile_provider_health(health) ]
+      rescue Hive::ProviderHealth::Unavailable, Hive::ManagedDirectory::UnsafeError
+        [ nil, false ]
+      end
+
+      def reconcile_provider_health(health)
+        health.reconcile!
+        true
+      rescue Hive::ProviderHealth::Unavailable, Hive::ManagedDirectory::UnsafeError
+        false
+      end
+
+      def open_health_store
+        Hive::ProviderHealth.open(attempt_reader: method(:health_attempt_state))
+      end
+
+      def health_attempt_state(attempt_id)
+        record = @store.fetch_hot(attempt_id)
+        return nil unless record
+
+        {
+          "attempt_id" => record.attempt_id,
+          "task_generation" => record.task_generation,
+          "ownership_fence" => record["ownership_generation"],
+          "state" => record.state,
+          "probe_bindings" => record["routing"].fetch("probe_bindings", [])
+        }
+      rescue Hive::Attempts::StoreError
+        nil
+      end
+
+      def select_provider_route(policy:, health:, snapshot:, records:, generation:, now:,
+                                health_available: true)
+        routes = policy.eligible_routes
+        route_evaluations = if health_available
+          health.evaluate_routes(
+            routes: routes.map do |route|
+              { account_id: route.account, model_id: route.model }
+            end,
+            now: now
+          )
+        else
+          routes.map { |route| unavailable_route_evaluation(route) }
+        end
+        evaluations = routes.each_with_index.to_h do |route, index|
+          [ route.id, route_evaluations.fetch(index) ]
+        end
+        capacity = snapshot.provider_account_capacity(
+          policy: policy,
+          records: records
+        )
+        request = Hive::ProviderRouting::Request.new(
+          policy: policy,
+          task_generation: generation.task_generation,
+          health: evaluations,
+          capacity: capacity
+        )
+        @router.call(
+          request: request,
+          decision_id: @decision_id_generator.call,
+          decided_at: now
+        )
+      end
+
+      def unavailable_route_evaluation(route)
+        scopes = [
+          Hive::ProviderHealth::Scope.provider_account(account_id: route.account),
+          Hive::ProviderHealth::Scope.model(account_id: route.account, model_id: route.model)
+        ]
+        inspections = scopes.map do |scope|
+          Hive::ProviderHealth::Inspection.new(
+            status: "unavailable", scope: scope, circuit: nil,
+            generation: 0, journal_epoch: 0,
+            unavailable_reason: "health_state_unavailable"
+          )
+        end
+        Hive::ProviderHealth::RouteEvaluation.new(
+          status: "excluded",
+          inspections: inspections,
+          blockers: inspections.map do |inspection|
+            {
+              "scope" => inspection.scope.to_h,
+              "reason" => "health_state_unavailable",
+              "generation" => 0,
+              "journal_epoch" => 0
+            }
+          end,
+          probe_requirements: []
+        )
+      end
+
+      def persist_launching_attempt(view:, attempt_id:, request_id:, predecessor_attempt_id:,
+                                    task:, generation:, argv:, provider:, routing:,
+                                    claim_capability:, retry_charge:, inherited_outputs:,
+                                    subject:, now:)
+        view.reserve_live(
+          attempt_id: attempt_id,
+          project: generation.project,
+          task_slug: generation.task_slug
+        )
+        record = @store.create_launching(
+          attempt_id: attempt_id,
+          request_id: request_id,
+          predecessor_attempt_id: predecessor_attempt_id,
+          task_id: generation.task_id&.to_s,
+          project: generation.project,
+          task_slug: generation.task_slug,
+          intended_stage: generation.intended_stage,
+          task_generation: generation.task_generation,
+          ownership_generation: generation.ownership_generation,
+          task_input_epoch: generation.task_input_epoch,
+          progress_token: generation.progress_token,
+          provider: provider,
+          routing: routing,
+          worker_argv: argv,
+          claim_capability_digest: Capability.digest(claim_capability),
+          starting_revision: starting_revision(task),
+          retry_charge: retry_charge,
+          inherited_outputs: inherited_outputs || [],
+          subject: subject,
+          launch_timeout_sec: @launch_timeout_sec,
+          now: now
+        )
+        view.confirm_live(record)
+        view.record(record)
+      end
+
+      def explicit_routing(decision, probe_bindings)
+        route = decision.route
+        {
+          "mode" => "explicit",
+          "policy_digest" => decision.policy_digest,
+          "decision" => decision.to_record_h,
+          "route" => {
+            "route_id" => route.id,
+            "provider_account_id" => route.account,
+            "adapter" => route.adapter,
+            "launch_binding_id" => route.launch_binding,
+            "model" => route.model,
+            "effort" => route.effort
+          },
+          "circuit_generations" => decision.circuit_generations,
+          "probe_bindings" => Array(probe_bindings).map(&:to_h)
+        }
       end
 
       def intended_stage_for(argv, task)

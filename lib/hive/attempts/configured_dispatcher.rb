@@ -3,6 +3,7 @@ require "hive/task_resolver"
 require "hive/attempts/detached_launcher"
 require "hive/attempts/dispatcher"
 require "hive/attempts/launch_policy"
+require "hive/provider_routing"
 
 module Hive
   module Attempts
@@ -70,8 +71,18 @@ module Hive
           launcher: launcher,
           limits: LaunchPolicy.limits(daemon: daemon),
           launch_timeout_sec: cfg.fetch("attempt_launch_timeout_sec"),
-          task_resolver: task_resolver
+          task_resolver: task_resolver,
+          routing_policy_resolver: lambda do |_task, intended_stage|
+            Hive::ProviderRouting::Configuration.from(
+              cfg: cfg,
+              stage_name: routing_stage_name(intended_stage)
+            ).policy
+          end
         )
+      end
+
+      def routing_stage_name(intended_stage)
+        intended_stage.to_s.sub(/\A\d+-/, "").tr("-", "_")
       end
     end
   end

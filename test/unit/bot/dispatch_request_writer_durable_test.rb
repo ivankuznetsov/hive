@@ -69,6 +69,36 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
     end
   end
 
+  def test_initial_no_route_leaves_delivery_pending_without_dereferencing_an_attempt
+    with_tmp_dir do |state_home|
+      task = FakeTask.new(
+        slug: "demo-task", project_root: "/tmp/demo", project_name: "demo",
+        stage_index: 4, stage_name: "execute"
+      )
+      entrypoint = Object.new
+      entrypoint.define_singleton_method(:dispatch) do |**_kwargs|
+        Hive::Attempts::DispatchResult.new(
+          status: :no_route, attempt: nil, receipt: nil,
+          attach_descriptor: nil, reason: "no_eligible_provider_route", decision: Object.new
+        )
+      end
+
+      with_replaced_singleton_method(
+        Hive::Bot::DispatchRequestWriter, :resolve_task, ->(**_kwargs) { task }
+      ) do
+        reference = Hive::Bot::DispatchRequestWriter.dispatch!(
+          project: "demo", slug: "demo-task", argv: %w[hive run demo-task],
+          request_id: "request-no-route", state_home: state_home, entrypoint: entrypoint
+        )
+
+        assert reference.queued?
+        assert_nil reference.attempt_id
+        assert_equal 1,
+                     Hive::Daemon::DispatchRequestQueue.pending(state_home: state_home).size
+      end
+    end
+  end
+
   def test_unexpected_admission_failure_removes_unclaimed_delivery
     with_tmp_dir do |state_home|
       task = FakeTask.new(

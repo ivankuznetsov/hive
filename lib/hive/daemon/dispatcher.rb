@@ -105,7 +105,9 @@ module Hive
         @attempt_snapshot = nil
         @last_terminal_recovery_prune_at = nil
         @recovery_coordinator = recovery_coordinator || RecoveryCoordinator.new(
-          state_home: dispatch_request_state_home || Hive::Paths.state_home
+          state_home: dispatch_request_state_home || Hive::Paths.state_home,
+          attempt_store: @attempt_reconciler&.respond_to?(:store) ?
+            @attempt_reconciler.store : nil
         )
 
         # Update-flow collaborators (plan 2026-05-27-002). The check runs
@@ -225,6 +227,10 @@ module Hive
         # remain blocked for many polls; only state changes are useful in the
         # append-only daemon log.
         @dispatch_request_log_signatures = {}
+        # Per-tick exact provider-routing decisions keyed by the status row
+        # they evaluated. The completed operational snapshot consumes these;
+        # no selector is rerun for status rendering.
+        @routing_observations = {}
       end
 
       # Single tick: reap, fetch, dispatch. Pure dispatcher — no signal
@@ -241,6 +247,7 @@ module Hive
         # cache populated on first sight stuck for the daemon's
         # lifetime and the only way to honour a disable was SIGHUP.
         @enabled_cache.clear
+        @routing_observations.clear
         @logger.event(:tick_begin, now: now.utc.iso8601)
         reset_active_agent_snapshot
 
@@ -1487,6 +1494,7 @@ module Hive
           now: now,
           trigger: trigger
         )
+        remember_routing_observation(row, dispatch_result)
         outcome = dispatch_outcome(dispatch_result)
         if outcome == :attempt_terminal_replay
           # A successful durable attempt already consumed this exact task
@@ -1513,7 +1521,7 @@ module Hive
         when :terminal_replay then :attempt_terminal_replay
         when :deferred
           case result.reason
-          when "capacity" then :attempt_capacity
+          when "capacity", "capacity_saturated" then :attempt_capacity
           when "attempt_lost" then :attempt_lost
           when "launch_handoff_failed" then :launch_handoff_failed
           when "invalid_predecessor" then :invalid_predecessor
@@ -1568,7 +1576,20 @@ module Hive
         else
           [ "unknown", "dispatch outcome is not recognized" ]
         end
-        observe_operational_disposition(row, decision: outcome, owner: owner, reason: reason)
+        details = {}
+        routing = @routing_observations.delete([ row.project.to_s, row.slug.to_s ])
+        details[:routing] = routing if routing
+        observe_operational_disposition(
+          row, decision: outcome, owner: owner, reason: reason, **details
+        )
+      end
+
+      def remember_routing_observation(row, result)
+        return unless result.is_a?(Hive::Attempts::DispatchResult)
+        return unless result.decision.is_a?(Hive::ProviderRouting::Decision)
+        return if result.decision.legacy?
+
+        @routing_observations[[ row.project.to_s, row.slug.to_s ]] = result.decision.to_h
       end
 
       def observe_operational_disposition(row, decision:, owner:, reason:, **details)
@@ -1714,9 +1735,12 @@ module Hive
               "project" => request.project,
               "slug" => request.slug,
               "stage" => request.expected_stage,
+              "task_generation" => request.task_generation,
+              "recovery_variant" => request.recovery["variant"] || "marker",
               "recovery_phase" => request.recovery["phase"],
               "expected_marker_name" => request.expected_marker_name,
               "expected_marker_attrs" => request.recovery["expected_marker_attrs"],
+              "routing" => request.recovery["admission_observation"],
               "receipt" => receipt.to_h
             }
           rescue StandardError => e
@@ -2385,6 +2409,24 @@ module Hive
             admission_view: @attempt_snapshot&.admission_view
           )
           log_attempt_admission(result)
+          if result.status == :deferred && result.reason == "capacity_saturated"
+            recovery_receipt = if req.recovery.is_a?(Hash)
+              @recovery_coordinator.observe_admission_result(
+                request: req, result: result, now: now
+              )
+            end
+            Hive::Daemon::DispatchRequestQueue.release_claim(
+              req.request_id, state_home: dispatch_request_state_home
+            )
+            log_dispatch_request_once(
+              :dispatch_request_blocked,
+              request_id: req.request_id, project: req.project,
+              slug: req.slug, reason: result.reason,
+              lifecycle: recovery_receipt&.status,
+              next_eligible_at: recovery_receipt&.next_eligible_at
+            )
+            return result
+          end
           if result.status == :deferred
             recovery_receipt = defer_recovery_after_dispatch_failure(req, now: now)
             Hive::Daemon::DispatchRequestQueue.release_claim(
@@ -2394,6 +2436,40 @@ module Hive
               :dispatch_request_blocked,
               request_id: req.request_id, project: req.project,
               slug: req.slug, reason: result.reason,
+              lifecycle: recovery_receipt&.status,
+              next_eligible_at: recovery_receipt&.next_eligible_at
+            )
+            return result
+          end
+          if result.status == :no_route
+            recovery_receipt = if req.recovery.is_a?(Hash)
+              @recovery_coordinator.observe_admission_result(
+                request: req, result: result, now: now
+              )
+            else
+              @recovery_coordinator.request_admission_failure(
+                request: req, decision: result.decision, now: now
+              )
+            end
+            if req.recovery.is_a?(Hash)
+              Hive::Daemon::DispatchRequestQueue.release_claim(
+                req.request_id, state_home: dispatch_request_state_home
+              )
+            elsif recovery_receipt && recovery_receipt.request_id &&
+                  recovery_receipt.request_id != req.request_id
+              Hive::Daemon::DispatchRequestQueue.remove(
+                req.request_id, state_home: dispatch_request_state_home
+              )
+            else
+              Hive::Daemon::DispatchRequestQueue.release_claim(
+                req.request_id, state_home: dispatch_request_state_home
+              )
+            end
+            log_dispatch_request_once(
+              :dispatch_request_blocked,
+              request_id: req.request_id, project: req.project,
+              slug: req.slug, reason: result.reason,
+              recovery_request_id: recovery_receipt&.request_id,
               lifecycle: recovery_receipt&.status,
               next_eligible_at: recovery_receipt&.next_eligible_at
             )
@@ -3034,6 +3110,19 @@ module Hive
             command: command, trigger: trigger,
             reason: result.reason, dry_run: false
           )
+        elsif result.status == :no_route
+          recovery_receipt = @recovery_coordinator.request_admission_failure(
+            request: request, decision: result.decision, now: now
+          )
+          @logger.event(
+            :blocked,
+            project: project, slug: slug, stage: stage,
+            command: command, trigger: trigger,
+            reason: result.reason, dry_run: false,
+            recovery_request_id: recovery_receipt.request_id,
+            recovery_status: recovery_receipt.status,
+            next_eligible_at: recovery_receipt.next_eligible_at
+          )
         end
         result
       end
@@ -3045,6 +3134,7 @@ module Hive
           when :existing_live then :attempt_duplicate
           when :terminal_replay then :attempt_terminal_replay
           when :deferred then :attempt_capacity_deferred
+          when :no_route then :attempt_route_unavailable
           else return
           end
         @logger.event(

@@ -244,6 +244,52 @@ class HiveBotSupervisorTest < Minitest::Test
     )
   end
 
+  def test_run_forever_starts_loops_and_closes_collaborators
+    calls = Queue.new
+    @supervisor.define_singleton_method(:install_signal_handlers!) { calls << :signals }
+    @supervisor.define_singleton_method(:register_bot_commands) { calls << :commands }
+    @supervisor.define_singleton_method(:poll_loop) { calls << :poll }
+    @supervisor.define_singleton_method(:status_loop) { calls << :status }
+    @supervisor.define_singleton_method(:reaper_loop) { calls << :reaper }
+    @child_supervisor.define_singleton_method(:in_flight_count) { 2 }
+    @child_supervisor.define_singleton_method(:terminate_all) do |grace_sec:|
+      calls << [ :terminate, grace_sec ]
+    end
+    @logger.define_singleton_method(:close) { calls << :close }
+
+    @supervisor.run_forever
+
+    observed = 7.times.map { calls.pop }
+    assert_includes observed, :signals
+    assert_includes observed, :commands
+    assert_includes observed, :poll
+    assert_includes observed, :status
+    assert_includes observed, :reaper
+    assert_includes observed, [ :terminate, 60 ]
+    assert_includes observed, :close
+    assert_equal :bot_started, @logger.events.first.fetch(:name)
+    assert_equal :bot_stopping, @logger.events.last.fetch(:name)
+  end
+
+  def test_signal_handlers_flip_shutdown_and_reload_flags
+    handlers = {}
+    replacement = lambda do |name, &block|
+      handlers[name] = block
+    end
+
+    with_replaced_singleton_method(Signal, :trap, replacement) do
+      @supervisor.send(:install_signal_handlers!)
+    end
+
+    handlers.fetch("TERM").call
+    assert @supervisor.instance_variable_get(:@shutdown)
+    @supervisor.instance_variable_set(:@shutdown, false)
+    handlers.fetch("INT").call
+    assert @supervisor.instance_variable_get(:@shutdown)
+    handlers.fetch("HUP").call
+    assert @supervisor.instance_variable_get(:@reload)
+  end
+
   DispatchResultNotice = Struct.new(:command, :project, :slug, :exit_code, keyword_init: true)
 
   def dispatch_result_notice(command:, project: "hive", slug: nil, exit_code: 0)

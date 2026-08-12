@@ -111,6 +111,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
   "status" => { schema: "hive-status", error_kind: "error" },
+  "circuits" => { schema: "hive-circuits", error_kind: "usage" },
   "act" => { schema: "hive-act", error_kind: "usage" },
   "prune" => { schema: "hive-prune", error_kind: "usage" },
   "forget" => { schema: "hive-forget", error_kind: "usage" },

@@ -518,7 +518,7 @@ class ComponentBoundaryContract
   end
 
   class RubySyntax
-    CONSTRUCTION_METHODS = %w[new open_default].freeze
+    CONSTRUCTION_METHODS = %w[new open_default runtime].freeze
 
     attr_reader :requires, :constructions
 

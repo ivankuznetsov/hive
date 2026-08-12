@@ -1,21 +1,21 @@
 ---
 title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
-source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb, lib/hive/agent_skills/
+source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-07-27
+updated: 2026-08-12
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
-**TLDR**: `Hive::AgentRuntime` is the provider-neutral, policy-light invocation
-boundary. It accepts an immutable `Request`, compiles provider argv/stdin into
-a `CompiledInvocation`, returns typed capability/probe evidence, and normalizes
-provider output into an `ObservableResult`. `Hive::AgentProfile` remains the
-frozen provider adapter and its optional-keyword constructor remains the custom
-extension contract. `Hive::AgentProfiles` remains the registry; built-ins for
-Claude, Codex, Pi, and Grok load through `require "hive/agent_runtime"`.
-Process lifetime, timeouts, workflow selection, retries, artifact acceptance,
-and stage success remain in Hive.
+**TLDR**: `Hive::AgentRuntime` is the stable Hive facade over the published
+`agent-cli-runtime` gem. The package compiles provider argv/stdin, probes local
+CLI prerequisites, verifies capabilities, extracts usage, and normalizes
+results. `Hive::AgentProfile` adds only Hive policy and preserves its
+optional-keyword custom extension contract. `Hive::AgentProfiles` remains the
+registry; its Claude, Codex, Pi, and Grok adapters reference the package's
+built-in profiles. Process lifetime, workflow selection, model routing,
+subscription binding, retries, artifact acceptance, and stage success remain
+in Hive.
 
 ## Supported Agent ABI
 
@@ -30,18 +30,24 @@ The values crossing this boundary are:
 - `AgentRuntime::Request` — provider-neutral intent: prompt, permission mode,
   directories, tool scope, budget hint, model/effort, named capabilities, and
   legacy raw provider arguments.
-- `AgentRuntime::CompiledInvocation` — frozen discrete `argv`, optional
+- `AgentRuntime::CompiledInvocation` — the package value under the preserved
+  Hive constant: frozen discrete `argv`, optional
   `stdin_data`, provider and launcher identity, and capability evidence.
-- `AgentRuntime::CapabilityEvidence` — supported/unsupported capability,
+- `AgentRuntime::CapabilityEvidence` — the package value under the preserved
+  Hive constant: supported/unsupported capability,
   provider, launcher identity, native arguments, and a bounded redacted
   diagnostic.
 - `AgentRuntime::ProbeResult` — version/preflight evidence after the profile's
   bounded checks.
-- `AgentRuntime::ObservableResult` — provider-neutral exit, timeout, status,
+- `AgentRuntime::ObservableResult` — the package value under the preserved
+  Hive constant: provider-neutral exit, timeout, status,
   normalized usage, final message, and bounded diagnostic.
 
-`compile` never spawns. `prepare!` delegates the version and provider preflight
-probes. `require_capability!` is the only supported path for opt-in named CLI
+`compile` never spawns and delegates provider compilation to the package after
+Hive validates any admitted routing envelope. `prepare!` delegates executable
+and version checks, plus authentication-configuration checks for shipped
+profiles that declare them required (Pi and Grok).
+`require_capability!` is the only supported path for opt-in named CLI
 capabilities. Unsupported headless, read-only, workspace-write, required
 additional-directory, model, effort, raw-argument, and named-capability
 requests fail closed as `AgentRuntime::UnsupportedCapability` with typed
@@ -56,10 +62,15 @@ contract.
 
 ## `Hive::AgentProfile` — value object
 
-Constructor kwargs (every profile freezes after init):
+Shipped profiles pass `runtime_profile:` and only their Hive-owned policy.
+Custom registrations may keep using the existing compatibility kwargs; Hive
+constructs a package profile from them. Every profile freezes after init.
 
 | Kwarg | Purpose |
 |-------|---------|
+| `runtime_profile:` | Optional `AgentCliRuntime::Profile`. The four shipped profiles use the package registry directly; custom profiles may omit it and use the compatibility kwargs below. |
+| `auth_configuration_required:` | Hive preflight policy. The shipped Pi and Grok adapters require a CLI subscription/session artifact; custom profiles default false. |
+| `subscription_environment(unset_value: nil)` | Builds the Hive-only child environment scrub from the package credential-name inventory while preserving explicit session-file selectors such as `GROK_AUTH_PATH`. |
 | `name:` | Symbol used by the registry. |
 | `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`). |
 | `env_bin_override_key:` | Env var name (`"HIVE_CLAUDE_BIN"` etc.) that overrides `bin_default` when set non-empty. |
@@ -74,7 +85,7 @@ Constructor kwargs (every profile freezes after init):
 | `status_detection_mode:` | One of `:state_file_marker`, `:exit_code_only`, `:output_file_exists`. |
 | `headless_supported:` | Defaults `true`; profiles without headless support raise on `check_version!`. |
 | `min_version:` | Required minimum version (semver tuple compare). |
-| `preflight:` | Optional `Proc` invoked before each spawn (e.g., `pi` checks `~/.pi/agent/auth.json`). |
+| `preflight:` | Optional Hive-specific `Proc` invoked after the package probe. Shipped provider authentication checks live in `agent-cli-runtime`. |
 | `usage_extractor:` | Optional callable that parses agent events into input/output/cached counters for [[token-usage]]. Interim events can drive `Hive::Agent::StreamTokenMeter`; terminal-only or unavailable counters still leave spawn/day quotas and wall-clock timeouts as the safety fallback. Missing or unrecognized payloads return nil/zero-fill rather than failing the spawn. |
 | `skill_verifier:` | Optional callable used by `verify_skill` for profile-specific skill/slash-command resolution. |
 | `workspace_write_flags:` | Optional argv that guarantees a writable workspace confined to the spawn root. An empty value means the profile cannot enforce that boundary. Codex declares `--sandbox workspace-write`, `approval_policy="never"`, ephemeral mode, and user-config/rules suppression. |
@@ -97,15 +108,15 @@ Constructor kwargs (every profile freezes after init):
 | Method | Behavior |
 |--------|----------|
 | `bin` | Resolved binary path; env override > `bin_default`. |
-| `check_version!` | Runs `bin --version` under a bounded process-group probe, parses semver, compares against `min_version`, and caches per `(bin, min_version)` pair. Raises `Hive::AgentError` on missing/un-runnable binary, parse failure, timeout, or version below minimum. Timeout escalates TERM to KILL and reaps the child/readers, so a descendant that inherits stdout cannot strand preflight. |
+| `check_version!` | Delegates the bounded process-group version probe to the package and caches its result per `(bin, min_version)` pair. Raises `Hive::AgentError` on missing/un-runnable binary, parse failure, timeout, or version below minimum. |
 | `preflight!` | Calls the user-supplied `preflight:` Proc (if any). May raise `Hive::AgentError`. |
 | `verify_skill(invocation, project_root: nil)` | Delegates to the profile's `Hive::SkillCheck::*` verifier. Returns `[:present, path] / [:missing, hint] / [:not_applicable, why]`. |
 | `format_skill_invocation(skill)` | Renders a configured skill name through the profile's `skill_syntax_format`. Accepts slash-prefixed stage form (`/plan`, `/plug:name`), bare reviewer form (`ce-code-review`), and legacy Compound Engineering namespace form (`/compound-engineering:ce-code-review`). Legacy `compound-engineering:ce-*` inputs normalize to the current bare CE skill before profile formatting, so Claude/Codex render `/ce-*` and Pi renders `/skill:ce-*`. Other slash-prefixed inputs round-trip unchanged for profiles whose syntax is the default `"/%{skill}"`; profiles with a non-default syntax strip the leading `/` and any plugin namespace before formatting. Used uniformly by `Stages::Brainstorm`, `Stages::Plan`, `Reviewers::Agent`, `Stages::Review::BrowserTest`, and `Hive::Commands::Doctor` so the slash invocation that reaches the agent CLI matches doctor's verification target. |
-| `logged_in?(name, home: Dir.home)` | Returns whether the profile's CLI-owned credential artifact is present. Setup diagnostics use this alongside API-key env vars so token-authenticated Claude/Codex users are not reported unauthenticated, while an empty config directory such as `CODEX_HOME` alone is not treated as auth. |
+| `logged_in?(name, home: Dir.home)` | Returns whether the profile's CLI-owned subscription/session artifact is present. An empty config directory such as `CODEX_HOME` alone is not treated as authentication. Hive does not provision API keys. |
 | `permission_flags(mode = nil)` | Returns profile-owned permission argv. Ordinary modes preserve the existing Claude behavior. The special cross-profile modes `workspace-write` and `read-only` return only their declared sandbox argv and raise if the profile cannot enforce the requested boundary. |
 | `workspace_write_supported?` | True only when the profile declares non-empty root-confined workspace-write argv. Architecture patrol uses this as a fail-closed auto-fix provider gate. |
 | `read_only_supported?` | True only when the profile declares non-empty read-only argv. Architecture discovery uses this for non-Claude profiles. |
-| `require_cli_capability!(name)` | Version-checks the resolved binary, probes `<bin> <capability-argv> --help` under the same bounded process-group deadline as version discovery, verifies every option token (arguments such as a `--tools` CSV are not mistaken for flags), caches the result by binary/version/capability/argv, and returns a copy. Missing declarations, flags, binaries, failed help, and timeouts raise `Hive::AgentError`. |
+| `require_cli_capability!(name)` | Version-checks the resolved binary, then delegates the bounded `<bin> <capability-argv> --help` check and option verification to the package. Missing declarations, flags, binaries, failed help, and timeouts raise `Hive::AgentError`. |
 | `concrete_default_model(cfg:, project_root:)` | Resolves and validates a provider-native model without copying credentials or arbitrary CLI configuration into Hive state. Codex discovery reads the top-level TOML `model` assignment and accepts ordinary inline comments. |
 | `identity_arguments(model:, effort:, pin_model:)` | Returns normalized model/effort observability plus discrete native argv, including requested/effective effort and support. |
 | `validate_routed_control!(control, source:)` | Validates one exact/coarse `ModelRouting::EffectiveControl` against this profile's native model/effort capabilities and vocabulary. |
@@ -167,21 +178,22 @@ generation/selection policy and `Reconstructor` retains recovery policy.
 
 - `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, interim plus terminal usage extraction, and opt-in verified capabilities for `safe_mode` plus the minimal patrol review/fix contexts. Patrol disables slash commands; review exposes `Read,Grep,Glob,Write`, while fix additionally exposes `Bash,Edit`. The profile reserves 20,000 initial-context tokens for patrol admission. Message-start/delta counters support a true in-flight patrol stop. A structured terminal `result/error_max_budget_usd` event is surfaced as the per-run `budget_exhausted` outcome, distinct from account/rate/quota `limits_reached` recovery; ordinary prose is never used to infer it. Min version `2.1.118`. `:state_file_marker` mode. `AgentProfile#permission_flags(mode)` is the single source of truth for permission argv, shared by the headless `Hive::Agent` path and the tmux `Hive::ClaudeLauncher#wrapper_command` path: `bypassPermissions` (and a nil mode) yields `--dangerously-skip-permissions`, any other ordinary Claude mode yields `--permission-mode <mode>`.
 - `codex` — `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, headless via the `exec` subcommand, `--json` output, and dedicated read-only/workspace-write sandbox bundles (approval policy `never`, ephemeral execution, and ignored user config/rules) for architecture discovery and fixes. Prompts are delivered on stdin with `-` in argv. No native budget flag. Hive consumes usage events when present, but real interim-event coverage remains unverified, so spawn/day quotas and the wall-clock timeout are the provider-independent fallback. Min version `0.125.0`. `:output_file_exists`.
-- `pi` — no permission flag, no `--add-dir` (triggers `warn_isolation_reduced` when callers pass `add_dirs:` per ADR-018), preflight checks for `auth.json` beneath the same validated `PI_CODING_AGENT_DIR` (or default `~/.pi/agent`) used by skill discovery. Min version `0.70.2`. `:output_file_exists`.
+- `pi` — no permission flag and no `--add-dir` (triggers `warn_isolation_reduced` when callers pass `add_dirs:` per ADR-018). The package probe checks for `auth.json` beneath the same validated `PI_CODING_AGENT_DIR` (or default `~/.pi/agent`) used by skill discovery. Min version `0.70.2`. `:output_file_exists`.
 - `grok` — headless via `-p <prompt>`, `--always-approve`, and
   `--output-format streaming-json`; normalized effort is pinned with
   `--reasoning-effort`. The profile alone declares
   `structured_output_protocol: :grok_end`, which scopes terminal
   `end.structuredOutput` authority and opacity to Grok while leaving custom
-  profiles backward-compatible. Preflight accepts `XAI_API_KEY`,
-  `GROK_CODE_XAI_API_KEY`, an explicit absolute credential file via
-  `GROK_AUTH_PATH`, or `auth.json` under an absolute `GROK_HOME`/the default
-  `~/.grok`; device login is `grok login --device-auth`. The direct path takes
+  profiles backward-compatible. The package probe accepts the CLI's supported
+  authentication configuration, including an explicit absolute session file
+  via `GROK_AUTH_PATH` or `auth.json` under an absolute `GROK_HOME`/the default
+  `~/.grok`; Hive operators use device-login subscriptions and Hive does not
+  accept an API key as session readiness. The direct path takes
   precedence over `GROK_HOME`, matching the CLI and allowing one
   refresh-token/lock domain to be mounted into isolated runners. Hive rejects
-  relative path overrides, even when an API key is present, so its parent
-  preflight and a child spawned in another working directory cannot consume
-  different credential files or state directories. No add-dir or budget flag.
+  relative path overrides before launch, so its parent preflight and a child
+  spawned in another working directory cannot consume different credential
+  files or state directories. No add-dir or budget flag.
   Text events are concatenated into `final_message`; unavailable token usage
   stays nil. Min version `0.2.90`. `:output_file_exists`.
   `Hive::SkillCheck::Grok` resolves project/user skills plus enabled native
@@ -204,7 +216,7 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   Claude-specific admission and turn-limit policy.
 - `Hive::RefactorPatrol::ReviewAgentRunner` — uses Claude's read-only permission scope or a profile-declared native read-only sandbox, and pins the resolved refactor model/effort arguments.
 - `Hive::RefactorPatrol::Fixer` — accepts only a profile with `workspace_write_supported?` and invokes it through the special `workspace-write` permission mode.
-- `Stages::Base.record_usage` — reads each profile's `usage_extractor` output and stores per-spawn rows in `Hive::UsageDB`.
+- `Stages::Base.record_usage` — stores the package-normalized usage returned through `AgentRuntime.extract_usage` as per-spawn rows in `Hive::UsageDB`.
 - `Hive::Config.validate_role_agent_names!` and `validate_reviewers!` — every `agent:` field in `review.{ci,triage,fix,browser_test}` and `review.reviewers[]` must resolve via `AgentProfiles.lookup`.
 - `Hive::WorkflowPackage::RuntimePolicy` — legacy packages can still compile
   their command/domain policy, while current Honeycomb actors resolve their
@@ -247,6 +259,54 @@ installing in the background. Adapters do not alter the profile registry or
 make arbitrary custom profiles provisionable. See
 [[commands/doctor]] and [[commands/setup-agents]].
 
+## Explicit provider-account execution and evidence
+
+An admitted explicit route overrides mutable role/profile/model configuration
+at the final `Stages::Base.spawn_agent` seam. Every provider-backed invocation
+inside that durable attempt uses the persisted adapter, model, effort, and
+symbolic launch binding. Claude explicit routes are forced through the
+headless path so a persistent tmux session cannot escape the enclosing
+attempt's account identity.
+
+`launch_binding: default` preserves the adapter's existing external session.
+A named binding such as `team-a` is validated while an explicit routing policy
+is built and resolved again at launch from
+`HIVE_PROVIDER_BINDING_<ADAPTER>_<BINDING>` (uppercased, with hyphens mapped to
+underscores), for example `HIVE_PROVIDER_BINDING_CODEX_TEAM_A`. Its value must
+be an existing absolute adapter configuration directory. Hive passes the
+corresponding `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_DIR`, or
+`GROK_HOME` only to preflight and the child process. The path and credential
+contents never enter routing policy, attempts, health state, status, or logs.
+Hive obtains those override names and their default home-relative directories
+from the published `agent-cli-runtime` profiles. Configuration
+normalization canonicalizes an existing default session directory too, so a
+named binding cannot alias the same subscription session through a different
+path.
+For default and named bindings, Hive clears the adapter profile's
+`credential_environment_keys` before preflight and launch. That inventory is
+owned by the published `agent-cli-runtime` profile. Pi's inventory
+covers its supported ambient provider credentials and tokens, so the isolated
+directory's subscription session is authoritative; `launch_binding: default`
+uses the CLI's default session directory without inherited API credentials.
+The same subscription-only scrub is applied at the two direct subprocess seams
+that do not instantiate `Hive::Agent`: display-name generation and native
+`codex review` execution.
+Claude's inventory includes `ANTHROPIC_AUTH_TOKEN` as a defensive override to
+clear for every launch; Hive does not provision or require that variable.
+
+`AgentProfiles::ErrorNormalizers` enables a transport shape only after a
+sanitized real subscription capture proves a stable class and scope. The
+current transport allowlist contains Claude's rejected `rate_limit_event` for
+the `five_hour` and `seven_day` subscription windows. Because the admitted
+launch binding identifies the external account, those events normalize to
+provider-account `account_quota`. Current Codex and Grok failures expose only
+message text, and Pi has no reviewed subscription capture, so all three remain
+task-local. Final/assistant messages, prompt-derived output, tool output, vague
+429/permission text, timeouts, network failures, and every unreviewed shape are
+also rejected. The safe result contains only class, explicit scope,
+provenance, and a bounded reset hint; raw message fields are discarded before
+the attempt evidence channel.
+
 ## Tests
 
 - `test/unit/agent_runtime_test.rb` — immutable request/invocation/evidence
@@ -257,6 +317,11 @@ make arbitrary custom profiles provisionable. See
 - `test/unit/agent_profile_modes_test.rb` — `:state_file_marker` / `:exit_code_only` / `:output_file_exists` branching in `Hive::Agent#handle_exit`.
 - `test/unit/agent_profiles_test.rb` — registry register / lookup / unknown.
 - `test/unit/spawn_agent_test.rb` — preflight ordering, isolation-warning trigger, default-profile fallback.
+- `test/unit/agent_profiles/error_normalizers_test.rb` — captured Claude
+  subscription limits, closed diagnostic taxonomy, task-local unsupported
+  adapters/adversarial channels, and raw-message independence.
+- `test/unit/agent_profiles/launch_bindings_test.rb` — symbolic binding
+  resolution, distinct same-adapter contexts, and preflight restoration.
 - `test/unit/workflow_package/runtime_policy_test.rb` — exact policy files,
   deny/command/domain enforcement, and multi-actor admission failure.
 - `test/unit/pi_preflight_test.rb` — pi's auth.json preflight gate.

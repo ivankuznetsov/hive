@@ -14,7 +14,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
         boundary = Hive::Conditions::ExecuteBoundary.allocate
         boundary.instance_variable_set(:@context, Object.new)
         store = boundary.send(:default_attempt_store)
-        assert_equal File.join(root, "attempts", "v3"), store.root
+        assert_equal File.join(root, "attempts", "v4"), store.root
       end
       assert File.file?(File.join(root, "attempts", "v2"))
     end

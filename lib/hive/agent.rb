@@ -5,6 +5,7 @@ require "tempfile"
 require "time"
 require "hive/agent_runtime"
 require "hive/agent_profiles"
+require "hive/agent_profiles/error_normalizers"
 require "hive/agent_limit"
 require "hive/agent/message_extractor"
 require "hive/artifact_firewall"
@@ -142,7 +143,7 @@ module Hive
                    disallowed_tools: nil, cli_flags: [], max_tokens: nil,
                    max_turns: nil, identity_arguments: [], runtime_policy: nil,
                    launch_arguments: nil, routing_arguments: nil,
-                   log_stream: true)
+                   launch_environment: {}, provider_route: nil, log_stream: true)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -154,6 +155,7 @@ module Hive
       @log_label = log_label || task.stage_name
       @log_stream = log_stream
       @profile = profile || Hive::AgentProfiles.lookup(:claude)
+      @provider_route = provider_route
       @runtime_policy = runtime_policy
       @expected_output = expected_output
       # Per-spawn override of the profile's default detection mode. The
@@ -183,6 +185,10 @@ module Hive
         @runtime_cli_flags = []
         @child_environment = SCRUBBED_CHILD_ENV
       end
+      @child_environment = @child_environment
+        .merge(launch_environment || {})
+        .merge(@profile.subscription_environment)
+        .freeze
       @launch_arguments = normalize_launch_arguments(launch_arguments)
       supplied_identity_arguments =
         Hive::ImplementationIdentity.validate_native_arguments(identity_arguments)
@@ -283,6 +289,7 @@ module Hive
       last_usage = nil
       token_meter = StreamTokenMeter.new(@profile.name)
       resource_exhaustion = nil
+      provider_signal = nil
       termination_deadline = nil
       completion_event_deadline = nil
       completed_turns = 0
@@ -331,6 +338,11 @@ module Hive
             # logical message can span multiple newline-delimited JSON events,
             # so per-line regex redaction cannot safely retain their payloads.
             json = parse_json_line(line)
+            provider_signal ||= Hive::AgentProfiles::ErrorNormalizers.normalize(
+              adapter: @profile.name,
+              event: json,
+              route: @provider_route
+            ) if @provider_route
             sensitive_payload = Hive::Agent::MessageExtractor.sensitive_payload?(
               json,
               raw_line: line,
@@ -504,6 +516,7 @@ module Hive
         model: reported_usage&.dig(:model),
         resource_exhaustion: resource_exhaustion,
         output_completed: output_completed,
+        provider_signal: provider_signal,
         status: nil
       }
       if structured_failure
@@ -611,6 +624,22 @@ module Hive
     #   = :ok. Used by reviewer/triage spawns where a structured artifact
     #   is the success criterion.
     def handle_exit(result)
+      if result[:provider_signal]
+        if effective_status_mode == :state_file_marker
+          Hive::Markers.set(
+            @task.state_file,
+            :error,
+            reason: "provider_route_failed",
+            provider_account_id: @provider_route.fetch("provider_account_id"),
+            route_id: @provider_route.fetch("route_id")
+          )
+        end
+        result[:status] = :error
+        result[:error_reason] = "provider_route_failed"
+        result[:error_message] = "admitted provider route failed"
+        return
+      end
+
       if result[:output_completed] && completed_output_file?
         result[:status] = :ok
         return

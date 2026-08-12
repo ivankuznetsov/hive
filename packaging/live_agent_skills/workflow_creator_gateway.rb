@@ -235,7 +235,7 @@ module HiveLiveAgentProof
 
     def operational_status?(payload)
       valid = payload.instance_of?(Hash) && payload.values_at("schema", "schema_version", "ok") ==
-        [ "hive-operational-status", 3, true ] && payload["tasks"].instance_of?(Array) && payload["tasks"].one?
+        [ "hive-operational-status", 4, true ] && payload["tasks"].instance_of?(Array) && payload["tasks"].one?
       task = payload["tasks"].first if valid
       valid && task.instance_of?(Hash) && task["workflow"] == "editorial" &&
         task.dig("identity", "slug") == @task_slug && task.dig("position", "stage") == "1-research"

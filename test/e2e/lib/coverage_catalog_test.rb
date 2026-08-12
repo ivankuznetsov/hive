@@ -63,13 +63,13 @@ class E2ECoverageCatalogTest < Minitest::Test
   end
 
   def test_checked_in_catalog_maps_every_scenario_once_and_release_profile_is_runnable
-    assert_equal 24, catalog.entries.size
+    assert_equal 25, catalog.entries.size
     assert_equal scenarios.map(&:name).sort, catalog.primary_scenarios.map(&:name).sort
 
     selection = catalog.select_profile("release")
-    assert_equal 20, selection.fetch("coverage_ids").size
-    assert_equal 20, selection.fetch("scenarios").size
-    assert_equal 4, selection.fetch("planned").size
+    assert_equal 22, selection.fetch("coverage_ids").size
+    assert_equal 22, selection.fetch("scenarios").size
+    assert_equal 3, selection.fetch("planned").size
   end
 
   def test_validation_is_idempotent
@@ -77,13 +77,14 @@ class E2ECoverageCatalogTest < Minitest::Test
 
     assert_same checked, checked.validate!
     assert_equal scenarios.map(&:name).sort, checked.primary_scenarios.map(&:name).sort
-    assert_equal 20, checked.select_profile("release").fetch("scenarios").size
+    assert_equal 22, checked.select_profile("release").fetch("scenarios").size
   end
 
   def test_exact_id_wins_and_substring_results_are_lexical
     exact = catalog.search("recovery.provider_limit")
     assert_equal [ "recovery.provider_limit" ], exact.map { |match| match.fetch("id") }
-    assert_nil exact.first.fetch("runnable_command")
+    assert_equal "bin/hive-e2e run --coverage recovery.provider_limit",
+                 exact.first.fetch("runnable_command")
 
     ids = catalog.search("update").map { |match| match.fetch("id") }
     assert_equal ids.sort, ids
@@ -112,7 +113,12 @@ class E2ECoverageCatalogTest < Minitest::Test
     assert_equal "full_pipeline_happy_path", match.dig("primary_scenario", "name")
     assert_empty match.fetch("supporting_scenarios")
 
-    pending = catalog.search("recovery.provider_limit").first
+    provider = catalog.search("recovery.provider_limit").first
+    assert_equal false, provider.dig("primary_scenario", "pending")
+    assert_equal "bin/hive-e2e run --coverage recovery.provider_limit",
+                 provider.fetch("runnable_command")
+
+    pending = catalog.search("attempt.caller_loss_adoption").first
     assert_equal true, pending.dig("primary_scenario", "pending")
     assert_nil pending.fetch("runnable_command")
   end

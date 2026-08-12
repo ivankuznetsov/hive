@@ -4,7 +4,7 @@ require "hive/attempts/record"
 
 module Hive
   module Attempts
-    # Immutable, record-compatible schema-v3 proof. It is deliberately
+    # Immutable, record-compatible schema-v4 proof. It is deliberately
     # point-addressed and exposes no enumeration API.
     class PermanentProofStore
       MAX_RECORD_BYTES = 4 * 1024 * 1024
@@ -29,7 +29,7 @@ module Hive
 
       def publish(record)
         unless record.is_a?(Record) && record.final?
-          raise StoreError, "permanent attempt proof requires a final schema-v3 record"
+          raise StoreError, "permanent attempt proof requires a final schema-v4 record"
         end
 
         id = attempt_id_key(record.attempt_id)

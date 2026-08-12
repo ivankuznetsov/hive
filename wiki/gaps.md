@@ -3,11 +3,25 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-07
+updated: 2026-08-10
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
+
+## Provider-routing trusted captures (updated 2026-08-11)
+
+The U1 provider-routing policy includes a sanitized provenance inventory for
+Claude, Codex, Pi, and Grok under `test/fixtures/provider_errors/`. A reviewed
+Claude subscription capture now proves that rejected `five_hour` and
+`seven_day` rate-limit events can be bound to the admitted account and safely
+classified as provider-account `account_quota`. Real Codex and Grok failures
+contain only message text, and no Pi subscription session is configured on the
+evidence host, so those adapters and every exact-model class remain task-local.
+Do not promote prose, HTTP-like text, synthetic fixtures, final messages,
+prompt-derived output, or tool output into shared circuit evidence. Expand the
+allowlist only after a reviewed, sanitized real subscription capture proves a
+stable class and scope.
 
 ## Current release gap
 
@@ -94,25 +108,6 @@ tags: [gap, todo, release-proof, agent-skills]
   primitive and a live conventional-project browser provider remain follow-up
   work; the built-in Hivebox recorder is unaffected.
 
-- `agent-cli-runtime` 0.1.0 has a self-contained package, exact-artifact
-  verifier, Linux/macOS install matrix, and component-scoped trusted-publishing
-  workflow. Repository-hosted controls remain operator work: the
-  `components/agent-cli-runtime/v*` tag ruleset must restrict creation, update,
-  deletion, and bypass; the `agent-cli-runtime-release` environment must
-  require release reviewers and permit only matching component tags; and the
-  RubyGems pending publisher must match that environment identity. Until the
-  package PR is merged, those controls are verified, the component tag workflow
-  succeeds, and a fresh remote install matches the retained checksum, this is
-  release-ready source evidence rather than proof of a public gem. Hive
-  intentionally keeps its internal
-  implementation authoritative and does not depend on the unpublished package;
-  the separately authorized cutover follows remote verification.
-  Candidate/install/publish jobs have a 15-minute job timeout and retain the
-  exact candidate for 30 days. The install verifier does not add a second,
-  per-subprocess timeout around each gem command; a hung child can therefore
-  consume the remainder of its bounded job before cancellation. This narrow
-  operational risk is accepted for 0.1.0 rather than duplicating process
-  supervision in release shell.
 - Native package-layout integration now proves that an installed gem plus
   authenticated, real `git archive` managed bundle resolves `hive-cli` from
   the package root and reaches the setup service seam without a parent
@@ -628,16 +623,19 @@ stable local API, so the reserve is deliberately conservative rather than an
 exact forecast. Recalibrate from captured streams if Claude materially changes
 its headless context or event cadence.
 
-## Four incident e2e fixtures remain sibling-gated (2026-07-17)
+## Three incident e2e fixtures remain sibling-gated (updated 2026-08-11)
 
 All six production-incident sequences are synthetic and parseable. The #9771
 plan-only dependency and repository-routing fixtures now execute as ordinary
-green results against the merged fail-closed contracts. Four remain visible as
-pending entries rather than claimed passes because the current tree does not expose the exact sibling-owned
-contracts needed to activate them: #9767's durable attempt lease and adoption
-reason, #9768's generation identity and reconciliation reason, #9769's
-finalize lifecycle terminal reason, and #9770's retry-owner evidence and bounded
-terminal reason. The harness deliberately does not infer those formats or strings.
+green results against the merged fail-closed contracts. The #9770
+provider-limit fixture is also green: it now proves a trusted account-scoped
+failure, one durable health transition, and one charged
+`RecoveryCoordinator` successor on the next route. Three remain visible as
+pending entries rather than claimed passes because the current tree does not
+expose the exact sibling-owned contracts needed to activate them: #9767's
+durable attempt lease and adoption reason, #9768's generation identity and
+reconciliation reason, and #9769's finalize lifecycle terminal reason. The
+harness deliberately does not infer those formats or strings.
 
 Close this gap one fixture at a time after the corresponding sibling lands:
 replace its activation guard with real CLI reconciliation and exact
@@ -1043,6 +1041,17 @@ mutated during this implementation. Before calling the operational path proven
 on every channel, run one disposable installed upgrade for brew, AUR, and bash
 and retain the updater plus migration output. This gap does not weaken the
 local command contract or its deterministic tests.
+
+## Provider transport coverage remains intentionally partial (2026-08-11)
+
+The explicit provider-health implementation now enables only the real Claude
+subscription rate-limit shape recorded in the provenance inventory. Synthetic
+Claude, Codex, Pi, and Grok contract envelopes were removed from positive
+tests because no current CLI emitted them. Before enabling another transport
+class, retain a sanitized real subscription capture from that adapter's
+structured transport or separately authenticated provider-diagnostic channel,
+confirm stable account/model scope, and update the inventory. Until then,
+unmatched provider output remains attempt-local and cannot open shared health.
 
 ## Live Workflow Creator still needs authorized exact-head evidence (2026-08-04)
 

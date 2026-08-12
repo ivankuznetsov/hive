@@ -1746,6 +1746,43 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_nested_review_provider_routing_is_rejected_at_load
+    cases = {
+      "review.ci" => "review:\n  ci:\n    routing: { pool: [] }\n",
+      "review.triage" => "review:\n  triage:\n    routing: { pool: [] }\n",
+      "review.fix" => "review:\n  fix:\n    routing: { pool: [] }\n",
+      "review.browser_test" => "review:\n  browser_test:\n    routing: { pool: [] }\n",
+      "review.reviewers[0]" => <<~YAML,
+        review:
+          reviewers:
+            - routing: { pool: [] }
+      YAML
+      "review.adhoc.reviewers[0]" => <<~YAML,
+        review:
+          adhoc:
+            reviewers:
+              - routing: { pool: [] }
+      YAML
+      "patrol.review.reviewers[0]" => <<~YAML
+        patrol:
+          review:
+            reviewers:
+              - routing: { pool: [] }
+      YAML
+    }
+
+    cases.each do |label, yaml|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), yaml)
+
+        error = assert_raises(Hive::ConfigError, label) { Hive::Config.load(dir) }
+        assert_includes error.message, "#{label}.routing"
+        assert_includes error.message, label.start_with?("patrol.") ? "patrol.routing" : "review.routing"
+      end
+    end
+  end
+
   def test_permission_config_errors_fail_closed_at_load
     cases = [
       [ "permissions: reckless\n", /unknown preset "reckless"/ ],

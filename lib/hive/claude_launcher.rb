@@ -163,7 +163,12 @@ module Hive
       profile.validate_routing_arguments!(routing_arguments) if routing_arguments
       routed_flags = routing_arguments&.native_arguments
       cli_flags = routed_flags || identity_arguments || (cfg ? Hive::Config.claude_cli_flags(cfg) : [])
-      launch_mode = Hive::Config.claude_mode(cfg)
+      launch_mode = if defined?(Hive::Attempts::Context) &&
+                       Hive::Attempts::Context.current&.explicit_routing?
+        :headless
+      else
+        Hive::Config.claude_mode(cfg)
+      end
 
       if launch_mode == :headless
         require "hive/stages/base"
@@ -229,7 +234,9 @@ module Hive
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
 
-      runner = build_runner(task: task, session_name: session_name, cwd: cwd)
+      runner = build_runner(
+        task: task, session_name: session_name, cwd: cwd, profile: profile
+      )
       # Pre-clean signal files BEFORE the preflight check so a stale
       # `.done` / `result.json` from a previously-collided run doesn't
       # leak into the next attempt's wait_for_status loop. A
@@ -416,13 +423,11 @@ module Hive
       File.basename(task.folder.to_s)
     end
 
-    def build_runner(task:, session_name:, cwd:)
+    def build_runner(task:, session_name:, cwd:, profile:)
       Hive::TmuxRunner.new(
         name: session_name,
         cwd: cwd,
-        env: {
-          "ANTHROPIC_API_KEY" => "",
-          "CLAUDE_API_KEY" => "",
+        env: profile.subscription_environment(unset_value: "").merge(
           # Screenote's base URL reaches claude through prompt/MCP context,
           # not the child environment; blanking it here stops an operator's
           # exported HIVE_SCREENOTE_BASE_URL from becoming a redundant,
@@ -432,7 +437,7 @@ module Hive
           # three sibling scrub sites in step.
           "HIVE_SCREENOTE_BASE_URL" => "",
           "HIVE_TASK_STAGE_DIR" => task.folder
-        },
+        ),
         tmux_bin: tmux_bin,
         socket_name: ENV["HIVE_TMUX_SOCKET"]
       )
@@ -532,8 +537,9 @@ module Hive
 
     def isolated_managed_command(command, runtime_policy, task)
       environment = runtime_policy.environment.merge(
-        "ANTHROPIC_API_KEY" => "",
-        "CLAUDE_API_KEY" => "",
+        Hive::AgentProfiles.lookup(:claude)
+          .subscription_environment(unset_value: "")
+      ).merge(
         "HIVE_SCREENOTE_BASE_URL" => "",
         "HIVE_TASK_STAGE_DIR" => task.folder
       )

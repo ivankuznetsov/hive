@@ -21,7 +21,7 @@ module Hive
         {
           "status" => "unknown",
           "layout" => {
-            "generation" => 3,
+            "generation" => 4,
             "migration" => "unknown",
             "last_migrated_at" => nil,
             "last_result" => nil
@@ -85,7 +85,7 @@ module Hive
         update do |current|
           success = current.merge(
             "layout" => {
-              "generation" => 3,
+              "generation" => 4,
               "migration" => "complete",
               "last_migrated_at" => now.utc.iso8601(6),
               "last_result" => values

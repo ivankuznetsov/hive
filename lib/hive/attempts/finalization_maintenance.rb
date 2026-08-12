@@ -20,10 +20,28 @@ module Hive
       def self.runtime(store:, state_home: Hive::Paths.state_home, **options)
         require "hive/conditions/attempt_observer"
         require "hive/daemon/dispatch_request_queue"
+        require "hive/provider_health/attempt_observer"
+        require "hive/provider_health/store"
         observer = Hive::Conditions::AttemptObserver.new(store: store)
         new(
           store: store,
           condition_observer: observer,
+          provider_health_observer_factory: lambda do
+            health_store = Hive::ProviderHealth::Store.new(
+              root: File.join(state_home, "provider-health", "v1"),
+              cooldown_resolver: cooldown_resolver(store),
+              attempt_reader: lambda do |attempt_id|
+                attempt = store.fetch(attempt_id)
+                attempt && {
+                  "attempt_id" => attempt.attempt_id,
+                  "task_generation" => attempt.task_generation,
+                  "ownership_fence" => attempt.ownership_generation,
+                  "state" => attempt.state
+                }
+              end
+            )
+            Hive::ProviderHealth::AttemptObserver.new(store: health_store)
+          end,
           delivery_pending: lambda do |record|
             Hive::Daemon::DispatchRequestQueue.claimed(state_home: state_home).any? do |delivery|
               delivery.claim["attempt_id"].to_s == record.attempt_id
@@ -33,13 +51,29 @@ module Hive
         )
       end
 
+      def self.cooldown_resolver(store)
+        lambda do |evidence|
+          record = store.fetch(evidence.attempt_id)
+          policy = record && store.routing_policies.fetch_snapshot(
+            ownership_generation: record.ownership_generation,
+            subject: record.subject
+          )
+          policy&.account_policy&.dig(evidence.route.account_id, "cooldown_sec", evidence.failure_class) ||
+            Hive::ProviderHealth::Store::DEFAULT_COOLDOWN_SECONDS
+        rescue Hive::Attempts::StoreError
+          Hive::ProviderHealth::Store::DEFAULT_COOLDOWN_SECONDS
+        end
+      end
+
       def initialize(store:, condition_observer: nil, delivery_pending: nil,
-                     task_archived: nil, logger: nil)
+                     task_archived: nil, logger: nil,
+                     provider_health_observer_factory: nil)
         @store = store
         @condition_observer = condition_observer
         @delivery_pending = delivery_pending
         @task_archived = task_archived
         @logger = logger
+        @provider_health_observer_factory = provider_health_observer_factory
         @storage_health = store.storage_health
       end
 
@@ -49,9 +83,11 @@ module Hive
 
         @store.permanent_proofs.publish(record)
         publish_indexes(record)
+        consumers = record.state == "lost" ? LOST_CONSUMERS : TERMINAL_CONSUMERS
+        consumers = consumers + [ "provider_health" ] if record.explicit_routing?
         pending.create(
           attempt_id: record.attempt_id,
-          consumers: record.state == "lost" ? LOST_CONSUMERS : TERMINAL_CONSUMERS
+          consumers: consumers
         )
         pending.acknowledge(record.attempt_id, consumer: "accounting")
         pending.acknowledge(record.attempt_id, consumer: "loss") if record.state == "lost"
@@ -63,6 +99,23 @@ module Hive
 
         pending.acknowledge(record.attempt_id, consumer: consumer.to_s)
         true
+      end
+
+      def acknowledge_provider_health(record)
+        return true unless record.explicit_routing?
+        return false unless @provider_health_observer_factory
+
+        @provider_health_observer ||= @provider_health_observer_factory.call
+        result = @provider_health_observer.observe(record)
+        return false unless %i[acknowledged not_applicable].include?(result)
+
+        entry = pending.fetch(record.attempt_id)
+        if entry&.fetch("consumers", {})&.key?("provider_health")
+          pending.acknowledge(record.attempt_id, consumer: "provider_health")
+        end
+        true
+      rescue Hive::ProviderHealth::Error, Hive::ManagedDirectory::UnsafeError
+        false
       end
 
       def promote(record)
@@ -93,6 +146,7 @@ module Hive
       def finalize(record, now: Time.now.utc)
         return false unless prepare(record)
 
+        acknowledge_provider_health(record)
         acknowledge_journal(record, now: now)
         acknowledge(record, :request_delivery) unless delivery_pending?(record)
         promote(record)

@@ -305,7 +305,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   class FakeRecoveryCoordinator
-    attr_reader :resumes, :deferred, :marked
+    attr_reader :resumes, :deferred, :marked, :admission_failures,
+                :admission_observations
     attr_accessor :defer_error
 
     def initialize(status: "blocked")
@@ -313,6 +314,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @resumes = []
       @deferred = []
       @marked = []
+      @admission_failures = []
+      @admission_observations = []
       @defer_error = nil
     end
 
@@ -363,6 +366,30 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     def mark_dispatched(request, **attributes)
       @marked << { request: request, **attributes }
+    end
+
+    def request_admission_failure(request:, decision:, now:)
+      @admission_failures << { request: request, decision: decision, now: now }
+      Hive::Daemon::RecoveryCoordinator::Receipt.new(
+        status: "cooldown", request_id: "route-recovery-request",
+        attempt_id: nil, phase: "admitted",
+        failure_origin: "no_eligible_provider_route",
+        next_eligible_at: (now + 3_600).iso8601(6), owner: "scheduler",
+        reason: "no_eligible_provider_route", remediation: nil,
+        retry_count: 1, provider_hint: nil
+      )
+    end
+
+    def observe_admission_result(request:, result:, now:)
+      @admission_observations << { request: request, result: result, now: now }
+      Hive::Daemon::RecoveryCoordinator::Receipt.new(
+        status: result.status == :deferred ? "queued" : "cooldown",
+        request_id: request.request_id, attempt_id: nil,
+        phase: request.recovery["phase"], failure_origin: result.reason,
+        next_eligible_at: request.recovery["next_eligible_at"],
+        owner: "scheduler", reason: result.reason, remediation: nil,
+        retry_count: request.recovery["retry_count"], provider_hint: nil
+      )
     end
   end
 
@@ -1136,6 +1163,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       [ :existing_live, nil, :in_flight, "agent" ],
       [ :terminal_replay, nil, :attempt_terminal_replay, "hive" ],
       [ :deferred, "capacity", :attempt_capacity, "scheduler" ],
+      [ :deferred, "capacity_saturated", :attempt_capacity, "scheduler" ],
       [ :deferred, "attempt_lost", :attempt_lost, "hive" ],
       [ :deferred, "launch_handoff_failed", :launch_handoff_failed, "hive" ],
       [ :deferred, "invalid_predecessor", :invalid_predecessor, "hive" ]
@@ -1168,6 +1196,55 @@ class HiveDaemonDispatcherTest < Minitest::Test
       assert_equal expected_outcome, disposition.fetch(:decision)
       assert_equal expected_owner, disposition.fetch(:owner)
     end
+  end
+
+  def test_durable_dispatch_publishes_the_exact_provider_routing_decision
+    route = Hive::ProviderRouting::Route.new(
+      id: "account-a/model-a", account: "account-a", adapter: "codex",
+      launch_binding: "default", model: "model-a", effort: "high", order: 0,
+      capabilities: Hive::ProviderRouting::DEFAULT_CAPABILITIES
+    )
+    policy = Hive::ProviderRouting::Policy.explicit(
+      stage: "execute", routes: [ route ], requirements: Hive::ProviderRouting::Requirements.empty,
+      pin: nil,
+      account_policy: {
+        "account-a" => {
+          "adapter" => "codex", "launch_binding" => "default",
+          "models" => [ "model-a" ], "max_concurrent" => 2,
+          "cooldown_sec" => Hive::ProviderRouting::DEFAULT_COOLDOWN_SEC
+        }
+      }
+    )
+    request = Hive::ProviderRouting::Request.new(
+      policy: policy, task_generation: "generation-1"
+    )
+    decision = Hive::ProviderRouting::Decision.selected(
+      request: request, route: route, considered: [ route ],
+      decision_id: "decision-1", decided_at: T0
+    )
+    attempt = Struct.new(:attempt_id, :task_generation, :state)
+                    .new("attempt-1", "generation-1", "running")
+    result = Hive::Attempts::DispatchResult.new(
+      status: :accepted, attempt: attempt, receipt: nil,
+      attach_descriptor: nil, reason: nil, decision: decision
+    )
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) { |*_args, **_options| result }
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, = make_dispatcher(
+      rows: [], attempt_dispatcher: attempt_dispatcher, operational_snapshot: snapshot
+    )
+    observed = row(
+      stage: "4-execute", action: "ready_to_run", command: "hive run s1 --json"
+    )
+
+    outcome = dispatcher.send(:dispatch_or_block, observed, now: T0)
+    dispatcher.send(:observe_dispatch_outcome, observed, outcome)
+
+    disposition = snapshot.calls.last.last
+    assert_equal "decision-1", disposition.dig(:routing, "decision_id")
+    assert_equal "account-a/model-a", disposition.dig(:routing, "selected_route")
+    assert_equal "attempt", disposition.dig(:routing, "next_action_owner")
   end
 
   def test_handled_status_failure_publishes_failed_without_authoritative_tasks
@@ -5143,6 +5220,175 @@ end
 
       assert_equal [ T0 ], coordinator.deferred.map { |entry| entry.fetch(:now) }
       assert_equal [ "recovery-deferred" ],
+                   Q.pending(state_home: state_home).map(&:request_id)
+      assert_empty Q.claimed(state_home: state_home)
+    end
+  end
+
+  def test_explicit_capacity_is_neutral_for_an_active_recovery_request
+    Dir.mktmpdir("hive-routed-capacity") do |state_home|
+      decision = Object.new
+      result = Hive::Attempts::DispatchResult.new(
+        status: :deferred, attempt: nil, receipt: nil,
+        attach_descriptor: nil, reason: "capacity_saturated", decision: decision
+      )
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) { |*_args, **_kwargs| result }
+      coordinator = FakeRecoveryCoordinator.new(status: "queued")
+      dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        attempt_dispatcher: attempt_dispatcher,
+        recovery_coordinator: coordinator
+      )
+      Q.write_request!(
+        project: "p1", slug: "recovery-task", argv: %w[hive run recovery-task],
+        request_id: "routed-capacity", task_generation: "c" * 64,
+        task_id: 817, expected_stage: "4-execute",
+        expected_marker_name: "error", expected_marker_id: "marker-1",
+        recovery: dispatcher_recovery(phase: "cleared"),
+        state_home: state_home, now: T0
+      )
+      request = Q.pending(state_home: state_home).fetch(0)
+
+      assert_same result, dispatcher.send(:dispatch_request!, request, now: T0)
+      assert_equal 1, coordinator.admission_observations.size
+      assert_empty coordinator.deferred
+      assert_equal [ "routed-capacity" ],
+                   Q.pending(state_home: state_home).map(&:request_id)
+      assert_empty Q.claimed(state_home: state_home)
+    end
+  end
+
+  def test_initial_no_route_becomes_one_markerless_recovery_request
+    Dir.mktmpdir("hive-routed-no-route") do |state_home|
+      decision = Object.new
+      result = Hive::Attempts::DispatchResult.new(
+        status: :no_route, attempt: nil, receipt: nil,
+        attach_descriptor: nil, reason: "no_eligible_provider_route",
+        decision: decision
+      )
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) { |*_args, **_kwargs| result }
+      coordinator = FakeRecoveryCoordinator.new
+      dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        attempt_dispatcher: attempt_dispatcher,
+        recovery_coordinator: coordinator
+      )
+      Q.write_request!(
+        project: "p1", slug: "route-task", argv: %w[hive run route-task],
+        request_id: "initial-route-request", state_home: state_home, now: T0
+      )
+      request = Q.pending(state_home: state_home).fetch(0)
+
+      assert_same result, dispatcher.send(:dispatch_request!, request, now: T0)
+      assert_equal 1, coordinator.admission_failures.size
+      assert_same decision, coordinator.admission_failures.dig(0, :decision)
+      assert_empty coordinator.admission_observations
+      assert_empty Q.pending(state_home: state_home)
+      assert_empty Q.claimed(state_home: state_home)
+    end
+  end
+
+  def test_initial_no_route_releases_the_claim_when_recovery_reuses_the_request_id
+    Dir.mktmpdir("hive-routed-no-route-reuse") do |state_home|
+      decision = Object.new
+      result = Hive::Attempts::DispatchResult.new(
+        status: :no_route, attempt: nil, receipt: nil,
+        attach_descriptor: nil, reason: "no_eligible_provider_route",
+        decision: decision
+      )
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) { |*_args, **_kwargs| result }
+      coordinator = FakeRecoveryCoordinator.new
+      coordinator.define_singleton_method(:request_admission_failure) do |request:, decision:, now:|
+        @admission_failures << { request: request, decision: decision, now: now }
+        Hive::Daemon::RecoveryCoordinator::Receipt.new(
+          status: "cooldown", request_id: request.request_id,
+          attempt_id: nil, phase: "admitted",
+          failure_origin: "no_eligible_provider_route",
+          next_eligible_at: (now + 3_600).iso8601(6), owner: "scheduler",
+          reason: "no_eligible_provider_route", remediation: nil,
+          retry_count: 1, provider_hint: nil
+        )
+      end
+      dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        attempt_dispatcher: attempt_dispatcher,
+        recovery_coordinator: coordinator
+      )
+      Q.write_request!(
+        project: "p1", slug: "route-task", argv: %w[hive run route-task],
+        request_id: "reused-route-request", state_home: state_home, now: T0
+      )
+      request = Q.pending(state_home: state_home).fetch(0)
+
+      assert_same result, dispatcher.send(:dispatch_request!, request, now: T0)
+      assert_equal [ "reused-route-request" ],
+                   Q.pending(state_home: state_home).map(&:request_id)
+      assert_empty Q.claimed(state_home: state_home)
+    end
+  end
+
+  def test_direct_durable_no_route_enters_markerless_recovery_and_logs_the_owner
+    decision = Object.new
+    result = Hive::Attempts::DispatchResult.new(
+      status: :no_route, attempt: nil, receipt: nil,
+      attach_descriptor: nil, reason: "no_eligible_provider_route",
+      decision: decision
+    )
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) { |*_args, **_kwargs| result }
+    coordinator = FakeRecoveryCoordinator.new
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [], attempt_dispatcher: attempt_dispatcher,
+      recovery_coordinator: coordinator
+    )
+
+    observed = dispatcher.send(
+      :dispatch_durable_command,
+      "hive run route-task",
+      project: "p1", slug: "route-task", stage: "4-execute",
+      now: T0, trigger: "advance", request_id: nil
+    )
+
+    assert_same result, observed
+    assert_equal 1, coordinator.admission_failures.length
+    assert_same decision, coordinator.admission_failures.dig(0, :decision)
+    event = logger.events.find { |name, _attrs| name == :blocked }
+    assert_equal "route-recovery-request", event.dig(1, :recovery_request_id)
+    assert_equal "cooldown", event.dig(1, :recovery_status)
+  end
+
+  def test_post_failure_no_route_updates_the_existing_recovery_request
+    Dir.mktmpdir("hive-routed-recovery-no-route") do |state_home|
+      result = Hive::Attempts::DispatchResult.new(
+        status: :no_route, attempt: nil, receipt: nil,
+        attach_descriptor: nil, reason: "no_eligible_provider_route",
+        decision: Object.new
+      )
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) { |*_args, **_kwargs| result }
+      coordinator = FakeRecoveryCoordinator.new(status: "queued")
+      dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        attempt_dispatcher: attempt_dispatcher,
+        recovery_coordinator: coordinator
+      )
+      Q.write_request!(
+        project: "p1", slug: "recovery-task", argv: %w[hive run recovery-task],
+        request_id: "existing-route-recovery", task_generation: "c" * 64,
+        task_id: 817, expected_stage: "4-execute",
+        expected_marker_name: "error", expected_marker_id: "marker-1",
+        recovery: dispatcher_recovery(phase: "cleared"),
+        state_home: state_home, now: T0
+      )
+      request = Q.pending(state_home: state_home).fetch(0)
+
+      assert_same result, dispatcher.send(:dispatch_request!, request, now: T0)
+      assert_equal 1, coordinator.admission_observations.size
+      assert_empty coordinator.admission_failures
+      assert_equal [ "existing-route-recovery" ],
                    Q.pending(state_home: state_home).map(&:request_id)
       assert_empty Q.claimed(state_home: state_home)
     end

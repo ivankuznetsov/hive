@@ -13,6 +13,8 @@ ruby "~> 3.4"
 # `Bubbletea::VERSION` on load, but the lock-down at the dependency layer
 # is the first line of defence. See `lib/hive/tui/paste_aware_runner.rb` and
 # the dependency rationale in `wiki/architecture.md`.
+gem "agent-cli-runtime", path: "components/agent-cli-runtime"
+
 gemspec
 
 group :development, :test do

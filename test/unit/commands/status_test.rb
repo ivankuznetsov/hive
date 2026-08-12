@@ -523,6 +523,22 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_operational_row_renders_a_no_selection_routing_reason
+    row = {
+      "identity" => {
+        "project" => "demo", "slug" => "routed", "display_name" => "Routed"
+      },
+      "position" => { "stage" => "4-execute", "marker" => "none" },
+      "blocker_owner" => "operator",
+      "reason" => "provider health is unavailable",
+      "routing" => { "selected_route" => nil, "reason" => "health_state_unavailable" }
+    }
+
+    line = Hive::Commands::Status.new.send(:operational_row_line, row)
+
+    assert_includes line, "routing health_state_unavailable"
+  end
+
   def test_json_payload_unblocks_dependency_at_gate_stage
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

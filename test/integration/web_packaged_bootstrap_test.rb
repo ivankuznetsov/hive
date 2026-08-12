@@ -9,6 +9,7 @@ require "zlib"
 
 class WebPackagedBootstrapTest < Minitest::Test
   ROOT = File.expand_path("../..", __dir__)
+  AGENT_CLI_RUNTIME_ROOT = File.join(ROOT, "components", "agent-cli-runtime")
 
   def test_installed_gem_root_bootstraps_without_parent_checkout_gemspec
     Dir.mktmpdir("hive-packaged-web") do |tmp|
@@ -20,6 +21,21 @@ class WebPackagedBootstrapTest < Minitest::Test
       assert build_status.success?, "gem build failed: #{build_out}\n#{build_err}"
 
       gem_home = File.join(tmp, "gems")
+      runtime_gem_file = File.join(tmp, "agent-cli-runtime.gem")
+      runtime_build_out, runtime_build_err, runtime_build_status = Open3.capture3(
+        "gem", "build", File.join(AGENT_CLI_RUNTIME_ROOT, "agent-cli-runtime.gemspec"),
+        "--output", runtime_gem_file,
+        chdir: AGENT_CLI_RUNTIME_ROOT
+      )
+      assert runtime_build_status.success?,
+             "agent-cli-runtime gem build failed: #{runtime_build_out}\n#{runtime_build_err}"
+      _runtime_out, runtime_install_err, runtime_install_status = Open3.capture3(
+        "gem", "install", runtime_gem_file, "--install-dir", gem_home,
+        "--bindir", File.join(gem_home, "bin"), "--ignore-dependencies", "--no-document"
+      )
+      assert runtime_install_status.success?,
+             "agent-cli-runtime gem install failed: #{runtime_install_err}"
+
       _out, install_err, install_status = Open3.capture3(
         "gem", "install", gem_file, "--install-dir", gem_home,
         "--bindir", File.join(gem_home, "bin"), "--ignore-dependencies", "--no-document"

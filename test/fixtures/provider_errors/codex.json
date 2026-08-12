@@ -1,0 +1,18 @@
+{
+  "schema": "hive-provider-error-capture/v1",
+  "adapter": "codex",
+  "channel": "jsonl_transport",
+  "adapter_version": "0.147.0",
+  "capture_status": "sanitized_real_capture",
+  "observed_at": "2026-08-11T10:59:00Z",
+  "source_artifact_sha256": "dbad8a752ffd091477a2765f7e12cb0de5a253db759a60027d7ac71a611d1b9c",
+  "scenario": "subscription_usage_limit",
+  "observed_event": {
+    "type": "turn.failed",
+    "field_set": ["error.message"]
+  },
+  "trusted_scope": null,
+  "trusted_class": null,
+  "retained_fields": ["type"],
+  "classification": "task_local"
+}

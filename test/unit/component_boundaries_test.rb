@@ -19,6 +19,9 @@ class ComponentBoundariesTest < Minitest::Test
       agent-artifact-firewall
       attempts
       patrol-effects
+      provider-health
+      provider-routing-operations
+      provider-routing-policy
       safe-agent-git-gate
       skillpack
       user-service
@@ -29,11 +32,44 @@ class ComponentBoundariesTest < Minitest::Test
       workflow-creator-values
     ], contract.components.map { |component| component.fetch("id") }.sort
 
+    provider_health = contract.component("provider-health")
+    assert_equal "candidate", provider_health.fetch("state")
+    assert_equal "hive/provider_health", provider_health.dig("entrypoint", "require")
+    assert_equal "Hive::ProviderHealth", provider_health.dig("entrypoint", "constant")
+    assert_includes provider_health.dig("public_contract", "values"),
+                    "Hive::ProviderHealth::Store"
+    assert_empty provider_health.fetch("component_dependencies")
+    assert_includes provider_health.fetch("allowed_hive_dependencies"),
+                    "hive/output_reference"
+    refute provider_health.fetch("allowed_hive_dependencies").any? { |path| path.start_with?("hive/attempts") }
+    assert_empty provider_health.fetch("migration_exceptions")
+
+    provider_routing = contract.component("provider-routing-policy")
+    assert_equal "candidate", provider_routing.fetch("state")
+    assert_equal "hive/provider_routing", provider_routing.dig("entrypoint", "require")
+    assert_equal "Hive::ProviderRouting", provider_routing.dig("entrypoint", "constant")
+    assert_includes provider_routing.dig("public_contract", "values"),
+                    "Hive::ProviderRouting::Policy"
+    assert_empty provider_routing.fetch("component_dependencies")
+    assert_includes provider_routing.fetch("allowed_hive_dependencies"),
+                    "hive/point_storage"
+    assert_match(/routing-policy snapshots/, provider_routing.fetch("mutation_authority"))
+    assert_empty provider_routing.fetch("migration_exceptions")
+
+    provider_operations = contract.component("provider-routing-operations")
+    assert_equal "candidate", provider_operations.fetch("state")
+    assert_equal %w[attempts provider-health provider-routing-policy],
+                 provider_operations.fetch("component_dependencies")
+    assert_includes provider_operations.dig("public_contract", "values"),
+                    "Hive::ProviderRouting::OperationalProjection"
+    assert_empty provider_operations.fetch("migration_exceptions")
+
     attempts = contract.component("attempts")
     assert_equal "candidate", attempts.fetch("state")
     assert_equal "hive/attempts/api", attempts.dig("entrypoint", "require")
     assert_equal "Hive::Attempts::API", attempts.dig("entrypoint", "constant")
-    assert_empty attempts.fetch("component_dependencies")
+    assert_equal %w[provider-health provider-routing-policy],
+                 attempts.fetch("component_dependencies")
     assert_empty attempts.fetch("migration_exceptions")
     assert_equal %w[
       Hive::Attempts::ClientResult
@@ -68,19 +104,28 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal(
       {
         "Hive::Attempts::AdmissionView" => [ "lib/hive/recovery/migration.rb" ],
-        "Hive::Attempts::FinalizationMaintenance" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::FinalizationMaintenance" => [
+          "lib/hive/commands/daemon.rb",
+          "lib/hive/recovery/migration.rb"
+        ],
         "Hive::Attempts::LostOutcomeProcessor" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::LostOutcomeStore" => [ "lib/hive/commands/daemon.rb" ],
-        "Hive::Attempts::ProcessIdentity" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::ProcessIdentity" => [
+          "lib/hive/commands/daemon.rb",
+          "lib/hive/recovery/migration.rb"
+        ],
         "Hive::Attempts::Reconciler" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::StorageHealth" => [ "lib/hive/recovery/migration.rb" ],
         "Hive::Attempts::Store" => [
           "lib/hive/commands/attempt_supervise.rb",
+          "lib/hive/commands/circuits.rb",
           "lib/hive/commands/daemon.rb",
           "lib/hive/commands/module/dry_run.rb",
           "lib/hive/conditions/execute_boundary.rb",
           "lib/hive/implementation_identity/store.rb",
           "lib/hive/modules/inspector.rb",
+          "lib/hive/provider_routing/operational_projection.rb",
+          "lib/hive/daemon/recovery_coordinator.rb",
           "lib/hive/recovery/migration.rb",
           "lib/hive/task_closure.rb",
           "lib/hive/task_projection/store.rb"
@@ -194,6 +239,12 @@ class ComponentBoundariesTest < Minitest::Test
                     "Hive::AgentRuntime::ObservableResult"
     assert_includes agent_abi.dig("public_contract", "errors"),
                     "Hive::AgentRuntime::UnsupportedCapability"
+    assert_equal [ "AgentCliRuntime" ],
+                 agent_abi.fetch("internal_collaborators")
+    assert_includes agent_abi.fetch("allowed_hive_dependencies"),
+                    "hive/model_routing"
+    refute_includes agent_abi.fetch("allowed_hive_dependencies"),
+                    "hive/secret_patterns"
     assert_empty agent_abi.fetch("migration_exceptions")
 
     artifact_firewall = contract.component("agent-artifact-firewall")
@@ -441,7 +492,10 @@ class ComponentBoundariesTest < Minitest::Test
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
-    assert_equal %w[attempts patrol-effects],
+    assert_equal %w[
+      attempts patrol-effects provider-health provider-routing-operations
+      provider-routing-policy
+    ],
                  remaining_candidates.map { |entry| entry.fetch("id") }.sort
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
@@ -747,6 +801,10 @@ class ComponentBoundariesTest < Minitest::Test
 
     assert_equal(
       {
+        "attempts" => [ "provider-health", "provider-routing-policy" ],
+        "provider-routing-operations" => [
+          "attempts", "provider-health", "provider-routing-policy"
+        ],
         "skillpack" => [ "agent-abi" ],
         "workflow-creator-core" => [ "workflow-creator-values" ],
         "workflow-creator-live" => [ "workflow-creator-core", "workflow-creator-execution" ],

@@ -83,6 +83,7 @@ module Hive
         attempt_duplicate
         attempt_terminal_replay
         attempt_capacity_deferred
+        attempt_route_unavailable
         attempt_legacy_backfilled
         answer_digest_failure_backoff
         answer_digest_state_unreadable

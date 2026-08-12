@@ -179,8 +179,8 @@ operator-ward device flows: the one-time code is entered at the provider, the
 CLI polls in the background, and the status frame keeps polling until the child
 exits instead of showing a paste-back form. `gh`'s device-flow prompt asks for
 a bare Enter before polling, so the relay auto-answers that prompt.
-Grok follows the same operator-ward shape via `grok login --device-auth` and
-also supports non-interactive `XAI_API_KEY` authentication.
+Grok follows the same operator-ward shape via `grok login --device-auth`.
+Hive deliberately does not select the CLI's separate API-key mode.
 For Pi, Hive web validates that the submitted token JSON is a non-empty object
 and writes it to `~/.pi/agent/auth.json` with mode `0600`. The container sets
 `HOME=/data/home`, so `~/.claude`, `~/.codex`, `~/.pi`, `~/.grok`, and `~/.config/gh`
@@ -206,7 +206,7 @@ behavior is covered in [[commands/web]].
 
 **Decision:** Eliminate the dual-writer for state-mutating `hive` verbs by routing all of them through a file-backed request queue at `<state_home>/dispatch_requests/`. The bot stops being a subprocess caller for the allowlisted verb set; instead it writes a JSON request file via `Hive::Bot::DispatchRequestWriter.write!` (atomic via tmp + rename). Hive web later reused the same producer path. Recoverable-marker adapters now submit observations through `Hive::Recovery::API`; one `RecoveryCoordinator` persists the retry request and owns the guarded marker transition. `StaleAgentHealer` is only the automatic scheduler, with no special `3-plan` clear/requeue path. The daemon's tick loop scans the queue via `Hive::Daemon::DispatchRequestQueue.pending`, validates argv against `ALLOWED_VERBS` (and the request's slug against ADR-012's regex + project against a name regex), and dispatches through the same durable-attempt path as auto-advance. The daemon's completion observation then keeps the baseline current.
 
-The queue schema is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published under `schemas/` (per ADR-025 — every entry in SCHEMA_VERSIONS must have a corresponding schema file). Current producers emit `hive-dispatch-request.v4`. V4 carries generation intent for ordinary delivery and, for recovery, canonical task/stage/marker identity plus the crash-restartable `admitted → cleared → dispatched → terminal` lifecycle. Pending v2/v3 delivery records remain readable only to drain work written by an older installed daemon; no producer emits them. Recovery requests never use a sequence sidecar or adapter-owned clear/run pair.
+The queue schema is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published under `schemas/` (per ADR-025 — every entry in SCHEMA_VERSIONS must have a corresponding schema file). Current producers emit `hive-dispatch-request.v5`. V5 carries generation intent for ordinary delivery and, for recovery, canonical task/stage/marker identity plus markerless provider-admission observations and the crash-restartable `admitted → cleared → dispatched → terminal` lifecycle. Pending v1-v4 delivery records are upgraded by the one-off migration before the runtime queue opens; no producer emits them. Recovery requests never use a sequence sidecar or adapter-owned clear/run pair.
 
 The allowlist is closed: `run develop brainstorm plan review open-pr artifacts finalize archive markers daemon`. Adding a new state-mutating verb to the daemon requires updating `ALLOWED_VERBS` and the schema's `$defs.ALLOWED_VERBS` in lockstep — a unit test asserts cross-list equality.
 
@@ -639,7 +639,8 @@ projection, not another compatibility layer beside the earlier mechanisms.
 
 **Decision:** Migrate every in-repository producer and consumer in one change,
 then publish only the current `hive-status.v7`,
-`hive-operational-status.v3`, and `hive-act.v2` contracts. Remove their
+`hive-operational-status.v4`, and `hive-act.v2` contracts. Operational-status
+v4 adds the coordinated required nullable exact-routing projection. Remove their
 superseded schema files and compatibility assertions instead of accepting or
 translating older recovery/status documents. Older persisted task state is
 migrated at the task/state layer; wire-schema compatibility is not a second

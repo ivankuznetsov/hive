@@ -24,6 +24,13 @@ module Hive
   # ecosystem (Ruby/Rails); the per-project `bin/ci` pattern keeps hive
   # ecosystem-agnostic.
   module Reviewers
+    ROUTED_REVIEW_TEMPLATES = {
+      "claude" => "reviewer_claude_ce_code_review.md.erb",
+      "codex" => "reviewer_codex_ce_code_review.md.erb",
+      "grok" => "reviewer_grok_ce_code_review.md.erb",
+      "pi" => "reviewer_codex_ce_code_review.md.erb"
+    }.freeze
+
     # Default attempt budget for a reviewer adapter (Hive::Reviewers::Agent).
     # A reviewer spec can override via the optional `max_attempts` field;
     # `1` disables retry (single attempt). Backoff between failed attempts
@@ -59,6 +66,7 @@ module Hive
     # AgentProfile lookup. Pre-cfg callers continue to work; the lookup
     # falls back to the registry-stored profile when cfg is nil.
     def self.dispatch(spec, ctx, cfg: nil)
+      spec = admitted_route_spec(spec)
       kind = (spec["kind"] || "agent").to_s
       case kind
       when "agent"
@@ -80,5 +88,30 @@ module Hive
               "unknown reviewer kind: #{kind.inspect} (expected 'agent' or 'codex_review')"
       end
     end
+
+    # Native `codex review` is deliberately a direct subprocess adapter. It
+    # predates durable provider routing, so it has no account launch-binding
+    # seam, trusted evidence channel, or provider-neutral failure handoff.
+    # Inside an explicitly routed durable attempt, translate that one native
+    # reviewer into the normal agent adapter. Stages::Base then supplies the
+    # already-admitted account, adapter, model, effort, and evidence pipe just
+    # like every other provider-backed invocation in the enclosing attempt.
+    def self.admitted_route_spec(spec)
+      context = Hive::Attempts::Context.current
+      return spec unless context&.explicit_routing?
+      return spec unless (spec["kind"] || "agent").to_s == "codex_review"
+
+      adapter = context.adapter.to_s
+      spec.merge(
+        "kind" => "agent",
+        "agent" => adapter,
+        "skill" => "ce-code-review",
+        "prompt_template" => ROUTED_REVIEW_TEMPLATES.fetch(
+          adapter,
+          "reviewer_codex_ce_code_review.md.erb"
+        )
+      ).freeze
+    end
+    private_class_method :admitted_route_spec
   end
 end

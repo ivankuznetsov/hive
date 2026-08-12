@@ -1,3 +1,5 @@
+require "digest"
+require "json"
 require "time"
 require "hive/attempts/capability"
 require "hive/attempts/output_reference"
@@ -13,7 +15,47 @@ module Hive
     # generation lock; callers can only observe snapshots.
     class Record
       SCHEMA = "hive-attempt"
-      SCHEMA_VERSION = 3
+      SCHEMA_VERSION = 4
+      RECEIPT_VERSION = 1
+      MAX_IDENTIFIER_BYTES = 128
+      MAX_DETAIL_BYTES = 240
+      MAX_EVIDENCE_REFERENCE_PATH = 512
+      MAX_RESET_HINT_SECONDS = 7 * 24 * 60 * 60
+      SHA256_PATTERN = /\A[0-9a-f]{64}\z/
+      PROVIDER_FAILURE_CLASSES = %w[
+        authentication billing_configuration exhausted_credits account_quota
+        provider_rate_limit provider_outage
+      ].freeze
+      MODEL_FAILURE_CLASSES = %w[
+        unavailable disabled deprecated model_quota model_rate model_capacity
+      ].freeze
+      TRUSTED_PROVENANCE = %w[
+        claude_stream_json_transport codex_jsonl_transport
+        grok_streaming_json_transport pi_json_transport provider_diagnostic
+      ].freeze
+      RECEIPT_KEYS = %w[
+        receipt_version terminal_lease_version attempt_id task_generation
+        ownership_generation task_input_epoch outcome exit_status started_at ended_at
+        final_checkpoint output_references log_reference provider_evidence
+      ].freeze
+      EXPLICIT_ROUTING_KEYS = %w[
+        mode policy_digest decision route circuit_generations probe_bindings
+      ].freeze
+      DECISION_KEYS = %w[decision_id policy_digest decided_at exclusions].freeze
+      EXCLUSION_KEYS = %w[route_id reason detail].freeze
+      ROUTE_KEYS = %w[
+        route_id provider_account_id adapter launch_binding_id model effort
+      ].freeze
+      CIRCUIT_GENERATION_KEYS = %w[scope journal_epoch observed_generation].freeze
+      SCOPE_KEYS = %w[kind provider_account_id model].freeze
+      PROBE_BINDING_KEYS = %w[
+        scope journal_epoch observed_generation claim_generation attempt_id
+        task_generation ownership_fence
+      ].freeze
+      PROVIDER_EVIDENCE_KEYS = %w[
+        failure_class scope provenance route_id reset_hint_seconds fingerprint
+        source_reference
+      ].freeze
       SUBJECT_KINDS = %w[task_stage module_hook].freeze
       STATES = %w[launching running terminal lost].freeze
       TERMINAL_OUTCOMES = %w[succeeded failed cancelled].freeze
@@ -22,7 +64,7 @@ module Hive
         schema schema_version attempt_id request_id predecessor_attempt_id
         task_id project task_slug intended_stage task_generation progress_token
         ownership_generation task_input_epoch
-        provider worker_argv claim_capability_digest starting_revision retry_charge
+        provider routing worker_argv claim_capability_digest starting_revision retry_charge
         subject created_at accepted_at
       ].freeze
       REQUIRED_KEYS = (IMMUTABLE_KEYS + %w[
@@ -39,7 +81,7 @@ module Hive
                          worker_argv:, claim_capability_digest:, starting_revision:, retry_charge:,
                          inherited_outputs:, now:,
                          launch_timeout_sec:, ownership_generation: nil,
-                         task_input_epoch: 0, subject: nil)
+                         task_input_epoch: 0, subject: nil, routing: { "mode" => "legacy" })
         timestamp = iso8601(now)
         subject ||= task_stage_subject(
           task_id: task_id, task_slug: task_slug, intended_stage: intended_stage
@@ -59,6 +101,7 @@ module Hive
           "task_input_epoch" => task_input_epoch,
           "progress_token" => progress_token,
           "provider" => provider,
+          "routing" => Hive::StringifyKeys.call(routing),
           "worker_argv" => Hive::StringifyKeys.call(worker_argv),
           "claim_capability_digest" => claim_capability_digest,
           "starting_revision" => starting_revision,
@@ -96,24 +139,40 @@ module Hive
       end
 
       def self.validate_receipt!(receipt, attempt_id:, task_generation:, task_input_epoch: nil,
-                                 ownership_generation: nil)
+                                 ownership_generation: nil, terminal_lease_version: nil,
+                                 routing: { "mode" => "legacy" })
         unless receipt.is_a?(Hash)
           raise InvalidReceipt, "terminal receipt must be an object"
         end
-        required = %w[
-          attempt_id task_generation outcome exit_status started_at ended_at
-          final_checkpoint output_references log_reference
-        ]
-        missing = required.reject { |key| receipt.key?(key) }
-        raise InvalidReceipt, "terminal receipt missing #{missing.join(', ')}" unless missing.empty?
+        validate_exact_keys!(receipt, RECEIPT_KEYS, "terminal receipt", InvalidReceipt)
+        unless receipt["receipt_version"] == RECEIPT_VERSION
+          raise InvalidReceipt, "terminal receipt has unsupported receipt_version"
+        end
+        validate_nonnegative_integer!(
+          receipt["terminal_lease_version"], "terminal receipt lease version", InvalidReceipt
+        )
+        if !terminal_lease_version.nil? &&
+           receipt["terminal_lease_version"] != terminal_lease_version
+          raise InvalidReceipt, "terminal receipt lease version mismatch"
+        end
         raise InvalidReceipt, "terminal receipt attempt mismatch" unless receipt["attempt_id"] == attempt_id
         unless receipt["task_generation"] == task_generation
           raise InvalidReceipt, "terminal receipt task generation mismatch"
         end
-        if task_input_epoch && receipt["task_input_epoch"] != task_input_epoch
+        validate_identifier!(receipt["attempt_id"], "terminal receipt attempt", InvalidReceipt)
+        validate_identifier!(
+          receipt["task_generation"], "terminal receipt task generation", InvalidReceipt
+        )
+        validate_identifier!(
+          receipt["ownership_generation"], "terminal receipt ownership generation", InvalidReceipt
+        )
+        validate_nonnegative_integer!(
+          receipt["task_input_epoch"], "terminal receipt task input epoch", InvalidReceipt
+        )
+        if !task_input_epoch.nil? && receipt["task_input_epoch"] != task_input_epoch
           raise InvalidReceipt, "terminal receipt task input epoch mismatch"
         end
-        if ownership_generation && receipt["ownership_generation"] != ownership_generation
+        if !ownership_generation.nil? && receipt["ownership_generation"] != ownership_generation
           raise InvalidReceipt, "terminal receipt ownership generation mismatch"
         end
         unless TERMINAL_OUTCOMES.include?(receipt["outcome"])
@@ -139,6 +198,14 @@ module Hive
         rescue InvalidOutputReference => e
           raise InvalidReceipt, e.message
         end
+        validate_provider_evidence!(
+          receipt["provider_evidence"],
+          routing: routing,
+          protected_references: outputs + [ receipt["log_reference"] ]
+        )
+        if receipt["provider_evidence"] && receipt["outcome"] != "failed"
+          raise InvalidReceipt, "provider evidence requires a failed terminal outcome"
+        end
         true
       end
 
@@ -146,6 +213,8 @@ module Hive
         @data = Hive::StringifyKeys.call(data)
         validate_source_schema!
         validate!
+        self.class.deep_freeze(@data.fetch("routing"))
+        self.class.deep_freeze(@data["receipt"]) if @data["receipt"]
         @data.freeze
       end
 
@@ -165,6 +234,7 @@ module Hive
       def task_input_epoch = @data.fetch("task_input_epoch")
       def lease_version = @data.fetch("lease_version")
       def receipt = Hive::StringifyKeys.call(@data["receipt"])
+      def explicit_routing? = @data.dig("routing", "mode") == "explicit"
       def wrapper = Hive::StringifyKeys.call(@data["wrapper"])
       def worker = Hive::StringifyKeys.call(@data["worker"])
       def checkpoint = Hive::StringifyKeys.call(@data["checkpoint"])
@@ -225,6 +295,13 @@ module Hive
         unless @data["retry_charge"].is_a?(Integer) && @data["retry_charge"] >= 0
           raise InvalidRecord, "attempt record retry_charge must be non-negative"
         end
+        self.class.validate_routing!(
+          @data["routing"],
+          provider: @data["provider"],
+          attempt_id: attempt_id,
+          task_generation: task_generation,
+          ownership_generation: ownership_generation
+        )
         validate_subject!
         worker_argv = @data["worker_argv"]
         unless worker_argv.is_a?(Array) && worker_argv.all? { |value| value.is_a?(String) && !value.empty? }
@@ -262,7 +339,8 @@ module Hive
           raise InvalidRecord, "terminal attempt requires an outcome" unless TERMINAL_OUTCOMES.include?(outcome)
           self.class.validate_receipt!(
             @data["receipt"], attempt_id: attempt_id, task_generation: task_generation,
-            task_input_epoch: task_input_epoch, ownership_generation: ownership_generation
+            task_input_epoch: task_input_epoch, ownership_generation: ownership_generation,
+            terminal_lease_version: lease_version, routing: @data["routing"]
           )
           raise InvalidRecord, "terminal outcome and receipt disagree" unless @data["receipt"]["outcome"] == outcome
         elsif !outcome.nil? || !@data["receipt"].nil?
@@ -318,6 +396,300 @@ module Hive
       end
 
       class << self
+        def validate_routing!(routing, provider:, attempt_id:, task_generation:, ownership_generation:)
+          unless routing.is_a?(Hash)
+            raise InvalidRecord, "attempt routing must be an object"
+          end
+
+          case routing["mode"]
+          when "legacy"
+            validate_exact_keys!(routing, %w[mode], "legacy attempt routing", InvalidRecord)
+          when "explicit"
+            validate_explicit_routing!(
+              routing,
+              provider: provider,
+              attempt_id: attempt_id,
+              task_generation: task_generation,
+              ownership_generation: ownership_generation
+            )
+          else
+            raise InvalidRecord, "attempt routing mode must be legacy or explicit"
+          end
+          true
+        end
+
+        def validate_explicit_routing!(routing, provider:, attempt_id:, task_generation:,
+                                       ownership_generation:)
+          validate_exact_keys!(
+            routing, EXPLICIT_ROUTING_KEYS, "explicit attempt routing", InvalidRecord
+          )
+          policy_digest = routing["policy_digest"]
+          validate_sha256!(policy_digest, "routing policy digest", InvalidRecord)
+          validate_decision!(routing["decision"], policy_digest: policy_digest)
+          route = validate_route!(routing["route"])
+          unless route["adapter"] == provider
+            raise InvalidRecord, "explicit routing adapter must match the attempt provider"
+          end
+
+          circuits = validate_circuit_generations!(
+            routing["circuit_generations"], route: route
+          )
+          validate_probe_bindings!(
+            routing["probe_bindings"],
+            circuits: circuits,
+            attempt_id: attempt_id,
+            task_generation: task_generation,
+            ownership_generation: ownership_generation
+          )
+        end
+
+        def validate_decision!(decision, policy_digest:)
+          validate_exact_keys!(decision, DECISION_KEYS, "routing decision", InvalidRecord)
+          validate_identifier!(decision["decision_id"], "routing decision", InvalidRecord)
+          validate_sha256!(decision["policy_digest"], "routing decision policy digest", InvalidRecord)
+          unless decision["policy_digest"] == policy_digest
+            raise InvalidRecord, "routing decision policy digest mismatch"
+          end
+          parse_time(decision["decided_at"], label: "routing decision time", error_class: InvalidRecord)
+
+          exclusions = decision["exclusions"]
+          unless exclusions.is_a?(Array) && exclusions.length <= 1_024
+            raise InvalidRecord, "routing decision exclusions must be a bounded array"
+          end
+          route_ids = exclusions.map do |exclusion|
+            validate_exact_keys!(
+              exclusion, EXCLUSION_KEYS, "routing decision exclusion", InvalidRecord
+            )
+            validate_identifier!(exclusion["route_id"], "excluded route", InvalidRecord)
+            validate_identifier!(exclusion["reason"], "routing exclusion reason", InvalidRecord)
+            validate_optional_detail!(exclusion["detail"], "routing exclusion detail", InvalidRecord)
+            exclusion["route_id"]
+          end
+          if route_ids.uniq.length != route_ids.length
+            raise InvalidRecord, "routing decision cannot repeat an excluded route"
+          end
+        end
+
+        def validate_route!(route, error_class: InvalidRecord)
+          validate_exact_keys!(route, ROUTE_KEYS, "provider route", error_class)
+          %w[route_id provider_account_id adapter launch_binding_id model].each do |key|
+            validate_identifier!(route[key], "provider route #{key.tr('_', ' ')}", error_class)
+          end
+          unless route["effort"].nil?
+            validate_identifier!(route["effort"], "provider route effort", error_class)
+          end
+          route
+        end
+
+        def validate_circuit_generations!(generations, route:)
+          unless generations.is_a?(Array) && generations.length == 2
+            raise InvalidRecord, "explicit routing requires both enclosing circuit generations"
+          end
+          scopes = generations.map do |entry|
+            validate_exact_keys!(
+              entry, CIRCUIT_GENERATION_KEYS, "routing circuit generation", InvalidRecord
+            )
+            scope = validate_scope!(entry["scope"], "routing circuit scope", InvalidRecord)
+            validate_nonnegative_integer!(
+              entry["journal_epoch"], "routing circuit journal epoch", InvalidRecord
+            )
+            validate_nonnegative_integer!(
+              entry["observed_generation"], "routing circuit observed generation", InvalidRecord
+            )
+            scope
+          end
+          if scopes.uniq.length != scopes.length
+            raise InvalidRecord, "routing circuit generation vector cannot repeat a scope"
+          end
+
+          expected = [
+            [ "provider_account", route["provider_account_id"], nil ],
+            [ "model", route["provider_account_id"], route["model"] ]
+          ]
+          actual = scopes.map { |scope| scope_identity(scope) }
+          unless expected.all? { |scope| actual.include?(scope) }
+            raise InvalidRecord, "routing circuit scopes must enclose the selected route"
+          end
+          generations
+        end
+
+        def validate_probe_bindings!(bindings, circuits:, attempt_id:, task_generation:,
+                                     ownership_generation:)
+          unless bindings.is_a?(Array) && bindings.length <= 2
+            raise InvalidRecord, "routing probe bindings must be a bounded array"
+          end
+          scopes = bindings.map do |binding|
+            validate_exact_keys!(
+              binding, PROBE_BINDING_KEYS, "routing probe binding", InvalidRecord
+            )
+            scope = validate_scope!(binding["scope"], "routing probe scope", InvalidRecord)
+            validate_nonnegative_integer!(
+              binding["journal_epoch"], "routing probe journal epoch", InvalidRecord
+            )
+            validate_nonnegative_integer!(
+              binding["observed_generation"], "routing probe observed generation", InvalidRecord
+            )
+            validate_nonnegative_integer!(
+              binding["claim_generation"], "routing probe claim generation", InvalidRecord
+            )
+            unless binding["claim_generation"] == binding["observed_generation"] + 1
+              raise InvalidRecord, "routing probe claim generation must follow its observation"
+            end
+            unless binding["attempt_id"] == attempt_id &&
+                   binding["task_generation"] == task_generation &&
+                   binding["ownership_fence"] == ownership_generation
+              raise InvalidRecord, "routing probe binding does not match attempt ownership"
+            end
+            circuit = circuits.find { |entry| entry["scope"] == scope }
+            unless circuit && circuit["journal_epoch"] == binding["journal_epoch"] &&
+                   circuit["observed_generation"] == binding["observed_generation"]
+              raise InvalidRecord, "routing probe binding does not match its circuit observation"
+            end
+            scope
+          end
+          if scopes.uniq.length != scopes.length
+            raise InvalidRecord, "routing probe bindings cannot repeat a scope"
+          end
+        end
+
+        def validate_provider_evidence!(evidence, routing:, protected_references:)
+          return true if evidence.nil?
+          unless routing.is_a?(Hash) && routing["mode"] == "explicit"
+            raise InvalidReceipt, "provider evidence requires an explicit admitted route"
+          end
+
+          validate_exact_keys!(
+            evidence, PROVIDER_EVIDENCE_KEYS, "provider evidence", InvalidReceipt
+          )
+          route = validate_route!(routing["route"], error_class: InvalidReceipt)
+          scope = validate_scope!(evidence["scope"], "provider evidence scope", InvalidReceipt)
+          allowed_classes = scope["kind"] == "provider_account" ?
+            PROVIDER_FAILURE_CLASSES : MODEL_FAILURE_CLASSES
+          unless allowed_classes.include?(evidence["failure_class"])
+            raise InvalidReceipt, "provider evidence failure class is invalid for its scope"
+          end
+          unless TRUSTED_PROVENANCE.include?(evidence["provenance"])
+            raise InvalidReceipt, "provider evidence provenance is not allowlisted"
+          end
+          validate_identifier!(evidence["route_id"], "provider evidence route", InvalidReceipt)
+          unless evidence["route_id"] == route["route_id"]
+            raise InvalidReceipt, "provider evidence route does not match the admitted route"
+          end
+          unless scope["provider_account_id"] == route["provider_account_id"] &&
+                 (scope["kind"] == "provider_account" || scope["model"] == route["model"])
+            raise InvalidReceipt, "provider evidence scope does not match the admitted route"
+          end
+
+          reset_hint = evidence["reset_hint_seconds"]
+          unless reset_hint.nil? ||
+                 (reset_hint.is_a?(Integer) && reset_hint.between?(0, MAX_RESET_HINT_SECONDS))
+            raise InvalidReceipt, "provider evidence reset hint is outside the allowed bound"
+          end
+          validate_sha256!(evidence["fingerprint"], "provider evidence fingerprint", InvalidReceipt)
+          reference = evidence["source_reference"]
+          OutputReference.validate_shape!(reference)
+          if reference["path"].bytesize > MAX_EVIDENCE_REFERENCE_PATH
+            raise InvalidReceipt, "provider evidence source reference path is too long"
+          end
+          unless protected_references.include?(reference)
+            raise InvalidReceipt, "provider evidence source reference is not terminal output"
+          end
+
+          safe_fields = {
+            "failure_class" => evidence["failure_class"],
+            "scope" => scope,
+            "provenance" => evidence["provenance"],
+            "route_id" => evidence["route_id"],
+            "reset_hint_seconds" => reset_hint
+          }
+          expected = Digest::SHA256.hexdigest(JSON.generate(canonical_value(safe_fields)))
+          unless evidence["fingerprint"] == expected
+            raise InvalidReceipt, "provider evidence fingerprint does not match safe fields"
+          end
+          true
+        rescue InvalidOutputReference => e
+          raise InvalidReceipt, e.message
+        end
+
+        def validate_scope!(scope, label, error_class)
+          validate_exact_keys!(scope, SCOPE_KEYS, label, error_class)
+          unless %w[provider_account model].include?(scope["kind"])
+            raise error_class, "#{label} kind must be provider_account or model"
+          end
+          validate_identifier!(scope["provider_account_id"], "#{label} provider account", error_class)
+          if scope["kind"] == "provider_account"
+            raise error_class, "#{label} provider account must not include a model" unless scope["model"].nil?
+          else
+            validate_identifier!(scope["model"], "#{label} model", error_class)
+          end
+          scope
+        end
+
+        def validate_exact_keys!(value, expected, label, error_class)
+          unless value.is_a?(Hash) && value.keys.all?(String) && value.keys.sort == expected.sort
+            raise error_class, "#{label} has unexpected or missing fields"
+          end
+          true
+        end
+
+        def validate_identifier!(value, label, error_class)
+          unless value.is_a?(String) && !value.empty? && value.bytesize <= MAX_IDENTIFIER_BYTES &&
+                 value.valid_encoding? && !value.match?(/[\u0000-\u001f\u007f]/)
+            raise error_class, "#{label} identity is invalid"
+          end
+          true
+        end
+
+        def validate_optional_detail!(value, label, error_class)
+          return true if value.nil?
+          unless value.is_a?(String) && !value.empty? && value.bytesize <= MAX_DETAIL_BYTES &&
+                 value.valid_encoding? && !value.match?(/[\u0000-\u001f\u007f]/)
+            raise error_class, "#{label} is invalid"
+          end
+          true
+        end
+
+        def validate_nonnegative_integer!(value, label, error_class)
+          unless value.is_a?(Integer) && value >= 0
+            raise error_class, "#{label} must be a non-negative integer"
+          end
+          true
+        end
+
+        def validate_sha256!(value, label, error_class)
+          unless value.is_a?(String) && SHA256_PATTERN.match?(value)
+            raise error_class, "#{label} must be lowercase SHA-256"
+          end
+          true
+        end
+
+        def scope_identity(scope)
+          [ scope["kind"], scope["provider_account_id"], scope["model"] ]
+        end
+
+        def canonical_value(value)
+          case value
+          when Hash
+            value.keys.sort.to_h { |key| [ key, canonical_value(value.fetch(key)) ] }
+          when Array
+            value.map { |child| canonical_value(child) }
+          else
+            value
+          end
+        end
+
+        def deep_freeze(value)
+          case value
+          when Hash
+            value.each { |key, child| key.freeze; deep_freeze(child) }
+          when Array
+            value.each { |child| deep_freeze(child) }
+          when String
+            value.freeze
+          end
+          value&.freeze
+        end
+
         def iso8601(time)
           time.utc.iso8601(6)
         end

@@ -111,7 +111,7 @@ class E2EBinaryTest < Minitest::Test
     )
     assert status.success?, err
     assert_includes out, "recovery.provider_limit"
-    refute_includes out, "bin/hive-e2e run --coverage recovery.provider_limit"
+    assert_includes out, "bin/hive-e2e run --coverage recovery.provider_limit"
 
     out, err, status = Open3.capture3(
       hive_e2e, "coverage", "--match", "definitely-no-coverage", "--json"
@@ -141,7 +141,7 @@ class E2EBinaryTest < Minitest::Test
 
   def test_run_pending_or_planned_coverage_has_no_runnable_scenario
     out, err, status = Open3.capture3(
-      hive_e2e, "run", "--coverage", "recovery.provider_limit", "--json"
+      hive_e2e, "run", "--coverage", "attempt.caller_loss_adoption", "--json"
     )
 
     assert_equal 64, status.exitstatus
@@ -188,11 +188,15 @@ class E2EBinaryTest < Minitest::Test
       metadata = report.fetch("scenario_metadata")
 
       assert_equal 6, metadata.size
-      assert_equal 4, metadata.count { |entry| entry["pending"] == true }
+      assert_equal 3, metadata.count { |entry| entry["pending"] == true }
       assert_equal 6, metadata.map { |entry| entry["incident_id"] }.uniq.size
-      assert_equal 2, report.dig("summary", "total")
-      assert_equal 2, report.dig("summary", "passed")
-      assert_equal %w[incident_plan_only_dependency_gate incident_repository_routing],
+      assert_equal 3, report.dig("summary", "total")
+      assert_equal 3, report.dig("summary", "passed")
+      assert_equal %w[
+        incident_plan_only_dependency_gate
+        incident_provider_limit_retry
+        incident_repository_routing
+      ],
                    report.fetch("scenarios").map { |scenario| scenario.fetch("name") }.sort
       assert_equal "complete", report.fetch("status")
     end
@@ -206,7 +210,7 @@ class E2EBinaryTest < Minitest::Test
       )
 
       assert status.success?, err
-      assert_match(/selected 6, executed 2, pending 4, passed 2, failed 0/, out)
+      assert_match(/selected 6, executed 3, pending 3, passed 3, failed 0/, out)
     end
   end
 

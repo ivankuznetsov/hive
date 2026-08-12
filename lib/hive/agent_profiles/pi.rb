@@ -1,104 +1,20 @@
 require "hive/agent_profile"
 require "hive/skill_check"
-require "hive/agent_profiles/usage_extractors"
 
 module Hive
   module AgentProfiles
-    # Pi (mariozechner/pi-coding-agent) profile. Headless via -p / --print.
-    #
-    # Two ADR-008 boundary gaps documented in U11's matrix:
-    # - No --add-dir-equivalent flag; filesystem isolation is the OS user's
-    #   bound only. ADR-018 amends ADR-008 to cover this trade-off.
-    # - No permission-skip flag; tools (read, bash, edit, write) are enabled
-    #   by default. Use --tools <allowlist> for tool-level restriction in
-    #   read-only roles (e.g., reviewer).
-    #
-    # Pre-registered as profile-able but NOT in hive's default reviewer set
-    # — users opt in per project. Pi requires an interactive provider login
-    # before it can be invoked headless; PiProfile#preflight! enforces this.
-    #
-    # Source of truth: docs/notes/headless-agent-cli-matrix.md (pi column).
-    # Verify pi is logged in to a provider. ~/.pi/agent/auth.json being
-    # empty {} means the user hasn't run `pi` interactively to log in yet.
-    #
-    # Every error path translates to Hive::AgentError so the spawn_agent
-    # error contract holds for callers (who only rescue AgentError, not raw
-    # Errno or ArgumentError). Edge cases handled:
-    # - HOME unset → File.expand_path raises ArgumentError
-    # - auth.json unreadable (permissions, broken symlink) → File.read raises Errno::*
-    # - content is empty / whitespace / "{}" / has no real fields → not logged in
-    PI_PREFLIGHT = -> {
-      auth_path =
-        begin
-          File.join(Hive::SkillCheck::Pi.resolve_agent_dir(ENV), "auth.json")
-        rescue ArgumentError => e
-          raise Hive::AgentError,
-                "pi profile preflight failed: cannot resolve home directory (#{e.message}). " \
-                "Set $HOME or run `pi` interactively and log in to a provider."
-        end
-
-      unless File.exist?(auth_path)
-        raise Hive::AgentError,
-              "pi profile preflight failed: #{auth_path} not found. " \
-              "Run `pi` interactively and log in to a provider before using pi as a hive agent CLI."
-      end
-
-      content =
-        begin
-          File.read(auth_path)
-        rescue SystemCallError => e
-          raise Hive::AgentError,
-                "pi profile preflight failed: cannot read #{auth_path} (#{e.class.name.split('::').last}: #{e.message})."
-        end
-
-      stripped = content.strip
-      # Treat anything that isn't a non-trivial JSON object as "not logged in".
-      # Whitespace, "{}", and JSON whose only content is whitespace all count
-      # as the empty case. Avoids depending on a specific upstream pi schema.
-      not_logged_in = stripped.empty? ||
-                      stripped == "{}" ||
-                      stripped.match?(/\A\{\s*\}\z/m)
-
-      if not_logged_in
-        raise Hive::AgentError,
-              "pi profile preflight failed: no provider configured in #{auth_path}. " \
-              "Run `pi` interactively and log in to a provider before using pi as a hive agent CLI."
-      end
-
-      nil
-    }
-
     PI = AgentProfile.new(
-      name: :pi,
-      bin_default: "pi",
-      env_bin_override_key: "HIVE_PI_BIN",
-      headless_flag: "-p",
-      permission_skip_flag: nil, # pi has no permission gate
-      add_dir_flag: nil,         # pi has no --add-dir
-      budget_flag: nil,
-      output_format_flags: [ "--mode", "json", "--no-session" ],
-      version_flag: "--version",
-      # Pi resolves skills as `/skill:<name>` (extension commands as
-      # `/<name>`, prompt templates as `/<templatename>`). Hive's
-      # reviewer/stage prompts say "Use the <skill_invocation> skill",
-      # so the format must produce the skill form, not the
-      # extension-command form. See pi's README "Slash commands"
-      # section.
+      runtime_profile: AgentCliRuntime::Profiles.fetch(:pi),
+      auth_configuration_required: true,
       skill_syntax_format: "/skill:%{skill}",
-      headless_supported: true,
-      min_version: "0.70.2",
       status_detection_mode: :output_file_exists,
-      preflight: PI_PREFLIGHT,
-      usage_extractor: Hive::AgentProfiles::UsageExtractors::PI,
       skill_verifier: Hive::SkillCheck::Pi.method(:verify),
       default_model_resolver: ->(**kwargs) {
         Hive::ImplementationIdentity::NativeDefaults.resolve(:pi, **kwargs)
       },
-      model_argument_builder: ->(model) { [ "--model", model ] },
       routed_model_argument_builder: ->(model) {
         %w[default inherit].include?(model) ? [] : [ "--model", model ]
-      },
-      launcher_identity: "pi-coding-agent/v1"
+      }
     )
 
     register(:pi, PI)

@@ -66,6 +66,7 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
                  dispatcher_options.dig(:limits, :max_global)
     assert_equal :launcher, dispatcher_options.fetch(:launcher)
     assert_same task, dispatcher_options.fetch(:task_resolver).call(nil)
+    assert dispatcher_options.fetch(:routing_policy_resolver).call(nil, "4-execute").legacy?
   end
 
   def test_successor_uses_the_same_per_project_configuration

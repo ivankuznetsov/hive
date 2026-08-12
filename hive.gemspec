@@ -1,4 +1,4 @@
-require_relative "lib/hive"
+require_relative "lib/hive/version"
 
 Gem::Specification.new do |spec|
   spec.name        = "hive-cli"
@@ -57,6 +57,7 @@ Gem::Specification.new do |spec|
 
   # Runtime dependencies. Dev/test dependencies stay in the Gemfile because
   # they have no business being installed for end users.
+  spec.add_dependency "agent-cli-runtime", "~> 0.1.1"
   spec.add_dependency "base64", ">= 0.2"
   spec.add_dependency "bubbletea", "= 0.1.4"
   # Managed installs isolate GEM_HOME/GEM_PATH from the operator's gems. Keep

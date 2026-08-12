@@ -60,7 +60,7 @@ module Hive
         stdin_file = prompt_stdin_file(invocation)
         spawn_opts = { chdir: @task.project_root, pgroup: true, out: w, err: w }
         spawn_opts[:in] = stdin_file if stdin_file
-        pid = Process.spawn(*cmd, **spawn_opts)
+        pid = Process.spawn(profile.subscription_environment, *cmd, **spawn_opts)
         w.close
         pgid = process_group(pid)
         messages = Hive::Agent::MessageExtractor::Accumulator.new(

@@ -50,7 +50,7 @@ If a daemon stop or killed agent leaves a zero-byte `plan.md`, or a missing `pla
 
 When the plan agent writes a recoverable terminal `ERROR`, the daemon's sole
 automatic scheduler submits it after the shared cooldown. `RecoveryCoordinator`
-persists the generation-bound v4 request before the sole guarded marker
+persists the generation-bound v5 request before the sole guarded marker
 transition and derives
 `hive plan <slug> --project <project> --from 3-plan` as the owning workflow
 retry. This covers agent loss, provider limits, timeouts, and every other

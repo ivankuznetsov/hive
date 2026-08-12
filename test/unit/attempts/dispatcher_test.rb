@@ -13,7 +13,7 @@ class AttemptsDispatcherTest < Minitest::Test
   )
   FakeRequest = Struct.new(
     :slug, :project, :argv, :request_id, :task_generation,
-    :predecessor_attempt_id, :inherited_outputs,
+    :predecessor_attempt_id, :inherited_outputs, :recovery,
     keyword_init: true
   )
 
@@ -562,11 +562,13 @@ class AttemptsDispatcherTest < Minitest::Test
       successor_request.request_id = "request-two"
       successor_request.task_generation = lost.task_generation
       successor_request.predecessor_attempt_id = lost.attempt_id
+      successor_request.recovery = { "retry_count" => 3 }
 
       successor = dispatcher.dispatch_request(successor_request, interactive: true, now: NOW + 2)
 
       assert_equal :accepted, successor.status
       assert_equal lost.attempt_id, successor.attempt["predecessor_attempt_id"]
+      assert_equal 3, successor.attempt["retry_charge"]
       assert_equal 2, launcher.launched.size
     end
   end
@@ -974,6 +976,50 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal 1, store.decision_index.daily_count(
         project: "demo", date: NOW.utc.to_date
       )
+    end
+  end
+
+  def test_routing_collaborator_defaults_and_health_attempt_projection_fail_closed
+    with_dispatcher do |dispatcher, _launcher, task, store|
+      assert_match(
+        /\A[0-9a-f-]{36}\z/,
+        dispatcher.instance_variable_get(:@decision_id_generator).call
+      )
+
+      dispatcher.instance_variable_set(:@routing_policy_resolver, ->(*) { Object.new })
+      assert_raises(Hive::ConfigError) do
+        dispatcher.send(:resolve_routing_policy, task, "4-execute")
+      end
+      dispatcher.instance_variable_set(
+        :@routing_policy_resolver,
+        ->(_task, stage) { Hive::ProviderRouting::Policy.legacy(stage: stage) }
+      )
+
+      result = dispatch(dispatcher, task, request_id: "request-one")
+      state = dispatcher.send(:health_attempt_state, result.attempt.attempt_id)
+      assert_equal result.attempt.attempt_id, state.fetch("attempt_id")
+      assert_equal "launching", state.fetch("state")
+      assert_empty state.fetch("probe_bindings")
+
+      original_fetch = store.method(:fetch_hot)
+      store.define_singleton_method(:fetch_hot) do |_attempt_id|
+        raise Hive::Attempts::StoreError, "unavailable"
+      end
+      assert_nil dispatcher.send(:health_attempt_state, result.attempt.attempt_id)
+      store.define_singleton_method(:fetch_hot, original_fetch)
+
+      opened = Object.new
+      test_case = self
+      dispatcher.instance_variable_set(:@health_store, nil)
+      with_replaced_singleton_method(
+        Hive::ProviderHealth, :open,
+        lambda { |attempt_reader:|
+          test_case.assert_kind_of Method, attempt_reader
+          opened
+        }
+      ) do
+        assert_same opened, dispatcher.send(:provider_health_store)
+      end
     end
   end
 

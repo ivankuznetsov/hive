@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, schemas/hive-e2e-{coverage,selection}.v1.json, Rakefile
 created: 2026-04-29
-updated: 2026-08-04
+updated: 2026-08-11
 tags: [test, e2e, tui, incidents, modules, artifacts]
 ---
 
@@ -286,12 +286,15 @@ On failure, the harness writes a scenario bundle containing:
 | `update_flow_tui_no_nudge` | TUI no-update-nudge path when update state should not be shown. |
 | `update_flow_up_to_date` | Daemon update-check path when the installed version is already current. |
 | `incident_plan_only_dependency_gate` | Rejects a plan-only assertion, holds exact metadata below the gate, then proves one real dispatch after the prerequisite reaches `8-finalize`. |
+| `incident_provider_limit_retry` | Opens one account-scoped circuit from trusted transport evidence and proves one charged fallback successor under daemon recovery ownership. |
+| `provider_routing_durable_matrix` | Runs AE2-AE8 through `Attempts::Dispatcher`, durable attempt ownership and receipts, restart reopening, a real `Attempts::Supervisor`, recovery reuse, operator/corruption handling, and the real no-pool subscription `limits_reached` isolation path. |
 | `incident_repository_routing` | Rejects a cross-project dependency whose registered repository identity disagrees with its live origin and preserves the non-target task. |
 
 The six incident-regression fixtures and their current pending/green states
-are indexed in `test/e2e/scenarios/README.md`. The two #9771 fixtures are green;
-pending fixtures for #9767, #9768, #9769, and #9770 remain report-visible until
-their sibling-owned persistence and reason contracts are available.
+are indexed in `test/e2e/scenarios/README.md`. The two #9771 fixtures and the
+#9770 provider-limit fixture are green; pending fixtures for #9767, #9768, and
+#9769 remain report-visible until their sibling-owned persistence and reason
+contracts are available.
 
 ## Operational Notes
 

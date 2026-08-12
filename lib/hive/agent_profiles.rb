@@ -54,18 +54,7 @@ module Hive
       end
 
       def grok_auth_path(home: nil)
-        auth_path = ENV["GROK_AUTH_PATH"]
-        grok_home = ENV["GROK_HOME"]
-
-        raise ArgumentError, "GROK_AUTH_PATH must be absolute" if !auth_path.to_s.strip.empty? && !File.absolute_path?(auth_path)
-        raise ArgumentError, "GROK_HOME must be absolute" if !grok_home.to_s.strip.empty? && !File.absolute_path?(grok_home)
-
-        return auth_path unless auth_path.to_s.strip.empty?
-
-        return File.join(grok_home, "auth.json") unless grok_home.to_s.strip.empty?
-
-        root = File.join(home || Dir.home, ".grok")
-        File.join(root, "auth.json")
+        AgentCliRuntime::Profiles.grok_auth_path(home:, env: ENV)
       end
 
       def logged_in?(name, home: nil)
@@ -82,11 +71,6 @@ module Hive
         when :pi
           credential_present?(File.join(home || Dir.home, ".pi", "agent", "auth.json"))
         when :grok
-          api_key = [ ENV["XAI_API_KEY"], ENV["GROK_CODE_XAI_API_KEY"] ].any? do |value|
-            !value.to_s.strip.empty?
-          end
-          return true if api_key
-
           credential_present?(grok_auth_path(home:))
         else
           false
@@ -118,3 +102,5 @@ require "hive/agent_profiles/claude"
 require "hive/agent_profiles/codex"
 require "hive/agent_profiles/pi"
 require "hive/agent_profiles/grok"
+require "hive/agent_profiles/error_normalizers"
+require "hive/agent_profiles/launch_bindings"

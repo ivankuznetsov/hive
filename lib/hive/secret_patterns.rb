@@ -51,7 +51,7 @@ module Hive
       # by a non-trivial value.
       session_cookie:        /(?:Set-)?Cookie:\s*[^;\s]*(?:session(?:id)?|sid|auth)[^;=\s]*=[^;\s]{8,}/i,
       # OpenAI / Anthropic / Stripe API keys (canonical prefixes).
-      openai_api_key:        /\bsk-[A-Za-z0-9]{20,}/,
+      openai_api_key:        /\bsk-(?!ant-)[A-Za-z0-9_-]{20,}/,
       anthropic_api_key:     /\bsk-ant-[A-Za-z0-9_\-]{20,}/,
       stripe_api_key:        /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{20,}/,
       # Slack tokens.

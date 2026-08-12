@@ -9,6 +9,86 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
     end
   end
 
+  def test_builtin_credential_environment_contract_is_immutable
+    expected = {
+      claude: %w[ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY],
+      codex: %w[OPENAI_API_KEY],
+      pi: AgentCliRuntime::Profiles::PI_CREDENTIAL_ENVIRONMENT_KEYS,
+      grok: %w[GROK_AUTH_PATH XAI_API_KEY GROK_CODE_XAI_API_KEY]
+    }
+
+    expected.each do |provider, keys|
+      actual = AgentCliRuntime::Profiles.fetch(provider).credential_environment_keys
+      assert_equal keys, actual, provider
+      assert_predicate actual, :frozen?
+    end
+  end
+
+  def test_builtin_configuration_directory_contract_is_immutable
+    expected = {
+      claude: [ "CLAUDE_CONFIG_DIR", ".claude" ],
+      codex: [ "CODEX_HOME", ".codex" ],
+      pi: [ "PI_CODING_AGENT_DIR", ".pi/agent" ],
+      grok: [ "GROK_HOME", ".grok" ]
+    }
+
+    expected.each do |provider, (key, relative)|
+      profile = AgentCliRuntime::Profiles.fetch(provider)
+      assert_equal key, profile.configuration_environment_key
+      assert_equal relative, profile.default_configuration_directory
+      assert_equal "/runtime/#{relative}", profile.configuration_directory(home: "/runtime")
+      assert_equal "/configured", profile.configuration_directory(
+        home: "/runtime", env: { key => "/configured" }
+      )
+    end
+  end
+
+  def test_custom_credential_environment_keys_are_validated
+    profile = AgentCliRuntime::Profile.new(
+      name: :custom,
+      bin_default: "custom",
+      headless_flag: "-p",
+      version_flag: "--version",
+      credential_environment_keys: %w[CUSTOM_TOKEN]
+    )
+    assert_equal %w[CUSTOM_TOKEN], profile.credential_environment_keys
+
+    assert_raises(ArgumentError) do
+      AgentCliRuntime::Profile.new(
+        name: :custom,
+        bin_default: "custom",
+        headless_flag: "-p",
+        version_flag: "--version",
+        credential_environment_keys: [ "not-valid" ]
+      )
+    end
+  end
+
+  def test_custom_configuration_directory_metadata_is_optional_and_validated
+    profile = AgentCliRuntime::Profile.new(
+      name: :custom,
+      bin_default: "custom",
+      headless_flag: "-p",
+      version_flag: "--version",
+      configuration_environment_key: "CUSTOM_HOME",
+      default_configuration_directory: ".custom"
+    )
+    assert_equal "/tmp/.custom", profile.configuration_directory(home: "/tmp")
+
+    assert_raises(ArgumentError) do
+      AgentCliRuntime::Profile.new(
+        name: :custom, bin_default: "custom", headless_flag: "-p",
+        version_flag: "--version", configuration_environment_key: "bad-key"
+      )
+    end
+    assert_raises(ArgumentError) do
+      AgentCliRuntime::Profile.new(
+        name: :custom, bin_default: "custom", headless_flag: "-p",
+        version_flag: "--version", default_configuration_directory: "/absolute"
+      )
+    end
+  end
+
   def test_compile_preserves_each_builtin_prompt_transport
     assert_equal [
       "claude", "-p", "--dangerously-skip-permissions",
@@ -174,6 +254,16 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
     refute_includes result.diagnostic, "sk-"
     assert_includes result.diagnostic, "[REDACTED:openai_api_key]"
     assert_operator result.diagnostic.bytesize, :<=, AgentCliRuntime::DIAGNOSTIC_BYTES
+  end
+
+  def test_observe_carries_an_optional_immutable_provider_signal
+    signal = { "failure_class" => "account_quota" }
+
+    result = AgentCliRuntime.observe(:codex, provider_signal: signal)
+
+    assert_equal signal, result.provider_signal
+    refute_same signal, result.provider_signal
+    assert_predicate result.provider_signal, :frozen?
   end
 
   private

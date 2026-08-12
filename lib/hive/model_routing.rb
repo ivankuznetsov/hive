@@ -209,6 +209,58 @@ module Hive
       )
     end
 
+    # Resolve one explicit provider-routing candidate through the same exact /
+    # coarse / current / legacy precedence as every existing model-routing
+    # caller. Unlike the legacy identity path, every non-nil candidate field
+    # is a hard routed requirement and therefore validates against the chosen
+    # profile even when its provenance is the candidate's current value.
+    def resolve_candidate(models:, stage:, profile:, current: EMPTY_MODELS,
+                          legacy: EMPTY_MODELS, source: nil, cfg: nil)
+      resolution = resolve(
+        models: models,
+        stage: stage,
+        current: current,
+        legacy: legacy,
+        provider: profile.name
+      )
+
+      FIELDS.each do |field|
+        value = resolution.public_send(field)
+        next if value.nil?
+
+        profile.validate_routed_control!(
+          EffectiveControl.new(
+            stage: resolution.stage,
+            profile: profile,
+            provider: profile.name,
+            field: field,
+            value: value,
+            provenance: resolution.provenance.fetch(field)
+          ),
+          source: source
+        )
+      end
+
+      model = resolution.model
+      if model.nil? || %w[default inherit].include?(model.to_s.downcase)
+        model = profile.concrete_default_model(
+          cfg: cfg,
+          project_root: cfg.is_a?(Hash) ? cfg["project_root"] : nil
+        )
+      else
+        require "hive/implementation_identity"
+        model = Hive::ImplementationIdentity.normalize_model(model, concrete: true)
+      end
+
+      Resolution.new(
+        stage: resolution.stage,
+        provider: resolution.provider,
+        model: model,
+        effort: resolution.effort,
+        provenance: resolution.provenance
+      )
+    end
+
     # Project a reachable-call matrix through the resolver and yield only
     # controls whose effective value came from `models:`. Disabled calls,
     # calls without stage context, inactive maps, and shadowed coarse fields

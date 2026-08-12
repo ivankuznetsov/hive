@@ -35,9 +35,9 @@ module Hive
     end
 
     # Owner-private, versioned durable task-attempt state. RecoveryMigration
-    # moves the physical v2 tree here before current readers may open it.
+    # moves the physical v3 tree here before current readers may open it.
     def attempts_root
-      File.join(state_home, "attempts", "v3")
+      File.join(state_home, "attempts", "v4")
     end
 
     def attempt_records_root
@@ -66,6 +66,12 @@ module Hive
 
     def attempt_pending_finalization_root
       File.join(attempts_root, "pending-finalization")
+    end
+
+    # Owner-private, host-global provider-account and exact-model health.
+    # Explicit routing alone consults this state; legacy attempts bypass it.
+    def provider_health_root
+      File.join(state_home, "provider-health", "v1")
     end
 
     def workflow_publish_root

@@ -120,6 +120,22 @@ class ReviewersCodexReviewTest < Minitest::Test
     end
   end
 
+  def test_removes_ambient_api_key_from_codex_review_child
+    with_tmp_dir do |dir|
+      log = File.join(dir, "argv.log")
+      ENV["HIVE_FAKE_CODEX_ARGV_LOG"] = log
+      ENV["OPENAI_API_KEY"] = "ambient-api-key"
+      reviewer = build_reviewer(dir)
+
+      result = reviewer.run!
+
+      assert result.ok?, result.error_message
+      assert_includes File.read(log), "openai_api_key=unset"
+    ensure
+      ENV.delete("OPENAI_API_KEY")
+    end
+  end
+
   # --- stdout -> findings file ------------------------------------------
 
   def test_captures_stdout_into_findings_file

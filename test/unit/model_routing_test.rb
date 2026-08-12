@@ -386,6 +386,63 @@ class ModelRoutingTest < Minitest::Test
     refute invoked
   end
 
+  def test_candidate_resolution_reuses_precedence_per_profile_without_switching_provider
+    models = Hive::ModelRouting.parse(
+      {
+        "execute" => { "effort" => "high" },
+        "execute_implementation" => { "model" => "gpt-5.6-sol" }
+      },
+      source: "test"
+    )
+
+    codex = Hive::ModelRouting.resolve_candidate(
+      models: models,
+      stage: "execute_implementation",
+      profile: Hive::AgentProfiles.lookup(:codex),
+      current: { model: "gpt-5.6-terra", effort: "low" },
+      source: "execute.routing.pool[0]"
+    )
+    claude = Hive::ModelRouting.resolve_candidate(
+      models: models,
+      stage: "execute_implementation",
+      profile: Hive::AgentProfiles.lookup(:claude),
+      current: { model: "sonnet", effort: "low" },
+      source: "execute.routing.pool[1]"
+    )
+
+    assert_equal :codex, codex.provider
+    assert_equal :claude, claude.provider
+    assert_equal "gpt-5.6-sol", codex.model
+    assert_equal "gpt-5.6-sol", claude.model
+    assert_equal "high", codex.effort
+    assert_equal "high", claude.effort
+  end
+
+  def test_candidate_resolution_materializes_the_profile_default_with_project_context
+    observed = nil
+    profile = Object.new
+    profile.define_singleton_method(:name) { :fixture }
+    profile.define_singleton_method(:validate_routed_control!) { |_control, source:| source }
+    profile.define_singleton_method(:concrete_default_model) do |cfg:, project_root:|
+      observed = [ cfg, project_root ]
+      "fixture-default-model"
+    end
+    cfg = { "project_root" => "/tmp/routed-project" }
+
+    resolution = Hive::ModelRouting.resolve_candidate(
+      models: { "execute" => { "effort" => "high" } },
+      stage: "execute",
+      profile: profile,
+      current: {},
+      source: "execute.routing.pool[0]",
+      cfg: cfg
+    )
+
+    assert_equal "fixture-default-model", resolution.model
+    assert_equal "high", resolution.effort
+    assert_equal [ cfg, "/tmp/routed-project" ], observed
+  end
+
   private
 
   def assert_provenance(result, field, kind, key)

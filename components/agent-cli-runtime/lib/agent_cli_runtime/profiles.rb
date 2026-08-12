@@ -1,5 +1,52 @@
 module AgentCliRuntime
   module Profiles
+    PI_CREDENTIAL_ENVIRONMENT_KEYS = %w[
+      AI_GATEWAY_API_KEY
+      ANTHROPIC_API_KEY
+      ANTHROPIC_AUTH_TOKEN
+      ANTHROPIC_OAUTH_TOKEN
+      ANT_LING_API_KEY
+      AWS_ACCESS_KEY_ID
+      AWS_BEARER_TOKEN_BEDROCK
+      AWS_CONTAINER_CREDENTIALS_FULL_URI
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
+      AWS_PROFILE
+      AWS_SECRET_ACCESS_KEY
+      AWS_SESSION_TOKEN
+      AWS_WEB_IDENTITY_TOKEN_FILE
+      AZURE_OPENAI_API_KEY
+      BASETEN_API_KEY
+      CEREBRAS_API_KEY
+      CLOUDFLARE_API_KEY
+      COPILOT_GITHUB_TOKEN
+      DEEPSEEK_API_KEY
+      FIREWORKS_API_KEY
+      GEMINI_API_KEY
+      GOOGLE_APPLICATION_CREDENTIALS
+      GOOGLE_CLOUD_API_KEY
+      GROQ_API_KEY
+      HF_TOKEN
+      KIMI_API_KEY
+      MINIMAX_API_KEY
+      MINIMAX_CN_API_KEY
+      MISTRAL_API_KEY
+      MOONSHOT_API_KEY
+      NVIDIA_API_KEY
+      OPENCODE_API_KEY
+      OPENAI_API_KEY
+      OPENROUTER_API_KEY
+      QWEN_TOKEN_PLAN_API_KEY
+      RADIUS_API_KEY
+      TOGETHER_API_KEY
+      XAI_API_KEY
+      XIAOMI_API_KEY
+      XIAOMI_TOKEN_PLAN_AMS_API_KEY
+      XIAOMI_TOKEN_PLAN_CN_API_KEY
+      XIAOMI_TOKEN_PLAN_SGP_API_KEY
+      ZAI_API_KEY
+      ZAI_CODING_CN_API_KEY
+    ].freeze
+
     module_function
 
     def names
@@ -78,6 +125,11 @@ module AgentCliRuntime
       effort_argument_builder: ->(effort) { [ "--effort", effort ] },
       launcher_identity: "claude-code/v1",
       usage_extractor: UsageExtractors::CLAUDE,
+      credential_environment_keys: %w[
+        ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY
+      ],
+      configuration_environment_key: "CLAUDE_CONFIG_DIR",
+      default_configuration_directory: ".claude",
       raw_cli_arguments_supported: true,
       auth_configuration_probe: lambda do |home:, env:|
         if env_configured?(env, "ANTHROPIC_API_KEY")
@@ -117,6 +169,9 @@ module AgentCliRuntime
         ->(effort) { [ "-c", "model_reasoning_effort=#{effort}" ] },
       launcher_identity: "codex-cli/v1",
       usage_extractor: UsageExtractors::CODEX,
+      credential_environment_keys: %w[OPENAI_API_KEY],
+      configuration_environment_key: "CODEX_HOME",
+      default_configuration_directory: ".codex",
       auth_configuration_probe: lambda do |home:, env:|
         if env_configured?(env, "OPENAI_API_KEY")
           AuthConfiguration.new(status: :configured, source: "environment")
@@ -140,6 +195,9 @@ module AgentCliRuntime
       model_argument_builder: ->(model) { [ "--model", model ] },
       launcher_identity: "pi-coding-agent/v1",
       usage_extractor: UsageExtractors::PI,
+      credential_environment_keys: PI_CREDENTIAL_ENVIRONMENT_KEYS,
+      configuration_environment_key: "PI_CODING_AGENT_DIR",
+      default_configuration_directory: ".pi/agent",
       auth_configuration_probe: lambda do |home:, env:|
         directory = env["PI_CODING_AGENT_DIR"]
         path =
@@ -169,6 +227,9 @@ module AgentCliRuntime
         ->(effort) { [ "--reasoning-effort", effort ] },
       launcher_identity: "grok-cli/v1",
       usage_extractor: UsageExtractors::GROK,
+      credential_environment_keys: %w[GROK_AUTH_PATH XAI_API_KEY GROK_CODE_XAI_API_KEY],
+      configuration_environment_key: "GROK_HOME",
+      default_configuration_directory: ".grok",
       auth_configuration_probe: lambda do |home:, env:|
         if env_configured?(env, "XAI_API_KEY", "GROK_CODE_XAI_API_KEY")
           AuthConfiguration.new(status: :configured, source: "environment")

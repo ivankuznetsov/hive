@@ -124,6 +124,31 @@ class HiveRecoveryAuthorityTest < Minitest::Test
     refute_match(/legacy_occurrence_at|legacy-\#\{marker_generation/, coordinator_source)
   end
 
+  def test_provider_routing_and_health_cannot_own_recovery_or_dispatch_effects
+    forbidden = {
+      "task marker mutation" => /Hive::Markers\.(?:set|clear_current|clear_all)/,
+      "recovery request mutation" => /Hive::Recovery|RecoveryCoordinator/,
+      "dispatch queue mutation" => /DispatchRequestQueue\.(?:write|claim|remove|release|update)/,
+      "successor admission" => /(?:create|dispatch)_successor|successor_attempt_id\s*=/,
+      "delayed work" => /enqueue_delayed|next_eligible_at\s*=/,
+      "stage verb invocation" => /Hive::Commands::(?:Run|StageAction)|\.run_stage\(/,
+      "rejected recovery machinery" => /ProviderRouting::RecoveryGate|AttemptLeaseStore|AttemptLease|ResumableWorkflow/
+    }
+    paths = %w[provider_routing provider_health].flat_map do |namespace|
+      Dir.glob(File.join(ROOT, "lib/hive/#{namespace}{.rb,/**/*.rb}"))
+    end.uniq.sort
+    violations = paths.flat_map do |path|
+      source = File.read(path)
+      forbidden.filter_map do |label, pattern|
+        "#{relative(path)}: #{label}" if source.match?(pattern)
+      end
+    end
+
+    assert_empty violations,
+                 "provider routing/health must remain decision and evidence domains:\n" \
+                 "#{violations.join("\n")}"
+  end
+
   private
 
   def adapter_paths

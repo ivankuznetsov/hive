@@ -3,6 +3,8 @@ require "tmpdir"
 
 module HiveTestTmpCleanup
   DEFAULT_MIN_AGE_SECONDS = 24 * 60 * 60
+  REMOVE_ATTEMPTS = 3
+  REMOVE_RETRY_DELAY_SECONDS = 0.01
 
   # These are test-only names created by test/test_helper.rb or by the few
   # tests that need a source tree to outlive the statement that creates it.
@@ -40,26 +42,30 @@ module HiveTestTmpCleanup
 
     return false unless File.exist?(target) || File.symlink?(target)
 
-    stat = File.lstat(target)
-    unless stat.uid == Process.uid
-      raise UnsafePath, "refusing to remove test tmp path owned by uid #{stat.uid}: #{target}"
+    REMOVE_ATTEMPTS.times do |attempt|
+      stat = File.lstat(target)
+      unless stat.uid == Process.uid
+        raise UnsafePath, "refusing to remove test tmp path owned by uid #{stat.uid}: #{target}"
+      end
+
+      # remove_entry_secure repairs directory permissions while walking a sticky
+      # world-writable tmpdir. Ruby falls back to plain removal for a private
+      # TMPDIR (and for the legacy ~/Dev root), so make owned directories writable
+      # there first. Plain rm_rf silently leaves the 0555/0444 trees produced by
+      # managed-package tests.
+      parent_stat = File.stat(root)
+      if stat.directory? && !parent_stat.world_writable?
+        FileUtils.chmod_R(0o700, target, force: true)
+      end
+      FileUtils.rm_rf(target, secure: true)
+      return true unless File.exist?(target) || File.symlink?(target)
+
+      sleep(REMOVE_RETRY_DELAY_SECONDS * (attempt + 1)) if attempt + 1 < REMOVE_ATTEMPTS
+    rescue Errno::ENOENT
+      return true
     end
 
-    # remove_entry_secure repairs directory permissions while walking a sticky
-    # world-writable tmpdir. Ruby falls back to plain removal for a private
-    # TMPDIR (and for the legacy ~/Dev root), so make owned directories writable
-    # there first. Plain rm_rf silently leaves the 0555/0444 trees produced by
-    # managed-package tests.
-    parent_stat = File.stat(root)
-    if stat.directory? && !parent_stat.world_writable?
-      FileUtils.chmod_R(0o700, target, force: true)
-    end
-    FileUtils.rm_rf(target, secure: true)
-    if File.exist?(target) || File.symlink?(target)
-      raise CleanupError, "test tmp path still exists after removal: #{target}"
-    end
-
-    true
+    raise CleanupError, "test tmp path still exists after #{REMOVE_ATTEMPTS} removal attempts: #{target}"
   end
 
   def remove_all!(paths)

@@ -132,6 +132,21 @@ module Hive
           "adversarial" => "plan_review_adversarial",
           "verification" => "plan_review_verification"
         },
+        "routes" => {
+          "primary" => {
+            "agent" => "codex", "model" => "gpt-5.6-sol", "family" => "openai",
+            "effort" => "high", "route" => "native_codex"
+          },
+          "adversarial" => {
+            "agent" => "grok", "model" => "grok-4.6", "family" => "grok",
+            "effort" => "high", "route" => "native_grok_build"
+          },
+          "verification" => {
+            "agent" => "codex", "model" => "gpt-5.6-sol", "family" => "openai",
+            "effort" => "high", "route" => "native_codex"
+          },
+          "fallbacks" => []
+        },
         "approval_policies" => []
       },
       "execute" => { "agent" => "claude" },
@@ -2171,14 +2186,15 @@ module Hive
 
     PLAN_REVIEW_KEYS = %w[
       enabled classifier_version minimum_level coding skip protected_paths attempts
-      coverage adapter reviewers approval_policies
+      coverage adapter reviewers routes approval_policies
     ].freeze
     PLAN_REVIEW_NESTED_KEYS = {
       "coding" => %w[minimum_level],
       "skip" => %w[max_files max_bytes],
       "attempts" => %w[max_transient timeout_sec],
       "coverage" => %w[required optional],
-      "reviewers" => %w[primary adversarial verification]
+      "reviewers" => %w[primary adversarial verification],
+      "routes" => %w[primary adversarial verification fallbacks]
     }.freeze
     PLAN_REVIEW_ADAPTERS = %w[ce_doc_review].freeze
     PLAN_REVIEW_NAME = /\A[a-z][a-z0-9_]{0,63}\z/
@@ -2230,6 +2246,7 @@ module Hive
               "plan_review.reviewers.#{key} in #{describe_source(source_path)} must name a " \
               "registered model route; got #{route.inspect}"
       end
+      validate_plan_review_routes!(review.fetch("routes"), source_path)
       validate_plan_review_coverage!(review.fetch("coverage"), source_path)
       validate_plan_review_approval_policies!(review.fetch("approval_policies"), source_path)
     end
@@ -2275,6 +2292,44 @@ module Hive
       raise ConfigError,
             "plan_review coverage in #{describe_source(source_path)} cannot be both required and " \
             "optional: #{overlap.inspect}"
+    end
+
+    def validate_plan_review_routes!(routes, source_path)
+      route_keys = %w[agent model family effort route]
+      %w[primary adversarial verification].each do |role|
+        row = routes[role]
+        unless row.is_a?(Hash)
+          raise ConfigError, "plan_review.routes.#{role} in #{describe_source(source_path)} must be a Hash"
+        end
+        validate_closed_mapping!(row, route_keys, "plan_review.routes.#{role}", source_path)
+        validate_plan_review_route_row!(row, "plan_review.routes.#{role}", source_path)
+      end
+      fallbacks = routes["fallbacks"]
+      unless fallbacks.is_a?(Array)
+        raise ConfigError, "plan_review.routes.fallbacks in #{describe_source(source_path)} must be an Array"
+      end
+      fallbacks.each_with_index do |row, index|
+        unless row.is_a?(Hash)
+          raise ConfigError,
+                "plan_review.routes.fallbacks[#{index}] in #{describe_source(source_path)} must be a Hash"
+        end
+        validate_closed_mapping!(row, route_keys, "plan_review.routes.fallbacks[#{index}]", source_path)
+        validate_plan_review_route_row!(row, "plan_review.routes.fallbacks[#{index}]", source_path)
+      end
+    end
+
+    def validate_plan_review_route_row!(row, label, source_path)
+      validate_agent_name!(row["agent"], "#{label}.agent", source_path)
+      %w[model family route].each do |key|
+        unless row[key].is_a?(String) && !row[key].strip.empty?
+          raise ConfigError, "#{label}.#{key} in #{describe_source(source_path)} must be non-empty"
+        end
+      end
+      unless Hive::ModelRouting::EFFORT_VALUES.include?(row["effort"])
+        raise ConfigError,
+              "#{label}.effort in #{describe_source(source_path)} must be one of " \
+              "#{Hive::ModelRouting::EFFORT_VALUES.inspect}"
+      end
     end
 
     def validate_plan_review_approval_policies!(policies, source_path)
@@ -2438,6 +2493,14 @@ module Hive
         calls, cfg, "plan", cfg.dig("plan", "agent"),
         current: model_routing_current(cfg["plan"])
       )
+      plan_review = cfg.fetch("plan_review")
+      %w[primary adversarial verification].each do |role|
+        route = plan_review.dig("routes", role)
+        add_model_routing_call(
+          calls, cfg, plan_review.dig("reviewers", role), route.fetch("agent"),
+          current: model_routing_current(route)
+        )
+      end
       add_model_routing_call(
         calls, cfg, "execute_implementation", execute_agent,
         current: model_routing_current(cfg["execute"])

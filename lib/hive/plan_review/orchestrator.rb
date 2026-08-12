@@ -3,9 +3,11 @@ require "fileutils"
 require "json"
 require "time"
 require "hive/atomic_file"
+require "hive/plan_review/approval_policy"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/adapters/ce_doc_review"
 require "hive/plan_review/clearance"
+require "hive/plan_review/decision"
 require "hive/plan_review/identity"
 require "hive/plan_review/planner_revision"
 require "hive/plan_review/plan_signals"
@@ -118,6 +120,7 @@ module Hive
           )
         end
 
+        record = consume_approval_policies(record)
         pending = pending_decision_findings(record)
         unless pending.empty?
           blockers = pending.map { |finding| Clearance.send(:finding_blocker, finding) }
@@ -236,7 +239,8 @@ module Hive
             "kind" => "projection", "version" => version,
             "candidate_plan_digest" => nil, "state" => "uninitialized", "outcome" => nil,
             "attempt_ids" => [], "current_attempt_id" => nil,
-            "coverage" => requested_coverage, "findings" => [], "decisions" => [],
+            "coverage" => requested_coverage(review_id, policy.policy_fingerprint),
+            "findings" => [], "decisions" => [],
             "routes" => [ planner_route(@planner_identity) ],
             "artifacts" => { "policy" => policy_ref }, "blockers" => [],
             "required_action" => policy.effective_level == "skip" ? nil : "start plan review",
@@ -268,7 +272,10 @@ module Hive
             end
           end
 
-          record, = dispatch_attempt(record, role, plan_bytes, coverage_for(role))
+          record, = dispatch_attempt(
+            record, role, plan_bytes,
+            coverage_for(role, record.review_id, record.policy_fingerprint)
+          )
         end
       end
 
@@ -378,27 +385,88 @@ module Hive
         @store.publish_current!(Record.new(data), expected_version: record.version)
       end
 
-      def requested_coverage
+      def requested_coverage(review_id, policy_fingerprint)
         required = Array(@cfg.dig("plan_review", "coverage", "required"))
         optional = Array(@cfg.dig("plan_review", "coverage", "optional"))
         (required.map { |name| [ name, true ] } + optional.map { |name| [ name, false ] })
           .uniq { |name, _required| name }
           .map do |name, required_value|
-            { "name" => name, "required" => required_value, "status" => "requested" }.freeze
+            {
+              "name" => name, "required" => required_value, "status" => "requested",
+              "fingerprint" => Identity.coverage(
+                review_id:, name:, policy_fingerprint:
+              )
+            }.freeze
           end.freeze
       end
 
-      def coverage_for(role)
-        rows = requested_coverage
+      def coverage_for(role, review_id, policy_fingerprint)
+        rows = requested_coverage(review_id, policy_fingerprint)
         if role == "adversarial"
           row = rows.find { |entry| entry.fetch("name") == "adversarial" }
-          [ row || { "name" => "adversarial", "required" => true, "status" => "requested" } ]
+          [ row || coverage_row(review_id, policy_fingerprint, "adversarial", required: true) ]
         else
           selected = rows.reject { |entry| entry.fetch("name") == "adversarial" }
           selected.empty? ?
-            [ { "name" => "whole_document", "required" => true, "status" => "requested" } ] :
+            [ coverage_row(review_id, policy_fingerprint, "whole_document", required: true) ] :
             selected
         end
+      end
+
+      def coverage_row(review_id, policy_fingerprint, name, required:)
+        {
+          "name" => name, "required" => required, "status" => "requested",
+          "fingerprint" => Identity.coverage(
+            review_id:, name:, policy_fingerprint:
+          )
+        }.freeze
+      end
+
+      def consume_approval_policies(record)
+        findings = record["findings"].map { |entry| Finding.new(entry) }
+        decisions = record["decisions"].dup
+        artifacts = record["artifacts"].dup
+        changed = false
+        findings.map! do |finding|
+          unless finding.classification == "gated_auto" && finding.lifecycle == "open"
+            next finding
+          end
+          match = ApprovalPolicy.match(
+            finding:, policies: @cfg.dig("plan_review", "approval_policies"),
+            review_id: record.review_id, policy_fingerprint: record.policy_fingerprint,
+            now: @clock.call
+          )
+          next finding unless match
+
+          decision = Decision.new(
+            "schema" => Decision::SCHEMA, "schema_version" => Decision::SCHEMA_VERSION,
+            "review_id" => record.review_id,
+            "task_generation" => record.task_generation.to_s,
+            "policy_fingerprint" => record.policy_fingerprint,
+            "expected_artifact_digest" => Projection.new(record).observation_digest,
+            "target_fingerprint" => finding.fingerprint,
+            "action" => "approve_finding", "value" => {}, "reason" => nil,
+            "origin" => "policy", "operator" => "policy:#{match.receipt.fetch('policy_id')}",
+            "policy_receipt" => match.receipt, "decided_at" => timestamp
+          )
+          reference = @store.write_decision!(
+            review_id: record.review_id, target_fingerprint: finding.fingerprint,
+            decision_id: decision.decision_id, data: decision.to_h
+          )
+          decisions << decision.to_h
+          artifacts["decision_#{decision.decision_id}"] = reference
+          changed = true
+          Finding.new(finding.to_h.merge(
+            "lifecycle" => "approved", "decision_id" => decision.decision_id
+          ))
+        end
+        return record unless changed
+
+        publish(
+          record, "findings" => findings.map(&:to_h), "decisions" => decisions,
+          "artifacts" => artifacts, "state" => "reviewing", "outcome" => nil,
+          "blockers" => [], "required_action" => nil, "execution_allowed" => false
+        )
       end
 
       def pending_decision_findings(record)

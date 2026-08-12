@@ -32,6 +32,28 @@ class PlanReviewRecordTest < Minitest::Test
     assert_equal projection.fetch("policy_fingerprint"), manifest.policy_fingerprint
   end
 
+  def test_projection_rejects_untyped_decisions_and_unbound_coverage
+    assert_raises(Hive::PlanReview::InvalidRecord) do
+      Hive::PlanReview::Record.new(
+        projection.merge(
+          "decisions" => [
+            { "decision_id" => "prd-#{'d' * 64}", "action" => "approve_finding",
+              "target_fingerprint" => "prf-#{'e' * 64}" }
+          ]
+        )
+      )
+    end
+    assert_raises(Hive::PlanReview::InvalidRecord) do
+      Hive::PlanReview::Record.new(
+        projection.merge(
+          "coverage" => [
+            { "name" => "adversarial", "required" => true, "status" => "completed" }
+          ]
+        )
+      )
+    end
+  end
+
   private
 
   def projection

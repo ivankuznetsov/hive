@@ -26,6 +26,10 @@ module Hive
         )
       end
 
+      def coverage(review_id:, name:, policy_fingerprint:)
+        stable_id("prc", review_id:, name: name.to_s, policy_fingerprint:)
+      end
+
       def stable_id(prefix, attributes)
         "#{prefix}-#{Digest::SHA256.hexdigest(JSON.generate(normalize(attributes)))}"
       end

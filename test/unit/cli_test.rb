@@ -23,6 +23,7 @@ require "hive/commands/act"
 require "hive/commands/approve"
 require "hive/commands/findings"
 require "hive/commands/finding_toggle"
+require "hive/commands/plan_review"
 require "hive/commands/patrol"
 require "hive/commands/refactor_patrol"
 require "hive/commands/pairing"
@@ -784,6 +785,54 @@ class HiveCliTest < Minitest::Test
       assert_equal({ ids: [ "1", "2" ], all: true, severity: "high", pass: 3, project: "proj", stage: "execute", json: true }, accept.fetch(:kwargs))
       assert_equal [ Hive::Commands::FindingToggle::REJECT, "slug" ], reject.fetch(:args)
       assert_equal({ ids: [ "4" ], all: false, severity: "low", pass: nil, project: "proj", stage: nil, json: true }, reject.fetch(:kwargs))
+    end
+  end
+
+  def test_plan_review_and_raise_only_plan_option_pass_exact_observation_fields
+    with_command_new_stub(Hive::Commands::PlanReview) do |calls|
+      Hive::CLI.start([
+        "plan-review", "slug", "answer-finding",
+        "--review-id", "pr-#{'a' * 64}",
+        "--task-generation", "generation-1",
+        "--policy-fingerprint", "b" * 64,
+        "--expected-artifact-digest", "c" * 64,
+        "--target-fingerprint", "prf-#{'d' * 64}",
+        "--answer", "Use the export path", "--reason", "operator response",
+        "--project", "demo", "--json"
+      ])
+
+      assert_equal [ "slug", "answer-finding" ], calls.first.fetch(:args)
+      assert_equal(
+        {
+          review_id: "pr-#{'a' * 64}", task_generation: "generation-1",
+          policy_fingerprint: "b" * 64, expected_artifact_digest: "c" * 64,
+          target_fingerprint: "prf-#{'d' * 64}", answer: "Use the export path",
+          coverage: nil, level: nil, reason: "operator response",
+          project: "demo", json: true
+        },
+        calls.first.fetch(:kwargs)
+      )
+    end
+
+    raises = []
+    replacement = lambda do |target, **kwargs|
+      raises << [ target, kwargs ]
+      { "applied" => true }
+    end
+    with_replaced_singleton_method(
+      Hive::Commands::PlanReview, :persist_raise_for_target!, replacement
+    ) do
+      with_command_new_stub(Hive::Commands::StageAction) do |calls|
+        Hive::CLI.start([
+          "plan", "slug", "--review-level", "mandatory",
+          "--from", "3-plan", "--project", "demo"
+        ])
+
+        assert_equal "slug", raises.first.first
+        assert_equal "mandatory", raises.first.last.fetch(:level)
+        assert_equal "3-plan", raises.first.last.fetch(:stage)
+        assert_equal [ "plan", "slug" ], calls.first.fetch(:args)
+      end
     end
   end
 

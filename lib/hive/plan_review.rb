@@ -12,6 +12,18 @@ module Hive
     class InvalidPlan < Error; end
     class InvalidRecord < Error; end
     class StaleObservation < Error; end
+    class InvalidAction < Error
+      def exit_code = Hive::ExitCodes::USAGE
+    end
+    class StaleDecision < Error
+      def exit_code = Hive::ExitCodes::TEMPFAIL
+    end
+    class ConflictingDecision < Error
+      def exit_code = Hive::ExitCodes::USAGE
+    end
+    class UnauthorizedAction < Error
+      def exit_code = Hive::ExitCodes::USAGE
+    end
     class TransitionBlocked < Error; end
 
     module_function

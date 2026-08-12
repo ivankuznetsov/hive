@@ -77,6 +77,7 @@
     "AttemptId": { "type": "string", "pattern": "^pra-[0-9a-f]{64}$" },
     "DecisionId": { "type": "string", "pattern": "^prd-[0-9a-f]{64}$" },
     "FindingId": { "type": "string", "pattern": "^prf-[0-9a-f]{64}$" },
+    "CoverageId": { "type": "string", "pattern": "^prc-[0-9a-f]{64}$" },
     "Level": { "type": "string", "enum": ["skip", "standard", "mandatory"] },
     "State": {
       "type": "string",
@@ -133,22 +134,80 @@
     },
     "Coverage": {
       "type": "object",
-      "additionalProperties": true,
-      "required": ["name", "required", "status"],
+      "additionalProperties": false,
+      "required": ["name", "required", "status", "fingerprint"],
       "properties": {
         "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
         "required": { "type": "boolean" },
-        "status": { "enum": ["requested", "completed", "failed", "unsupported", "waived"] }
+        "status": { "enum": ["requested", "completed", "failed", "unsupported", "waived"] },
+        "fingerprint": { "$ref": "#/$defs/CoverageId" },
+        "reason": { "type": ["string", "null"] },
+        "retry_at": { "type": ["string", "null"], "format": "date-time" },
+        "decision_id": { "$ref": "#/$defs/DecisionId" }
       }
     },
     "Decision": {
       "type": "object",
-      "additionalProperties": true,
-      "required": ["decision_id", "action", "target_fingerprint"],
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "decision_id", "review_id", "task_generation",
+        "policy_fingerprint", "expected_artifact_digest", "target_fingerprint",
+        "action", "value", "reason", "origin", "operator", "policy_receipt",
+        "decided_at"
+      ],
       "properties": {
+        "schema": { "const": "hive-plan-review-decision" },
+        "schema_version": { "const": 1 },
         "decision_id": { "$ref": "#/$defs/DecisionId" },
-        "action": { "$ref": "#/$defs/NonEmptyString" },
-        "target_fingerprint": { "$ref": "#/$defs/NonEmptyString" }
+        "review_id": { "$ref": "#/$defs/ReviewId" },
+        "task_generation": { "$ref": "#/$defs/NonEmptyString" },
+        "policy_fingerprint": { "$ref": "#/$defs/Digest" },
+        "expected_artifact_digest": { "$ref": "#/$defs/Digest" },
+        "target_fingerprint": { "$ref": "#/$defs/NonEmptyString" },
+        "action": {
+          "enum": [
+            "approve_finding", "answer_finding", "waive_coverage",
+            "downgrade_level", "raise_level", "retry", "request_review"
+          ]
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "answer": { "type": "string", "maxLength": 16384 },
+            "coverage": { "$ref": "#/$defs/NonEmptyString" },
+            "level": { "$ref": "#/$defs/Level" }
+          }
+        },
+        "reason": { "type": ["string", "null"] },
+        "origin": { "enum": ["cli", "web", "operator", "policy", "daemon"] },
+        "operator": { "$ref": "#/$defs/NonEmptyString" },
+        "policy_receipt": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/PolicyReceipt" }
+          ]
+        },
+        "decided_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "PolicyReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_id", "policy_version", "policy_digest", "action", "risk", "path",
+        "review_id", "policy_fingerprint", "matched_at"
+      ],
+      "properties": {
+        "policy_id": { "$ref": "#/$defs/NonEmptyString" },
+        "policy_version": { "type": "integer", "minimum": 1 },
+        "policy_digest": { "$ref": "#/$defs/Digest" },
+        "action": { "const": "approve_finding" },
+        "risk": { "enum": ["low", "medium", "high", "critical"] },
+        "path": { "$ref": "#/$defs/NonEmptyString" },
+        "review_id": { "$ref": "#/$defs/ReviewId" },
+        "policy_fingerprint": { "$ref": "#/$defs/Digest" },
+        "matched_at": { "type": "string", "format": "date-time" }
       }
     },
     "RouteReceipt": {

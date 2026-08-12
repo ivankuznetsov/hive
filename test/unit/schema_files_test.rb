@@ -10,6 +10,7 @@ require "hive/commands/daemon"
 require "hive/commands/drop"
 require "hive/commands/doctor"
 require "hive/commands/decide"
+require "hive/commands/plan_review"
 require "hive/commands/forget"
 require "hive/commands/init"
 require "hive/commands/patrol"
@@ -48,6 +49,17 @@ class SchemaFilesTest < Minitest::Test
     assert_equal false, document.fetch("additionalProperties")
     assert_equal Hive::PlanReview::LEVELS.sort,
                  document.dig("$defs", "Level", "enum").sort
+  end
+
+  def test_plan_review_action_schema_matches_success_payload_contract
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-plan-review-action")))
+    success = document.dig("$defs", "SuccessPayload")
+
+    assert_equal Hive::Commands::PlanReview::SUCCESS_KEYS.sort,
+                 success.fetch("required").sort
+    assert_equal false, success.fetch("additionalProperties")
+    assert_equal Hive::PlanReview::Decision::ACTIONS.sort,
+                 success.dig("properties", "action", "enum").sort
   end
 
   def test_provider_routing_exclusion_reason_vocabularies_do_not_drift

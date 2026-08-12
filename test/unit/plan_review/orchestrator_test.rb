@@ -84,6 +84,45 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_exact_scoped_policy_approves_gated_finding_with_a_receipt
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["approval_policies"] = [
+        {
+          "id" => "plan_wording", "version" => 1,
+          "action" => "approve_finding", "risk" => "low",
+          "paths" => [ "plan.md" ],
+          "valid_from" => "2026-08-12T00:00:00Z",
+          "valid_until" => "2026-08-13T00:00:00Z", "revoked" => false
+        }
+      ]
+      adapter = success_adapter(primary_findings: [ finding("gated_auto", "Clarify tests") ])
+      revision = FakeRevision.new(revised)
+      projection = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal 1, projection.record["decisions"].length
+      decision = projection.record["decisions"].first
+      assert_equal "policy", decision.fetch("origin")
+      assert_equal "plan_wording", decision.dig("policy_receipt", "policy_id")
+      assert_equal 1, revision.calls.length
+    end
+  end
+
+  def test_coverage_rows_have_stable_review_bound_fingerprints
+    with_task(standard_plan) do |task, cfg|
+      adapter = success_adapter
+      projection = orchestrator(task, cfg, adapter:).advance!
+
+      projection.record["coverage"].each do |entry|
+        assert_equal Hive::PlanReview::Identity.coverage(
+          review_id: projection.record.review_id, name: entry.fetch("name"),
+          policy_fingerprint: projection.record.policy_fingerprint
+        ), entry.fetch("fingerprint")
+      end
+    end
+  end
+
   def test_standard_total_unavailability_degrades_but_mandatory_blocks
     [ [ standard_plan, "degraded_cleared", "review_unavailable" ],
       [ mandatory_plan, "blocked", nil ] ].each do |plan, state, degradation|

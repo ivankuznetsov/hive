@@ -1,6 +1,7 @@
 require "json"
 require "time"
 require "hive/plan_review"
+require "hive/plan_review/decision"
 require "hive/plan_review/finding"
 require "hive/plan_review/identity"
 
@@ -26,6 +27,9 @@ module Hive
       OUTCOMES = %w[skipped cleared degraded_cleared blocked].freeze
       EXECUTABLE_STATES = %w[skipped cleared degraded_cleared].freeze
       COVERAGE_STATUSES = %w[requested completed failed unsupported waived].freeze
+      COVERAGE_KEYS = %w[
+        name required status fingerprint reason retry_at decision_id
+      ].freeze
       DIGEST = /\A[0-9a-f]{64}\z/
       IDENTIFIER = /\A(?:pr|pra|prd|prf)-[0-9a-f]{64}\z/
 
@@ -132,13 +136,34 @@ module Hive
         end
         self["coverage"].each { |entry| validate_coverage!(entry) }
         self["findings"].each { |entry| Finding.new(entry) }
+        self["decisions"].each do |entry|
+          Decision.new(entry)
+        rescue InvalidAction => e
+          raise InvalidRecord, "invalid plan review decision: #{e.message}"
+        end
       end
 
       def validate_coverage!(entry)
-        unless entry.is_a?(Hash) && entry["name"].is_a?(String) &&
+        unless entry.is_a?(Hash) && (entry.keys - COVERAGE_KEYS).empty? &&
+               entry["name"].is_a?(String) &&
                (entry["required"] == true || entry["required"] == false) &&
                COVERAGE_STATUSES.include?(entry["status"])
           raise InvalidRecord, "invalid plan review coverage entry"
+        end
+        expected = Identity.coverage(
+          review_id:, name: entry.fetch("name"), policy_fingerprint:
+        )
+        unless entry["fingerprint"] == expected
+          raise InvalidRecord, "plan review coverage fingerprint does not match its review"
+        end
+        if entry["retry_at"]
+          parse_time!(entry["retry_at"], "coverage retry_at")
+        end
+        if entry["decision_id"] && !entry["decision_id"].to_s.match?(/\Aprd-[0-9a-f]{64}\z/)
+          raise InvalidRecord, "plan review coverage decision id is malformed"
+        end
+        if entry["status"] == "waived" && entry["decision_id"].nil?
+          raise InvalidRecord, "waived plan review coverage requires a decision id"
         end
       end
 

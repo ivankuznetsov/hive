@@ -68,6 +68,7 @@ module Hive
             "name" => request.fetch("name"),
             "required" => request.fetch("required"),
             "status" => status,
+            "fingerprint" => request["fingerprint"],
             "reason" => row["reason"],
             "retry_at" => row["retry_at"]
           }.compact.freeze

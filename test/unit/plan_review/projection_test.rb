@@ -26,8 +26,7 @@ class PlanReviewProjectionTest < Minitest::Test
         finding("fyi", "open"), finding("safe_auto", "verified")
       ],
       "coverage" => [
-        { "name" => "whole_document", "required" => true, "status" => "completed" },
-        { "name" => "adversarial", "required" => true, "status" => "failed" }
+        coverage("whole_document", "completed"), coverage("adversarial", "failed")
       ]
     )
     summary = Hive::PlanReview::Projection.new(Hive::PlanReview::Record.new(data)).summary
@@ -66,5 +65,14 @@ class PlanReviewProjectionTest < Minitest::Test
       },
       "lifecycle" => lifecycle, "display_order" => 1
     ).to_h
+  end
+
+  def coverage(name, status)
+    {
+      "name" => name, "required" => true, "status" => status,
+      "fingerprint" => Hive::PlanReview::Identity.coverage(
+        review_id: record.review_id, name:, policy_fingerprint: record.policy_fingerprint
+      )
+    }
   end
 end

@@ -113,6 +113,20 @@ class AgentProfileTest < Minitest::Test
     assert profile.frozen?
   end
 
+  def test_constructor_rejects_incomplete_and_untyped_runtime_profiles
+    assert_raises(ArgumentError) { make_profile(bin_default: nil) }
+
+    untyped_runtime = Struct.new(:name).new(:custom)
+    error = assert_raises(ArgumentError) do
+      Hive::AgentProfile.new(
+        runtime_profile: untyped_runtime,
+        skill_syntax_format: "/%{skill}"
+      )
+    end
+
+    assert_match(/must be an AgentCliRuntime::Profile/, error.message)
+  end
+
   def test_rejects_unknown_prompt_style
     error = assert_raises(ArgumentError) do
       make_profile(prompt_style: :shell_interpolation)
@@ -213,6 +227,28 @@ class AgentProfileTest < Minitest::Test
     end
 
     assert_match(/cannot pin model/, error.message)
+  end
+
+  def test_identity_arguments_preserve_other_package_capability_diagnostics
+    runtime = AgentCliRuntime::Profile.new(
+      name: :custom,
+      bin_default: "custom-agent",
+      headless_flag: "-p",
+      version_flag: "--version",
+      model_argument_builder: lambda do |_model|
+        raise AgentCliRuntime::UnsupportedCapability, "synthetic package refusal"
+      end
+    )
+    profile = Hive::AgentProfile.new(
+      runtime_profile: runtime,
+      skill_syntax_format: "/%{skill}"
+    )
+
+    error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      profile.identity_arguments(model: "provider/model", effort: nil)
+    end
+
+    assert_equal "synthetic package refusal", error.message
   end
 
   def test_routed_effort_rejects_profiles_without_native_effort_support
@@ -890,8 +926,62 @@ class AgentProfileTest < Minitest::Test
     overridden = profile.with_overrides("bin" => "/x")
     assert overridden.frozen?
   end
+
+  def test_runtime_override_probes_binary_paths_path_entries_and_capabilities
+    with_tmp_dir do |dir|
+      binary = capability_binary(dir, help: "--safe-mode")
+      profile = make_profile(
+        bin_default: binary,
+        env_bin_override_key: nil,
+        cli_capabilities: { safe_mode: [ "--safe-mode" ] }
+      ).with_overrides("min_version" => "1.0.0")
+      runtime = profile.runtime_profile
+
+      assert runtime.binary_installed?(env: { "PATH" => "" })
+      assert_equal "2.1.179", runtime.check_version!(env: {})
+      assert_equal [ "--safe-mode" ], runtime.require_cli_capability!(:safe_mode)
+
+      command = File.join(dir, "custom-agent")
+      FileUtils.cp(binary, command)
+      command_profile = profile.with_overrides("bin" => "custom-agent")
+      assert command_profile.runtime_profile.binary_installed?(
+        env: { "PATH" => dir }
+      )
+
+      malformed_environment = Object.new
+      malformed_environment.define_singleton_method(:[]) { |_key| "set" }
+      malformed_environment.define_singleton_method(:fetch) do |*_args|
+        raise ArgumentError, "synthetic malformed environment"
+      end
+      overridden = profile.with_overrides("env_override" => "CUSTOM_BIN")
+      refute overridden.runtime_profile.binary_installed?(
+        env: malformed_environment
+      )
+    end
+  end
+
   def test_usage_extractor_errors_are_ignored
     profile = make_profile(usage_extractor: ->(_event) { raise "bad usage payload" })
+
+    assert_nil profile.extract_usage_event({ "type" => "result" })
+  end
+
+  def test_runtime_adapter_contains_usage_extractor_failures
+    runtime_class = Class.new(AgentCliRuntime::Profile) do
+      def extract_usage_event(_event)
+        raise "synthetic package usage failure"
+      end
+    end
+    runtime = runtime_class.new(
+      name: :custom,
+      bin_default: "custom-agent",
+      headless_flag: "-p",
+      version_flag: "--version"
+    )
+    profile = Hive::AgentProfile.new(
+      runtime_profile: runtime,
+      skill_syntax_format: "/%{skill}"
+    )
 
     assert_nil profile.extract_usage_event({ "type" => "result" })
   end

@@ -35,6 +35,23 @@ class PlanReviewProjectionTest < Minitest::Test
     assert_equal 1, summary.dig("finding_counts", "open_manual")
     assert_equal 1, summary.dig("coverage_counts", "completed")
     assert_equal 1, summary.dig("coverage_counts", "failed")
+    assert_equal "none", summary.fetch("blocker_owner")
+    assert_nil summary.fetch("blocker_reason")
+    assert_nil summary.fetch("retry_at")
+    assert_equal "unknown", summary.dig("freshness", "status")
+  end
+
+  def test_empty_summary_has_the_complete_status_shape
+    summary = Hive::PlanReview::Projection.empty_summary(
+      state: "uninitialized", freshness_status: "not_initialized",
+      required_action: "run the plan review", blocker_owner: "agent"
+    )
+
+    assert_nil summary.fetch("review_id")
+    assert_equal 0, summary.dig("coverage_counts", "completed")
+    assert_equal 0, summary.dig("finding_counts", "open_manual")
+    assert_equal "not_initialized", summary.dig("freshness", "status")
+    refute summary.fetch("execution_allowed")
   end
 
   private

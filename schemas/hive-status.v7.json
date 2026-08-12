@@ -119,7 +119,7 @@
         "condition_task_generation",
          "commit_generation", "current_attempt", "conditions", "condition_history",
          "evidence", "closure", "condition_overrides", "condition_gate", "condition_migration", "condition_provenance",
-         "shadow_audit", "condition_warning", "unanswered_questions", "action",
+         "shadow_audit", "condition_warning", "plan_review", "unanswered_questions", "action",
          "action_label", "suggested_command", "outcomes",
         "next_action", "diagnostic"
       ],
@@ -247,6 +247,12 @@
            "description": "Operator-visible shadow divergence warning, or null.",
            "type": ["string", "null"]
          },
+        "plan_review": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/PlanReviewSummary" }
+          ]
+        },
         "implementation_identity": {
           "oneOf": [
             { "$ref": "#/$defs/ImplementationIdentity" },
@@ -262,6 +268,8 @@
             "ready_to_finalize", "ready_to_archive", "ready_to_advance",
             "ready_to_run", "recover_draft_pr", "review_parked", "needs_input", "recover_execute",
             "recover_review", "agent_running", "archived", "manual_steering",
+            "plan_reviewing", "plan_review_retry", "plan_review_decision",
+            "plan_review_degraded", "plan_review_unsupported", "plan_review_blocked",
             "error", "admission_error"
           ]
         },
@@ -287,6 +295,144 @@
             { "type": "null" }
           ]
         }
+      }
+    },
+    "PlanReviewSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "applicable", "review_id", "version", "task_generation", "plan_digest",
+        "policy_fingerprint", "computed_level", "effective_level", "state", "outcome",
+        "degraded", "degradation_reason", "attempt_count", "current_attempt_id",
+        "coverage_counts", "finding_counts", "blockers", "blocker_owner", "blocker_reason",
+        "required_action", "retry_at", "routes", "artifacts", "freshness", "execution_allowed"
+      ],
+      "properties": {
+        "applicable": { "const": true },
+        "review_id": { "type": ["string", "null"], "pattern": "^pr-[0-9a-f]{64}$" },
+        "version": { "type": ["integer", "null"], "minimum": 1 },
+        "task_generation": { "type": ["string", "integer", "null"] },
+        "plan_digest": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "policy_fingerprint": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "computed_level": { "enum": ["skip", "standard", "mandatory", null] },
+        "effective_level": { "enum": ["skip", "standard", "mandatory", null] },
+        "state": {
+          "enum": [
+            "uninitialized", "skipped", "reviewing", "retry_scheduled", "awaiting_decision",
+            "revising", "verifying", "cleared", "degraded_cleared", "blocked"
+          ]
+        },
+        "outcome": { "enum": ["skipped", "cleared", "degraded_cleared", "blocked", null] },
+        "degraded": { "type": "boolean" },
+        "degradation_reason": {
+          "enum": ["partial_coverage", "review_unavailable", "terminal_failure", null]
+        },
+        "attempt_count": { "type": "integer", "minimum": 0 },
+        "current_attempt_id": {
+          "type": ["string", "null"], "pattern": "^pra-[0-9a-f]{64}$"
+        },
+        "coverage_counts": { "$ref": "#/$defs/PlanReviewCoverageCounts" },
+        "finding_counts": { "$ref": "#/$defs/PlanReviewFindingCounts" },
+        "blockers": {
+          "type": "array", "items": { "$ref": "#/$defs/PlanReviewBlocker" }
+        },
+        "blocker_owner": {
+          "enum": ["agent", "operator", "provider", "reviewer", "planner", "scheduler", "hive", "none", "unknown"]
+        },
+        "blocker_reason": { "type": ["string", "null"] },
+        "required_action": { "type": ["string", "object", "null"] },
+        "retry_at": { "type": ["string", "null"], "format": "date-time" },
+        "routes": { "type": "array", "items": { "$ref": "#/$defs/PlanReviewRoute" } },
+        "artifacts": {
+          "type": "object", "additionalProperties": { "$ref": "#/$defs/PlanReviewArtifact" }
+        },
+        "freshness": { "$ref": "#/$defs/PlanReviewFreshness" },
+        "execution_allowed": { "type": "boolean" }
+      }
+    },
+    "PlanReviewCoverageCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requested", "completed", "failed", "unsupported", "waived"],
+      "properties": {
+        "requested": { "type": "integer", "minimum": 0 },
+        "completed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "unsupported": { "type": "integer", "minimum": 0 },
+        "waived": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "PlanReviewFindingCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "open", "approved", "answered", "incorporated", "verified", "resolved", "waived",
+        "total", "open_gated", "open_manual", "fyi"
+      ],
+      "properties": {
+        "open": { "type": "integer", "minimum": 0 },
+        "approved": { "type": "integer", "minimum": 0 },
+        "answered": { "type": "integer", "minimum": 0 },
+        "incorporated": { "type": "integer", "minimum": 0 },
+        "verified": { "type": "integer", "minimum": 0 },
+        "resolved": { "type": "integer", "minimum": 0 },
+        "waived": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 },
+        "open_gated": { "type": "integer", "minimum": 0 },
+        "open_manual": { "type": "integer", "minimum": 0 },
+        "fyi": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "PlanReviewBlocker": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["owner", "reason"],
+          "properties": {
+            "owner": { "type": "string" }, "reason": { "type": "string" },
+            "coverage": { "type": "string" },
+            "finding_fingerprint": { "type": "string", "pattern": "^prf-[0-9a-f]{64}$" }
+          }
+        }
+      ]
+    },
+    "PlanReviewRouteIdentity": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string" }, "model": { "type": "string" },
+        "family": { "type": ["string", "null"] }, "effort": { "type": "string" },
+        "route": { "type": "string" }, "reconstructed": { "type": "boolean" }
+      }
+    },
+    "PlanReviewRoute": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "requested", "actual", "independence_verified"],
+      "properties": {
+        "role": { "type": "string" },
+        "requested": { "$ref": "#/$defs/PlanReviewRouteIdentity" },
+        "actual": { "$ref": "#/$defs/PlanReviewRouteIdentity" },
+        "capability_result": { "type": ["string", "null"] },
+        "independence_verified": { "type": "boolean" },
+        "independence_reason": { "type": ["string", "null"] },
+        "attempt_id": { "type": ["string", "null"], "pattern": "^pra-[0-9a-f]{64}$" },
+        "outcome": {
+          "enum": ["success", "partial_coverage", "unsupported", "provider_limit", "timeout", "retryable_failure", "terminal_failure", null]
+        },
+        "retry_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "PlanReviewArtifact": {
+      "type": "object", "additionalProperties": false, "required": ["path", "sha256", "bytes"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "PlanReviewFreshness": {
+      "type": "object", "additionalProperties": false, "required": ["status", "reason"],
+      "properties": {
+        "status": { "enum": ["current", "stale", "not_initialized", "invalid", "unknown"] },
+        "reason": { "type": ["string", "null"] }
       }
     },
     "HumanOutcome": {

@@ -189,6 +189,24 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", manual.fetch("blocker_owner")
   end
 
+  def test_plan_review_state_owner_reason_and_projection_are_preserved
+    review = {
+      "state" => "awaiting_decision", "required_action" => "answer manual finding",
+      "blocker_owner" => "operator", "blocker_reason" => "manual_answer_required"
+    }
+    source = task(
+      action: "plan_review_decision", slug: "review", stage: "3-plan",
+      marker: "waiting", plan_review: review
+    )
+
+    projected = project(status_payload(source)).fetch("tasks").first
+
+    assert_equal "waiting_on_you", projected.fetch("state")
+    assert_equal "operator", projected.fetch("blocker_owner")
+    assert_equal "answer manual finding", projected.fetch("reason")
+    assert_equal review, projected.fetch("plan_review")
+  end
+
   def test_daemon_owned_error_retry_is_not_reported_as_operator_repair
     error = task(
       action: "error",
@@ -1108,7 +1126,7 @@ class OperationalStatusTest < Minitest::Test
   def task(action:, slug:, stage: "1-inbox", marker: "waiting", attrs: {}, held: nil,
            live_task_lock: false, task_lock_pid: nil, unanswered_questions: 0,
            blocked: false, depends_on: nil, blocked_by: nil, dependency_stage: nil,
-           admission_error: nil, closure: nil)
+           admission_error: nil, closure: nil, plan_review: nil)
     attrs = attrs.dup
     if Hive::Recovery.recoverable_marker?(marker) && !attrs.key?("marker_id")
       attrs["marker_id"] = "marker-#{slug}"
@@ -1154,6 +1172,7 @@ class OperationalStatusTest < Minitest::Test
       "condition_provenance" => {},
       "shadow_audit" => {},
       "condition_warning" => nil,
+      "plan_review" => plan_review,
       "unanswered_questions" => unanswered_questions,
       "action" => action,
       "action_label" => action.tr("_", " "),

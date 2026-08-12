@@ -7,6 +7,8 @@ require "json"
 module Hive
   module PlanReview
     class Projection
+      FRESHNESS_STATUSES = %w[current stale not_initialized invalid unknown].freeze
+
       attr_reader :record
 
       def self.load(task_folder:)
@@ -34,6 +36,7 @@ module Hive
       def summary
         findings = record["findings"].map { |entry| Finding.new(entry) }
         coverage = record["coverage"]
+        blocker_owner, blocker_reason = blocker_summary(record["blockers"], record)
         {
           "applicable" => true,
           "review_id" => record.review_id,
@@ -52,12 +55,46 @@ module Hive
           "coverage_counts" => count_by(coverage, "status", Record::COVERAGE_STATUSES),
           "finding_counts" => finding_counts(findings),
           "blockers" => record["blockers"],
+          "blocker_owner" => blocker_owner,
+          "blocker_reason" => blocker_reason,
           "required_action" => record.required_action,
+          "retry_at" => record["retry_at"],
           "routes" => record["routes"],
           "artifacts" => record["artifacts"],
+          "freshness" => { "status" => "unknown", "reason" => nil },
           "execution_allowed" => record.execution_allowed?
         }
       end
+
+      def self.empty_summary(state:, freshness_status:, required_action: nil,
+                             blocker_owner: "none", blocker_reason: nil)
+        unless Record::STATES.include?(state.to_s) && FRESHNESS_STATUSES.include?(freshness_status.to_s)
+          raise ArgumentError, "invalid empty plan review summary"
+        end
+
+        {
+          "applicable" => true, "review_id" => nil, "version" => nil,
+          "task_generation" => nil, "plan_digest" => nil, "policy_fingerprint" => nil,
+          "computed_level" => nil, "effective_level" => nil, "state" => state.to_s,
+          "outcome" => nil, "degraded" => false, "degradation_reason" => nil,
+          "attempt_count" => 0, "current_attempt_id" => nil,
+          "coverage_counts" => Record::COVERAGE_STATUSES.to_h { |value| [ value, 0 ] },
+          "finding_counts" => empty_finding_counts,
+          "blockers" => blocker_reason ? [ { "owner" => blocker_owner, "reason" => blocker_reason } ] : [],
+          "blocker_owner" => blocker_owner, "blocker_reason" => blocker_reason,
+          "required_action" => required_action, "retry_at" => nil,
+          "routes" => [], "artifacts" => {},
+          "freshness" => { "status" => freshness_status.to_s, "reason" => blocker_reason },
+          "execution_allowed" => false
+        }
+      end
+
+      def self.empty_finding_counts
+        Finding::LIFECYCLES.to_h { |value| [ value, 0 ] }.merge(
+          "total" => 0, "open_gated" => 0, "open_manual" => 0, "fyi" => 0
+        )
+      end
+      private_class_method :empty_finding_counts
 
       def to_h = record.to_h
 
@@ -85,6 +122,23 @@ module Hive
           end,
           "fyi" => findings.count { |finding| finding.classification == "fyi" }
         )
+      end
+
+      def blocker_summary(blockers, review)
+        first = Array(blockers).first
+        owner = first.is_a?(Hash) ? first["owner"].to_s : ""
+        reason = first.is_a?(Hash) ? first["reason"].to_s : first.to_s
+        if owner.empty?
+          owner = case review.state
+          when "awaiting_decision" then "operator"
+          when "retry_scheduled" then "provider"
+          when "reviewing", "revising", "verifying" then "agent"
+          when "blocked" then "hive"
+          else "none"
+          end
+        end
+        reason = review.required_action.to_s if reason.empty? && review.required_action
+        [ owner, reason.empty? ? nil : reason ]
       end
     end
   end

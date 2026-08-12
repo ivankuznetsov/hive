@@ -13,6 +13,7 @@ require "hive/markers"
 require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
+require "hive/plan_review/transition_guard"
 
 module Hive
   # Classifier that turns a (Task, Marker) pair into a user-facing
@@ -244,7 +245,9 @@ module Hive
     READY_COMMANDS = ACTIONS.values.each_with_object({}) do |action, commands|
       key = action.fetch(:key)
       commands[key] = action.fetch(:command) if key.start_with?("ready_")
-    end.freeze
+    end.merge(
+      Hive::Schemas::TaskActionKind::PLAN_REVIEW_DEGRADED => "develop"
+    ).freeze
 
     attr_reader :task, :marker, :project_name, :projection
 
@@ -654,6 +657,9 @@ module Hive
     def plan_review_action
       return nil unless plan_review
 
+      freshness = plan_review.dig("freshness", "status")
+      return ACTIONS.fetch(:plan_review_blocked) if %w[stale invalid].include?(freshness)
+
       state = plan_review["state"].to_s
       case state
       when "skipped", "cleared"
@@ -813,18 +819,36 @@ module Hive
     end
 
     def load_plan_review
-      return nil unless task.stage_name == "plan" && File.directory?(task.folder)
+      return nil unless File.directory?(task.folder)
       return nil unless Hive::Workflows.coding_id?(task_workflow.id)
-      return ({ "state" => "uninitialized", "execution_allowed" => false }) unless
-        File.exist?(File.join(task.folder, Hive::PlanReview::Store::ROOT_BASENAME))
+      review_root = File.join(task.folder, Hive::PlanReview::Store::ROOT_BASENAME)
+      unless File.exist?(review_root)
+        return nil unless task.stage_name == "plan"
 
-      Hive::PlanReview::Projection.load(task_folder: task.folder).summary
-    rescue Hive::PlanReview::Error, SystemCallError, IOError
-      {
-        "state" => "blocked", "execution_allowed" => false,
-        "required_action" => "repair invalid plan review evidence",
-        "blockers" => [ { "owner" => "hive", "reason" => "invalid_plan_review" } ]
-      }
+        return Hive::PlanReview::Projection.empty_summary(
+          state: "uninitialized", freshness_status: "not_initialized",
+          required_action: "run the plan review", blocker_owner: "agent"
+        )
+      end
+
+      projection = Hive::PlanReview::Projection.load(task_folder: task.folder)
+      freshness = Hive::PlanReview::TransitionGuard.freshness(
+        task:, projection:, config: @config
+      )
+      summary = projection.summary.merge("freshness" => freshness)
+      return summary if freshness.fetch("status") == "current"
+
+      summary.merge(
+        "blocker_owner" => "hive", "blocker_reason" => freshness.fetch("reason"),
+        "required_action" => "refresh plan review state and retry",
+        "execution_allowed" => false
+      )
+    rescue Hive::PlanReview::Error, Hive::ConfigError, SystemCallError, IOError
+      Hive::PlanReview::Projection.empty_summary(
+        state: "blocked", freshness_status: "invalid",
+        required_action: "repair invalid plan review evidence",
+        blocker_owner: "hive", blocker_reason: "invalid_plan_review"
+      )
     end
 
     def retry_due?(value)

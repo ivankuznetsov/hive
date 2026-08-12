@@ -514,7 +514,7 @@ class CommandsStatusTest < Minitest::Test
 
       assert_equal({
         "brainstorm-task-260620-aaaa" => "ready_to_plan",
-        "plan-task-260620-bbbb" => "needs_input",
+        "plan-task-260620-bbbb" => "plan_reviewing",
         "execute-task-260620-cccc" => "ready_to_open_pr"
       }, actions_by_slug)
       assert_equal [ { "stage_dir" => "5-review", "task_count" => 1 } ],

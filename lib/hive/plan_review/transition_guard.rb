@@ -114,24 +114,29 @@ module Hive
         end
 
         record = projection.record
-        plan_digest = current_plan_digest(task)
-        allowed_digests = [ record.plan_digest, record["candidate_plan_digest"] ].compact
-        generation_matches = record.task_generation.to_s == Identity.task_generation(task).to_s
-        policy_matches = policy_configuration_matches?(record, task, cfg)
-        fresh = generation_matches && allowed_digests.include?(plan_digest) && policy_matches
+        current_freshness = freshness(task:, projection:, config: cfg)
+        fresh = current_freshness.fetch("status") == "current"
         executable = record.execution_allowed? && record["blockers"].empty?
         return projection if fresh && executable
 
-        reason = if !generation_matches
-          "task generation changed after plan review"
-        elsif !allowed_digests.include?(plan_digest)
-          "canonical plan changed after plan review"
-        elsif !policy_matches
-          "plan review policy changed after resolution"
-        else
+        reason = current_freshness["reason"] ||
           "plan review is #{record.state} and does not authorize execution"
-        end
         raise blocked_error(task, projection, reason)
+      end
+
+      def freshness(task:, projection:, config:)
+        record = projection.record
+        allowed_digests = [ record.plan_digest, record["candidate_plan_digest"] ].compact
+        return stale("task generation changed after plan review") unless
+          record.task_generation.to_s == Identity.task_generation(task).to_s
+        return stale("canonical plan changed after plan review") unless
+          allowed_digests.include?(current_plan_digest(task))
+        return stale("plan review policy changed after resolution") unless
+          policy_configuration_matches?(record, task, config)
+
+        { "status" => "current", "reason" => nil }.freeze
+      rescue InvalidPlan, InvalidRecord, SystemCallError, IOError => error
+        { "status" => "invalid", "reason" => error.message }.freeze
       end
 
       def observation(projection)
@@ -217,6 +222,8 @@ module Hive
         nil
       end
 
+      def stale(reason) = { "status" => "stale", "reason" => reason }.freeze
+
       def blocked_error(task, projection, reason, required_action: nil)
         record = projection&.record
         action = required_action || record&.required_action || "complete or resolve the plan review"
@@ -242,7 +249,7 @@ module Hive
       private_class_method :authorize!, :observation, :policy_configuration_matches?,
                            :current_plan_digest, :write_legacy_adoption!,
                            :persisted_run_level, :blocked_error,
-                           :coding?, :stage_dir, :planner_family
+                           :stale, :coding?, :stage_dir, :planner_family
     end
   end
 end

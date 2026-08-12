@@ -54,6 +54,17 @@ class PlanReviewRecordTest < Minitest::Test
     end
   end
 
+  def test_projection_nested_state_is_immutable
+    value = Hive::PlanReview::Record.new(
+      projection.merge("routes" => [ { "role" => "primary" } ])
+    )
+
+    assert_predicate value["routes"], :frozen?
+    assert_predicate value["routes"].first, :frozen?
+    assert_raises(FrozenError) { value["routes"] << { "role" => "adversarial" } }
+    assert_raises(FrozenError) { value["routes"].first["role"] = "verification" }
+  end
+
   private
 
   def projection

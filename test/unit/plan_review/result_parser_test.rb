@@ -40,6 +40,16 @@ class PlanReviewResultParserTest < Minitest::Test
     end
   end
 
+  def test_duplicate_coverage_is_rejected
+    duplicate = valid_result.fetch("coverage").first.dup
+    result = valid_result.merge("coverage" => [ duplicate, duplicate.dup ])
+
+    error = assert_raises(Hive::PlanReview::InvalidRecord) do
+      Hive::PlanReview::ResultParser.parse(JSON.generate(result))
+    end
+    assert_includes error.message, "duplicate"
+  end
+
   private
 
   def valid_result

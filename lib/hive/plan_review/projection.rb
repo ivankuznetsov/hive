@@ -1,8 +1,6 @@
 require "hive/plan_review/record"
 require "hive/plan_review/store"
-require "hive/plan_review/identity"
-require "digest"
-require "json"
+require "hive/canonical_json"
 
 module Hive
   module PlanReview
@@ -101,7 +99,7 @@ module Hive
       def to_h = record.to_h
 
       def observation_digest
-        Digest::SHA256.hexdigest(JSON.generate(Identity.normalize(record.to_h)))
+        Hive::CanonicalJSON.digest(record.to_h)
       end
 
       private

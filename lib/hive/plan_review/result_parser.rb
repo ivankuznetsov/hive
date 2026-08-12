@@ -1,4 +1,6 @@
 require "json"
+require "set"
+require "hive/plan_review/adapters/base"
 require "hive/plan_review/finding"
 require "hive/plan_review/record"
 
@@ -8,9 +10,7 @@ module Hive
       SCHEMA = "hive-plan-review-adapter-result".freeze
       SCHEMA_VERSION = 1
       MAX_BYTES = 1024 * 1024
-      OUTCOMES = %w[
-        success partial_coverage unsupported provider_limit timeout retryable_failure terminal_failure
-      ].freeze
+      OUTCOMES = Adapters::Base::OUTCOMES
       KEYS = %w[
         schema schema_version attempt_id plan_digest policy_fingerprint outcome findings coverage
         selected_lenses residual_evidence diagnostic retry_at
@@ -109,7 +109,7 @@ module Hive
 
       def validate_coverage!(value)
         raise InvalidRecord, "plan review coverage must be an Array" unless value.is_a?(Array)
-        names = []
+        names = Set.new
         value.map do |entry|
           unless entry.is_a?(Hash) && (entry.keys - %w[name required status reason retry_at]).empty? &&
                  entry["name"].to_s.match?(/\A[a-z][a-z0-9_]{0,63}\z/) &&
@@ -117,10 +117,9 @@ module Hive
                  Record::COVERAGE_STATUSES.include?(entry["status"])
             raise InvalidRecord, "invalid plan review coverage entry"
           end
-          raise InvalidRecord, "duplicate plan review coverage item" if names.include?(entry["name"])
+          raise InvalidRecord, "duplicate plan review coverage item" unless names.add?(entry["name"])
 
-          names << entry["name"]
-          entry.freeze
+          Hive::PlanReview.deep_freeze(entry)
         end
       end
 

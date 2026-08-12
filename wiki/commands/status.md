@@ -3,8 +3,8 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-10
-tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, terminal-outcomes, dependencies, scheduler]
+updated: 2026-08-12
+tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler]
 ---
 
 **TLDR**: `hive status` now defaults to a compact operational snapshot for
@@ -395,6 +395,26 @@ With `--write`, `Hive::DiagnosisAgent` uses the configured development profile (
 
 JSON output uses schema `hive-status-diagnose`, version `2`, and returns `slug`, `id`, `display_name`, `task_folder`, `diagnostic`, and `path` (set only when `--write` wrote an artifact).
 
+## Plan-review projection
+
+Both current status contracts have a required nullable `plan_review` field on
+task rows. It is `null` for non-coding workflows and tasks outside the
+applicable boundary. A coding plan row exposes the shared
+[[modules/plan_review]] summary: logical review/version/observation identity,
+task generation and plan/policy digests, computed/effective level,
+state/outcome/degradation, attempt identity, complete coverage and finding
+counts, exact blockers and owner, retry time, one required action, sanitized
+planner/reviewer route receipts, safe artifact references, freshness, and
+`execution_allowed`.
+
+Status validates every referenced artifact before projecting clearance. A
+missing, corrupt, symlinked, stale, or hash-mismatched record becomes an inert
+visible `plan_review_blocked` row; it never falls back to the coarse plan
+marker. Concise text leads with review level/state and its exact next action.
+The same object is copied into operational status, daemon status rows, and TUI
+snapshot rows, and remains visible after a degraded plan advances while the
+task surface can still expose its evidence.
+
 ## Read-only
 
 Normal status does not mutate task stage, markers, dependencies, or ordinary
@@ -426,4 +446,4 @@ task/commit locks and committed before the clock can hide a row.
 ## Backlinks
 
 - [[cli]] · [[commands/run]] · [[commands/approve]] · [[commands/watch]]
-- [[modules/markers]] · [[modules/task]] · [[modules/task_action]] · [[modules/task_dependencies]] · [[modules/config]]
+- [[modules/markers]] · [[modules/task]] · [[modules/task_action]] · [[modules/task_dependencies]] · [[modules/config]] · [[modules/plan_review]]

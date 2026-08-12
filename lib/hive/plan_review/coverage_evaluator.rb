@@ -1,4 +1,5 @@
 require "hive/plan_review"
+require "hive/plan_review/adapters/base"
 require "hive/plan_review/record"
 
 module Hive
@@ -28,7 +29,7 @@ module Hive
           !row.fetch("required") && %w[failed unsupported].include?(row.fetch("status"))
         end
         verification_failed = verification_outcome &&
-                              !%w[success partial_coverage].include?(verification_outcome.to_s)
+                              !Adapters::Base::SUCCESS_OUTCOMES.include?(verification_outcome.to_s)
 
         if missing.empty? && !verification_failed
           return result(optional_failed ? "degraded" : "complete",

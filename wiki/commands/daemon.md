@@ -3,8 +3,8 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-08-02
-tags: [command, daemon, automation, json]
+updated: 2026-08-12
+tags: [command, daemon, automation, plan-review, json]
 ---
 
 **TLDR**: `hive daemon SUBCOMMAND` is the operator surface for the
@@ -86,7 +86,10 @@ stage.
 | `ready_to_finalize`   | Dispatch `hive finalize <slug> --from 7-artifacts` (7→8) |
 | Any coding task with `pr_url` in stages `5-open-pr` through `8-finalize` | **Observe before policy dispatch.** Persist the exact task generation and PR binding, poll with per-candidate durable backoff, verify the observed head and reachable merge SHA, checkpoint required architecture intake, then use a daemon-owned `remote_merge` closure receipt to move the same generation to `9-done`. This includes recoverable error rows; no marker-reason allowlist or archive child exists. |
 | Held PR-bearing task | Keep the candidate in `pr-merge-reconciliation.json` with its hold reason, but do not poll or archive until a later status observation clears the dependency/admission hold. |
-| `needs_input` at `3-plan` | **Auto-dispatch immediately.** Plan-stage `:waiting` is an approval pause, not a Q&A wait — `daemon.enabled: true` is the durable consent. `Hive::Daemon::PlanApproval.prepare` rewrites the row's `hive plan ...` command to `hive develop ...` and flips the `:waiting` marker to `:complete` before dispatch so the workflow verb's terminal-marker gate (`VALID_TERMINAL_MARKERS`) accepts the advance. Logged as `:dispatched` with `trigger: "plan_approval"`. |
+| `plan_reviewing` or due `plan_review_retry` at coding `3-plan` | Dispatch `hive plan-review-run ...`. This automation can start/retry critique, perform an already-authorized revision, and verify, but cannot create approvals, answers, waivers, or mandatory downgrades. |
+| future `plan_review_retry` | Hold until the projection's `retry_at`; provider/transient evidence remains attached to the same attempt lineage. |
+| `plan_review_decision`, `plan_review_unsupported`, or `plan_review_blocked` | Skip. The row names the operator/configuration action; daemon enrollment creates no authority. |
+| `ready_to_develop` or `plan_review_degraded` at coding `3-plan` | `PlanApproval.prepare` rewrites to `hive develop ...`, revalidates the exact current plan-review observation under the task lock, and only then flips `:waiting` to `:complete`. A missing/stale/blocked review leaves the marker and folder untouched. |
 | `needs_input` (any other stage) | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. Brainstorm/execute/review WAITING represent actual user-authored answers; auto-dispatch without an edit would either spam the agent or skip real user input. The `[project, slug] → mtime` baseline this compares against is **persisted** (`daemon_dispatch_baselines.json` under the state home, beside `.daemon.pid`), so a daemon restart no longer re-strands a task answered while it was down — see [[modules/daemon]] "Persisted dispatch baselines". **Brainstorm Q&A gate:** mtime-debounce alone can't tell "answered 1 of 3, still going" from "done" — each Telegram answer bumps the file mtime — so a `2-brainstorm` `needs_input` row whose `brainstorm.md` still has unanswered `### Q{n}.` slots is **held** (`Policy :wait_for_answers`, logged `:skipped reason=answers_pending`) until every question is answered, whether they arrive one-at-a-time via the bot or in one editor save. See [[modules/daemon]] "Brainstorm answers-pending gate". |
 | `recover_execute` | Skip — `EXECUTE_STALE` / waiting findings are explicit human-input gates. |
 | `recover_review` | Policy skips the row. `REVIEW_ERROR` is handled earlier by the universal recovery scheduler; `REVIEW_STALE` / `REVIEW_CI_STALE` remain explicit operator submissions after inspection or edits. |
@@ -251,6 +254,6 @@ outcomes all use registered event names.
 ## Backlinks
 
 - [[cli]] · [[commands/run]] · [[commands/status]] · [[commands/approve]]
-- [[modules/daemon]]
+- [[modules/daemon]] · [[modules/plan_review]]
 - [[decisions]] (ADR-024)
 - [[architecture]]

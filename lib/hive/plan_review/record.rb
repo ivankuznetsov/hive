@@ -38,7 +38,7 @@ module Hive
       def initialize(attributes)
         @data = Identity.normalize(attributes)
         validate!
-        @data = JSON.parse(JSON.generate(@data)).freeze
+        @data = Hive::PlanReview.deep_freeze(JSON.parse(JSON.generate(@data)))
         freeze
       rescue JSON::GeneratorError, TypeError => e
         raise InvalidRecord, "plan review record is not JSON-safe: #{e.message}"

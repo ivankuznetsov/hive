@@ -8,6 +8,7 @@ require "hive/agent_profiles"
 require "hive/agent_skills"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/result_parser"
+require "hive/plan_review/route_resolver"
 require "hive/secret_patterns"
 
 module Hive
@@ -85,7 +86,7 @@ module Hive
             )
           end
 
-          before_digest = Digest::SHA256.file(request.plan_path).hexdigest
+          before_digest = request.plan_digest
           disposable = prepare_disposable(request)
           output_path = File.join(disposable, OUTPUT_BASENAME)
           prompt = render_prompt(request, disposable, output_path, capability)
@@ -234,16 +235,14 @@ module Hive
 
         def route_receipt(request, actual: nil, capability_result: "present")
           actual = stringify(actual || request.reviewer)
-          planner_family = request.planner_identity["family"].to_s
-          reviewer_family = actual["family"].to_s
-          independent = !planner_family.empty? && !reviewer_family.empty? && planner_family != reviewer_family
+          independent, reason = RouteResolver.independence(request.planner_identity, actual)
           {
             "role" => request.kind,
             "requested" => request.reviewer,
             "actual" => actual,
             "capability_result" => capability_result,
             "independence_verified" => independent,
-            "independence_reason" => independent ? "different_model_family" : "same_or_unknown_model_family"
+            "independence_reason" => reason
           }.freeze
         end
 

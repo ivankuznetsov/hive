@@ -1,8 +1,6 @@
-require "digest"
-require "json"
 require "time"
+require "hive/canonical_json"
 require "hive/plan_review/finding"
-require "hive/plan_review/identity"
 
 module Hive
   module PlanReview
@@ -22,7 +20,7 @@ module Hive
 
           receipt = {
             "policy_id" => policy.fetch("id"), "policy_version" => policy.fetch("version"),
-            "policy_digest" => Digest::SHA256.hexdigest(JSON.generate(Identity.normalize(policy))),
+            "policy_digest" => Hive::CanonicalJSON.digest(policy),
             "action" => "approve_finding", "risk" => finding["risk"],
             "path" => finding["evidence"].fetch("path"),
             "review_id" => review_id, "policy_fingerprint" => policy_fingerprint,

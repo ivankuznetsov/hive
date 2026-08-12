@@ -430,6 +430,39 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_plan_review_requirement_is_true_only_and_survives_rewrites
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(
+        dir, id: 7, slug: "reviewed-plan", display_name: nil,
+        plan_review_required: true
+      )
+
+      assert Hive::TaskMeta.plan_review_required?(dir)
+      Hive::TaskMeta.update_display_name(dir, "Reviewed plan")
+      assert_equal true, Hive::TaskMeta.read(dir).fetch(:plan_review_required)
+
+      File.write(File.join(dir, "meta.yml"), "plan_review_required: false\n")
+      error = assert_raises(Hive::TaskMeta::InvalidMetadata) do
+        Hive::TaskMeta.plan_review_required?(dir)
+      end
+      assert_includes error.message, "must be true"
+    end
+  end
+
+  def test_plan_review_requirement_rejects_duplicate_metadata
+    with_tmp_dir do |dir|
+      File.write(
+        File.join(dir, "meta.yml"),
+        "plan_review_required: true\nplan_review_required: true\n"
+      )
+
+      error = assert_raises(Hive::TaskMeta::InvalidMetadata) do
+        Hive::TaskMeta.plan_review_required?(dir)
+      end
+      assert_includes error.message, "duplicate plan_review_required"
+    end
+  end
+
   def test_update_id_preserves_slug_display_name_dependency_and_workflow
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(

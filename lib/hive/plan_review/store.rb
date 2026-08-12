@@ -3,6 +3,7 @@ require "fileutils"
 require "json"
 require "pathname"
 require "hive/atomic_file"
+require "hive/canonical_json"
 require "hive/plan_review/record"
 require "hive/secret_patterns"
 
@@ -20,7 +21,6 @@ module Hive
         @task_folder = File.expand_path(task_folder)
         @root = File.join(@task_folder, ROOT_BASENAME)
         @current_path = File.join(@root, CURRENT_BASENAME)
-        ensure_directory!(@root)
       end
 
       def create_review!(record)
@@ -135,9 +135,7 @@ module Hive
 
       def review_root(review_id)
         safe_segment!(review_id, "review id")
-        path = File.join(root, "reviews", review_id)
-        ensure_directory!(path)
-        path
+        File.join(root, "reviews", review_id)
       end
 
       def ensure_review!(review_id)
@@ -312,7 +310,7 @@ module Hive
       end
 
       def canonical_json(value)
-        "#{JSON.generate(Identity.normalize(value))}\n"
+        "#{Hive::CanonicalJSON.generate(value)}\n"
       end
     end
   end

@@ -3,6 +3,7 @@ require "time"
 require "hive/atomic_file"
 require "hive/git_ops"
 require "hive/lock"
+require "hive/plan_review/adapters/base"
 require "hive/plan_review/decision"
 require "hive/plan_review/projection"
 require "hive/plan_review/store"
@@ -11,7 +12,7 @@ require "hive/secret_patterns"
 module Hive
   module PlanReview
     class DecisionService
-      TRANSIENT_OUTCOMES = %w[provider_limit timeout retryable_failure].freeze
+      TRANSIENT_OUTCOMES = Adapters::Base::TRANSIENT_OUTCOMES
 
       Result = Data.define(:applied, :decision, :projection) do
         def noop? = !applied

@@ -3,8 +3,8 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-08-10
-tags: [config, yaml, validation]
+updated: 2026-08-12
+tags: [config, yaml, validation, plan-review]
 ---
 
 **TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, an optional project-owned artifact capture provider, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
@@ -141,6 +141,55 @@ shape: compatible Hivebox trees continue on the built-in recorder, while
 incompatible conventional trees receive the precise unsupported-provider
 diagnostic until they opt in. Retained v1 capture manifests remain readable;
 new successful capture emits the provider-neutral v2 manifest.
+
+## Plan-review policy and routes
+
+`plan_review` is a closed, always-enabled configuration subtree for the
+built-in coding plan boundary. It does not extend workflow descriptors or
+activate critique for other workflows. Defaults are:
+
+```yaml
+plan_review:
+  enabled: true
+  classifier_version: 1
+  minimum_level: skip
+  coding: {minimum_level: skip}
+  skip: {max_files: 5, max_bytes: 262144}
+  protected_paths:
+    - .github/workflows/**
+    - config/**
+    - db/migrate/**
+    - packaging/**
+    - Gemfile
+    - Gemfile.lock
+    - hive.gemspec
+    - install.sh
+  attempts: {max_transient: 2, timeout_sec: 900}
+  coverage: {required: [whole_document, adversarial], optional: []}
+  adapter: ce_doc_review
+  reviewers:
+    primary: plan_review
+    adversarial: plan_review_adversarial
+    verification: plan_review_verification
+  routes:
+    primary: {agent: codex, model: gpt-5.6-sol, family: openai, effort: high, route: native_codex}
+    adversarial: {agent: grok, model: grok-4.6, family: grok, effort: high, route: native_grok_build}
+    verification: {agent: codex, model: gpt-5.6-sol, family: openai, effort: high, route: native_codex}
+    fallbacks: []
+  approval_policies: []
+```
+
+Minimum levels accept only `skip`, `standard`, or `mandatory`; inherited and
+per-run inputs are raise-only. File/byte/retry/timeout limits are bounded,
+protected globs must be safe relative patterns, coverage names are unique
+lowercase identifiers, and required/optional coverage cannot overlap. Every
+route is a closed provider/model/family/effort/route receipt and every reviewer
+name must exist in the model-routing registry.
+
+Approval-policy rows are also closed. Their unique ID/version, action, risk,
+relative paths, validity interval, and revocation flag must validate before the
+project loads. Runtime matching is exact and emits a consumption receipt; it
+cannot lower a mandatory review. See [[modules/plan_review]].
 
 ## Condition authority
 
@@ -545,6 +594,8 @@ cfg.dig("review", "ci", "agent")
 cfg.dig("review", "reviewers")
 cfg.dig("review", "adhoc", "reviewers")
 cfg.dig("review", "adhoc", "fix")
+cfg.dig("plan_review", "routes", "adversarial")
+cfg.dig("plan_review", "coverage", "required")
 cfg.dig("babysitter", "enabled")
 cfg.dig("babysitter", "max_concurrent_prs")
 cfg.dig("patrol", "review_prs")
@@ -566,4 +617,4 @@ Tests use `with_tmp_global_config` (`test/test_helper.rb:30`) to point `HIVE_HOM
 ## Backlinks
 
 - [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/babysit]] · [[commands/patrol]] · [[commands/refactor-patrol]] · [[commands/web]]
-- [[modules/agent]] · [[state-model]]
+- [[modules/agent]] · [[modules/plan_review]] · [[state-model]]

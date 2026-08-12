@@ -23,3 +23,47 @@ Write one JSON object to `<%= output_path %>` using schema
 
 Use only typed findings and named coverage. Free-form stdout is diagnostic,
 not clearance authority.
+
+Use exactly this JSON shape (JSON has no comments):
+
+```json
+{
+  "schema": "hive-plan-review-adapter-result",
+  "schema_version": 1,
+  "attempt_id": "<%= attempt_id %>",
+  "plan_digest": "<%= plan_digest %>",
+  "policy_fingerprint": "<%= policy_fingerprint %>",
+  "outcome": "success",
+  "findings": [
+    {
+      "source": "adversarial",
+      "classification": "gated_auto",
+      "risk": "high",
+      "title": "Short finding title",
+      "description": "Concrete consequence and proposed disposition",
+      "evidence": {
+        "path": "plan.md",
+        "start_line": 1,
+        "end_line": 1,
+        "anchor_digest": "64 lowercase hexadecimal characters",
+        "excerpt": "A short redacted excerpt"
+      },
+      "lifecycle": "open",
+      "display_order": 1
+    }
+  ],
+  "coverage": [
+    {"name": "adversarial", "required": true, "status": "completed"}
+  ],
+  "selected_lenses": [],
+  "residual_evidence": [],
+  "diagnostic": null,
+  "retry_at": null
+}
+```
+
+Use an empty `findings` array when there are no findings. Emit one unique
+coverage row for every requested item; statuses are `requested`, `completed`,
+`failed`, `unsupported`, or `waived`. Outcomes are `success`,
+`partial_coverage`, `unsupported`, `provider_limit`, `timeout`,
+`retryable_failure`, or `terminal_failure`.

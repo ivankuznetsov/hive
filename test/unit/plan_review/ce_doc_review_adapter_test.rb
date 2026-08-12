@@ -38,6 +38,24 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_route_receipt_normalizes_model_family_before_attesting_independence
+    with_request do |request, _plan_path|
+      runner = lambda do |output_path:, request:, **|
+        File.write(output_path, JSON.generate(valid_result(request)))
+        {
+          "status" => "ok",
+          "actual_route" => request.reviewer.merge("family" => " CLAUDE ")
+        }
+      end
+      adapter = adapter_for(runner)
+
+      receipt = adapter.call(request).route_receipt
+
+      refute receipt.fetch("independence_verified")
+      assert_equal "same_model_family", receipt.fetch("independence_reason")
+    end
+  end
+
   def test_timeout_limit_retryable_and_canonical_mutation_are_distinct
     outcomes = {
       "timeout" => { "status" => "timeout" },
@@ -58,6 +76,18 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       end)
       assert_equal "terminal_failure", adapter.call(request).outcome
     end
+  end
+
+  def test_result_nested_evidence_is_immutable
+    result = Hive::PlanReview::Adapters::Base::Result.new(
+      outcome: "success",
+      coverage: [ { "name" => "whole_document", "status" => "completed" } ],
+      route_receipt: { "actual" => { "family" => "openai" } }
+    )
+
+    assert_predicate result.coverage.first, :frozen?
+    assert_predicate result.route_receipt.fetch("actual"), :frozen?
+    assert_raises(FrozenError) { result.coverage.first["status"] = "failed" }
   end
 
   private

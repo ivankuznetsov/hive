@@ -50,5 +50,15 @@ module Hive
     def higher_level(*levels)
       levels.compact.map { |level| level!(level) }.max_by { |level| LEVEL_RANK.fetch(level) }
     end
+
+    def deep_freeze(value)
+      case value
+      when Hash
+        value.each { |key, child| key.freeze; deep_freeze(child) }
+      when Array
+        value.each { |child| deep_freeze(child) }
+      end
+      value.freeze
+    end
   end
 end

@@ -26,6 +26,16 @@ class PlanReviewFindingTest < Minitest::Test
     assert_match(/classification/i, error.message)
   end
 
+  def test_nested_evidence_cannot_mutate_a_finding
+    value = finding
+
+    assert_predicate value["evidence"], :frozen?
+    assert_raises(FrozenError) { value["evidence"]["path"] = "other.md" }
+    copy = value.to_h
+    copy.fetch("evidence")["path"] = "other.md"
+    assert_equal "plan.md", value["evidence"].fetch("path")
+  end
+
   private
 
   def finding(overrides = {})

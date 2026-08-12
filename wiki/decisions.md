@@ -3,8 +3,8 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-07-30
-tags: [decisions, adr]
+updated: 2026-08-12
+tags: [decisions, adr, plan-review]
 ---
 
 **TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records Hive web's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records Hive web's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit); ADR-038 keeps reusable components in the Hive monorepo, establishes Hive-first internal boundaries before packaging, and makes standalone gem publication conditional on real external demand and an explicit release decision.
@@ -777,6 +777,37 @@ context keep the legacy path byte-for-byte. The architecture idea recovered
 from #706 survives, while its stale renderer and identity mechanics do not.
 See [[modules/model_routing]], [[modules/agent_profile]], [[modules/config]],
 and [[state-model]].
+
+## ADR-043: Plan critique is a freshness-bound plan substate, not a workflow stage or reviewer vote
+
+**Status:** Active
+
+**Context:** The built-in coding workflow previously treated the terminal
+`plan.md` marker as sufficient authority for execute. That left generic
+approval, `--force`, daemon plan approval, Web mutation, raw folder movement,
+and direct execute entry with no durable way to distinguish a proportionately
+reviewed plan from an incomplete or stale one. Inserting a filesystem stage
+would migrate the nine-stage contract and still would not define finding,
+coverage, or operator-decision authority.
+
+**Decision:** Keep critique inside `3-plan`. Classify built-in coding plans as
+`skip`, `standard`, or `mandatory`; review non-skipped plans through a Hive-owned
+typed adapter plus an independently attested adversarial route; keep the
+original planner as the only plan author; batch accepted findings into at most
+one revision and one verification. Persist immutable attempt/decision artifacts
+and one atomic current resolution. Only a fresh terminal `skipped`, `cleared`,
+or standard `degraded_cleared` resolution may cross to execute. Every mutation
+path shares `PlanReview::TransitionGuard`; automation can schedule work but
+cannot create approvals, answers, coverage waivers, or mandatory downgrades.
+
+**Consequences:** The nine-stage descriptor and canonical `plan.md` remain
+stable, while marker edits and force flags no longer bypass critique. Standard
+review can fail open only through a visible bounded degradation receipt;
+mandatory review fails closed. Retries preserve stable findings and decisions,
+external plan/policy changes start a linked lineage, and CLI/status/daemon/TUI/
+Web consume one projection. Existing coding tasks already in execute are
+adopted with an explicit compatibility receipt rather than retroactively
+blocked. See [[modules/plan_review]], [[stages/plan]], and [[stages/execute]].
 
 ## Source
 

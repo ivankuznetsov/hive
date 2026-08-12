@@ -1,5 +1,4 @@
-require "digest"
-require "json"
+require "hive/canonical_json"
 require "hive/plan_review"
 
 module Hive
@@ -65,7 +64,7 @@ module Hive
           effective_level: effective.freeze,
           matched_reasons: Array(signals.mandatory_reasons).map(&:dup).freeze,
           level_sources: sources,
-          policy_fingerprint: Digest::SHA256.hexdigest(canonical_json(fingerprint_input)).freeze,
+          policy_fingerprint: Hive::CanonicalJSON.digest(fingerprint_input).freeze,
           classifier_version: version
         ).freeze
       end
@@ -102,27 +101,7 @@ module Hive
 
       def configuration_fingerprint(config)
         settings = config.fetch("plan_review", config)
-        Digest::SHA256.hexdigest(canonical_json(policy_affecting_config(settings)))
-      end
-
-      def canonical_json(value)
-        JSON.generate(canonicalize(value))
-      end
-
-      def canonicalize(value)
-        case value
-        when Hash
-          value.keys.map(&:to_s).sort.to_h do |key|
-            original = value.key?(key) ? key : value.keys.find { |candidate| candidate.to_s == key }
-            [ key, canonicalize(value.fetch(original)) ]
-          end
-        when Array
-          value.map { |entry| canonicalize(entry) }
-        when Symbol
-          value.to_s
-        else
-          value
-        end
+        Hive::CanonicalJSON.digest(policy_affecting_config(settings))
       end
     end
   end

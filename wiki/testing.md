@@ -3,8 +3,8 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, bin/hive-patrol-installed-live-smoke, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate,patrol_evidence}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-08-10
-tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, terminal-outcomes, release-proof, bounded-storage]
+updated: 2026-08-12
+tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage]
 ---
 
 **TLDR**: Minitest covers unit/integration behavior; opt-in layers cover outer
@@ -508,6 +508,7 @@ cleanup fails, while a cleanup failure still fails an otherwise-green test.
 | Path | Purpose |
 |------|---------|
 | `test/fixtures/fake-claude` | Shell fixture for built-in provider headless argv. It can log/output/write, make one commit, or create a deterministic multi-commit sequence with progress/release sentinels for durable caller-loss scenarios. E2E points `HIVE_CLAUDE_BIN`, `HIVE_CODEX_BIN`, `HIVE_PI_BIN`, and `HIVE_GROK_BIN` at it. |
+| `test/fixtures/plan_review/terminal_outcomes.json` | Deterministic proof snapshot for `skipped`, `cleared`, standard `degraded_cleared`, and mandatory `blocked`, including identities, attempt/coverage/finding counts, route receipts, cross-surface blocker parity, and transition results. |
 | `test/fixtures/fake-gh` | Shell script that handles `gh pr create` / `gh auth status` / `gh pr list`, returns a dummy URL. |
 | `test/fixtures/brainstorm_skill/` | Deterministic partial/multi-round brainstorm documents, missing-answer headers, renumbered and duplicate-fingerprint questions, original/reordered/degraded status snapshots, and sanitized S01–S12 transcript expectations. The fixtures contain no transport-private chat metadata. |
 | `test/fixtures/voice/voice-idea.oga` | Checked-in Ogg/Opus speech sample saying "voice idea" for the Telegram voice-note E2E path. `run_idea_e2e.sh` uses it by default when `TG_IDEA_MODE=voice`; explicit voice mode hard-fails when `HIVE_WHISPER_API_KEY` is unset. Voice mode uses the same fixture for both new audio idea capture and audio brainstorm answers. |
@@ -847,6 +848,41 @@ credentials inside a running box.
 The live Telegram bot E2E wrapper lives at `test/e2e/tg/run_idea_e2e.sh` and is also opt-in because it uses a real Bot API test token plus a Telethon user session. In default text mode it drives `/idea <nonce>` through the project picker. With `TG_IDEA_MODE=voice`, the wrapper requires the voice fixture and `HIVE_WHISPER_API_KEY`, starts the bot from the current checkout, drives a new voice idea through transcript confirmation/project selection, seeds a temporary `2-brainstorm/<slug>/brainstorm.md` in the scratch project, then sends `/answer <slug>` and answers Q1 with the same voice note. Cleanup resets the scratch state repo to the captured baseline and removes temporary inbox/brainstorm folders.
 
 `test/e2e/lib/hive_e2e_binary_test.rb` is the focused contract suite for the executable itself. It pins `list --json`, `clean --json`, leading JSON option normalization including `--json=true`, duplicate JSON boolean handling where a final false flag chooses prose, malformed `--json=1` / `--json=yes` rejection, error-envelope shapes, help/version handling, leading `--json --help run` / `--json -h run` command-help rendering, replay path validation, missing/non-executable/symlinked runs-root and replay artifact errors (`missing_repro` / `unusable_repro`, exit `78`), and the usage exit-code contract: unknown commands and missing required arguments exit `64` in both human and `--json` modes. Human usage errors are expected to print a `hive-e2e:`-prefixed prose message on stderr.
+
+## Plan-review lifecycle and authenticated route smoke
+
+The focused offline contract is:
+
+```bash
+bundle exec ruby -Itest -Ilib test/integration/plan_review_lifecycle_test.rb
+bundle exec ruby -Itest -Ilib test/integration/plan_review_action_test.rb
+bundle exec ruby -Itest -Ilib test/unit/plan_review/policy_test.rb
+bundle exec ruby -Itest -Ilib test/unit/plan_review/orchestrator_test.rb
+```
+
+The lifecycle fixture proves transition denial before authority, exactly one
+move after current degraded clearance, an external-plan-edit linked rollover,
+and an explicit legacy execute adoption receipt. The complete
+`test/unit/plan_review/` set covers classifier categories, immutable/CAS state,
+stable finding fingerprints, exact-scoped decisions, adapter parsing and
+canonical-plan isolation, model-family independence, bounded retries, one
+revision/verification, coverage semantics, and stale transition rejection.
+Status integration plus Rails model/integration/system tests pin the same
+projection and actions through CLI, operational status, daemon/TUI, and Web.
+
+`test/smoke/plan_review_smoke_test.rb` is excluded from the default suite. Run
+it only with explicit paid-provider consent:
+
+```bash
+HIVE_LIVE_PLAN_REVIEW=1 rake smoke
+```
+
+It resolves the production adversarial route, invokes native Grok Build with
+`grok-4.6` against a disposable plan, requires schema-valid completed
+adversarial coverage and a different-family independence receipt, and verifies
+that ambient credential values are absent from retained results. Missing
+opt-in, binary, authentication, or capability skips with a diagnostic and is
+not evidence.
 
 ## Live agent skill resolution smoke
 

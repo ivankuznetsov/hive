@@ -27,6 +27,14 @@ class PlanReviewDecisionTest < Minitest::Test
     assert_includes error.message, "decided_at"
   end
 
+  def test_nested_action_value_is_immutable
+    value = decision("value" => { "answer" => [ "approved" ] })
+
+    assert_predicate value.value, :frozen?
+    assert_predicate value.value.fetch("answer"), :frozen?
+    assert_raises(FrozenError) { value.value.fetch("answer") << "changed" }
+  end
+
   private
 
   def decision(overrides = {})

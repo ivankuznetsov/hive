@@ -3,8 +3,8 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-10
-tags: [gap, todo, release-proof, agent-skills]
+updated: 2026-08-12
+tags: [gap, todo, release-proof, agent-skills, plan-review]
 ---
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
@@ -1073,3 +1073,16 @@ one-file shape remains rejected and no compatibility reader exists. No
 provider-backed exact-head run, publication, or release qualification was
 performed here; hostile/property campaigns remain optional and outside the
 normal merge gate.
+
+## Plan-review native route still needs an authorized live capture (2026-08-12)
+
+Deterministic policy, adapter, lineage, decision, transition-bypass, status/TUI,
+and Rails Web tests pin the conditional plan-review contract, including
+requested native Grok Build / `grok-4.6` and different-family independence.
+`test/smoke/plan_review_smoke_test.rb` now provides the credential-preserving
+real route proof, but it deliberately requires `HIVE_LIVE_PLAN_REVIEW=1` and is
+excluded from normal CI. Until an operator runs that opt-in smoke on the exact
+candidate and retains its sanitized receipt, native route/model/effort and
+real-provider JSON-file behavior remain source/offline-test evidence rather
+than an authenticated live claim. The default runtime still fails mandatory
+coverage closed when that capability is unavailable.

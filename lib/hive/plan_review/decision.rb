@@ -42,7 +42,7 @@ module Hive
           raise InvalidAction, "plan review decision id does not match its semantic action"
         end
         @data["decision_id"] = expected
-        @data = JSON.parse(JSON.generate(@data)).freeze
+        @data = Hive::PlanReview.deep_freeze(JSON.parse(JSON.generate(@data)))
         freeze
       rescue JSON::GeneratorError, TypeError => e
         raise InvalidAction, "plan review decision is not JSON-safe: #{e.message}"

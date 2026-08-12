@@ -15,13 +15,14 @@ require "hive/plan_review/policy"
 require "hive/plan_review/projection"
 require "hive/plan_review/route_resolver"
 require "hive/plan_review/store"
+require "hive/task_meta"
 
 module Hive
   module PlanReview
     class Orchestrator
-      TRANSIENT_OUTCOMES = %w[provider_limit timeout retryable_failure].freeze
-      SUCCESS_OUTCOMES = %w[success partial_coverage].freeze
-      TERMINAL_OUTCOMES = (SUCCESS_OUTCOMES + %w[unsupported terminal_failure]).freeze
+      TRANSIENT_OUTCOMES = Adapters::Base::TRANSIENT_OUTCOMES
+      SUCCESS_OUTCOMES = Adapters::Base::SUCCESS_OUTCOMES
+      TERMINAL_OUTCOMES = (Adapters::Base::OUTCOMES - TRANSIENT_OUTCOMES).freeze
 
       class << self
         def run!(task:, cfg:, planner_identity:, **options)
@@ -49,6 +50,7 @@ module Hive
         plan_path = File.join(@task.folder, "plan.md")
         canonical_digest = safe_plan_digest(plan_path)
         return nil unless canonical_digest
+        ensure_review_requirement!
 
         current = @store.current_validated(optional: true)
         if current && current["candidate_plan_digest"] == canonical_digest &&
@@ -641,6 +643,14 @@ module Hive
       def task_generation = Identity.task_generation(@task)
 
       def task_id = (@task.id || @task.slug).to_s
+
+      def ensure_review_requirement!
+        return if Hive::TaskMeta.plan_review_required?(@task.folder)
+
+        Hive::TaskMeta.rewrite(@task.folder, plan_review_required: true)
+      rescue Hive::TaskMeta::InvalidMetadata => error
+        raise InvalidRecord, "plan review requirement could not be persisted: #{error.message}"
+      end
 
       def policy_configuration_fresh?(record)
         reference = record["artifacts"]["policy"]

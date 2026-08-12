@@ -1,6 +1,7 @@
 require "digest"
 require "json"
 require "securerandom"
+require "hive/canonical_json"
 require "hive/plan_review"
 
 module Hive
@@ -52,20 +53,11 @@ module Hive
       end
 
       def stable_id(prefix, attributes)
-        "#{prefix}-#{Digest::SHA256.hexdigest(JSON.generate(normalize(attributes)))}"
+        "#{prefix}-#{Hive::CanonicalJSON.digest(attributes)}"
       end
 
       def normalize(value)
-        case value
-        when Hash
-          value.keys.map(&:to_s).sort.to_h do |key|
-            original = value.key?(key) ? key : value.keys.find { |candidate| candidate.to_s == key }
-            [ key, normalize(value.fetch(original)) ]
-          end
-        when Array then value.map { |entry| normalize(entry) }
-        when Symbol then value.to_s
-        else value
-        end
+        Hive::CanonicalJSON.normalize(value)
       end
     end
   end

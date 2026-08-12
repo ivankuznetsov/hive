@@ -31,7 +31,7 @@ module Hive
           raise InvalidRecord, "finding fingerprint does not match semantic evidence"
         end
         @data["fingerprint"] = expected
-        @data.freeze
+        Hive::PlanReview.deep_freeze(@data)
         freeze
       end
 
@@ -40,7 +40,7 @@ module Hive
       def lifecycle = data.fetch("lifecycle")
       def resolved? = RESOLVED_LIFECYCLES.include?(lifecycle)
       def blocking? = %w[gated_auto manual].include?(classification) && !resolved?
-      def to_h = data.dup
+      def to_h = JSON.parse(JSON.generate(data))
 
       def [](key)
         data[key.to_s]

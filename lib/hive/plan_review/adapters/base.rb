@@ -7,6 +7,8 @@ module Hive
         OUTCOMES = %w[
           success partial_coverage unsupported provider_limit timeout retryable_failure terminal_failure
         ].freeze
+        SUCCESS_OUTCOMES = %w[success partial_coverage].freeze
+        TRANSIENT_OUTCOMES = %w[provider_limit timeout retryable_failure].freeze
         KINDS = %w[primary adversarial verification].freeze
 
         Request = Data.define(
@@ -64,18 +66,18 @@ module Hive
             raise ArgumentError, "unknown plan review outcome #{outcome.inspect}" unless OUTCOMES.include?(normalized)
             super(
               outcome: normalized.freeze,
-              findings: Array(findings).freeze,
-              coverage: Array(coverage).freeze,
-              selected_lenses: Array(selected_lenses).freeze,
-              residual_evidence: Array(residual_evidence).freeze,
+              findings: Hive::PlanReview.deep_freeze(Array(findings).dup),
+              coverage: Hive::PlanReview.deep_freeze(Array(coverage).dup),
+              selected_lenses: Hive::PlanReview.deep_freeze(Array(selected_lenses).dup),
+              residual_evidence: Hive::PlanReview.deep_freeze(Array(residual_evidence).dup),
               diagnostic: diagnostic&.to_s&.freeze,
               retry_at: retry_at&.to_s&.freeze,
-              route_receipt: route_receipt.to_h.freeze
+              route_receipt: Hive::PlanReview.deep_freeze(route_receipt.to_h.dup)
             )
             freeze
           end
 
-          def successful? = %w[success partial_coverage].include?(outcome)
+          def successful? = SUCCESS_OUTCOMES.include?(outcome)
 
           def to_h
             {

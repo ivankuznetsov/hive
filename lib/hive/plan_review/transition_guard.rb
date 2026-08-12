@@ -11,6 +11,7 @@ require "hive/plan_review/policy"
 require "hive/plan_review/projection"
 require "hive/plan_review/store"
 require "hive/stages/base"
+require "hive/task_meta"
 require "hive/workflows"
 
 module Hive
@@ -83,6 +84,12 @@ module Hive
 
         root = File.join(task.folder, Store::ROOT_BASENAME)
         unless File.exist?(root) || File.symlink?(root)
+          if Hive::TaskMeta.plan_review_required?(task.folder)
+            raise blocked_error(
+              task, nil, "required plan review evidence is missing",
+              required_action: "move the task back to plan and rerun its review"
+            )
+          end
           write_legacy_adoption!(task, clock:)
           return true
         end
@@ -90,7 +97,8 @@ module Hive
         cfg = config || Hive::Config.load(task.project_root)
         authorize!(task, Projection.load(task_folder: task.folder), cfg:)
         true
-      rescue InvalidRecord, StaleObservation, Hive::ConfigError => error
+      rescue InvalidRecord, StaleObservation, Hive::ConfigError,
+             Hive::TaskMeta::InvalidMetadata => error
         raise blocked_error(
           task, nil, "execute entry has invalid plan review evidence: #{error.message}",
           required_action: "move the task back to plan and repair its review"

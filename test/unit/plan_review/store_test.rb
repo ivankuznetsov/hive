@@ -2,6 +2,16 @@ require "test_helper"
 require "hive/plan_review/store"
 
 class PlanReviewStoreTest < Minitest::Test
+  def test_read_only_construction_does_not_create_review_state
+    Dir.mktmpdir("hive-plan-review-store") do |task_folder|
+      store = Hive::PlanReview::Store.new(task_folder:)
+
+      refute File.exist?(store.root)
+      assert_nil store.current(optional: true)
+      refute File.exist?(store.root)
+    end
+  end
+
   def test_attempt_history_is_immutable_and_projection_has_one_current_winner
     with_store do |store|
       manifest = manifest_record

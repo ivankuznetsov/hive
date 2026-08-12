@@ -102,6 +102,53 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_resume_matches_unicode_marker_attrs_after_json_round_trip
+    attrs = {
+      "reason" => "implementer_failed",
+      "message" => "Claude stopped — retry the review",
+      "marker_id" => "marker-unicode"
+    }
+    with_fixture(marker_attrs: attrs) do |coordinator, row, state_home|
+      coordinator.request(
+        row: row, requestor: "healer", request_id: "recover-unicode", now: NOW
+      )
+      request = Q.fetch("recover-unicode", state_home: state_home)
+      current = Hive::Markers.current(row.state_file)
+
+      assert_equal Encoding::UTF_8,
+                   request.recovery.dig("expected_marker_attrs", "message").encoding
+      assert_equal Encoding::BINARY, current.attrs.fetch("message").encoding
+      assert_equal attrs.fetch("message").bytes,
+                   current.attrs.fetch("message").bytes
+
+      resumed = coordinator.resume(request: request, row: row)
+
+      assert_equal "queued", resumed.status
+      assert_equal "cleared", resumed.phase
+      assert Hive::Markers.current(row.state_file).none?
+    end
+  end
+
+  def test_request_rejects_invalid_utf8_marker_attrs_without_clearing_marker
+    message = "agent stopped \xFF".b
+    attrs = {
+      "reason" => "implementer_failed",
+      "message" => message,
+      "marker_id" => "marker-invalid-utf8"
+    }
+    with_fixture(marker_attrs: attrs) do |coordinator, row, state_home|
+      assert_raises JSON::GeneratorError do
+        coordinator.request(
+          row: row, requestor: "healer", request_id: "recover-invalid", now: NOW
+        )
+      end
+
+      assert_nil Q.fetch("recover-invalid", state_home: state_home)
+      assert_equal message.bytes,
+                   Hive::Markers.current(row.state_file).attrs.fetch("message").bytes
+    end
+  end
+
   def test_restart_after_marker_clear_recovers_from_expected_post_clear_fingerprint
     with_fixture do |coordinator, row, state_home|
       coordinator.request(

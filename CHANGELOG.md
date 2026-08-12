@@ -2,6 +2,26 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.7.1
+
+- Added provider-health circuits and durable, policy-bound route selection so
+  unavailable provider accounts can fail over without losing recovery identity.
+  (#983, #985)
+- Added Guided and YOLO brainstorm answering with identity-bound writes across
+  the CLI, Hive web, Telegram, and the canonical operating skill. (#981)
+- Made hive-bench use Hive's native model routing and durable quota recovery,
+  removing its separate retry control plane. (#986)
+- Fixed recovery markers whose persisted UTF-8 JSON encoding differed from
+  their in-memory bytes, preventing false generation conflicts and missed
+  scheduled retries. (#987)
+- Fixed Patrol and Architecture Patrol delivery, saturated journals, coding-only
+  workflow eligibility, and bounded attempt-history retention. (#970, #971,
+  #972, #977)
+- Added the persistent PR babysitter service and automatic provisioning of its
+  `needs-human` label. (#968, #969)
+- Fixed terminal-attempt recovery, historical workflow-stage detection, and
+  Hive web recovery/status responsiveness. (#965, #967, #976, #980)
+
 ## 0.7.0
 
 Hive 0.7.0 expands workflow authoring and makes unattended operation safer,

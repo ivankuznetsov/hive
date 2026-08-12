@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "hive/bot/supervisor"
+require "hive/bot/status_watcher"
 require "hive/bot/telegram"
 require "hive/bot/brainstorm_parser"
 require "hive/daemon/dispatch_request_queue"
@@ -52,7 +53,8 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
       "bot" => { "chat_id_allowlist" => [ 12345 ] }
     }.to_yaml)
 
-    supervisor = supervisor_for
+    supervisor = supervisor_for(project: project, slug: slug)
+    supervisor.status_tick
     supervisor.process_update(update(text: "/answer #{slug}", update_id: 1))
     4.times do |idx|
       supervisor.process_update(update(text: "Answer #{idx + 1}", update_id: idx + 2))
@@ -78,7 +80,7 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
 
   private
 
-  def supervisor_for
+  def supervisor_for(project:, slug:)
     @telegram = FakeTelegram.new
     @child = FakeChildSupervisor.new
     Hive::Bot::Supervisor.new(
@@ -86,7 +88,7 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
       token: "token",
       logger: FakeLogger.new,
       telegram: @telegram,
-      status_watcher: FakeStatusWatcher.new,
+      status_watcher: FakeStatusWatcher.new([ status_row(project: project, slug: slug) ]),
       notification_dispatcher: FakeNotificationDispatcher.new,
       child_supervisor: @child,
       dispatch_request_writer: QueueOnlyDispatchRequestWriter,
@@ -96,6 +98,20 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
 
   def child
     @child
+  end
+
+  def status_row(project:, slug:)
+    Hive::Bot::StatusWatcher::Row.new(
+      project: "hive",
+      project_path: project,
+      hive_state_path: File.join(project, ".hive-state"),
+      slug: slug,
+      stage: "2-brainstorm",
+      workflow: "coding",
+      marker: "waiting",
+      action: "needs_input",
+      action_label: "Answer"
+    )
   end
 
   def bot_config
@@ -132,7 +148,8 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
 
   class FakeStatusWatcher
     Result = Struct.new(:ok, :rows, :error, keyword_init: true)
-    def fetch = Result.new(ok: true, rows: [], error: nil)
+    def initialize(rows) = @rows = rows
+    def fetch = Result.new(ok: true, rows: @rows, error: nil)
   end
 
   class FakeNotificationDispatcher

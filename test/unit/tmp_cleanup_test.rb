@@ -93,8 +93,27 @@ class HiveTestTmpCleanupTest < Minitest::Test
       error = assert_raises(HiveTestTmpCleanup::CleanupError) do
         HiveTestTmpCleanup.remove!(path)
       end
-      assert_match(/still exists after removal/, error.message)
+      assert_match(/still exists after 3 removal attempts/, error.message)
     end
+  ensure
+    FileUtils.rm_rf(path) if path
+  end
+
+  def test_remove_retries_when_fileutils_transiently_leaves_the_path
+    path = Dir.mktmpdir("hive-test-cleanup")
+    original = FileUtils.method(:rm_rf)
+    attempts = 0
+    replacement = lambda do |*args, **kwargs|
+      attempts += 1
+      original.call(*args, **kwargs) if attempts > 1
+    end
+
+    with_replaced_singleton_method(FileUtils, :rm_rf, replacement) do
+      assert HiveTestTmpCleanup.remove!(path)
+    end
+
+    assert_equal 2, attempts
+    refute File.exist?(path)
   ensure
     FileUtils.rm_rf(path) if path
   end
@@ -275,7 +294,7 @@ class HiveTestTmpCleanupTest < Minitest::Test
 
         assert_empty result.removed
         assert_equal [ path ], result.failed.map { |failure| failure.fetch(:path) }
-        assert_match(/still exists after removal/, result.failed.first.fetch(:error))
+        assert_match(/still exists after 3 removal attempts/, result.failed.first.fetch(:error))
       end
     end
   end

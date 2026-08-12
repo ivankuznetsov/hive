@@ -116,7 +116,7 @@ restore the workflow, then rerun migrate.
 ## Durable recovery schema cutover
 
 Runtime recovery supports only the current shapes: attempt v4, dispatch request
-v4, and dispatch result v2. `Hive::Recovery::Migration` performs a forward-only
+v5, and dispatch result v2. `Hive::Recovery::Migration` performs a forward-only
 physical cutover from `$HIVE_HOME/attempts/v3` to `attempts/v4` (and accepts a
 remaining supported v2 source). It takes the shared recovery lock and every
 source writer lock, rejects attempts whose owners may still be active, and

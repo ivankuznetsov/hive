@@ -3,7 +3,7 @@ title: Hive::Markers
 type: module
 source: lib/hive/markers.rb
 created: 2026-04-25
-updated: 2026-08-02
+updated: 2026-08-12
 tags: [marker, protocol, flock, recovery, migration, binary, filesystem-safety]
 ---
 
@@ -58,6 +58,16 @@ operator repair primitive and performs the same history purge after its
 current-name and optional attribute guards pass. Both paths remove every
 recognized marker comment while preserving surrounding prose, so a successful
 retry cannot expose an older shadowed marker.
+
+Marker scans retain their binary encoding so malformed surrounding artifact
+bytes remain readable. `Hive::Recovery` is the shared compatibility boundary
+for marker attrs that subsequently cross JSON: byte-identical valid UTF-8 is
+retagged as UTF-8 before request/snapshot serialization and comparison.
+Consequently a non-ASCII diagnostic such as an em dash cannot make the
+persisted request look like a newer marker generation merely because the live
+scan is `ASCII-8BIT`. `Markers.clear_current`, `RecoveryCoordinator`, and the
+operational scheduler join all use that same comparison; genuinely invalid
+UTF-8 remains binary and fails closed at JSON boundaries.
 
 Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`, requires a marker-name boundary, and captures attrs until the terminating `-->` without crossing another `<!--`. Quoted error details may contain `>` (for example Git stderr `branch -> branch`) and newlines. Adding a marker name requires updating BOTH the list AND the regex alternation (they are two sources of truth).
 
@@ -114,6 +124,13 @@ State = Struct.new(:name, :attrs, :raw, keyword_init: true)
   installed inode after rename. This prevents a predictable temporary-path
   symlink from redirecting controller writes outside the task folder.
 - This locking is what makes concurrent writes from `Hive::Agent` (during a run) and `Markers.set` (from tests or recovery) safe.
+
+`with_markers_lock(path, create: false)` still opens the sticky sidecar lock but
+never creates a missing task directory. Callers may also provide `timeout:`;
+that form polls `LOCK_NB` against a monotonic deadline and raises the retryable
+`Hive::ConcurrentRunError` when the deadline expires. The identity-bound
+brainstorm writer uses both options, preventing a stalled marker holder from
+keeping the task lock and hanging CLI, web, or Telegram writes indefinitely.
 
 ## `parse_attrs`
 

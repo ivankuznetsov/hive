@@ -62,7 +62,7 @@ module Hive
       ].freeze
 
       Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
-                          :project, :slug, :stage, :question_n, :answer_text, :mode,
+                          :project, :slug, :stage, :question_n, :binding, :answer_text, :mode,
                           :intent, :alert_reset, :clear_keyboard, :format,
                           :attachment, :recovery, keyword_init: true)
 
@@ -314,6 +314,7 @@ module Hive
             project: state.project,
             slug: state.slug,
             question_n: state.question_n,
+            binding: state.respond_to?(:binding) ? state.binding : nil,
             mode: state.mode
           }
         end
@@ -378,6 +379,7 @@ module Hive
         result.project = context[:project]
         result.slug = context.fetch(:slug)
         result.question_n = context[:question_n]
+        result.binding = context[:binding] if result.respond_to?(:binding=)
         result.mode = context[:mode] || :path_b
         result.attachment = result.attachment.merge(purpose: :answer)
         result

@@ -1,6 +1,7 @@
 require "test_helper"
 require "fileutils"
 require "hive/bot/supervisor"
+require "hive/bot/status_watcher"
 require "hive/commands/init"
 
 class HiveBotScenarioVoiceIdeaTest < Minitest::Test
@@ -68,7 +69,7 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
     end
   end
 
-  def supervisor(transcriber:, telegram:)
+  def supervisor(transcriber:, telegram:, status_rows: [])
     Hive::Bot::Supervisor.new(
       config: {
         "chat_id_allowlist" => [ 12345 ],
@@ -82,7 +83,9 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
       token: "test-token",
       logger: StubLogger.new,
       telegram: telegram,
-      status_watcher: Struct.new(:ok) { def fetch = Struct.new(:ok, :rows).new(true, []) }.new,
+      status_watcher: Struct.new(:rows) {
+        def fetch = Struct.new(:ok, :rows).new(true, rows)
+      }.new(status_rows),
       notification_dispatcher: Struct.new(:processed) { def process_rows(_rows); end }.new,
       child_supervisor: Struct.new(:in_flight_count) do
         def reap_all = []
@@ -144,6 +147,20 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
       <!-- WAITING -->
     MARKDOWN
     path
+  end
+
+  def status_row(project_root:, project:, slug:)
+    Hive::Bot::StatusWatcher::Row.new(
+      project: project,
+      project_path: project_root,
+      hive_state_path: File.join(project_root, ".hive-state"),
+      slug: slug,
+      stage: "2-brainstorm",
+      workflow: "coding",
+      marker: "waiting",
+      action: "needs_input",
+      action_label: "Answer"
+    )
   end
 
   def test_voice_happy_path_captures_transcript_only
@@ -235,7 +252,7 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
   end
 
   def test_voice_answer_writes_transcript_to_current_brainstorm_question
-    setup_project do |dir, _project|
+    setup_project do |dir, project|
       slug = "voice-answer-260606-e2e"
       brainstorm = write_brainstorm(dir, slug)
       telegram = FakeTelegram.new
@@ -243,8 +260,13 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
         results: [ TranscriptionResult.new(status: :ok, text: "spoken answer", language: "en") ],
         calls: []
       )
-      bot = supervisor(transcriber: transcriber, telegram: telegram)
+      bot = supervisor(
+        transcriber: transcriber,
+        telegram: telegram,
+        status_rows: [ status_row(project_root: dir, project: project, slug: slug) ]
+      )
 
+      bot.status_tick
       bot.process_update(message_update(text: "/answer #{slug}"))
       bot.process_update(message_update(voice: voice_payload))
 

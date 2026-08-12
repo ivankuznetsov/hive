@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+require "base64"
+require "digest"
+
 module Hive
   # Pure parser for the brainstorm Q&A file format (`brainstorm.md`):
   # `## Round N` sections containing `### Q{n}.` / `### A{n}.` pairs.
@@ -14,10 +17,12 @@ module Hive
       end
     end
 
-    ROUND_RE = /\A##\s+Round\s+(\d+)\b/i
-    QUESTION_RE = /\A###\s+Q(\d+)\.\s*(.*)\z/
-    ANSWER_RE = /\A###\s+A(\d+)\.\s*\z/
+    ROUND_RE = /\A##\s+Round\s+([1-9]\d*)\b/i
+    QUESTION_RE = /\A###\s+Q([1-9]\d*)\.\s*(.*)\z/
+    ANSWER_ENCODING_V1 = "<!-- hive-answer:v1 -->".freeze
+    ANSWER_RE = /\A###\s+A([1-9]\d*)\.\s*(#{Regexp.escape(ANSWER_ENCODING_V1)})?\s*\z/
     MARKER_RE = /\A<!--\s*[A-Z_]+(?:\s+[^<>]*?)?\s*-->\s*\z/
+    ANSWER_ESCAPE_PREFIX = "\\hive-answer-v1:".freeze
 
     module_function
 
@@ -81,10 +86,17 @@ module Hive
           # actual slot on disk.
           if current && current[:answer_lines].nil?
             current[:answer_lines] = []
+            current[:answer_encoding] = :v1 if match[2]
             mode = :answer
           end
           next
         end
+
+        # Stage markers delimit the Q/A block but are not part of either the
+        # question presented to an operator or its fingerprint. In particular,
+        # a final question with no A-header must keep the same fingerprint after
+        # the writer repairs its slot immediately before `<!-- WAITING -->`.
+        next if MARKER_RE.match?(line)
 
         case mode
         when :question
@@ -95,7 +107,11 @@ module Hive
       end
 
       finalize(questions, current)
-      questions.sort_by { |question| [ question.round || 0, question.n ] }
+      # Preserve the file's physical order. Question numbers restart between
+      # rounds and malformed-but-recoverable files can contain non-monotonic
+      # numbering; callers that bind a user reply need the actual document
+      # position rather than a synthetic sort order.
+      questions
     end
 
     def next_unanswered_question(parsed)
@@ -108,6 +124,23 @@ module Hive
 
     def question_for(parsed, question_n)
       parsed.find { |question| question.n == question_n }
+    end
+
+    # Normalize layout-only differences before binding a presented question to
+    # a durable fingerprint. NFC closes canonically-equivalent Unicode forms
+    # without compatibility-folding distinct glyphs such as ①/1 or x²/x2;
+    # whitespace collapsing lets harmless markdown reflow relocate a reply.
+    # Wording, compatibility characters, and case remain significant so a
+    # materially edited question fails closed instead of receiving a stale
+    # answer.
+    def normalize_question_text(text)
+      text.to_s.scrub.unicode_normalize(:nfc).gsub(/[[:space:]]+/, " ").strip
+    end
+
+    def question_fingerprint(text)
+      Digest::SHA256.hexdigest(
+        [ "hive-brainstorm-question-v1", normalize_question_text(text) ].join("\0")
+      )
     end
 
     # Canonical heading strings. Centralized here so supervisor copy,
@@ -123,6 +156,10 @@ module Hive
       "### A#{n}."
     end
 
+    def encoded_answer_header(n)
+      "#{answer_header(n)} #{ANSWER_ENCODING_V1}"
+    end
+
     def finalize(out, current)
       return unless current
 
@@ -130,7 +167,7 @@ module Hive
         round: current[:round],
         n: current[:n],
         text: clean_body(current[:question_lines]),
-        answer: clean_answer(current[:answer_lines])
+        answer: clean_answer(current[:answer_lines], encoding: current[:answer_encoding])
       )
     end
     private_class_method :finalize
@@ -140,15 +177,31 @@ module Hive
     end
     private_class_method :clean_body
 
-    def clean_answer(lines)
+    def clean_answer(lines, encoding: nil)
       return nil if lines.nil?
 
       body_lines = Array(lines).dup
       body_lines.pop while (last = body_lines.last) && (last.strip.empty? || MARKER_RE.match?(last))
+      body_lines.map! { |line| restore_answer_line(line) } if encoding == :v1
       body = body_lines.join("\n").strip
       body.empty? ? nil : body
     end
     private_class_method :clean_answer
+
+    # Only decode the explicit v1 envelope written by BrainstormAnswerWriter.
+    # Older brainstorm files stored literal answer text, including doubled
+    # backslashes and strings such as `\&lt;!--`; treating those as an implicit
+    # escape format changes settled answers and can create false idempotency
+    # conflicts.
+    def restore_answer_line(line)
+      return line unless line.start_with?(ANSWER_ESCAPE_PREFIX)
+
+      encoded = line.delete_prefix(ANSWER_ESCAPE_PREFIX)
+      Base64.urlsafe_decode64(encoded)
+    rescue ArgumentError
+      line
+    end
+    private_class_method :restore_answer_line
 
     def normalize_newlines(text)
       text.to_s.gsub("\r\n", "\n").gsub("\r", "\n")

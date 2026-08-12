@@ -83,6 +83,30 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes text, "Never publish externally"
   end
 
+  def test_projection_carries_the_guided_and_yolo_brainstorm_answering_contract
+    root = ROOT.join("hive")
+    reference = root.join("references", "brainstorm-answering.md")
+    scenarios = root.join("references", "brainstorm-answering-scenarios.md")
+
+    assert reference.file?
+    assert scenarios.file?
+    assert_equal "0.1.4", Hive::AgentSkills::CanonicalSkill.new.version
+
+    text = projection_text
+    assert_includes text, "Guided is the default"
+    assert_includes text, "YOLO requires explicit opt-in"
+    assert_includes text, "Status-only discovery is read-only"
+    assert_includes text, "fresh inventory before every write"
+    assert_includes text, "original full-status order remains the traversal authority"
+    assert_includes text, "bare `approve` or `continue`"
+    assert_includes text, "explicit `continue` may resume the same paused YOLO run"
+    assert_includes text, "Never dispatch a stage from this answer flow"
+    assert_includes text, "Native Telegram `/answer` and Hive web forms remain literal-answer surfaces"
+    assert_includes text, "S01 — Status-only inventory and preview"
+    assert_includes text, "S09 — YOLO writes safe later slots past ambiguity"
+    assert_includes text, "S12 — 2026-07-25 evidence-backed answers plus one escalation"
+  end
+
   def test_projection_keeps_recovery_and_release_authority_guarded
     text = projection_text
     normalized_text = text.gsub(/\s+/, " ")

@@ -39,6 +39,7 @@ module HiveBench
     )
     GROK_AUTH = File.join(GROK_AUTH_DIR, "auth.json")
     GROK_AUTH_CONTAINER_DIR = "#{HOME}/.grok-auth".freeze
+    HIVE_HOME = "/work/.hb/hive-home".freeze
     GENERATION_IDENTITY = "generation-identity.json"
     RESUMABLE_EXECUTE_FAILURE = %r{\Astream\ disconnected\ before\ completion:\ (?:
       failed\ to\ lookup\ address\ information:.*|
@@ -76,12 +77,14 @@ module HiveBench
         init_state_repo(work)
         persist_generation_identity(work, identity)
       end
+      seed_project_enrollment(work)
 
+      log_baseline = stream_log_baseline(work)
       started = @clock.call
       stdout = run_container(slug, base, work, candidate, out_dir, resume_marker_id: resume_marker_id)
       wall = (@clock.call - started).round(2)
 
-      build_cell(entry, candidate, work, stdout, wall)
+      build_cell(entry, candidate, work, stdout, wall, log_baseline: log_baseline)
     end
 
     private
@@ -159,6 +162,26 @@ module HiveBench
       File.write(File.join(dir, GENERATION_IDENTITY), "#{JSON.pretty_generate(identity)}\n")
     end
 
+    # Hive 0.7+ validates every stage action against the global project
+    # registry. Keep that registry inside the cell so no host enrollment leaks
+    # into the benchmark and the container sees exactly one project: /work.
+    def seed_project_enrollment(work)
+      home = File.join(work, ".hb", "hive-home")
+      FileUtils.mkdir_p(home)
+      File.write(
+        File.join(home, "config.yml"),
+        YAML.dump(
+          "registered_projects" => [
+            {
+              "name" => "work",
+              "path" => "/work",
+              "hive_state_path" => "/work/.hive-state"
+            }
+          ]
+        )
+      )
+    end
+
     def generation_identity_matches?(work, expected)
       path = File.join(work, ".hb", GENERATION_IDENTITY)
       File.file?(path) && JSON.parse(File.read(path)) == expected
@@ -215,6 +238,7 @@ module HiveBench
     def run_container(slug, base, work, candidate, out_dir, resume_marker_id: nil)
       cmd = ["docker", "run", "--rm",
              "-e", "HOME=#{HOME}",
+             "-e", "HIVE_HOME=#{HIVE_HOME}",
              *(resume_marker_id ? ["-e", "HB_RESUME_EXECUTE=1", "-e", "HB_RESUME_MARKER_ID=#{resume_marker_id}"] : []),
              # Full-cycle by default (plan->execute->open-pr->review, the real
              # hive pipeline); HB_REVIEW=0 falls back to plan+execute only.
@@ -293,9 +317,9 @@ module HiveBench
                    "-v", "#{codex}:#{HOME}/.codex/auth.json:ro"]
         # Codex registers plugins in config.toml (found 2026-07-09: the cache
         # mount alone leaves skills unregistered). The bench GENERATES a
-        # minimal config per cell — plugin registration + /work trust, plus
-        # the effort pin for xhigh candidates — never the operator's own
-        # config.toml (it carries personal MCP servers and project trusts).
+        # minimal config per cell — plugin registration + /work trust — never
+        # the operator's own config.toml (it carries personal MCP servers and
+        # project trusts). Model routing lives in Hive config.yml.
         cfg = File.expand_path(File.join(out_dir, "codex-config.toml"))
         File.write(cfg, codex_config(candidate))
         mounts += ["-v", "#{cfg}:#{HOME}/.codex/config.toml:ro"]
@@ -387,50 +411,32 @@ module HiveBench
       state.file? && state.uid == Process.uid && state.nlink == 1 && state.mode.nobits?(0o022)
     end
 
-    # OPENROUTER_API_KEY is forwarded (never echoed) when a pi/open-model stage
-    # runs, along with per-stage model pins for the in-container shims. Codex
-    # needs stage pins when one cell uses Sol to plan/review and Terra to execute;
-    # Grok's profile also needs the shim because Hive passes no model flags.
+    # Forward credentials only. Candidate identity is declared in Hive's native
+    # `models:` config and compiled by the shared Agent CLI runtime.
     def env_args(candidate)
       args = []
       if uses?(candidate, "pi")
         args += ENV["OPENROUTER_API_KEY"] ? ["-e", "OPENROUTER_API_KEY"] : []
-        (candidate.pi_models || {}).each do |stage, pattern|
-          args += ["-e", "HB_PI_MODEL_#{stage.upcase}=#{pattern}"]
-        end
-      end
-      if uses?(candidate, "codex")
-        (candidate.codex_models || {}).each do |stage, model|
-          args += ["-e", "HB_CODEX_MODEL_#{stage.upcase}=#{model}"]
-        end
-        (candidate.codex_efforts || {}).each do |stage, effort|
-          args += ["-e", "HB_CODEX_EFFORT_#{stage.upcase}=#{effort}"]
-        end
       end
       if uses?(candidate, "grok")
         args += ["-e", "GROK_AUTH_PATH=#{GROK_AUTH_CONTAINER_DIR}/auth.json"]
-        args += ["-e", "HB_GROK_MODEL=#{candidate.grok_model}"] if candidate.grok_model
-        args += ["-e", "HB_GROK_EFFORT=#{candidate.grok_effort}"] if candidate.grok_effort
       end
       args
     end
 
     def uses?(candidate, agent)
-      [candidate.plan, candidate.execute, candidate.review].include?(agent)
+      stage_agents = [candidate.plan, candidate.execute, candidate.review]
+      reviewer_agents = Array(candidate.reviewers).filter_map do |reviewer|
+        reviewer.is_a?(Hash) ? (reviewer["agent"] || reviewer[:agent]) : nil
+      end
+      (stage_agents + reviewer_agents).include?(agent)
     end
 
-    # Minimal per-cell codex config: CE plugin registration (the cache is
-    # mounted + linked separately) + trust for /work, + the effort pin for
-    # xhigh candidates. Deliberately NOT the operator's config.toml — that
-    # carries personal MCP servers and host project trusts.
-    def codex_config(candidate)
-      # TOML: top-level keys must precede any [table] section, so the model
-      # and effort pins go first.
-      pins = +""
-      pins << %(model = "#{candidate.codex_model}"\n) if candidate.codex_model
-      pins << %(model_reasoning_effort = "#{candidate.codex_effort}"\n) if candidate.codex_effort
-      pins << "\n" unless pins.empty?
-      pins + <<~TOML
+    # Minimal per-cell Codex config: CE plugin registration (the cache is
+    # mounted + linked separately) and trust for /work. Candidate model and
+    # effort never live here; Hive's Agent CLI runtime supplies them per call.
+    def codex_config(_candidate)
+      <<~TOML
         [marketplaces.compound-engineering-plugin]
         source_type = "git"
         source = "https://github.com/EveryInc/compound-engineering-plugin.git"
@@ -445,7 +451,7 @@ module HiveBench
 
     # ---- result assembly ----
 
-    def build_cell(entry, candidate, work, stdout, wall, recovered: nil)
+    def build_cell(entry, candidate, work, stdout, wall, recovered: nil, log_baseline: nil)
       diff_path = File.join(work, "candidate.patch")
       diff = File.file?(diff_path) ? File.read(diff_path) : ""
       tel = telemetry(work).merge("wall_clock_sec" => wall)
@@ -465,7 +471,11 @@ module HiveBench
         tel["answer_key_access_suspect"] = hit
         warn "hive-bench: ANSWER-KEY ACCESS SUSPECT — #{entry["task_id"]}: #{hit}"
       end
-      status, reason = classify(stdout, work, diff)
+      status, reason = classify(stdout, work, diff, log_baseline: log_baseline)
+      # `generate` treats candidate.patch as a paid artifact sentinel. A failed
+      # stage can still leave a zero-byte capture behind, so remove only that
+      # nonterminal sentinel; preserve real partial diffs and terminal empty_diff.
+      FileUtils.rm_f(diff_path) if diff.empty? && !%w[generated empty_diff].include?(status)
       cell(entry, candidate, status, status == "generated" ? diff_path : nil, tel, reason)
     end
 
@@ -491,9 +501,9 @@ module HiveBench
 
     # run_status from the stage markers + the captured diff. limit_hit (a provider
     # wall) parks the cell; an empty/failed plan or execute is surfaced honestly.
-    def classify(stdout, work, diff)
+    def classify(stdout, work, diff, log_baseline: nil)
       err = File.file?(f = File.join(work, ".hb", "stage.err")) ? File.read(f) : ""
-      limit_hit = AgentLimit.limit_hit?("#{stdout}\n#{err}")
+      limit_hit = provider_limit_hit?(stdout, work, err, log_baseline: log_baseline)
       # timeout(1) kills the whole stage script — a slow candidate, not one that
       # cannot plan. HB_EXIT comes from the run_container wrapper; any other
       # nonzero means the harness itself did not produce a trustworthy artifact.
@@ -512,6 +522,31 @@ module HiveBench
       return ["empty_diff", "execute produced no diff"] if diff.strip.empty?
 
       ["generated", nil]
+    end
+
+    def stream_log_baseline(work)
+      Dir.glob(File.join(work, ".hive-state", "logs", "**", "*.log")).each_with_object({}) do |path, out|
+        stat = File.stat(path)
+        out[path] = [stat.dev, stat.ino, stat.size]
+      rescue SystemCallError
+        next
+      end
+    end
+
+    def provider_limit_hit?(stdout, work, stage_error, log_baseline: nil)
+      return true if AgentLimit.limit_hit?("#{stdout}\n#{stage_error}")
+
+      Dir.glob(File.join(work, ".hive-state", "logs", "**", "*.log")).any? do |path|
+        File.open(path) do |file|
+          stat = file.stat
+          baseline = log_baseline&.fetch(path, nil)
+          offset = baseline && baseline.values_at(0, 1) == [stat.dev, stat.ino] && stat.size >= baseline[2] ? baseline[2] : 0
+          file.seek(offset)
+          file.each_line.any? { |line| AgentLimit.limit_hit?(line) }
+        end
+      rescue SystemCallError
+        false
+      end
     end
 
     # Detects the one leakage that invalidates a cell outright: the candidate

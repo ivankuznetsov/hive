@@ -12,6 +12,33 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_marker_lock_timeout_is_bounded_and_retryable
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      File.write(file, "body\n")
+      lock_path = "#{file}.markers-lock"
+      File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |holder|
+        holder.flock(File::LOCK_EX)
+
+        error = assert_raises(Hive::ConcurrentRunError) do
+          Hive::Markers.with_markers_lock(file, create: false, timeout: 0.01) { flunk }
+        end
+        assert_equal lock_path, error.lock_path
+      end
+    end
+  end
+
+  def test_marker_lock_without_create_refuses_a_missing_parent
+    with_tmp_dir do |dir|
+      missing = File.join(dir, "missing", "state.md")
+
+      assert_raises(Errno::ENOENT) do
+        Hive::Markers.with_markers_lock(missing, create: false) { flunk }
+      end
+      refute Dir.exist?(File.dirname(missing))
+    end
+  end
+
   def test_current_rejects_symlinks_and_fifos_without_blocking
     skip "File::NONBLOCK is unavailable" unless File.const_defined?(:NONBLOCK)
 

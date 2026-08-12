@@ -72,7 +72,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
   class FakeRouter
     Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands, :project, :slug,
-                        :stage, :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
+                        :stage, :question_n, :binding, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
                         :intent, :attachment, :recovery,
                         keyword_init: true)
   end
@@ -148,8 +148,9 @@ class HiveBotSupervisorTest < Minitest::Test
   FakeConversationStore = Struct.new(:starts, :updates, :states, :ttl_updates, keyword_init: true) do
     def start(**kwargs)
       starts << kwargs
-      state = Struct.new(:question_n, :mode, :project, keyword_init: true).new(
-        question_n: kwargs[:question_n], mode: kwargs[:mode], project: kwargs[:project]
+      state = Struct.new(:question_n, :binding, :mode, :project, keyword_init: true).new(
+        question_n: kwargs[:question_n], binding: kwargs[:binding],
+        mode: kwargs[:mode], project: kwargs[:project]
       )
       states[[ kwargs[:chat_id], kwargs[:slug] ]] = state
       state
@@ -316,13 +317,22 @@ class HiveBotSupervisorTest < Minitest::Test
 
 
   def with_brainstorm_file(slug: "bot-task-260522-aa", content:)
-    with_tmp_dir do |dir|
-      project = File.join(dir, "project")
-      folder = File.join(project, ".hive-state", "stages", "2-brainstorm", slug)
-      FileUtils.mkdir_p(folder)
-      path = File.join(folder, "brainstorm.md")
-      File.write(path, content)
-      yield path, project
+    with_tmp_global_config do
+      with_tmp_dir do |dir|
+        project = File.join(dir, "project")
+        hive_state = File.join(project, ".hive-state")
+        folder = File.join(hive_state, "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(hive_state, "config.yml"), {}.to_yaml)
+        Hive::TaskMeta.write(
+          folder, id: 71, slug: slug, display_name: slug,
+          input_fingerprint: "a" * 64, idempotency_key: slug
+        )
+        path = File.join(folder, "brainstorm.md")
+        File.write(path, content)
+        Hive::Config.register_project(name: "hive", path: project)
+        yield path, project
+      end
     end
   end
 
@@ -700,9 +710,10 @@ class HiveBotSupervisorTest < Minitest::Test
 
   def test_transcribe_voice_answer_writes_transcript_into_active_conversation
     content = "## Round 1\n### Q1. Scope?\n### A1.\n\n### Q2. Cadence?\n### A2.\n"
-    with_brainstorm_file(content: content) do |path, _project|
-      @conversation_store.start(chat_id: 42, slug: "task", question_n: 1, mode: :path_b, project: "hive")
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+    with_brainstorm_file(slug: "task", content: content) do |path, _project|
+      binding = Hive::Commands::Answer.inventory("task", project: "hive").dig("slots", 0, "binding")
+      @conversation_store.start(chat_id: 42, slug: "task", question_n: 1,
+                                binding: binding, mode: :path_b, project: "hive")
       @transcriber.results << TranscriptionResult.new(status: :ok, text: "spoken answer", language: "en")
       @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 5 } }
       @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
@@ -711,6 +722,7 @@ class HiveBotSupervisorTest < Minitest::Test
         project: "hive",
         slug: "task",
         question_n: 1,
+        binding: binding,
         mode: :path_b,
         attachment: { chat_id: 42, file_id: "voice-id", file_size: 5, purpose: :answer }
       )
@@ -2877,9 +2889,8 @@ class HiveBotSupervisorTest < Minitest::Test
 
   def test_start_answer_includes_question_text_in_first_prompt
     with_brainstorm_file(content: "## Round 1\n### Q1. Should we use SQLite or Postgres?\n### A1.\n") do |path, project|
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
       result = FakeRouter::Result.new(action: :start_answer, slug: "bot-task-260522-aa",
-                                      project: File.basename(project), mode: :path_b)
+                                      project: "hive", mode: :path_b)
 
       @supervisor.send(:start_answer, result, Update.new(chat_id: 42, update_id: 13))
 
@@ -2887,23 +2898,82 @@ class HiveBotSupervisorTest < Minitest::Test
       assert_includes text, "Q1: Should we use SQLite or Postgres?",
                       "first prompt must include the actual question text so operators don't have to fetch it elsewhere"
       assert_includes text, "Reply with your answer"
+      assert_match(/\A[A-Za-z0-9_-]+\z/, @conversation_store.starts.last.fetch(:binding))
     end
   end
 
-  def test_execute_answer_write_handles_missing_slug_and_no_unanswered_question
+  def test_execute_answer_write_refuses_unbound_restart_or_ttl_replies
     result = FakeRouter::Result.new(
       action: :write_answer_then_reply, slug: "missing", project: "hive", answer_text: "answer"
     )
     @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 14))
-    assert_equal "Slug not found, was it archived?", @telegram.messages.last.fetch(:text)
+    assert_match(/answer context expired/, @telegram.messages.last.fetch(:text))
+    assert_match(%r{/answer missing}, @telegram.messages.last.fetch(:text))
+  end
 
-    @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| "/tmp/brainstorm.md" }
-    @supervisor.define_singleton_method(:next_unanswered_question_n) { |_path| nil }
+  def test_execute_answer_write_acknowledges_completion_after_stage_movement
     result = FakeRouter::Result.new(
-      action: :write_answer_then_reply, slug: "done", project: "hive", answer_text: "answer"
+      action: :write_answer_then_reply, slug: "task", project: "hive",
+      question_n: 1, binding: "bound", answer_text: "done"
     )
-    @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 15))
-    assert_equal "No unanswered questions remain for done.", @telegram.messages.last.fetch(:text)
+    @conversation_store.start(
+      chat_id: 42, slug: "task", question_n: 1,
+      binding: "bound", mode: :path_b, project: "hive"
+    )
+    receipt = {
+      "outcome" => "written", "reason" => "exact_match", "complete" => true,
+      "slot" => { "question_number" => 1 }, "task" => { "project" => "hive" }
+    }
+    inventory = ->(*_args, **_kwargs) { raise Hive::WrongStage.new("moved") }
+
+    with_replaced_singleton_method(Hive::Commands::Answer, :write, ->(*_args, **_kwargs) { receipt }) do
+      with_replaced_singleton_method(Hive::Commands::Answer, :inventory, inventory) do
+        @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 15))
+      end
+    end
+
+    assert_match(/All questions answered/, @telegram.messages.last.fetch(:text))
+    assert_match(/already moved on/, @telegram.messages.last.fetch(:text))
+    assert_nil @conversation_store.get(chat_id: 42, slug: "task")
+  end
+
+  def test_execute_answer_write_reports_incomplete_answer_after_stage_movement
+    result = FakeRouter::Result.new(
+      action: :write_answer_then_reply, slug: "task", project: "hive",
+      question_n: 1, binding: "bound", answer_text: "done"
+    )
+    receipt = {
+      "outcome" => "written", "reason" => "exact_match", "complete" => false,
+      "slot" => { "question_number" => 1 }, "task" => { "project" => "hive" }
+    }
+    inventory = ->(*_args, **_kwargs) { raise Hive::WrongStage.new("moved") }
+
+    with_replaced_singleton_method(Hive::Commands::Answer, :write, ->(*_args, **_kwargs) { receipt }) do
+      with_replaced_singleton_method(Hive::Commands::Answer, :inventory, inventory) do
+        @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 16))
+      end
+    end
+
+    assert_match(/Recorded Q1/, @telegram.messages.last.fetch(:text))
+    assert_match(/moved on/, @telegram.messages.last.fetch(:text))
+  end
+
+  def test_execute_answer_write_rejects_unknown_answer_outcome
+    result = FakeRouter::Result.new(
+      action: :write_answer_then_reply, slug: "task", project: "hive",
+      question_n: 1, binding: "bound", answer_text: "done"
+    )
+    receipt = {
+      "outcome" => "unknown", "slot" => { "question_number" => 1 },
+      "task" => { "project" => "hive" }
+    }
+
+    with_replaced_singleton_method(Hive::Commands::Answer, :write, ->(*_args, **_kwargs) { receipt }) do
+      error = assert_raises(Hive::InternalError) do
+        @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 17))
+      end
+      assert_match(/unknown brainstorm answer outcome/, error.message)
+    end
   end
   def test_request_shutdown_and_reload_set_loop_flags
     @supervisor.request_shutdown!
@@ -3011,14 +3081,9 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal false, ok
   end
 
-  def test_project_and_brainstorm_paths_resolve_registered_project
-    with_tmp_global_config do
-      with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, project|
-        Hive::Config.register_project(name: "proj", path: project)
-
-        assert_equal project, @supervisor.send(:project_path_for, "proj")
-        assert_equal path, @supervisor.send(:brainstorm_path_for, "bot-task-260522-aa", project: "proj")
-      end
+  def test_project_path_resolves_registered_project
+    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |_path, project|
+      assert_equal project, @supervisor.send(:project_path_for, "hive")
     end
   end
 
@@ -3115,14 +3180,16 @@ class HiveBotSupervisorTest < Minitest::Test
 
   def test_execute_answer_write_appends_real_answer_and_advances_conversation
     content = "## Round 1\n### Q1. Scope?\n### A1.\n\n### Q2. Cadence?\n### A2.\n"
-    with_brainstorm_file(content: content) do |path, _project|
-      @conversation_store.start(chat_id: 42, slug: "task", question_n: 1, mode: :path_b, project: "hive")
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+    with_brainstorm_file(slug: "task", content: content) do |path, _project|
+      binding = Hive::Commands::Answer.inventory("task", project: "hive").dig("slots", 0, "binding")
+      @conversation_store.start(chat_id: 42, slug: "task", question_n: 1,
+                                binding: binding, mode: :path_b, project: "hive")
       result = FakeRouter::Result.new(
         action: :write_answer_then_reply,
         slug: "task",
         project: "hive",
         question_n: 1,
+        binding: binding,
         answer_text: "Build the real thing"
       )
 
@@ -3138,15 +3205,40 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  def test_answer_conversation_binding_rejects_same_number_from_a_new_round
+    original = "## Round 1\n### Q1. Original scope?\n### A1.\n<!-- WAITING -->\n"
+    with_brainstorm_file(slug: "task", content: original) do |path, _project|
+      start = FakeRouter::Result.new(
+        action: :start_answer, slug: "task", project: "hive", mode: :path_b
+      )
+      @supervisor.send(:start_answer, start, Update.new(chat_id: 42, update_id: 19))
+      state = @conversation_store.states.fetch([ 42, "task" ])
+
+      File.write(
+        path,
+        "## Round 2\n### Q1. Replacement scope?\n### A1.\n<!-- WAITING -->\n"
+      )
+      reply = FakeRouter::Result.new(
+        action: :write_answer_then_reply, slug: "task", project: "hive",
+        question_n: state.question_n, binding: state.binding, answer_text: "old reply"
+      )
+      @supervisor.send(:execute_answer_write, reply, Update.new(chat_id: 42, update_id: 20))
+
+      assert_nil Hive::BrainstormParser.parse(path).first.answer
+      assert_match(/question changed/, @telegram.messages.last.fetch(:text))
+    end
+  end
+
   def test_execute_answer_write_reports_already_answered_and_missing_question
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.
+    with_brainstorm_file(slug: "task", content: "## Round 1\n### Q1. Scope?\n### A1.
   Done.\n") do |path, _project|
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      binding = Hive::Commands::Answer.inventory("task", project: "hive").dig("slots", 0, "binding")
       answered = FakeRouter::Result.new(
         action: :write_answer_then_reply,
         slug: "task",
         project: "hive",
         question_n: 1,
+        binding: binding,
         answer_text: "new answer"
       )
 
@@ -3161,7 +3253,7 @@ class HiveBotSupervisorTest < Minitest::Test
         answer_text: "new answer"
       )
       @supervisor.send(:execute_answer_write, missing, Update.new(chat_id: 42, update_id: 22))
-      assert_equal "Question 99 was not found.", @telegram.messages.last.fetch(:text)
+      assert_match(/answer context expired/, @telegram.messages.last.fetch(:text))
     end
   end
 
@@ -3302,64 +3394,54 @@ class HiveBotSupervisorTest < Minitest::Test
   end
 
   def test_execute_answer_write_reports_lock_busy
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+    with_brainstorm_file(slug: "task", content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
+      binding = Hive::Commands::Answer.inventory("task", project: "hive").dig("slots", 0, "binding")
       result = FakeRouter::Result.new(
         action: :write_answer_then_reply,
         slug: "task",
         project: "hive",
         question_n: 1,
+        binding: binding,
         answer_text: "Build it"
       )
 
-      with_replaced_singleton_method(Hive::Bot::BrainstormAnswerWriter, :append!, ->(**_kwargs) { :lock_busy }) do
+      held = Hive::Lock.acquire_task_lock(File.dirname(path), op: "test", create: false)
+      begin
         @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 23))
+      ensure
+        Hive::Lock.release_task_lock(File.dirname(path), lock_id: held.fetch("lock_id"))
       end
 
       assert_equal "Try again - another run holds the lock", @telegram.messages.last.fetch(:text)
     end
   end
 
-  # `:answer_slot_missing` is a distinct result from
-  # `:question_not_found` — the question IS in brainstorm.md but no
-  # fillable A-slot was locatable. Supervisor must render a message
-  # that says so (not the legacy "Question N was not found", which is
-  # misleading when Q{n} actually exists). Observed 2026-05-28 on
-  # explore-the-simplest-way-to-260528-2503 where the brainstorm
-  # agent emitted `### A2.` directly after `### Q1.`.
-  def test_execute_answer_write_reports_answer_slot_missing_distinctly
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+  def test_execute_answer_write_reports_stale_binding_without_writing
+    with_brainstorm_file(slug: "task", content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |_path, _project|
       result = FakeRouter::Result.new(
         action: :write_answer_then_reply,
         slug: "task",
         project: "hive",
         question_n: 1,
+        binding: "opaque-binding",
         answer_text: "Build it"
       )
 
-      with_replaced_singleton_method(Hive::Bot::BrainstormAnswerWriter, :append!,
-                                     ->(**_kwargs) { :answer_slot_missing }) do
+      receipt = {
+        "outcome" => "stale", "reason" => "question_changed", "slot" => nil
+      }
+      with_replaced_singleton_method(Hive::Commands::Answer, :write, ->(*_args, **_kwargs) { receipt }) do
         @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 24))
       end
 
       text = @telegram.messages.last.fetch(:text)
-      assert_match(/answer slot is missing or malformed/, text,
-                   "must distinguish from `Question N was not found`")
-      assert_match(/### A1\./, text, "must name the expected header to add")
-      refute_match(/was not found\.\z/, text,
-                   "must not fall through to the legacy not-found copy")
+      assert_match(/question changed/, text)
+      assert_match(%r{/answer task}, text)
     end
   end
 
 
 
-
-  def test_next_unanswered_question_n_parses_brainstorm_file
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
-      assert_equal 1, @supervisor.send(:next_unanswered_question_n, path)
-    end
-  end
 
   def with_registered_projects(projects)
     original = Hive::Config.method(:registered_projects)

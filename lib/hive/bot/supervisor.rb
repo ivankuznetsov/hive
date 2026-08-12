@@ -30,6 +30,7 @@ require "hive/daemon/dispatch_result_queue"
 require "hive/diagnostic_evidence"
 require "hive/paths"
 require "hive/bot/brainstorm_answer_writer"
+require "hive/commands/answer"
 require "hive/bot/brainstorm_parser"
 require "hive/bot/title_formatter"
 require "hive/task"
@@ -1237,62 +1238,56 @@ module Hive
       end
 
       def execute_answer_write(result, update)
-        path = brainstorm_path_for(result.slug, project: result.project)
-        unless path
-          safe_send_message(chat_id: update.chat_id, text: "Slug not found, was it archived?")
-          return
-        end
-
-        question_n = result.question_n || next_unanswered_question_n(path)
-        unless question_n
-          safe_send_message(chat_id: update.chat_id, text: "No unanswered questions remain for #{result.slug}.")
-          return
-        end
-
-        write_result = Hive::Bot::BrainstormAnswerWriter.append!(
-          brainstorm_path: path,
-          question_n: question_n,
-          answer_text: result.answer_text,
-          logger: @logger
-        )
-        case write_result
-        when :written
-          @logger.event(:answer_written, slug: result.slug, question_n: question_n,
-                                         project: result.project)
-          advance_conversation_after_write(result, update, path)
-          prompt_next_question_or_complete(result, update, path, question_n)
-        when :already_answered
-          @logger.event(:answer_skipped_already_answered, slug: result.slug,
-                                                         question_n: question_n,
-                                                         project: result.project)
-          safe_send_message(chat_id: update.chat_id,
-                            text: "Question #{question_n} was already answered by another device")
-        when :lock_busy
-          safe_send_message(chat_id: update.chat_id, text: "Try again - another run holds the lock")
-        when :answer_slot_missing
-          # Q{n} IS in the brainstorm file but no empty `### A{n}.`
-          # slot was locatable, even via the by-position fallback. The
-          # agent likely emitted a mis-numbered header (e.g. `### A2.`
-          # right after `### Q1.` for a fresh Round 2 — observed on
-          # explore-the-simplest-way-to-260528-2503). The user used to
-          # get "Question N was not found" here, which is misleading
-          # because the question IS there.
-          @logger.event(:answer_slot_missing, slug: result.slug,
-                                              question_n: question_n,
-                                              project: result.project)
-          expected_a = Hive::Bot::BrainstormParser.answer_header(question_n)
-          expected_q = Hive::Bot::BrainstormParser.question_header(question_n)
+        binding = result.respond_to?(:binding) ? result.binding : nil
+        if binding.to_s.empty?
           safe_send_message(
             chat_id: update.chat_id,
-            text: "Question #{question_n}'s answer slot is missing or malformed " \
-                  "in brainstorm.md. The brainstorm agent likely emitted a " \
-                  "mis-numbered `### A.` header. Ensure exactly one empty " \
-                  "`#{expected_a}` sits immediately after `#{expected_q}` " \
-                  "(remove any stale mis-numbered `### A.` header in between), " \
-                  "then try again."
+            text: "That answer context expired. Send /answer #{result.slug} to reopen the current question."
+          )
+          return
+        end
+
+        payload = Hive::Commands::Answer.write(
+          result.slug,
+          project: result.project,
+          binding: binding,
+          answer: result.answer_text
+        )
+        resolved_project = result.project || payload.dig("task", "project")
+        result.project = resolved_project
+        question_n = payload.dig("slot", "question_number") || result.question_n
+        case payload.fetch("outcome")
+        when "written", "idempotent"
+          @logger.event(:answer_written, slug: result.slug, question_n: question_n,
+                                         project: resolved_project)
+          inventory = post_write_answer_inventory(result.slug, project: resolved_project)
+          unless inventory
+            @conversation_store.clear(chat_id: update.chat_id, slug: result.slug)
+            text = if payload["complete"]
+              "Got Q#{question_n}.\n\n✅ All questions answered — brainstorm Q&A complete. The task has already moved on."
+            else
+              "Recorded Q#{question_n}. The task moved on before I could present the next question."
+            end
+            safe_send_message(chat_id: update.chat_id, text: text)
+            return
+          end
+          advance_conversation_after_write(result, update, inventory)
+          prompt_next_question_or_complete(result, update, inventory, question_n)
+        when "conflict"
+          @logger.event(:answer_skipped_already_answered, slug: result.slug,
+                                                         question_n: question_n,
+                                                         project: resolved_project)
+          safe_send_message(chat_id: update.chat_id,
+                            text: "Question #{question_n} was already answered by another device")
+        when "lock_busy"
+          safe_send_message(chat_id: update.chat_id, text: "Try again - another run holds the lock")
+        when "stale", "ambiguous"
+          safe_send_message(
+            chat_id: update.chat_id,
+            text: "That question changed while you were answering it. Send /answer #{result.slug} to refresh."
           )
         else
-          safe_send_message(chat_id: update.chat_id, text: "Question #{question_n} was not found.")
+          raise Hive::InternalError, "unknown brainstorm answer outcome #{payload.fetch('outcome').inspect}"
         end
       end
 
@@ -1301,14 +1296,13 @@ module Hive
       # without the operator having to know what to answer next. When no
       # questions remain, clear the conversation state and confirm with one
       # "Brainstorm complete" message.
-      def prompt_next_question_or_complete(result, update, brainstorm_path, answered_n)
-        next_question = Hive::Bot::BrainstormParser.next_unanswered_question(
-          Hive::Bot::BrainstormParser.parse(brainstorm_path)
-        )
+      def prompt_next_question_or_complete(result, update, inventory, answered_n)
+        next_question = inventory.fetch("slots").find { |slot| !slot.fetch("answered") }
         if next_question
           safe_send_message(
             chat_id: update.chat_id,
-            text: "Got Q#{answered_n}.\n\nQ#{next_question.n}: #{next_question.text.to_s.strip}\n\n" \
+            text: "Got Q#{answered_n}.\n\nQ#{next_question.fetch('question_number')}: " \
+                  "#{next_question.fetch('text').to_s.strip}\n\n" \
                   "Reply with your answer."
           )
         else
@@ -1370,19 +1364,8 @@ module Hive
       end
 
       def start_answer(result, update)
-        # Backfill project from the on-disk brainstorm path. The
-        # `/answer <slug>` slash command doesn't carry project (slugs
-        # are unique enough in practice), but downstream the queue
-        # writer needs project for `find_project` lookup, so we infer
-        # it once here and stash it on the conversation state.
-        resolved_project = result.project || brainstorm_project_for(result.slug)
-        path = brainstorm_path_for(result.slug, project: resolved_project)
-        question =
-          if path
-            Hive::Bot::BrainstormParser.next_unanswered_question(
-              Hive::Bot::BrainstormParser.parse(path)
-            )
-          end
+        resolved_project = result.project
+        question = next_unanswered_answer_slot(result.slug, project: resolved_project)
 
         unless question
           safe_send_message(chat_id: update.chat_id,
@@ -1391,27 +1374,30 @@ module Hive
         end
 
         @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
-                                  question_n: question.n, mode: result.mode || :path_b,
+                                  question_n: question.fetch("question_number"),
+                                  binding: question.fetch("binding"),
+                                  mode: result.mode || :path_b,
                                   project: resolved_project)
         safe_send_message(
           chat_id: update.chat_id,
-          text: "Q#{question.n}: #{question.text.to_s.strip}\n\nReply with your answer."
+          text: "Q#{question.fetch('question_number')}: " \
+                "#{question.fetch('text').to_s.strip}\n\nReply with your answer."
         )
       end
 
-      def advance_conversation_after_write(result, update, brainstorm_path)
+      def advance_conversation_after_write(result, update, inventory)
         state = @conversation_store.get(chat_id: update.chat_id, slug: result.slug)
         return unless state
 
-        next_question = Hive::Bot::BrainstormParser.next_unanswered_question(
-          Hive::Bot::BrainstormParser.parse(brainstorm_path)
-        )
+        next_question = inventory.fetch("slots").find { |slot| !slot.fetch("answered") }
         if next_question
           @conversation_store.update(chat_id: update.chat_id, slug: result.slug,
-                                     question_n: next_question.n)
+                                     question_n: next_question.fetch("question_number"),
+                                     binding: next_question.fetch("binding"))
         else
           @conversation_store.update(chat_id: update.chat_id, slug: result.slug,
-                                     question_n: result.question_n + 1)
+                                     question_n: result.question_n.to_i + 1,
+                                     binding: nil)
         end
       end
 
@@ -1751,10 +1737,22 @@ module Hive
         fetch_result.warning
       end
 
-      def next_unanswered_question_n(brainstorm_path)
-        Hive::Bot::BrainstormParser.next_unanswered_question(
-          Hive::Bot::BrainstormParser.parse(brainstorm_path)
-        )&.n
+      def answer_inventory(slug, project:)
+        Hive::Commands::Answer.inventory(slug, project: project)
+      end
+
+      def post_write_answer_inventory(slug, project:)
+        answer_inventory(slug, project: project)
+      rescue Hive::WrongStage, Hive::StaleOperationalObservation, Hive::InvalidTaskPath
+        nil
+      end
+
+      def next_unanswered_answer_slot(slug, project:)
+        answer_inventory(slug, project: project).fetch("slots").find do |slot|
+          !slot.fetch("answered")
+        end
+      rescue Hive::Error
+        nil
       end
 
       def queued_updates(updates)
@@ -1771,30 +1769,6 @@ module Hive
         return nil unless project_name
 
         Hive::Config.find_project(project_name)&.fetch("path", nil)
-      end
-
-      def brainstorm_path_for(slug, project: nil)
-        entry = brainstorm_project_entry_for(slug, project: project)
-        entry ? File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md") : nil # coding-scoped: Telegram answer flow edits coding brainstorm.md
-      end
-
-      # Resolve the project name a brainstorm slug currently lives in.
-      # Returns nil when nothing matches. Used by `start_answer` to
-      # backfill `state.project` so the daemon's dispatch-request
-      # consumer can `Hive::Config.find_project(project)` on `/done`
-      # — the answer flow's slash handlers don't carry project but
-      # the on-disk brainstorm file does.
-      def brainstorm_project_for(slug, project: nil)
-        brainstorm_project_entry_for(slug, project: project)&.fetch("name", nil)
-      end
-
-      def brainstorm_project_entry_for(slug, project: nil)
-        projects = Hive::Config.registered_projects
-        projects = projects.select { |entry| entry["name"] == project } if project && !project.empty?
-        projects.find do |entry|
-          path = File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md") # coding-scoped: Telegram answer flow edits coding brainstorm.md
-          File.exist?(path)
-        end
       end
 
       def chat_ids

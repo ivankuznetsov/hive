@@ -72,7 +72,7 @@ class ReleaseCandidateBaselineCacheMaterializerTest < Minitest::Test
       File.write(File.join(repo, "Gemfile.lock"), minimal_lock)
       run_git(repo, "add", "Gemfile.lock")
       run_git(repo, "commit", "-m", "baseline")
-      run_git(repo, "tag", "v0.6.9")
+      run_git(repo, "tag", latest_stable.fetch("tag"))
 
       artifact = {
         "filename" => "rake-13.2.1.gem",
@@ -115,7 +115,7 @@ class ReleaseCandidateBaselineCacheMaterializerTest < Minitest::Test
       PATH
         remote: .
         specs:
-          hive-cli (0.6.9)
+          hive-cli (#{latest_stable.fetch("version")})
             rake (= 13.2.1)
 
       GEM
@@ -132,16 +132,23 @@ class ReleaseCandidateBaselineCacheMaterializerTest < Minitest::Test
   end
 
   def synthetic_packages
+    version = latest_stable.fetch("version")
     [
       {
         "row_id" => "latest-stable",
         "role" => "producer",
-        "tag" => "v0.6.9",
-        "filename" => "hive-cli-0.6.9.gem",
+        "tag" => latest_stable.fetch("tag"),
+        "filename" => "hive-cli-#{version}.gem",
         "size" => 1,
         "sha256" => "a" * 64
       }
     ]
+  end
+
+  def latest_stable
+    @latest_stable ||= YAML.safe_load_file(
+      CATALOG, permitted_classes: [ Date ], aliases: false
+    ).fetch("rows").first
   end
 
   def run_git(repo, *argv)

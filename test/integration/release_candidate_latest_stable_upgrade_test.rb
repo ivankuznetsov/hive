@@ -9,22 +9,26 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
   include HiveTestHelper
   ROOT = File.expand_path("../..", __dir__).freeze
   CATALOG = File.join(ROOT, "packaging/release_candidate/baselines.yml").freeze
+  LATEST_STABLE = HiveReleaseCandidate::BaselineCatalog.load(CATALOG).latest_stable
+  BASELINE_VERSION = LATEST_STABLE.version
+  BASELINE_GEM_SHA256 = LATEST_STABLE.packages.dig("producer", "artifact", "sha256")
+  CANDIDATE_VERSION = Hive::VERSION
+  CANDIDATE_GEM_SHA256 = "b" * 64
 
   def test_runs_latest_stable_named_phases_and_channel_oracle
     with_tmp_dir do |dir|
       targets = {
         "baseline" => target(
-          dir, "baseline", "0.6.9",
-          "9e9d065f67ccf3381b263f9a5ca44afb79b3122309b1b87c2477ddb6b2fba7a1"
+          dir, "baseline", BASELINE_VERSION, BASELINE_GEM_SHA256
         ),
-        "candidate" => target(dir, "candidate", "0.6.9", "b" * 64)
+        "candidate" => target(dir, "candidate", CANDIDATE_VERSION, CANDIDATE_GEM_SHA256)
       }
       phases = []
       state = latest_state
       executor = lambda do |target:, phase:, **|
         phases << [ target.role, phase ]
         snapshot = Marshal.load(Marshal.dump(state))
-        snapshot["install_identity"]["gem_sha256"] = "b" * 64 unless phase == "before"
+        snapshot["install_identity"]["gem_sha256"] = CANDIDATE_GEM_SHA256 unless phase == "before"
         {
           "status" => "passed", "producer_kind" => "real-installed",
           "target_gem_sha256" => target.manifest.fetch("gem_sha256"),
@@ -35,7 +39,7 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
       channel = lambda do |**|
         {
           "status" => "passed", "channel" => "linux-bash",
-          "candidate_gem_sha256" => "b" * 64, "stale_files" => [],
+          "candidate_gem_sha256" => CANDIDATE_GEM_SHA256, "stale_files" => [],
           "wrapper_role" => "candidate", "sidecars_current" => true,
           "dependencies_current" => true
         }
@@ -66,15 +70,14 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
     with_tmp_dir do |dir|
       targets = {
         "baseline" => target(
-          dir, "baseline", "0.6.9",
-          "9e9d065f67ccf3381b263f9a5ca44afb79b3122309b1b87c2477ddb6b2fba7a1"
+          dir, "baseline", BASELINE_VERSION, BASELINE_GEM_SHA256
         ),
-        "candidate" => target(dir, "candidate", "0.6.9", "b" * 64)
+        "candidate" => target(dir, "candidate", CANDIDATE_VERSION, CANDIDATE_GEM_SHA256)
       }
       state = latest_state
       executor = lambda do |target:, phase:, **|
         snapshot = Marshal.load(Marshal.dump(state))
-        snapshot["install_identity"]["gem_sha256"] = "b" * 64 unless phase == "before"
+        snapshot["install_identity"]["gem_sha256"] = CANDIDATE_GEM_SHA256 unless phase == "before"
         {
           "status" => "passed", "producer_kind" => "real-installed",
           "target_gem_sha256" => target.manifest.fetch("gem_sha256"),
@@ -86,7 +89,7 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
       channel = lambda do |**|
         {
           "status" => "passed", "channel" => "linux-bash",
-          "candidate_gem_sha256" => "b" * 64, "stale_files" => [],
+          "candidate_gem_sha256" => CANDIDATE_GEM_SHA256, "stale_files" => [],
           "wrapper_role" => "candidate", "sidecars_current" => true,
           "dependencies_current" => true
         }
@@ -108,15 +111,14 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
     with_tmp_dir do |dir|
       targets = {
         "baseline" => target(
-          dir, "baseline", "0.6.9",
-          "9e9d065f67ccf3381b263f9a5ca44afb79b3122309b1b87c2477ddb6b2fba7a1"
+          dir, "baseline", BASELINE_VERSION, BASELINE_GEM_SHA256
         ),
-        "candidate" => target(dir, "candidate", "0.6.9", "b" * 64)
+        "candidate" => target(dir, "candidate", CANDIDATE_VERSION, CANDIDATE_GEM_SHA256)
       }
       state = latest_state
       executor = lambda do |target:, phase:, **|
         snapshot = Marshal.load(Marshal.dump(state))
-        snapshot["install_identity"]["gem_sha256"] = "b" * 64 unless phase == "before"
+        snapshot["install_identity"]["gem_sha256"] = CANDIDATE_GEM_SHA256 unless phase == "before"
         snapshot["tasks"]["task-7"]["contents"] = "lost" if phase == "after"
         snapshot["configuration"]["second_run"] = true if phase == "idempotency"
         {
@@ -145,10 +147,9 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
     with_tmp_dir do |dir|
       targets = {
         "baseline" => target(
-          dir, "baseline", "0.6.9",
-          "9e9d065f67ccf3381b263f9a5ca44afb79b3122309b1b87c2477ddb6b2fba7a1"
+          dir, "baseline", BASELINE_VERSION, BASELINE_GEM_SHA256
         ),
-        "candidate" => target(dir, "candidate", "0.6.9", "b" * 64)
+        "candidate" => target(dir, "candidate", CANDIDATE_VERSION, CANDIDATE_GEM_SHA256)
       }
       calls = 0
       executor = ->(**) { calls += 1 }
@@ -164,9 +165,9 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
         },
         candidate_manifest: {
           "candidate_sha" => "a" * 40,
-          "hive_version" => "0.6.9",
+          "hive_version" => CANDIDATE_VERSION,
           "files" => {
-            "hive-cli-0.6.9.gem" => {
+            "hive-cli-#{CANDIDATE_VERSION}.gem" => {
               "kind" => "gem", "sha256" => "b" * 64
             }
           }
@@ -317,7 +318,7 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
         "candidate_sha" => "a" * 40,
         "hive_version" => targets.fetch("candidate").manifest.fetch("version"),
         "files" => {
-          "hive-cli-0.6.9.gem" => {
+          "hive-cli-#{targets.fetch("candidate").manifest.fetch("version")}.gem" => {
             "kind" => "gem",
             "sha256" => targets.fetch("candidate").manifest.fetch("gem_sha256")
           }

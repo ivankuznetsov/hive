@@ -81,6 +81,20 @@ class WorkflowsBenchTest < Minitest::Test
     assert_path_exists File.join(runtime, "Dockerfile.runner")
   end
 
+  def test_packaged_runtime_uses_hive_model_routing_for_flagship_candidates
+    runtime = Hive::Workflows::Bench::RUNTIME_DIR
+    config = File.read(File.join(runtime, "harness", "lib", "hive_config.rb"))
+    stages = File.read(File.join(runtime, "harness", "lib", "hive_stages.sh"))
+    candidates = File.read(File.join(runtime, "harness", "profiles", "candidates.rb"))
+
+    assert_includes config, 'config["models"] = models'
+    assert_includes config, '"review_reviewers"'
+    refute_includes stages, "HB_CODEX_MODEL_"
+    refute_includes stages, "HB_GROK_MODEL"
+    assert_includes candidates, "opus-5-plan@xhigh->sol-exec@high+sol-opus-review"
+    assert_includes candidates, "fable-5-plan@xhigh->sol-exec@high+sol-opus-review"
+  end
+
   def test_failed_rollback_warns_without_masking_the_original_install_error
     ops = Object.new
     ops.define_singleton_method(:hive_state_path) { "/unused/hive-state" }
@@ -361,8 +375,42 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes instruction, "write_limits_reached()"
     assert_includes instruction, "exit(quota_only ? 75 : 2)"
     assert_includes instruction, 'if [ "$outcome_status" -eq 75 ]'
-    assert_includes instruction, "<!-- ERROR reason=limits_reached"
-    assert_includes instruction, 'retry_after="%s"'
+    assert_includes instruction, "Hive::Markers.set("
+    assert_includes instruction, '"reason" => "limits_reached"'
+    assert_includes instruction, '"retry_after" => ARGV.fetch(1)'
+  end
+
+  def test_generate_quota_marker_has_canonical_recovery_identity
+    instruction = File.read(stages_by_name.fetch("generate").instruction)
+    function = instruction.match(
+      /(?<body>write_limits_reached\(\) \{.*?\n\})\n\nwrite_complete\(\)/m
+    )&.[](:body)
+    refute_nil function, "generate instruction must expose write_limits_reached"
+
+    Dir.mktmpdir("hive-bench-quota-marker") do |dir|
+      state_file = File.join(dir, "generate.md")
+      File.write(state_file, "# Generate\n<!-- AGENT_WORKING -->\n")
+      ruby_lib = [ File.expand_path("../../../lib", __dir__), ENV["RUBYLIB"] ].compact
+        .join(File::PATH_SEPARATOR)
+      shell = <<~BASH
+        set -euo pipefail
+        STATE_FILE="$1"
+        #{function}
+        write_limits_reached "provider limit"
+      BASH
+
+      _out, err, status = Open3.capture3(
+        { "RUBYLIB" => ruby_lib, "HIVE_LIMITS_RETRY_COOLDOWN_SEC" => "60" },
+        "bash", "-c", shell, "--", state_file
+      )
+
+      assert status.success?, err
+      marker = Hive::Markers.current(state_file)
+      assert_equal :error, marker.name
+      assert_equal "limits_reached", marker.attrs.fetch("reason")
+      assert_match(/\A[0-9a-f]{16}\z/, marker.attrs.fetch("marker_id"))
+      refute_nil Hive::Markers.recovery_match_attr(marker.attrs)
+    end
   end
 
   def test_judge_validation_rejects_a_missing_round_two_verdict

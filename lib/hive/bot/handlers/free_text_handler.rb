@@ -37,7 +37,7 @@ module Hive
 
           return blank_answer_refusal if blank?(answer_text)
 
-          @result_class.new(
+          result = @result_class.new(
             action: :write_answer_then_reply,
             project: state.project,
             slug: state.slug,
@@ -45,6 +45,8 @@ module Hive
             answer_text: answer_text,
             mode: state.mode
           )
+          result.binding = state.binding if result.respond_to?(:binding=) && state.respond_to?(:binding)
+          result
         end
 
         private

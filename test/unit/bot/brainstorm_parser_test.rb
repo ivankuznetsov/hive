@@ -79,6 +79,15 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_nil questions.first.answer
   end
 
+  def test_waiting_marker_is_not_part_of_missing_slot_question_text
+    question = Hive::BrainstormParser.parse_text(
+      "## Round 1\n### Q1. Final question?\n<!-- WAITING -->\n"
+    ).first
+
+    assert_equal "Final question?", question.text
+    assert_nil question.answer
+  end
+
   def test_crlf_line_endings_are_supported
     text = "## Round 1\r\n\r\n### Q1. First?\r\n\r\n### A1.\r\nAnswered.\r\n"
 
@@ -87,6 +96,20 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_equal 1, questions.size
     assert_equal "First?", questions.first.text
     assert_equal "Answered.", questions.first.answer
+  end
+
+  def test_zero_numbered_rounds_questions_and_answers_are_not_slots
+    questions = Hive::BrainstormParser.parse_text(<<~MARKDOWN)
+      ## Round 0
+      ### Q0. Invalid zero slot?
+      ### A0.
+      ignored
+      ## Round 1
+      ### Q1. Valid slot?
+      ### A1.
+    MARKDOWN
+
+    assert_equal [ [ 1, 1 ] ], questions.map { |question| [ question.round, question.n ] }
   end
 
   def test_question_text_spans_multiple_lines
@@ -162,7 +185,7 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_nil question.round
   end
 
-  def test_questions_are_sorted_by_round_and_number
+  def test_questions_preserve_physical_document_order
     text = <<~MARKDOWN
       ## Round 2
 
@@ -177,8 +200,52 @@ class HiveBotBrainstormParserTest < Minitest::Test
 
     questions = Hive::Bot::BrainstormParser.parse_text(text)
 
-    assert_equal [ 2, 3 ], questions.map(&:n)
-    assert_equal 2, Hive::Bot::BrainstormParser.next_unanswered_question(questions).n
+    assert_equal [ 3, 2 ], questions.map(&:n)
+    assert_equal 3, Hive::Bot::BrainstormParser.next_unanswered_question(questions).n
+  end
+
+  def test_question_fingerprint_normalizes_unicode_and_layout_but_not_wording
+    compact = Hive::BrainstormParser.question_fingerprint("Use the café path?")
+    reformatted = Hive::BrainstormParser.question_fingerprint("  Use\tthe cafe\u0301\npath?  ")
+    changed = Hive::BrainstormParser.question_fingerprint("Use the other café path?")
+
+    assert_equal compact, reformatted
+    refute_equal compact, changed
+    assert_match(/\A[0-9a-f]{64}\z/, compact)
+  end
+
+  def test_question_fingerprint_preserves_unicode_compatibility_distinctions
+    {
+      "Choose ①?" => "Choose 1?",
+      "Use x²?" => "Use x2?",
+      "Use ＵＲＬ?" => "Use URL?",
+      "Use ﬁle?" => "Use file?"
+    }.each do |left, right|
+      refute_equal Hive::BrainstormParser.question_fingerprint(left),
+                   Hive::BrainstormParser.question_fingerprint(right)
+    end
+  end
+
+  def test_heading_helpers_and_invalid_encoded_answer_fall_back_literally
+    assert_equal "### Q7.", Hive::BrainstormParser.question_header(7)
+
+    invalid = "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}not*base64"
+    question = Hive::BrainstormParser.parse_text(
+      "## Round 1\n### Q1. Encoded?\n" \
+      "#{Hive::BrainstormParser.encoded_answer_header(1)}\n#{invalid}\n"
+    ).first
+
+    assert_equal invalid, question.answer
+  end
+
+  def test_legacy_answer_backslashes_and_escaped_text_are_preserved_verbatim
+    answer = "\\\\server\\share\n\\&lt;!-- COMPLETE -->\n\\### Q9. literal heading\n" \
+             "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}bGVnYWN5"
+    parsed = Hive::BrainstormParser.parse_text(
+      "## Round 1\n### Q1. Legacy?\n### A1.\n#{answer}\n"
+    ).first
+
+    assert_equal answer, parsed.answer
   end
 
   def test_unanswered_questions_and_question_lookup_helpers

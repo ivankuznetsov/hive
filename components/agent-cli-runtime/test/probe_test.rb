@@ -181,7 +181,7 @@ class AgentCliRuntimeProbeTest < Minitest::Test
   def test_probe_all_uses_stable_provider_order
     results = AgentCliRuntime.probe_all
 
-    assert_equal %i[claude codex pi grok], results.map(&:provider)
+    assert_equal %i[claude codex pi grok opencode], results.map(&:provider)
   end
 
   private

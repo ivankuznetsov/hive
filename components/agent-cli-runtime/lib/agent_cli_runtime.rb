@@ -12,6 +12,8 @@ require "agent_cli_runtime/profile"
 require "agent_cli_runtime/profiles"
 require "agent_cli_runtime/probe"
 require "agent_cli_runtime/runtime"
+require "agent_cli_runtime/opencode/probe"
+require "agent_cli_runtime/opencode/overlay"
 require "agent_cli_runtime/cli"
 
 module AgentCliRuntime
@@ -21,8 +23,8 @@ module AgentCliRuntime
     Runtime.compile(request)
   end
 
-  def prepare!(profile)
-    Runtime.prepare!(profile)
+  def prepare!(profile, env: ENV)
+    Runtime.prepare!(profile, env:)
   end
 
   def require_capability!(profile, capability)
@@ -38,7 +40,11 @@ module AgentCliRuntime
   end
 
   def probe(profile, home: nil, env: ENV)
-    Probe.call(profile, home: home, env: env)
+    if profile.is_a?(ProbeRequest)
+      OpenCode::Probe.call(profile, env: env)
+    else
+      Probe.call(profile, home: home, env: env)
+    end
   end
 
   def probe_all(home: nil, env: ENV)

@@ -10,16 +10,17 @@ tags: [agent, runtime, component, gem, cli]
 **TLDR**: `agent-cli-runtime` is the first independently versioned gem kept in
 the Hive monorepo. It exposes provider-neutral profiles, invocation
 compilation, local prerequisite evidence, usage extraction, and normalized
-results for Claude Code, Codex CLI, Pi, and Grok CLI. Hive remains the primary
-consumer; the gem does not own orchestration or Hive policy.
+results for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. Hive remains
+the primary consumer; the gem does not own orchestration or Hive policy.
 
 ## Public surface
 
 The package lives at `components/agent-cli-runtime/`, loads with
 `require "agent_cli_runtime"`, and exposes the `AgentCliRuntime` namespace.
-Its built-in profiles are ordered `claude`, `codex`, `pi`, `grok`. Callers
-construct immutable requests and receive immutable compiled invocations,
-capability evidence, probe results, and observable results.
+Its built-in profiles are ordered `claude`, `codex`, `pi`, `grok`, `opencode`.
+The appended profile leaves the order and behavior of the four legacy profiles
+unchanged. Callers construct immutable requests and receive immutable compiled
+invocations, capability evidence, probe results, and observable results.
 Each profile also exposes an immutable `credential_environment_keys`
 inventory. This is compatibility metadata for an orchestrator that needs to
 remove ambient credentials when selecting a named subscription/session; it
@@ -39,6 +40,28 @@ cannot represent them. Provider profiles and extractors are public,
 SemVer-governed behavior; orchestration policy stays injectable or outside the
 package.
 
+OpenCode adds a stricter, additive preparation surface because its safe
+headless contract depends on an invocation-owned configuration overlay. An
+`OpenCodePreparationRequest` identifies an exact `provider/model`, a selected
+configuration source, named credential environment keys, a working directory,
+declared extra roots, and a fresh absolute invocation root. `prepare!` performs
+only bounded local version/help/auth/model-inventory inspections, writes
+owner-private XDG config/data/cache/state homes, compiles deny-first permission
+rules, and returns a `PreparedInvocation`. The value exposes discrete argv,
+non-secret child-environment overrides, requested-route evidence, generated
+paths, and idempotent `cleanup!`; it never starts `opencode run`. The process
+owner forwards only the named credential keys and must invoke cleanup from its
+own lifecycle `ensure`.
+
+The OpenCode route-aware probe requires `1.18.16+`, all pinned run/export
+flags, a selected authentication source, and the exact cached
+`provider/model` plus requested variant while remote model fetching and ambient
+project configuration are disabled. Generic `probe(profile)` and
+`prepare!(profile)` remain compatible for legacy profiles. OpenCode's ordinary
+`nil`, `read-only`, and `workspace-write` compilation paths fail closed unless
+the prepared overlay supplies its explicit typed policy and trusted `--auto`
+argument.
+
 The public facade includes `compile`, `prepare!`, `require_capability!`,
 `extract_usage`, `observe`, `probe`, and `probe_all`. It accepts built-in names
 or custom `Profile` objects, preserves `UnknownProvider` as a typed caller
@@ -49,8 +72,9 @@ zero-token events. Observable results also carry an optional immutable
 `provider_signal` supplied by a trusted caller. The component does not classify
 that signal or own provider-health policy.
 
-For compatibility with Hive's trusted headless launches,
-`permission_mode: nil` still selects a provider's bypass flag. Independent
+For compatibility with Hive's trusted legacy headless launches,
+`permission_mode: nil` still selects a legacy provider's bypass flag. OpenCode
+requires a prepared explicit policy. Independent
 consumers should pass `read-only` or `workspace-write` when they require those
 restrictions; unsupported enforcement fails closed. Version probes execute
 with their supplied environment, reject output containing multiple distinct

@@ -77,6 +77,14 @@ paths are eligible for removal; worktrees, task folders, selected config, and
 credential sources remain caller-owned. The legacy Claude, Codex, Pi, and Grok
 spawn path and mutable result shape are unchanged.
 
+Implementation-owning stages journal OpenCode's observed route and nullable
+usage only after their artifact-firewall snapshot validates. This keeps
+`task-journal.jsonl` and `task-projection.json` controller-owned: the agent
+cannot modify them, while Hive's own post-spawn observation append is not
+mistaken for agent tampering. Direct/manual execute runs without a durable
+attempt context still resolve `models.execute_implementation` for launch, but
+do not claim durable observed identity without an admitted attempt.
+
 ## `Hive::AgentProfile` — value object
 
 Shipped profiles pass `runtime_profile:` and only their Hive-owned policy.

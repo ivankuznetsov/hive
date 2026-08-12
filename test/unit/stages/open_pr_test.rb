@@ -194,6 +194,7 @@ class HiveStagesOpenPrTest < Minitest::Test
 
       assert_equal "open_pr", captured.fetch(:implementation_stage)
       assert_same configuration, captured.fetch(:cfg)
+      assert captured.fetch(:defer_implementation_observation)
     end
   end
 

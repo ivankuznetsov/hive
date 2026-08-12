@@ -54,13 +54,16 @@ Dir.mktmpdir("agent-cli-runtime-candidate") do |sandbox|
   gem_home = File.join(sandbox, "gems")
   bin_dir = File.join(sandbox, "bin")
   FileUtils.mkdir_p([ gem_home, bin_dir ])
-  install_env = {
+  bundler_environment = ENV.keys.grep(/\A(?:BUNDLE|BUNDLER_)/).to_h do |key|
+    [ key, nil ]
+  end
+  install_env = bundler_environment.merge(
     "GEM_HOME" => gem_home,
     "GEM_PATH" => gem_home,
-    "BUNDLE_GEMFILE" => nil,
+    "RUBYGEMS_GEMDEPS" => nil,
     "RUBYLIB" => nil,
     "RUBYOPT" => nil
-  }
+  )
   install_command = [
     Gem.ruby, "-S", "gem", "install", gem_path,
     "--install-dir", gem_home,

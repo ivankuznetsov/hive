@@ -666,8 +666,57 @@ class HiveStagesExecuteTest < Minitest::Test
           assert_equal "opencode", returned.fetch(:implementation_provider)
           assert_same cfg, spawned.fetch(:cfg)
           assert_equal "execute", spawned.fetch(:implementation_stage)
+          assert spawned.fetch(:defer_implementation_observation)
         end
       end
+    end
+  end
+
+  def test_spawn_implementation_routes_opencode_without_an_attempt_context
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      spawned = nil
+      scope = {
+        add_dirs: [ task.folder ], permission_mode: "workspace-write",
+        allowed_tools: nil, disallowed_tools: nil, runtime_policy: nil,
+        additional_read_roots: [ task.folder ],
+        additional_write_roots: [ task.folder ]
+      }
+      cfg = {
+        "agents" => { "opencode" => {} },
+        "execute" => { "agent" => "opencode" },
+        "models" => {
+          "execute_implementation" => {
+            "model" => "anthropic/claude-sonnet-4-5", "effort" => "high"
+          }
+        }
+      }
+
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :stage_permission_scope_or_mark!,
+        ->(*, **) { scope }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :spawn_agent,
+          ->(*, **kwargs) { spawned = kwargs; { status: :ok } }
+        ) do
+          Hive::Stages::Execute.spawn_implementation(
+            task, cfg, File.join(dir, "worktree")
+          )
+        end
+      end
+
+      routing = spawned.fetch(:routing_arguments)
+      assert_equal :opencode, routing.profile_name
+      assert_equal "execute_implementation", routing.stage
+      assert_equal "anthropic/claude-sonnet-4-5", routing.model
+      assert_equal "high", routing.effort
+      assert_equal [
+        "--model", "anthropic/claude-sonnet-4-5", "--variant", "high"
+      ], routing.native_arguments
+      assert_nil spawned.fetch(:identity_arguments)
+      assert spawned.fetch(:defer_implementation_observation)
     end
   end
 

@@ -127,7 +127,9 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
 
         assert_equal "deny", policy.fetch("*")
         assert_equal "deny", policy.fetch("bash")
-        assert_equal "allow", policy.dig("edit", "*")
+        assert_equal "deny", policy.dig("edit", "*")
+        assert_equal "allow", policy.dig("edit", work)
+        assert_equal "allow", policy.dig("edit", "#{work}/**")
         assert_equal "deny", policy.dig("edit", "#{readable}/**")
         assert_equal "allow", policy.dig("edit", "#{writable}/**")
         assert_equal "allow",

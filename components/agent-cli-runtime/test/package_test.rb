@@ -6,7 +6,7 @@ class AgentCliRuntimePackageTest < Minitest::Test
   def test_build_candidate_records_one_exact_gem
     Dir.mktmpdir do |dir|
       dirty, git_error, git_status = Open3.capture3(
-        "git", "-C", File.expand_path("../..", ROOT), "status", "--porcelain"
+        "git", "-C", ROOT, "status", "--porcelain", "--", "."
       )
       assert git_status.success?, git_error
 

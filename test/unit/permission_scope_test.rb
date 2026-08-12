@@ -410,6 +410,19 @@ class PermissionScopeTest < Minitest::Test
     end
   end
 
+  def test_legacy_claude_profile_without_capability_api_keeps_safe_scope_support
+    profile = Struct.new(:name).new(:claude)
+
+    with_tmp_dir do |dir|
+      scope = Hive::PermissionScope.resolve(
+        "read-only", task_folder: dir, profile:, stage: "plan"
+      )
+
+      assert_equal "read-only", scope.preset
+      assert_equal "default", scope.permission_mode
+    end
+  end
+
   def test_yolo_is_allowed_for_non_claude_profiles
     with_tmp_dir do |dir|
       scope = Hive::PermissionScope.resolve("yolo", task_folder: dir, profile: codex_profile, stage: "execute")

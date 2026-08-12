@@ -151,6 +151,10 @@ module Hive
               )
             end
 
+            Hive::Stages::Base.record_deferred_opencode_observation(
+              synthetic_task(ctx), cfg, "review.ci", spawn_result
+            )
+
             if spawn_result[:status] != :ok
               return Result.new(
                 status: :error,
@@ -397,7 +401,10 @@ module Hive
               session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-ci-fix-attempt#{attempt}", task)
             )
           else
-            Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
+            Hive::Stages::Base.spawn_agent(
+              task, **kwargs, cfg: cfg,
+              defer_implementation_observation: true
+            )
           end
         end
 

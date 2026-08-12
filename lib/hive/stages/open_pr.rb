@@ -139,7 +139,7 @@ module Hive
         )
         custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
         begin
-          spawn_open_pr_agent(
+          spawn_result = spawn_open_pr_agent(
             task, cfg, prompt, profile, worktree_path,
             identity: identity, launch_arguments: launch_arguments
           )
@@ -156,6 +156,10 @@ module Hive
                             restore_error: custody_report.restore_diagnostic.to_s[0, 200])
           return { commit: "open_pr_tampered", status: :error }
         end
+
+        Hive::Stages::Base.record_deferred_opencode_observation(
+          task, cfg, "open_pr", spawn_result
+        )
 
         marker = Hive::Markers.current(task.state_file)
         unless marker.name == :complete
@@ -213,7 +217,10 @@ module Hive
             session_name: Hive::ClaudeLauncher.tmux_session_name("5-open-pr", task) # coding-scoped: coding open-pr stage tmux session
           )
         else
-          Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
+          Hive::Stages::Base.spawn_agent(
+            task, **kwargs, cfg: cfg,
+            defer_implementation_observation: true
+          )
         end
       end
 

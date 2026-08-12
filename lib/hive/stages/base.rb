@@ -793,7 +793,8 @@ module Hive
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
                       routing_resolution: nil, routing_arguments: nil,
                       additional_read_roots: [], additional_write_roots: [],
-                      implementation_stage: nil)
+                      implementation_stage: nil,
+                      defer_implementation_observation: false)
         context = Hive::Attempts::Context.current
         launch_binding = nil
         provider_route = nil
@@ -912,9 +913,12 @@ module Hive
             result[:error_message] = e.message
           end
         end
-        record_opencode_observation(
-          task, cfg, implementation_stage, result
-        ) if profile.name == :opencode && implementation_stage
+        if profile.name == :opencode && implementation_stage &&
+           !defer_implementation_observation
+          record_deferred_opencode_observation(
+            task, cfg, implementation_stage, result
+          )
+        end
         record_usage(task, profile, result, started_at)
         if result[:provider_signal]
           unless context.publish_provider_signal(result.fetch(:provider_signal))
@@ -1029,7 +1033,9 @@ module Hive
           strict_mcp_config: strict_mcp_config,
           identity_arguments: identity_arguments,
           routing_arguments: routing_arguments,
-          runtime_policy: runtime_policy
+          runtime_policy: runtime_policy,
+          additional_read_roots: additional_read_roots,
+          additional_write_roots: additional_write_roots
         )
       end
 
@@ -1181,14 +1187,27 @@ module Hive
       end
 
       def record_opencode_observation(task, cfg, stage, result)
+        normalized_usage = result[:normalized_outcome]&.usage || result[:usage]
         Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).observe_opencode!(
           stage: stage,
           requested_route: result.fetch(:requested_opencode_route),
           actual_route: result[:actual_opencode_route],
           resolution_status: result.fetch(:route_resolution_status),
           outcome_kind: result.fetch(:normalized_outcome_kind),
-          usage: result[:usage]
+          usage: normalized_usage
         )
+      end
+
+      # Implementation stages protect their journal/projection files while an
+      # agent is running. They defer this controller-owned append until after
+      # that custody check so valid observed-route evidence cannot be mistaken
+      # for agent tampering.
+      def record_deferred_opencode_observation(task, cfg, stage, result)
+        return result unless Hive::Attempts::Context.current
+        return result unless result&.key?(:requested_opencode_route)
+
+        record_opencode_observation(task, cfg, stage, result)
+        result
       end
 
       def usage_project_slug(task)

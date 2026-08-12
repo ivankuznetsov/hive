@@ -782,8 +782,14 @@ module Hive
       def initialize(base, bin_default:, env_bin_override_key:, min_version:)
         @base = base
         @bin_default_override = bin_default.to_s.dup.freeze
-        @env_bin_override_keys = Array(env_bin_override_key).compact
-          .map { |key| key.to_s.dup.freeze }.freeze
+        # Keep the package-owned override keys as fallbacks. OpenCode
+        # preparation pins the already-resolved executable through the
+        # package's AGENT_CLI_RUNTIME_* key; replacing the inventory with a
+        # Hive-only config key would make that private route probe look for a
+        # different binary after preparation had already resolved one.
+        @env_bin_override_keys = [
+          *Array(env_bin_override_key), *base.env_bin_override_keys
+        ].compact.map { |key| key.to_s.dup.freeze }.uniq.freeze
         @min_version_override = min_version&.to_s&.dup&.freeze
         freeze
       end

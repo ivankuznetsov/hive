@@ -918,6 +918,8 @@ class AgentProfileTest < Minitest::Test
     profile = make_profile(env_bin_override_key: "HIVE_CLAUDE_BIN")
     overridden = profile.with_overrides("env_override" => "MY_CUSTOM_BIN")
     assert_equal "MY_CUSTOM_BIN", overridden.env_bin_override_key
+    assert_equal %w[MY_CUSTOM_BIN HIVE_CLAUDE_BIN],
+                 overridden.runtime_profile.env_bin_override_keys
   end
 
   def test_with_overrides_preserves_prompt_style

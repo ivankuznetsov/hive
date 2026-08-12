@@ -25,6 +25,7 @@ class InitDoctorPreflightTest < Minitest::Test
         when "claude" then Hive::SkillCheck::Claude
         when "codex" then Hive::SkillCheck::Codex
         when "pi" then Hive::SkillCheck::Pi
+        when "opencode" then Hive::SkillCheck::OpenCode
         end
         found = resolver.resolve(target.invocation, project_root: @project_root)
         health = found.status == :present ? "healthy" : "missing"
@@ -69,7 +70,8 @@ class InitDoctorPreflightTest < Minitest::Test
     roots = {
       "claude" => File.join(home, ".claude"),
       "codex" => File.join(home, ".codex"),
-      "pi" => File.join(home, ".pi", "agent")
+      "pi" => File.join(home, ".pi", "agent"),
+      "opencode" => File.join(home, ".config", "opencode")
     }
     roots.each do |platform, root|
       publisher = Hive::AgentSkills::DirectoryPublisher.new(
@@ -88,6 +90,9 @@ class InitDoctorPreflightTest < Minitest::Test
     write_file("#{home}/.claude/skills/ce-code-review/SKILL.md")
     write_file("#{home}/.codex/skills/ce-code-review/SKILL.md")
     write_file("#{home}/.claude/plugins/cache/mp/pr-review-toolkit/1.0/skills/review-pr/SKILL.md")
+    write_file("#{home}/.config/opencode/opencode.json", JSON.generate(
+      "plugin" => [ Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN ]
+    ))
   end
 
   def test_all_green_emits_no_preflight_output

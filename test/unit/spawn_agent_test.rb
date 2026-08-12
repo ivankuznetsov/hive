@@ -1584,13 +1584,18 @@ class SpawnAgentTest < Minitest::Test
     with_tmp_dir do |dir|
       task = make_task(dir, "6-review")
       cfg = { "agents" => { "opencode" => {} } }
+      typed_usage = Hive::AgentRuntime::NormalizedUsage.new(
+        input: nil, output: 0, cache_read: 0, cache_write: nil,
+        reasoning: nil, cost: 0.0
+      )
       outcome = {
         status: :error,
         requested_opencode_route: "anthropic/claude-sonnet-4-5",
         actual_opencode_route: nil,
         route_resolution_status: :unobserved,
         normalized_outcome_kind: :configuration_failure,
-        usage: nil
+        normalized_outcome: Struct.new(:usage).new(typed_usage),
+        usage: { cached: 0, model: "anthropic/claude-sonnet-4-5" }
       }
       agent = Object.new
       agent.define_singleton_method(:run!) { outcome }
@@ -1599,25 +1604,29 @@ class SpawnAgentTest < Minitest::Test
       store.define_singleton_method(:observe_opencode!) do |**values|
         observation = values
       end
+      with_attempt_context(
+        attempt_id: "opencode-attempt", task_generation: 1,
+        ownership_generation: "generation-1"
+      ) do
+        with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+          with_replaced_singleton_method(Hive::Agent, :new, ->(**) { agent }) do
+            with_replaced_singleton_method(
+              Hive::ImplementationIdentity::Store, :new,
+              ->(**) { store }
+            ) do
+              result = Hive::Stages::Base.spawn_agent(
+                task,
+                prompt: "prompt",
+                max_budget_usd: nil,
+                timeout_sec: 5,
+                profile: opencode_scope_profile,
+                cfg: cfg,
+                implementation_stage: "review.fix",
+                status_mode: :exit_code_only
+              )
 
-      with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
-        with_replaced_singleton_method(Hive::Agent, :new, ->(**) { agent }) do
-          with_replaced_singleton_method(
-            Hive::ImplementationIdentity::Store, :new,
-            ->(**) { store }
-          ) do
-            result = Hive::Stages::Base.spawn_agent(
-              task,
-              prompt: "prompt",
-              max_budget_usd: nil,
-              timeout_sec: 5,
-              profile: opencode_scope_profile,
-              cfg: cfg,
-              implementation_stage: "review.fix",
-              status_mode: :exit_code_only
-            )
-
-            assert_same outcome, result
+              assert_same outcome, result
+            end
           end
         end
       end
@@ -1628,7 +1637,7 @@ class SpawnAgentTest < Minitest::Test
       assert_nil observation.fetch(:actual_route)
       assert_equal :unobserved, observation.fetch(:resolution_status)
       assert_equal :configuration_failure, observation.fetch(:outcome_kind)
-      assert_nil observation.fetch(:usage)
+      assert_same typed_usage, observation.fetch(:usage)
     end
   end
 

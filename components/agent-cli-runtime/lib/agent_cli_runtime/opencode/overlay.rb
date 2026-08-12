@@ -246,12 +246,18 @@ module AgentCliRuntime
           )
         end
 
-        edit = { "*" => "allow" }
+        # OpenCode applies the last matching permission rule. Start from a
+        # denial and append only the invocation's declared write roots. The
+        # working directory is an implicit write root for workspace-write;
+        # additional read roots remain explicitly denied unless the caller
+        # also declared them writable.
+        writable_roots = [ roots.fetch(:working), *roots.fetch(:write) ].uniq
+        edit = { "*" => "deny" }
         (roots.fetch(:read) - roots.fetch(:write)).each do |root|
           edit[root] = "deny"
           edit["#{root}/**"] = "deny"
         end
-        roots.fetch(:write).each do |root|
+        writable_roots.each do |root|
           edit[root] = "allow"
           edit["#{root}/**"] = "allow"
         end

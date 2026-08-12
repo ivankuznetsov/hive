@@ -1502,6 +1502,11 @@ module Hive
       end
 
       def open_in_agent(row)
+        # Keep the fallback initialized before Task/Config construction: route
+        # validation may consult the profile registry while loading config, so
+        # an unavailable configured profile can now fail before the explicit
+        # steering lookup below.
+        agent_name = "claude"
         task = Hive::Task.new(row.folder)
 
         # Stale-row guard: a snapshot poll that pre-dated a stage advance
@@ -1525,7 +1530,7 @@ module Hive
         end
 
         cfg = Hive::Config.load(task.project_root)
-        agent_name = cfg.dig("execute", "agent") || "claude"
+        agent_name = cfg.dig("execute", "agent") || agent_name
         profile = Hive::AgentProfiles.lookup(agent_name, cfg: cfg)
         Hive::AgentRuntime.prepare!(profile)
 

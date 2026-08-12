@@ -1348,19 +1348,34 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
   def with_agent_profile_lookup_stub(stub_proc)
     sentinel = Hive::AgentProfiles.method(:lookup)
-    Hive::AgentProfiles.define_singleton_method(:lookup, &stub_proc)
+    Hive::AgentProfiles.define_singleton_method(:lookup) do |name, cfg: nil|
+      # Config's route-capability validation resolves every reachable default
+      # provider before open_in_agent performs the execute-profile lookup this
+      # helper is intended to isolate. Keep those unrelated providers real.
+      if name.to_s == "claude"
+        stub_proc.call(name, cfg: cfg)
+      else
+        sentinel.call(name, cfg: cfg)
+      end
+    end
     yield
   ensure
     Hive::AgentProfiles.define_singleton_method(:lookup, sentinel) if sentinel
   end
 
   ManualProfileStub = Struct.new(:bin, :add_dir_flag, :version_checked, :preflight_checked, keyword_init: true) do
+    def name = :claude
+
     def check_version!
       self.version_checked = true
     end
 
     def preflight!
       self.preflight_checked = true
+    end
+
+    def validate_routed_control!(*, **)
+      true
     end
   end
 

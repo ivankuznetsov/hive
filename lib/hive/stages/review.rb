@@ -625,6 +625,10 @@ module Hive
                      status: :review_error }
           end
 
+          Hive::Stages::Base.record_deferred_opencode_observation(
+            task, cfg, "review.fix", fix_result
+          )
+
           # Compute the post-fix worktree status once and reuse it for both
           # the completion-fallback evidence and the auto-commit branch
           # below, rather than spawning the git subprocess twice.
@@ -2166,7 +2170,10 @@ module Hive
             session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task)
           )
         else
-          Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
+          Hive::Stages::Base.spawn_agent(
+            task, **kwargs, cfg: cfg,
+            defer_implementation_observation: true
+          )
         end
       end
 

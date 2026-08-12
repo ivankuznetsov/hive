@@ -99,6 +99,11 @@ historical executor and reports `compliant_local_upgrade_executor_unavailable`;
 focused tests inject its fixed executor seam, while the real upgrade cells are
 hosted proof.
 
+The committed live-agent artifact builder loads only the canonical skill leaf,
+not the full Hive runtime. A `--disable-gems` regression keeps candidate source
+exports buildable before the candidate gem and its runtime dependencies are
+installed.
+
 The default suite excludes four expensive outer-proof files and skips the
 single large babysitter command-classification matrix. CI runs all five proofs
 as named gates and feeds their matrix result, together with exhaustive coverage,

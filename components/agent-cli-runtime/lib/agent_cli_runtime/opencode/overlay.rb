@@ -411,7 +411,10 @@ module AgentCliRuntime
           require_add_dirs: false,
           allowed_tools: nil,
           disallowed_tools: nil,
-          max_budget_usd: source.max_budget_usd,
+          # OpenCode has no verified per-run budget flag in the pinned
+          # contract. The caller may enforce external limits, but preparation
+          # must not claim that this value reached the CLI.
+          max_budget_usd: nil,
           model: route.to_s,
           effort: source.effort,
           pin_model: true,

@@ -64,6 +64,14 @@ class SpawnAgentTest < Minitest::Test
     )
   end
 
+  def opencode_scope_profile
+    Hive::AgentProfile.new(
+      runtime_profile: AgentCliRuntime::Profiles.fetch(:opencode),
+      skill_syntax_format: "/%{skill}",
+      permission_presets: %w[read-only scoped]
+    )
+  end
+
   def managed_output_policy(task, binary, output)
     Hive::WorkflowPackage::RuntimePolicy::Policy.new(
       permission_mode: nil,
@@ -974,6 +982,63 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_stage_permission_scope_maps_declared_opencode_modes_and_roots
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      writable = File.join(task.folder, "artifacts")
+      cfg = {
+        "execute" => {
+          "permissions" => {
+            "preset" => "scoped",
+            "tools" => %w[Read Edit],
+            "dirs" => [ writable ]
+          }
+        }
+      }
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        cfg, "execute", task, opencode_scope_profile,
+        base_add_dirs: [ task.folder ]
+      )
+
+      assert_equal "workspace-write", scope.fetch(:permission_mode)
+      assert_nil scope.fetch(:allowed_tools)
+      assert_nil scope.fetch(:disallowed_tools)
+      assert_equal [ task.folder, writable ],
+                   scope.fetch(:additional_read_roots)
+      assert_equal [ task.folder, writable ],
+                   scope.fetch(:additional_write_roots)
+      kwargs = Hive::Stages::Base.tool_scope_kwargs(scope)
+      assert_equal scope.fetch(:additional_write_roots),
+                   kwargs.fetch(:additional_write_roots)
+    end
+  end
+
+  def test_stage_permission_scope_fails_closed_for_opencode_yolo_and_bash
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      yolo = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Base.stage_permission_scope(
+          { "permissions" => "yolo" },
+          "execute", task, opencode_scope_profile
+        )
+      end
+      assert_match(/must select read-only or scoped/, yolo.message)
+
+      bash = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Base.stage_permission_scope(
+          {
+            "execute" => {
+              "permissions" => { "preset" => "scoped", "bash" => true }
+            }
+          },
+          "execute", task, opencode_scope_profile
+        )
+      end
+      assert_match(/cannot grant unrestricted Bash/, bash.message)
+    end
+  end
+
   # default_allowed_tools_for_mode guard clause: a NON-claude profile never
   # gets the tmux builtin allowlist threaded, even in tmux mode with a default
   # set — codex/pi can't take claude's --allowedTools. The yolo tmux tests
@@ -1298,7 +1363,7 @@ class SpawnAgentTest < Minitest::Test
         marker = Hive::Markers.current(task.state_file)
         assert_equal :error, marker.name, "#{runner} must leave an attributed :error marker"
         assert_equal "permission_config_error", marker.attrs["reason"]
-        assert_match(/claude only/, marker.attrs["message"].to_s)
+        assert_match(/does not declare enforcement/, marker.attrs["message"].to_s)
       end
     end
   end

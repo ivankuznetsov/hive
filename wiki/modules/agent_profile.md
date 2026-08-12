@@ -60,6 +60,23 @@ Legacy callers still receive the existing mutable result Hash from
 the corresponding immutable observation without changing that return
 contract.
 
+### OpenCode process ownership
+
+OpenCode uses the component's additive prepared-invocation ABI while keeping
+process supervision in Hive. `Hive::Agent` prepares a private overlay, starts
+exactly one `opencode run` process with a selected child environment, captures
+bounded stdout and stderr, and records timeout or cancellation before parsing.
+After a zero exit it may start one non-model `opencode export --sanitize`
+inspection to correlate the terminal message with observed provider/model and
+usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that
+inspection as appropriate.
+
+Cleanup runs from the process owner's `ensure` path after preparation, spawn,
+inspection, or normalization failures. Only the prepared invocation's owned
+paths are eligible for removal; worktrees, task folders, selected config, and
+credential sources remain caller-owned. The legacy Claude, Codex, Pi, and Grok
+spawn path and mutable result shape are unchanged.
+
 ## `Hive::AgentProfile` — value object
 
 Shipped profiles pass `runtime_profile:` and only their Hive-owned policy.

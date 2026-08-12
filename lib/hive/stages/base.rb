@@ -251,13 +251,20 @@ module Hive
             base_add_dirs: base_add_dirs,
             managed_outputs: managed_outputs
           )
-          return {
+          values = {
             add_dirs: runtime_policy.directories,
             permission_mode: runtime_policy.permission_mode,
             allowed_tools: runtime_policy.allowed_tools,
             disallowed_tools: runtime_policy.disallowed_tools,
             runtime_policy: runtime_policy
           }
+          if profile.name == :opencode
+            values[:additional_read_roots] = runtime_policy.directories
+            values[:additional_write_roots] = opencode_write_roots(
+              profile, runtime_policy.allowed_tools, runtime_policy.directories
+            )
+          end
+          return adapt_opencode_scope!(values, profile, stage_name)
         end
 
         spec = if explicit_permission_spec.equal?(MISSING_EXPLICIT_PERMISSION_SPEC)
@@ -274,6 +281,10 @@ module Hive
         base_dirs = Array(base_add_dirs)
 
         if scope.yolo?
+          if profile.name == :opencode
+            raise Hive::ConfigError,
+                  "stage #{stage_name} must select read-only or scoped permissions for OpenCode"
+          end
           return {
             add_dirs: base_dirs,
             permission_mode: nil,
@@ -282,12 +293,20 @@ module Hive
           }
         end
 
-        {
+        values = {
           add_dirs: base_dirs + scope.add_dirs_extra,
           permission_mode: scope.permission_mode,
           allowed_tools: scope.allowed_tools,
           disallowed_tools: scope.disallowed_tools
         }
+        if profile.name == :opencode
+          directories = base_dirs + scope.add_dirs_extra
+          values[:additional_read_roots] = directories
+          values[:additional_write_roots] = opencode_write_roots(
+            profile, scope.allowed_tools, directories
+          )
+        end
+        adapt_opencode_scope!(values, profile, stage_name)
       end
 
       # Prepare one actor launch from one managed snapshot, so its prompt and
@@ -318,7 +337,9 @@ module Hive
         kwargs = {
           permission_mode: scope.fetch(:permission_mode),
           allowed_tools: scope.fetch(:allowed_tools),
-          disallowed_tools: scope.fetch(:disallowed_tools)
+          disallowed_tools: scope.fetch(:disallowed_tools),
+          additional_read_roots: scope.fetch(:additional_read_roots, []),
+          additional_write_roots: scope.fetch(:additional_write_roots, [])
         }
         kwargs[:runtime_policy] = scope[:runtime_policy] if scope[:runtime_policy]
         kwargs
@@ -388,6 +409,37 @@ module Hive
 
         default_allowed_tools
       end
+
+      def adapt_opencode_scope!(values, profile, stage_name)
+        return values unless profile.name == :opencode
+
+        granted = Array(values[:allowed_tools]).flat_map do |rule|
+          Hive::PermissionScope.granted_tool_names(rule)
+        end
+        if granted.include?("Bash")
+          raise Hive::ConfigError,
+                "stage #{stage_name} OpenCode permissions cannot grant unrestricted Bash"
+        end
+        writable = !(granted & Hive::PermissionScope::FILE_EDIT_TOOLS).empty?
+        values.merge(
+          permission_mode: writable ? "workspace-write" : "read-only",
+          allowed_tools: nil,
+          disallowed_tools: nil
+        )
+      end
+      private_class_method :adapt_opencode_scope!
+
+      def opencode_write_roots(profile, allowed_tools, directories)
+        return [] unless profile.name == :opencode
+
+        granted = Array(allowed_tools).flat_map do |rule|
+          Hive::PermissionScope.granted_tool_names(rule)
+        end
+        return [] if (granted & Hive::PermissionScope::FILE_EDIT_TOOLS).empty?
+
+        Array(directories)
+      end
+      private_class_method :opencode_write_roots
 
       MISSING_EXPLICIT_PERMISSION_SPEC = Object.new.freeze
 
@@ -711,7 +763,8 @@ module Hive
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
                       disallowed_tools: nil, cli_flags: nil,
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
-                      routing_resolution: nil, routing_arguments: nil)
+                      routing_resolution: nil, routing_arguments: nil,
+                      additional_read_roots: [], additional_write_roots: [])
         context = Hive::Attempts::Context.current
         launch_binding = nil
         provider_route = nil
@@ -755,7 +808,7 @@ module Hive
                    error_message: "preflight failed: #{e.message}" }
         end
 
-        if !profile.add_dir_flag && Array(add_dirs).any?
+        if profile.name != :opencode && !profile.add_dir_flag && Array(add_dirs).any?
           warn_isolation_reduced(task, profile, add_dirs)
         end
         if max_budget_usd && !profile.budget_flag
@@ -817,7 +870,9 @@ module Hive
           runtime_policy: runtime_policy,
           routing_arguments: routing_arguments,
           launch_environment: launch_binding&.environment || {},
-          provider_route: provider_route
+          provider_route: provider_route,
+          additional_read_roots: additional_read_roots,
+          additional_write_roots: additional_write_roots
         ).run!
         if result[:status] == :ok && runtime_policy&.host_outputs?
           begin

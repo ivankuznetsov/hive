@@ -1,4 +1,5 @@
 require "agent_cli_runtime"
+require "json"
 require "hive/implementation_identity"
 require "hive/model_routing"
 
@@ -62,7 +63,10 @@ module Hive
                 :default_model_resolver, :policy_capabilities,
                 :routed_effort_values, :routing_argument_placement,
                 :routed_model_argument_builder, :routed_effort_argument_builder,
-                :structured_output_protocol, :cli_capabilities
+                :structured_output_protocol, :cli_capabilities,
+                :permission_presets, :opencode_configuration_path,
+                :opencode_configuration, :opencode_credential_environment_keys,
+                :opencode_credential_file, :opencode_plugins, :opencode_pure
 
     # Existing custom profile registrations remain source compatible. Shipped
     # profiles pass runtime_profile: so their compatibility definition comes
@@ -90,7 +94,13 @@ module Hive
                    structured_output_protocol: nil,
                    credential_environment_keys: [],
                    configuration_environment_key: nil,
-                   default_configuration_directory: nil)
+                   default_configuration_directory: nil,
+                   permission_presets: nil,
+                   opencode_configuration_path: nil,
+                   opencode_configuration: nil,
+                   opencode_credential_environment_keys: [],
+                   opencode_credential_file: nil,
+                   opencode_plugins: [], opencode_pure: true)
       effective_name = runtime_profile&.name || name
       raise ArgumentError, "missing keyword: :name" if effective_name.nil?
 
@@ -161,6 +171,25 @@ module Hive
       @routed_effort_argument_builder =
         routed_effort_argument_builder || @runtime_profile.effort_argument_builder
       @structured_output_protocol = structured_output_protocol&.to_sym
+      @permission_presets = normalize_permission_presets(
+        permission_presets ||
+          (effective_name.to_sym == :claude ? %w[read-only scoped] : [])
+      )
+      if opencode_configuration_path && opencode_configuration
+        raise ArgumentError,
+              "choose opencode_configuration_path or opencode_configuration, not both"
+      end
+      @opencode_configuration_path =
+        opencode_configuration_path&.to_s&.dup&.freeze
+      @opencode_configuration =
+        opencode_configuration && deep_freeze_hash(opencode_configuration)
+      @opencode_credential_environment_keys = normalize_environment_keys(
+        opencode_credential_environment_keys
+      )
+      @opencode_credential_file = opencode_credential_file&.to_s&.dup&.freeze
+      @opencode_plugins = Array(opencode_plugins)
+        .map { |plugin| plugin.to_s.dup.freeze }.freeze
+      @opencode_pure = opencode_pure != false
       freeze
     end
 
@@ -193,6 +222,10 @@ module Hive
 
     def raw_cli_arguments_supported?
       @runtime_profile.raw_cli_arguments_supported?
+    end
+
+    def permission_preset_supported?(preset)
+      @permission_presets.include?(preset.to_s)
     end
 
     def auth_configuration_required?
@@ -404,10 +437,17 @@ module Hive
       raise Hive::AgentError, e.message, cause: e
     end
 
-    OVERRIDE_KEYS = {
+    RUNTIME_OVERRIDE_KEYS = {
       "bin" => :bin_default,
       "env_override" => :env_bin_override_key,
       "min_version" => :min_version
+    }.freeze
+    OPENCODE_OVERRIDE_KEYS = {
+      "config_path" => :opencode_configuration_path,
+      "credential_env" => :opencode_credential_environment_keys,
+      "credential_file" => :opencode_credential_file,
+      "plugins" => :opencode_plugins,
+      "isolation" => :opencode_isolation
     }.freeze
 
     def with_overrides(overrides_hash)
@@ -418,14 +458,31 @@ module Hive
       end
 
       runtime_overrides = {}
+      policy_overrides = {}
       overrides_hash.each do |key, value|
-        kwarg = OVERRIDE_KEYS[key.to_s]
-        unless kwarg
-          raise Hive::ConfigError,
-                "agents.#{name}.#{key} is not a recognized override key " \
-                "(known: #{OVERRIDE_KEYS.keys.inspect})"
+        normalized_key = key.to_s
+        if (kwarg = RUNTIME_OVERRIDE_KEYS[normalized_key])
+          runtime_overrides[kwarg] = value
+          next
         end
-        runtime_overrides[kwarg] = value
+        if name == :opencode &&
+           (kwarg = OPENCODE_OVERRIDE_KEYS[normalized_key])
+          if kwarg == :opencode_isolation
+            unless value.to_s == "hermetic"
+              raise Hive::ConfigError,
+                    "agents.opencode.isolation must be hermetic"
+            end
+          else
+            policy_overrides[kwarg] = value
+          end
+          next
+        end
+
+        known = RUNTIME_OVERRIDE_KEYS.keys
+        known += OPENCODE_OVERRIDE_KEYS.keys if name == :opencode
+        raise Hive::ConfigError,
+              "agents.#{name}.#{key} is not a recognized override key " \
+              "(known: #{known.inspect})"
       end
 
       overridden_runtime = RuntimeProfileOverride.new(
@@ -437,6 +494,7 @@ module Hive
       )
       self.class.new(
         **construction_kwargs.merge(
+          **policy_overrides,
           runtime_profile: overridden_runtime,
           env_bin_override_key:
             runtime_overrides.fetch(:env_bin_override_key, @env_bin_override_key)
@@ -564,7 +622,15 @@ module Hive
         routing_argument_placement: @routing_argument_placement,
         routed_model_argument_builder: @routed_model_argument_builder,
         routed_effort_argument_builder: @routed_effort_argument_builder,
-        structured_output_protocol: @structured_output_protocol
+        structured_output_protocol: @structured_output_protocol,
+        permission_presets: @permission_presets.dup,
+        opencode_configuration_path: @opencode_configuration_path,
+        opencode_configuration: @opencode_configuration,
+        opencode_credential_environment_keys:
+          @opencode_credential_environment_keys.dup,
+        opencode_credential_file: @opencode_credential_file,
+        opencode_plugins: @opencode_plugins.dup,
+        opencode_pure: @opencode_pure
       }
     end
 
@@ -587,6 +653,50 @@ module Hive
       normalized
     end
 
+    def normalize_permission_presets(values)
+      presets = Array(values).map(&:to_s).uniq
+      invalid = presets - %w[read-only scoped]
+      unless invalid.empty?
+        raise ArgumentError,
+              "unknown permission preset #{invalid.first.inspect}"
+      end
+      presets.freeze
+    end
+
+    def normalize_environment_keys(values)
+      keys = Array(values).map { |value| value.to_s.dup.freeze }
+      invalid = keys.find { |key| !key.match?(/\A[A-Z][A-Z0-9_]*\z/) }
+      raise ArgumentError, "invalid OpenCode credential environment key" if invalid
+      raise ArgumentError, "OpenCode credential environment keys must be unique" if
+        keys.uniq.length != keys.length
+
+      keys.freeze
+    end
+
+    def deep_freeze_hash(value)
+      unless value.is_a?(Hash)
+        raise ArgumentError, "opencode_configuration must be a Hash"
+      end
+
+      JSON.parse(JSON.generate(value)).tap do |copy|
+        deep_freeze_value(copy)
+      end
+    rescue JSON::GeneratorError
+      raise ArgumentError, "opencode_configuration must contain JSON values"
+    end
+
+    def deep_freeze_value(value)
+      case value
+      when Hash
+        value.each { |key, item| key.freeze; deep_freeze_value(item) }
+      when Array
+        value.each { |item| deep_freeze_value(item) }
+      when String
+        value.freeze
+      end
+      value.freeze
+    end
+
     def control_path(control, source)
       key = control.provenance.key || control.stage
       path = "models.#{key}.#{control.field}"
@@ -605,9 +715,10 @@ module Hive
         model_argument_builder effort_argument_builder launcher_identity
         cli_capabilities declared_capability_support
         credential_environment_keys configuration_environment_key
-        default_configuration_directory permission_flags identity_arguments
+        default_configuration_directory permission_policy_required result_parser
+        permission_flags identity_arguments
         raw_cli_arguments_supported? auth_configuration extract_usage_event
-        configuration_directory
+        configuration_directory parse_run normalize_captured_result
       ].freeze
 
       def initialize(base, bin_default:, env_bin_override_key:, min_version:)

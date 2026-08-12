@@ -1,0 +1,26 @@
+<% timeline = workspace.dig("panels", "timeline") %>
+
+<section id="workspace-timeline" class="workspace-panel workspace-wide workspace-state-<%= timeline.fetch("state") %>"
+         aria-labelledby="workspace-timeline-heading">
+  <div class="workspace-panel-heading">
+    <div>
+      <h2 id="workspace-timeline-heading">Audit timeline</h2>
+      <p class="muted"><span class="workspace-state-label"><%= timeline.fetch("state").humanize %></span> · authoritative decisions and bounded observations</p>
+    </div>
+  </div>
+
+  <% if Array(timeline["records"]).empty? && Array(timeline["noise_groups"]).empty? %>
+    <p class="workspace-empty">No material activity has been captured for this task.</p>
+  <% else %>
+    <%= turbo_frame_tag "task-timeline-page" do %>
+      <%= render "tasks/timeline_page", timeline: timeline %>
+    <% end %>
+  <% end %>
+
+  <% if Array(timeline["diagnostics"]).any? %>
+    <details class="workspace-diagnostics" data-workspace-disclosure-key="timeline-diagnostics">
+      <summary>Timeline diagnostics (<%= timeline.fetch("diagnostics").length %>)</summary>
+      <ul><% timeline.fetch("diagnostics").each do |row| %><li><%= row.fetch("reason").to_s.humanize %></li><% end %></ul>
+    </details>
+  <% end %>
+</section>

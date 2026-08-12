@@ -84,6 +84,8 @@
   <%= render "tasks/primary_actions", task: @task, daemon_enabled: @daemon_enabled,
         mutations_enabled: @status_fresh %>
 
+  <%= render "tasks/workspace_summary", workspace: @workspace %>
+
   <% if @questions.any? %>
     <section class="qa">
       <h2>Questions from the agent</h2>

@@ -91,6 +91,30 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     end
   end
 
+  def test_decision_postures_follow_canonical_answer_approve_retry_wait_and_investigate_precedence
+    with_fixture do |native, task|
+      attributes = task.instance_variable_get(:@attributes)
+
+      assert_equal "answer", builder(native, task, questions: 1).call.dig("decision", "posture")
+
+      attributes["passable"] = true
+      assert_equal "approve", builder(native, task, questions: 0).call.dig("decision", "posture")
+
+      attributes["passable"] = false
+      attributes["recovery_visible"] = true
+      attributes["recovery_enabled"] = true
+      assert_equal "retry", builder(native, task, questions: 0).call.dig("decision", "posture")
+
+      attributes["recovery_visible"] = false
+      attributes["recovery_enabled"] = false
+      attributes["action"] = "agent_running"
+      assert_equal "wait", builder(native, task, questions: 0).call.dig("decision", "posture")
+
+      attributes["action"] = nil
+      assert_equal "investigate", builder(native, task, questions: 0).call.dig("decision", "posture")
+    end
+  end
+
   private
 
   def with_fixture(artifact: "# Artifact\n", material_events: 1)

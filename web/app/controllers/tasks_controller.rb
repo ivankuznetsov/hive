@@ -6,9 +6,9 @@ class TasksController < Tasks::BaseController
       questions_count: @questions.length, daemon_enabled: @daemon_enabled
     ).call
     @artifact_panel = @workspace.dig("panels", "artifacts")
-    @files = @artifact_panel.fetch("records").filter_map do |record|
-      [ record.fetch("name"), record["content"] ] unless record["binary"]
-    end
+    @publication_refresh_available = @task_source.nil? &&
+                                     session[:github_token].present? &&
+                                     @workspace.dig("panels", "publication", "refresh", "eligible") == true
     respond_to do |format|
       format.html do
         @media = @task.media_manifest

@@ -1,7 +1,7 @@
 <% content_for(:title, "#{web_product_name} — diff #{@task["slug"]}") %>
 <%= turbo_frame_tag "task-diff" do %>
 <div class="task-header">
-  <h1>
+  <% heading = capture do %>
     <% if @diff_result.state == "empty" %>
       No task changes
     <% elsif @diff_result.state == "unavailable" %>
@@ -9,7 +9,12 @@
     <% else %>
       Task changes
     <% end %>
-  </h1>
+  <% end %>
+  <% if turbo_frame_request? %>
+    <h2><%= heading %></h2>
+  <% else %>
+    <h1><%= heading %></h1>
+  <% end %>
   <%= stage_badge(@task["stage"]) %>
 </div>
 <p class="task-slug"><%= @project.name %> · <%= @task["slug"] %></p>

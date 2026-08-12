@@ -1060,6 +1060,40 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_redirected_to "/login"
   end
 
+  test "task HTML composes the same normalized workspace with permanent lazy evidence owners" do
+    get task_path(@project, @slug, format: :json)
+    workspace = response.parsed_body
+
+    get task_path(@project, @slug)
+
+    assert_response :success
+    assert_select "#status-stream-owner[data-controller~='task-workspace']", 1
+    assert_select "#workspace-summary-heading",
+                  text: workspace.dig("decision", "posture").humanize
+    %w[attempts provenance timeline dependencies artifacts publication].each do |panel|
+      assert_select "#workspace-#{panel}", 1, "#{panel} must be represented exactly once"
+    end
+    assert_select "turbo-frame#task-diff[data-turbo-permanent]", 1
+    assert_select "turbo-frame#task-publication[data-turbo-permanent][loading='lazy'][src]", 1
+    assert_select ".workspace-table-scroll[role='region'][tabindex='0']", minimum: 1
+    assert_select "#task-workspace-announcement[role='status'][aria-live='polite']", 1
+    refute_includes response.body, stage_dir(@project, "1-inbox").to_s
+  end
+
+  test "a failed publication source degrades only that panel" do
+    original = Task.instance_method(:publication)
+    Task.define_method(:publication) { |cache: nil| raise Errno::EIO, "publication unavailable" }
+
+    get task_path(@project, @slug)
+
+    assert_response :success
+    assert_select "#workspace-publication.workspace-state-unavailable", text: /Unavailable/i
+    assert_select "#workspace-artifacts details[data-artifact-name='idea.md']", 1
+    assert_select ".advanced form", minimum: 1
+  ensure
+    Task.define_method(:publication, original) if original
+  end
+
   test "timeline endpoint pages material events and expands bounded noise groups" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
     records = 205.times.map do |index|

@@ -2,7 +2,7 @@
       src: task_diff_path(project.name, task.slug, source: task_source),
       loading: :lazy,
       data: { turbo_permanent: true } do %>
-  <section class="workspace-panel" aria-labelledby="task-diff-loading-heading">
+  <section id="workspace-diff" class="workspace-panel" aria-labelledby="task-diff-loading-heading">
     <h2 id="task-diff-loading-heading">Changes</h2>
     <p class="muted">Loading bounded task changes…</p>
   </section>

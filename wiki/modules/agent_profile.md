@@ -89,7 +89,7 @@ constructs a package profile from them. Every profile freezes after init.
 | `auth_configuration_required:` | Hive preflight policy. The shipped Pi and Grok adapters require a CLI subscription/session artifact; custom profiles default false. |
 | `subscription_environment(unset_value: nil)` | Builds the Hive-only child environment scrub from the package credential-name inventory while preserving explicit session-file selectors such as `GROK_AUTH_PATH`. |
 | `name:` | Symbol used by the registry. |
-| `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`). |
+| `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`, `"opencode"`). |
 | `env_bin_override_key:` | Env var name (`"HIVE_CLAUDE_BIN"` etc.) that overrides `bin_default` when set non-empty. |
 | `headless_flag:` | The `-p` / `--prompt` style flag. |
 | `prompt_style:` | `:positional`, `:headless_flag_value`, or `:stdin`; controls where the rendered prompt is delivered. Defaults to `:stdin` for a profile named `codex` (backward compatibility), otherwise `:positional`. |

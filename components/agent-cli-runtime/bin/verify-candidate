@@ -80,7 +80,8 @@ Dir.mktmpdir("agent-cli-runtime-candidate") do |sandbox|
     abort "Hive loaded unexpectedly" if defined?(Hive)
     abort "wrong version" unless
       AgentCliRuntime::VERSION == #{AgentCliRuntime::VERSION.dump}
-    abort "wrong providers" unless AgentCliRuntime::Profiles.names == %i[claude codex pi grok]
+    abort "wrong providers" unless
+      AgentCliRuntime::Profiles.names == %i[claude codex pi grok opencode]
   RUBY
   _out, err, status = Open3.capture3(
     runtime_env, Gem.ruby, "-e", require_script

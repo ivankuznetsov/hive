@@ -33,6 +33,21 @@ claude:
 <% if claude_effort %>  effort: <%= claude_effort %>
 <% else %>  # effort: medium
 <% end %>
+# OpenCode 1.18.16+ is built in but selected nowhere by default. Opt in with
+# an explicit non-secret provider config, named credential sources, exact
+# provider/model routing, and read-only/scoped stage permissions:
+# agents:
+#   opencode:
+#     config_path: .hive/opencode.json
+#     credential_env: [ANTHROPIC_API_KEY]
+#     plugins:
+#       - compound-engineering@git+https://github.com/EveryInc/compound-engineering-plugin.git#compound-engineering-v3.21.4
+#     isolation: hermetic
+# models:
+#   execute_implementation:
+#     model: anthropic/claude-sonnet-4-5
+#     effort: high
+
 # Optional built-in stage routing. `models:` changes only model and effort;
 # the existing stage/reviewer `agent:` still selects the provider. Exact keys
 # inherit an omitted field from their coarse family independently:
@@ -60,8 +75,9 @@ claude:
 # put `model:` / `effort:` on their workflow descriptor instead.
 
 # Optional per-stage agent tool scopes. Default is yolo, which preserves
-# today's stage behavior. Non-yolo scopes are Claude-only and are tool-level
-# controls, not an OS sandbox; see docs/permissions.md.
+# today's stage behavior. Non-yolo scopes are supported by Claude and OpenCode
+# through their native enforcement contracts, not an OS sandbox; see
+# docs/permissions.md.
 # permissions: yolo
 # permissions: read-only
 # permissions:
@@ -78,7 +94,8 @@ claude:
 # its prompt. Hive ships expecting llm-wiki and compound-engineering to
 # be installed alongside your agent CLI. Plan defaults are agent-aware:
 # claude → `/plan`, codex → `/llm-wiki:wiki-plan`, pi →
-# `/skill:wiki-plan` after profile formatting. Brainstorm defaults to
+# `/skill:wiki-plan`, opencode → `/ce-plan` after profile formatting.
+# Brainstorm defaults to
 # `/ce-brainstorm`. Legacy `/compound-engineering:ce-*` values are
 # normalized before prompts are rendered. Override here to pin a
 # different skill per project.
@@ -87,8 +104,7 @@ brainstorm:
   # skill: /ce-brainstorm
   # Brainstorm must WRITE brainstorm.md (its WAITING/COMPLETE marker), so a
   # read-only scope would block it from completing — grant Write/Edit via a
-  # scoped block instead. Non-yolo scopes are claude-only, so this stage's
-  # agent must be claude to use it.
+  # scoped block instead. Claude and OpenCode can enforce this scope.
   # permissions:
   #   preset: scoped
   #   tools: [Read, Write, Edit]
@@ -99,7 +115,7 @@ plan:
   # skill: /plan
   # Plan must WRITE plan.md (its marker), so a read-only scope would block it
   # from completing — grant Write/Edit via a scoped block instead. Non-yolo
-  # scopes are claude-only, so this stage's agent must be claude to use it.
+  # scopes are supported by Claude and OpenCode.
   # permissions:
   #   preset: scoped
   #   tools: [Read, Write, Edit]
@@ -127,9 +143,9 @@ execute:
   #     provider: codex-primary
   #     model: gpt-5.6-sol
   # Scoped dirs extend the task folder add-dir list; relative paths are
-  # resolved from the task folder. Non-yolo scopes are claude-only: to
-  # uncomment this you must also set `agent: claude` here, since the
-  # development default is codex, which cannot enforce tool scoping.
+  # resolved from the task folder. Non-yolo scopes are supported by Claude
+  # and OpenCode; the development default is Codex, which cannot enforce this
+  # stage scope.
   # permissions:
   #   preset: scoped
   #   tools: [Read, Write, Edit]
@@ -194,7 +210,7 @@ rebase:
   conflict_resolution_timeout_sec: 2700
 
 # 6-review stage configuration. Each role takes an `agent` (one of the
-# names registered in Hive::AgentProfiles — claude, codex, pi, grok by default)
+# names registered in Hive::AgentProfiles — claude, codex, pi, grok, opencode)
 # and an optional `prompt_template` path under templates/.
 review:
   ci:

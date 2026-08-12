@@ -112,12 +112,13 @@ budgets, or contain Hive defaults and skills. It can load and run without
 `hive-cli` or Hive constants. Direct standard-library gem dependencies are
 declared in its gemspec.
 
-Hive consumes `agent-cli-runtime ~> 0.1.1` directly. Source development resolves
-the monorepo component path; installed Hive and the packaged Web lock resolve
-the same compatible release from RubyGems. `Hive::AgentRuntime` preserves its
+Hive source declares `agent-cli-runtime ~> 0.2.0` and resolves the monorepo
+component path so the directly loaded typed runtime ABI remains coherent. This
+is source/package metadata for a reviewable candidate, not authority to publish
+the component or release Hive. `Hive::AgentRuntime` preserves its
 public request, probe, error, and result names as a forwarding facade, while
 `Hive::AgentProfile` wraps package profiles with only Hive-owned skill, model
-routing, default-model, status, and policy metadata. The four built-in Hive
+routing, default-model, status, and policy metadata. The five source-built Hive
 profiles reference the package's profile objects instead of copying provider
 flags, probes, usage extractors, or configuration metadata.
 
@@ -135,7 +136,10 @@ task. Candidate tooling builds one gem, records its source commit and dirty
 state, checksums it, installs it into a private gem home, proves a clean require,
 and exercises the executable. Root parity fixtures cover non-default
 compilation, local probes, named capability evidence, provider usage variants,
-and observable normalization/redaction across all four built-ins.
+and observable normalization/redaction across all five built-ins. The `0.2.0`
+candidate adds OpenCode without authorizing a tag, publication, mirror release,
+deployment, or Hive release. `bin/release-preflight` remains
+tag-bound and is not run against a fabricated tag during candidate work.
 
 Only `components/agent-cli-runtime/vX.Y.Z` tags can trigger the component
 workflow. The tag, package version, exact main commit, and clean checkout must
@@ -170,11 +174,13 @@ here.
 
 ## Compatibility
 
-The public line is 0.1.x on Ruby 3.4 or newer, tested on Linux and
-macOS. Additive fields are compatible within 0.1.x. Removing or changing an
-existing public field, flag mapping, event meaning, or executable contract
-requires a new minor release while pre-1.0. A published bad version is fixed
-forward; yanking or ownership changes are separate operator decisions.
+The published line remains 0.1.x; the prepared source candidate is 0.2.0 on
+Ruby 3.4 or newer, tested on Linux and macOS. The minor bump covers the
+additive prepared-invocation, route-probe, strict-parser, identity, and usage
+contracts. Removing or changing an existing public field, flag mapping, event
+meaning, or executable contract requires another minor release while pre-1.0.
+A published bad version is fixed forward; yanking or ownership changes are
+separate operator decisions.
 
 Related context: [[component-boundaries]], [[modules/agent_profile]], and
 ADR-038 in [[decisions]].

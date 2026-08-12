@@ -9,8 +9,9 @@ Gem::Specification.new do |spec|
   spec.description = <<~DESC
     Agent CLI Runtime provides immutable profiles, invocation compilation,
     local prerequisite probes, capability evidence, usage extraction, and
-    result normalization for Claude Code, Codex CLI, Pi, and Grok CLI. It does
-    not spawn agents or claim live provider health, quota, or credential validity.
+    result normalization for Claude Code, Codex CLI, Pi, Grok CLI, and
+    OpenCode. It does not spawn agents or claim live provider health, quota,
+    or credential validity.
   DESC
   spec.homepage = "https://github.com/ivankuznetsov/agent-cli-runtime"
   spec.license = "MIT"

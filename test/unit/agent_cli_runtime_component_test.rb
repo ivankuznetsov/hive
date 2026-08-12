@@ -38,7 +38,7 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     script = <<~'RUBY'
       require "agent_cli_runtime"
       abort "loaded Hive unexpectedly" if defined?(Hive)
-      abort "wrong version" unless AgentCliRuntime::VERSION == "0.1.1"
+      abort "wrong version" unless AgentCliRuntime::VERSION == "0.2.0"
       puts AgentCliRuntime::Profiles.names.join(",")
     RUBY
     out, err, status = Bundler.with_unbundled_env do
@@ -323,17 +323,18 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     end
   end
 
-  def test_hive_cutover_uses_the_released_dependency_and_package_profiles
+  def test_hive_source_dependency_and_package_profiles_advance_in_lockstep
     spec = Gem::Specification.load(File.expand_path("../../hive.gemspec", __dir__))
     dependency = spec.runtime_dependencies.find do |candidate|
       candidate.name == "agent-cli-runtime"
     end
 
     refute_nil dependency
-    assert dependency.requirement.satisfied_by?(Gem::Version.new("0.1.1"))
+    assert dependency.requirement.satisfied_by?(Gem::Version.new("0.2.0"))
+    refute dependency.requirement.satisfied_by?(Gem::Version.new("0.1.1"))
     assert File.read(File.expand_path("../../lib/hive.rb", __dir__))
                .include?('require "agent_cli_runtime"')
-    %i[claude codex pi grok].each do |provider|
+    %i[claude codex pi grok opencode].each do |provider|
       assert_same AgentCliRuntime::Profiles.fetch(provider),
                   Hive::AgentProfiles.lookup(provider).runtime_profile
     end

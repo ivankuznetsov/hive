@@ -2,7 +2,7 @@ PATH
   remote: .
   specs:
     hive-cli (0.7.1)
-      agent-cli-runtime (~> 0.1.1)
+      agent-cli-runtime (~> 0.2.0)
       base64 (>= 0.2)
       bubbletea (= 0.1.4)
       bundler (= 2.7.2)
@@ -22,7 +22,7 @@ PATH
 PATH
   remote: components/agent-cli-runtime
   specs:
-    agent-cli-runtime (0.1.1)
+    agent-cli-runtime (0.2.0)
       json (>= 2.7, < 3.0)
       open3 (~> 0.2)
       timeout (>= 0.4, < 1.0)

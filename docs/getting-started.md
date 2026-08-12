@@ -6,7 +6,7 @@ The example is xbookmark, a real Hive dogfood task that finished as [xbookmark P
 
 ## Prerequisites
 
-You need Ruby 3.4, git >= 2.40, `claude` authenticated, `codex` installed for the default execute agent, `gh` authenticated, and a git checkout you can modify. Released native installations also use `cosign` to authenticate the managed Hive web bundle. The commands below use `~/Dev/xbookmark`; substitute your own project path and project name when running against another repo.
+You need Ruby 3.4, git >= 2.40, `claude` authenticated, `codex` installed for the default execute agent, `gh` authenticated, and a git checkout you can modify. OpenCode is optional and requires `opencode` 1.18.16 or newer. Released native installations also use `cosign` to authenticate the managed Hive web bundle. The commands below use `~/Dev/xbookmark`; substitute your own project path and project name when running against another repo.
 
 ## Step 1 - Install
 
@@ -38,6 +38,91 @@ hive init .
 ```
 
 `hive init` creates `.hive-state/` as a worktree of the orphan `hive/state` branch, registers the project in `~/Dev/hive/config.yml`, and scaffolds the stage folders. Read the storage details in [docs/architecture.md#storage-layout](architecture.md#storage-layout).
+
+## Optional OpenCode Profile
+
+OpenCode is registered everywhere Hive accepts an agent profile but remains
+entirely opt-in: no default stage, reviewer council, or fallback selects it.
+Install OpenCode 1.18.16 or newer and configure the provider credential you
+intend to use. `opencode auth login` writes OpenCode's own auth file; automation
+may instead name one credential environment variable in project config. Hive
+never accepts the credential value in YAML.
+
+Create an explicit, non-secret provider definition in the project, for
+example `.hive/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "anthropic": {
+      "npm": "@ai-sdk/anthropic"
+    }
+  }
+}
+```
+
+Then add the typed profile and route settings to `.hive-state/config.yml`.
+Replace the example route and credential variable name with the exact local
+provider/model you intend to run:
+
+```yaml
+agents:
+  opencode:
+    config_path: .hive/opencode.json
+    credential_env: [ANTHROPIC_API_KEY]
+    plugins:
+      - compound-engineering@git+https://github.com/EveryInc/compound-engineering-plugin.git#compound-engineering-v3.21.4
+    isolation: hermetic
+
+execute:
+  agent: opencode
+  permissions:
+    preset: scoped
+    tools: [Read, Write, Edit]
+
+models:
+  execute_implementation:
+    model: anthropic/claude-sonnet-4-5
+    effort: high
+```
+
+OpenCode routes are nested values inside the Hive `opencode` profile. They
+must be full `provider/model` values; a different configured provider never
+satisfies the request. A top-level exact `model` in the selected OpenCode JSON
+may be used as the explicit default when the role has no `models.*.model`.
+Faithful effort values render as OpenCode variants only after the local route
+probe proves that variant exists.
+
+OpenCode does not accept Hive's default `yolo` stage permission. Use
+`read-only` or a scoped policy. Read-only denies edits, shell, unsafe tools,
+and external writes. Scoped `Write`/`Edit` enables the generated
+workspace-write policy over Hive's resolved working/write roots while still
+denying unrestricted shell. Hive redirects OpenCode config, data, cache, and
+state into a private per-invocation root, ignores ambient project/global
+configuration, forwards only the named credential source, and removes the
+overlay after every lifecycle outcome. This is application-level enforcement,
+not an OS/container boundary; use Hivebox for hostile-code containment.
+
+Skill-bearing roles additionally require the native Compound Engineering
+OpenCode plugin. Preview and apply its pinned `3.21.4` entry with:
+
+```bash
+hive setup-agents --agent opencode \
+  --skill ce-plan ce-brainstorm ce-code-review ce-test-browser
+hive doctor
+```
+
+Setup previews the selected OpenCode config change and asks once before its
+atomic write. Normal task execution never mutates that source config. A
+missing/stale plugin or a higher-precedence project/user CE skill that shadows
+the selected plugin fails readiness before any model process starts.
+
+`hive status --json` keeps the Hive provider as `opencode`, retains the
+requested nested route, and appends sanitized-export-observed backend/model,
+resolution status, outcome, and nullable usage after an implementation
+attempt. A requested alias is never copied into the actual field without
+export evidence.
 
 ## Step 3 - Capture The Idea
 

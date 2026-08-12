@@ -2,12 +2,13 @@ require_relative "test_helper"
 
 class AgentCliRuntimeGemspecTest < Minitest::Test
   GEMSPEC = File.expand_path("../agent-cli-runtime.gemspec", __dir__)
+  ROOT = File.expand_path("..", __dir__)
 
   def test_public_identity_and_inventory
     spec = Gem::Specification.load(GEMSPEC)
 
     assert_equal "agent-cli-runtime", spec.name
-    assert_equal Gem::Version.new("0.1.1"), spec.version
+    assert_equal Gem::Version.new("0.2.0"), spec.version
     assert_equal Gem::Requirement.new(">= 3.4.0"), spec.required_ruby_version
     assert_equal [ "agent-runtime" ], spec.executables
     assert_equal "MIT", spec.license
@@ -25,6 +26,17 @@ class AgentCliRuntimeGemspecTest < Minitest::Test
     spec = Gem::Specification.load(GEMSPEC)
 
     assert_equal %w[json open3 timeout], spec.runtime_dependencies.map(&:name).sort
+  end
+
+  def test_version_changelog_and_consumer_readme_describe_the_same_candidate
+    readme = File.read(File.join(ROOT, "README.md"))
+    changelog = File.read(File.join(ROOT, "CHANGELOG.md"))
+
+    assert_includes readme, 'gem "agent-cli-runtime", "~> 0.2.0"'
+    assert_includes readme, "OpenCode `1.18.16+`"
+    assert_includes readme, "PreparedInvocation#cleanup!"
+    refute_match(/~> 0\.1\.0/, readme)
+    assert_match(/\A# Changelog\n\n## 0\.2\.0 - 2026-08-12\n/, changelog)
   end
 
   def test_public_links_use_the_distribution_mirror_and_canonical_issue_tracker

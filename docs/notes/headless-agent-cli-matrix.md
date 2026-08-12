@@ -40,11 +40,34 @@ An unsupported effective effort fails before launch; Hive does not translate
 or leak another provider's flags. When routing is inactive or no recognized
 stage context is supplied, the pre-routing argv path and order are unchanged.
 
-> **Scope decision (2026-04-25, post-spike):** **opencode is dropped from v1 scope.** Reasons captured in the per-CLI summary below: (a) no native CE plugin → hive must inline SKILL.md content, losing plugin-update propagation; (b) per-spawn filesystem isolation requires temp-config writing rather than a simple flag, which is non-trivial to implement and harder to reason about than the per-spawn `--add-dir` model; (c) hive's v1 default reviewer set already covers two profile-supported CLIs (claude + codex), so opencode adds maintenance surface without unique signal. The opencode column below is preserved as evidence of evaluation; U12 ships profiles for **claude, codex, and pi only**. Opencode can be revisited in v1.1 if a user needs it (e.g., for OpenCode Zen cost reasons).
+## Current OpenCode contract
+
+The supported OpenCode profile is entirely opt-in and does not alter defaults,
+councils, or fallbacks. It consumes only an explicitly selected non-secret
+provider config and named credential source, redirects OpenCode-owned homes to
+an invocation-private root, disables ambient project/default discovery and
+remote model refresh, and compiles `read-only` or `workspace-write` into stable
+deny-first permission rules. `yolo`/implicit nil permissions fail closed.
+
+Offline readiness checks the executable, `1.18.16+` version, required run and
+sanitized-export flags, selected auth, cached exact route, and requested
+variant without sending a prompt. The caller owns the main process and the
+post-success `export SESSION --sanitize` inspection. Strict normalization
+correlates one terminal assistant message, keeps requested and actual nested
+routes separate, preserves nil versus zero usage/cost, and classifies timeout,
+cancellation, malformed output, auth/config failure, and generic CLI failure.
+Compound Engineering `3.21.4` supplies the native OpenCode plugin; Hive gates
+skill-bearing roles on that selected source and rejects shadowing.
+
+> **Historical scope decision (2026-04-25, superseded 2026-08-12):** OpenCode
+> was dropped from the original v1 scope because the `1.14.25` spike had no
+> native CE plugin evidence and no implemented per-run config isolation. The
+> historical text below is retained to explain that decision. It is not
+> current configuration or security guidance.
 
 ---
 
-## Comparison matrix
+## Historical comparison matrix (April 2026)
 
 | Dimension | claude | codex | pi | opencode |
 |-----------|--------|-------|----|----|
@@ -120,7 +143,7 @@ Source of truth: `pi --help`, `pi install --help`, `pi list`, on-disk inspection
 
 ---
 
-### opencode
+### opencode (historical `1.14.25` spike; superseded)
 
 Source of truth: `opencode --help`, `opencode run --help`, `opencode agent list`, on-disk inspection of `~/.config/opencode/` and `~/.local/share/opencode/`.
 
@@ -175,7 +198,7 @@ pi -p \
   --no-session \
   '<rendered prompt invoking /ce-code-review>'
 
-# opencode reviewer (no CE plugin; inline-prompt approach)
+# Historical opencode reviewer sketch (superseded; do not use)
 opencode run \
   --dir <task-folder> \
   --dangerously-skip-permissions \
@@ -187,7 +210,7 @@ These shapes are the input to U12's profile `build_cmd` logic and the integratio
 
 ---
 
-## Final outcomes per CLI (Task #7)
+## Historical final outcomes per CLI (Task #7)
 
 | CLI | Outcome | Default in hive's reviewer set? | ADR-008 boundary |
 |-----|---------|--------------------------------|--------------------|
@@ -196,7 +219,7 @@ These shapes are the input to U12's profile `build_cmd` logic and the integratio
 | **pi** | partial-profile-with-caveats | **no** (opt-in per project) | **weakened** — no `--add-dir` equivalent, no permission gate. ADR-018 amends ADR-008 for pi. Tool-level restriction (`--tools read,edit,write` minus `bash`) is the only mitigation for the reviewer phase; not effective for fix/CI-fix roles. |
 | **opencode** | **out of scope for v1** | n/a | not applicable — see scope decision callout at the top of this doc. Evaluation column retained below for transparency but opencode does not ship as an `AgentProfile` in v1. |
 
-### Plan adjustments locked in (consumed by Task #7's plan-edit pass)
+### Historical plan adjustments (consumed by the April plan-edit pass)
 
 1. **Skill-name correction (P1).** Plan currently uses `ce-review` throughout. The actual skill name in both Claude Code and Codex CE plugins is `ce-code-review`. Fix everywhere:
    - U2 default reviewer set: `claude-ce-review` → `claude-ce-code-review`, `codex-ce-review` → `codex-ce-code-review`

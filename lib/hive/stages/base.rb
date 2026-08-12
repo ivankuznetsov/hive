@@ -16,6 +16,7 @@ require "hive/stages/clean_exit"
 require "hive/usage_db"
 require "hive/worktree"
 require "hive/attempts/context"
+require "hive/agent_observation"
 require "hive/context_provenance"
 require "hive/implementation_identity/store"
 
@@ -722,7 +723,8 @@ module Hive
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
                       disallowed_tools: nil, cli_flags: nil,
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
-                      routing_resolution: nil, routing_arguments: nil)
+                      routing_resolution: nil, routing_arguments: nil,
+                      resource_guards: nil)
         context = Hive::Attempts::Context.current
         launch_binding = nil
         provider_route = nil
@@ -811,48 +813,68 @@ module Hive
 
         started_at = Time.now.utc.iso8601
         effective_status_mode = runtime_policy&.host_outputs? ? :exit_code_only : status_mode
-        result = Hive::Agent.new(
-          task: task,
-          prompt: prompt,
-          max_budget_usd: max_budget_usd,
+        observation = session_observation(
+          task: task, context: context, profile: profile,
+          role: log_label || task.stage_name,
+          requested_model: requested_model(context, routing_arguments, launch_arguments, model),
+          requested_effort: requested_effort(context, routing_arguments, launch_arguments, effort),
           timeout_sec: timeout_sec,
-          add_dirs: add_dirs,
-          cwd: cwd,
-          log_label: log_label,
-          profile: profile,
-          expected_output: expected_output,
-          status_mode: effective_status_mode,
-          permission_mode: permission_mode,
-          allowed_tools: allowed_tools,
-          disallowed_tools: disallowed_tools,
-          cli_flags: cli_flags,
-          identity_arguments: identity_arguments || [],
-          launch_arguments: launch_arguments,
-          runtime_policy: runtime_policy,
-          routing_arguments: routing_arguments,
-          launch_environment: launch_binding&.environment || {},
-          provider_route: provider_route
-        ).run!
-        if result[:status] == :ok && runtime_policy&.host_outputs?
-          begin
-            runtime_policy.materialize_outputs!(result)
-          rescue Hive::ConfigError => e
-            result[:status] = :error
-            result[:error_reason] = "managed_output_invalid"
-            result[:error_message] = e.message
+          guards: runtime_resource_guards(
+            resource_guards, profile: profile, max_budget_usd: max_budget_usd,
+            timeout_sec: timeout_sec
+          )
+        )
+        result = nil
+        observation.start!
+        begin
+          result = Hive::Agent.new(
+            task: task,
+            prompt: prompt,
+            max_budget_usd: max_budget_usd,
+            timeout_sec: timeout_sec,
+            add_dirs: add_dirs,
+            cwd: cwd,
+            log_label: log_label,
+            profile: profile,
+            expected_output: expected_output,
+            status_mode: effective_status_mode,
+            permission_mode: permission_mode,
+            allowed_tools: allowed_tools,
+            disallowed_tools: disallowed_tools,
+            cli_flags: cli_flags,
+            identity_arguments: identity_arguments || [],
+            launch_arguments: launch_arguments,
+            runtime_policy: runtime_policy,
+            routing_arguments: routing_arguments,
+            launch_environment: launch_binding&.environment || {},
+            provider_route: provider_route
+          ).run!
+          if result[:status] == :ok && runtime_policy&.host_outputs?
+            begin
+              runtime_policy.materialize_outputs!(result)
+            rescue Hive::ConfigError => e
+              result[:status] = :error
+              result[:error_reason] = "managed_output_invalid"
+              result[:error_message] = e.message
+            end
           end
-        end
-        record_usage(task, profile, result, started_at)
-        Hive::ContextProvenance.promote_agent_receipt(
-          task: task, context: context
-        ) if context
-        if result[:provider_signal]
-          unless context.publish_provider_signal(result.fetch(:provider_signal))
-            raise Hive::ProviderRouteFailed, "admitted provider route failed without durable evidence delivery"
+          record_usage(
+            task, profile, result, started_at,
+            context: context, session_id: observation.session_id
+          )
+          Hive::ContextProvenance.promote_agent_receipt(
+            task: task, context: context
+          ) if context
+          if result[:provider_signal]
+            unless context.publish_provider_signal(result.fetch(:provider_signal))
+              raise Hive::ProviderRouteFailed, "admitted provider route failed without durable evidence delivery"
+            end
+            raise Hive::ProviderRouteFailed, "admitted provider route failed"
           end
-          raise Hive::ProviderRouteFailed, "admitted provider route failed"
+          result
+        ensure
+          observation.finish!(result || {}, exception: $!)
         end
-        result
       ensure
         runtime_policy&.cleanup!
       end
@@ -883,15 +905,18 @@ module Hive
       end
 
       def stage_resource_limits(cfg, stage)
+        budget = Hive::Config.stage_resource_limit_resolution(
+          cfg, "budget_usd", stage.name, descriptor_default: stage.budget_usd
+        )
+        timeout = Hive::Config.stage_resource_limit_resolution(
+          cfg, "timeout_sec", stage.name,
+          descriptor_default: stage.timeout_sec,
+          fallback: DEFAULT_GENERIC_STAGE_TIMEOUT_SEC
+        )
         {
-          max_budget_usd: Hive::Config.stage_resource_limit(
-            cfg, "budget_usd", stage.name, descriptor_default: stage.budget_usd
-          ),
-          timeout_sec: Hive::Config.stage_resource_limit(
-            cfg, "timeout_sec", stage.name,
-            descriptor_default: stage.timeout_sec,
-            fallback: DEFAULT_GENERIC_STAGE_TIMEOUT_SEC
-          )
+          max_budget_usd: budget.value,
+          timeout_sec: timeout.value,
+          resource_guards: [ budget.to_h, timeout.to_h ]
         }
       end
 
@@ -901,7 +926,8 @@ module Hive
                          permission_mode: nil, allowed_tools: nil,
                          disallowed_tools: nil, mcp_config_path: nil,
                          strict_mcp_config: false, identity_arguments: nil,
-                         routing_arguments: nil, runtime_policy: nil)
+                         routing_arguments: nil, runtime_policy: nil,
+                         resource_guards: nil)
         require "hive/claude_launcher"
 
         context = Hive::Attempts::Context.current
@@ -923,7 +949,8 @@ module Hive
             disallowed_tools: disallowed_tools,
             identity_arguments: identity_arguments,
             routing_arguments: routing_arguments,
-            runtime_policy: runtime_policy
+            runtime_policy: runtime_policy,
+            resource_guards: resource_guards
           )
         end
 
@@ -934,35 +961,64 @@ module Hive
                 "spawn_claude! only supports the claude profile; got #{profile.name.inspect}"
         end
 
+        headless = context&.explicit_routing? || Hive::Config.claude_mode(cfg) == :headless
+        if headless
+          return Hive::ClaudeLauncher.launch!(
+            task: task, cfg: cfg, prompt: prompt, add_dirs: add_dirs,
+            cwd: cwd || task.folder, max_budget_usd: max_budget_usd,
+            timeout_sec: timeout_sec, log_label: log_label,
+            session_name: session_name, status_mode: status_mode,
+            expected_output: expected_output, profile: profile,
+            permission_mode: permission_mode, allowed_tools: allowed_tools,
+            disallowed_tools: disallowed_tools, mcp_config_path: mcp_config_path,
+            strict_mcp_config: strict_mcp_config,
+            identity_arguments: identity_arguments,
+            routing_arguments: routing_arguments, runtime_policy: runtime_policy,
+            resource_guards: resource_guards
+          )
+        end
+
         prompt = Hive::ContextProvenance.decorate_prompt(
           task: task, prompt: prompt, context: context
         )
-        result = Hive::ClaudeLauncher.launch!(
-          task: task,
-          cfg: cfg,
-          prompt: prompt,
-          add_dirs: add_dirs,
-          cwd: cwd || task.folder,
-          max_budget_usd: max_budget_usd,
+        observation = session_observation(
+          task: task, context: context, profile: profile,
+          role: log_label || task.stage_name,
+          requested_model: requested_model(context, routing_arguments, nil, nil),
+          requested_effort: requested_effort(context, routing_arguments, nil, nil),
           timeout_sec: timeout_sec,
-          log_label: log_label,
-          session_name: session_name,
-          status_mode: status_mode,
-          expected_output: expected_output,
-          profile: profile,
-          permission_mode: permission_mode,
-          allowed_tools: allowed_tools,
-          disallowed_tools: disallowed_tools,
-          mcp_config_path: mcp_config_path,
-          strict_mcp_config: strict_mcp_config,
-          identity_arguments: identity_arguments,
-          routing_arguments: routing_arguments,
-          runtime_policy: runtime_policy
+          guards: runtime_resource_guards(
+            resource_guards, profile: profile, max_budget_usd: max_budget_usd,
+            timeout_sec: timeout_sec
+          )
         )
-        Hive::ContextProvenance.promote_agent_receipt(
-          task: task, context: context
-        ) if context
-        result
+        result = nil
+        started_at = Time.now.utc.iso8601
+        observation.start!
+        begin
+          result = Hive::ClaudeLauncher.launch!(
+            task: task, cfg: cfg, prompt: prompt, add_dirs: add_dirs,
+            cwd: cwd || task.folder, max_budget_usd: max_budget_usd,
+            timeout_sec: timeout_sec, log_label: log_label,
+            session_name: session_name, status_mode: status_mode,
+            expected_output: expected_output, profile: profile,
+            permission_mode: permission_mode, allowed_tools: allowed_tools,
+            disallowed_tools: disallowed_tools, mcp_config_path: mcp_config_path,
+            strict_mcp_config: strict_mcp_config,
+            identity_arguments: identity_arguments,
+            routing_arguments: routing_arguments, runtime_policy: runtime_policy
+          )
+          record_usage(
+            task, profile, result, started_at,
+            context: context, session_id: observation.session_id
+          )
+          Hive::ContextProvenance.promote_agent_receipt(
+            task: task, context: context
+          ) if context
+          result
+        ensure
+          observation.finish!(result || {}, exception: $!)
+        end
       end
 
       # Wrap a spawn_claude! call so that AgentErrors land on the
@@ -1086,7 +1142,60 @@ module Hive
         end
       end
 
-      def record_usage(task, profile, result, started_at)
+      def session_observation(task:, context:, profile:, role:, requested_model:,
+                              requested_effort:, timeout_sec:, guards:)
+        Hive::AgentObservation.new(
+          task: task, context: context, session_id: SecureRandom.uuid,
+          role: role, provider: profile.name.to_s,
+          requested_model: requested_model, requested_effort: requested_effort,
+          timeout_sec: timeout_sec, guards: guards
+        )
+      end
+
+      def requested_model(context, routing_arguments, launch_arguments, fallback)
+        return context.model if context&.explicit_routing?
+
+        routing_arguments&.model || launch_arguments&.model || fallback
+      end
+
+      def requested_effort(context, routing_arguments, launch_arguments, fallback)
+        return context.effort if context&.explicit_routing?
+
+        routing_arguments&.effort || launch_arguments&.requested_effort || fallback
+      end
+
+      def runtime_resource_guards(resolutions, profile:, max_budget_usd:, timeout_sec:)
+        indexed = Array(resolutions).to_h do |resolution|
+          row = resolution.to_h.transform_keys(&:to_s)
+          [ row["field"], row ]
+        end
+        budget = indexed["budget_usd"] || {
+          "value" => max_budget_usd, "source" => "caller", "scope" => "session"
+        }
+        timeout = indexed["timeout_sec"] || {
+          "value" => timeout_sec, "source" => "caller", "scope" => "session"
+        }
+        billing = profile.billing_semantics.to_s
+        budget_kind = billing == "api_billed" ?
+          "monetary_api_cap" : "budget_equivalent_guard"
+        [
+          {
+            "kind" => budget_kind, "unit" => "usd", "scope" => "session",
+            "source" => budget.fetch("source", "unknown"),
+            "enforcement" => profile.budget_flag ? "provider_cli" : "unenforced",
+            "billing_semantics" => billing,
+            "configured" => budget["value"], "observed" => nil
+          },
+          {
+            "kind" => "timeout", "unit" => "seconds", "scope" => "session",
+            "source" => timeout.fetch("source", "unknown"),
+            "enforcement" => "controller", "billing_semantics" => "not_applicable",
+            "configured" => timeout["value"], "observed" => nil
+          }
+        ]
+      end
+
+      def record_usage(task, profile, result, started_at, context: nil, session_id: nil)
         usage = result && result[:usage]
         return unless usage
 
@@ -1100,7 +1209,11 @@ module Hive
           ended_at: Time.now.utc.iso8601,
           input: usage[:input] || 0,
           output: usage[:output] || 0,
-          cached: usage[:cached] || 0
+          cached: usage[:cached] || 0,
+          attempt_id: context&.attempt_id,
+          session_id: context ? session_id : nil,
+          task_generation: context&.task_generation,
+          source: context ? "runtime_receipt" : nil
         )
       rescue StandardError => e
         warn "[hive] usage record failed: #{e.message}"

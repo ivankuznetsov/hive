@@ -9,6 +9,7 @@ module Hive
       runtime_profile: AgentCliRuntime::Profiles.fetch(:claude),
       skill_syntax_format: "/%{skill}",
       status_detection_mode: :state_file_marker,
+      billing_semantics: :subscription_backed,
       policy_capabilities: %i[
         tools directories commands domains settings_isolation mcp_isolation
         environment_isolation

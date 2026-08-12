@@ -13,7 +13,9 @@ module Hive
   module UsageDb
     AGENTS = %i[claude codex pi grok].freeze
     BUCKETS = %i[today 7d 30d all].freeze
-    SCHEMA_SQL = <<~SQL.freeze
+    SCHEMA_VERSION = 2
+    BUSY_TIMEOUT_MS = 5_000
+    LEGACY_SCHEMA_SQL = <<~SQL.freeze
       CREATE TABLE IF NOT EXISTS token_usage (
         id           TEXT PRIMARY KEY,
         agent        TEXT NOT NULL,
@@ -31,6 +33,31 @@ module Hive
       CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_slug, started_at);
       CREATE INDEX IF NOT EXISTS idx_token_usage_task ON token_usage(task_slug, started_at);
     SQL
+    SCHEMA_SQL = <<~SQL.freeze
+      CREATE TABLE IF NOT EXISTS token_usage (
+        id              TEXT PRIMARY KEY,
+        agent           TEXT NOT NULL,
+        model           TEXT,
+        project_slug    TEXT,
+        task_slug       TEXT,
+        stage           TEXT,
+        started_at      TEXT NOT NULL,
+        ended_at        TEXT,
+        input           INTEGER NOT NULL DEFAULT 0,
+        output          INTEGER NOT NULL DEFAULT 0,
+        cached          INTEGER NOT NULL DEFAULT 0,
+        attempt_id      TEXT,
+        session_id      TEXT,
+        task_generation INTEGER,
+        source          TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_token_usage_started_at ON token_usage(started_at);
+      CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_slug, started_at);
+      CREATE INDEX IF NOT EXISTS idx_token_usage_task ON token_usage(task_slug, started_at);
+      CREATE INDEX IF NOT EXISTS idx_token_usage_attempt ON token_usage(attempt_id, task_generation);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_token_usage_session_unique
+        ON token_usage(session_id) WHERE session_id IS NOT NULL;
+    SQL
 
     module_function
 
@@ -43,35 +70,105 @@ module Hive
     end
 
     def record!(agent:, model:, project_slug:, task_slug:, stage:, started_at:, ended_at:,
-                input:, output:, cached:)
+                input:, output:, cached:, attempt_id: nil, session_id: nil,
+                task_generation: nil, source: nil)
       with_database(create: true) do |db|
         ensure_schema!(db)
-        db.execute(
-          <<~SQL,
-            INSERT INTO token_usage (
-              id, agent, model, project_slug, task_slug, stage,
-              started_at, ended_at, input, output, cached
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          SQL
-          [
-            SecureRandom.uuid,
-            agent.to_s,
-            blank_to_nil(model),
-            blank_to_nil(project_slug),
-            blank_to_nil(task_slug),
-            blank_to_nil(stage),
-            iso8601(started_at),
-            ended_at.nil? ? nil : iso8601(ended_at),
-            integer(input),
-            integer(output),
-            integer(cached)
-          ]
-        )
+        attributes = [
+          SecureRandom.uuid, agent.to_s, blank_to_nil(model), blank_to_nil(project_slug),
+          blank_to_nil(task_slug), blank_to_nil(stage), iso8601(started_at),
+          ended_at.nil? ? nil : iso8601(ended_at), integer(input), integer(output),
+          integer(cached), blank_to_nil(attempt_id), blank_to_nil(session_id),
+          task_generation.nil? ? nil : Integer(task_generation), blank_to_nil(source)
+        ]
+        if attributes[12]
+          db.execute(SESSION_UPSERT_SQL, attributes)
+          raise "session usage identity conflict" if db.changes.zero?
+        else
+          db.execute(INSERT_SQL, attributes)
+        end
       end
       true
     rescue StandardError => e
       warn "[hive] usage record failed: #{e.class}: #{e.message}"
       false
+    end
+
+    INSERT_SQL = <<~SQL.freeze
+      INSERT INTO token_usage (
+        id, agent, model, project_slug, task_slug, stage, started_at, ended_at,
+        input, output, cached, attempt_id, session_id, task_generation, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    SQL
+    SESSION_UPSERT_SQL = <<~SQL.freeze
+      #{INSERT_SQL.strip}
+      ON CONFLICT(session_id) WHERE session_id IS NOT NULL DO UPDATE SET
+        agent = excluded.agent,
+        model = COALESCE(excluded.model, token_usage.model),
+        project_slug = COALESCE(excluded.project_slug, token_usage.project_slug),
+        task_slug = COALESCE(excluded.task_slug, token_usage.task_slug),
+        stage = COALESCE(excluded.stage, token_usage.stage),
+        started_at = MIN(token_usage.started_at, excluded.started_at),
+        ended_at = COALESCE(excluded.ended_at, token_usage.ended_at),
+        input = MAX(token_usage.input, excluded.input),
+        output = MAX(token_usage.output, excluded.output),
+        cached = MAX(token_usage.cached, excluded.cached),
+        source = COALESCE(excluded.source, token_usage.source)
+      WHERE token_usage.attempt_id = excluded.attempt_id
+        AND token_usage.task_generation = excluded.task_generation
+    SQL
+
+    def exact_attempt(attempt_id:, task_generation: nil, project_slug: nil,
+                      task_slug: nil, legacy_limit: 100)
+      db_path = path
+      return unavailable_exact("store_missing") unless File.file?(db_path)
+
+      with_database(create: false) do |db|
+        ensure_schema!(db)
+        clauses = [ "attempt_id = ?" ]
+        binds = [ attempt_id.to_s ]
+        unless task_generation.nil?
+          clauses << "task_generation = ?"
+          binds << Integer(task_generation)
+        end
+        rows = db.execute(
+          "SELECT session_id, agent, model, project_slug, task_slug, stage, " \
+          "started_at, ended_at, input, output, cached, attempt_id, task_generation, source " \
+          "FROM token_usage WHERE #{clauses.join(' AND ')} ORDER BY session_id, started_at",
+          binds
+        )
+        sessions = rows.map { |row| exact_row(row) }
+        legacy_clauses = [ "attempt_id IS NULL" ]
+        legacy_binds = []
+        unless blank?(project_slug)
+          legacy_clauses << "project_slug = ?"
+          legacy_binds << project_slug.to_s
+        end
+        unless blank?(task_slug)
+          legacy_clauses << "task_slug = ?"
+          legacy_binds << task_slug.to_s
+        end
+        unattributed_rows = db.execute(
+          "SELECT session_id, agent, model, project_slug, task_slug, stage, " \
+          "started_at, ended_at, input, output, cached, attempt_id, task_generation, source " \
+          "FROM token_usage WHERE #{legacy_clauses.join(' AND ')} " \
+          "ORDER BY started_at DESC LIMIT ?",
+          legacy_binds + [ Integer(legacy_limit) ]
+        ).map { |row| exact_row(row) }
+        {
+          available: true,
+          sessions: sessions,
+          totals: sum_usage(sessions),
+          unattributed: unattributed_rows,
+          unattributed_count: db.get_first_value(
+            "SELECT COUNT(*) FROM token_usage WHERE #{legacy_clauses.join(' AND ')}",
+            legacy_binds
+          ).to_i
+        }
+      end
+    rescue StandardError => e
+      warn "[hive] exact attempt usage failed: #{e.class}: #{e.message}"
+      unavailable_exact("read_failed")
     end
 
     def aggregate(scope:, now: Time.now.utc)
@@ -153,7 +250,25 @@ module Hive
     end
 
     def ensure_schema!(db)
-      db.execute_batch(SCHEMA_SQL)
+      version = db.get_first_value("PRAGMA user_version").to_i
+      raise "usage database schema #{version} is newer than supported #{SCHEMA_VERSION}" if
+        version > SCHEMA_VERSION
+      return if version == SCHEMA_VERSION && schema_columns(db).include?("session_id")
+
+      db.transaction(:immediate) do
+        db.execute_batch(LEGACY_SCHEMA_SQL)
+        columns = schema_columns(db)
+        {
+          "attempt_id" => "TEXT",
+          "session_id" => "TEXT",
+          "task_generation" => "INTEGER",
+          "source" => "TEXT"
+        }.each do |name, type|
+          db.execute("ALTER TABLE token_usage ADD COLUMN #{name} #{type}") unless columns.include?(name)
+        end
+        db.execute_batch(SCHEMA_SQL)
+        db.execute("PRAGMA user_version = #{SCHEMA_VERSION}")
+      end
     end
 
     def zero_aggregate
@@ -237,9 +352,36 @@ module Hive
       db_path = path
       FileUtils.mkdir_p(File.dirname(db_path)) if create
       db = SQLite3::Database.new(db_path)
+      db.busy_timeout(BUSY_TIMEOUT_MS)
       yield db
     ensure
       db&.close
+    end
+
+    def schema_columns(db)
+      db.table_info("token_usage").map { |row| (row["name"] || row[1]).to_s }
+    end
+
+    def exact_row(row)
+      {
+        session_id: row[0], agent: row[1], model: row[2], project_slug: row[3],
+        task_slug: row[4], stage: row[5], started_at: row[6], ended_at: row[7],
+        input: integer(row[8]), output: integer(row[9]), cached: integer(row[10]),
+        attempt_id: row[11], task_generation: row[12], source: row[13]
+      }
+    end
+
+    def sum_usage(rows)
+      rows.each_with_object({ input: 0, output: 0, cached: 0 }) do |row, total|
+        %i[input output cached].each { |key| total[key] += integer(row[key]) }
+      end
+    end
+
+    def unavailable_exact(reason)
+      {
+        available: false, sessions: [], totals: nil, unattributed: [],
+        unattributed_count: nil, reason: reason
+      }
     end
 
     def env_path

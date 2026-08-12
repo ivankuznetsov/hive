@@ -1,0 +1,269 @@
+require "time"
+require "hive/attempts/store"
+require "hive/task_activity"
+
+module Hive
+  # Attempt-bound, provider-neutral session evidence. This object never owns
+  # process liveness: it records one durable start and at most one terminal
+  # observation around the existing launcher result.
+  class AgentObservation
+    RESOURCE_KINDS = %w[
+      monetary_api_cap budget_equivalent_guard token_limit launch_quota timeout
+      account_quota provider_rate_limit turn_limit
+    ].freeze
+    UNITS = %w[usd tokens launches seconds turns requests].freeze
+    ENFORCEMENTS = %w[controller provider_cli provider_account advisory unenforced].freeze
+    BILLING_SEMANTICS = %w[api_billed subscription_backed not_applicable unknown].freeze
+
+    attr_reader :session_id, :started_at
+
+    def initialize(task:, context:, session_id:, role:, provider:, timeout_sec:,
+                   guards:, requested_model: nil, requested_effort: nil,
+                   activity: nil, attempt_store: nil, clock: -> { Time.now.utc })
+      @task = task
+      @context = context
+      @session_id = identifier(session_id, "session_id")
+      @role = normalized_role(role)
+      @provider = identifier(provider, "provider")
+      @requested_model = optional_text(requested_model)
+      @requested_effort = optional_text(requested_effort)
+      @timeout_sec = positive_number(timeout_sec, "timeout_sec")
+      @guards = normalize_guards(guards)
+      @clock = clock
+      @attempt_store = attempt_store
+      @activity = activity || build_activity
+      @available = compatible_context? && !@activity.nil?
+      @started = false
+      @finished = false
+    end
+
+    def available? = @available
+
+    def start!
+      return false unless available?
+      return true if @started
+
+      @started_at = normalize_time(@clock.call)
+      append(
+        kind: "session_started", operation_id: "session:#{session_id}:start",
+        reason: "agent session started", occurred_at: @started_at,
+        payload: base_payload.merge(
+          "started_at" => @started_at, "ended_at" => nil,
+          "live" => true, "health" => "live", "outcome" => nil,
+          "actual_model" => nil, "guards" => @guards
+        )
+      )
+      @started = true
+    rescue Hive::TaskActivity::Error
+      false
+    end
+
+    def finish!(result = nil, exception: nil, **attributes)
+      return false unless available?
+      return false if @finished
+
+      result = (result || {}).to_h.merge(attributes)
+      start! unless @started
+      ended_at = normalize_time(@clock.call)
+      resource = resource_observation(result)
+      append(
+        kind: "session_finished", operation_id: "session:#{session_id}:finish",
+        reason: "agent session finished", occurred_at: ended_at,
+        payload: base_payload.merge(
+          "started_at" => @started_at, "ended_at" => ended_at,
+          "live" => false, "health" => health(result, exception),
+          "outcome" => outcome(result, exception),
+          "actual_model" => actual_model(result),
+          "timed_out" => result[:timed_out] == true,
+          "resource_observation" => resource,
+          "usage" => normalized_usage(result[:usage]),
+          "guards" => @guards
+        )
+      )
+      @finished = true
+      true
+    rescue Hive::TaskActivity::Error
+      false
+    end
+
+    private
+
+    def append(kind:, operation_id:, reason:, occurred_at:, payload:)
+      @activity.record(
+        kind: kind, operation_id: operation_id, correlation_id: session_id,
+        reason: reason, source: "agent_runtime", occurred_at: occurred_at,
+        observed_at: occurred_at,
+        evidence: [ { "kind" => "runtime_receipt", "reference" => "sessions/#{session_id}" } ],
+        payload: payload
+      )
+    end
+
+    def base_payload
+      {
+        "session_id" => session_id, "role" => @role, "provider" => @provider,
+        "requested_model" => @requested_model,
+        "requested_effort" => @requested_effort,
+        "timeout_sec" => @timeout_sec
+      }
+    end
+
+    def build_activity
+      return nil unless compatible_context?
+
+      workflow = @task.respond_to?(:workflow) ? @task.workflow : nil
+      workflow = workflow.id if workflow.respond_to?(:id)
+      Hive::TaskActivity.new(
+        task_folder: @task.folder,
+        task: { "id" => @task.respond_to?(:id) ? @task.id : nil, "slug" => @task.slug },
+        workflow: workflow.to_s.empty? ? "coding" : workflow.to_s,
+        stage: @context.intended_stage, attempt_id: @context.attempt_id,
+        task_generation: @context.task_generation,
+        ownership_generation: @context.ownership_generation,
+        attempt_store: @attempt_store || Hive::Attempts::Store.new,
+        clock: @clock
+      )
+    rescue Hive::TaskActivity::Error, SystemCallError
+      nil
+    end
+
+    def compatible_context?
+      @context && @task.respond_to?(:slug) &&
+        @context.task_slug.to_s == @task.slug.to_s &&
+        !@context.attempt_id.to_s.empty?
+    end
+
+    def normalize_guards(value)
+      Array(value).map.with_index do |guard, index|
+        row = guard.to_h.transform_keys(&:to_s)
+        kind = row.fetch("kind").to_s
+        unit = row.fetch("unit").to_s
+        enforcement = row.fetch("enforcement").to_s
+        billing = row.fetch("billing_semantics").to_s
+        raise ArgumentError, "guard #{index} kind is invalid" unless RESOURCE_KINDS.include?(kind)
+        raise ArgumentError, "guard #{index} unit is invalid" unless UNITS.include?(unit)
+        raise ArgumentError, "guard #{index} enforcement is invalid" unless ENFORCEMENTS.include?(enforcement)
+        raise ArgumentError, "guard #{index} billing semantics are invalid" unless BILLING_SEMANTICS.include?(billing)
+
+        {
+          "kind" => kind, "unit" => unit,
+          "scope" => identifier(row.fetch("scope"), "guard scope"),
+          "source" => identifier(row.fetch("source"), "guard source"),
+          "enforcement" => enforcement, "billing_semantics" => billing,
+          "configured" => numeric_or_nil(row["configured"]),
+          "observed" => numeric_or_nil(row["observed"]),
+          "reset_at" => optional_time(row["reset_at"]),
+          "retry_at" => optional_time(row["retry_at"])
+        }
+      end.freeze
+    end
+
+    def resource_observation(result)
+      detail = result[:resource_exhaustion]
+      if detail.is_a?(Hash)
+        reason = detail[:reason] || detail["reason"]
+        kind = reason.to_s == "turn_limit" ? "turn_limit" : "token_limit"
+        return {
+          "kind" => kind,
+          "unit" => kind == "turn_limit" ? "turns" : "tokens",
+          "configured" => detail[:limit] || detail["limit"],
+          "observed" => detail[:observed] || detail["observed"],
+          "retry_at" => nil
+        }
+      end
+      signal = result[:provider_signal]
+      return nil unless signal.respond_to?(:to_h)
+
+      row = signal.to_h
+      failure = row[:failure_class] || row["failure_class"]
+      kind = failure.to_s.include?("rate") ? "provider_rate_limit" : "account_quota"
+      retry_seconds = row[:reset_hint_seconds] || row["reset_hint_seconds"]
+      {
+        "kind" => kind, "unit" => "requests", "configured" => nil,
+        "observed" => nil,
+        "retry_at" => retry_seconds && normalize_time(@clock.call + retry_seconds.to_i)
+      }
+    end
+
+    def actual_model(result)
+      optional_text(result[:model] || result.dig(:usage, :model))
+    end
+
+    def normalized_usage(value)
+      return nil unless value.is_a?(Hash)
+
+      {
+        "input" => nonnegative_integer(value[:input] || value["input"]),
+        "output" => nonnegative_integer(value[:output] || value["output"]),
+        "cached" => nonnegative_integer(value[:cached] || value["cached"])
+      }
+    end
+
+    def outcome(result, exception)
+      return "timed_out" if result[:timed_out] == true
+      return "failed" if exception
+
+      status = result[:status].to_s
+      return "unavailable" if status.empty?
+      return "failed" if %w[error failed].include?(status)
+
+      "succeeded"
+    end
+
+    def health(result, exception)
+      return "timed_out" if result[:timed_out] == true
+      return "error" if exception || %w[error failed].include?(result[:status].to_s)
+      return "unavailable" if result[:status].to_s.empty?
+
+      "completed"
+    end
+
+    def identifier(value, label)
+      string = value.to_s
+      unless string.match?(%r{\A[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\z})
+        raise ArgumentError, "#{label} is invalid"
+      end
+      string
+    end
+
+    def normalized_role(value)
+      role = value.to_s.gsub(%r{[^A-Za-z0-9._:/-]+}, "-")
+                     .sub(/\A-+/, "").sub(/-+\z/, "")
+      role = "agent" if role.empty?
+      identifier(role.byteslice(0, 256), "role")
+    end
+
+    def optional_text(value)
+      return nil if value.to_s.empty?
+
+      text = Hive::SecretPatterns.redact(value.to_s)
+      raise ArgumentError, "observation text exceeds 512 bytes" if text.bytesize > 512
+      text
+    end
+
+    def positive_number(value, label)
+      number = Float(value)
+      raise ArgumentError, "#{label} must be positive" unless number.positive?
+      number % 1 == 0 ? number.to_i : number
+    end
+
+    def numeric_or_nil(value)
+      return nil if value.nil?
+
+      number = Float(value)
+      number % 1 == 0 ? number.to_i : number
+    end
+
+    def nonnegative_integer(value)
+      integer = Integer(value || 0)
+      [ integer, 0 ].max
+    end
+
+    def optional_time(value)
+      value.nil? ? nil : normalize_time(value)
+    end
+
+    def normalize_time(value)
+      (value.respond_to?(:utc) ? value.utc : Time.iso8601(value.to_s).utc).iso8601(6)
+    end
+  end
+end

@@ -62,8 +62,16 @@ class AttemptsDispatcherTest < Minitest::Test
     provenance = Object.new
     provenance.define_singleton_method(:capture_launch) do |task:, attempt:, generation:,
                                                         attempt_store:, clock:|
+      journal = Hive::TaskProjection.read_journal(
+        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME),
+        attempt_store: attempt_store
+      )
+      admitted = journal.any? do |record|
+        record.dig("payload", "activity_kind") == "attempt_admitted" &&
+          record["attempt_id"] == attempt.attempt_id
+      end
       events << [ :context, task.slug, attempt.attempt_id, generation.task_generation,
-                  !attempt_store.fetch(attempt.attempt_id).nil?, clock.call ]
+                  !attempt_store.fetch(attempt.attempt_id).nil?, admitted, clock.call ]
     end
 
     with_dispatcher(context_provenance: provenance) do |dispatcher, launcher, task|
@@ -79,7 +87,7 @@ class AttemptsDispatcherTest < Minitest::Test
 
       assert_equal :accepted, result.status
       assert_equal :context, events.fetch(0).fetch(0)
-      assert_equal [ task.slug, result.attempt.attempt_id, result.attempt.task_generation, true, NOW ],
+      assert_equal [ task.slug, result.attempt.attempt_id, result.attempt.task_generation, true, true, NOW ],
                    events.fetch(0).drop(1)
       assert_equal [ :launch, result.attempt.attempt_id ], events.fetch(1)
     end

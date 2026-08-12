@@ -104,6 +104,56 @@ class StagesBaseUsageTest < Minitest::Test
     end
   end
 
+  def test_attempt_bound_spawn_records_one_session_and_exact_usage_attribution
+    with_tmp_dir do |root|
+      task = make_task(root, "2-brainstorm", "usage-task-260524-abcd")
+      context = Hive::Attempts::Context.send(
+        :new, attempt_id: "attempt-1", task_generation: 3,
+        ownership_generation: "owner-3", project: task.project_name,
+        task_slug: task.slug, intended_stage: "2-brainstorm"
+      )
+      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      store.create_launching(
+        attempt_id: "attempt-1", request_id: "request-1",
+        predecessor_attempt_id: nil, task_id: task.id,
+        project: task.project_name, task_slug: task.slug,
+        intended_stage: "2-brainstorm", task_generation: "owner-3",
+        ownership_generation: "owner-3", task_input_epoch: 3,
+        progress_token: "progress-1", provider: "claude",
+        worker_argv: [ "hive", "run", task.slug ],
+        claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
+        starting_revision: "a" * 40, retry_charge: 0,
+        inherited_outputs: [], launch_timeout_sec: 30,
+        now: Time.utc(2026, 8, 12, 10)
+      )
+      with_usage_db(root) do
+        configure_fake_agent(task)
+        with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+          with_replaced_singleton_method(Hive::Attempts::Store, :new, ->(**) { store }) do
+            result = spawn(task)
+            assert_equal :waiting, result[:status]
+          end
+        end
+
+        events = Hive::TaskProjection.read_journal(
+          File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+        ).select do |record|
+          %w[session_started session_finished].include?(
+            record.dig("payload", "activity_kind")
+          )
+        end
+        assert_equal 2, events.length
+        session_ids = events.map { |record| record.dig("payload", "session_id") }.uniq
+        assert_equal 1, session_ids.length
+
+        exact = Hive::UsageDb.exact_attempt(attempt_id: "attempt-1", task_generation: 3)
+        assert exact.fetch(:available)
+        assert_equal session_ids.first, exact.fetch(:sessions).first.fetch(:session_id)
+        assert_equal({ input: 321, output: 123, cached: 30 }, exact.fetch(:totals))
+      end
+    end
+  end
+
   def test_spawn_without_usage_extractor_inserts_no_row
     with_tmp_dir do |root|
       task = make_task(root)

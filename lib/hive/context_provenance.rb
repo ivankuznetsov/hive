@@ -6,6 +6,7 @@ require "time"
 require "hive/context_provenance/context_receipt"
 require "hive/context_provenance/repository_snapshot"
 require "hive/context_provenance/wiki_snapshot"
+require "hive/attempts/store"
 require "hive/task_activity"
 
 module Hive
@@ -206,6 +207,7 @@ module Hive
         attempt_id: context.attempt_id,
         task_generation: context.task_generation,
         ownership_generation: context.ownership_generation,
+        attempt_store: Hive::Attempts::Store.new,
         clock: clock
       )
     end

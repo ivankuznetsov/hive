@@ -336,6 +336,7 @@ module Hive
 
         return result if result
 
+        record_attempt_admission(task, created, now)
         capture_launch_context(task, created, generation, now)
         handoff = @launcher.launch(created, claim_capability: claim_capability)
         if handoff.is_a?(Hash) && (handoff["claimed"] == true || handoff["state"] == "launching")
@@ -369,6 +370,35 @@ module Hive
         # partial/unavailable, while the already-durable attempt still proceeds
         # to the worker handoff.
         nil
+      end
+
+      def record_attempt_admission(task, attempt, now)
+        return unless task && task.respond_to?(:folder) && !task.folder.to_s.empty?
+
+        workflow = task.respond_to?(:workflow) ? task.workflow : nil
+        workflow = workflow.id if workflow.respond_to?(:id)
+        Hive::TaskActivity.new(
+          task_folder: task.folder,
+          task: { "id" => task.id, "slug" => task.slug },
+          workflow: workflow.to_s.empty? ? "coding" : workflow.to_s,
+          stage: attempt["intended_stage"], attempt_id: attempt.attempt_id,
+          task_generation: attempt.task_input_epoch,
+          ownership_generation: attempt.ownership_generation,
+          attempt_store: @store, clock: -> { now }
+        ).record(
+          kind: "attempt_admitted",
+          operation_id: "attempt-admitted:#{attempt.attempt_id}",
+          reason: "durable attempt admitted",
+          source: "attempt_dispatcher", occurred_at: now, observed_at: now,
+          evidence: [
+            { "kind" => "attempt_record", "reference" => "attempts/#{attempt.attempt_id}" }
+          ],
+          payload: {
+            "provider" => attempt["provider"],
+            "predecessor_attempt_id" => attempt["predecessor_attempt_id"],
+            "state" => attempt.state
+          }
+        )
       end
 
       # Request IDs own delivery idempotency: replaying the same request must

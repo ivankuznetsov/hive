@@ -1,6 +1,6 @@
 class Tasks::PublicationsController < Tasks::BaseController
   def show
-    render_publication(cache: cache_for_current_credential)
+    render_publication(cache: publication_cache_for_current_credential)
   end
 
   def create
@@ -14,7 +14,7 @@ class Tasks::PublicationsController < Tasks::BaseController
       return render_publication(cache: nil)
     end
 
-    cache = cache_for(token)
+    cache = publication_cache_for(token)
     initial = @task.publication(cache: cache)
     identity = initial.dig("refresh", "identity")
     if identity
@@ -47,20 +47,4 @@ class Tasks::PublicationsController < Tasks::BaseController
     end
   end
 
-  def cache_for_current_credential
-    token = session[:github_token].to_s
-    token.empty? ? nil : cache_for(token)
-  end
-
-  def cache_for(token)
-    principal = Hive::TaskWorkspace::PublicationCache.principal_id(
-      token, secret: Rails.application.secret_key_base
-    )
-    fingerprint = Hive::TaskWorkspace::PublicationCache.project_fingerprint(
-      @project.attributes
-    )
-    Hive::TaskWorkspace::PublicationCache.new(
-      principal_id: principal, project_fingerprint: fingerprint
-    )
-  end
 end

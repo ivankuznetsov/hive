@@ -38,7 +38,7 @@
     },
     "SafeString": {
       "type": "string",
-      "maxLength": 262144,
+      "maxLength": 524288,
       "pattern": "^(?!/)(?!\\\\)(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$))[\\s\\S]*$"
     },
     "SafeValue": {

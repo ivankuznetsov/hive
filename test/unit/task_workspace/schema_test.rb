@@ -70,6 +70,22 @@ class TaskWorkspaceSchemaTest < Minitest::Test
     assert_includes error.message, "forbidden"
   end
 
+  def test_schema_accepts_the_documented_per_artifact_string_ceiling
+    document = valid_document
+    document["panels"]["artifacts"] = {
+      "state" => "partial", "records" => [ { "content" => "a" * (400 * 1024) } ],
+      "diagnostics" => [], "truncated" => true
+    }
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace")))
+    )
+
+    assert schemer.valid?(document), schemer.validate(document).to_a.inspect
+    assert_raises(ArgumentError) do
+      Hive::TaskWorkspace.safe_value!("a" * (Hive::TaskWorkspace::SAFE_STRING_BYTES + 1))
+    end
+  end
+
   private
 
   def valid_document

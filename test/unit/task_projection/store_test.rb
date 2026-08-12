@@ -280,6 +280,9 @@ class TaskProjectionStoreTest < Minitest::Test
       assert_equal "unsatisfied",
                    result.projection.current_condition("AgentHealthy").fetch("state")
       assert_equal File.size(store.journal_path), result.journal_cursor
+      assert_equal %w[event-1 event-2],
+                   result.journal_records.map { |record| record.fetch("event_id") }
+      refute result.journal_records.any? { |record| record.keys.any? { |key| key.start_with?("__") } }
       refute result.truncated
     end
   end

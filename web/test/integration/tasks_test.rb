@@ -728,6 +728,10 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     get "/tasks/#{@project}/#{@slug}"
     assert_response :success
+    get "/tasks/#{@project}/#{@slug}.json"
+    assert_response :success
+    get "/tasks/#{@project}/#{@slug}/timeline.json"
+    assert_response :success
     get "/tasks/#{@project}/#{@slug}/log"
     assert_response :success
     get "/tasks/#{@project}/#{@slug}/diff"
@@ -1030,6 +1034,77 @@ class TasksTest < ActionDispatch::IntegrationTest
     post "/logout"
     get task_publication_path(@project, @slug)
     assert_redirected_to "/login"
+  end
+
+  test "existing task route serves authenticated schema-valid workspace JSON" do
+    get "/tasks/#{@project}/#{@slug}.json"
+
+    assert_response :success
+    assert_equal "application/json", response.media_type
+    document = JSON.parse(response.body)
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace")))
+    )
+    assert_empty schemer.validate(document).to_a
+    assert_equal @project, document.dig("task", "project")
+    assert_equal @slug, document.dig("task", "slug")
+    assert_equal "hive-task-workspace", document.fetch("schema")
+    assert_equal Hive::TaskWorkspace::PANEL_NAMES.sort,
+                 document.fetch("panels").keys.sort
+    refute_includes document.to_s, stage_dir(@project, "1-inbox").to_s
+    refute document.to_s.include?("suggested_command")
+    refute document.to_s.include?("observation_token")
+
+    post "/logout"
+    get "/tasks/#{@project}/#{@slug}.json"
+    assert_redirected_to "/login"
+  end
+
+  test "timeline endpoint pages material events and expands bounded noise groups" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    records = 205.times.map do |index|
+      {
+        "event_id" => "material-#{index}", "event_type" => "stage_enter",
+        "ts" => (Time.utc(2026, 8, 12, 12) + index).iso8601,
+        "stage" => "1-inbox", "source" => "controller"
+      }
+    end
+    records.concat(25.times.map do |index|
+      {
+        "event_id" => "noise-#{index}", "event_type" => "heartbeat",
+        "ts" => (Time.utc(2026, 8, 12, 13) + index).iso8601,
+        "stage" => "1-inbox", "source" => "runtime_receipt"
+      }
+    end)
+    folder.join("events.jsonl").write(
+      records.map { |record| JSON.generate(record) }.join("\n") + "\n"
+    )
+
+    get "/tasks/#{@project}/#{@slug}/timeline.json"
+    assert_response :success
+    first = JSON.parse(response.body)
+    assert_equal 200, first.fetch("records").length
+    assert first.fetch("truncated")
+    refute_nil first.fetch("older_cursor")
+    assert_equal 25, first.dig("noise_groups", 0, "count")
+
+    get "/tasks/#{@project}/#{@slug}/timeline.json",
+        params: { cursor: first.fetch("older_cursor") }
+    assert_response :success
+    older = JSON.parse(response.body)
+    assert_equal 5, older.fetch("records").length
+    assert_nil older["older_cursor"]
+
+    get "/tasks/#{@project}/#{@slug}/timeline.json",
+        params: { raw_cursor: first.dig("noise_groups", 0, "raw_cursor") }
+    assert_response :success
+    raw = JSON.parse(response.body)
+    assert_equal 20, raw.fetch("records").length
+    assert raw.fetch("truncated")
+
+    get "/tasks/#{@project}/#{@slug}/timeline.json",
+        params: { cursor: "#{first.fetch('older_cursor')}x" }
+    assert_response :unprocessable_entity
   end
 
   test "publication refresh performs at most one fixed remote read" do

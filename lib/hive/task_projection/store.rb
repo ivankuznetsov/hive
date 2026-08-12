@@ -17,15 +17,18 @@ module Hive
       PREFIX_SENTINEL_BYTES = 4 * 1024
 
       BoundedRead = Data.define(
-        :projection, :state, :diagnostics, :truncated, :journal_cursor
+        :projection, :state, :diagnostics, :truncated, :journal_cursor,
+        :journal_records
       ) do
-        def initialize(projection:, state:, diagnostics:, truncated:, journal_cursor:)
+        def initialize(projection:, state:, diagnostics:, truncated:, journal_cursor:,
+                       journal_records: [])
           super(
             projection: projection,
             state: state.to_s.freeze,
             diagnostics: JSON.parse(JSON.generate(diagnostics), freeze: true),
             truncated: truncated == true,
-            journal_cursor: Integer(journal_cursor || 0)
+            journal_cursor: Integer(journal_cursor || 0),
+            journal_records: JSON.parse(JSON.generate(journal_records), freeze: true)
           )
         end
       end
@@ -239,7 +242,10 @@ module Hive
         )
         BoundedRead.new(
           projection: projection, state: "current", diagnostics: [],
-          truncated: false, journal_cursor: current_size
+          truncated: false, journal_cursor: current_size,
+          journal_records: replayed.records.map do |record|
+            record.reject { |key, _| key.to_s.start_with?("__") }
+          end
         )
       end
 
@@ -276,7 +282,10 @@ module Hive
         BoundedRead.new(
           projection: projection, state: "partial",
           diagnostics: [ bounded_diagnostic(checkpoint_reason) ],
-          truncated: false, journal_cursor: binding.fetch("cursor")
+          truncated: false, journal_cursor: binding.fetch("cursor"),
+          journal_records: binding.fetch("records").map do |record|
+            record.reject { |key, _| key.to_s.start_with?("__") }
+          end
         )
       rescue Errno::ENOENT
         projection = @projector.project(records: [], cursor: 0,
@@ -284,7 +293,7 @@ module Hive
         BoundedRead.new(
           projection: projection, state: "partial",
           diagnostics: [ bounded_diagnostic(checkpoint_reason) ],
-          truncated: false, journal_cursor: 0
+          truncated: false, journal_cursor: 0, journal_records: []
         )
       end
 
@@ -338,7 +347,7 @@ module Hive
         BoundedRead.new(
           projection: projection, state: state,
           diagnostics: [ bounded_diagnostic(reason, details) ],
-          truncated: truncated, journal_cursor: cursor
+          truncated: truncated, journal_cursor: cursor, journal_records: []
         )
       end
 
@@ -351,7 +360,8 @@ module Hive
           projection: projection, state: state,
           diagnostics: [ bounded_diagnostic(reason, safe_details) ],
           truncated: truncated,
-          journal_cursor: projection&.dig("journal", "cursor") || 0
+          journal_cursor: projection&.dig("journal", "cursor") || 0,
+          journal_records: []
         )
       end
 

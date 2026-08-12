@@ -54,6 +54,7 @@ Rails.application.routes.draw do
     get  "diff" => "tasks/diffs#show", as: :task_diff
     get  "publication" => "tasks/publications#show", as: :task_publication
     post "publication" => "tasks/publications#create"
+    get  "timeline" => "tasks/timelines#show", as: :task_timeline
     get  "log" => "tasks/logs#show", as: :task_log
     get  "media/:filename" => "tasks/media#show", as: :task_media,
          format: false,

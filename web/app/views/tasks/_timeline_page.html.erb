@@ -1,0 +1,16 @@
+<ol class="timeline-list">
+  <% timeline.fetch("records").each do |event| %>
+    <li id="timeline-event-<%= event.fetch("event_id") %>">
+      <time datetime="<%= event.fetch("occurred_at") %>"><%= event.fetch("occurred_at") %></time>
+      <strong><%= event.fetch("summary") %></strong>
+      <span class="muted"><%= event.fetch("source_quality").humanize %></span>
+    </li>
+  <% end %>
+</ol>
+
+<% if timeline["older_cursor"].present? %>
+  <%= link_to "Load older",
+        task_timeline_path(@project.name, @task.slug,
+          cursor: timeline.fetch("older_cursor"), source: @task_source),
+        class: "btn btn-secondary", data: { turbo_frame: "task-timeline-page" } %>
+<% end %>

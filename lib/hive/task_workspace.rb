@@ -9,6 +9,7 @@ module Hive
   module TaskWorkspace
     SCHEMA = "hive-task-workspace".freeze
     SCHEMA_VERSION = 1
+    SAFE_STRING_BYTES = 512 * 1024
 
     STATES = %w[
       current stale partial missing conflicting unavailable estimated exhausted retry-after
@@ -63,7 +64,7 @@ module Hive
       when Array
         value.each_with_index { |child, index| safe_value!(child, path + [ index.to_s ]) }
       when String
-        raise ArgumentError, "workspace string exceeds 256 KiB" if value.bytesize > 256 * 1024
+        raise ArgumentError, "workspace string exceeds 512 KiB" if value.bytesize > SAFE_STRING_BYTES
       when NilClass, TrueClass, FalseClass, Numeric
         nil
       else

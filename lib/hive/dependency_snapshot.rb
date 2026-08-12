@@ -24,6 +24,34 @@ module Hive
   module DependencySnapshot
     module_function
 
+    def semantic_fingerprint(context)
+      projects = context.project_snapshot_layers.each_with_index.flat_map do |layer_projects, layer|
+        layer_projects.map do |project|
+          {
+            "layer" => layer,
+            "name" => project.name,
+            "repository_identity" => project.repository_identity,
+            "live_repository_identity" => project.live_repository_identity,
+            "dependency_gate_stage" => project.dependency_gate_stage,
+            "validation_error" => project.validation_error.to_s,
+            "tasks" => project.tasks.map do |task|
+              {
+                "project" => task.project, "slug" => task.slug, "id" => task.id,
+                "stage" => task.stage, "depends_on" => task.depends_on,
+                "workflow_stages" => task.workflow_stages,
+                "metadata_status" => task.metadata_status,
+                "plan_status" => task.plan_status,
+                "validation_error" => task.validation_error.to_s
+              }
+            end.sort_by { |task| [ task["project"].to_s, task["slug"].to_s, task["id"].to_s ] }
+          }
+        end
+      end.sort_by do |project|
+        [ project["layer"], project["name"].to_s, JSON.generate(project) ]
+      end
+      Digest::SHA256.hexdigest(JSON.generate(projects))
+    end
+
     def tasks(project_root)
       Hive::Stages::DIRS.each_with_index.flat_map do |stage, index|
         stage_dir = File.join(project_root, ".hive-state", "stages", stage)

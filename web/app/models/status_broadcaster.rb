@@ -27,6 +27,7 @@ class StatusBroadcaster
     def feed=(new_feed)
       @feed = new_feed
       @broadcast_pending = false
+      @dependency_context_cache = {}
     end
 
     def snapshot
@@ -79,6 +80,23 @@ class StatusBroadcaster
         last_success_at: state.last_success_at,
         error: state.error
       )
+    end
+
+    # Cache immutable dependency contexts by their semantic fingerprint. A
+    # lookup is a non-scanning read of the status producer's latest context;
+    # broadcasts and task renders never build another fleet snapshot.
+    def dependency_context_snapshot
+      observed = feed.respond_to?(:dependency_context_snapshot) ?
+        feed.dependency_context_snapshot : nil
+      return unless observed && observed[:context] && observed[:fingerprint]
+
+      @dependency_context_cache ||= {}
+      @dependency_context_cache[observed[:fingerprint]] = observed[:context]
+      @dependency_context_cache.shift while @dependency_context_cache.length > 2
+      {
+        context: @dependency_context_cache.fetch(observed[:fingerprint]),
+        fingerprint: observed[:fingerprint]
+      }
     end
 
     def archive_snapshot

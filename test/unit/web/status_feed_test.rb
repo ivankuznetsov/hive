@@ -84,12 +84,17 @@ class StatusFeedTest < Minitest::Test
   class RecordingSource
     attr_reader :calls
 
-    def initialize = @calls = 0
+    def initialize
+      @calls = 0
+      @dependency_snapshot = { context: Object.new, fingerprint: "fingerprint" }.freeze
+    end
 
     def refresh_payload_now
       @calls += 1
       { "projects" => [], "call" => @calls }
     end
+
+    def dependency_context_snapshot = @dependency_snapshot
   end
 
   class RecordingRecoveryStatus
@@ -142,6 +147,19 @@ class StatusFeedTest < Minitest::Test
     assert_equal 1, first.fetch("call")
     assert_equal 2, second.fetch("call")
     assert_equal 2, source.calls
+  end
+
+  def test_dependency_context_is_a_non_scanning_read_through_feed_and_command
+    source = RecordingSource.new
+    command = Hive::Web::CachedStatusCommand.new(source: source)
+    feed = Hive::Web::StatusFeed.new(status_command: command)
+
+    snapshot = feed.dependency_context_snapshot
+
+    assert_equal "fingerprint", snapshot.fetch(:fingerprint)
+    assert_equal 0, source.calls
+  ensure
+    feed&.stop
   end
 
   def test_cached_status_command_delegates_recovery_join_with_the_cached_payload

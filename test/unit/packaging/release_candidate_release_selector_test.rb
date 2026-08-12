@@ -19,7 +19,10 @@ class ReleaseCandidateReleaseSelectorTest < Minitest::Test
   ARTIFACT_DIGEST = "sha256:#{'e' * 64}"
   EVIDENCE_ARTIFACT_DIGEST = "sha256:#{'f' * 64}"
   REPOSITORY = "ivankuznetsov/hive"
-  VERSION = "0.7.0"
+  VERSION = Hive::VERSION
+  LATEST_STABLE_VERSION = HiveReleaseCandidate::BaselineCatalog.load(
+    File.expand_path("../../../packaging/release_candidate/baselines.yml", __dir__)
+  ).latest_stable.version
   WRAPPER = File.expand_path(
     "../../../packaging/release_candidate/select_release_candidate.rb", __dir__
   )
@@ -224,7 +227,7 @@ class ReleaseCandidateReleaseSelectorTest < Minitest::Test
         repo_root: ROOT, candidate_dir: candidate,
         candidate_sha: CANDIDATE_SHA, tag_version: VERSION
       )
-      assert_equal "0.6.9", manifest.fetch("latest_stable_version")
+      assert_equal LATEST_STABLE_VERSION, manifest.fetch("latest_stable_version")
       assert_equal(
         %W[
           hive-cli-#{VERSION}.gem
@@ -234,11 +237,11 @@ class ReleaseCandidateReleaseSelectorTest < Minitest::Test
         manifest.fetch("public_files").values.sort
       )
 
-      old = build_candidate_fixture(dir, "0.6.9", suffix: "-old")
+      old = build_candidate_fixture(dir, LATEST_STABLE_VERSION, suffix: "-old")
       assert_raises(HiveReleaseCandidate::Error) do
         HiveReleaseCandidate::ReleaseCandidateVerifier.new.call(
           repo_root: ROOT, candidate_dir: old,
-          candidate_sha: CANDIDATE_SHA, tag_version: "0.6.9"
+          candidate_sha: CANDIDATE_SHA, tag_version: LATEST_STABLE_VERSION
         )
       end
     end

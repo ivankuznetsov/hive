@@ -143,6 +143,54 @@ class StatusLegacyLayoutTest < Minitest::Test
     end
   end
 
+  def test_managed_task_pinned_to_historical_stage_is_not_reported_as_legacy
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        folder = seed_managed_task(dir, "4-review", "historical-architecture-260810-aaaa")
+        generation = Struct.new(:stage_dirs).new([ "1-inbox", "2-repo-research" ])
+        loaded = []
+
+        with_replaced_singleton_method(Hive::Task, :new, lambda { |candidate, workflow_generation:|
+          loaded << [ candidate, workflow_generation ]
+          Object.new
+        }) do
+          legacy = Hive::Commands::Status.new.send(
+            :detect_legacy_stage_dirs,
+            File.join(dir, ".hive-state"),
+            workflow_generation: generation
+          )
+
+          assert_empty legacy
+          assert_equal [ [ folder, generation ] ], loaded
+        end
+      end
+    end
+  end
+
+  def test_unloadable_managed_pin_remains_a_legacy_layout_blocker
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        seed_managed_task(dir, "4-review", "broken-architecture-260810-bbbb")
+        generation = Struct.new(:stage_dirs).new([ "1-inbox", "2-repo-research" ])
+
+        with_replaced_singleton_method(
+          Hive::Task, :new,
+          ->(*, **) { raise Hive::InvalidTaskPath, "managed generation is unavailable" }
+        ) do
+          legacy = Hive::Commands::Status.new.send(
+            :detect_legacy_stage_dirs,
+            File.join(dir, ".hive-state"),
+            workflow_generation: generation
+          )
+
+          assert_equal [ { "stage_dir" => "4-review", "task_count" => 1 } ], legacy
+        end
+      end
+    end
+  end
+
   def test_text_warns_under_project_header_when_rows_and_legacy_both_exist
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -186,5 +234,19 @@ class StatusLegacyLayoutTest < Minitest::Test
     folder = File.join(project_dir, ".hive-state", "stages", stage, slug)
     FileUtils.mkdir_p(folder)
     File.write(File.join(folder, "task.md"), "x\n")
+  end
+
+  def seed_managed_task(project_dir, stage, slug)
+    folder = File.join(project_dir, ".hive-state", "stages", stage, slug)
+    Hive::TaskMeta.write(
+      folder,
+      id: 1,
+      slug: slug,
+      display_name: "Historical architecture",
+      workflow: "architecture",
+      workflow_commit: "a" * 40,
+      workflow_manifest_digest: "b" * 64
+    )
+    folder
   end
 end

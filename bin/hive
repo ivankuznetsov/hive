@@ -121,6 +121,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
     omit_error_class: true
   },
   "answer-digest" => { schema: "hive-answer-digest", error_kind: "usage" },
+  "answer" => { schema: "hive-answer", error_kind: "usage" },
   # Residual workflow argv-shape errors raised by Thor before command dispatch
   # (for example too many positionals) must ride the same JSON envelope as the
   # command's own UsageError. Bare `hive workflow` is handled in-command.

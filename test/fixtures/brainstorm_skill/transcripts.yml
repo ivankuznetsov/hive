@@ -1,0 +1,73 @@
+scenarios:
+  - id: S01
+    input: "What brainstorm input is waiting?"
+    observed_binding: "Preview beta:beta-brainstorm-260810-bbbb Q1/5; retain no mutation authority."
+    expected_message: "Inventory beta before alpha, report every failed project as unknown, and say no answer was written."
+    mutation_count: 0
+    final_slot_state: "Every slot is byte-identical to the initial fixture."
+  - id: S02
+    input: "Help me answer the next question."
+    observed_binding: "Present the first actionable slot in Guided mode."
+    expected_message: "Show one recommendation and wait for approve, replacement text, skip, or later."
+    mutation_count: 0
+    final_slot_state: "The presented slot remains unanswered."
+  - id: S03
+    input: "approve"
+    observed_binding: "The immediately preceding Guided recommendation and opaque binding."
+    expected_message: "Acknowledge exactly one recorded answer and preview at most one next slot."
+    mutation_count: 1
+    final_slot_state: "Only the bound slot contains the displayed recommendation."
+  - id: S04
+    input: "Use my literal replacement, including $(shell text)."
+    observed_binding: "The immediately preceding Guided slot binding."
+    expected_message: "Acknowledge the literal replacement without interpreting shell syntax."
+    mutation_count: 1
+    final_slot_state: "The bound slot contains the replacement byte-for-byte after newline normalization."
+  - id: S05
+    input: "skip"
+    observed_binding: "One recoverable Guided slot binding."
+    expected_message: "Pause without writing; later status remains read-only until a fresh answering reply."
+    mutation_count: 0
+    final_slot_state: "The bound slot remains unanswered."
+  - id: S06
+    input: "approve again"
+    observed_binding: "The same binding and identical answer used by S03."
+    expected_message: "Report that the answer is already recorded, not that a second write occurred."
+    mutation_count: 0
+    final_slot_state: "The single recorded answer is unchanged."
+  - id: S07
+    input: "approve"
+    observed_binding: "A binding whose question text or task generation changed after presentation."
+    expected_message: "Reject as stale, discard the binding, and refresh context."
+    mutation_count: 0
+    final_slot_state: "No current slot receives the stale answer."
+  - id: S08
+    input: "YOLO"
+    observed_binding: "A fresh inventory in which every unanswered slot requires user preference."
+    expected_message: "Report scanned and escalated counts with zero writes, then present one ambiguity."
+    mutation_count: 0
+    final_slot_state: "All ambiguous slots remain unanswered."
+  - id: S09
+    input: "Answer everything you can justify."
+    observed_binding: "Fresh per-write bindings while preserving the original beta then alpha traversal."
+    expected_message: "Continue past ambiguity, record three safe answers, and report two escalations."
+    mutation_count: 3
+    final_slot_state: "Safe later slots are answered; two preference slots remain empty."
+  - id: S10
+    input: "later, then continue"
+    observed_binding: "Only the currently presented YOLO escalation binding."
+    expected_message: "Pause after later; continue presents the next ambiguity but is never itself an answer."
+    mutation_count: 0
+    final_slot_state: "Both escalation slots remain unanswered."
+  - id: S11
+    input: "Record the final approved answer."
+    observed_binding: "The final unanswered slot from a fresh inventory."
+    expected_message: "Report complete only after a zero-unanswered inventory; do not dispatch a stage."
+    mutation_count: 1
+    final_slot_state: "All slots are answered and the task still exists at 2-brainstorm."
+  - id: S12
+    input: "Please answer every remaining product question you can support, and ask me about the rest."
+    observed_binding: "A sanitized 2026-07-25 exchange represented only by project, task, slot, and opaque binding."
+    expected_message: "Use the same Guided or explicit YOLO policy on every canonical skill projection."
+    mutation_count: 2
+    final_slot_state: "Evidence-backed answers persist; unresolved product preference remains empty."

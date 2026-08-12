@@ -6,6 +6,10 @@ require "hive/web/environment"
 class Task
   include TaskMutations
 
+  BoundBrainstormQuestion = Struct.new(
+    :round, :n, :text, :binding, :ordinal, keyword_init: true
+  )
+
   ARTIFACT_ORDER = %w[idea.md brainstorm.md plan.md task.md pr.md summary.md artifact.md].freeze
   MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif|webp|webm|mp4)\z/i
   CAPTURE_MANIFEST_V2_SCHEMER = JSONSchemer.schema(
@@ -145,12 +149,20 @@ class Task
   end
 
   def open_questions
-    return [] unless folder
+    return [] unless self["stage"] == "2-brainstorm"
 
-    path = File.join(folder, "brainstorm.md")
-    return [] unless File.file?(path)
-
-    Hive::Bot::BrainstormParser.unanswered_questions(Hive::Bot::BrainstormParser.parse(path))
+    Hive::Commands::Answer.inventory(slug, project: project.name)
+                          .fetch("slots")
+                          .reject { |slot| slot.fetch("answered") }
+                          .map do |slot|
+      BoundBrainstormQuestion.new(
+        round: slot.fetch("round"),
+        n: slot.fetch("question_number"),
+        text: slot.fetch("text"),
+        binding: slot.fetch("binding"),
+        ordinal: slot.fetch("ordinal")
+      )
+    end
   rescue StandardError => e
     Rails.logger.warn("brainstorm.md unparseable for #{slug}: #{e.class}: #{e.message}")
     []

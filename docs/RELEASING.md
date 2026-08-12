@@ -161,8 +161,8 @@ ruby packaging/release_candidate/materialize_baseline_cache.rb \
   "$PWD/tmp/release-candidates/baseline-cache"
 ```
 
-For this release preparation, the source version is 0.7.0 and the reviewed
-latest-stable baseline remains v0.6.9. The candidate must not report
+For this release preparation, the source version is 0.7.1 and the reviewed
+latest-stable baseline remains v0.7.0. The candidate must not report
 `candidate_not_newer`; it may advance to `qa_ready` only after every other
 deterministic blocker clears. The candidate tool never chooses or bumps the
 version.

@@ -1,0 +1,46 @@
+{
+  "info": {
+    "id": "ses_contract_one",
+    "title": "[redacted:session-title:ses_contract_one]",
+    "directory": "[redacted:session-directory:ses_contract_one]",
+    "version": "1.18.16",
+    "time": {"created": 1786500000000, "updated": 1786500000002}
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg_user_one",
+        "sessionID": "ses_contract_one",
+        "role": "user",
+        "time": {"created": 1786500000000},
+        "agent": "build",
+        "model": {"providerID": "anthropic", "modelID": "claude-sonnet-4-5"}
+      },
+      "parts": [
+        {"id": "prt_user_text", "sessionID": "ses_contract_one", "messageID": "msg_user_one", "type": "text", "text": "[redacted:text:prt_user_text]"}
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_assistant_final",
+        "sessionID": "ses_contract_one",
+        "role": "assistant",
+        "time": {"created": 1786500000000, "completed": 1786500000002},
+        "parentID": "msg_user_one",
+        "providerID": "anthropic",
+        "modelID": "claude-sonnet-4-5",
+        "mode": "build",
+        "agent": "build",
+        "path": {"cwd": "[redacted:cwd:msg_assistant_final]", "root": "[redacted:root:msg_assistant_final]"},
+        "cost": 0.0,
+        "tokens": {"total": 7, "input": 5, "output": 2, "reasoning": 0, "cache": {"read": 2, "write": 0}},
+        "finish": "stop"
+      },
+      "parts": [
+        {"id": "prt_start_one", "sessionID": "ses_contract_one", "messageID": "msg_assistant_final", "type": "step-start"},
+        {"id": "prt_text_one", "sessionID": "ses_contract_one", "messageID": "msg_assistant_final", "type": "text", "text": "[redacted:text:prt_text_one]", "time": {"start": 1786500000000, "end": 1786500000001}},
+        {"id": "prt_finish_one", "sessionID": "ses_contract_one", "messageID": "msg_assistant_final", "type": "step-finish", "reason": "stop", "cost": 0.0, "tokens": {"total": 7, "input": 5, "output": 2, "reasoning": 0, "cache": {"read": 2, "write": 0}}}
+      ]
+    }
+  ]
+}

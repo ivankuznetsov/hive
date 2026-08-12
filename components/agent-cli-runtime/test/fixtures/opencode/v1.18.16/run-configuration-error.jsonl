@@ -1,0 +1,1 @@
+{"type":"error","timestamp":1786500000400,"sessionID":"ses_contract_config_error","error":{"name":"UnknownError","data":{"message":"Model not found for configured provider route"}}}

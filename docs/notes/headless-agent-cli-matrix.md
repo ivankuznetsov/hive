@@ -10,6 +10,19 @@ Current provider compatibility facts are owned by the published
 workflow policy. If a CLI changes upstream, update and release that component,
 then update any affected Hive policy here.
 
+> **Superseding evidence (2026-08-12):** The OpenCode observations below were
+> captured against `1.14.25` and remain historical. OpenCode `1.18.16` is the
+> supported contract for the first-class profile: `run` exposes exact
+> `provider/model`, `--variant`, `--format json`, `--dir`, and `--pure`;
+> `OPENCODE_DISABLE_PROJECT_CONFIG` plus redirected XDG/config/data/state homes
+> permit an invocation-owned overlay; `export <session> --sanitize` preserves
+> assistant `providerID`/`modelID` and usage while redacting transcript/path
+> material. Compound Engineering `3.21.4` also ships a native OpenCode plugin
+> that registers its skills directory and slash commands. Committed fixtures
+> under `components/agent-cli-runtime/test/fixtures/opencode/v1.18.16/` pin
+> these shapes. The old exclusion and caveats are retained below as the April
+> decision record; they are not current support guidance.
+
 ## Routed model and effort capabilities
 
 The selected `AgentProfile` validates and renders an effective built-in-stage
@@ -21,6 +34,7 @@ route. `models:` never selects the profile.
 | Codex | yes; `default`/`inherit` omit the flag | `default`, `inherit`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh` | global `--model` / `-c model_reasoning_effort=…` before `exec` or `review` |
 | Grok | yes; `default`/`inherit` omit the flag | `default`, `inherit`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | profile-native `--model` / `--reasoning-effort` flags |
 | Pi | yes; `default`/`inherit` omit the flag | unsupported | profile-native model flag only |
+| OpenCode (`1.18.16+`) | exact nested `provider/model` | faithful provider model variant | `--model provider/model` / `--variant value` on `opencode run` |
 
 An unsupported effective effort fails before launch; Hive does not translate
 or leak another provider's flags. When routing is inactive or no recognized

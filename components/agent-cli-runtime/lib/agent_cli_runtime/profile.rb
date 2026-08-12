@@ -28,7 +28,7 @@ module AgentCliRuntime
                 :cli_capabilities, :declared_capability_support,
                 :credential_environment_keys, :configuration_environment_key,
                 :default_configuration_directory,
-                :permission_policy_required
+                :permission_policy_required, :result_parser
 
     def initialize(name:, bin_default:, headless_flag:, version_flag:,
                    env_bin_override_keys: [], permission_skip_flag: nil,
@@ -41,7 +41,7 @@ module AgentCliRuntime
                    cli_capabilities: {}, raw_cli_arguments_supported: false,
                    credential_environment_keys: [], configuration_environment_key: nil,
                    default_configuration_directory: nil,
-                   permission_policy_required: false)
+                   permission_policy_required: false, result_parser: nil)
       normalized_prompt_style = prompt_style.to_sym
       unless PROMPT_STYLES.include?(normalized_prompt_style)
         raise ArgumentError,
@@ -81,6 +81,7 @@ module AgentCliRuntime
         default_configuration_directory
       )
       @permission_policy_required = permission_policy_required == true
+      @result_parser = result_parser
       @declared_capability_support = build_declared_capability_support
       freeze
     end
@@ -218,6 +219,26 @@ module AgentCliRuntime
       @usage_extractor.call(event)
     rescue StandardError
       nil
+    end
+
+    def parse_run(stdout)
+      unless @result_parser
+        raise UnsupportedCapability,
+              "agent profile #{@name.inspect} has no strict result parser"
+      end
+
+      @result_parser.parse_run(stdout)
+    end
+
+    def normalize_captured_result(captured, requested_route:)
+      unless @result_parser
+        raise UnsupportedCapability,
+              "agent profile #{@name.inspect} has no strict result parser"
+      end
+
+      @result_parser.normalize(
+        captured, requested_route: requested_route, profile: self
+      )
     end
 
     def configuration_directory(home: nil, env: ENV)

@@ -125,6 +125,16 @@ module AgentCliRuntime
       )
     end
 
+    def parse_run(profile, stdout:)
+      Profiles.resolve(profile).parse_run(stdout)
+    end
+
+    def normalize(profile, captured, requested_route:)
+      Profiles.resolve(profile).normalize_captured_result(
+        captured, requested_route:
+      )
+    end
+
     def supported_evidence(profile, capability, arguments = [])
       CapabilityEvidence.new(
         capability: capability,

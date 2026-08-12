@@ -8,12 +8,14 @@ end
 
 require "agent_cli_runtime/redactor"
 require "agent_cli_runtime/usage_extractors"
+require "agent_cli_runtime/opencode/result_parser"
 require "agent_cli_runtime/profile"
 require "agent_cli_runtime/profiles"
 require "agent_cli_runtime/probe"
 require "agent_cli_runtime/runtime"
 require "agent_cli_runtime/opencode/probe"
 require "agent_cli_runtime/opencode/overlay"
+require "agent_cli_runtime/opencode/inspection"
 require "agent_cli_runtime/cli"
 
 module AgentCliRuntime
@@ -37,6 +39,18 @@ module AgentCliRuntime
 
   def observe(profile, result)
     Runtime.observe(profile, result)
+  end
+
+  def parse_run(profile, stdout:)
+    Runtime.parse_run(profile, stdout:)
+  end
+
+  def prepare_inspection(prepared, parsed_run)
+    OpenCode::Inspection.compile(prepared, parsed_run)
+  end
+
+  def normalize(profile, captured, requested_route:)
+    Runtime.normalize(profile, captured, requested_route:)
   end
 
   def probe(profile, home: nil, env: ENV)

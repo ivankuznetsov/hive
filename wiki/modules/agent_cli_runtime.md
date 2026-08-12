@@ -62,6 +62,19 @@ project configuration are disabled. Generic `probe(profile)` and
 the prepared overlay supplies its explicit typed policy and trusted `--auto`
 argument.
 
+OpenCode also uses the profile's additive strict result-parser hook. A caller
+passes captured stdout/stderr plus typed exit, signal, timeout, or cancellation
+evidence. A successful run must contain one consistent session, a recognized
+terminal `step_finish`, and text for that terminal message identity. The caller
+then executes the separately compiled non-model `export SESSION --sanitize`
+inspection under the same overlay. Normalization correlates the exported
+assistant record, records requested and actual nested routes separately, and
+uses its token/cache/reasoning/cost fields without converting absence to zero.
+Timeout, cancellation, authentication failure, configuration failure, generic
+CLI failure, malformed output, and completion remain distinct outcomes.
+Unknown additive event payloads are discarded; only bounded, redacted type
+summaries survive. Legacy profile extraction and observation are unchanged.
+
 The public facade includes `compile`, `prepare!`, `require_capability!`,
 `extract_usage`, `observe`, `probe`, and `probe_all`. It accepts built-in names
 or custom `Profile` objects, preserves `UnknownProvider` as a typed caller

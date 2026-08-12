@@ -116,7 +116,8 @@ module AgentCliRuntime
             requested_route: requested_route,
             configuration_source: source_label,
             probe_result: probe_result,
-            cleanup: cleanup
+            cleanup: cleanup,
+            executable: executable
           )
         rescue Exception
           cleanup.call

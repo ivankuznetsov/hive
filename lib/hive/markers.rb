@@ -139,7 +139,7 @@ module Hive
         return false unless marker.name.to_s == expected_name.to_s.downcase
 
         expected = match_attrs.to_h.transform_keys(&:to_s)
-        return false unless expected.all? { |key, value| marker.attrs[key].to_s == value.to_s }
+        return false unless Hive::Recovery.marker_attrs_match?(marker.attrs, expected)
 
         if purge_history
           remove_all_markers(state_file_path)

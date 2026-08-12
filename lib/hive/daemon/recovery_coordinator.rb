@@ -89,8 +89,7 @@ module Hive
         def observation_token(row)
           attrs = row_value(row, :marker_attrs)
           attrs = row_value(row, :attrs) unless attrs.is_a?(Hash)
-          attrs = attrs.is_a?(Hash) ? attrs.to_h.transform_keys(&:to_s) : {}
-          attrs = attrs.keys.sort.to_h { |key| [ key, attrs[key] ] }
+          attrs = attrs.is_a?(Hash) ? Hive::Recovery.canonical_marker_attrs(attrs) : {}
           observed_at = row_value(row, :state_file_mtime) ||
                         row_value(row, :observation_mtime) ||
                         row_value(row, :mtime)
@@ -313,7 +312,7 @@ module Hive
               row, locked_task, expected_generation, generation.task_generation
             )
           end
-          attrs = current.attrs.to_h.transform_keys(&:to_s)
+          attrs = Hive::Recovery.canonical_marker_attrs(current.attrs)
           marker_id = marker_identity(current)
           next_eligible_at = assessment[:retry_at].utc.iso8601(6)
           recovery = {
@@ -985,13 +984,12 @@ module Hive
       end
 
       def marker_generation(marker)
-        attrs = marker.attrs.to_h.transform_keys(&:to_s)
+        attrs = Hive::Recovery.canonical_marker_attrs(marker.attrs)
         return nil if attrs["marker_id"].to_s.empty?
 
-        canonical = attrs.keys.sort.to_h { |key| [ key, attrs[key] ] }
         ::Digest::SHA256.hexdigest(JSON.generate(
           "name" => marker.name.to_s,
-          "attrs" => canonical
+          "attrs" => attrs
         ))
       end
 
@@ -1146,9 +1144,7 @@ module Hive
       end
 
       def expected_attrs_match?(marker, expected)
-        expected.to_h.all? do |key, expected_value|
-          marker.attrs[key.to_s].to_s == expected_value.to_s
-        end
+        Hive::Recovery.marker_attrs_match?(marker.attrs, expected)
       end
 
       def retry_argv(row)

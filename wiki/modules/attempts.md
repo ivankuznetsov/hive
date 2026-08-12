@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-08-11
+updated: 2026-08-12
 tags: [attempts, ownership, leases, daemon, recovery, bounded-storage]
 ---
 
@@ -206,6 +206,9 @@ directory revalidates the winning entry before use.
 Lost-outcome and dirty-state directories receive the same containment check.
 Corrupt or replacement links therefore fail closed and never redirect attempt
 state or permission changes outside `$HIVE_HOME/attempts/v4`.
+The descriptor adapter selects Linux `O_DIRECTORY` by CPU architecture:
+x86_64 uses `0200000`, while aarch64 uses `040000`. This keeps the same
+fail-closed managed-directory custody on both supported Linux architectures.
 
 Record construction/readers and store transitions all use the same
 non-mutating `Hive::StringifyKeys` transform as the task journal and projection.

@@ -425,7 +425,113 @@ class TaskTest < ActiveSupport::TestCase
     assert_equal Task::DIFF_TIMEOUT_SEC, options.fetch(:timeout_sec)
   end
 
+  test "plan review details expose only current content-addressed audit artifacts" do
+    root = Pathname(Dir.mktmpdir("hive-web-plan-review"))
+    folder = root.join("task")
+    folder.mkpath
+    store, projection = seed_plan_review_store(folder)
+    summary = projection.summary.merge(
+      "freshness" => { "status" => "current", "reason" => nil }
+    )
+    task = Task.new(
+      project: Project.new("name" => "alpha", "path" => root.to_s),
+      attributes: {
+        "slug" => "reviewed-plan-260812-abcd", "folder" => folder.to_s,
+        "stage" => "3-plan", "workflow" => "coding", "plan_review" => summary
+      }
+    )
+
+    details = task.plan_review_details
+
+    assert_equal projection.record.review_id, details.dig("summary", "review_id")
+    assert_equal [ "manual" ], details.fetch("findings").map { |row| row.fetch("classification") }
+    assert_equal [ "adversarial" ], details.fetch("coverage").map { |row| row.fetch("name") }
+    assert_equal [ "primary_result" ], details.fetch("artifacts").map { |row| row.fetch("name") }
+    refute_includes details.dig("artifacts", 0, "content"), "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    assert store.current_validated
+  ensure
+    FileUtils.remove_entry(root) if root&.exist?
+  end
+
+  test "plan review details fail inert when a selected artifact is changed" do
+    root = Pathname(Dir.mktmpdir("hive-web-plan-review-stale"))
+    folder = root.join("task")
+    folder.mkpath
+    store, projection = seed_plan_review_store(folder)
+    summary = projection.summary.merge(
+      "freshness" => { "status" => "current", "reason" => nil }
+    )
+    reference = projection.record["artifacts"].fetch("primary_result")
+    File.write(File.join(store.root, reference.fetch("path")), "tampered\n")
+    task = Task.new(
+      project: Project.new("name" => "alpha", "path" => root.to_s),
+      attributes: {
+        "slug" => "reviewed-plan-260812-abcd", "folder" => folder.to_s,
+        "stage" => "3-plan", "workflow" => "coding", "plan_review" => summary
+      }
+    )
+
+    details = task.plan_review_details
+
+    assert_equal "invalid", details.dig("summary", "freshness", "status")
+    refute details.dig("summary", "execution_allowed")
+    assert_empty details.fetch("artifacts")
+  ensure
+    FileUtils.remove_entry(root) if root&.exist?
+  end
+
   private
+
+  def seed_plan_review_store(folder)
+    store = Hive::PlanReview::Store.new(task_folder: folder.to_s)
+    manifest = Hive::PlanReview::Record.new(
+      "schema" => "hive-plan-review", "schema_version" => 1, "kind" => "manifest",
+      "review_id" => "pr-#{'a' * 64}", "prior_review_id" => nil,
+      "task_id" => "task-1", "task_generation" => "generation-1",
+      "plan_digest" => "b" * 64, "policy_fingerprint" => "c" * 64,
+      "computed_level" => "mandatory", "effective_level" => "mandatory",
+      "created_at" => "2026-08-12T12:00:00Z"
+    )
+    store.create_review!(manifest)
+    result_ref = store.write_review_artifact!(
+      review_id: manifest.review_id, basename: "result.json",
+      content: { "finding" => "reviewed", "credential" => "ghp_abcdefghijklmnopqrstuvwxyz0123456789" },
+      json: true
+    )
+    input_ref = store.write_review_artifact!(
+      review_id: manifest.review_id, basename: "input-plan.md", content: "# Private input\n"
+    )
+    finding = Hive::PlanReview::Finding.new(
+      "source" => "whole_document", "classification" => "manual", "risk" => "high",
+      "title" => "Choose a rollback boundary", "description" => "Operator input is required.",
+      "evidence" => {
+        "path" => "plan.md", "start_line" => 2, "end_line" => 3,
+        "anchor_digest" => "d" * 64
+      },
+      "lifecycle" => "open", "display_order" => 1
+    )
+    coverage = {
+      "name" => "adversarial", "required" => true, "status" => "completed",
+      "fingerprint" => Hive::PlanReview::Identity.coverage(
+        review_id: manifest.review_id, name: "adversarial",
+        policy_fingerprint: manifest.policy_fingerprint
+      )
+    }
+    record = Hive::PlanReview::Record.new(
+      manifest.to_h.merge(
+        "kind" => "projection", "version" => 1, "candidate_plan_digest" => nil,
+        "state" => "awaiting_decision", "outcome" => nil, "attempt_ids" => [],
+        "current_attempt_id" => nil, "coverage" => [ coverage ],
+        "findings" => [ finding.to_h ], "decisions" => [], "routes" => [],
+        "artifacts" => { "primary_result" => result_ref, "primary_input" => input_ref },
+        "blockers" => [ { "owner" => "operator", "reason" => "manual finding" } ],
+        "required_action" => "answer manual finding", "degradation_reason" => nil,
+        "execution_allowed" => false, "updated_at" => "2026-08-12T12:01:00Z"
+      )
+    )
+    store.publish_current!(record, expected_version: nil)
+    [ store, Hive::PlanReview::Projection.new(record) ]
+  end
 
   def valid_v2_capture_manifest(image, task:)
     {

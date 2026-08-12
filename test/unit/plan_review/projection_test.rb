@@ -38,6 +38,9 @@ class PlanReviewProjectionTest < Minitest::Test
     assert_equal "none", summary.fetch("blocker_owner")
     assert_nil summary.fetch("blocker_reason")
     assert_nil summary.fetch("retry_at")
+    assert_equal Hive::PlanReview::Projection.new(
+      Hive::PlanReview::Record.new(data)
+    ).observation_digest, summary.fetch("observation_digest")
     assert_equal "unknown", summary.dig("freshness", "status")
   end
 
@@ -48,6 +51,7 @@ class PlanReviewProjectionTest < Minitest::Test
     )
 
     assert_nil summary.fetch("review_id")
+    assert_nil summary.fetch("observation_digest")
     assert_equal 0, summary.dig("coverage_counts", "completed")
     assert_equal 0, summary.dig("finding_counts", "open_manual")
     assert_equal "not_initialized", summary.dig("freshness", "status")

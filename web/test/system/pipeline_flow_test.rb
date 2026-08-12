@@ -156,6 +156,33 @@ class PipelineFlowTest < ApplicationSystemTestCase
            "approve must move the task into 2-brainstorm"
   end
 
+  test "plan review detail offers an exact decision but no force bypass" do
+    slug = create_task!(@project, "Review decision probe")
+    source = stage_dir(@project, "1-inbox").join(slug)
+    destination = stage_dir(@project, "3-plan").join(slug)
+    destination.dirname.mkpath
+    FileUtils.mv(source, destination)
+    destination.join("plan.md").write("# Plan\n\n<!-- WAITING -->\n")
+
+    details = system_plan_review_details
+    with_replaced_task_method(:plan_review_details, -> { details }) do
+      sign_in!
+      visit "/tasks/#{@project}/#{slug}"
+
+      assert_selector "section.plan-review[data-review-state='awaiting_decision']", wait: 5
+      within "section.plan-review" do
+        assert_text "mandatory"
+        assert_text "Choose the rollback boundary"
+        assert_field "Answer this finding"
+        assert_button "Record answer"
+        assert_selector "input[name=expected_artifact_digest][value='#{'e' * 64}']",
+                        visible: :all
+      end
+      find(".advanced summary").click
+      assert_no_button "Force approve", wait: 0
+    end
+  end
+
   test "a failed Turbo submission keeps the draft and staged attachment" do
     sign_in!
     compose_idea "Keep this failed draft"
@@ -705,6 +732,56 @@ class PipelineFlowTest < ApplicationSystemTestCase
   end
 
   private
+
+  def system_plan_review_details
+    summary = {
+      "applicable" => true, "review_id" => "pr-#{'a' * 64}", "version" => 2,
+      "observation_digest" => "e" * 64, "task_generation" => "generation-1",
+      "plan_digest" => "b" * 64, "policy_fingerprint" => "c" * 64,
+      "computed_level" => "mandatory", "effective_level" => "mandatory",
+      "state" => "awaiting_decision", "outcome" => nil, "degraded" => false,
+      "degradation_reason" => nil, "attempt_count" => 2,
+      "current_attempt_id" => "pra-#{'d' * 64}",
+      "coverage_counts" => {
+        "requested" => 0, "completed" => 2, "failed" => 0,
+        "unsupported" => 0, "waived" => 0
+      },
+      "finding_counts" => {
+        "open" => 1, "approved" => 0, "answered" => 0, "incorporated" => 0,
+        "verified" => 0, "resolved" => 0, "waived" => 0, "total" => 1,
+        "open_gated" => 0, "open_manual" => 1, "fyi" => 0
+      },
+      "blockers" => [ { "owner" => "operator", "reason" => "manual finding" } ],
+      "blocker_owner" => "operator", "blocker_reason" => "manual finding",
+      "required_action" => "answer manual plan finding", "retry_at" => nil,
+      "routes" => [], "artifacts" => {},
+      "freshness" => { "status" => "current", "reason" => nil },
+      "execution_allowed" => false
+    }
+    finding = {
+      "fingerprint" => "prf-#{'f' * 64}", "source" => "whole_document",
+      "classification" => "manual", "risk" => "high",
+      "title" => "Choose the rollback boundary",
+      "description" => "The plan needs an operator answer.",
+      "evidence" => {
+        "path" => "plan.md", "start_line" => 1, "end_line" => 1,
+        "anchor_digest" => "1" * 64
+      },
+      "lifecycle" => "open", "display_order" => 1
+    }
+    {
+      "summary" => summary, "coverage" => [], "findings" => [ finding ],
+      "routes" => [], "artifacts" => []
+    }
+  end
+
+  def with_replaced_task_method(name, replacement)
+    original = Task.instance_method(name)
+    Task.define_method(name, replacement)
+    yield
+  ensure
+    Task.define_method(name, original)
+  end
 
   # Turbo refreshes the project rail and composer select while this test is
   # using them. Query and click in one JavaScript turn so a refresh cannot

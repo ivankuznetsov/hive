@@ -675,7 +675,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "applicable", "review_id", "version", "task_generation", "plan_digest",
+        "applicable", "review_id", "version", "observation_digest", "task_generation", "plan_digest",
         "policy_fingerprint", "computed_level", "effective_level", "state", "outcome",
         "degraded", "degradation_reason", "attempt_count", "current_attempt_id",
         "coverage_counts", "finding_counts", "blockers", "blocker_owner", "blocker_reason",
@@ -685,6 +685,7 @@
         "applicable": { "const": true },
         "review_id": { "type": ["string", "null"], "pattern": "^pr-[0-9a-f]{64}$" },
         "version": { "type": ["integer", "null"], "minimum": 1 },
+        "observation_digest": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "task_generation": { "type": ["string", "integer", "null"] },
         "plan_digest": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "policy_fingerprint": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },

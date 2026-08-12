@@ -955,3 +955,99 @@ pre {
   font-size: 0.85rem;
   word-break: break-word;
 }
+
+/* ---- Plan critique evidence and exact-scoped operator actions ---- */
+
+.plan-review {
+  margin: 28px 0;
+  padding: 20px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.plan-review h2, .plan-review h3 { margin-top: 0; }
+.plan-review h3 { margin-top: 24px; }
+.plan-review-heading,
+.plan-review-finding-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: start;
+}
+.plan-review-heading p { margin: 4px 0 0; }
+.plan-review-clearance {
+  flex: none;
+  padding: 5px 9px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.plan-review-clearance.is-allowed {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+}
+.plan-review-required-action { margin-bottom: 18px; }
+.plan-review-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px 18px;
+  margin: 0;
+}
+.plan-review-summary div {
+  min-width: 0;
+  padding: 10px 12px;
+  background: var(--bg-sunken);
+  border-radius: var(--radius);
+}
+.plan-review-summary dt {
+  color: var(--ink-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.plan-review-summary dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+.plan-review-table-wrap { overflow-x: auto; }
+.plan-review-table { width: 100%; }
+.plan-review-table th, .plan-review-table td { vertical-align: top; }
+.plan-review-action-row td { background: var(--bg-sunken); }
+.plan-review-findings { padding-left: 24px; }
+.plan-review-findings > li {
+  padding: 14px 0 18px;
+  border-bottom: 1px solid var(--line);
+}
+.plan-review-finding-heading span {
+  flex: none;
+  color: var(--ink-muted);
+  font-size: 0.82rem;
+}
+.plan-review-inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+.plan-review-inline-form label { width: 100%; font-size: 0.85rem; }
+.plan-review-inline-form input[type="text"],
+.plan-review-inline-form textarea { flex: 1 1 320px; }
+.plan-review-inline-form textarea { min-height: 90px; }
+.plan-review-global-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+  margin-top: 22px;
+}
+.plan-review-global-actions form {
+  padding: 12px;
+  background: var(--bg-sunken);
+  border-radius: var(--radius);
+}
+.plan-review-artifact-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-bottom: 14px;
+}
+.plan-review-artifact { scroll-margin-top: 20px; }

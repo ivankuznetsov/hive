@@ -24,6 +24,9 @@
       error: @status_error %>
 <%= render "tasks/state" %>
 
+<%= render "tasks/plan_review", plan_review: @plan_review, task: @task,
+      status_fresh: @status_fresh, task_source: @task_source if @plan_review %>
+
 <% if (closure = @task["closure"]).is_a?(Hash) && closure["schema"] == Hive::TaskClosure::SCHEMA %>
   <section class="task-closure" aria-labelledby="task-closure-title">
     <h2 id="task-closure-title">Closure evidence</h2>
@@ -98,7 +101,7 @@
           disabled: !@status_fresh, aria: { disabled: (!@status_fresh).to_s },
           data: { turbo_confirm: "Send #{@task["slug"]} back a stage?" } %>
   </div>
-  <% unless @task.passable? %>
+  <% unless @task.passable? || (@task["stage"] == "3-plan" && @task.plan_review) %>
     <div class="advanced-item">
       <div>
         <p class="advanced-title">Force approve</p>

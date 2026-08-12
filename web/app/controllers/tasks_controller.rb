@@ -4,6 +4,7 @@ class TasksController < Tasks::BaseController
     @media = @task.media_manifest
     @log = @task.latest_log
     @questions = @task.open_questions
+    @plan_review = @task.plan_review_details
     @daemon_enabled = @project.daemon_enabled?
     @daemon_running = Daemon.new.running?
   end

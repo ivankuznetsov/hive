@@ -41,6 +41,7 @@ module Hive
           "applicable" => true,
           "review_id" => record.review_id,
           "version" => record.version,
+          "observation_digest" => observation_digest,
           "task_generation" => record.task_generation,
           "plan_digest" => record.plan_digest,
           "policy_fingerprint" => record.policy_fingerprint,
@@ -74,6 +75,7 @@ module Hive
 
         {
           "applicable" => true, "review_id" => nil, "version" => nil,
+          "observation_digest" => nil,
           "task_generation" => nil, "plan_digest" => nil, "policy_fingerprint" => nil,
           "computed_level" => nil, "effective_level" => nil, "state" => state.to_s,
           "outcome" => nil, "degraded" => false, "degradation_reason" => nil,

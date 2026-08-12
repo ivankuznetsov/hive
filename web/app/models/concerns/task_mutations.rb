@@ -3,9 +3,17 @@ require "hive/bot/dispatch_request_writer"
 require "hive/commands/answer"
 require "hive/commands/approve"
 require "hive/commands/drop"
+require "hive/config"
 require "hive/daemon/dispatch_request_queue"
+require "hive/git_ops"
+require "hive/lock"
+require "hive/plan_review/automation"
+require "hive/plan_review/decision_service"
+require "hive/plan_review/projection"
+require "hive/plan_review/transition_guard"
 require "hive/recovery/api"
 require "hive/stages"
+require "hive/task"
 require "hive/task_action"
 require "hive/task_closure"
 require "hive/task_resolver"
@@ -142,7 +150,62 @@ module TaskMutations
     { ok: true, answered: answered }
   end
 
+  def plan_review_action!(action:, review_id:, task_generation:, policy_fingerprint:,
+                          expected_artifact_digest:, target_fingerprint: nil,
+                          answer: nil, coverage: nil, level: nil, reason: nil,
+                          operator:, authorized:, service_factory: nil, resumer: nil)
+    native = Hive::TaskResolver.new(folder, project_filter: project.name).resolve
+    assert_current_plan_review!(native)
+    normalized_action = action.to_s.tr("-", "_")
+    service_factory ||= ->(task) { Hive::PlanReview::DecisionService.new(task:) }
+    result = service_factory.call(native).apply(
+      action: normalized_action, review_id:, task_generation: task_generation.to_s,
+      policy_fingerprint:, expected_artifact_digest:, target_fingerprint:,
+      value: plan_review_action_value(normalized_action, answer:, coverage:, level:),
+      reason:, origin: "web", operator:, authorized:
+    )
+    projection = if result.applied
+      (resumer || method(:resume_plan_review_after_decision!)).call(native, normalized_action)
+    else
+      result.projection
+    end
+    { applied: result.applied, decision: result.decision, projection: }
+  end
+
   private
+
+  def assert_current_plan_review!(task)
+    projection = Hive::PlanReview::Projection.load(task_folder: task.folder)
+    config = Hive::Config.load(task.project_root)
+    freshness = Hive::PlanReview::TransitionGuard.freshness(
+      task:, projection:, config:
+    )
+    return if freshness.fetch("status") == "current"
+
+    raise Hive::PlanReview::StaleDecision,
+          "plan review changed; refresh the current observation"
+  end
+
+  def plan_review_action_value(action, answer:, coverage:, level:)
+    case action
+    when "answer_finding" then { "answer" => answer }
+    when "waive_coverage" then { "coverage" => coverage }
+    when "downgrade_level", "raise_level" then { "level" => level }
+    else {}
+    end
+  end
+
+  def resume_plan_review_after_decision!(task, action)
+    projection = nil
+    Hive::Lock.with_commit_lock(task.hive_state_path) do
+      projection = Hive::PlanReview::Automation.run!(task: Hive::Task.new(task.folder))
+      Hive::GitOps.new(task.project_root).hive_commit(
+        stage_name: "#{task.stage_index}-#{task.stage_name}", slug: task.slug,
+        action: "resume plan review after #{action} from web"
+      )
+    end
+    projection
+  end
 
   def native_task_for_closure
     Hive::TaskResolver.new(folder, project_filter: project.name).resolve

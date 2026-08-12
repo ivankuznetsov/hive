@@ -1,6 +1,8 @@
 require "digest"
 require "json_schemer"
 require "pathname"
+require "hive/plan_review/projection"
+require "hive/plan_review/store"
 require "hive/web/environment"
 
 class Task
@@ -35,6 +37,7 @@ class Task
     "8" => "ready_to_finalize"
   }.freeze
   PASSABLE_MARKERS = Hive::Commands::Approve::VALID_TERMINAL_MARKERS.map(&:to_s).freeze
+  PLAN_REVIEW_ARTIFACT_KEYS = /\A(?:policy|candidate_plan|resolution|(?:primary|adversarial|verification)_(?:result|coverage|route)|decision_prd-[0-9a-f]{64})\z/
 
   attr_reader :project
 
@@ -98,6 +101,58 @@ class Task
       path = File.join(folder, name)
       [ name, File.read(path) ] if File.file?(path)
     end
+  end
+
+  def plan_review
+    value = self["plan_review"]
+    value.is_a?(Hash) && value["applicable"] == true ? value : nil
+  end
+
+  # Status owns the summary. The task-local store owns detailed evidence, and
+  # this accessor will read only the content-addressed artifacts selected by
+  # the exact status observation. There is deliberately no caller-supplied
+  # path, so Web cannot become an arbitrary task-folder file reader.
+  def plan_review_details
+    summary = plan_review
+    return nil unless summary
+
+    details = {
+      "summary" => summary, "coverage" => [], "findings" => [],
+      "routes" => Array(summary["routes"]), "artifacts" => []
+    }
+    return details unless folder && summary["review_id"]
+
+    review_root = File.join(folder, Hive::PlanReview::Store::ROOT_BASENAME)
+    root_status = File.lstat(review_root)
+    unless root_status.directory? && !root_status.symlink?
+      raise Hive::PlanReview::InvalidRecord, "plan review root is not a plain directory"
+    end
+    store = Hive::PlanReview::Store.new(task_folder: folder)
+    current = store.current_validated
+    projection = Hive::PlanReview::Projection.new(current)
+    unless current.review_id == summary["review_id"] && current.version == summary["version"] &&
+           projection.observation_digest == summary["observation_digest"]
+      raise Hive::PlanReview::StaleObservation,
+            "task status and plan review evidence identify different observations"
+    end
+
+    details.merge(
+      "coverage" => current["coverage"],
+      "findings" => current["findings"].sort_by { |finding| finding["display_order"] },
+      "routes" => current["routes"],
+      "artifacts" => safe_plan_review_artifacts(store, current["artifacts"])
+    )
+  rescue Hive::PlanReview::Error, JSON::ParserError, SystemCallError, IOError => error
+    Rails.logger.warn("plan review evidence unreadable for #{slug}: #{error.class}: #{error.message}")
+    {
+      "summary" => summary.merge(
+        "freshness" => { "status" => "invalid", "reason" => "plan review evidence changed" },
+        "blocker_owner" => "hive", "blocker_reason" => "invalid_plan_review",
+        "required_action" => "refresh plan review state and retry",
+        "execution_allowed" => false
+      ),
+      "coverage" => [], "findings" => [], "routes" => [], "artifacts" => []
+    }
   end
 
   def media_manifest
@@ -278,6 +333,20 @@ class Task
   end
 
   private
+
+  def safe_plan_review_artifacts(store, references)
+    references.sort.filter_map do |name, reference|
+      next unless name.match?(PLAN_REVIEW_ARTIFACT_KEYS)
+
+      content = store.read_reference(reference)
+      {
+        "name" => name, "path" => reference.fetch("path"),
+        "sha256" => reference.fetch("sha256"), "bytes" => reference.fetch("bytes"),
+        "format" => name == "candidate_plan" ? "markdown" : "json",
+        "content" => content.force_encoding(Encoding::UTF_8).scrub("?")
+      }
+    end
+  end
 
   def recovery_intervention_required?
     Hive::Recovery.intervention_required?(

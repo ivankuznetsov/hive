@@ -747,6 +747,7 @@ module Hive
       #     more general InvalidTaskPath case (when added) would shadow it.
       def error_kind_for(error)
         case error
+        when Hive::PlanReview::TransitionBlocked then Hive::Schemas::RunErrorKind::PLAN_REVIEW_BLOCKED
         when Hive::WrongStage         then Hive::Schemas::RunErrorKind::WRONG_STAGE
         when Hive::ConcurrentRunError then Hive::Schemas::RunErrorKind::CONCURRENT_RUN
         when Hive::TaskInErrorState   then Hive::Schemas::RunErrorKind::TASK_IN_ERROR

@@ -424,6 +424,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       operational_snapshot: nil, module_runtime: nil,
                       module_migration_coordinator: nil,
                       recovery_coordinator: nil,
+                      plan_approval: Hive::Daemon::PlanApproval,
                       runtime_ready_callback: nil)
     config = {
       "daemon" => {
@@ -477,6 +478,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       module_runtime: module_runtime,
       module_migration_coordinator: module_migration_coordinator,
       recovery_coordinator: recovery_coordinator,
+      plan_approval: plan_approval,
       runtime_ready_callback: runtime_ready_callback
     )
     # Generic dispatcher tests exercise routing, not the detached production
@@ -2978,16 +2980,23 @@ class HiveDaemonDispatcherTest < Minitest::Test
       state_file = File.join(dir, "plan.md")
       File.write(state_file, "# plan\n\n<!-- WAITING -->\n")
 
-      rows = [ row(stage: "3-plan", action: "needs_input", marker: "waiting",
-                   command: "hive plan s1 --from 3-plan",
+      rows = [ row(stage: "3-plan", action: "ready_to_develop", marker: "waiting",
+                   command: "hive develop s1 --from 3-plan",
                    mtime: T0 - 600, state_file: state_file) ]
-      dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+      plan_approval = Object.new
+      plan_approval.define_singleton_method(:prepare) do |command, path|
+        Hive::Daemon::PlanApproval.prepare(
+          command, path, clearance_checker: -> { true }
+        )
+      end
+      dispatcher, sup, ctrl, logger, _mw = make_dispatcher(
+        rows: rows, plan_approval: plan_approval
+      )
       dispatcher.tick(now: T0)
 
       # Dispatched the rewritten command (develop, not plan).
       assert_equal 1, sup.spawned.size
-      assert_equal "hive develop s1 --from 3-plan", sup.spawned.first[:command],
-                   "PlanApproval must rewrite `hive plan ...` to `hive develop ...`"
+      assert_equal "hive develop s1 --from 3-plan", sup.spawned.first[:command]
 
       # Marker flipped to :complete on disk so `hive develop --from
       # 3-plan` will be accepted by VALID_TERMINAL_MARKERS on the
@@ -3021,10 +3030,18 @@ class HiveDaemonDispatcherTest < Minitest::Test
       state_file = File.join(dir, "plan.md")
       File.write(state_file, "# plan\n\n<!-- ERROR reason=plan_failed -->\n")
 
-      rows = [ row(stage: "3-plan", action: "needs_input", marker: "waiting",
-                   command: "hive plan s1 --from 3-plan",
+      rows = [ row(stage: "3-plan", action: "ready_to_develop", marker: "waiting",
+                   command: "hive develop s1 --from 3-plan",
                    mtime: T0 - 600, state_file: state_file) ]
-      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+      plan_approval = Object.new
+      plan_approval.define_singleton_method(:prepare) do |command, path|
+        Hive::Daemon::PlanApproval.prepare(
+          command, path, clearance_checker: -> { true }
+        )
+      end
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: rows, plan_approval: plan_approval
+      )
       dispatcher.tick(now: T0)
 
       assert_equal 0, sup.spawned.size, "must not spawn when marker isn't :waiting/:complete"
@@ -3046,10 +3063,18 @@ class HiveDaemonDispatcherTest < Minitest::Test
       state_file = File.join(dir, "plan.md")
       File.write(state_file, "# plan\n\n<!-- WAITING -->\n")
 
-      rows = [ row(stage: "3-plan", action: "needs_input", marker: "waiting",
+      rows = [ row(stage: "3-plan", action: "ready_to_develop", marker: "waiting",
                    command: "hive review s1 --from 3-plan",
                    mtime: T0 - 600, state_file: state_file) ]
-      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+      plan_approval = Object.new
+      plan_approval.define_singleton_method(:prepare) do |command, path|
+        Hive::Daemon::PlanApproval.prepare(
+          command, path, clearance_checker: -> { true }
+        )
+      end
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: rows, plan_approval: plan_approval
+      )
       dispatcher.tick(now: T0)
 
       assert_equal 0, sup.spawned.size
@@ -3062,6 +3087,25 @@ class HiveDaemonDispatcherTest < Minitest::Test
       assert_equal :waiting, Hive::Markers.current(state_file).name,
                    "malformed command must not flip the marker"
     end
+  end
+
+  def test_plan_review_automation_dispatches_without_marker_approval
+    rows = [ row(
+      stage: "3-plan", action: "plan_reviewing", marker: "waiting",
+      command: "hive plan-review-run s1", mtime: T0 - 600
+    ) ]
+    plan_approval = Object.new
+    plan_approval.define_singleton_method(:prepare) { |*| flunk "must not approve" }
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+      rows: rows, plan_approval: plan_approval
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, sup.spawned.length
+    assert_equal "hive plan-review-run s1", sup.spawned.first.fetch(:command)
+    event = logger.events.find { |name, _attrs| name == :dispatched }
+    assert_equal "plan_review", event.last.fetch(:trigger)
   end
 
   def test_edit_action_after_baseline_user_edit_dispatches

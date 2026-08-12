@@ -24,7 +24,18 @@ module Hive
     class UnauthorizedAction < Error
       def exit_code = Hive::ExitCodes::USAGE
     end
-    class TransitionBlocked < Error; end
+    class TransitionBlocked < Hive::WrongStage
+      attr_reader :review_id, :review_state, :required_action, :blockers
+
+      def initialize(message, review_id: nil, review_state: nil, required_action: nil,
+                     blockers: [], **stage_context)
+        super(message, **stage_context)
+        @review_id = review_id
+        @review_state = review_state
+        @required_action = required_action
+        @blockers = Array(blockers).freeze
+      end
+    end
 
     module_function
 

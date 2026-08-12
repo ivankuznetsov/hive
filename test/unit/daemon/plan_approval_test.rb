@@ -65,7 +65,9 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
 
   def test_prepare_flips_waiting_marker_to_complete_and_returns_develop_command
     with_state_file("<!-- WAITING -->") do |path|
-      cmd = PA.prepare("hive plan slug --from 3-plan", path)
+      cmd = PA.prepare(
+        "hive plan slug --from 3-plan", path, clearance_checker: -> { true }
+      )
       assert_equal "hive develop slug --from 3-plan", cmd
       assert_equal :complete, Hive::Markers.current(path).name
     end
@@ -77,7 +79,9 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
     # and dispatch. The dispatch is still valid; we just don't
     # re-flip.
     with_state_file("<!-- COMPLETE -->") do |path|
-      cmd = PA.prepare("hive plan slug --from 3-plan", path)
+      cmd = PA.prepare(
+        "hive plan slug --from 3-plan", path, clearance_checker: -> { true }
+      )
       assert_equal "hive develop slug --from 3-plan", cmd
       assert_equal :complete, Hive::Markers.current(path).name
     end
@@ -89,7 +93,10 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
     # return that develop command (no-op on the marker), making the :complete
     # branch reachable instead of raising on the develop verb.
     with_state_file("<!-- COMPLETE -->") do |path|
-      cmd = PA.prepare("hive develop slug --from 3-plan --project hive", path)
+      cmd = PA.prepare(
+        "hive develop slug --from 3-plan --project hive", path,
+        clearance_checker: -> { true }
+      )
       assert_equal "hive develop slug --from 3-plan --project hive", cmd
       assert_equal :complete, Hive::Markers.current(path).name
     end
@@ -98,7 +105,9 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
   def test_prepare_raises_not_approvable_for_error_marker
     with_state_file("<!-- ERROR reason=plan_failed -->") do |path|
       err = assert_raises(PA::NotApprovable) do
-        PA.prepare("hive plan slug --from 3-plan", path)
+        PA.prepare(
+          "hive plan slug --from 3-plan", path, clearance_checker: -> { true }
+        )
       end
       assert_match(/marker=:error/, err.message)
       # Marker NOT touched.
@@ -109,7 +118,9 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
   def test_prepare_raises_not_approvable_for_agent_working_marker
     with_state_file("<!-- AGENT_WORKING pid=12345 -->") do |path|
       assert_raises(PA::NotApprovable) do
-        PA.prepare("hive plan slug --from 3-plan", path)
+        PA.prepare(
+          "hive plan slug --from 3-plan", path, clearance_checker: -> { true }
+        )
       end
     end
   end
@@ -127,6 +138,19 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
       end
       assert_equal :waiting, Hive::Markers.current(path).name,
                    "command validation must happen before marker flip"
+    end
+  end
+
+  def test_prepare_checks_clearance_before_flipping_marker
+    with_state_file("<!-- WAITING -->") do |path|
+      error = assert_raises(PA::NotApprovable) do
+        PA.prepare(
+          "hive plan slug --from 3-plan", path, clearance_checker: -> { false }
+        )
+      end
+
+      assert_includes error.message, "has not authorized execution"
+      assert_equal :waiting, Hive::Markers.current(path).name
     end
   end
 end

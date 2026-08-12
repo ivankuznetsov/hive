@@ -44,6 +44,35 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_checks_plan_review_before_identity_or_worktree_initialization
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      identity_calls = 0
+      guard = lambda do |**|
+        raise Hive::PlanReview::TransitionBlocked, "review blocked"
+      end
+
+      with_replaced_singleton_method(
+        Hive::PlanReview::TransitionGuard, :validate_execute_entry!, guard
+      ) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :capture_implementation_identity, lambda { |*|
+            identity_calls += 1
+          }
+        ) do
+          assert_raises(Hive::PlanReview::TransitionBlocked) do
+            Hive::Stages::Execute.run!(task, "worktree_root" => File.join(dir, "worktrees"))
+          end
+        end
+      end
+
+      assert_equal 0, identity_calls
+      refute File.exist?(task.worktree_yml_path)
+      refute Dir.exist?(File.join(dir, "worktrees", task.slug))
+    end
+  end
+
   def test_apply_execute_outcome_publishes_projection_before_compatibility_marker
     with_tmp_git_repo do |worktree|
       with_tmp_dir do |dir|

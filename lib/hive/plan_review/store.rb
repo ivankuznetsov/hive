@@ -107,6 +107,17 @@ module Hive
         raise InvalidRecord, "plan review current projection is invalid JSON: #{e.message}"
       end
 
+      # Authority-bearing readers use this accessor so a syntactically valid
+      # current.json cannot authorize execution while one of the artifacts it
+      # names has been removed, replaced, or edited in place.
+      def current_validated(optional: false)
+        record = current(optional:)
+        return nil unless record
+
+        record["artifacts"].each_value { |reference| validate_reference!(reference) }
+        record
+      end
+
       def read_reference(reference)
         validate_reference!(reference)
         path = reference_path(reference.fetch("path"))

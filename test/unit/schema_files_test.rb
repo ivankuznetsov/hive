@@ -382,7 +382,7 @@ class SchemaFilesTest < Minitest::Test
 
     producer_kinds = %w[
       ambiguous_slug destination_collision final_stage
-      wrong_stage rollback_failed invalid_task_path dependency_wait
+      plan_review_blocked wrong_stage rollback_failed invalid_task_path dependency_wait
       admission_error error
     ].sort
 
@@ -1066,6 +1066,8 @@ class SchemaFilesTest < Minitest::Test
       Hive::Schemas::RunErrorKind::CONCURRENT_RUN    => Hive::ConcurrentRunError.new("lock contention"),
       Hive::Schemas::RunErrorKind::TASK_IN_ERROR     => Hive::TaskInErrorState.new("error marker"),
       Hive::Schemas::RunErrorKind::WRONG_STAGE       => Hive::WrongStage.new("wrong stage"),
+      Hive::Schemas::RunErrorKind::PLAN_REVIEW_BLOCKED =>
+        Hive::PlanReview::TransitionBlocked.new("plan review blocked"),
       Hive::Schemas::RunErrorKind::STAGE             => Hive::StageError.new("stage failed"),
       Hive::Schemas::RunErrorKind::CONFIG            => Hive::ConfigError.new("config bad"),
       Hive::Schemas::RunErrorKind::AGENT             => Hive::AgentError.new("agent died"),

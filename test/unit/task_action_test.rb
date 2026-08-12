@@ -87,6 +87,75 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive plan demo-260426-aaaa --from 3-plan", action.command
   end
 
+  def test_plan_review_lifecycle_controls_the_plan_action
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    waiting = marker(:waiting)
+
+    reviewing = Hive::TaskAction.for(
+      task, waiting, plan_review: { "state" => "reviewing" }
+    )
+    assert_equal "plan_reviewing", reviewing.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", reviewing.command
+
+    retry_wait = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: {
+        "state" => "retry_scheduled", "retry_at" => "2026-08-12T13:00:00Z"
+      },
+      clock: -> { Time.utc(2026, 8, 12, 12) }
+    )
+    assert_equal "plan_review_retry", retry_wait.key
+    assert_nil retry_wait.command
+
+    retry_due = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: {
+        "state" => "retry_scheduled", "retry_at" => "2026-08-12T11:00:00Z"
+      },
+      clock: -> { Time.utc(2026, 8, 12, 12) }
+    )
+    assert_equal "plan_review_retry", retry_due.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", retry_due.command
+
+    decision = Hive::TaskAction.for(
+      task, waiting, plan_review: { "state" => "awaiting_decision" }
+    )
+    assert_equal "plan_review_decision", decision.key
+    assert_nil decision.command
+
+    unsupported = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: {
+        "state" => "blocked", "required_action" => "restore reviewer capability"
+      }
+    )
+    assert_equal "plan_review_unsupported", unsupported.key
+    assert_nil unsupported.command
+
+    blocked = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: { "state" => "blocked", "required_action" => "resolve verification blockers" }
+    )
+    assert_equal "plan_review_blocked", blocked.key
+    assert_nil blocked.command
+  end
+
+  def test_cleared_and_degraded_review_are_the_only_review_states_that_offer_develop
+    task = fake_task(stage_name: "plan", stage_index: 3)
+
+    cleared = Hive::TaskAction.for(
+      task, marker(:waiting), plan_review: { "state" => "cleared" }
+    )
+    assert_equal "ready_to_develop", cleared.key
+    assert_equal "hive develop demo-260426-aaaa --from 3-plan", cleared.command
+
+    degraded = Hive::TaskAction.for(
+      task, marker(:complete), plan_review: { "state" => "degraded_cleared" }
+    )
+    assert_equal "plan_review_degraded", degraded.key
+    assert_equal "hive develop demo-260426-aaaa --from 3-plan", degraded.command
+  end
+
   def test_markerless_plan_is_ready_to_run_not_needs_input
     # A task moved into 3-plan without a plan run yet (e.g. via `hive approve`)
     # must be runnable so the daemon dispatches the plan agent — not classified
@@ -1270,8 +1339,8 @@ class TaskActionTest < Minitest::Test
     },
     "plan" => {
       none: "ready_to_run",
-      waiting: "needs_input",
-      terminal: "ready_to_develop"
+      waiting: "plan_reviewing",
+      terminal: "plan_reviewing"
     },
     "execute" => {
       none: "ready_to_run",

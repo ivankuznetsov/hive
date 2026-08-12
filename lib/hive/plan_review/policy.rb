@@ -100,6 +100,11 @@ module Hive
         end
       end
 
+      def configuration_fingerprint(config)
+        settings = config.fetch("plan_review", config)
+        Digest::SHA256.hexdigest(canonical_json(policy_affecting_config(settings)))
+      end
+
       def canonical_json(value)
         JSON.generate(canonicalize(value))
       end

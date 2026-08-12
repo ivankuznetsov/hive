@@ -237,6 +237,7 @@
           "enum": [
             "concurrent_run",
             "task_in_error",
+            "plan_review_blocked",
             "wrong_stage",
             "stage",
             "config",

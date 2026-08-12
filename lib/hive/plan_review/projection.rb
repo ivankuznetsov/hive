@@ -10,7 +10,7 @@ module Hive
       attr_reader :record
 
       def self.load(task_folder:)
-        record = Store.new(task_folder:).current
+        record = Store.new(task_folder:).current_validated
         new(record)
       end
 

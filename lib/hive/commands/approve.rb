@@ -20,6 +20,7 @@ require "hive/conditions/transition_guard"
 require "hive/workflow_package/mutation_lock"
 require "hive/task_meta"
 require "hive/completion_time"
+require "hive/plan_review/transition_guard"
 
 module Hive
   module Commands
@@ -51,6 +52,7 @@ module Hive
 
       def self.error_kind_for(error)
         case error
+        when Hive::PlanReview::TransitionBlocked then "plan_review_blocked"
         when Hive::AmbiguousSlug then "ambiguous_slug"
         when Hive::DestinationCollision then "destination_collision"
         when Hive::FinalStageReached then "final_stage"
@@ -215,6 +217,10 @@ module Hive
         dest = stage_for_dest!(task, dest_stage)
         return if dest.index <= task.stage_index
         Hive::Conditions::TransitionGuard.validate!(task, force: @force, source: "approve")
+        @plan_review_config = Hive::Config.load(task.project_root)
+        @plan_review_observation = Hive::PlanReview::TransitionGuard.prepare!(
+          task:, destination: dest_stage, config: @plan_review_config
+        )
         return if @force
         return if VALID_TERMINAL_MARKERS.include?(marker.name)
 
@@ -284,6 +290,10 @@ module Hive
               Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
               Hive::Attempts::Context.current&.validate_generation!(task)
               @observation_guard&.call(task)
+              Hive::PlanReview::TransitionGuard.verify!(
+                task:, destination: dest_stage, observation: @plan_review_observation,
+                config: @plan_review_config
+              )
               human_state_snapshot = initialize_human_destination!(task, dest_stage)
               if completion_on_terminal_entry?(task, dest_stage)
                 completion_snapshot = Hive::TaskMeta.snapshot(task.folder)

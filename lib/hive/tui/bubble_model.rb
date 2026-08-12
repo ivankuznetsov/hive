@@ -14,6 +14,7 @@ require "hive/agent_profiles"
 require "hive/config"
 require "hive/commands/new"
 require "hive/markers"
+require "hive/daemon/plan_approval"
 require "hive/recovery/api"
 require "hive/stages"
 require "hive/task"
@@ -2059,7 +2060,13 @@ module Hive
           raise MarkerRaceError, current.name
         end
 
-        Hive::Markers.set(row.state_file, :complete)
+        plan_approval = @plan_approval || Hive::Daemon::PlanApproval
+        prepared = plan_approval.prepare(row.suggested_command, row.state_file)
+        expected = develop_command_from_plan(row.suggested_command).argv
+        unless Shellwords.split(prepared) == expected
+          raise ArgumentError, "guarded plan approval returned a different develop command"
+        end
+        true
       end
 
       def develop_command_from_plan(suggested_command)

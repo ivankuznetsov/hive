@@ -109,6 +109,7 @@ class PlanReviewDecisionServiceTest < Minitest::Test
 
       assert result.applied
       assert_equal "reviewing", store.current.state
+      assert_equal "pra-#{'e' * 64}", result.decision.target_fingerprint
     end
 
     with_service(routes: [ route("unsupported") ]) do |service, _store, record|
@@ -204,7 +205,8 @@ class PlanReviewDecisionServiceTest < Minitest::Test
       manifest.to_h.merge(
         "kind" => "projection", "version" => 1, "candidate_plan_digest" => nil,
         "state" => "awaiting_decision", "outcome" => nil,
-        "attempt_ids" => [], "current_attempt_id" => nil,
+        "attempt_ids" => routes.map { |entry| entry.fetch("attempt_id") },
+        "current_attempt_id" => routes.last&.fetch("attempt_id"),
         "coverage" => [ coverage ], "findings" => Array(finding).map(&:to_h),
         "decisions" => [], "routes" => routes, "artifacts" => {},
         "blockers" => [], "required_action" => "operator action",
@@ -230,6 +232,7 @@ class PlanReviewDecisionServiceTest < Minitest::Test
   def route(outcome)
     {
       "role" => "primary", "outcome" => outcome,
+      "attempt_id" => "pra-#{'e' * 64}",
       "requested" => {}, "actual" => {}, "capability_result" => "present",
       "independence_verified" => false
     }

@@ -12,6 +12,7 @@ require "hive/git_ops"
 require "hive/markers"
 require "hive/plan_frontmatter"
 require "hive/conditions/execute_boundary"
+require "hive/plan_review/transition_guard"
 
 module Hive
   module Stages
@@ -43,6 +44,7 @@ module Hive
       UNRESOLVED_IDENTITY = Object.new.freeze
 
       def run!(task, cfg)
+        Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: cfg)
         plan_path = File.join(task.folder, "plan.md")
         unless File.exist?(plan_path)
           warn "hive: plan.md missing; this task did not pass through 3-plan"

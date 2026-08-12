@@ -397,7 +397,7 @@ class RunStageActionTest < Minitest::Test
         assert_equal "2-brainstorm", payload["from_stage_dir"]
         assert_equal "3-plan", payload["to_stage_dir"]
         assert_equal "waiting", payload["marker_after"]
-        assert_equal "needs_input", payload["next_action"]["key"]
+        assert_equal "ready_to_develop", payload["next_action"]["key"]
       end
     end
   end

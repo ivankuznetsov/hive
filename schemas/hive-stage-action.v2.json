@@ -158,6 +158,7 @@
             "ambiguous_slug",
             "destination_collision",
             "final_stage",
+            "plan_review_blocked",
             "wrong_stage",
             "rollback_failed",
             "invalid_task_path",

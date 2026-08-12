@@ -38,6 +38,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       set_last_project: ->(project) { @last_projects << project },
       conversation_store: nil,
       result_class: Result,
+      plan_approval: test_plan_approval,
       logger: @logger
     )
   end
@@ -78,6 +79,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       conversation_store: nil,
       result_class: Result,
       logger: @logger,
+      plan_approval: test_plan_approval,
       status_snapshot_provider: -> { rows }
     )
   end
@@ -91,6 +93,16 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       status_snapshot_provider: -> { snapshot },
       logger: @logger
     )
+  end
+
+  def test_plan_approval
+    @test_plan_approval ||= Object.new.tap do |collaborator|
+      collaborator.define_singleton_method(:prepare) do |command, state_file|
+        Hive::Daemon::PlanApproval.prepare(
+          command, state_file, clearance_checker: -> { true }
+        )
+      end
+    end
   end
 
   def status_row(project: "alpha", slug: "red-task-260518-aaaa", stage: "6-review",

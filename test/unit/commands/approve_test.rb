@@ -39,6 +39,69 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_plan_review_guard_runs_under_locks_immediately_before_plan_to_execute_move
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "3-plan", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "plan.md"), "# plan\n<!-- COMPLETE -->\n")
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 3, stage_name: "plan"
+      )
+      cmd = command
+      expected_observation = Object.new
+      cmd.instance_variable_set(:@plan_review_observation, expected_observation)
+      cmd.instance_variable_set(:@plan_review_config, {})
+      testcase = self
+
+      verify = lambda do |task:, destination:, observation:, config:|
+        testcase.assert_same current, task
+        testcase.assert_equal "4-execute", destination
+        testcase.assert_same expected_observation, observation
+        testcase.assert_equal({}, config)
+        testcase.assert File.exist?(File.join(state, ".commit-lock"))
+        testcase.assert File.exist?(File.join(source, ".lock"))
+        raise Hive::PlanReview::TransitionBlocked, "blocked under lock"
+      end
+
+      with_replaced_singleton_method(
+        Hive::PlanReview::TransitionGuard, :verify!, verify
+      ) do
+        assert_raises(Hive::PlanReview::TransitionBlocked) do
+          cmd.send(:perform_move_and_commit, current, "4-execute")
+        end
+      end
+
+      assert File.directory?(source)
+      refute File.exist?(File.join(state, "stages", "4-execute", current.slug))
+    end
+  end
+
+  def test_force_does_not_bypass_plan_review_preflight
+    current = task(stage_index: 3, stage_name: "plan")
+    cmd = command(force: true)
+    calls = 0
+
+    with_replaced_singleton_method(Hive::Config, :load, ->(_root) { {} }) do
+      with_replaced_singleton_method(
+        Hive::PlanReview::TransitionGuard, :prepare!, lambda { |**|
+          calls += 1
+          raise Hive::PlanReview::TransitionBlocked, "uncleared"
+        }
+      ) do
+        assert_raises(Hive::PlanReview::TransitionBlocked) do
+          cmd.send(
+            :validate_move!, current, "4-execute",
+            Hive::Markers::State.new(name: :waiting, attrs: {}, raw: nil)
+          )
+        end
+      end
+    end
+
+    assert_equal 1, calls
+  end
+
   def test_restore_human_destination_handles_existing_new_and_missing_folders
     with_tmp_dir do |root|
       source = File.join(root, "source")

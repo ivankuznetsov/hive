@@ -50,8 +50,9 @@ module Hive
         canonical_digest = safe_plan_digest(plan_path)
         return nil unless canonical_digest
 
-        current = @store.current(optional: true)
-        if current && current["candidate_plan_digest"] == canonical_digest
+        current = @store.current_validated(optional: true)
+        if current && current["candidate_plan_digest"] == canonical_digest &&
+           policy_configuration_fresh?(current)
           return Projection.new(current) if current.execution_allowed?
 
           return resume_review(current, File.binread(plan_path))
@@ -231,7 +232,10 @@ module Hive
         @store.create_review!(manifest)
         policy_ref = @store.write_review_artifact!(
           review_id:, basename: "policy-#{policy.policy_fingerprint}.json",
-          content: policy.to_h.merge("signals" => signals.to_h), json: true
+          content: policy.to_h.merge(
+            "signals" => signals.to_h,
+            "configuration_fingerprint" => Policy.configuration_fingerprint(@cfg)
+          ), json: true
         )
         version = current ? current.version + 1 : 1
         projection = Record.new(
@@ -316,6 +320,7 @@ module Hive
           role:, attempt_id:, outcome: adapter_result.outcome,
           retry_at: adapter_result.retry_at
         )
+        coverage = reject_unverified_adversarial_coverage(coverage, role:, route:)
         refs = @store.write_attempt!(
           review_id: record.review_id, attempt_id:, plan_bytes:,
           result: adapter_result.to_h, coverage:, route_receipt: route
@@ -573,6 +578,19 @@ module Hive
         }.compact
       end
 
+      def reject_unverified_adversarial_coverage(coverage, role:, route:)
+        return coverage unless role == "adversarial" && !route["independence_verified"]
+
+        coverage.map do |entry|
+          next entry unless entry.fetch("name") == "adversarial"
+
+          entry.merge(
+            "status" => "failed",
+            "reason" => route["independence_reason"] || "independence_unverified"
+          ).freeze
+        end.freeze
+      end
+
       def planner_route(identity)
         {
           "role" => "planner", "requested" => identity, "actual" => identity,
@@ -620,16 +638,20 @@ module Hive
         nil
       end
 
-      def task_generation
-        meta = File.file?(@task.meta_yml_path) ? File.binread(@task.meta_yml_path) : ""
-        Digest::SHA256.hexdigest(JSON.generate(
-          "task_id" => task_id, "slug" => @task.slug,
-          "workflow" => @task.workflow.id.to_s,
-          "meta_digest" => Digest::SHA256.hexdigest(meta)
-        ))
-      end
+      def task_generation = Identity.task_generation(@task)
 
       def task_id = (@task.id || @task.slug).to_s
+
+      def policy_configuration_fresh?(record)
+        reference = record["artifacts"]["policy"]
+        return false unless reference
+
+        artifact = JSON.parse(@store.read_reference(reference))
+        artifact["configuration_fingerprint"] == Policy.configuration_fingerprint(@cfg) &&
+          record["level_sources"]&.dig("run") == persisted_run_level
+      rescue JSON::ParserError, KeyError, TypeError
+        false
+      end
 
       def retry_in_future?(value)
         value && Time.iso8601(value) > @clock.call

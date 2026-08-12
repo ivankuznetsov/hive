@@ -214,6 +214,34 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_unverified_adversarial_route_cannot_satisfy_independent_coverage
+    [ [ standard_plan, "degraded_cleared", "terminal_failure" ],
+      [ mandatory_plan, "blocked", nil ] ].each do |plan, state, degradation|
+      with_task(plan) do |task, cfg|
+        adapter = FakeAdapter.new do |request|
+          result = successful_result(request)
+          next result unless request.kind == "adversarial"
+
+          Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "success", coverage: result.coverage,
+            route_receipt: result.route_receipt.merge(
+              "independence_verified" => false,
+              "independence_reason" => "same_family"
+            )
+          )
+        end
+        projection = orchestrator(task, cfg, adapter:).advance!
+
+        assert_equal state, projection.record.state
+        degradation ? assert_equal(degradation, projection.record["degradation_reason"]) :
+          assert_nil(projection.record["degradation_reason"])
+        adversarial = projection.record["coverage"].find { |row| row["name"] == "adversarial" }
+        assert_equal "failed", adversarial.fetch("status")
+        assert_equal "same_family", adversarial.fetch("reason")
+      end
+    end
+  end
+
   private
 
   def orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(standard_plan))

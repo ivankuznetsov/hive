@@ -788,6 +788,14 @@ module Hive
     end
     map "plan-review" => :plan_review
 
+    desc "plan-review-run TARGET", "Start or resume plan critique without operator authority"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def plan_review_run(target)
+      require "hive/commands/plan_review_run"
+      Hive::Commands::PlanReviewRun.new(target, project: options[:project]).call
+    end
+    map "plan-review-run" => :plan_review_run
+
     desc "develop TARGET", "Move a completed plan task into execute, or run an existing execute task"
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"

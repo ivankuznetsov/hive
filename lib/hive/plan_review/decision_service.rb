@@ -38,7 +38,7 @@ module Hive
         @commit_locker.call do
           @task_locker.call do
             current = @store.current
-            target = normalize_target(action, target_fingerprint, value, review_id)
+            target = normalize_target(action, target_fingerprint, value, review_id, current)
             decision = build_decision(
               action:, review_id:, task_generation:, policy_fingerprint:,
               expected_artifact_digest:, target_fingerprint: target, value:,
@@ -177,14 +177,19 @@ module Hive
         end
       end
 
-      def normalize_target(action, target, value, review_id)
+      def normalize_target(action, target, value, review_id, current)
         return target.to_s unless target.to_s.empty?
 
         case action.to_s
         when "downgrade_level", "raise_level"
           level = value.is_a?(Hash) ? value["level"] || value[:level] : value
           "level-#{level}"
-        when "retry", "request_review" then "review-#{review_id}"
+        when "retry"
+          attempt_id = current["current_attempt_id"] || latest_review_route(current)&.fetch("attempt_id", nil)
+          raise InvalidAction, "retry requires a current transient attempt" unless attempt_id
+
+          attempt_id
+        when "request_review" then "review-#{review_id}"
         else
           raise InvalidAction, "#{action} requires an exact target fingerprint"
         end
@@ -227,7 +232,7 @@ module Hive
         when "raise_level"
           raised_level(current, decision)
         when "retry"
-          validate_retry!(current)
+          validate_retry!(current, decision)
         when "request_review"
           # Explicit request simply re-enters review from a stable blocked state.
         end
@@ -310,12 +315,19 @@ module Hive
         )
       end
 
-      def validate_retry!(current)
-        route = current["routes"].reverse.find do |entry|
-          %w[primary adversarial].include?(entry["role"])
-        end
+      def validate_retry!(current, decision)
+        route = latest_review_route(current)
         unless route && TRANSIENT_OUTCOMES.include?(route["outcome"])
           raise InvalidAction, "retry is allowed only for a transient plan review outcome"
+        end
+        unless decision.target_fingerprint == route["attempt_id"]
+          raise StaleDecision, "retry target is not the current transient attempt"
+        end
+      end
+
+      def latest_review_route(current)
+        current["routes"].reverse.find do |entry|
+          %w[primary adversarial].include?(entry["role"])
         end
       end
 

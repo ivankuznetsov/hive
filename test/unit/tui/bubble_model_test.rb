@@ -5150,6 +5150,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
       # Editor is a no-op: opens, returns 0, file untouched (real
       # File.mtime / File.read drive the comparison).
       @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+      plan_approval = Object.new
+      plan_approval.define_singleton_method(:prepare) do |_command, _state_file|
+        "hive develop some-slug --from 3-plan"
+      end
+      @model.instance_variable_set(:@plan_approval, plan_approval)
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
       cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
@@ -5332,6 +5337,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
       )
       @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
       @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+      plan_approval = Object.new
+      plan_approval.define_singleton_method(:prepare) do |command, state_file|
+        Hive::Daemon::PlanApproval.prepare(
+          command, state_file, clearance_checker: -> { true }
+        )
+      end
+      @model.instance_variable_set(:@plan_approval, plan_approval)
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
       cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call

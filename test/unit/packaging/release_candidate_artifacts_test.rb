@@ -37,7 +37,10 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
 
   def test_live_agent_builder_loads_without_hive_runtime_dependencies
     builder = File.expand_path("../../../packaging/live_agent_skills/build.rb", __dir__)
-    stdout, stderr, status = Open3.capture3(RbConfig.ruby, "--disable-gems", builder)
+    clean_ruby = { "BUNDLE_GEMFILE" => nil, "RUBYLIB" => nil, "RUBYOPT" => nil }
+    stdout, stderr, status = Open3.capture3(
+      clean_ruby, RbConfig.ruby, "--disable-gems", builder
+    )
 
     refute status.success?
     assert_empty stdout

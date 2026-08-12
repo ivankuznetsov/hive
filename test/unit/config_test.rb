@@ -2,6 +2,54 @@ require "test_helper"
 require "hive/config"
 
 class ConfigTest < Minitest::Test
+  def test_plan_review_defaults_are_closed_and_conservative
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+      review = cfg.fetch("plan_review")
+
+      assert_equal true, review.fetch("enabled")
+      assert_equal "skip", review.fetch("minimum_level")
+      assert_equal "skip", review.dig("coding", "minimum_level")
+      assert_equal 5, review.dig("skip", "max_files")
+      assert_equal 2, review.dig("attempts", "max_transient")
+      assert_equal "ce_doc_review", review.fetch("adapter")
+      assert_equal [], review.fetch("approval_policies")
+    end
+  end
+
+  def test_load_validates_plan_review_levels_paths_attempts_and_closed_keys
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        plan_review:
+          minimum_level: standard
+          coding:
+            minimum_level: mandatory
+          protected_paths: ["config/**"]
+          attempts:
+            max_transient: 3
+            timeout_sec: 120
+      YAML
+
+      cfg = Hive::Config.load(dir)
+      assert_equal "standard", cfg.dig("plan_review", "minimum_level")
+      assert_equal "mandatory", cfg.dig("plan_review", "coding", "minimum_level")
+      assert_equal [ "config/**" ], cfg.dig("plan_review", "protected_paths")
+
+      {
+        "minimum_level: lower" => /minimum_level.*one of/i,
+        "protected_paths: ['../secret']" => /protected_paths.*relative path glob/i,
+        "attempts: { max_transient: -1 }" => /max_transient.*at least 0/i,
+        "surprise: true" => /unknown field.*surprise/i
+      }.each do |fragment, pattern|
+        File.write(config_path, "plan_review:\n  #{fragment}\n")
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match pattern, error.message
+      end
+    end
+  end
+
   def test_registry_round_trips_repository_identity
     with_tmp_global_config do
       with_tmp_git_repo do |repo|

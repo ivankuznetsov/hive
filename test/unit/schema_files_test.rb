@@ -17,6 +17,7 @@ require "hive/commands/prune"
 require "hive/commands/run"
 require "hive/commands/stage_action"
 require "hive/commands/status"
+require "hive/plan_review"
 require "hive/agent_skills/inspector"
 require "hive/agent_skills/provisioner"
 require "hive/patrol/candidate_selector"
@@ -38,6 +39,17 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_plan_review_schema_is_registered_closed_and_versioned
+    path = Hive::Schemas.schema_path("hive-plan-review")
+    document = JSON.parse(File.read(path))
+
+    assert_equal "https://json-schema.org/draft/2020-12/schema", document.fetch("$schema")
+    assert_equal 1, document.dig("properties", "schema_version", "const")
+    assert_equal false, document.fetch("additionalProperties")
+    assert_equal Hive::PlanReview::LEVELS.sort,
+                 document.dig("$defs", "Level", "enum").sort
+  end
+
   def test_provider_routing_exclusion_reason_vocabularies_do_not_drift
     expected = Hive::Daemon::DispatchRequestQueue::ADMISSION_EXCLUSIONS.sort
     %w[

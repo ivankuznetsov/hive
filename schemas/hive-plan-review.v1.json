@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-plan-review.v1.json",
+  "title": "Hive plan review record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "kind", "review_id", "policy"],
+  "properties": {
+    "schema": { "const": "hive-plan-review" },
+    "schema_version": { "const": 1 },
+    "kind": { "enum": ["manifest", "attempt", "decision", "resolution", "projection"] },
+    "review_id": { "$ref": "#/$defs/Identifier" },
+    "policy": { "$ref": "#/$defs/Policy" }
+  },
+  "$defs": {
+    "Identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "Digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "Level": {
+      "type": "string",
+      "enum": ["skip", "standard", "mandatory"]
+    },
+    "Reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "evidence"],
+      "properties": {
+        "category": { "$ref": "#/$defs/Identifier" },
+        "evidence": { "type": "string", "maxLength": 1024 },
+        "path": { "type": "string", "maxLength": 4096 },
+        "pattern": { "type": "string", "maxLength": 4096 }
+      }
+    },
+    "Policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "classifier_version",
+        "computed_level",
+        "effective_level",
+        "matched_reasons",
+        "policy_fingerprint"
+      ],
+      "properties": {
+        "classifier_version": { "type": "integer", "minimum": 1 },
+        "computed_level": { "$ref": "#/$defs/Level" },
+        "effective_level": { "$ref": "#/$defs/Level" },
+        "matched_reasons": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Reason" }
+        },
+        "policy_fingerprint": { "$ref": "#/$defs/Digest" }
+      }
+    }
+  }
+}

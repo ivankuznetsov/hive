@@ -51,7 +51,8 @@ claude:
 #     model: gpt-5.6-sol       # inherits review.effort
 #
 # Project-owned keys:
-# brainstorm, plan, execute, execute_implementation, rebase, diagnose,
+# brainstorm, plan, plan_review, plan_review_adversarial,
+# plan_review_verification, execute, execute_implementation, rebase, diagnose,
 # babysitter, review, review_ci, review_reviewers, review_triage, review_fix,
 # review_browser, patrol, patrol_review, patrol_fix, open_pr, artifacts,
 # finalize. Hive's former in-process PR digest was removed; PRDigest is now a
@@ -103,6 +104,28 @@ plan:
   # permissions:
   #   preset: scoped
   #   tools: [Read, Write, Edit]
+plan_review:
+  # Built-in coding plan review is always active. These settings can raise the
+  # level and tune bounded attempts; they cannot create operator authority or
+  # lower a policy-computed mandatory review.
+  minimum_level: skip
+  coding:
+    minimum_level: skip
+  skip:
+    max_files: 5
+    max_bytes: 262144
+  protected_paths:
+    - .github/workflows/**
+    - config/**
+    - db/migrate/**
+    - packaging/**
+    - Gemfile
+    - Gemfile.lock
+    - hive.gemspec
+    - install.sh
+  attempts:
+    max_transient: 2
+    timeout_sec: 900
 execute:
   agent: <%= development_agent %>
   # Provider routing is a separate explicit opt-in from `models:`. Accounts

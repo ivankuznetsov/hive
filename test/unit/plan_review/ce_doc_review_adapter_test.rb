@@ -1,7 +1,10 @@
 require "test_helper"
 require "hive/plan_review/adapters/ce_doc_review"
+require "hive/stages/base"
 
 class PlanReviewCeDocReviewAdapterTest < Minitest::Test
+  include HiveTestHelper
+
   def test_success_uses_disposable_plan_and_validates_machine_output
     with_request do |request, plan_path|
       original = File.binread(plan_path)
@@ -88,6 +91,72 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     assert_predicate result.coverage.first, :frozen?
     assert_predicate result.route_receipt.fetch("actual"), :frozen?
     assert_raises(FrozenError) { result.coverage.first["status"] = "failed" }
+  end
+
+  def test_capability_configuration_errors_are_normalized_as_unsupported
+    with_request do |request, _plan_path|
+      adapter = Hive::PlanReview::Adapters::CeDocReview.new(
+        runner: ->(**) { flunk "configuration failure must not invoke the runner" },
+        capability_resolver: lambda do |*|
+          raise Hive::ConfigError, "invalid capability manifest"
+        end
+      )
+
+      result = adapter.call(request)
+
+      assert_equal "unsupported", result.outcome
+      assert_includes result.diagnostic, "invalid capability manifest"
+    end
+  end
+
+  def test_output_is_read_with_the_parser_byte_bound
+    with_request do |request, _plan_path|
+      runner = lambda do |output_path:, **|
+        File.binwrite(output_path, "x" * (Hive::PlanReview::ResultParser::MAX_BYTES + 1))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+
+      result = adapter_for(runner).call(request)
+
+      assert_equal "terminal_failure", result.outcome
+      assert_includes result.diagnostic, "size limit"
+    end
+  end
+
+  def test_production_runner_restores_forged_authoritative_review_state
+    with_request do |request, _plan_path|
+      current_path = File.join(request.project_root, "plan-review", "current.json")
+      meta_path = File.join(request.project_root, "meta.yml")
+      FileUtils.mkdir_p(File.dirname(current_path))
+      File.write(current_path, "authoritative\n")
+      File.write(meta_path, "id: task-1\n")
+      task = Struct.new(:folder, :meta_yml_path, keyword_init: true).new(
+        folder: request.project_root, meta_yml_path: meta_path
+      )
+      runner = Hive::PlanReview::Adapters::CeDocReview::HiveRunner.new(
+        task:, cfg: Hive::Config::DEFAULTS
+      )
+      valid_payload = valid_result(request)
+      replacement = lambda do |_task, expected_output:, **|
+        File.write(current_path, "forged clearance\n")
+        File.write(expected_output, JSON.generate(valid_payload))
+        { status: :ok, usage: { model: request.reviewer.fetch("model") } }
+      end
+
+      observed = nil
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :spawn_agent, replacement
+      ) do
+        observed = runner.call(
+          prompt: "review", cwd: request.output_directory,
+          output_path: File.join(request.output_directory, "result.json"), request:
+        )
+      end
+
+      assert_equal "terminal_failure", observed.fetch("status")
+      assert_includes observed.fetch("diagnostic"), "plan-review/current.json"
+      assert_equal "authoritative\n", File.read(current_path)
+    end
   end
 
   private

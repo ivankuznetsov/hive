@@ -11,6 +11,8 @@ require "hive/secret_patterns"
 module Hive
   module PlanReview
     class PlannerRevision
+      MAX_CANDIDATE_BYTES = 1024 * 1024
+
       Result = Data.define(:outcome, :candidate_bytes, :candidate_digest, :route_receipt, :diagnostic) do
         def success? = outcome == "success"
       end
@@ -119,7 +121,10 @@ module Hive
         raise InvalidRecord, "candidate plan is a symlink" if stat.symlink?
         raise InvalidRecord, "candidate plan is not a regular file" unless stat.file?
 
-        bytes = File.binread(expanded)
+        bytes = File.binread(expanded, MAX_CANDIDATE_BYTES + 1)
+        if bytes.bytesize > MAX_CANDIDATE_BYTES
+          raise InvalidRecord, "candidate plan exceeds the size limit"
+        end
         text = bytes.dup.force_encoding(Encoding::UTF_8)
         raise InvalidRecord, "candidate plan is invalid UTF-8" unless text.valid_encoding?
         marker = Hive::Markers.current(expanded)

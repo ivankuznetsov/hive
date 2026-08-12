@@ -103,6 +103,32 @@ class PlanReviewPlanSignalsTest < Minitest::Test
     end
   end
 
+  def test_explicitly_negated_risk_statements_do_not_trigger_mandatory_review
+    with_plan(<<~PLAN) do |path, task_folder|
+      # Local wording change
+
+      ## Files
+      - `lib/hive/parser.rb`
+      - `test/unit/parser_test.rb`
+
+      ## Test scenarios
+      - focused parser test passes
+
+      ## Rollback
+      Revert the change; no data migration is required.
+
+      No authentication changes. Deployment is out of scope. This does not
+      change the public API. No permissions changes. No concurrency changes.
+      No recovery changes. No release changes.
+    PLAN
+      result = Hive::PlanReview::PlanSignals.analyze(
+        plan_path: path, task_folder:, max_files: 5
+      )
+
+      assert_empty result.mandatory_reasons
+    end
+  end
+
   def test_symlink_traversal_invalid_utf8_and_oversize_fail_conservatively
     Dir.mktmpdir("hive-plan-signals") do |task_folder|
       outside = File.join(File.dirname(task_folder), "outside-plan.md")

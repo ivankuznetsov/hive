@@ -31,7 +31,11 @@ module Hive
         name required status fingerprint reason retry_at decision_id
       ].freeze
       DIGEST = /\A[0-9a-f]{64}\z/
-      IDENTIFIER = /\A(?:pr|pra|prd|prf)-[0-9a-f]{64}\z/
+      REVIEW_ID = /\Apr-[0-9a-f]{64}\z/
+      ATTEMPT_ID = /\Apra-[0-9a-f]{64}\z/
+      DECISION_ID = /\Aprd-[0-9a-f]{64}\z/
+      FINDING_ID = /\Aprf-[0-9a-f]{64}\z/
+      DEGRADATION_REASONS = %w[partial_coverage review_unavailable terminal_failure].freeze
 
       attr_reader :data
 
@@ -80,8 +84,8 @@ module Hive
       end
 
       def validate_identity!
-        raise InvalidRecord, "invalid plan review id" unless review_id.to_s.match?(IDENTIFIER)
-        if prior_review_id && !prior_review_id.to_s.match?(IDENTIFIER)
+        raise InvalidRecord, "invalid plan review id" unless review_id.to_s.match?(REVIEW_ID)
+        if prior_review_id && !prior_review_id.to_s.match?(REVIEW_ID)
           raise InvalidRecord, "invalid prior plan review id"
         end
         unless self["task_id"].is_a?(String) && !self["task_id"].empty?
@@ -112,6 +116,9 @@ module Hive
         if outcome && !OUTCOMES.include?(outcome)
           raise InvalidRecord, "unknown plan review outcome #{outcome.inspect}"
         end
+        if self["degradation_reason"] && !DEGRADATION_REASONS.include?(self["degradation_reason"])
+          raise InvalidRecord, "unknown plan review degradation reason #{self['degradation_reason'].inspect}"
+        end
         validate_arrays!
         validate_artifacts!
         validate_optional_projection_fields!
@@ -127,11 +134,11 @@ module Hive
         %w[attempt_ids coverage findings decisions routes blockers].each do |key|
           raise InvalidRecord, "plan review #{key} must be an Array" unless self[key].is_a?(Array)
         end
-        unless self["attempt_ids"].all? { |id| id.to_s.match?(IDENTIFIER) }
+        unless self["attempt_ids"].all? { |id| id.to_s.match?(ATTEMPT_ID) }
           raise InvalidRecord, "plan review attempt_ids contains an invalid id"
         end
         current = self["current_attempt_id"]
-        if current && (!current.to_s.match?(IDENTIFIER) || !self["attempt_ids"].include?(current))
+        if current && (!current.to_s.match?(ATTEMPT_ID) || !self["attempt_ids"].include?(current))
           raise InvalidRecord, "current attempt must belong to attempt_ids"
         end
         self["coverage"].each { |entry| validate_coverage!(entry) }

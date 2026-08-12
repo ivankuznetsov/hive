@@ -14,7 +14,7 @@ class PlanReviewFindingTest < Minitest::Test
   def test_lifecycle_is_closed_and_answer_is_not_resolution
     answered = finding("classification" => "manual", "lifecycle" => "answered")
     refute answered.resolved?
-    assert answered.blocking?
+    refute answered.blocking?
 
     verified = finding("classification" => "manual", "lifecycle" => "verified")
     assert verified.resolved?

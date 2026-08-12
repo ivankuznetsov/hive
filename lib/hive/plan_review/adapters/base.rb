@@ -14,11 +14,12 @@ module Hive
         Request = Data.define(
           :plan_path, :plan_digest, :document_type, :level, :required_coverage,
           :policy_fingerprint, :planner_identity, :reviewer, :output_directory,
-          :timeout_sec, :attempt_id, :kind, :project_root
+          :timeout_sec, :attempt_id, :kind, :project_root, :verification_findings
         ) do
           def initialize(plan_path:, plan_digest:, document_type:, level:, required_coverage:,
                          policy_fingerprint:, planner_identity:, reviewer:, output_directory:,
-                         timeout_sec:, attempt_id:, kind: "primary", project_root: nil)
+                         timeout_sec:, attempt_id:, kind: "primary", project_root: nil,
+                         verification_findings: [])
             normalized_level = Hive::PlanReview.level!(level)
             normalized_kind = kind.to_s
             raise ArgumentError, "unknown plan review adapter kind #{kind.inspect}" unless KINDS.include?(normalized_kind)
@@ -43,7 +44,12 @@ module Hive
               timeout_sec: timeout_sec,
               attempt_id: attempt_id.to_s.freeze,
               kind: normalized_kind.freeze,
-              project_root: project_root && File.expand_path(project_root)
+              project_root: project_root && File.expand_path(project_root),
+              verification_findings: Hive::PlanReview.deep_freeze(
+                Array(verification_findings).map do |finding|
+                  finding.respond_to?(:to_h) ? finding.to_h : finding
+                end
+              )
             )
             freeze
           end

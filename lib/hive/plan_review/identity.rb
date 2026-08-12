@@ -9,8 +9,8 @@ module Hive
     module Identity
       module_function
 
-      def logical(task_id:, plan_generation:, policy_fingerprint:)
-        stable_id("pr", task_id:, plan_generation:, policy_fingerprint:)
+      def logical(task_id:, plan_generation:, policy_fingerprint:, prior_review_id: nil)
+        stable_id("pr", task_id:, plan_generation:, policy_fingerprint:, prior_review_id:)
       end
 
       def attempt(review_id)

@@ -331,6 +331,11 @@ Stage-layout rename regressions from this ADR's follow-on work are captured in `
 3. **Post-run integrity checks** — SHA-256 pre/post on `plan.md` and `worktree.yml` around **both** the implementation and reviewer passes; either-agent tampering yields `<!-- ERROR reason=implementer_tampered|reviewer_tampered -->`. The PR stage runs an additional regex secret-scan on the published body and refuses to commit on api-key/AWS/GH-token hits. Inode-based concurrent-edit detection was tried and dropped because claude's atomic `Edit`/`Write` rotates inodes on every legitimate write.
 **Consequences:** Acceptable for a single local user; explicitly NOT acceptable for multi-user or CI deploys. Re-design required for Phase 2+.
 
+Authority-bearing local CLI commands, including plan-review approvals,
+waivers, answers, and downgrades, treat direct invocation as that same user's
+operator authority. An agent with unrestricted shell access has that CLI
+authority too; privilege-separated deployments must restrict agent OS access.
+
 ## ADR-009: Hive state never modifies master
 
 **Status:** Active

@@ -140,6 +140,20 @@ class TaskActionTest < Minitest::Test
     assert_nil blocked.command
   end
 
+  def test_stale_plan_review_offers_linked_review_recovery_command
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    action = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "cleared", "freshness" => { "status" => "stale" },
+        "required_action" => "start a linked plan review"
+      }
+    )
+
+    assert_equal "plan_reviewing", action.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", action.command
+  end
+
   def test_cleared_and_degraded_review_are_the_only_review_states_that_offer_develop
     task = fake_task(stage_name: "plan", stage_index: 3)
 

@@ -311,6 +311,24 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                  "a blocked row must append the dependency block to its action-state label"
   end
 
+  def test_plan_review_status_includes_the_shared_required_action
+    task = make_task(
+      slug: "reviewed-task", stage: "3-plan", action: "plan_review_decision",
+      action_label: "Plan review needs an operator decision", marker: "waiting"
+    ).merge(
+      "plan_review" => {
+        "effective_level" => "mandatory", "state" => "awaiting_decision",
+        "coverage_counts" => { "completed" => 2, "failed" => 0 },
+        "finding_counts" => { "open_gated" => 1, "open_manual" => 0 },
+        "required_action" => "approve gated plan finding prf-abc"
+      }
+    )
+    row = make_snapshot([ { "name" => "hive", "tasks" => [ task ] } ]).projects.first.rows.first
+
+    label = Hive::Tui::Views::TasksPane.status_label(row)
+    assert_includes label, "next=approve gated plan finding prf-abc"
+  end
+
   def test_admission_error_shows_reason_and_safe_correction_without_wait_label
     error = {
       "reason_code" => "dependency_cycle",

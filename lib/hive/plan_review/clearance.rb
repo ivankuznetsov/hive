@@ -15,10 +15,7 @@ module Hive
                    revision_required:, revision_complete:, verification_complete:,
                    verification_blockers: [])
         typed = Array(findings).map { |entry| entry.is_a?(Finding) ? entry : Finding.new(entry) }
-        decision_findings = typed.select do |finding|
-          %w[gated_auto manual].include?(finding.classification) &&
-            !%w[approved answered incorporated verified resolved waived].include?(finding.lifecycle)
-        end
+        decision_findings = typed.select(&:blocking?)
         unless decision_findings.empty?
           return build(
             "awaiting_decision", nil, false,

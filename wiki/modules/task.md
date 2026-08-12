@@ -3,7 +3,7 @@ title: Hive::Task
 type: module
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_counter.rb
 created: 2026-04-25
-updated: 2026-07-24
+updated: 2026-08-12
 tags: [model, task, parsing, task-id, dependencies, workflows]
 ---
 
@@ -74,9 +74,16 @@ For stages 4 and later:
 
 `Hive::TaskMeta` (`lib/hive/task_meta.rb`) owns the optional `<task>/meta.yml` sidecar:
 
-- `read(task_folder)` returns `{id:, slug:, display_name:, depends_on:, workflow:}` and is total over missing, malformed, or non-Hash YAML.
+- `read(task_folder)` returns the identity/workflow fields plus optional
+  `plan_review_required: true`; it is total over missing, malformed, or
+  non-Hash YAML.
 - `read_for_admission(task_folder)` returns a result-bearing strict read. It distinguishes an absent legacy sidecar from unreadable YAML, a non-mapping document, and an invalid dependency reference; admission code must use this path rather than interpreting tolerant-read nil as “no dependency.”
-- `write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil)` normalizes empty strings to nil, normalizes ids with `Integer(...)`, writes optional `depends_on` / `workflow` only when present, and writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
+- `write(..., plan_review_required: nil)` preserves the ordinary identity and
+  workflow fields, accepts only literal `true` for the plan-review flag, and
+  writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
+- `plan_review_required?(task_folder)` strictly distinguishes migrated/new
+  pre-execute coding tasks from legacy execute tasks. Absence is the durable
+  compatibility shape; malformed values fail closed.
 - `update_display_name(task_folder, name)` preserves the existing id, slug, `depends_on`, and `workflow`, defaulting slug to `File.basename(task_folder)` only when the sidecar is absent. It refuses corrupt input.
 - `update_id(task_folder, id)` preserves slug, display name, `depends_on`, and `workflow`, and likewise refuses corrupt input; daemon backfill cannot sanitize dependency evidence by replacing a damaged mapping.
 

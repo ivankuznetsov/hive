@@ -2,6 +2,7 @@ require "digest"
 require "fileutils"
 require "json"
 require "time"
+require "tmpdir"
 require "hive/atomic_file"
 require "hive/plan_review/approval_policy"
 require "hive/plan_review/adapters/base"
@@ -47,6 +48,12 @@ module Hive
       end
 
       def advance!
+        @store.with_orchestration_lock { advance_unlocked! }
+      end
+
+      private
+
+      def advance_unlocked!
         plan_path = File.join(@task.folder, "plan.md")
         canonical_digest = safe_plan_digest(plan_path)
         return nil unless canonical_digest
@@ -54,6 +61,7 @@ module Hive
 
         current = @store.current_validated(optional: true)
         if current && current["candidate_plan_digest"] == canonical_digest &&
+           current.task_generation.to_s == task_generation.to_s &&
            policy_configuration_fresh?(current)
           return Projection.new(current) if current.execution_allowed?
 
@@ -75,17 +83,20 @@ module Hive
         return nil unless policy.applicable?
 
         generation = task_generation
-        review_id = Identity.logical(
-          task_id: task_id,
-          plan_generation: "#{generation}:#{signals.plan_digest}",
-          policy_fingerprint: policy.policy_fingerprint
-        )
-        if current&.review_id == review_id
+        if current && current.task_generation.to_s == generation.to_s &&
+           current.plan_digest == signals.plan_digest &&
+           current.policy_fingerprint == policy.policy_fingerprint
           return Projection.new(current) if current.execution_allowed?
 
           return resume_review(current, File.binread(plan_path))
         end
 
+        review_id = Identity.logical(
+          task_id: task_id,
+          plan_generation: "#{generation}:#{signals.plan_digest}",
+          policy_fingerprint: policy.policy_fingerprint,
+          prior_review_id: current&.review_id
+        )
         record = begin_review(current, policy, signals, generation, review_id)
         return terminal(record, state: "skipped", outcome: "skipped") if
           record.effective_level == "skip"
@@ -94,8 +105,6 @@ module Hive
       rescue StaleObservation
         Projection.load(task_folder: @task.folder)
       end
-
-      private
 
       def resume_review(record, original_plan_bytes)
         %w[primary adversarial].each do |role|
@@ -115,14 +124,6 @@ module Hive
             required_action: "waive named coverage or restore required reviewer capability"
           )
         end
-        if record.effective_level == "standard" && initial_coverage.degraded? &&
-           initial_coverage.degradation_reason != "partial_coverage"
-          return terminal(
-            record, state: "degraded_cleared", outcome: "degraded_cleared",
-            degradation_reason: initial_coverage.degradation_reason
-          )
-        end
-
         record = consume_approval_policies(record)
         pending = pending_decision_findings(record)
         unless pending.empty?
@@ -135,6 +136,14 @@ module Hive
             "blockers" => blockers, "required_action" => action,
             "execution_allowed" => false
           ))
+        end
+        if record.effective_level == "standard" && initial_coverage.degraded? &&
+           initial_coverage.degradation_reason != "partial_coverage" &&
+           accepted_findings(record).empty?
+          return terminal(
+            record, state: "degraded_cleared", outcome: "degraded_cleared",
+            degradation_reason: initial_coverage.degradation_reason
+          )
         end
 
         accepted = accepted_findings(record)
@@ -181,21 +190,23 @@ module Hive
           "required_action" => "run disposition verification", "execution_allowed" => false
         ) unless record.state == "verifying"
 
+        verification_targets = verification_targets(record)
+        record, pending = ensure_leg(
+          record, "verification", candidate_bytes,
+          requested: [ { "name" => "verification", "required" => true } ],
+          merge_coverage: false, merge_findings: false,
+          verification_findings: verification_targets.map(&:to_h)
+        )
+        return Projection.new(record) if pending
+
         verification_route = latest_route(record, "verification")
-        verification_result = nil
-        unless verification_route
-          record, verification_result = dispatch_attempt(
-            record, "verification", candidate_bytes,
-            [ { "name" => "verification", "required" => true } ],
-            merge_coverage: false, merge_findings: false
-          )
-          verification_route = latest_route(record, "verification")
-        end
         verification_outcome = verification_route.fetch("outcome")
-        verification_findings = verification_result ? verification_result.findings :
-          persisted_result_findings(record, "verification")
+        persisted_verification = persisted_result(record, "verification")
+        verification_findings = Array(persisted_verification["findings"])
+        verification_evidence = Array(persisted_verification["residual_evidence"])
         findings, verification_blockers = apply_verification(
-          record["findings"], verification_findings, verification_outcome
+          record["findings"], verification_findings, verification_outcome,
+          verification_evidence
         )
         if record["candidate_plan_digest"] && !SUCCESS_OUTCOMES.include?(verification_outcome)
           verification_blockers << {
@@ -259,14 +270,15 @@ module Hive
         @store.publish_current!(projection, expected_version: current&.version)
       end
 
-      def ensure_leg(record, role, plan_bytes)
+      def ensure_leg(record, role, plan_bytes, requested: nil, merge_coverage: true,
+                     merge_findings: true, verification_findings: [])
         max_attempts = 1 + Integer(@cfg.dig("plan_review", "attempts", "max_transient"))
         loop do
           route = latest_route(record, role)
           return [ record, false ] if route && TERMINAL_OUTCOMES.include?(route["outcome"])
 
           if route
-            attempts = record["routes"].count { |entry| entry["role"] == role }
+            attempts = attempts_in_current_run(record, role)
             return [ record, false ] if attempts >= max_attempts
             if retry_in_future?(route["retry_at"])
               scheduled = publish(
@@ -280,34 +292,34 @@ module Hive
 
           record, = dispatch_attempt(
             record, role, plan_bytes,
-            coverage_for(role, record.review_id, record.policy_fingerprint)
+            requested || coverage_for(role, record.review_id, record.policy_fingerprint),
+            merge_coverage:, merge_findings:, verification_findings:
           )
         end
       end
 
       def dispatch_attempt(record, role, plan_bytes, requested, merge_coverage: true,
-                           merge_findings: true)
+                           merge_findings: true, verification_findings: [])
         resolution = @route_resolver.call(role:, planner_identity: planner_identity(record))
         attempt_id = Identity.attempt(record.review_id)
         if resolution.resolved?
-          attempt_dir = File.join(
-            @store.root, "reviews", record.review_id, "adapter-output", attempt_id
-          )
-          FileUtils.mkdir_p(attempt_dir, mode: 0o700)
-          input_path = File.join(attempt_dir, "controller-input.md")
-          File.binwrite(input_path, plan_bytes)
-          File.chmod(0o400, input_path)
-          request = Adapters::Base::Request.new(
-            plan_path: input_path, plan_digest: Digest::SHA256.hexdigest(plan_bytes.b),
-            document_type: "executable_plan", level: record.effective_level,
-            required_coverage: requested.map { |entry| entry.fetch("name") },
-            policy_fingerprint: record.policy_fingerprint,
-            planner_identity: planner_identity(record), reviewer: resolution.candidate,
-            output_directory: attempt_dir,
-            timeout_sec: @cfg.dig("plan_review", "attempts", "timeout_sec"),
-            attempt_id:, kind: role, project_root: @task.project_root
-          )
-          adapter_result = @adapter.call(request)
+          adapter_result = Dir.mktmpdir("hive-plan-review-#{attempt_id}-") do |attempt_dir|
+            input_path = File.join(attempt_dir, "controller-input.md")
+            File.binwrite(input_path, plan_bytes)
+            File.chmod(0o400, input_path)
+            request = Adapters::Base::Request.new(
+              plan_path: input_path, plan_digest: Digest::SHA256.hexdigest(plan_bytes.b),
+              document_type: "executable_plan", level: record.effective_level,
+              required_coverage: requested.map { |entry| entry.fetch("name") },
+              policy_fingerprint: record.policy_fingerprint,
+              planner_identity: planner_identity(record), reviewer: resolution.candidate,
+              output_directory: attempt_dir,
+              timeout_sec: @cfg.dig("plan_review", "attempts", "timeout_sec"),
+              attempt_id:, kind: role, project_root: @task.project_root,
+              verification_findings:
+            )
+            @adapter.call(request)
+          end
         else
           adapter_result = Adapters::Base::Result.new(
             outcome: "unsupported", diagnostic: "review route is unavailable",
@@ -317,10 +329,14 @@ module Hive
         coverage = CoverageEvaluator.merge(
           requested:, observed: adapter_result.coverage, outcome: adapter_result.outcome
         )
+        retry_at = adapter_result.retry_at
+        if TRANSIENT_OUTCOMES.include?(adapter_result.outcome) && retry_at.nil?
+          retry_at = default_retry_at(record, role, attempt_id)
+        end
         route = merge_route_receipts(
           resolution.receipt, adapter_result.route_receipt,
           role:, attempt_id:, outcome: adapter_result.outcome,
-          retry_at: adapter_result.retry_at
+          retry_at:
         )
         coverage = reject_unverified_adversarial_coverage(coverage, role:, route:)
         refs = @store.write_attempt!(
@@ -347,7 +363,7 @@ module Hive
           "coverage" => combined_coverage, "findings" => findings,
           "routes" => record["routes"] + [ route ], "artifacts" => artifacts,
           "blockers" => [], "required_action" => nil,
-          "retry_at" => adapter_result.retry_at, "execution_allowed" => false
+          "retry_at" => retry_at, "execution_allowed" => false
         )
         [ updated, adapter_result ]
       end
@@ -477,10 +493,7 @@ module Hive
       end
 
       def pending_decision_findings(record)
-        record["findings"].map { |entry| Finding.new(entry) }.select do |finding|
-          finding.classification == "gated_auto" && finding.lifecycle == "open" ||
-            finding.classification == "manual" && finding.lifecycle == "open"
-        end
+        record["findings"].map { |entry| Finding.new(entry) }.select(&:blocking?)
       end
 
       def accepted_findings(record)
@@ -500,14 +513,25 @@ module Hive
         end
       end
 
-      def apply_verification(entries, observed, outcome)
+      def apply_verification(entries, observed, outcome, evidence)
         existing = entries.map { |entry| Finding.new(entry) }
         verification = Array(observed).map { |entry| entry.is_a?(Finding) ? entry : Finding.new(entry) }
         observed_ids = verification.map(&:fingerprint)
+        attestations = Array(evidence).filter_map do |entry|
+          next unless entry.is_a?(Hash)
+          fingerprint = entry["finding_fingerprint"] || entry[:finding_fingerprint]
+          status = entry["status"] || entry[:status]
+          detail = entry["evidence"] || entry[:evidence]
+          next unless fingerprint.to_s.match?(Record::FINDING_ID) && status == "verified" &&
+                      !detail.to_s.strip.empty?
+
+          fingerprint.to_s
+        end
         updated = existing.map do |finding|
           if SUCCESS_OUTCOMES.include?(outcome) &&
              %w[incorporated approved answered].include?(finding.lifecycle) &&
-             !observed_ids.include?(finding.fingerprint)
+             !observed_ids.include?(finding.fingerprint) &&
+             attestations.include?(finding.fingerprint)
             finding.to_h.merge("lifecycle" => "verified", "verified_at" => timestamp)
           else
             finding.to_h
@@ -523,6 +547,15 @@ module Hive
               "owner" => "operator", "reason" => "verification_finding",
               "finding_fingerprint" => finding.fingerprint
             }
+          end.tap do |rows|
+            updated.map { |entry| Finding.new(entry) }.select do |finding|
+              %w[incorporated approved answered].include?(finding.lifecycle)
+            end.each do |finding|
+              rows << {
+                "owner" => "reviewer", "reason" => "disposition_verification_missing",
+                "finding_fingerprint" => finding.fingerprint
+              }
+            end
           end
         else []
         end
@@ -546,14 +579,33 @@ module Hive
         reference && @store.read_reference(reference)
       end
 
-      def persisted_result_findings(record, role)
+      def persisted_result(record, role)
         reference = record["artifacts"]["#{role}_result"]
-        return [] unless reference
+        return {} unless reference
 
-        parsed = JSON.parse(@store.read_reference(reference))
-        Array(parsed["findings"])
+        JSON.parse(@store.read_reference(reference))
       rescue JSON::ParserError
         raise InvalidRecord, "persisted #{role} result is invalid JSON"
+      end
+
+      def verification_targets(record)
+        record["findings"].map { |entry| Finding.new(entry) }.select do |finding|
+          %w[incorporated approved answered].include?(finding.lifecycle)
+        end
+      end
+
+      def attempts_in_current_run(record, role)
+        routes = record["routes"].select { |entry| entry["role"] == role }
+        reset = routes.rindex { |entry| entry["recovery_reset"] == true }
+        routes = routes.drop(reset + 1) if reset
+        routes.count { |entry| entry["attempt_id"] }
+      end
+
+      def default_retry_at(record, role, attempt_id)
+        ordinal = attempts_in_current_run(record, role) + 1
+        base = [ 5 * (2**(ordinal - 1)), 60 ].min
+        jitter = Digest::SHA256.hexdigest(attempt_id)[0, 4].to_i(16) % (base + 1)
+        (@clock.call + base + jitter).utc.iso8601(6)
       end
 
       def latest_initial_outcomes(record)

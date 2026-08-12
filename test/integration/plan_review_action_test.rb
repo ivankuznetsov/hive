@@ -1,7 +1,11 @@
 require "test_helper"
+require "digest"
 require "json"
 require "json_schemer"
+require "hive/commands/init"
+require "hive/commands/new"
 require "hive/commands/plan_review"
+require "hive/plan_review/orchestrator"
 
 class PlanReviewActionIntegrationTest < Minitest::Test
   include HiveTestHelper
@@ -10,6 +14,56 @@ class PlanReviewActionIntegrationTest < Minitest::Test
     :folder, :project_root, :hive_state_path, :slug, :id, :stage_index, :stage_name,
     keyword_init: true
   )
+
+  class LifecycleAdapter
+    attr_reader :calls
+
+    def initialize(finding)
+      @finding = finding
+      @calls = []
+    end
+
+    def call(request)
+      @calls << request
+      findings = request.kind == "primary" ? [ @finding ] : []
+      evidence = request.kind == "verification" ? request.verification_findings.map do |entry|
+        {
+          "finding_fingerprint" => entry.fetch("fingerprint"),
+          "status" => "verified", "evidence" => "candidate addresses the approved finding"
+        }
+      end : []
+      Hive::PlanReview::Adapters::Base::Result.new(
+        outcome: "success", findings:, residual_evidence: evidence,
+        coverage: request.required_coverage.map do |name|
+          { "name" => name, "required" => true, "status" => "completed" }
+        end,
+        route_receipt: {
+          "role" => request.kind, "requested" => request.reviewer,
+          "actual" => request.reviewer, "capability_result" => "present",
+          "independence_verified" => true,
+          "independence_reason" => "different_model_family"
+        }
+      )
+    end
+  end
+
+  class LifecycleRevision
+    attr_reader :calls
+
+    def initialize(candidate)
+      @candidate = candidate
+      @calls = []
+    end
+
+    def call(**arguments)
+      @calls << arguments
+      Hive::PlanReview::PlannerRevision::Result.new(
+        outcome: "success", candidate_bytes: @candidate,
+        candidate_digest: Digest::SHA256.hexdigest(@candidate),
+        route_receipt: arguments.fetch(:planner_identity), diagnostic: ""
+      )
+    end
+  end
 
   def test_public_command_emits_schema_valid_action_and_idempotent_replay
     with_current_review do |task, store, current|
@@ -46,6 +100,72 @@ class PlanReviewActionIntegrationTest < Minitest::Test
       assert schema.valid?(payload), schema.validate(payload).to_a.inspect
       assert_equal "stale_decision", payload.fetch("error_kind")
       assert_empty store.current["decisions"]
+    end
+  end
+
+  def test_public_command_resumes_revision_verification_and_candidate_promotion
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io do
+          Hive::Commands::Init.new(dir).call
+          Hive::Commands::New.new(File.basename(dir), "public plan review decision").call
+        end
+        inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
+        slug = File.basename(inbox)
+        folder = File.join(dir, ".hive-state", "stages", "3-plan", slug)
+        FileUtils.mkdir_p(File.dirname(folder))
+        FileUtils.mv(inbox, folder)
+        original = lifecycle_plan
+        candidate = original.sub("# Plan", "# Plan\n\nApproved: preserve the compatibility contract.")
+        File.write(File.join(folder, "plan.md"), original)
+        task = Hive::Task.new(folder)
+        finding = lifecycle_finding
+        adapter = LifecycleAdapter.new(finding)
+        revision = LifecycleRevision.new(candidate)
+        route_resolver = method(:lifecycle_route)
+        options = {
+          adapter:, planner_revision: revision, route_resolver:,
+          clock: -> { Time.utc(2026, 8, 12, 12) }
+        }
+        initial = Hive::PlanReview::Orchestrator.new(
+          task:, cfg: Hive::Config.load(dir), planner_identity: planner_identity,
+          **options
+        ).advance!
+        assert_equal "awaiting_decision", initial.record.state
+
+        replacement = lambda do |task:, cfg:, planner_identity:, **|
+          Hive::PlanReview::Orchestrator.new(
+            task:, cfg:, planner_identity:, **options
+          ).advance!
+        end
+        current = initial.record
+        arguments = {
+          review_id: current.review_id, task_generation: current.task_generation,
+          policy_fingerprint: current.policy_fingerprint,
+          expected_artifact_digest: initial.observation_digest,
+          target_fingerprint: current["findings"].first.fetch("fingerprint"),
+          json: true
+        }
+        output = nil
+        with_replaced_singleton_method(
+          Hive::PlanReview::Orchestrator, :run!, replacement
+        ) do
+          output, = capture_io do
+            Hive::Commands::PlanReview.new(folder, "approve-finding", **arguments).call
+          end
+        end
+
+        payload = JSON.parse(output)
+        assert schema.valid?(payload), schema.validate(payload).to_a.inspect
+        assert_equal "cleared", payload.fetch("state")
+        assert payload.fetch("execution_allowed")
+        assert_equal 1, revision.calls.length
+        assert_equal 1, adapter.calls.count { |request| request.kind == "verification" }
+        assert_equal candidate, File.read(File.join(folder, "plan.md"))
+        assert_equal "verified", Hive::PlanReview::Store.new(
+          task_folder: folder
+        ).current["findings"].first.fetch("lifecycle")
+      end
     end
   end
 
@@ -123,5 +243,56 @@ class PlanReviewActionIntegrationTest < Minitest::Test
     @schema ||= JSONSchemer.schema(
       JSON.parse(File.read(Hive::Schemas.schema_path("hive-plan-review-action")))
     )
+  end
+
+  def lifecycle_plan
+    <<~MD
+      ---
+      files:
+        - lib/demo.rb
+        - test/demo_test.rb
+      ---
+      # Plan
+      ## Test scenarios
+      - Run the focused test.
+      <!-- COMPLETE -->
+    MD
+  end
+
+  def lifecycle_finding
+    Hive::PlanReview::Finding.new(
+      "source" => "whole_document", "classification" => "gated_auto",
+      "risk" => "medium", "title" => "Preserve compatibility",
+      "description" => "The plan needs an explicit compatibility disposition.",
+      "evidence" => {
+        "path" => "plan.md", "start_line" => 1, "end_line" => 1,
+        "anchor_digest" => Digest::SHA256.hexdigest("plan")
+      },
+      "lifecycle" => "open", "display_order" => 1
+    )
+  end
+
+  def lifecycle_route(role:, **)
+    candidate = {
+      "provider" => role == "adversarial" ? "grok" : "codex",
+      "model" => role == "adversarial" ? "grok-4.6" : "gpt-5.6-sol",
+      "family" => role == "adversarial" ? "grok" : "openai",
+      "effort" => "high", "route" => "native_#{role}"
+    }
+    Hive::PlanReview::RouteResolver::Resolution.new(
+      status: "resolved", candidate:,
+      receipt: {
+        "role" => role, "requested" => candidate, "actual" => candidate,
+        "capability_result" => "present", "independence_verified" => true,
+        "independence_reason" => "different_model_family"
+      }
+    )
+  end
+
+  def planner_identity
+    {
+      "provider" => "claude", "model" => "opus", "family" => "anthropic",
+      "effort" => "high", "route" => "native_claude"
+    }
   end
 end

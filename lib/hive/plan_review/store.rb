@@ -124,6 +124,18 @@ module Hive
         File.binread(path)
       end
 
+      # Serialize the full observe/dispatch/publish lifecycle, not only the
+      # current.json CAS write. A waiter re-reads the winner's route after the
+      # lock and coalesces instead of spawning a duplicate reviewer.
+      def with_orchestration_lock
+        ensure_directory!(root)
+        path = File.join(root, ".orchestrator.lock")
+        File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|
+          lock.flock(File::LOCK_EX)
+          yield
+        end
+      end
+
       private
 
       def coerce_record(record, kind:)

@@ -115,10 +115,10 @@ module Hive
         lifecycle.merge(
           "total" => findings.length,
           "open_gated" => findings.count do |finding|
-            finding.classification == "gated_auto" && !finding.resolved?
+            finding.classification == "gated_auto" && finding.blocking?
           end,
           "open_manual" => findings.count do |finding|
-            finding.classification == "manual" && !finding.resolved?
+            finding.classification == "manual" && finding.blocking?
           end,
           "fyi" => findings.count { |finding| finding.classification == "fyi" }
         )

@@ -106,8 +106,14 @@ module Hive
           task_generation: @task_generation,
           policy_fingerprint: @policy_fingerprint,
           expected_artifact_digest: @expected_artifact_digest,
-          target_fingerprint: @target_fingerprint, value: action_value,
+          target_fingerprint: @target_fingerprint,
+          value: Hive::PlanReview::DecisionService.action_value(
+            @action, answer: @answer, coverage: @coverage, level: @level
+          ),
           reason: @reason, origin: "cli", operator: @operator,
+          # ADR-008's local same-user boundary treats an intentional direct CLI
+          # invocation as operator authority. An agent granted unrestricted
+          # shell access therefore has that user's authority too.
           authorized: true
         )
         projection = result.applied ? @resumer.call(task) : result.projection
@@ -122,15 +128,6 @@ module Hive
           "--expected-artifact-digest" => @expected_artifact_digest
         }.each do |flag, value|
           raise Hive::PlanReview::InvalidAction, "#{flag} is required" if value.to_s.strip.empty?
-        end
-      end
-
-      def action_value
-        case @action
-        when "answer_finding" then { "answer" => @answer }
-        when "waive_coverage" then { "coverage" => @coverage }
-        when "downgrade_level", "raise_level" then { "level" => @level }
-        else {}
         end
       end
 

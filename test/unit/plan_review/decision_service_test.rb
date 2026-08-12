@@ -110,6 +110,10 @@ class PlanReviewDecisionServiceTest < Minitest::Test
       assert result.applied
       assert_equal "reviewing", store.current.state
       assert_equal "pra-#{'e' * 64}", result.decision.target_fingerprint
+      reset = store.current["routes"].last
+      assert reset.fetch("recovery_reset")
+      assert_nil reset["retry_at"]
+      refute reset.key?("attempt_id")
     end
 
     with_service(routes: [ route("unsupported") ]) do |service, _store, record|
@@ -117,6 +121,38 @@ class PlanReviewDecisionServiceTest < Minitest::Test
         service.apply(**decision_arguments(record, action: "retry", authorized: false))
       end
     end
+  end
+
+  def test_retry_can_target_transient_verification_and_request_review_resets_terminal_route
+    verification = route("timeout").merge("role" => "verification")
+    with_service(routes: [ verification ]) do |service, store, record|
+      result = service.apply(**decision_arguments(record, action: "retry", authorized: false))
+      assert result.applied
+      assert_equal "reviewing", store.current.state
+      assert_equal "verification", store.current["routes"].last.fetch("role")
+      assert store.current["routes"].last.fetch("recovery_reset")
+    end
+
+    with_service(routes: [ route("unsupported") ]) do |service, store, record|
+      result = service.apply(**decision_arguments(
+        record, action: "request_review", authorized: false
+      ))
+      assert result.applied
+      reset = store.current["routes"].last
+      assert reset.fetch("recovery_reset")
+      assert_equal "retryable_failure", reset.fetch("outcome")
+      refute reset.key?("attempt_id")
+    end
+  end
+
+  def test_action_value_normalization_is_shared_by_cli_and_web_callers
+    assert_equal({ "answer" => "yes" }, Hive::PlanReview::DecisionService.action_value(
+      "answer-finding", answer: "yes"
+    ))
+    assert_equal({ "coverage" => "adversarial" }, Hive::PlanReview::DecisionService.action_value(
+      "waive_coverage", coverage: "adversarial"
+    ))
+    assert_equal({}, Hive::PlanReview::DecisionService.action_value("retry"))
   end
 
   def test_persisted_raise_is_idempotent_and_never_lowers

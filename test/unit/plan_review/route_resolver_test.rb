@@ -59,6 +59,22 @@ class PlanReviewRouteResolverTest < Minitest::Test
     assert_equal "unsupported", resolution.receipt.fetch("capability_result")
   end
 
+  def test_configured_identity_is_not_credited_when_probe_does_not_observe_model_family
+    resolution = Hive::PlanReview::RouteResolver.resolve(
+      role: "adversarial",
+      planner_identity: { "provider" => "openai", "family" => "openai" },
+      candidates: [ candidate("claude", "opus", "anthropic") ],
+      probe: lambda do |_candidate|
+        { "status" => "present", "actual" => { "provider" => "claude", "route" => "native" } }
+      end
+    )
+
+    refute resolution.receipt.fetch("independence_verified")
+    assert_equal "reviewer_family_unknown", resolution.receipt.fetch("independence_reason")
+    refute resolution.receipt.fetch("actual").key?("model")
+    assert_equal "opus", resolution.candidate.fetch("model")
+  end
+
   def test_project_model_routing_overrides_the_configured_role_without_switching_provider
     cfg = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS)).merge(
       "models" => { "plan_review_adversarial" => { "model" => "grok-4.6-fast", "effort" => "xhigh" } }

@@ -1,5 +1,6 @@
 require "json"
 require "set"
+require "time"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/finding"
 require "hive/plan_review/record"
@@ -64,16 +65,13 @@ module Hive
         findings = Array(data["findings"]).map { |entry| Finding.build(entry) }
         coverage = validate_coverage!(data["coverage"])
         lenses = validate_names!(data["selected_lenses"], "selected_lenses")
-        residual = data["residual_evidence"]
-        raise InvalidRecord, "residual_evidence must be an Array" unless residual.is_a?(Array)
+        residual = validate_residual_evidence!(data["residual_evidence"])
         diagnostic = data["diagnostic"]
         unless diagnostic.nil? || diagnostic.is_a?(String)
           raise InvalidRecord, "plan review diagnostic must be a String or null"
         end
         retry_at = data["retry_at"]
-        if retry_at && !retry_at.is_a?(String)
-          raise InvalidRecord, "plan review retry_at must be a timestamp String"
-        end
+        validate_retry_at!(retry_at, "retry_at") if retry_at
 
         Parsed.new(
           attempt_id: data["attempt_id"].freeze,
@@ -119,6 +117,7 @@ module Hive
           end
           raise InvalidRecord, "duplicate plan review coverage item" unless names.add?(entry["name"])
 
+          validate_retry_at!(entry["retry_at"], "coverage retry_at") if entry["retry_at"]
           Hive::PlanReview.deep_freeze(entry)
         end
       end
@@ -128,6 +127,35 @@ module Hive
           raise InvalidRecord, "plan review #{label} must contain lowercase names"
         end
         value.map(&:to_s).uniq
+      end
+
+      def validate_residual_evidence!(value)
+        raise InvalidRecord, "residual_evidence must be an Array" unless value.is_a?(Array)
+
+        seen = Set.new
+        value.map do |entry|
+          unless entry.is_a?(Hash) &&
+                 entry.keys.sort == %w[evidence finding_fingerprint status] &&
+                 entry["finding_fingerprint"].to_s.match?(Record::FINDING_ID) &&
+                 entry["status"] == "verified" &&
+                 entry["evidence"].is_a?(String) && !entry["evidence"].strip.empty?
+            raise InvalidRecord, "invalid plan review residual evidence entry"
+          end
+          unless seen.add?(entry["finding_fingerprint"])
+            raise InvalidRecord, "duplicate plan review residual evidence item"
+          end
+
+          Hive::PlanReview.deep_freeze(entry)
+        end
+      end
+
+      def validate_retry_at!(value, label)
+        unless value.is_a?(String)
+          raise InvalidRecord, "plan review #{label} must be a timestamp String"
+        end
+        Time.iso8601(value)
+      rescue ArgumentError
+        raise InvalidRecord, "plan review #{label} must be ISO-8601"
       end
     end
   end

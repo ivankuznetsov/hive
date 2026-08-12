@@ -658,7 +658,8 @@ module Hive
       return nil unless plan_review
 
       freshness = plan_review.dig("freshness", "status")
-      return ACTIONS.fetch(:plan_review_blocked) if %w[stale invalid].include?(freshness)
+      return ACTIONS.fetch(:plan_reviewing) if freshness == "stale"
+      return ACTIONS.fetch(:plan_review_blocked) if freshness == "invalid"
 
       state = plan_review["state"].to_s
       case state
@@ -840,7 +841,7 @@ module Hive
 
       summary.merge(
         "blocker_owner" => "hive", "blocker_reason" => freshness.fetch("reason"),
-        "required_action" => "refresh plan review state and retry",
+        "required_action" => "start a linked plan review from the current plan",
         "execution_allowed" => false
       )
     rescue Hive::PlanReview::Error, Hive::ConfigError, SystemCallError, IOError

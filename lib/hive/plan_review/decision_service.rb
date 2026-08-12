@@ -104,6 +104,15 @@ module Hive
         end
       end
 
+      def self.action_value(action, answer: nil, coverage: nil, level: nil)
+        case action.to_s.tr("-", "_")
+        when "answer_finding" then { "answer" => answer }
+        when "waive_coverage" then { "coverage" => coverage }
+        when "downgrade_level", "raise_level" then { "level" => level }
+        else {}
+        end
+      end
+
       def self.read_level(path)
         return nil unless File.file?(path) && !File.symlink?(path)
 
@@ -234,8 +243,9 @@ module Hive
           raised_level(current, decision)
         when "retry"
           validate_retry!(current, decision)
+          data["routes"] = append_recovery_reset(current, latest_review_route(current))
         when "request_review"
-          # Explicit request simply re-enters review from a stable blocked state.
+          data["routes"] = reset_terminal_route(current)
         end
         data.merge(
           "state" => "reviewing", "outcome" => nil, "blockers" => [],
@@ -252,14 +262,14 @@ module Hive
 
           found = true
           if decision.action == "approve_finding"
-            unless finding.classification == "gated_auto" && finding.lifecycle == "open"
+            unless finding.classification == "gated_auto" && finding.blocking?
               raise ConflictingDecision, "finding is not an open gated finding"
             end
             finding.to_h.merge(
               "lifecycle" => "approved", "decision_id" => decision.decision_id
             )
           else
-            unless finding.classification == "manual" && finding.lifecycle == "open"
+            unless finding.classification == "manual" && finding.blocking?
               raise ConflictingDecision, "finding is not an open manual finding"
             end
             finding.to_h.merge(
@@ -328,8 +338,30 @@ module Hive
 
       def latest_review_route(current)
         current["routes"].reverse.find do |entry|
-          %w[primary adversarial].include?(entry["role"])
+          %w[primary adversarial verification].include?(entry["role"]) &&
+            entry["attempt_id"]
         end
+      end
+
+      def reset_terminal_route(current)
+        route = current["routes"].reverse.find do |entry|
+          %w[primary adversarial verification].include?(entry["role"]) &&
+            !TRANSIENT_OUTCOMES.include?(entry["outcome"])
+        end
+        raise InvalidAction, "request_review requires a terminal reviewer route" unless route
+
+        append_recovery_reset(current, route)
+      end
+
+      def append_recovery_reset(current, route)
+        reset = route.slice(
+          "role", "requested", "actual", "capability_result",
+          "independence_verified", "independence_reason"
+        ).merge(
+          "outcome" => "retryable_failure", "retry_at" => nil,
+          "recovery_reset" => true
+        )
+        current["routes"] + [ reset ]
       end
 
       def timestamp = @clock.call.utc.iso8601(6)

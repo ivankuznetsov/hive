@@ -183,10 +183,10 @@ module Hive
       end
 
       def mandatory_reasons(text, files, protected_paths, uncertainties)
-        evidence_text = text.gsub(/\bno data migration\b/i, "")
+        evidence_text = text
         reasons = MANDATORY_PATTERNS.filter_map do |category, pattern|
           path = files.find { |file| MANDATORY_PATH_PATTERNS[category]&.match?(file) }
-          match = evidence_text.match(pattern)
+          match = affirmative_match(evidence_text, pattern)
           next unless path || match
 
           {
@@ -217,6 +217,33 @@ module Hive
         end
         reasons.freeze
       end
+
+      def affirmative_match(text, pattern)
+        offset = 0
+        while (match = pattern.match(text, offset))
+          return match unless explicitly_negated?(text, match)
+
+          offset = [ match.end(0), match.begin(0) + 1 ].max
+        end
+        nil
+      end
+      private_class_method :affirmative_match
+
+      def explicitly_negated?(text, match)
+        line_start = text.rindex("\n", match.begin(0))&.+(1) || 0
+        line_end = text.index("\n", match.end(0)) || text.length
+        prefix = text.byteslice(line_start, match.begin(0) - line_start).to_s
+        suffix = text.byteslice(match.end(0), line_end - match.end(0)).to_s
+        clause_start = text.rindex(/[.!?;]/, match.begin(0) - 1)&.+(1) || 0
+        clause_prefix = text.byteslice(clause_start, match.begin(0) - clause_start).to_s
+        prefix.match?(/\b(?:no|without|excluding)\s+(?:[a-z-]+\s+){0,3}\z/i) ||
+          prefix.match?(/\b(?:do(?:es)?|will|would|is|are)\s+not\s+(?:[a-z-]+\s+){0,3}\z/i) ||
+          clause_prefix.gsub(/\s+/, " ").match?(
+            /\b(?:do(?:es)?|will|would|is|are)\s+not\s+(?:[a-z-]+\s+){0,3}\z/i
+          ) ||
+          suffix.match?(/\A\s+(?:changes?\s+)?(?:is|are|remain(?:s)?)\s+(?:explicitly\s+)?(?:out of scope|unchanged)\b/i)
+      end
+      private_class_method :explicitly_negated?
 
       def local_scope?(production_files)
         return false if production_files.empty?

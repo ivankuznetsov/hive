@@ -38,11 +38,11 @@ module Hive
           }.compact
           next unless status == "present"
 
-          actual = normalize_candidate(observation.fetch("actual", candidate), require_family: false)
+          actual = normalize_observed_identity(observation["actual"])
           verified, reason = independence(planner_identity, actual)
           return Resolution.new(
             status: "resolved",
-            candidate: actual.freeze,
+            candidate: candidate.freeze,
             receipt: {
               "role" => role,
               "requested" => candidates.first,
@@ -132,10 +132,13 @@ module Hive
         result = Hive::AgentRuntime.prepare!(profile)
         {
           "status" => "present",
-          "actual" => candidate.merge(
+          # Runtime preparation attests only the launcher/provider. The served
+          # model is observed after the call; configured model/family values
+          # must not be promoted into the actual identity here.
+          "actual" => {
             "provider" => result.provider.to_s,
             "route" => result.launcher_identity.to_s
-          )
+          }
         }
       rescue StandardError => e
         { "status" => "unsupported", "diagnostic" => e.message }
@@ -165,6 +168,21 @@ module Hive
         end
         candidate["family"] = nil if candidate["family"].to_s.empty?
         candidate.transform_values { |entry| entry.is_a?(String) ? redact(entry) : entry }.freeze
+      end
+
+      def normalize_observed_identity(value)
+        actual = normalize_hash(value || {}).reject do |_key, entry|
+          entry.nil? || (entry.is_a?(String) && entry.strip.empty?)
+        end
+        unknown = actual.keys - CANDIDATE_KEYS
+        raise Hive::ConfigError, "observed plan review route has unknown fields: #{unknown.inspect}" unless unknown.empty?
+
+        actual.each do |key, entry|
+          unless entry.is_a?(String) && !entry.strip.empty?
+            raise Hive::ConfigError, "observed plan review route #{key} must be non-empty"
+          end
+        end
+        actual.transform_values { |entry| redact(entry) }.freeze
       end
 
       def normalize_hash(value)

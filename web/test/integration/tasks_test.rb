@@ -250,6 +250,22 @@ class TasksTest < ActionDispatch::IntegrationTest
                   "/tasks/#{@project}/#{@slug}/approve", text: "Force approve", count: 0
   end
 
+  test "verification blockers do not expose futile finding decisions" do
+    move_task_to_plan!
+    details = plan_review_details_fixture
+    details.fetch("summary")["state"] = "blocked"
+    details.fetch("summary")["required_action"] = "start a new linked plan"
+
+    with_replaced_instance_method(Task, :plan_review_details, -> { details }) do
+      get "/tasks/#{@project}/#{@slug}"
+    end
+
+    assert_response :success
+    assert_select "input[name=review_action][value=approve_finding]", 0
+    assert_select "input[name=review_action][value=answer_finding]", 0
+    assert_select ".plan-review-required-action", text: /start a new linked plan/
+  end
+
   test "plan review action delegates the exact observation to the shared task mutation" do
     captured = nil
     projection = Struct.new(:record).new(Struct.new(:state).new("revising"))

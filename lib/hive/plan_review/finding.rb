@@ -39,7 +39,13 @@ module Hive
       def classification = data.fetch("classification")
       def lifecycle = data.fetch("lifecycle")
       def resolved? = RESOLVED_LIFECYCLES.include?(lifecycle)
-      def blocking? = %w[gated_auto manual].include?(classification) && !resolved?
+      # A decision blocker is narrower than an unresolved finding: approved,
+      # answered, and incorporated findings still need revision/verification,
+      # but no longer await operator authority.
+      def self.blocking?(classification:, lifecycle:)
+        %w[gated_auto manual].include?(classification.to_s) && lifecycle.to_s == "open"
+      end
+      def blocking? = self.class.blocking?(classification:, lifecycle:)
       def to_h = JSON.parse(JSON.generate(data))
 
       def [](key)

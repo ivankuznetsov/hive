@@ -53,6 +53,22 @@ module Hive
         )
       end
 
+      # Interactive approval paths may validate an already-produced projection,
+      # but must leave provider dispatch to plan-stage automation.
+      def prepare_existing!(task:, destination:, config: nil)
+        return nil unless transition_applicable?(task, destination)
+
+        cfg = config || Hive::Config.load(task.project_root)
+        projection = Projection.load(task_folder: task.folder)
+        authorize!(task, projection, cfg:)
+        observation(projection)
+      rescue InvalidPlan, InvalidRecord, StaleObservation, Hive::ConfigError => error
+        raise blocked_error(
+          task, nil, "plan review evidence is unavailable or invalid: #{error.message}",
+          required_action: "run or repair the plan review and retry"
+        )
+      end
+
       def verify!(task:, destination:, observation:, config: nil)
         return true unless transition_applicable?(task, destination)
         raise blocked_error(task, nil, "plan review observation is missing") unless observation
@@ -93,6 +109,7 @@ module Hive
           write_legacy_adoption!(task, clock:)
           return true
         end
+        return true if legacy_adoption_valid?(task, root)
 
         cfg = config || Hive::Config.load(task.project_root)
         authorize!(task, Projection.load(task_folder: task.folder), cfg:)
@@ -134,11 +151,11 @@ module Hive
 
       def freshness(task:, projection:, config:)
         record = projection.record
-        allowed_digests = [ record.plan_digest, record["candidate_plan_digest"] ].compact
+        required_digest = record["candidate_plan_digest"] || record.plan_digest
         return stale("task generation changed after plan review") unless
           record.task_generation.to_s == Identity.task_generation(task).to_s
         return stale("canonical plan changed after plan review") unless
-          allowed_digests.include?(current_plan_digest(task))
+          required_digest == current_plan_digest(task)
         return stale("plan review policy changed after resolution") unless
           policy_configuration_matches?(record, task, config)
 
@@ -219,6 +236,25 @@ module Hive
         true
       rescue SystemCallError, IOError => error
         raise InvalidRecord, "legacy execute adoption could not be recorded: #{error.message}"
+      end
+
+      def legacy_adoption_valid?(task, root)
+        return false if Hive::TaskMeta.plan_review_required?(task.folder)
+
+        path = File.join(root, "legacy-execute-adoption.json")
+        return false unless File.file?(path) && !File.symlink?(path)
+
+        bytes = File.binread(path, Store::MAX_JSON_BYTES + 1)
+        raise InvalidRecord, "legacy execute adoption exceeds the size limit" if
+          bytes.bytesize > Store::MAX_JSON_BYTES
+        receipt = JSON.parse(bytes)
+        receipt["schema"] == ADOPTION_SCHEMA && receipt["schema_version"] == 1 &&
+          receipt["task_id"] == (task.id || task.slug).to_s &&
+          receipt["task_generation"].to_s == Identity.task_generation(task).to_s &&
+          receipt["stage"] == EXECUTE_STAGE &&
+          receipt["reason"] == "pre_feature_execute_task"
+      rescue JSON::ParserError
+        raise InvalidRecord, "legacy execute adoption is invalid JSON"
       end
 
       def persisted_run_level(store)

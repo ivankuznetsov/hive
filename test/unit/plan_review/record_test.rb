@@ -65,6 +65,23 @@ class PlanReviewRecordTest < Minitest::Test
     assert_raises(FrozenError) { value["routes"].first["role"] = "verification" }
   end
 
+  def test_projection_rejects_wrong_identifier_prefixes_and_degradation_reason
+    [
+      projection.merge("review_id" => "pra-#{'a' * 64}"),
+      projection.merge("prior_review_id" => "prd-#{'a' * 64}"),
+      projection.merge(
+        "state" => "reviewing", "outcome" => nil, "execution_allowed" => false,
+        "attempt_ids" => [ "pr-#{'e' * 64}" ],
+        "current_attempt_id" => "pr-#{'e' * 64}"
+      ),
+      projection.merge("degradation_reason" => "invented")
+    ].each do |value|
+      assert_raises(Hive::PlanReview::InvalidRecord) do
+        Hive::PlanReview::Record.new(value)
+      end
+    end
+  end
+
   private
 
   def projection

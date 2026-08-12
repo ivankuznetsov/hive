@@ -161,7 +161,9 @@ module TaskMutations
     result = service_factory.call(native).apply(
       action: normalized_action, review_id:, task_generation: task_generation.to_s,
       policy_fingerprint:, expected_artifact_digest:, target_fingerprint:,
-      value: plan_review_action_value(normalized_action, answer:, coverage:, level:),
+      value: Hive::PlanReview::DecisionService.action_value(
+        normalized_action, answer:, coverage:, level:
+      ),
       reason:, origin: "web", operator:, authorized:
     )
     projection = if result.applied
@@ -184,15 +186,6 @@ module TaskMutations
 
     raise Hive::PlanReview::StaleDecision,
           "plan review changed; refresh the current observation"
-  end
-
-  def plan_review_action_value(action, answer:, coverage:, level:)
-    case action
-    when "answer_finding" then { "answer" => answer }
-    when "waive_coverage" then { "coverage" => coverage }
-    when "downgrade_level", "raise_level" then { "level" => level }
-    else {}
-    end
   end
 
   def resume_plan_review_after_decision!(task, action)

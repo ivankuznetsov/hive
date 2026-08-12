@@ -63,12 +63,12 @@ module Hive
         end
 
         task = Hive::Task.new(File.dirname(state_file))
-        cfg = Hive::Config.load(task.project_root)
-        observation = Hive::PlanReview::TransitionGuard.prepare!(
-          task:, destination: "4-execute", config: cfg
-        )
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "plan-review-approval") do
           locked = Hive::Task.new(task.folder)
+          cfg = Hive::Config.load(locked.project_root)
+          observation = Hive::PlanReview::TransitionGuard.prepare_existing!(
+            task: locked, destination: "4-execute", config: cfg
+          )
           Hive::PlanReview::TransitionGuard.verify!(
             task: locked, destination: "4-execute", observation:, config: cfg
           )

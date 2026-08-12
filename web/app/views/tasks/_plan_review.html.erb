@@ -2,6 +2,7 @@
 <% current = summary.dig("freshness", "status") == "current" %>
 <% mutations_enabled = status_fresh && current && summary["observation_digest"].present? &&
      task["stage"] == "3-plan" %>
+<% decision_mutations_enabled = mutations_enabled && summary["state"] == "awaiting_decision" %>
 <% identity = {
      review_id: summary["review_id"], task_generation: summary["task_generation"],
      policy_fingerprint: summary["policy_fingerprint"],
@@ -100,6 +101,9 @@
     <h3>Findings</h3>
     <ol class="plan-review-findings">
       <% plan_review.fetch("findings").each do |finding| %>
+        <% finding_blocks = Hive::PlanReview::Finding.blocking?(
+             classification: finding["classification"], lifecycle: finding["lifecycle"]
+           ) %>
         <li id="plan-review-finding-<%= finding.fetch("fingerprint") %>">
           <div class="plan-review-finding-heading">
             <strong><%= finding.fetch("title") %></strong>
@@ -111,7 +115,8 @@
             <pre><%= finding.dig("evidence", "excerpt") %></pre>
           <% end %>
 
-          <% if finding["lifecycle"] == "open" && finding["classification"] == "gated_auto" %>
+          <% if decision_mutations_enabled && finding_blocks &&
+                finding["classification"] == "gated_auto" %>
             <%= form_with url: task_plan_review_action_path(
                   task.project.name, task.slug, source: task_source
                 ), class: "plan-review-inline-form" do |form| %>
@@ -121,7 +126,8 @@
               <%= form.submit "Approve exact finding", disabled: !mutations_enabled,
                     data: { turbo_confirm: "Approve this gated finding for the current review?" } %>
             <% end %>
-          <% elsif finding["lifecycle"] == "open" && finding["classification"] == "manual" %>
+          <% elsif decision_mutations_enabled && finding_blocks &&
+                   finding["classification"] == "manual" %>
             <%= form_with url: task_plan_review_action_path(
                   task.project.name, task.slug, source: task_source
                 ), class: "plan-review-inline-form" do |form| %>
@@ -164,7 +170,7 @@
 
   <% if mutations_enabled %>
     <div class="plan-review-global-actions">
-      <% transient_route = plan_review.fetch("routes").reverse.find { |route| %w[primary adversarial].include?(route["role"]) } %>
+      <% transient_route = plan_review.fetch("routes").reverse.find { |route| %w[primary adversarial verification].include?(route["role"]) } %>
       <% if summary["state"] == "retry_scheduled" && transient_route &&
             %w[provider_limit timeout retryable_failure].include?(transient_route["outcome"]) %>
         <%= form_with url: task_plan_review_action_path(

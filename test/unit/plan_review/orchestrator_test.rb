@@ -168,7 +168,12 @@ class PlanReviewOrchestratorTest < Minitest::Test
           successful_result(request)
         end
       end
-      projection = orchestrator(task, cfg, adapter:).advance!
+      first = orchestrator(task, cfg, adapter:).advance!
+      assert_equal "retry_scheduled", first.record.state
+      assert_operator Time.iso8601(first.record["retry_at"]), :>, Time.utc(2026, 8, 12, 12)
+      projection = orchestrator(
+        task, cfg, adapter:, clock: -> { Time.utc(2026, 8, 12, 12, 2) }
+      ).advance!
 
       assert_equal "cleared", projection.record.state
       assert_equal 2, adapter.calls.count { |request| request.kind == "primary" }
@@ -185,6 +190,95 @@ class PlanReviewOrchestratorTest < Minitest::Test
 
       assert_equal "degraded_cleared", projection.record.state
       assert_equal 1, adapter.calls.count { |request| request.kind == "primary" }
+    end
+  end
+
+  def test_standard_degradation_does_not_discard_open_manual_finding
+    with_task(standard_plan) do |task, cfg|
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "primary"
+          successful_result(request, findings: [ finding("manual", "Choose rollback") ])
+        else
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported")
+        end
+      end
+
+      projection = orchestrator(task, cfg, adapter:).advance!
+
+      assert_equal "awaiting_decision", projection.record.state
+      refute projection.record.execution_allowed?
+      assert_equal "manual_answer_required", projection.record["blockers"].first.fetch("reason")
+    end
+  end
+
+  def test_standard_degradation_still_revises_an_accepted_finding
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["approval_policies"] = [
+        {
+          "id" => "bounded_wording", "version" => 1,
+          "action" => "approve_finding", "risk" => "low",
+          "paths" => [ "plan.md" ], "valid_from" => "2026-08-12T00:00:00Z",
+          "valid_until" => "2026-08-13T00:00:00Z", "revoked" => false
+        }
+      ]
+      accepted = finding("gated_auto", "Clarify tests")
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "primary"
+          successful_result(request, findings: [ accepted ])
+        elsif request.kind == "adversarial"
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported")
+        else
+          successful_result(request)
+        end
+      end
+      revision = FakeRevision.new(revised)
+
+      projection = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+
+      assert_equal "degraded_cleared", projection.record.state
+      assert_equal 1, revision.calls.length
+      assert_equal "verified", projection.record["findings"].first.fetch("lifecycle")
+      assert_equal revised, File.binread(File.join(task.folder, "plan.md"))
+    end
+  end
+
+  def test_verification_provider_limit_waits_then_retries_within_the_same_bound
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      finding = finding("safe_auto", "Clarify tests")
+      verification_calls = 0
+      retry_at = "2026-08-12T13:00:00Z"
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "primary"
+          successful_result(request, findings: [ finding ])
+        elsif request.kind == "verification" && (verification_calls += 1) == 1
+          Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "provider_limit", retry_at:
+          )
+        else
+          successful_result(request)
+        end
+      end
+      first = orchestrator(
+        task, cfg, adapter:, planner_revision: FakeRevision.new(revised)
+      ).advance!
+      assert_equal "retry_scheduled", first.record.state
+      assert_equal retry_at, first.record["retry_at"]
+
+      held = orchestrator(
+        task, cfg, adapter:, planner_revision: FakeRevision.new(revised),
+        clock: -> { Time.utc(2026, 8, 12, 12, 30) }
+      ).advance!
+      assert_equal "retry_scheduled", held.record.state
+      assert_equal 1, verification_calls
+
+      cleared = orchestrator(
+        task, cfg, adapter:, planner_revision: FakeRevision.new(revised),
+        clock: -> { Time.utc(2026, 8, 12, 13) }
+      ).advance!
+      assert_equal "cleared", cleared.record.state
+      assert_equal 2, verification_calls
     end
   end
 
@@ -242,13 +336,68 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_returning_to_an_older_plan_creates_a_new_linked_review
+    plan_a = standard_plan
+    plan_b = standard_plan.sub("# Plan", "# Plan B")
+    with_task(plan_a) do |task, cfg|
+      first = orchestrator(task, cfg, adapter: success_adapter).advance!
+      File.binwrite(File.join(task.folder, "plan.md"), plan_b)
+      second = orchestrator(task, cfg, adapter: success_adapter).advance!
+      File.binwrite(File.join(task.folder, "plan.md"), plan_a)
+      third = orchestrator(task, cfg, adapter: success_adapter).advance!
+
+      assert_equal first.record.review_id, second.record.prior_review_id
+      assert_equal second.record.review_id, third.record.prior_review_id
+      refute_equal first.record.review_id, third.record.review_id
+      assert_equal "cleared", third.record.state
+    end
+  end
+
+  def test_metadata_drift_rolls_a_cleared_plan_into_a_new_review
+    with_task(standard_plan) do |task, cfg|
+      first = orchestrator(task, cfg, adapter: success_adapter).advance!
+      File.open(task.meta_yml_path, "a") { |file| file << "owner: platform\n" }
+      second = orchestrator(task, cfg, adapter: success_adapter).advance!
+
+      refute_equal first.record.task_generation, second.record.task_generation
+      refute_equal first.record.review_id, second.record.review_id
+      assert_equal first.record.review_id, second.record.prior_review_id
+      assert_equal "cleared", second.record.state
+    end
+  end
+
+  def test_concurrent_entries_coalesce_under_the_orchestration_lock
+    with_task(standard_plan) do |task, cfg|
+      adapter = FakeAdapter.new do |request|
+        sleep 0.03 if request.kind == "primary"
+        successful_result(request)
+      end
+      ready = Queue.new
+      release = Queue.new
+      threads = 2.times.map do
+        Thread.new do
+          ready << true
+          release.pop
+          orchestrator(task, cfg, adapter:).advance!
+        end
+      end
+      2.times { ready.pop }
+      2.times { release << true }
+      projections = threads.map(&:value)
+
+      assert_equal 1, projections.map { |projection| projection.record.review_id }.uniq.length
+      assert_equal %w[primary adversarial verification], adapter.calls.map(&:kind)
+    end
+  end
+
   private
 
-  def orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(standard_plan))
+  def orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(standard_plan),
+                   clock: -> { Time.utc(2026, 8, 12, 12) })
     Hive::PlanReview::Orchestrator.new(
       task:, cfg:, planner_identity: planner_identity, adapter:,
       planner_revision:, route_resolver: method(:resolve_route),
-      clock: -> { Time.utc(2026, 8, 12, 12) }
+      clock:
     )
   end
 
@@ -280,11 +429,21 @@ class PlanReviewOrchestratorTest < Minitest::Test
   end
 
   def successful_result(request, findings: [])
+    residual_evidence = if request.kind == "verification"
+      request.verification_findings.map do |finding|
+        {
+          "finding_fingerprint" => finding.fetch("fingerprint"),
+          "status" => "verified", "evidence" => "candidate contains the disposition"
+        }
+      end
+    else []
+    end
     Hive::PlanReview::Adapters::Base::Result.new(
         outcome: "success", findings:,
         coverage: request.required_coverage.map do |name|
           { "name" => name, "required" => true, "status" => "completed" }
         end,
+        residual_evidence:,
         route_receipt: {
           "role" => request.kind, "requested" => request.reviewer,
           "actual" => request.reviewer, "capability_result" => "present",

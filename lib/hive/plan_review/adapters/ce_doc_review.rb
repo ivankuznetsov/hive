@@ -4,8 +4,11 @@ require "fileutils"
 require "json"
 require "securerandom"
 require "timeout"
+require "hive/agent_limit"
 require "hive/agent_profiles"
 require "hive/agent_skills"
+require "hive/artifact_firewall"
+require "hive/config"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/result_parser"
 require "hive/plan_review/route_resolver"
@@ -28,22 +31,38 @@ module Hive
             require "hive/stages/base"
 
             profile = Hive::AgentProfiles.lookup(request.reviewer.fetch("provider"), cfg: @cfg)
-            result = Hive::Stages::Base.spawn_agent(
-              @task,
-              prompt:,
-              add_dirs: [ cwd ],
-              cwd:,
-              max_budget_usd: @cfg.dig("budget_usd", "plan"),
-              timeout_sec: request.timeout_sec,
-              log_label: "plan-review-#{request.kind}",
-              profile:,
-              expected_output: output_path,
-              status_mode: :output_file_exists,
-              cfg: @cfg,
-              model: request.reviewer["model"],
-              effort: request.reviewer["effort"]
-            )
+            manifest = custody_manifest(cwd, output_path)
+            snapshot = Hive::ArtifactFirewall.capture(manifest)
+            result = nil
+            report = nil
+            begin
+              result = Hive::Stages::Base.spawn_agent(
+                @task,
+                prompt:,
+                add_dirs: [ cwd ],
+                cwd:,
+                max_budget_usd: @cfg.dig("budget_usd", "plan"),
+                timeout_sec: request.timeout_sec,
+                log_label: "plan-review-#{request.kind}",
+                profile:,
+                expected_output: output_path,
+                status_mode: :output_file_exists,
+                cfg: @cfg,
+                model: request.reviewer["model"],
+                effort: request.reviewer["effort"]
+              )
+            ensure
+              report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+            end
+            if report.tampered?
+              return {
+                "status" => "terminal_failure",
+                "diagnostic" => "reviewer modified protected artifacts: #{report.tampered_labels.join(', ')}"
+              }
+            end
             normalize_result(result, request)
+          rescue Hive::ArtifactFirewall::Error => error
+            { "status" => "terminal_failure", "diagnostic" => error.message }
           end
 
           private
@@ -53,18 +72,54 @@ module Hive
               "ok"
             elsif result[:timed_out]
               "timeout"
-            elsif result[:error_reason].to_s.match?(/limit|quota|retry_after/)
+            elsif result[:error_reason].to_s.match?(/limit|quota|retry_after/) ||
+                  result[:limit_text] || Hive::AgentLimit.from_limit?(result[:error_message])
               "provider_limit"
             else
               "retryable_failure"
             end
-            served_model = result.dig(:usage, :model) || request.reviewer["model"]
+            served_model = result.dig(:usage, :model).to_s
+            retry_at = result[:retry_at]
+            if status == "provider_limit" && retry_at.to_s.empty?
+              retry_at = Hive::AgentLimit.retry_after(text: result[:limit_text])
+            end
+            actual = {
+              "provider" => request.reviewer["provider"],
+              "route" => request.reviewer["route"],
+              "effort" => request.reviewer["effort"]
+            }
+            unless served_model.empty?
+              actual["model"] = served_model
+              actual["family"] = request.reviewer["family"] if served_model == request.reviewer["model"]
+            end
             {
               "status" => status,
               "diagnostic" => result[:error_message],
-              "retry_at" => result[:retry_at],
-              "actual_route" => request.reviewer.merge("model" => served_model.to_s)
+              "retry_at" => retry_at,
+              "actual_route" => actual
             }
+          end
+
+          def custody_manifest(workspace, output_path)
+            protected = Hive::ArtifactFirewall::ORCHESTRATOR_OWNED.to_h do |name|
+              [ name, File.join(@task.folder, name) ]
+            end
+            protected["meta.yml"] = @task.meta_yml_path
+            review_root = File.join(@task.folder, "plan-review")
+            if File.directory?(review_root) && !File.symlink?(review_root)
+              Dir.glob(File.join(review_root, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
+                next if %w[. ..].include?(File.basename(path))
+                next unless File.file?(path) || File.symlink?(path)
+
+                relative = path.delete_prefix("#{review_root}/")
+                protected["plan-review/#{relative}"] = path
+              end
+            end
+            Hive::ArtifactFirewall::Manifest.new(
+              root: @task.folder, protected_anchors: protected,
+              permitted_writable_roots: [ workspace ],
+              required_outputs: { "review-result" => output_path }
+            )
           end
         end
 
@@ -116,8 +171,9 @@ module Hive
             )
           end
           validate_output!(output_path, disposable)
+          bytes = File.binread(output_path, ResultParser::MAX_BYTES + 1)
           parsed = ResultParser.parse(
-            File.binread(output_path),
+            bytes,
             expected: {
               "attempt_id" => request.attempt_id,
               "plan_digest" => request.plan_digest,
@@ -136,7 +192,7 @@ module Hive
           )
         rescue Timeout::Error
           result("timeout", diagnostic: "plan review adapter timed out")
-        rescue StaleObservation, InvalidRecord => e
+        rescue StaleObservation, InvalidRecord, Hive::ConfigError => e
           result("terminal_failure", diagnostic: e.message)
         rescue SystemCallError, IOError => e
           result("terminal_failure", diagnostic: "plan review adapter filesystem failure: #{e.message}")
@@ -153,7 +209,7 @@ module Hive
             invocation: contract.invocation,
             project_root: request.project_root
           )).merge("invocation" => contract.invocation)
-        rescue KeyError => e
+        rescue KeyError, Hive::ConfigError => e
           { "status" => "unsupported", "diagnostic" => e.message }
         end
 
@@ -194,8 +250,11 @@ module Hive
         end
 
         def render_prompt(request, disposable, output_path, capability)
-          template = request.kind == "adversarial" ?
-            "plan_review_adversarial_prompt.md.erb" : "plan_review_prompt.md.erb"
+          template = case request.kind
+          when "adversarial" then "plan_review_adversarial_prompt.md.erb"
+          when "verification" then "plan_review_verification_prompt.md.erb"
+          else "plan_review_prompt.md.erb"
+          end
           source = File.read(File.expand_path("../../../../templates/#{template}", __dir__))
           ERB.new(source, trim_mode: "-").result_with_hash(
             skill_invocation: request.kind == "adversarial" ? nil : capability.fetch("invocation"),
@@ -206,7 +265,8 @@ module Hive
             required_coverage_json: JSON.generate(request.required_coverage),
             attempt_id: request.attempt_id,
             plan_digest: request.plan_digest,
-            policy_fingerprint: request.policy_fingerprint
+            policy_fingerprint: request.policy_fingerprint,
+            verification_findings_json: JSON.pretty_generate(request.verification_findings)
           )
         end
 
@@ -234,7 +294,7 @@ module Hive
         end
 
         def route_receipt(request, actual: nil, capability_result: "present")
-          actual = stringify(actual || request.reviewer)
+          actual = stringify(actual)
           independent, reason = RouteResolver.independence(request.planner_identity, actual)
           {
             "role" => request.kind,

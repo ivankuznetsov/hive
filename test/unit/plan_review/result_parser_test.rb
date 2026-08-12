@@ -50,6 +50,46 @@ class PlanReviewResultParserTest < Minitest::Test
     assert_includes error.message, "duplicate"
   end
 
+  def test_malformed_top_level_and_coverage_retry_timestamps_are_rejected
+    [
+      valid_result.merge("retry_at" => "later"),
+      valid_result.merge(
+        "coverage" => valid_result.fetch("coverage").map.with_index do |row, index|
+          index.zero? ? row.merge("retry_at" => "not-a-time") : row
+        end
+      )
+    ].each do |value|
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        Hive::PlanReview::ResultParser.parse(JSON.generate(value))
+      end
+      assert_includes error.message, "ISO-8601"
+    end
+  end
+
+  def test_residual_evidence_requires_a_unique_verified_finding_attestation
+    row = {
+      "finding_fingerprint" => "prf-#{'d' * 64}",
+      "status" => "verified", "evidence" => "candidate line 12 names the guard"
+    }
+    parsed = Hive::PlanReview::ResultParser.parse(
+      JSON.generate(valid_result.merge("residual_evidence" => [ row ]))
+    )
+    assert_equal [ row ], parsed.residual_evidence
+
+    [ row.merge("status" => "maybe"), row.merge("evidence" => "") ].each do |invalid|
+      assert_raises(Hive::PlanReview::InvalidRecord) do
+        Hive::PlanReview::ResultParser.parse(
+          JSON.generate(valid_result.merge("residual_evidence" => [ invalid ]))
+        )
+      end
+    end
+    assert_raises(Hive::PlanReview::InvalidRecord) do
+      Hive::PlanReview::ResultParser.parse(
+        JSON.generate(valid_result.merge("residual_evidence" => [ row, row ]))
+      )
+    end
+  end
+
   private
 
   def valid_result

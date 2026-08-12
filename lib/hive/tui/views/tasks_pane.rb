@@ -274,8 +274,10 @@ module Hive
           findings = review.fetch("finding_counts", {})
           total = coverage.values.sum { |value| value.to_i }
           open = findings.fetch("open_gated", 0).to_i + findings.fetch("open_manual", 0).to_i
-          "#{row.action_label} [#{level}/#{review['state']} " \
+          label = "#{row.action_label} [#{level}/#{review['state']} " \
             "cov=#{coverage.fetch('completed', 0)}/#{total} open=#{open}]"
+          required = Hive::Tui::Text.sanitize(review["required_action"])
+          required.empty? ? label : "#{label} next=#{required}"
         end
 
         def admission_error_status(row)

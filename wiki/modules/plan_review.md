@@ -72,7 +72,9 @@ Adapter outcomes are closed: `success`, `partial_coverage`, `unsupported`,
 `provider_limit`, `timeout`, `retryable_failure`, and `terminal_failure`.
 `unsupported` is stable and consumes no transient retry. Provider limits,
 timeouts, and retryable failures preserve retry metadata and use at most one
-initial attempt plus `plan_review.attempts.max_transient` retries.
+initial attempt plus `plan_review.attempts.max_transient` retries for primary,
+adversarial, and verification legs. Missing retry hints receive bounded
+exponential delay with deterministic jitter rather than a hot retry loop.
 
 ## Findings, revision, and verification
 
@@ -88,8 +90,10 @@ of four classes:
 
 Accepted findings are batched into one `PlannerRevision` call using the
 captured planner provider/model/family/effort. That call writes only
-`candidate-plan.md`. Hive then runs exactly one disposition/regression
-verification. A remaining or newly discovered blocker stops the lineage; it
+`candidate-plan.md`. Hive then runs one bounded disposition/regression
+verification leg. Each accepted finding requires explicit fingerprint-bound
+verification evidence; absence from a generic critique does not verify it. A
+remaining or newly discovered blocker stops the lineage; it
 cannot trigger a recursive second revision. A verified candidate is atomically
 promoted to canonical `plan.md` immediately before its matching terminal
 resolution is published.
@@ -121,10 +125,12 @@ for regular-file type, confinement, byte size, and SHA-256 digest on every
 authority-bearing read. Current projection publication is version-CAS under a
 task-local lock. A late result is retained but cannot replace a newer pointer.
 
-The logical review ID binds task identity, initial plan generation/digest, and
-policy fingerprint. Transient retries stay in that lineage and preserve stable
-finding decisions. An external plan edit or material policy change creates a
-new review whose `prior_review_id` points at the previous manifest.
+The logical review ID binds task identity, initial plan generation/digest,
+policy fingerprint, and prior lineage identity. Transient retries stay in that
+lineage and preserve stable finding decisions. An external plan edit or
+material policy change creates a new review whose `prior_review_id` points at
+the previous manifest; returning A-to-B-to-A creates a third linked review
+instead of colliding with immutable history.
 
 ## Terminal resolution and transition authority
 
@@ -168,6 +174,10 @@ observation-bound and idempotent: an identical replay is a no-op, a stale
 observation exits temporary-failure, and a conflicting target decision is
 rejected. Waivers and downgrades require a human-readable reason. The JSON
 result is `hive-plan-review-action.v1`.
+
+Under ADR-008's local same-user trust model, direct CLI invocation is the
+operator boundary; Web actions use the authenticated access predicate. An
+agent with unrestricted same-user shell access therefore has CLI authority.
 
 Project-local approval policies can consume a gated finding only when policy
 ID/version, validity/revocation, action, risk, paths/scope, review ID, and policy

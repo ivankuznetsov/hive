@@ -32,7 +32,7 @@ class PlanReviewProjectionTest < Minitest::Test
     summary = Hive::PlanReview::Projection.new(Hive::PlanReview::Record.new(data)).summary
 
     assert_equal 1, summary.dig("finding_counts", "open_gated")
-    assert_equal 1, summary.dig("finding_counts", "open_manual")
+    assert_equal 0, summary.dig("finding_counts", "open_manual")
     assert_equal 1, summary.dig("coverage_counts", "completed")
     assert_equal 1, summary.dig("coverage_counts", "failed")
     assert_equal "none", summary.fetch("blocker_owner")

@@ -50,6 +50,29 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
     end
   end
 
+  def test_rejects_candidate_before_allocating_more_than_the_byte_limit
+    Dir.mktmpdir("hive-plan-revision") do |root|
+      task_folder = File.join(root, ".hive-state", "stages", "3-plan", "demo")
+      FileUtils.mkdir_p(task_folder)
+      runner = lambda do |output_path:, **|
+        File.binwrite(
+          output_path,
+          "a" * (Hive::PlanReview::PlannerRevision::MAX_CANDIDATE_BYTES + 1)
+        )
+        { "status" => "success" }
+      end
+      result = Hive::PlanReview::PlannerRevision.new(
+        task: Task.new(folder: task_folder), cfg: {}, runner:
+      ).call(
+        review_id: "pr-#{'c' * 64}", plan_bytes: "# Plan\n", findings: [],
+        planner_identity:, timeout_sec: 60
+      )
+
+      assert_equal "terminal_failure", result.outcome
+      assert_includes result.diagnostic, "size limit"
+    end
+  end
+
   private
 
   def planner_identity

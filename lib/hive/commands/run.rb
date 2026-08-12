@@ -715,6 +715,7 @@ module Hive
         Hive::TaskAction.for(
           task,
           marker,
+          config: Hive::Config.load(task.project_root),
           project_name: project_name_for(task),
           project_count: Hive::Config.registered_projects.size
         ).command
@@ -734,7 +735,10 @@ module Hive
       end
 
       def allowed_outcomes(task)
-        Hive::TaskAction.for(task, Hive::Markers.current(task.state_file)).allowed_outcomes
+        Hive::TaskAction.for(
+          task, Hive::Markers.current(task.state_file),
+          config: Hive::Config.load(task.project_root)
+        ).allowed_outcomes
       end
 
       # Map a Hive::Error subclass to a RunErrorKind value. Ordering matters:

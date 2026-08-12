@@ -95,6 +95,15 @@ class PlanReviewTransitionGuardTest < Minitest::Test
       )
       assert_equal Digest::SHA256.hexdigest(candidate), observation.plan_digest
 
+      File.binwrite(File.join(task.folder, "plan.md"), original)
+      reverted = assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.verify!(
+          task:, destination: "4-execute", observation:, config: cfg
+        )
+      end
+      assert_includes reverted.message, "canonical plan changed"
+      File.binwrite(File.join(task.folder, "plan.md"), candidate)
+
       changed_cfg = Marshal.load(Marshal.dump(cfg))
       changed_cfg["plan_review"]["attempts"]["timeout_sec"] += 1
       error = assert_raises(Hive::PlanReview::TransitionBlocked) do
@@ -131,6 +140,9 @@ class PlanReviewTransitionGuardTest < Minitest::Test
       ))
       assert_equal "pre_feature_execute_task", receipt.fetch("reason")
       assert_equal "4-execute", receipt.fetch("stage")
+      assert Hive::PlanReview::TransitionGuard.validate_execute_entry!(
+        task:, config: cfg, clock: -> { Time.utc(2026, 8, 12, 13) }
+      )
     end
 
     with_task(stage_index: 4, stage_name: "execute") do |task, cfg|

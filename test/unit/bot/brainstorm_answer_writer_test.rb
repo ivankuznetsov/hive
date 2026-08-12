@@ -342,6 +342,20 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
+  def test_exact_writer_rejects_invalid_ordinals_and_missing_raw_question_positions
+    with_brainstorm(sample) do |path|
+      assert_equal :question_not_found,
+                   Hive::Bot::BrainstormAnswerWriter.write_at_ordinal_under_lock!(
+                     brainstorm_path: path, ordinal: Object.new, answer_text: "never written"
+                   )
+    end
+
+    lines = [ "## Round 1\n", "### Q1. Only question?\n" ]
+    assert_nil Hive::Bot::BrainstormAnswerWriter.send(
+      :question_line_index_for_ordinal, lines, 2
+    )
+  end
+
   # Boundary coverage (#269): the slot-creation scan must STOP at a
   # `## Round N` header before any A-line — the created A1 slot belongs to
   # Round 1's Q1, so it is inserted BEFORE the Round 2 boundary, never

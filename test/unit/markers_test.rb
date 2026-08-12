@@ -28,6 +28,17 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_marker_lock_without_create_refuses_a_missing_parent
+    with_tmp_dir do |dir|
+      missing = File.join(dir, "missing", "state.md")
+
+      assert_raises(Errno::ENOENT) do
+        Hive::Markers.with_markers_lock(missing, create: false) { flunk }
+      end
+      refute Dir.exist?(File.dirname(missing))
+    end
+  end
+
   def test_current_rejects_symlinks_and_fifos_without_blocking
     skip "File::NONBLOCK is unavailable" unless File.const_defined?(:NONBLOCK)
 

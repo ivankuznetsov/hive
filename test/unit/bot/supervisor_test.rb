@@ -2936,6 +2936,45 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_match(/already moved on/, @telegram.messages.last.fetch(:text))
     assert_nil @conversation_store.get(chat_id: 42, slug: "task")
   end
+
+  def test_execute_answer_write_reports_incomplete_answer_after_stage_movement
+    result = FakeRouter::Result.new(
+      action: :write_answer_then_reply, slug: "task", project: "hive",
+      question_n: 1, binding: "bound", answer_text: "done"
+    )
+    receipt = {
+      "outcome" => "written", "reason" => "exact_match", "complete" => false,
+      "slot" => { "question_number" => 1 }, "task" => { "project" => "hive" }
+    }
+    inventory = ->(*_args, **_kwargs) { raise Hive::WrongStage.new("moved") }
+
+    with_replaced_singleton_method(Hive::Commands::Answer, :write, ->(*_args, **_kwargs) { receipt }) do
+      with_replaced_singleton_method(Hive::Commands::Answer, :inventory, inventory) do
+        @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 16))
+      end
+    end
+
+    assert_match(/Recorded Q1/, @telegram.messages.last.fetch(:text))
+    assert_match(/moved on/, @telegram.messages.last.fetch(:text))
+  end
+
+  def test_execute_answer_write_rejects_unknown_answer_outcome
+    result = FakeRouter::Result.new(
+      action: :write_answer_then_reply, slug: "task", project: "hive",
+      question_n: 1, binding: "bound", answer_text: "done"
+    )
+    receipt = {
+      "outcome" => "unknown", "slot" => { "question_number" => 1 },
+      "task" => { "project" => "hive" }
+    }
+
+    with_replaced_singleton_method(Hive::Commands::Answer, :write, ->(*_args, **_kwargs) { receipt }) do
+      error = assert_raises(Hive::InternalError) do
+        @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 17))
+      end
+      assert_match(/unknown brainstorm answer outcome/, error.message)
+    end
+  end
   def test_request_shutdown_and_reload_set_loop_flags
     @supervisor.request_shutdown!
     @supervisor.request_reload!

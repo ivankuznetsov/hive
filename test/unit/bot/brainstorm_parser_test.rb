@@ -226,6 +226,18 @@ class HiveBotBrainstormParserTest < Minitest::Test
     end
   end
 
+  def test_heading_helpers_and_invalid_encoded_answer_fall_back_literally
+    assert_equal "### Q7.", Hive::BrainstormParser.question_header(7)
+
+    invalid = "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}not*base64"
+    question = Hive::BrainstormParser.parse_text(
+      "## Round 1\n### Q1. Encoded?\n" \
+      "#{Hive::BrainstormParser.encoded_answer_header(1)}\n#{invalid}\n"
+    ).first
+
+    assert_equal invalid, question.answer
+  end
+
   def test_legacy_answer_backslashes_and_escaped_text_are_preserved_verbatim
     answer = "\\\\server\\share\n\\&lt;!-- COMPLETE -->\n\\### Q9. literal heading\n" \
              "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}bGVnYWN5"

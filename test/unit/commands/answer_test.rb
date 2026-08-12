@@ -174,6 +174,22 @@ class HiveCommandsAnswerTest < Minitest::Test
     end
   end
 
+  def test_unique_relocated_answered_question_is_idempotent_or_conflicting
+    content = "## Round 1\n### Q1. Keep?\n### A1.\n<!-- WAITING -->\n"
+    with_project(content) do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      File.write(path, "## Round 2\n### Q9. Keep?\n### A9.\nalready\n<!-- WAITING -->\n")
+
+      same = call_answer(binding: token, answer: "already")
+      different = call_answer(binding: token, answer: "different")
+
+      assert_equal "idempotent", same.fetch("outcome")
+      assert_equal true, same.fetch("relocated")
+      assert_equal "conflict", different.fetch("outcome")
+      assert_equal true, different.fetch("relocated")
+    end
+  end
+
   def test_duplicate_fingerprint_matches_are_ambiguous_and_never_write
     content = "## Round 1\n### Q1. Keep?\n### A1.\n<!-- WAITING -->\n"
     with_project(content) do |_project, _folder, path|
@@ -523,6 +539,32 @@ class HiveCommandsAnswerTest < Minitest::Test
     end
   end
 
+  def test_task_lock_enoent_and_under_lock_read_failure_are_closed_outcomes
+    with_project do |_project, _folder, _path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      with_replaced_singleton_method(Hive::Lock, :with_task_lock, ->(*) { raise Errno::ENOENT }) do
+        payload = call_answer(binding: token, answer: "answer")
+        assert_equal "stale", payload.fetch("outcome")
+        assert_equal "task_moved", payload.fetch("reason")
+      end
+    end
+
+    with_project do |_project, _folder, _path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      command = Hive::Commands::Answer.new(
+        SLUG, project: "demo", binding: token,
+        input: StringIO.new("answer"), output: StringIO.new
+      )
+      command.define_singleton_method(:read_brainstorm!) do |_task|
+        raise Hive::InvalidTaskPath, "state disappeared"
+      end
+
+      payload = command.call
+      assert_equal "stale", payload.fetch("outcome")
+      assert_equal "task_missing", payload.fetch("reason")
+    end
+  end
+
   def test_writer_closed_outcomes_are_preserved
     content = "## Round 1\n### Q1. Race?\n### A1.\n<!-- WAITING -->\n"
     with_project(content) do |_project, _folder, path|
@@ -552,6 +594,70 @@ class HiveCommandsAnswerTest < Minitest::Test
         assert_schema(payload)
       end
     end
+
+
+    with_project(content) do |_project, _folder, _path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      replacement = ->(**_kwargs) { :answer_slot_missing }
+      with_replaced_singleton_method(
+        Hive::Bot::BrainstormAnswerWriter, :write_at_ordinal_under_lock!, replacement
+      ) do
+        error = assert_raises(Hive::InternalError) do
+          call_answer(binding: token, answer: "same")
+        end
+        assert_match(/brainstorm answer writer returned/, error.message)
+      end
+    end
+  end
+
+  def test_canonical_invocation_paths_accept_aliases_and_fail_closed
+    with_project do |_project, folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      payload = call_answer(target: File.join(folder, "."), binding: token, answer: "path-bound")
+
+      assert_equal "written", payload.fetch("outcome")
+      assert_equal "path-bound", Hive::BrainstormParser.parse(path).first.answer
+    end
+
+    command = Hive::Commands::Answer.new("/definitely/missing/answer-task")
+    assert_nil command.send(:canonical_invocation_path)
+  end
+
+  def test_answer_size_state_read_and_path_comparison_fail_closed
+    with_project do |_project, _folder, _path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      output = StringIO.new
+      error = assert_raises(Hive::Commands::Answer::InvalidAnswer) do
+        Hive::Commands::Answer.new(
+          SLUG, project: "demo", binding: token, json: true,
+          input: StringIO.new("x" * (Hive::Commands::Answer::MAX_ANSWER_BYTES + 1)),
+          output: output
+        ).call
+      end
+      assert_match(/exceeds/, error.message)
+      assert_equal "invalid_answer", JSON.parse(output.string).fetch("error_kind")
+    end
+
+    command = Hive::Commands::Answer.new(SLUG)
+    missing = Struct.new(:state_file, :slug).new("/definitely/missing/brainstorm.md", SLUG)
+    assert_raises(Hive::InvalidTaskPath) { command.send(:read_brainstorm!, missing) }
+
+    left = Struct.new(:folder).new("/definitely/missing/left")
+    right = Struct.new(:folder).new("/definitely/missing/right")
+    refute command.send(:same_task_path?, left, right)
+  end
+
+  def test_unexpected_errors_use_the_internal_error_envelope
+    output = StringIO.new
+    command = Hive::Commands::Answer.new(SLUG, json: true, output: output)
+    command.define_singleton_method(:inventory_payload) { raise RuntimeError, "unexpected" }
+
+    error = assert_raises(Hive::InternalError) { command.call }
+    payload = JSON.parse(output.string)
+
+    assert_match(/RuntimeError: unexpected/, error.message)
+    assert_equal "internal", payload.fetch("error_kind")
+    assert_schema(payload)
   end
 
   def test_programmatic_write_requires_a_nonempty_binding

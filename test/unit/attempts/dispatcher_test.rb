@@ -9,7 +9,7 @@ class AttemptsDispatcherTest < Minitest::Test
   CLAIM_CAPABILITY = "c" * 64
   FakeTask = Struct.new(
     :id, :slug, :state_file, :stage_index, :stage_name, :project_root, :worktree_path,
-    :workflow, keyword_init: true
+    :workflow, :folder, keyword_init: true
   )
   FakeRequest = Struct.new(
     :slug, :project, :argv, :request_id, :task_generation,
@@ -54,6 +54,50 @@ class AttemptsDispatcherTest < Minitest::Test
       capability = launcher.launched.first.last
       assert Hive::Attempts::Capability.matches?(first.attempt["claim_capability_digest"], capability)
       refute_includes first.attempt.to_h.values, capability
+    end
+  end
+
+  def test_launch_context_is_captured_after_attempt_creation_and_before_handoff
+    events = []
+    provenance = Object.new
+    provenance.define_singleton_method(:capture_launch) do |task:, attempt:, generation:,
+                                                        attempt_store:, clock:|
+      events << [ :context, task.slug, attempt.attempt_id, generation.task_generation,
+                  !attempt_store.fetch(attempt.attempt_id).nil?, clock.call ]
+    end
+
+    with_dispatcher(context_provenance: provenance) do |dispatcher, launcher, task|
+      task.folder = File.dirname(task.state_file)
+      task.project_root = task.folder
+      original = launcher.method(:launch)
+      launcher.define_singleton_method(:launch) do |record, claim_capability:|
+        events << [ :launch, record.attempt_id ]
+        original.call(record, claim_capability: claim_capability)
+      end
+
+      result = dispatch(dispatcher, task, request_id: "capture-order")
+
+      assert_equal :accepted, result.status
+      assert_equal :context, events.fetch(0).fetch(0)
+      assert_equal [ task.slug, result.attempt.attempt_id, result.attempt.task_generation, true, NOW ],
+                   events.fetch(0).drop(1)
+      assert_equal [ :launch, result.attempt.attempt_id ], events.fetch(1)
+    end
+  end
+
+  def test_launch_context_failure_does_not_strand_durable_handoff
+    provenance = Object.new
+    provenance.define_singleton_method(:capture_launch) { |**| raise IOError, "capture failed" }
+
+    with_dispatcher(context_provenance: provenance) do |dispatcher, launcher, task|
+      task.folder = File.dirname(task.state_file)
+      task.project_root = task.folder
+
+      result = dispatch(dispatcher, task, request_id: "capture-failure")
+
+      assert_equal :accepted, result.status
+      assert_equal 1, launcher.launched.length
+      assert_equal result.attempt.attempt_id, launcher.launched.first.first.attempt_id
     end
   end
 
@@ -1025,7 +1069,8 @@ class AttemptsDispatcherTest < Minitest::Test
 
   private
 
-  def with_dispatcher(limits: { max_global: 3, max_per_project: 2, max_daily: 50 })
+  def with_dispatcher(limits: { max_global: 3, max_per_project: 2, max_daily: 50 },
+                      context_provenance: Hive::ContextProvenance)
     with_tmp_dir do |root|
       state_file = File.join(root, "task.md")
       File.write(state_file, "task\n<!-- WAITING -->\n")
@@ -1036,7 +1081,8 @@ class AttemptsDispatcherTest < Minitest::Test
       ids = %w[attempt-one attempt-two attempt-three].each
       dispatcher = Hive::Attempts::Dispatcher.new(
         store: store, launcher: launcher, limits: limits, clock: -> { NOW },
-        id_generator: -> { ids.next }, capability_generator: -> { CLAIM_CAPABILITY }
+        id_generator: -> { ids.next }, capability_generator: -> { CLAIM_CAPABILITY },
+        context_provenance: context_provenance
       )
       yield dispatcher, launcher, task, store
     end

@@ -16,6 +16,7 @@ require "hive/stages/clean_exit"
 require "hive/usage_db"
 require "hive/worktree"
 require "hive/attempts/context"
+require "hive/context_provenance"
 require "hive/implementation_identity/store"
 
 module Hive
@@ -740,6 +741,9 @@ module Hive
           provider_route = context.admitted_route
         end
         profile ||= Hive::AgentProfiles.lookup(:claude)
+        prompt = Hive::ContextProvenance.decorate_prompt(
+          task: task, prompt: prompt, context: context
+        )
         if routing_resolution && routing_arguments
           raise ArgumentError, "pass routing_resolution or routing_arguments, not both"
         end
@@ -839,6 +843,9 @@ module Hive
           end
         end
         record_usage(task, profile, result, started_at)
+        Hive::ContextProvenance.promote_agent_receipt(
+          task: task, context: context
+        ) if context
         if result[:provider_signal]
           unless context.publish_provider_signal(result.fetch(:provider_signal))
             raise Hive::ProviderRouteFailed, "admitted provider route failed without durable evidence delivery"
@@ -927,7 +934,10 @@ module Hive
                 "spawn_claude! only supports the claude profile; got #{profile.name.inspect}"
         end
 
-        Hive::ClaudeLauncher.launch!(
+        prompt = Hive::ContextProvenance.decorate_prompt(
+          task: task, prompt: prompt, context: context
+        )
+        result = Hive::ClaudeLauncher.launch!(
           task: task,
           cfg: cfg,
           prompt: prompt,
@@ -949,6 +959,10 @@ module Hive
           routing_arguments: routing_arguments,
           runtime_policy: runtime_policy
         )
+        Hive::ContextProvenance.promote_agent_receipt(
+          task: task, context: context
+        ) if context
+        result
       end
 
       # Wrap a spawn_claude! call so that AgentErrors land on the

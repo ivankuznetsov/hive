@@ -93,7 +93,10 @@ model/effort, enclosing circuit generation vector, and probe bindings. Runtime
 readers accept v4 only. The one-off recovery migration converts valid schema-v3
 records and permanent proofs to v4 legacy mode while moving the physical v3
 tree to v4; malformed hot bytes remain exact capacity reservations, while an
-unreadable immutable proof aborts the cutover.
+unreadable immutable proof aborts the cutover. Its exact-parity gate rebuilds
+same-day admission accounting from both the bounded hot set and permanent
+proofs, because finalization may promote a terminal attempt before an
+interrupted cutover resumes.
 
 Both subjects share the same CAS record store, leases, capabilities,
 heartbeats, detached ownership, bounded retry accounting, receipts, output

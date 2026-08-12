@@ -1,6 +1,7 @@
 require "test_helper"
 require "digest"
 require "json"
+require "hive/attempts/decision_index"
 require "hive/attempts/store"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
@@ -628,6 +629,30 @@ class RecoveryMigrationTest < Minitest::Test
       assert_match(/\A[0-9a-f]{64}\z/, result.dig("attempts", "decision_digest"))
       assert_equal result.dig("attempts", "decision_digest"), checkpoint.fetch("decision_digest")
       assert_equal 12, result.dig("attempts", "hot")
+    end
+  end
+
+  def test_daily_parity_includes_attempts_already_moved_to_permanent_proof
+    with_tmp_dir do |state_home|
+      terminal = terminal_attempt(current_attempt(
+        attempt_id: "proof-only-daily", accepted_at: NOW
+      ))
+      write_v3_proof(state_home, terminal)
+      current = Hive::Attempts::Record.new(
+        Hive::Attempts::RecordMigration.convert_v3(legacy_v3(terminal))
+      )
+      Hive::Attempts::DecisionIndex.new(
+        root: File.join(state_home, "attempts", "v3", "decision-indexes")
+      ).record_acceptance(current)
+
+      result = migrate(state_home)
+      store = Hive::Attempts::Store.new(
+        root: File.join(state_home, "attempts", "v4"), create_directories: false
+      )
+
+      assert_equal 0, result.dig("attempts", "source_count")
+      assert_equal current.to_h, store.permanent_proofs.fetch("proof-only-daily").to_h
+      assert_equal 1, store.decision_index.daily_count(project: "demo", date: NOW.to_date)
     end
   end
 

@@ -34,9 +34,14 @@ cleanup commands while keeping the fleet result visibly incomplete.
 Before project-local changes, the command runs the owner-private recovery-state
 cutover for the current Hive state home. Daemon and bot startup run the same
 cutover before opening their stores or queues. A foreground default attempt
-store opens only the physical v3 layout after the cutover. An obsolete v1 root
-or competing material v2/v3 roots fail closed, so an upgrade cannot silently
-choose or create a second authority.
+store opens only the physical v4 layout after the cutover. Obsolete v1 roots
+or competing material v2/v3/v4 roots fail closed, so an upgrade cannot
+silently choose or create a second authority.
+
+The v4 cutover verifies daily admission accounting against both bounded hot
+records and immutable permanent proofs. Terminal attempts may already have
+moved out of the hot window before a migration resumes; their same-day counts
+remain authoritative and must not be discarded as stale index entries.
 
 ## Task-folder renames
 

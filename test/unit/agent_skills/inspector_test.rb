@@ -86,7 +86,7 @@ class AgentSkillsInspectorTest < Minitest::Test
 
     targets = resolver.resolve
 
-    assert_equal %w[ce-brainstorm wiki-plan ce-code-review ce-test-browser hive hive hive].sort,
+    assert_equal %w[ce-brainstorm wiki-plan ce-code-review ce-test-browser hive hive hive hive].sort,
                  targets.select(&:managed).map(&:capability_id).sort
     assert_equal "/ce-code-review", targets.find { |t| t.capability_id == "ce-code-review" }.invocation
   end
@@ -483,6 +483,30 @@ class AgentSkillsInspectorTest < Minitest::Test
 
       assert result.success?
       assert_equal dir, result.stdout.strip
+    end
+  end
+
+  def test_command_runner_does_not_leak_hive_ruby_toolchain_into_agent_clis
+    with_tmp_dir do |dir|
+      script = File.join(dir, "environment")
+      File.write(script, <<~SH)
+        #!/bin/sh
+        for name in BUNDLE_GEMFILE GEM_HOME RUBYLIB RUBYOPT; do
+          eval 'test "${'"$name"'+x}" = x && exit 42'
+        done
+        printf clean
+      SH
+      FileUtils.chmod(0o755, script)
+
+      with_env(
+        "BUNDLE_GEMFILE" => "/host/Gemfile", "GEM_HOME" => "/host/gems",
+        "RUBYLIB" => "/host/lib", "RUBYOPT" => "-rbundler/setup"
+      ) do
+        result = Hive::AgentSkills::CommandRunner.new.call([ script ])
+
+        assert result.success?, result.stderr
+        assert_equal "clean", result.stdout
+      end
     end
   end
 

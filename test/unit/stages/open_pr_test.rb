@@ -166,6 +166,37 @@ class HiveStagesOpenPrTest < Minitest::Test
     end
   end
 
+  def test_opencode_spawn_declares_open_pr_observation_stage
+    with_tmp_dir do |root|
+      task = make_task(root)
+      configuration = cfg
+      profile = Struct.new(:name).new(:opencode)
+      scope = {
+        add_dirs: [ task.folder ], permission_mode: "read-only",
+        allowed_tools: nil, disallowed_tools: nil, runtime_policy: nil,
+        additional_read_roots: [ task.folder ], additional_write_roots: []
+      }
+      captured = nil
+
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :stage_permission_scope_or_mark!, ->(*, **) { scope }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :spawn_agent,
+          ->(*, **kwargs) { captured = kwargs; { status: :ok } }
+        ) do
+          Hive::Stages::OpenPr.spawn_open_pr_agent(
+            task, configuration, "prompt", profile, root,
+            launch_arguments: { identity_arguments: [] }
+          )
+        end
+      end
+
+      assert_equal "open_pr", captured.fetch(:implementation_stage)
+      assert_same configuration, captured.fetch(:cfg)
+    end
+  end
+
   def test_run_returns_non_terminal_marker_status_without_rewriting_error
     with_tmp_dir do |root|
       task = make_task(root)

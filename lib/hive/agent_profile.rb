@@ -182,13 +182,16 @@ module Hive
       @opencode_configuration_path =
         opencode_configuration_path&.to_s&.dup&.freeze
       @opencode_configuration =
-        opencode_configuration && deep_freeze_hash(opencode_configuration)
+        if opencode_configuration
+          deep_freeze_hash(opencode_configuration).tap do |configuration|
+            validate_nonsecret_opencode_configuration!(configuration)
+          end
+        end
       @opencode_credential_environment_keys = normalize_environment_keys(
         opencode_credential_environment_keys
       )
       @opencode_credential_file = opencode_credential_file&.to_s&.dup&.freeze
-      @opencode_plugins = Array(opencode_plugins)
-        .map { |plugin| plugin.to_s.dup.freeze }.freeze
+      @opencode_plugins = normalize_opencode_plugins(opencode_plugins)
       @opencode_pure = opencode_pure != false
       freeze
     end
@@ -248,7 +251,14 @@ module Hive
     def verify_skill(invocation, project_root: nil)
       return [ :not_applicable, "no skill verifier configured for this profile" ] unless @skill_verifier
 
-      @skill_verifier.call(invocation, project_root: project_root)
+      kwargs = { project_root: project_root }
+      if name == :opencode
+        kwargs[:configuration_path] = @opencode_configuration_path if
+          @opencode_configuration_path
+        kwargs[:configuration] = @opencode_configuration if @opencode_configuration
+        kwargs[:plugins] = @opencode_plugins unless @opencode_plugins.empty?
+      end
+      @skill_verifier.call(invocation, **kwargs)
     end
 
     def format_skill_invocation(skill)
@@ -314,6 +324,12 @@ module Hive
           e.message
         end
       raise Hive::ImplementationIdentity::ResolutionError, message, cause: e
+    rescue ArgumentError => e
+      raise unless name == :opencode
+
+      raise Hive::ImplementationIdentity::ResolutionError,
+            "agent profile :opencode requires an exact provider/model route: #{e.message}",
+            cause: e
     end
 
     def validate_routed_control!(control, source: nil)
@@ -325,6 +341,15 @@ module Hive
       value = normalize_routed_value(control.value, control_path(control, source))
       case control.field
       when :model
+        if name == :opencode
+          begin
+            value = AgentCliRuntime::Route.parse(value).to_s
+          rescue ArgumentError => e
+            raise Hive::ConfigError,
+                  "#{control_path(control, source)} must be an exact OpenCode " \
+                  "provider/model route: #{e.message}"
+          end
+        end
         return value if @routed_model_argument_builder
 
         raise Hive::ConfigError,
@@ -444,6 +469,7 @@ module Hive
     }.freeze
     OPENCODE_OVERRIDE_KEYS = {
       "config_path" => :opencode_configuration_path,
+      "config" => :opencode_configuration,
       "credential_env" => :opencode_credential_environment_keys,
       "credential_file" => :opencode_credential_file,
       "plugins" => :opencode_plugins,
@@ -673,6 +699,21 @@ module Hive
       keys.freeze
     end
 
+    def normalize_opencode_plugins(values)
+      unless values.is_a?(Array)
+        raise ArgumentError, "OpenCode plugins must be an array"
+      end
+      plugins = values.map { |plugin| plugin.to_s.dup.freeze }
+      if plugins.any?(&:empty?)
+        raise ArgumentError, "OpenCode plugins must be non-empty strings"
+      end
+      if plugins.uniq.length != plugins.length
+        raise ArgumentError, "OpenCode plugins must be unique"
+      end
+
+      plugins.freeze
+    end
+
     def deep_freeze_hash(value)
       unless value.is_a?(Hash)
         raise ArgumentError, "opencode_configuration must be a Hash"
@@ -695,6 +736,23 @@ module Hive
         value.freeze
       end
       value.freeze
+    end
+
+    def validate_nonsecret_opencode_configuration!(value, key = nil)
+      case value
+      when Hash
+        value.each do |child_key, child|
+          validate_nonsecret_opencode_configuration!(child, child_key)
+        end
+      when Array
+        value.each { |child| validate_nonsecret_opencode_configuration!(child, key) }
+      when String
+        if key.to_s.match?(/(?:api[_-]?key|token|secret|password|credential)/i) &&
+           !value.match?(/\A\$\{[A-Z][A-Z0-9_]*\}\z/)
+          raise ArgumentError,
+                "OpenCode provider definitions cannot contain credential values"
+        end
+      end
     end
 
     def control_path(control, source)

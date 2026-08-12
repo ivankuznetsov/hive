@@ -274,7 +274,7 @@ module Hive
 
       def self.compile_portable_actor(parsed_spec, scope:, task_root:, directories:,
                                       profile:, environment:, managed_outputs:, prepare:)
-        unless %i[codex grok].include?(profile.name)
+        unless %i[codex grok opencode].include?(profile.name)
           raise Hive::ConfigError,
                 "runner #{profile.name.inspect} cannot enforce managed workflow policy"
         end
@@ -319,6 +319,12 @@ module Hive
             scope, task_root: task_root, directories: directories, profile: profile,
             environment: environment, outputs: outputs, runtime_root: runtime_root, schema: schema,
             tool_names: tool_names
+          )
+        when :opencode
+          portable_policy(
+            scope, task_root: task_root, directories: directories,
+            environment: environment, outputs: outputs, runtime_root: nil,
+            cli_flags: [], executable: nil
           )
         end
       rescue StandardError

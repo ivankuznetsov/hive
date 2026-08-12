@@ -459,6 +459,13 @@ module Hive
     end
 
     def implementation_identity_projection(authoritative, generation)
+      observations = authoritative.select do |record|
+        record["event_type"] == "implementation_identity_observed"
+      end.each_with_object({}) do |record, indexed|
+        observation = projected_observation(record)
+        indexed[[ observation.fetch("generation"), observation.fetch("stage") ]] =
+          observation
+      end
       identity_events = authoritative.select do |record|
         %w[implementation_identity_captured implementation_identity_backfilled
            implementation_stage_resolved].include?(record["event_type"])
@@ -467,13 +474,13 @@ module Hive
         next unless %w[implementation_identity_captured implementation_identity_backfilled]
                     .include?(record["event_type"])
 
-        projected_identity(record)
+        enrich_identity(projected_identity(record), observations)
       end
       execute = execute_history.reverse.find { |identity| identity["generation"] == generation }
       stages = identity_events.filter_map do |record|
         next unless record["event_type"] == "implementation_stage_resolved"
 
-        identity = projected_identity(record)
+        identity = enrich_identity(projected_identity(record), observations)
         identity if identity["generation"] == generation
       end.group_by { |identity| identity.fetch("stage") }
        .transform_values(&:first)
@@ -501,6 +508,20 @@ module Hive
         "event_id" => record["event_id"],
         "resolved_attempt" => record["attempt_id"]
       )
+    end
+
+    def projected_observation(record)
+      Hive::StringifyKeys.call(record.dig("payload", "observation") || {}).merge(
+        "observation_event_id" => record["event_id"],
+        "observed_attempt" => record["attempt_id"]
+      )
+    end
+
+    def enrich_identity(identity, observations)
+      observation = observations[[ identity.fetch("generation"), identity.fetch("stage") ]]
+      return identity unless observation
+
+      identity.merge(observation.reject { |key, _| %w[stage generation].include?(key) })
     end
 
     def compatibility_for(baseline:, marker:)

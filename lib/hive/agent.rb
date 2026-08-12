@@ -738,11 +738,6 @@ module Hive
     def opencode_route_and_effort
       model = @routing_arguments&.model || @launch_arguments&.model
       effort = @routing_arguments&.effort || @launch_arguments&.effective_effort
-      if model.to_s.empty?
-        raise Hive::ConfigError,
-              "OpenCode requires a routed exact provider/model"
-      end
-
       [ model, effort ]
     end
 

@@ -128,6 +128,17 @@ module Hive
         Hive::AgentProfiles.lookup(name, cfg: cfg)
       end
 
+      def format_verified_skill_invocation(profile, skill, project_root:)
+        invocation = profile.format_skill_invocation(skill)
+        return invocation unless profile.name == :opencode
+
+        status, evidence = profile.verify_skill(invocation, project_root: project_root)
+        return invocation if status == :present
+
+        raise Hive::AgentError,
+              "OpenCode skill readiness failed for #{invocation}: #{evidence}"
+      end
+
       # Production stage launches run inside a durable attempt. Direct unit
       # calls predating attempt supervision receive nil and retain their
       # explicit test profile seam; real launches always resolve and journal
@@ -261,7 +272,8 @@ module Hive
           if profile.name == :opencode
             values[:additional_read_roots] = runtime_policy.directories
             values[:additional_write_roots] = opencode_write_roots(
-              profile, runtime_policy.allowed_tools, runtime_policy.directories
+              profile, runtime_policy.allowed_tools, runtime_policy.directories,
+              host_outputs: runtime_policy.host_outputs?
             )
           end
           return adapt_opencode_scope!(values, profile, stage_name)
@@ -420,7 +432,7 @@ module Hive
           raise Hive::ConfigError,
                 "stage #{stage_name} OpenCode permissions cannot grant unrestricted Bash"
         end
-        writable = !(granted & Hive::PermissionScope::FILE_EDIT_TOOLS).empty?
+        writable = Array(values[:additional_write_roots]).any?
         values.merge(
           permission_mode: writable ? "workspace-write" : "read-only",
           allowed_tools: nil,
@@ -429,15 +441,31 @@ module Hive
       end
       private_class_method :adapt_opencode_scope!
 
-      def opencode_write_roots(profile, allowed_tools, directories)
+      def opencode_write_roots(profile, allowed_tools, directories,
+                               host_outputs: false)
         return [] unless profile.name == :opencode
+        return [] if host_outputs
 
         granted = Array(allowed_tools).flat_map do |rule|
           Hive::PermissionScope.granted_tool_names(rule)
         end
         return [] if (granted & Hive::PermissionScope::FILE_EDIT_TOOLS).empty?
 
-        Array(directories)
+        qualified = Array(allowed_tools).filter_map do |rule|
+          match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s)
+          next unless match && match[:tool] == "Edit" && match[:specifier]
+
+          match[:specifier].sub(%r{\A//}, "/").delete_suffix("/**")
+        end
+        return Array(directories) if qualified.empty?
+
+        Array(directories).select do |directory|
+          expanded = File.expand_path(directory)
+          qualified.any? do |root|
+            expanded == root || expanded.start_with?(root + File::SEPARATOR) ||
+              root.start_with?(expanded + File::SEPARATOR)
+          end
+        end
       end
       private_class_method :opencode_write_roots
 
@@ -764,7 +792,8 @@ module Hive
                       disallowed_tools: nil, cli_flags: nil,
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
                       routing_resolution: nil, routing_arguments: nil,
-                      additional_read_roots: [], additional_write_roots: [])
+                      additional_read_roots: [], additional_write_roots: [],
+                      implementation_stage: nil)
         context = Hive::Attempts::Context.current
         launch_binding = nil
         provider_route = nil
@@ -883,6 +912,9 @@ module Hive
             result[:error_message] = e.message
           end
         end
+        record_opencode_observation(
+          task, cfg, implementation_stage, result
+        ) if profile.name == :opencode && implementation_stage
         record_usage(task, profile, result, started_at)
         if result[:provider_signal]
           unless context.publish_provider_signal(result.fetch(:provider_signal))
@@ -939,7 +971,9 @@ module Hive
                          permission_mode: nil, allowed_tools: nil,
                          disallowed_tools: nil, mcp_config_path: nil,
                          strict_mcp_config: false, identity_arguments: nil,
-                         routing_arguments: nil, runtime_policy: nil)
+                         routing_arguments: nil, runtime_policy: nil,
+                         implementation_stage: nil,
+                         additional_read_roots: [], additional_write_roots: [])
         require "hive/claude_launcher"
 
         context = Hive::Attempts::Context.current
@@ -961,7 +995,10 @@ module Hive
             disallowed_tools: disallowed_tools,
             identity_arguments: identity_arguments,
             routing_arguments: routing_arguments,
-            runtime_policy: runtime_policy
+            runtime_policy: runtime_policy,
+            implementation_stage: implementation_stage,
+            additional_read_roots: additional_read_roots,
+            additional_write_roots: additional_write_roots
           )
         end
 
@@ -1129,12 +1166,29 @@ module Hive
           stage: usage_stage_label(task),
           started_at: started_at,
           ended_at: Time.now.utc.iso8601,
-          input: usage[:input] || 0,
-          output: usage[:output] || 0,
-          cached: usage[:cached] || 0
+          input: usage[:input],
+          output: usage[:output],
+          cached: usage[:cached],
+          cache_read: usage[:cache_read],
+          cache_write: usage[:cache_write],
+          reasoning: usage[:reasoning],
+          cost: usage[:cost],
+          requested_route: result[:requested_opencode_route],
+          actual_route: result[:actual_opencode_route]
         )
       rescue StandardError => e
         warn "[hive] usage record failed: #{e.message}"
+      end
+
+      def record_opencode_observation(task, cfg, stage, result)
+        Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).observe_opencode!(
+          stage: stage,
+          requested_route: result.fetch(:requested_opencode_route),
+          actual_route: result[:actual_opencode_route],
+          resolution_status: result.fetch(:route_resolution_status),
+          outcome_kind: result.fetch(:normalized_outcome_kind),
+          usage: result[:usage]
+        )
       end
 
       def usage_project_slug(task)

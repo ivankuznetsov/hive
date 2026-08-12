@@ -1025,7 +1025,7 @@ module Hive
 
       def public_identity_stage(identity, status:)
         value = identity.respond_to?(:to_h) ? identity.to_h : identity
-        {
+        public_value = {
           "provider" => value["provider"],
           "model" => value["model"],
           "requested_effort" => value["requested_effort"],
@@ -1036,6 +1036,13 @@ module Hive
           "resolved_attempt" => value["resolved_attempt"],
           "status" => status
         }
+        %w[
+          requested_backend requested_model actual_backend actual_model
+          route_resolution_status outcome_kind usage observed_attempt
+        ].each do |key|
+          public_value[key] = value[key] if value.key?(key)
+        end
+        public_value
       end
 
       def implementation_preview_source(config, stage, execute)

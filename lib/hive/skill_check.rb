@@ -2,6 +2,7 @@ require "json"
 require "open3"
 require "pathname"
 require "timeout"
+require "uri"
 
 module Hive
   # Per-agent verification that a configured native skill
@@ -412,6 +413,190 @@ module Hive
         "grok: #{skill} is not available from an enabled Grok skill or plugin. " \
           "Install with `grok plugin install EveryInc/compound-engineering-plugin --trust` " \
           "or enable it with `grok plugin enable compound-engineering`."
+      end
+    end
+
+    module OpenCode
+      module_function
+
+      PINNED_COMPOUND_ENGINEERING_PLUGIN =
+        "compound-engineering@git+https://github.com/EveryInc/" \
+        "compound-engineering-plugin.git#compound-engineering-v3.21.4"
+
+      def verify(invocation, project_root: nil, configuration_path: nil,
+                 configuration: nil, plugins: nil)
+        resolution = resolve(
+          invocation, project_root: project_root,
+          configuration_path: configuration_path,
+          configuration: configuration, plugins: plugins
+        )
+        [ resolution.status, resolution.message ]
+      end
+
+      def resolve(invocation, project_root: nil, environment: ENV,
+                  configuration_path: nil, configuration: nil, plugins: nil)
+        inv = Hive::SkillCheck.parse(invocation)
+        home = environment["HOME"] || Dir.home
+        config_dir = resolve_config_dir(environment, home)
+        config_path = configuration_path || environment["OPENCODE_CONFIG"]
+        config_path = File.join(config_dir, "opencode.json") if
+          config_path.to_s.empty?
+        parse_errors = []
+        selected_plugins = if Array(plugins).empty?
+          plugin_entries(
+            config_path, parse_errors: parse_errors, configuration: configuration
+          )
+        else
+          Array(plugins)
+        end
+        candidates = build_candidates(
+          inv, home: home, config_dir: config_dir,
+          config_path: config_path, project_root: project_root,
+          environment: environment, parse_errors: parse_errors,
+          configuration: configuration, plugins: selected_plugins
+        )
+        path = Hive::SkillCheck.first_existing(candidates)
+        if path
+          if inv.name.start_with?("ce-")
+            compound_plugins = selected_plugins.select do |entry|
+              entry.include?("compound-engineering")
+            end
+            if compound_plugins.empty?
+              return Resolution.new(
+                status: :missing, path: nil,
+                message: install_hint(inv, config_path),
+                candidates: candidates.freeze, parse_errors: parse_errors.freeze
+              )
+            end
+            expected = compound_plugins.flat_map do |entry|
+              plugin_roots(
+                entry, config_dir: config_dir, environment: environment
+              ).map { |root| File.join(root, "skills", inv.name, "SKILL.md") }
+            end
+            unless expected.any? { |candidate| same_file?(path, candidate) }
+              return Resolution.new(
+                status: :shadowed, path: path,
+                message: "opencode: /#{inv.name} resolves to #{path}, which " \
+                         "shadows the configured Compound Engineering plugin",
+                candidates: candidates.freeze, parse_errors: parse_errors.freeze
+              )
+            end
+          end
+          return Resolution.new(
+            status: :present, path: path, message: path,
+            candidates: candidates.freeze, parse_errors: parse_errors.freeze
+          )
+        end
+
+        Resolution.new(
+          status: :missing, path: nil, message: install_hint(inv, config_path),
+          candidates: candidates.freeze, parse_errors: parse_errors.freeze
+        )
+      rescue ArgumentError => e
+        Resolution.new(
+          status: :missing, path: nil, message: "opencode: #{e.message}",
+          candidates: [].freeze, parse_errors: [].freeze
+        )
+      end
+
+      def build_candidates(inv, home:, config_dir:, config_path:, project_root:,
+                           environment:, parse_errors: [], configuration: nil,
+                           plugins: nil)
+        paths = []
+        if project_root
+          project = File.expand_path(project_root)
+          paths << File.join(project, ".opencode", "skills", inv.name, "SKILL.md")
+          paths << File.join(project, ".agents", "skills", inv.name, "SKILL.md")
+        end
+        paths << File.join(config_dir, "skills", inv.name, "SKILL.md")
+        paths << File.join(home, ".agents", "skills", inv.name, "SKILL.md")
+
+        entries = Array(plugins)
+        entries.each do |entry|
+          plugin_roots(entry, config_dir: config_dir, environment: environment).each do |root|
+            paths << File.join(root, "skills", inv.name, "SKILL.md")
+          end
+        end
+        paths.uniq
+      end
+
+      def same_file?(left, right)
+        return false unless File.exist?(right)
+
+        File.realpath(left) == File.realpath(right)
+      rescue SystemCallError
+        false
+      end
+
+      def resolve_config_dir(environment, home)
+        configured = environment["OPENCODE_CONFIG_DIR"].to_s
+        return File.expand_path(configured) unless configured.empty?
+
+        xdg = environment["XDG_CONFIG_HOME"].to_s
+        return File.join(File.expand_path(xdg), "opencode") unless xdg.empty?
+
+        File.join(home, ".config", "opencode")
+      end
+
+      def plugin_entries(config_path, parse_errors: [], configuration: nil)
+        document = configuration || JSON.parse(File.binread(config_path))
+        unless document.is_a?(Hash)
+          raise TypeError, "#{config_path} must contain a JSON object"
+        end
+        entries = document.fetch("plugin", [])
+        unless entries.is_a?(Array) && entries.all? { |entry| entry.is_a?(String) }
+          raise TypeError, "#{config_path} plugin must be an array of strings"
+        end
+        entries
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        []
+      rescue JSON::ParserError, TypeError, SystemCallError => e
+        parse_errors << e.message
+        []
+      end
+
+      def plugin_roots(entry, config_dir:, environment: ENV)
+        local = local_plugin_root(entry, config_dir)
+        return [ local ] if local
+
+        package = entry.split("@git+", 2).first
+        package = package.split("@", 2).first if package.start_with?("@")
+        package = "compound-engineering" if package.empty?
+        home = environment["HOME"] || Dir.home
+        cache = environment["XDG_CACHE_HOME"].to_s
+        cache = File.join(home, ".cache") if cache.empty?
+        data = environment["XDG_DATA_HOME"].to_s
+        data = File.join(home, ".local", "share") if data.empty?
+        [
+          File.join(cache, "opencode", "node_modules", package),
+          File.join(data, "opencode", "node_modules", package),
+          File.join(config_dir, "node_modules", package)
+        ]
+      end
+
+      def local_plugin_root(entry, config_dir)
+        path = if entry.start_with?("file://")
+          URI(entry).path
+        elsif entry.start_with?("/", "./", "../")
+          File.absolute_path?(entry) ? entry : File.expand_path(entry, config_dir)
+        end
+        return nil unless path
+
+        expanded = File.expand_path(path)
+        return expanded if File.directory?(expanded)
+        return nil unless File.file?(expanded)
+
+        marker = File.join(".opencode", "plugins")
+        index = expanded.index(marker)
+        index ? expanded[0...index].delete_suffix(File::SEPARATOR) : File.dirname(expanded)
+      rescue URI::InvalidURIError, ArgumentError
+        nil
+      end
+
+      def install_hint(inv, config_path)
+        "opencode: /#{inv.name} not found in project/user OpenCode skills or " \
+          "an explicitly configured plugin. Add #{PINNED_COMPOUND_ENGINEERING_PLUGIN.inspect} " \
+          "to the plugin array in #{config_path}."
       end
     end
 

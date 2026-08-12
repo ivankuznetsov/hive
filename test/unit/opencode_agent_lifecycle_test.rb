@@ -93,6 +93,23 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_explicit_overlay_default_supplies_the_route_when_role_has_no_model_override
+    with_fixture(default_route: ROUTE) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "default-route-260812-aaaa")
+      root = File.join(fixture.fetch(:dir), "invocation-default-route")
+      agent = build_agent(
+        task, fixture, invocation_root: root, explicit_launch: false
+      )
+
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") { agent.run! }
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal ROUTE, result.fetch(:requested_opencode_route)
+      assert_equal ROUTE, result.fetch(:actual_opencode_route)
+      refute File.exist?(root)
+    end
+  end
+
   private
 
   def make_task(dir, slug: "opencode-agent-260812-aaaa")
@@ -101,7 +118,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     Hive::Task.new(folder)
   end
 
-  def build_agent(task, fixture, invocation_root:, timeout_sec: 5)
+  def build_agent(task, fixture, invocation_root:, timeout_sec: 5,
+                  explicit_launch: true)
     profile = Hive::AgentProfile.new(
       runtime_profile: AgentCliRuntime::Profiles.fetch(:opencode),
       skill_syntax_format: "/%{skill}",
@@ -110,7 +128,9 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       opencode_configuration_path: fixture.fetch(:configuration),
       opencode_credential_environment_keys: [ "ANTHROPIC_API_KEY" ]
     ).with_overrides("bin" => fixture.fetch(:bin))
-    launch = profile.identity_arguments(model: ROUTE, effort: "high")
+    launch = if explicit_launch
+      profile.identity_arguments(model: ROUTE, effort: "high")
+    end
     Hive::Agent.new(
       task:, prompt: "make the atomic edit", max_budget_usd: nil,
       timeout_sec:, cwd: fixture.fetch(:work), profile:,
@@ -121,16 +141,18 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     )
   end
 
-  def with_fixture(mode: :success)
+  def with_fixture(mode: :success, default_route: nil)
     with_tmp_dir do |dir|
       work = File.join(dir, "work")
       FileUtils.mkdir_p(work)
       calls = File.join(dir, "calls.log")
       environment = File.join(dir, "environment.json")
       configuration = File.join(dir, "selected-config.json")
-      File.write(configuration, JSON.generate(
+      selected_config = {
         "provider" => { "anthropic" => { "npm" => "@ai-sdk/anthropic" } }
-      ))
+      }
+      selected_config["model"] = default_route if default_route
+      File.write(configuration, JSON.generate(selected_config))
       bin = File.join(dir, "opencode")
       File.write(bin, fixture_script(
         mode:, calls:, environment:, source_root: dir

@@ -61,14 +61,16 @@ module AgentCliRuntime
         validate_provider!(source_config, requested_route.provider)
         validate_nonsecret!(source_config)
         roots = resolve_roots(preparation)
-        permission = permission_rules(preparation, roots)
+        plugins = selected_plugins(source_config, preparation.plugins)
+        permission = permission_rules(preparation, roots, plugins: plugins)
 
         root = create_root!(preparation.invocation_root)
         cleanup = Cleanup.new(root)
         begin
           paths = create_directories(root)
+          pure = preparation.pure && plugins.empty?
           config = generated_configuration(
-            source_config, preparation, requested_route, permission
+            source_config, plugins, requested_route, permission
           )
           configuration_path = File.join(paths.fetch(:source), "opencode.json")
           write_private_file(configuration_path, JSON.pretty_generate(config) + "\n")
@@ -81,8 +83,7 @@ module AgentCliRuntime
           generated_paths.concat(staged_credential ? staged_credential : [])
 
           environment = overlay_environment(
-            paths, configuration_path,
-            pure: preparation.pure && preparation.plugins.empty?
+            paths, configuration_path, pure: pure
           )
           executable =
             preparation.request.executable || profile.bin(env: env)
@@ -101,7 +102,7 @@ module AgentCliRuntime
           probe_result = OpenCode::Probe.call!(probe_request, env: probe_env)
           invocation = compile_invocation(
             preparation, profile, requested_route, roots,
-            executable:, pure: preparation.pure && preparation.plugins.empty?,
+            executable:, pure: pure,
             probe_result:
           )
 
@@ -201,7 +202,7 @@ module AgentCliRuntime
       end
       private_class_method :resolve_roots
 
-      def permission_rules(preparation, roots)
+      def permission_rules(preparation, roots, plugins: preparation.plugins)
         mode = preparation.request.permission_mode
         if mode.nil?
           policy = preparation.permission_policy
@@ -234,7 +235,7 @@ module AgentCliRuntime
           "grep" => "allow",
           "list" => "allow",
           "lsp" => "allow",
-          "skill" => preparation.plugins.empty? ? "deny" : "allow",
+          "skill" => plugins.empty? ? "deny" : "allow",
           "external_directory" => external
         }
         if mode == "read-only"
@@ -312,15 +313,26 @@ module AgentCliRuntime
       end
       private_class_method :create_directories
 
-      def generated_configuration(source, preparation, route, permission)
+      def selected_plugins(source, requested)
+        values = requested.empty? ? source.fetch("plugin", []) : requested
+        unless values.is_a?(Array) &&
+               values.all? { |plugin| plugin.is_a?(String) && !plugin.empty? }
+          raise ConfigurationError,
+                "OpenCode plugin selection must be an array of non-empty strings"
+        end
+        values.uniq.freeze
+      end
+      private_class_method :selected_plugins
+
+      def generated_configuration(source, plugins, route, permission)
         config = deep_copy(source)
         config["$schema"] ||= "https://opencode.ai/config.json"
         config["model"] = route.to_s
         config["permission"] = permission
-        if preparation.plugins.empty?
+        if plugins.empty?
           config.delete("plugin")
         else
-          config["plugin"] = preparation.plugins.dup
+          config["plugin"] = plugins.dup
         end
         config
       end

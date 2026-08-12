@@ -1580,6 +1580,58 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_opencode_implementation_spawn_records_the_typed_observation
+    with_tmp_dir do |dir|
+      task = make_task(dir, "6-review")
+      cfg = { "agents" => { "opencode" => {} } }
+      outcome = {
+        status: :error,
+        requested_opencode_route: "anthropic/claude-sonnet-4-5",
+        actual_opencode_route: nil,
+        route_resolution_status: :unobserved,
+        normalized_outcome_kind: :configuration_failure,
+        usage: nil
+      }
+      agent = Object.new
+      agent.define_singleton_method(:run!) { outcome }
+      observation = nil
+      store = Object.new
+      store.define_singleton_method(:observe_opencode!) do |**values|
+        observation = values
+      end
+
+      with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+        with_replaced_singleton_method(Hive::Agent, :new, ->(**) { agent }) do
+          with_replaced_singleton_method(
+            Hive::ImplementationIdentity::Store, :new,
+            ->(**) { store }
+          ) do
+            result = Hive::Stages::Base.spawn_agent(
+              task,
+              prompt: "prompt",
+              max_budget_usd: nil,
+              timeout_sec: 5,
+              profile: opencode_scope_profile,
+              cfg: cfg,
+              implementation_stage: "review.fix",
+              status_mode: :exit_code_only
+            )
+
+            assert_same outcome, result
+          end
+        end
+      end
+
+      assert_equal "review.fix", observation.fetch(:stage)
+      assert_equal outcome.fetch(:requested_opencode_route),
+                   observation.fetch(:requested_route)
+      assert_nil observation.fetch(:actual_route)
+      assert_equal :unobserved, observation.fetch(:resolution_status)
+      assert_equal :configuration_failure, observation.fetch(:outcome_kind)
+      assert_nil observation.fetch(:usage)
+    end
+  end
+
   def explicit_context(binding: "default", evidence_writer: nil, effort: "high", adapter: "codex")
     provider_scope = {
       "kind" => "provider_account", "provider_account_id" => "account-a", "model" => nil

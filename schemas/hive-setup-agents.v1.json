@@ -64,7 +64,7 @@
       "required": ["id", "agent", "package", "capabilities", "kind", "argv", "files", "depends_on", "preconditions"],
       "properties": {
         "id": { "type": "string" },
-        "agent": { "enum": ["claude", "codex", "pi"] },
+        "agent": { "enum": ["claude", "codex", "pi", "grok", "opencode"] },
         "package": { "type": "string" },
         "capabilities": { "type": "array", "items": { "type": "string" } },
         "kind": { "type": "string" },
@@ -80,7 +80,7 @@
       "required": ["operation_id", "agent", "package", "status", "message", "exit_status", "changed_files"],
       "properties": {
         "operation_id": { "type": "string" },
-        "agent": { "enum": ["claude", "codex", "pi"] },
+        "agent": { "enum": ["claude", "codex", "pi", "grok", "opencode"] },
         "package": { "type": "string" },
         "status": { "enum": ["succeeded", "failed", "skipped"] },
         "message": { "type": "string" },

@@ -11,7 +11,7 @@ module Hive
   # basename, by design, so multiple checkouts of the same project collapse into
   # the same aggregate bucket.
   module UsageDb
-    AGENTS = %i[claude codex pi grok].freeze
+    AGENTS = %i[claude codex pi grok opencode].freeze
     BUCKETS = %i[today 7d 30d all].freeze
     SCHEMA_SQL = <<~SQL.freeze
       CREATE TABLE IF NOT EXISTS token_usage (
@@ -25,12 +25,44 @@ module Hive
         ended_at     TEXT,
         input        INTEGER NOT NULL DEFAULT 0,
         output       INTEGER NOT NULL DEFAULT 0,
-        cached       INTEGER NOT NULL DEFAULT 0
+        cached       INTEGER NOT NULL DEFAULT 0,
+        requested_backend TEXT,
+        requested_model   TEXT,
+        actual_backend    TEXT,
+        actual_model      TEXT,
+        cache_read        INTEGER,
+        cache_write       INTEGER,
+        reasoning         INTEGER,
+        cost              REAL,
+        input_available       INTEGER NOT NULL DEFAULT 1,
+        output_available      INTEGER NOT NULL DEFAULT 1,
+        cached_available      INTEGER NOT NULL DEFAULT 1,
+        cache_read_available  INTEGER NOT NULL DEFAULT 0,
+        cache_write_available INTEGER NOT NULL DEFAULT 0,
+        reasoning_available   INTEGER NOT NULL DEFAULT 0,
+        cost_available        INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS idx_token_usage_started_at ON token_usage(started_at);
       CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_slug, started_at);
       CREATE INDEX IF NOT EXISTS idx_token_usage_task ON token_usage(task_slug, started_at);
     SQL
+    ADDITIVE_COLUMNS = {
+      "requested_backend" => "TEXT",
+      "requested_model" => "TEXT",
+      "actual_backend" => "TEXT",
+      "actual_model" => "TEXT",
+      "cache_read" => "INTEGER",
+      "cache_write" => "INTEGER",
+      "reasoning" => "INTEGER",
+      "cost" => "REAL",
+      "input_available" => "INTEGER NOT NULL DEFAULT 1",
+      "output_available" => "INTEGER NOT NULL DEFAULT 1",
+      "cached_available" => "INTEGER NOT NULL DEFAULT 1",
+      "cache_read_available" => "INTEGER NOT NULL DEFAULT 0",
+      "cache_write_available" => "INTEGER NOT NULL DEFAULT 0",
+      "reasoning_available" => "INTEGER NOT NULL DEFAULT 0",
+      "cost_available" => "INTEGER NOT NULL DEFAULT 0"
+    }.freeze
 
     module_function
 
@@ -43,20 +75,32 @@ module Hive
     end
 
     def record!(agent:, model:, project_slug:, task_slug:, stage:, started_at:, ended_at:,
-                input:, output:, cached:)
+                input:, output:, cached:, requested_route: nil, actual_route: nil,
+                cache_read: nil, cache_write: nil, reasoning: nil, cost: nil)
+      requested_backend, requested_model = split_route(requested_route)
+      actual_backend, actual_model = split_route(actual_route)
       with_database(create: true) do |db|
         ensure_schema!(db)
         db.execute(
           <<~SQL,
             INSERT INTO token_usage (
-              id, agent, model, project_slug, task_slug, stage,
-              started_at, ended_at, input, output, cached
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              id, agent, model,
+              requested_backend, requested_model, actual_backend, actual_model,
+              project_slug, task_slug, stage, started_at, ended_at,
+              input, output, cached, cache_read, cache_write, reasoning, cost,
+              input_available, output_available, cached_available,
+              cache_read_available, cache_write_available,
+              reasoning_available, cost_available
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           SQL
           [
             SecureRandom.uuid,
             agent.to_s,
             blank_to_nil(model),
+            requested_backend,
+            requested_model,
+            actual_backend,
+            actual_model,
             blank_to_nil(project_slug),
             blank_to_nil(task_slug),
             blank_to_nil(stage),
@@ -64,7 +108,18 @@ module Hive
             ended_at.nil? ? nil : iso8601(ended_at),
             integer(input),
             integer(output),
-            integer(cached)
+            integer(cached),
+            nullable_number(cache_read),
+            nullable_number(cache_write),
+            nullable_number(reasoning),
+            nullable_number(cost),
+            availability(input),
+            availability(output),
+            availability(cached),
+            availability(cache_read),
+            availability(cache_write),
+            availability(reasoning),
+            availability(cost)
           ]
         )
       end
@@ -154,6 +209,14 @@ module Hive
 
     def ensure_schema!(db)
       db.execute_batch(SCHEMA_SQL)
+      existing = db.execute("PRAGMA table_info(token_usage)").map do |row|
+        row.is_a?(Hash) ? row.fetch("name") : row.fetch(1)
+      end
+      ADDITIVE_COLUMNS.each do |name, sql_type|
+        next if existing.include?(name)
+
+        db.execute("ALTER TABLE token_usage ADD COLUMN #{name} #{sql_type}")
+      end
     end
 
     def zero_aggregate
@@ -259,6 +322,27 @@ module Hive
 
     def integer(value)
       value.to_i
+    end
+
+    def nullable_number(value)
+      return nil if value.nil?
+
+      value
+    end
+
+    def availability(value)
+      value.nil? ? 0 : 1
+    end
+
+    def split_route(route)
+      return [ nil, nil ] if blank?(route)
+      return [ route.provider.to_s, route.model.to_s ] if
+        route.respond_to?(:provider) && route.respond_to?(:model)
+
+      provider, model = route.to_s.split("/", 2)
+      return [ nil, nil ] if blank?(provider) || blank?(model)
+
+      [ provider, model ]
     end
 
     def blank_to_nil(value)

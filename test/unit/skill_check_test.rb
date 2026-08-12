@@ -876,3 +876,122 @@ class HiveSkillCheckPiTest < Minitest::Test
     assert_match(/expected/, msg, "malformed invocation surfaces parse error")
   end
 end
+
+class HiveSkillCheckOpenCodeTest < Minitest::Test
+  include HiveTestHelper
+
+  def test_resolves_skill_from_explicit_native_plugin_source
+    with_tmp_dir do |home|
+      config_dir = File.join(home, ".config", "opencode")
+      plugin_root = File.join(home, "compound-engineering")
+      plugin_entry = File.join(
+        plugin_root, ".opencode", "plugins", "compound-engineering.js"
+      )
+      write_file(plugin_entry, "export default {}\n")
+      skill = File.join(plugin_root, "skills", "ce-plan", "SKILL.md")
+      write_file(skill, "# plan\n")
+      config = File.join(config_dir, "opencode.json")
+      write_file(config, JSON.generate("plugin" => [ "file://#{plugin_entry}" ]))
+
+      resolution = Hive::SkillCheck::OpenCode.resolve(
+        "/ce-plan",
+        configuration_path: config,
+        environment: { "HOME" => home, "OPENCODE_CONFIG_DIR" => config_dir }
+      )
+
+      assert_equal :present, resolution.status
+      assert_equal skill, resolution.path
+      assert_empty resolution.parse_errors
+    end
+  end
+
+  def test_project_skill_precedes_plugin_and_exposes_shadowing_path
+    with_tmp_dir do |home|
+      project = File.join(home, "project")
+      project_skill = File.join(
+        project, ".opencode", "skills", "ce-code-review", "SKILL.md"
+      )
+      write_file(project_skill, "# shadow\n")
+      config_dir = File.join(home, ".config", "opencode")
+      plugin_skill = File.join(
+        config_dir, "node_modules", "compound-engineering", "skills",
+        "ce-code-review", "SKILL.md"
+      )
+      write_file(plugin_skill, "# expected\n")
+      config = File.join(config_dir, "opencode.json")
+      write_file(
+        config,
+        JSON.generate(
+          "plugin" => [
+            Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+          ]
+        )
+      )
+
+      resolution = Hive::SkillCheck::OpenCode.resolve(
+        "/ce-code-review", project_root: project,
+        configuration_path: config,
+        environment: { "HOME" => home, "OPENCODE_CONFIG_DIR" => config_dir }
+      )
+
+      assert_equal :shadowed, resolution.status
+      assert_equal project_skill, resolution.path
+      assert_includes resolution.candidates, plugin_skill
+      assert_match(/shadows the configured Compound Engineering plugin/,
+                   resolution.message)
+    end
+  end
+
+  def test_resolves_skill_from_typed_inline_plugin_selection
+    with_tmp_dir do |home|
+      plugin_root = File.join(home, "compound-engineering")
+      plugin_entry = File.join(
+        plugin_root, ".opencode", "plugins", "compound-engineering.js"
+      )
+      write_file(plugin_entry, "export default {}\n")
+      skill = File.join(plugin_root, "skills", "ce-plan", "SKILL.md")
+      write_file(skill, "# plan\n")
+
+      resolution = Hive::SkillCheck::OpenCode.resolve(
+        "/ce-plan",
+        configuration: { "model" => "anthropic/claude-sonnet-4-5" },
+        plugins: [ "file://#{plugin_entry}" ],
+        environment: { "HOME" => home }
+      )
+
+      assert_equal :present, resolution.status
+      assert_equal skill, resolution.path
+    end
+  end
+
+  def test_missing_or_malformed_config_fails_with_pinned_setup_guidance
+    with_tmp_dir do |home|
+      config = File.join(home, ".config", "opencode", "opencode.json")
+      write_file(config, "{")
+
+      resolution = Hive::SkillCheck::OpenCode.resolve(
+        "/ce-brainstorm", configuration_path: config,
+        environment: { "HOME" => home }
+      )
+
+      assert_equal :missing, resolution.status
+      assert_equal 1, resolution.parse_errors.size
+      assert_match(/compound-engineering-v3\.21\.4/, resolution.message)
+      assert_match(/opencode\.json/, resolution.message)
+    end
+  end
+
+  def test_malformed_invocation_returns_missing
+    status, message = Hive::SkillCheck::OpenCode.verify("garbage")
+
+    assert_equal :missing, status
+    assert_match(/expected/, message)
+  end
+
+  private
+
+  def write_file(path, content = "")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, content)
+  end
+end

@@ -224,7 +224,9 @@ module Hive
             default_branch: ctx.default_branch,
             pass: ctx.pass,
             output_path: output_path,
-            skill_invocation: profile.format_skill_invocation(skill),
+            skill_invocation: Hive::Stages::Base.format_verified_skill_invocation(
+              profile, skill, project_root: ctx.worktree_path
+            ),
             user_supplied_tag: tag,
             plan_context_section: Hive::Reviewers::PlanContext.render(ctx.task_folder, tag)
           )

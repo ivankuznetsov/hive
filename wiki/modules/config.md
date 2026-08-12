@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-08-10
+updated: 2026-08-12
 tags: [config, yaml, validation]
 ---
 
@@ -533,6 +533,22 @@ the argv fragment used by both the tmux wrapper and headless `Hive::Agent`.
 ## `agents.*` overrides are plumbed at spawn time
 
 `agents.<name>.{bin, env_override, min_version}` in per-project config now actually take effect (LFG-5). `Hive::AgentProfiles.lookup(name, cfg: cfg)` overlays `cfg.dig("agents", name)` onto the registry profile via `AgentProfile#with_overrides`, returning a new frozen profile. Unknown override keys raise `Hive::ConfigError`. Every spawn site in `lib/hive/stages/review.rb`, `review/ci_fix.rb`, `review/triage.rb`, `review/browser_test.rb`, and `reviewers/agent.rb` threads `cfg` into the lookup. Legacy callers passing `cfg: nil` get the registry profile unchanged.
+
+OpenCode adds only typed, non-secret overrides under `agents.opencode`:
+`config_path`, an inline non-secret `config` object, `credential_env` names,
+an optional `credential_file`, explicit `plugins`, and `isolation: hermetic`.
+Relative source paths resolve against `project_root`. Credential values, raw
+argv, raw environment maps, unknown agent blocks, and unknown override keys
+are rejected during config validation. The selected config remains read-only;
+Hive prepares and later removes a private per-invocation overlay.
+
+Every `ROLE_AGENT_PATHS` entry accepts `agent: opencode`, but none of
+`DEFAULT_GLOBAL_AGENTS`, stage defaults, reviewer councils, or fallback lists
+select it. Routed OpenCode roles normally require an exact
+`models.<role>.model: provider/model`; when that field is absent, only an
+explicit selected OpenCode config whose top-level `model` is exact may supply
+the default. Skill-bearing OpenCode plan roles use `/ce-plan` by default and
+must pass native skill/plugin readiness before spawn.
 
 `timeout_sec.review_ci` (default 3600) is enforced as a hard per-process kill in `Review::CiFix#run_ci_once` — TERM the pgid on expiry, 3s grace, then KILL — not just as an outer-loop budget check.
 

@@ -299,6 +299,14 @@ class AgentProfileTest < Minitest::Test
         effort: nil,
         global: [],
         subcommand: [ "--model", "openai/gpt-5.6-sol" ]
+      },
+      opencode: {
+        model: "anthropic/claude-sonnet-4-5",
+        effort: "high",
+        global: [],
+        subcommand: [
+          "--model", "anthropic/claude-sonnet-4-5", "--variant", "high"
+        ]
       }
     }
 
@@ -327,6 +335,23 @@ class AgentProfileTest < Minitest::Test
       %w[default inherit none minimal low medium high xhigh max],
       Hive::AgentProfiles.lookup(:grok).routed_effort_values
     )
+    assert_equal %w[minimal low medium high xhigh max],
+                 Hive::AgentProfiles.lookup(:opencode).routed_effort_values
+  end
+
+  def test_opencode_routed_model_requires_an_exact_nested_route
+    profile = Hive::AgentProfiles.lookup(:opencode)
+    resolution = Hive::ModelRouting.resolve(
+      models: { "plan" => { "model" => "claude-sonnet-4-5" } },
+      stage: "plan",
+      provider: :opencode
+    )
+
+    error = assert_raises(Hive::ConfigError) do
+      profile.routing_arguments(resolution)
+    end
+
+    assert_match(/exact OpenCode provider\/model route/, error.message)
   end
 
   def test_codex_routed_model_and_effort_can_be_rendered_independently

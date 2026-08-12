@@ -209,6 +209,49 @@ class TaskProjectionTest < Minitest::Test
     assert_equal({}, identity.fetch("stages"))
   end
 
+  def test_opencode_observation_augments_requested_identity_without_overwriting_it
+    execute = event(
+      event_type: "implementation_identity_captured", event_id: "identity-opencode",
+      task_generation: 1, commit_generation: 0,
+      payload: {
+        "identity" => identity_payload(
+          "execute", "opencode", "anthropic/claude-sonnet-4-5", 1
+        )
+      }
+    )
+    observation = event(
+      event_type: "implementation_identity_observed", event_id: "observed-opencode",
+      task_generation: 1, commit_generation: 0,
+      payload: {
+        "observation" => {
+          "stage" => "execute",
+          "generation" => 1,
+          "requested_backend" => "anthropic",
+          "requested_model" => "claude-sonnet-4-5",
+          "actual_backend" => "anthropic",
+          "actual_model" => "claude-sonnet-4-5-20250929",
+          "route_resolution_status" => "resolved_differently",
+          "outcome_kind" => "completed",
+          "usage" => {
+            "input" => nil, "output" => 0,
+            "cache_read" => 0, "cache_write" => nil,
+            "reasoning" => nil, "cost" => 0.0
+          }
+        }
+      }
+    )
+
+    projection = Hive::TaskProjection.project(records: [ execute, observation ])
+    identity = projection["implementation_identity"].fetch("execute")
+
+    assert_equal "anthropic/claude-sonnet-4-5", identity.fetch("model")
+    assert_equal "claude-sonnet-4-5", identity.fetch("requested_model")
+    assert_equal "claude-sonnet-4-5-20250929", identity.fetch("actual_model")
+    assert_equal "observed-opencode", identity.fetch("observation_event_id")
+    assert_nil identity.dig("usage", "input")
+    assert_equal 0, identity.dig("usage", "output")
+  end
+
   def test_validated_closure_overlay_preserves_condition_and_attempt_truth
     projection = Hive::TaskProjection.project(
       records: [

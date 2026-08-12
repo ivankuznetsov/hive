@@ -341,6 +341,37 @@
             },
             "originating_attempt": { "type": ["string", "null"] },
             "resolved_attempt": { "type": ["string", "null"] },
+            "observed_attempt": { "type": ["string", "null"] },
+            "requested_backend": { "type": "string", "minLength": 1 },
+            "requested_model": { "type": "string", "minLength": 1 },
+            "actual_backend": { "type": ["string", "null"] },
+            "actual_model": { "type": ["string", "null"] },
+            "route_resolution_status": {
+              "type": "string",
+              "enum": ["unobserved", "matched", "resolved_differently"]
+            },
+            "outcome_kind": {
+              "type": "string",
+              "enum": [
+                "completed", "authentication_failure", "configuration_failure",
+                "cli_failure", "malformed_output", "cancelled", "timed_out"
+              ]
+            },
+            "usage": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": [
+                "input", "output", "cache_read", "cache_write", "reasoning", "cost"
+              ],
+              "properties": {
+                "input": { "type": ["integer", "null"], "minimum": 0 },
+                "output": { "type": ["integer", "null"], "minimum": 0 },
+                "cache_read": { "type": ["integer", "null"], "minimum": 0 },
+                "cache_write": { "type": ["integer", "null"], "minimum": 0 },
+                "reasoning": { "type": ["integer", "null"], "minimum": 0 },
+                "cost": { "type": ["number", "null"], "minimum": 0 }
+              }
+            },
             "status": { "type": "string", "enum": ["resolved", "preview"] }
           }
         },
@@ -372,7 +403,7 @@
         "source": { "type": "string", "enum": ["marker", "artifact"] },
         "source_path": { "type": ["string", "null"] },
         "artifact_paths": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
-        "generated_by": { "type": "string", "enum": ["local", "claude", "codex", "pi", "grok"] },
+        "generated_by": { "type": "string", "enum": ["local", "claude", "codex", "pi", "grok", "opencode"] },
         "marker_signature": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "suggested_next_action": {
           "oneOf": [

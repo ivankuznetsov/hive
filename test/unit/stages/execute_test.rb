@@ -620,6 +620,57 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_spawn_implementation_declares_the_execute_identity_observation_stage
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      identity = Struct.new(:provider, :native_arguments) do
+        def routing_arguments(_profile) = nil
+      end.new("opencode", [])
+      spawned = nil
+      result = {
+        status: :ok,
+        requested_opencode_route: "anthropic/claude-sonnet-4-5",
+        actual_opencode_route: "anthropic/claude-sonnet-4-5-20250929",
+        route_resolution_status: :resolved_differently,
+        normalized_outcome_kind: :completed,
+        usage: {
+          input: nil, output: 0, cached: nil, cache_read: nil,
+          cache_write: 0, reasoning: nil, cost: 0.0
+        }
+      }
+      scope = {
+        add_dirs: [ task.folder ], permission_mode: "read-only",
+        allowed_tools: nil, disallowed_tools: nil, runtime_policy: nil,
+        additional_read_roots: [ task.folder ], additional_write_roots: []
+      }
+
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :stage_permission_scope_or_mark!,
+        ->(*, **) { scope }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :spawn_agent,
+          ->(*, **kwargs) { spawned = kwargs; result }
+        ) do
+          cfg = {
+            "agents" => { "opencode" => {} },
+            "execute" => { "agent" => "opencode" },
+            "budget_usd" => { "execute_implementation" => 1 },
+            "timeout_sec" => { "execute_implementation" => 5 }
+          }
+          returned = Hive::Stages::Execute.spawn_implementation(
+            task, cfg, File.join(dir, "worktree"), identity: identity
+          )
+
+          assert_equal "opencode", returned.fetch(:implementation_provider)
+          assert_same cfg, spawned.fetch(:cfg)
+          assert_equal "execute", spawned.fetch(:implementation_stage)
+        end
+      end
+    end
+  end
+
   def build_task(project_root, depends_on: nil)
     folder = File.join(project_root, ".hive-state", "stages", "4-execute", "demo-260522-aaaa")
     FileUtils.mkdir_p(folder)

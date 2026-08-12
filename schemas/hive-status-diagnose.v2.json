@@ -217,7 +217,8 @@
             "claude",
             "codex",
             "pi",
-            "grok"
+            "grok",
+            "opencode"
           ]
         },
         "marker_signature": {

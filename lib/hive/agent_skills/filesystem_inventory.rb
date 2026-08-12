@@ -25,6 +25,7 @@ module Hive
         when "codex" then codex_inventory(native_spec, root)
         when "pi" then pi_inventory(native_spec, root)
         when "grok" then grok_inventory(native_spec, root)
+        when "opencode" then opencode_inventory(native_spec, root)
         else raise TypeError, "unsupported provider #{native_spec.provider.inspect}"
         end
 
@@ -179,6 +180,34 @@ module Hive
         }.freeze
       end
 
+      def opencode_inventory(native_spec, root)
+        config_path = File.join(root, "opencode.json")
+        document = read_optional_json(config_path, {})
+        unless document.is_a?(Hash)
+          raise TypeError, "#{config_path} must contain an object"
+        end
+        plugins = document.fetch("plugin", [])
+        unless plugins.is_a?(Array) && plugins.all? { |entry| entry.is_a?(String) }
+          raise TypeError, "#{config_path} plugin must be an array of strings"
+        end
+        configured = plugins.include?(native_spec.package)
+        roots = configured ? Hive::SkillCheck::OpenCode.plugin_roots(
+          native_spec.package, config_dir: root
+        ) : []
+        install_path = roots.find { |path| File.directory?(path) }
+        version = native_spec.package[/#compound-engineering-v([0-9.]+)\z/, 1]
+        {
+          "package" => configured && {
+            "id" => native_spec.package,
+            "version" => version,
+            "enabled" => true,
+            "install_path" => install_path,
+            "source" => native_spec.source
+          }.freeze,
+          "marketplace" => nil
+        }.freeze
+      end
+
       def read_optional_json(path, default)
         return @json_cache.fetch(path) if @json_cache.key?(path)
 
@@ -293,6 +322,7 @@ module Hive
           File.join(root, ".claude-plugin", "plugin.json"),
           File.join(root, ".codex-plugin", "plugin.json"),
           File.join(root, ".grok-plugin", "plugin.json"),
+          File.join(root, ".opencode", "plugin.json"),
           File.join(root, "package.json")
         ]
         candidates.each do |path|

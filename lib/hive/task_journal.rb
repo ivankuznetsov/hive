@@ -23,6 +23,7 @@ module Hive
       implementation_identity_captured
       implementation_identity_backfilled
       implementation_identity_fallback
+      implementation_identity_observed
       implementation_stage_resolved
     ].freeze
     LEGACY_ATTEMPT_ID = "legacy".freeze

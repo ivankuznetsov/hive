@@ -108,7 +108,10 @@ module Hive
       end
 
       def render_prompt(task, _cfg, stage, profile:, instruction_body:)
-        skill_invocation = stage.skill && profile.format_skill_invocation(stage.skill)
+        skill_invocation = stage.skill &&
+          Hive::Stages::Base.format_verified_skill_invocation(
+            profile, stage.skill, project_root: task.project_root
+          )
         Hive::Stages::Base.render(
           "agent_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(

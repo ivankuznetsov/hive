@@ -217,6 +217,26 @@ class ImplementationIdentityRoutingTest < Minitest::Test
     end
   end
 
+  def test_opencode_open_pr_inherits_the_exact_execute_route
+    with_tmp_dir do |project_root|
+      cfg = identity_config(
+        project_root, provider: "opencode",
+        model: "anthropic/claude-sonnet-4-5"
+      )
+      resolver = Hive::ImplementationIdentity::Resolver.new(cfg: cfg)
+      execute = resolver.resolve_execute(generation: 1, attempt_id: "opencode-execute")
+
+      open_pr = resolver.resolve_stage("open_pr", execute_identity: execute)
+
+      assert_equal "opencode", open_pr.provider
+      assert_equal "anthropic/claude-sonnet-4-5", open_pr.model
+      assert_equal true, open_pr.model_pinned
+      assert_equal [
+        "--model", "anthropic/claude-sonnet-4-5", "--variant", "medium"
+      ], open_pr.native_arguments
+    end
+  end
+
   private
 
   def with_identity_task

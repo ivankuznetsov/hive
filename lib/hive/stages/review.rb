@@ -2153,6 +2153,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "review_fix") || 2700,
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
+          implementation_stage: "review.fix",
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only,
           **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
@@ -2165,7 +2166,7 @@ module Hive
             session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task)
           )
         else
-          Hive::Stages::Base.spawn_agent(task, **kwargs)
+          Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
         end
       end
 

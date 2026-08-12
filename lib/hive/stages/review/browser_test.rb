@@ -110,7 +110,9 @@ module Hive
               attempt: attempt,
               pass: ctx.pass,
               result_path: result_path,
-              skill_invocation: profile.format_skill_invocation(SKILL),
+              skill_invocation: Hive::Stages::Base.format_verified_skill_invocation(
+                profile, SKILL, project_root: ctx.worktree_path
+              ),
               user_supplied_tag: Hive::Stages::Base.user_supplied_tag
             )
           )

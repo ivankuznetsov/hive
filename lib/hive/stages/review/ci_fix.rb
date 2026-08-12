@@ -384,6 +384,7 @@ module Hive
             timeout_sec: cfg.dig("timeout_sec", "review_ci") || 600,
             log_label: "review-ci-fix-attempt#{format('%02d', attempt)}",
             profile: profile,
+            implementation_stage: "review.ci",
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :exit_code_only,
             **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
@@ -396,7 +397,7 @@ module Hive
               session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-ci-fix-attempt#{attempt}", task)
             )
           else
-            Hive::Stages::Base.spawn_agent(task, **kwargs)
+            Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
           end
         end
 

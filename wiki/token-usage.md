@@ -3,7 +3,7 @@ title: Token Usage Stats
 type: observability
 source: lib/hive/agent.rb, lib/hive/usage_db.rb, lib/hive/patrol/token_budget.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-24
-updated: 2026-07-22
+updated: 2026-08-12
 tags: [observability, tui, sqlite, agent]
 ---
 
@@ -30,6 +30,7 @@ That placement deliberately excludes sessions launched outside Hive and avoids s
 | `codex` | accepts known final result / turn-completed JSON shapes and zero-fills when a usage payload is absent. |
 | `pi` | accepts known final result / completion JSON shapes and zero-fills when a usage payload is absent. |
 | `grok` | accepts a real usage object if a future streaming event supplies one; current `end` events contain no counts, so the extractor returns nil rather than fabricating zero usage. |
+| `opencode` | uses the strict run/export normalizer. Sanitized export supplies authoritative input, output, cache-read, cache-write, reasoning, and cost values; unavailable fields remain nil and numeric zero remains zero. |
 
 Codex and Pi payload shapes still need refinement from captured real streams; the zero-fill path keeps one row per Hive spawn without pretending unknown usage is known. The follow-up is tracked in [[gaps]].
 
@@ -48,13 +49,17 @@ Schema:
 | Column | Meaning |
 |--------|---------|
 | `id` | UUID primary key. |
-| `agent` | Profile name, for example `claude`, `codex`, `pi`, or `grok`. |
-| `model` | Best-effort model name from the usage event. |
+| `agent` | Profile name, for example `claude`, `codex`, `pi`, `grok`, or `opencode`. |
+| `model` | Best-effort model name from the usage event; OpenCode uses its observed actual route when export proved it. |
+| `requested_backend` / `requested_model` | OpenCode's requested nested route, stored separately from actual identity. |
+| `actual_backend` / `actual_model` | Sanitized-export-observed OpenCode route, or nil when unavailable. |
 | `project_slug` | `task.project_name`, intentionally path-independent so multiple checkouts collapse. |
 | `task_slug` | Hive task slug. |
 | `stage` | Stage name at spawn time, for example `4-execute`. |
 | `started_at` / `ended_at` | UTC ISO8601 timestamps. |
-| `input` / `output` / `cached` | Token counters. Claude cached tokens are cache-read plus cache-creation input tokens. |
+| `input` / `output` / `cached` | Backward-compatible aggregate counters. Claude cached tokens are cache-read plus cache-creation input tokens. Unknown detailed values store numeric zero here only for legacy aggregation and have a false availability flag. |
+| `cache_read` / `cache_write` / `reasoning` / `cost` | Nullable OpenCode details; cache directions are never collapsed when only one is available. |
+| `*_available` | Per-field evidence flags preserving unavailable separately from numeric zero. Existing databases gain these additive columns in place; legacy input/output/cached rows are marked available and newly introduced details unavailable. |
 
 Indexes cover `started_at`, `(project_slug, started_at)`, and `(task_slug, started_at)`.
 
@@ -69,7 +74,7 @@ Indexes cover `started_at`, `(project_slug, started_at)`, and `(task_slug, start
 
 The scope hash accepts `project_slug:` and `task_slug:` filters. `task_slug` is normally paired with `project_slug` by the TUI so same-named tasks in different projects stay distinguishable.
 
-The aggregate also returns `:patrol` buckets by summing rows whose `stage` starts with `patrol` **or** `refactor-patrol`, honoring the same scope and time-window filters. This is a cross-cutting attribution bucket: patrol tokens still belong to their actual agent rows (`claude`, `codex`, `pi`, or `grok`) and still contribute to `TOTAL`; the patrol bucket is not added into `TOTAL` a second time.
+The aggregate also returns `:patrol` buckets by summing rows whose `stage` starts with `patrol` **or** `refactor-patrol`, honoring the same scope and time-window filters. This is a cross-cutting attribution bucket: patrol tokens still belong to their actual agent rows (`claude`, `codex`, `pi`, `grok`, or `opencode`) and still contribute to `TOTAL`; the patrol bucket is not added into `TOTAL` a second time.
 
 `Hive::UsageDb.patrol_activity` is the runtime enforcement view for the current UTC day. It returns input/output/cached telemetry plus the charged input-plus-output total, aggregate patrol launches, separate ordinary/architecture launch counts, architecture-review count, and separate unmetered counts. A cached-only row is still metered, so it never masquerades as missing provider accounting, but it adds zero charged tokens. `Hive::Patrol::TokenBudget` checks that durable project-wide view before each default ordinary or architecture patrol spawn, while also retaining an in-process cycle counter if SQLite recording fails. Architecture launches do not consume ordinary `max_agent_spawns_per_day` headroom; architecture reviews instead use `max_architecture_review_spawns_per_day` (default `8`), architecture fixes retain capacity after that review cap, and unmetered architecture work has its own daily backstop (default `96`). A project-keyed `flock` is acquired before that check and held until usage is recorded, serializing all ordinary and architecture agent lifetimes for the project; a competing process cannot reserve the same daily remainder and fails closed as `agent_in_flight`, while a crash releases the kernel lock automatically. Before spawning, `Hive::Patrol::AgentLaunch` requires enough remaining per-agent/cycle/day allowance for the profile's `initial_context_tokens` plus one token per rendered prompt byte. Claude reserves 20,000 initial-context tokens, covering the provider context sent before its first measurable stream event; insufficient headroom returns `insufficient_launch_headroom` without a child or usage row, or `daily_token_headroom` when the shared UTC-day remainder is specifically the constraining allowance. Hive then passes the smallest of the applicable per-agent limit and the remaining cycle/day allowances into each running agent: low/medium/high/ultrapatrol reviews use at most 40k/50k/75k/100k, ordinary fixes default to 2x that per-agent headroom, and architecture uses its configured multiplier (2x by default) without compounding the fix multiplier. The shared cycle/day totals and native dollar-equivalent guard are not multiplied by the ordinary fix setting. Claude's interim events make that an actual in-flight stop, subject to the granularity of provider events. Providers that expose usage only in their terminal event can be marked over-limit then, but cannot be interrupted early from token data; provider-independent launch caps and wall-clock timeouts remain the fallback. The CLI calls the native guard a USD budget; on subscription-backed providers it does not mean Hive makes an additional payment.
 
@@ -87,7 +92,7 @@ The tuple is `input/output/cached`. Units use `k` and `M` with compact one-decim
 - project when the left pane is focused on a project,
 - task when the right pane has a focused row.
 
-Press `T` in grid mode to open the full-screen token matrix. It renders `claude`, `codex`, `pi`, `grok`, `patrol`, and `TOTAL` rows across `today`, `7d`, `30d`, and `all`. The `patrol` row is the attribution lens described above, not an extra summand. In the stats mode:
+Press `T` in grid mode to open the full-screen token matrix. It renders `claude`, `codex`, `pi`, `grok`, `opencode`, `patrol`, and `TOTAL` rows across `today`, `7d`, `30d`, and `all`. The `patrol` row is the attribution lens described above, not an extra summand. In the stats mode:
 
 - `Left` / `Right` or `h` / `l` drill between all, project, and task scope.
 - `Up` / `Down` or `k` / `j` select the project or task at the current drill level.

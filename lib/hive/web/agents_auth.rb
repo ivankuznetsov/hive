@@ -40,6 +40,7 @@ module Hive
         # `--device-auth` "on a remote or headless machine".
         "codex" => %w[codex login --device-auth],
         "grok" => %w[grok login --device-auth],
+        "opencode" => %w[opencode auth login],
         # gh is not a pipeline agent, but its login IS first-run setup: git's
         # https credential helper reads it for every push the daemon makes.
         # The flags pin the prompts away (host, protocol, no ssh key upload)
@@ -80,7 +81,7 @@ module Hive
       end
 
       def statuses
-        agents = %w[claude codex pi grok].to_h do |agent|
+        agents = %w[claude codex pi grok opencode].to_h do |agent|
           [ agent, { "logged_in" => Hive::AgentProfiles.logged_in?(agent) } ]
         end
         # Not an agent profile, but part of the same first-run checklist:

@@ -2,6 +2,7 @@ require "hive/agent_skills/adapters/claude"
 require "hive/agent_skills/adapters/codex"
 require "hive/agent_skills/adapters/grok"
 require "hive/agent_skills/adapters/pi"
+require "hive/agent_skills/adapters/opencode"
 
 module Hive
   module AgentSkills
@@ -11,7 +12,8 @@ module Hive
           "claude" => Claude,
           "codex" => Codex,
           "grok" => Grok,
-          "pi" => Pi
+          "pi" => Pi,
+          "opencode" => OpenCode
         }.freeze
 
         def initialize(**options)

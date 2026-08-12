@@ -18,7 +18,9 @@ module Hive
             task_folder: task.folder,
             brainstorm_text: brainstorm_text,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
-            skill_invocation: profile.format_skill_invocation(skill)
+            skill_invocation: Hive::Stages::Base.format_verified_skill_invocation(
+              profile, skill, project_root: task.project_root
+            )
           )
         )
         # See brainstorm.rb: add-dir narrowed to the task folder so a

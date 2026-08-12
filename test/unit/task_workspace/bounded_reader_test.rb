@@ -44,6 +44,20 @@ class TaskWorkspaceBoundedReaderTest < Minitest::Test
     end
   end
 
+  def test_redacts_a_secret_prefix_cut_by_the_display_ceiling
+    with_tmp_dir do |root|
+      File.write(File.join(root, "token.txt"), "before ghp_#{'a' * 36} after")
+
+      result = Hive::TaskWorkspace::BoundedReader.new(root: root).read(
+        "token.txt", max_bytes: 15
+      )
+
+      assert result.truncated
+      refute_includes result.content, "ghp_"
+      assert_includes result.content, "[REDACT"
+    end
+  end
+
   def test_rejects_traversal_and_symlinks
     with_tmp_dir do |root|
       outside = File.join(File.dirname(root), "workspace-outside-#{File.basename(root)}")

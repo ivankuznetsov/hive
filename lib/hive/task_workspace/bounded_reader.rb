@@ -57,6 +57,9 @@ module Hive
 
         path = contained_path(relative)
         before = File.lstat(path)
+        if before.symlink?
+          raise SourceError.new(source: "artifact", reason: "symlink_refused")
+        end
         unless before.file? && !before.symlink?
           raise SourceError.new(source: "artifact", reason: "not_regular", message: relative)
         end
@@ -81,11 +84,13 @@ module Hive
           binary = visible.include?("\0")
           text = visible.dup.force_encoding(Encoding::UTF_8).scrub("?")
           redacted = @redactor.call(text).to_s
+          truncated = raw.bytesize > allowed || opened.size > allowed
+          redacted = redact_truncated_secret_tail(redacted) if truncated
           redacted = utf8_prefix(redacted, allowed)
           Result.new(
             content: redacted.freeze,
             bytes: visible.bytesize,
-            truncated: raw.bytesize > allowed || opened.size > allowed,
+            truncated: truncated,
             invalid_encoding: invalid_encoding,
             binary: binary,
             evidence_ref: relative
@@ -135,6 +140,17 @@ module Hive
         return value if value.bytesize <= bytes
 
         value.byteslice(0, bytes).to_s.force_encoding(Encoding::UTF_8).scrub("")
+      end
+
+      # A display ceiling can cut a token before the shared full-token regex
+      # has enough bytes to recognize it. Conservatively hide a credential-
+      # shaped suffix at that exact boundary instead of publishing a useful
+      # token prefix. This does not claim that the suffix was a valid secret.
+      def redact_truncated_secret_tail(value)
+        value.gsub(
+          /(?:\b(?:github_pat_|gh[psou]_|sk-(?:ant-)?|(?:sk|rk|pk)_(?:live|test)_|xox[abprs]-)[A-Za-z0-9_.+\/=\-]*|\b(?:api[_-]?key|password|passwd|pwd)\s*[:=]\s*[^\s]*|\bauthorization\s*[:=]\s*(?:Bearer|Basic|Token)\s*[^\s]*)\z/i,
+          "[REDACTED:truncated_secret]"
+        )
       end
     end
   end

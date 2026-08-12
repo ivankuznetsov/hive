@@ -1,0 +1,88 @@
+<section class="workspace-panel publication-panel publication-<%= publication.fetch("state") %>"
+         aria-labelledby="publication-heading">
+  <div class="workspace-panel-heading">
+    <div>
+      <h2 id="publication-heading">Publication</h2>
+      <p class="muted">
+        <span class="status-text"><%= publication.fetch("publication_state").humanize %></span>
+        · <%= publication.fetch("state").humanize %> evidence
+      </p>
+    </div>
+    <% if refresh_available %>
+      <%= button_to "Refresh GitHub",
+            task_publication_path(@project.name, @task.slug),
+            class: "btn-secondary",
+            form: { data: { turbo_frame: "task-publication" } } %>
+    <% end %>
+  </div>
+
+  <% if refresh_notice.present? %>
+    <p class="state-banner"><%= refresh_notice %></p>
+  <% end %>
+
+  <% local = publication.fetch("local") %>
+  <dl class="workspace-facts">
+    <div><dt>Repository</dt><dd><%= local["repository"].presence || "Unavailable" %></dd></div>
+    <div><dt>Branch</dt><dd><%= local["branch"].presence || local["expected_branch"].presence || "Unavailable" %></dd></div>
+    <div><dt>Base</dt><dd><%= local["base_branch"].presence || "Unavailable" %></dd></div>
+    <div><dt>Head</dt><dd><code><%= local["head_oid"]&.first(12) || "Unavailable" %></code></dd></div>
+    <div><dt>Push</dt><dd><%= local.dig("push", "state").to_s.humanize %></dd></div>
+    <div><dt>Working tree</dt><dd><%= local["dirty"].nil? ? "Unavailable" : (local["dirty"] ? "Dirty" : "Clean") %></dd></div>
+  </dl>
+
+  <% pr = publication.fetch("pull_request") %>
+  <% if pr["url"].present? %>
+    <h3>Pull request</h3>
+    <p>
+      <%= link_to "PR ##{pr.fetch("number")}", pr.fetch("url"), rel: "noopener noreferrer" %>
+      <% if pr["title"].present? %>· <%= pr["title"] %><% end %>
+    </p>
+    <% if pr["body"].present? %>
+      <details>
+        <summary>Bounded local PR description</summary>
+        <pre class="publication-body"><%= pr["body"] %></pre>
+      </details>
+    <% end %>
+  <% else %>
+    <p class="empty-state">No validated pull request identity is available.</p>
+  <% end %>
+
+  <% remote = publication.dig("remote", "observation") %>
+  <% if remote %>
+    <h3>Cached GitHub observation</h3>
+    <p>
+      <%= remote.fetch("state").humanize %>
+      <% if publication.dig("remote", "observed_at") %>
+        · observed <time datetime="<%= publication.dig("remote", "observed_at") %>"><%= publication.dig("remote", "observed_at") %></time>
+      <% end %>
+    </p>
+    <% if Array(remote["checks"]).any? %>
+      <table class="workspace-table">
+        <caption>Bounded check results</caption>
+        <thead><tr><th scope="col">Check</th><th scope="col">Status</th><th scope="col">Conclusion</th></tr></thead>
+        <tbody>
+          <% Array(remote["checks"]).each do |check| %>
+            <tr>
+              <th scope="row"><%= check["name"] %></th>
+              <td><%= check["status"].presence || "Unavailable" %></td>
+              <td><%= check["conclusion"].presence || "Pending" %></td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    <% end %>
+  <% else %>
+    <p class="muted">GitHub has not been observed for this exact repository, PR, and head.</p>
+  <% end %>
+
+  <% if publication.fetch("diagnostics").any? %>
+    <details class="workspace-diagnostics">
+      <summary>Publication diagnostics (<%= publication.fetch("diagnostics").length %>)</summary>
+      <ul>
+        <% publication.fetch("diagnostics").each do |diagnostic| %>
+          <li><%= diagnostic.fetch("reason").humanize %></li>
+        <% end %>
+      </ul>
+    </details>
+  <% end %>
+</section>

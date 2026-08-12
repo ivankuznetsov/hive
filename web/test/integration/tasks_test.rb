@@ -1012,7 +1012,121 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_match "Worktree unavailable", response.body
   end
 
+  test "publication GET is authenticated cache-only HTML and JSON" do
+    api_factory = ->(*) { flunk "ordinary publication GET must not construct a GitHub client" }
+
+    with_replaced_singleton_method(GithubApi, :new, api_factory) do
+      get task_publication_path(@project, @slug)
+      assert_response :success
+      assert_select "turbo-frame#task-publication", 1
+      assert_select ".publication-panel", text: /Worktree unavailable/i
+
+      get task_publication_path(@project, @slug, format: :json)
+      assert_response :success
+      assert_equal "application/json", response.media_type
+      assert_equal "worktree_unavailable", response.parsed_body.fetch("publication_state")
+    end
+
+    post "/logout"
+    get task_publication_path(@project, @slug)
+    assert_redirected_to "/login"
+  end
+
+  test "publication refresh performs at most one fixed remote read" do
+    sign_in!(token: "github-session-token")
+    panel = publication_fixture
+    original_publication = Task.instance_method(:publication)
+    Task.define_method(:publication) { |cache: nil| panel }
+    cache = Object.new
+    refreshes = []
+    cache.define_singleton_method(:refresh) do |identity, &block|
+      refreshes << [ identity, block.call ]
+    end
+    api = Object.new
+    remote_calls = []
+    api.define_singleton_method(:pull_request) do |**kwargs|
+      remote_calls << kwargs
+      panel.dig("remote", "observation")
+    end
+
+    with_replaced_singleton_method(
+      Hive::TaskWorkspace::PublicationCache, :new, ->(**) { cache }
+    ) do
+      with_replaced_singleton_method(GithubApi, :new, ->(*) { api }) do
+        post task_publication_path(@project, @slug)
+      end
+    end
+
+    assert_response :success
+    assert_equal 1, refreshes.length
+    assert_equal 1, remote_calls.length
+    assert_equal "github.com/acme/demo", remote_calls.first.fetch(:repository)
+    assert_select "turbo-frame#task-publication", 1
+  ensure
+    Task.define_method(:publication, original_publication) if original_publication
+  end
+
+  test "publication refresh is CSRF protected and unavailable for archives" do
+    previous = ActionController::Base.allow_forgery_protection
+    ActionController::Base.allow_forgery_protection = true
+    post task_publication_path(@project, @slug)
+    assert_response :unprocessable_entity
+    ActionController::Base.allow_forgery_protection = previous
+
+    folder = stage_dir(@project, "9-done").join(@slug)
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug), folder)
+    Hive::TaskMeta.rewrite(folder.to_s, completed_at: Time.now.utc)
+    post task_publication_path(@project, @slug, source: "archive")
+    assert_response :unprocessable_entity
+    assert_match(/read-only/, response.body)
+  ensure
+    ActionController::Base.allow_forgery_protection = previous if previous != nil
+  end
+
   private
+
+  def publication_fixture
+    identity = {
+      "repository" => "github.com/acme/demo", "number" => 42,
+      "expected_head" => "a" * 40
+    }
+    observation = {
+      "repository" => identity.fetch("repository"), "number" => 42,
+      "url" => "https://github.com/acme/demo/pull/42", "state" => "OPEN",
+      "is_draft" => false, "title" => "Ship", "body" => "Body",
+      "base_branch" => "main", "head_oid" => "a" * 40,
+      "head_matches" => true, "head_branch_present" => true,
+      "checks" => [], "checks_truncated" => false
+    }
+    local = {
+      "state" => "current", "repository" => identity.fetch("repository"),
+      "branch" => @slug, "expected_branch" => @slug, "base_branch" => "main",
+      "base_oid" => "b" * 40, "head_oid" => "a" * 40,
+      "base_state" => "ancestor", "dirty" => false, "commits" => [],
+      "commits_truncated" => false,
+      "push" => { "state" => "pushed", "tracking_oid" => "a" * 40,
+                  "ahead" => 0, "behind" => 0 }
+    }
+    pr = {
+      "state" => "current", "reference" => "pr.md",
+      "url" => observation.fetch("url"), "repository" => identity.fetch("repository"),
+      "number" => 42, "declared_head_oid" => "a" * 40,
+      "title" => "Ship", "body" => "Body", "truncated" => false, "conflicts" => []
+    }
+    remote = {
+      "state" => "current", "cache_state" => "fresh", "refresh_state" => "idle",
+      "observation" => observation, "observed_at" => "2026-08-12T12:00:00Z",
+      "refreshed_at" => "2026-08-12T12:00:00Z", "retry_at" => nil,
+      "diagnostics" => []
+    }
+    {
+      "state" => "current", "records" => [], "local" => local,
+      "pull_request" => pr, "remote" => remote,
+      "publication_state" => "open",
+      "refresh" => { "eligible" => true, "reason" => nil, "identity" => identity },
+      "diagnostics" => [], "truncated" => false
+    }
+  end
 
   def media_fixture!(folder)
     media_dir = folder.join("media")

@@ -1,61 +1,174 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hive.local/schemas/hive-plan-review.v1.json",
-  "title": "Hive plan review record",
+  "title": "Hive plan review durable record",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "schema_version", "kind", "review_id", "policy"],
+  "required": [
+    "schema", "schema_version", "kind", "review_id", "prior_review_id", "task_id",
+    "task_generation", "plan_digest", "policy_fingerprint", "computed_level",
+    "effective_level", "created_at"
+  ],
   "properties": {
     "schema": { "const": "hive-plan-review" },
     "schema_version": { "const": 1 },
-    "kind": { "enum": ["manifest", "attempt", "decision", "resolution", "projection"] },
-    "review_id": { "$ref": "#/$defs/Identifier" },
-    "policy": { "$ref": "#/$defs/Policy" }
-  },
-  "$defs": {
-    "Identifier": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 256
-    },
-    "Digest": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{64}$"
-    },
-    "Level": {
-      "type": "string",
-      "enum": ["skip", "standard", "mandatory"]
-    },
-    "Reason": {
+    "kind": { "enum": ["manifest", "projection"] },
+    "review_id": { "$ref": "#/$defs/ReviewId" },
+    "prior_review_id": { "oneOf": [{ "$ref": "#/$defs/ReviewId" }, { "type": "null" }] },
+    "version": { "type": "integer", "minimum": 1 },
+    "task_id": { "$ref": "#/$defs/NonEmptyString" },
+    "task_generation": { "oneOf": [{ "$ref": "#/$defs/NonEmptyString" }, { "type": "integer" }] },
+    "plan_digest": { "$ref": "#/$defs/Digest" },
+    "candidate_plan_digest": { "oneOf": [{ "$ref": "#/$defs/Digest" }, { "type": "null" }] },
+    "policy_fingerprint": { "$ref": "#/$defs/Digest" },
+    "computed_level": { "$ref": "#/$defs/Level" },
+    "effective_level": { "$ref": "#/$defs/Level" },
+    "state": { "$ref": "#/$defs/State" },
+    "outcome": { "oneOf": [{ "$ref": "#/$defs/Outcome" }, { "type": "null" }] },
+    "attempt_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/AttemptId" } },
+    "current_attempt_id": { "oneOf": [{ "$ref": "#/$defs/AttemptId" }, { "type": "null" }] },
+    "coverage": { "type": "array", "items": { "$ref": "#/$defs/Coverage" } },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/Finding" } },
+    "decisions": { "type": "array", "items": { "$ref": "#/$defs/Decision" } },
+    "routes": { "type": "array", "items": { "$ref": "#/$defs/RouteReceipt" } },
+    "artifacts": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["category", "evidence"],
-      "properties": {
-        "category": { "$ref": "#/$defs/Identifier" },
-        "evidence": { "type": "string", "maxLength": 1024 },
-        "path": { "type": "string", "maxLength": 4096 },
-        "pattern": { "type": "string", "maxLength": 4096 }
+      "additionalProperties": { "$ref": "#/$defs/ArtifactReference" }
+    },
+    "blockers": { "type": "array", "items": { "type": ["string", "object"] } },
+    "required_action": { "type": ["string", "object", "null"] },
+    "degradation_reason": {
+      "enum": ["partial_coverage", "review_unavailable", "terminal_failure", null]
+    },
+    "execution_allowed": { "type": "boolean" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "manifest" } }, "required": ["kind"] },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["version"] }, { "required": ["state"] },
+            { "required": ["execution_allowed"] }
+          ]
+        }
       }
     },
-    "Policy": {
+    {
+      "if": { "properties": { "kind": { "const": "projection" } }, "required": ["kind"] },
+      "then": {
+        "required": [
+          "version", "candidate_plan_digest", "state", "outcome", "attempt_ids",
+          "current_attempt_id", "coverage", "findings", "decisions", "routes", "artifacts",
+          "blockers", "required_action", "degradation_reason", "execution_allowed", "updated_at"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "NonEmptyString": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "ReviewId": { "type": "string", "pattern": "^pr-[0-9a-f]{64}$" },
+    "AttemptId": { "type": "string", "pattern": "^pra-[0-9a-f]{64}$" },
+    "DecisionId": { "type": "string", "pattern": "^prd-[0-9a-f]{64}$" },
+    "FindingId": { "type": "string", "pattern": "^prf-[0-9a-f]{64}$" },
+    "Level": { "type": "string", "enum": ["skip", "standard", "mandatory"] },
+    "State": {
+      "type": "string",
+      "enum": [
+        "uninitialized", "skipped", "reviewing", "retry_scheduled", "awaiting_decision",
+        "revising", "verifying", "cleared", "degraded_cleared", "blocked"
+      ]
+    },
+    "Outcome": { "type": "string", "enum": ["skipped", "cleared", "degraded_cleared", "blocked"] },
+    "ArtifactReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes"],
+      "properties": {
+        "path": { "$ref": "#/$defs/NonEmptyString" },
+        "sha256": { "$ref": "#/$defs/Digest" },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "start_line", "end_line", "anchor_digest"],
+      "properties": {
+        "path": { "$ref": "#/$defs/NonEmptyString" },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "anchor_digest": { "$ref": "#/$defs/Digest" },
+        "excerpt": { "type": "string", "maxLength": 4096 }
+      }
+    },
+    "Finding": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "classifier_version",
-        "computed_level",
-        "effective_level",
-        "matched_reasons",
-        "policy_fingerprint"
+        "fingerprint", "source", "classification", "risk", "title", "description",
+        "evidence", "lifecycle", "display_order"
       ],
       "properties": {
-        "classifier_version": { "type": "integer", "minimum": 1 },
-        "computed_level": { "$ref": "#/$defs/Level" },
-        "effective_level": { "$ref": "#/$defs/Level" },
-        "matched_reasons": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/Reason" }
+        "fingerprint": { "$ref": "#/$defs/FindingId" },
+        "source": { "$ref": "#/$defs/NonEmptyString" },
+        "classification": { "enum": ["safe_auto", "gated_auto", "manual", "fyi"] },
+        "risk": { "enum": ["low", "medium", "high", "critical"] },
+        "title": { "$ref": "#/$defs/NonEmptyString" },
+        "description": { "$ref": "#/$defs/NonEmptyString" },
+        "evidence": { "$ref": "#/$defs/Evidence" },
+        "lifecycle": { "enum": ["open", "approved", "answered", "incorporated", "verified", "resolved", "waived"] },
+        "display_order": { "type": "integer", "minimum": 1 },
+        "decision_id": { "$ref": "#/$defs/DecisionId" },
+        "answer": { "type": "string", "maxLength": 16384 },
+        "incorporated_at": { "type": "string", "format": "date-time" },
+        "verified_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "Coverage": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "required", "status"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "required": { "type": "boolean" },
+        "status": { "enum": ["requested", "completed", "failed", "unsupported", "waived"] }
+      }
+    },
+    "Decision": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["decision_id", "action", "target_fingerprint"],
+      "properties": {
+        "decision_id": { "$ref": "#/$defs/DecisionId" },
+        "action": { "$ref": "#/$defs/NonEmptyString" },
+        "target_fingerprint": { "$ref": "#/$defs/NonEmptyString" }
+      }
+    },
+    "RouteReceipt": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["role", "requested", "actual", "independence_verified"],
+      "properties": {
+        "role": { "$ref": "#/$defs/NonEmptyString" },
+        "requested": { "type": "object" },
+        "actual": { "type": "object" },
+        "independence_verified": { "type": "boolean" }
+      }
+    },
+    "Attempt": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["attempt_id", "outcome", "artifacts"],
+      "properties": {
+        "attempt_id": { "$ref": "#/$defs/AttemptId" },
+        "outcome": {
+          "enum": ["success", "partial_coverage", "unsupported", "provider_limit", "timeout", "retryable_failure", "terminal_failure"]
         },
-        "policy_fingerprint": { "$ref": "#/$defs/Digest" }
+        "artifacts": { "type": "object", "additionalProperties": { "$ref": "#/$defs/ArtifactReference" } }
       }
     }
   }

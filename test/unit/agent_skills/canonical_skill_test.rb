@@ -13,11 +13,11 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     skill = Hive::AgentSkills::CanonicalSkill.new
 
     assert_equal "hive", skill.name
-    assert_equal "0.1.3", skill.version
+    assert_equal "0.1.4", skill.version
     assert_match(/\A[0-9a-f]{64}\z/, skill.canonical_digest)
     assert_equal %w[description name], skill.frontmatter.keys.sort
     assert_operator skill.body.lines.size, :<, 120
-    assert_equal 14, skill.reference_paths.size
+    assert_equal 16, skill.reference_paths.size
     assert skill.reference_paths.all? { |path| path.start_with?("references/") }
     refute_includes skill.rendered_canonical_files.values.join("\n"), "{{HIVE_VERSION}}"
     assert_includes skill.rendered_canonical_files.fetch("references/setup-and-platforms.md"),
@@ -139,6 +139,70 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     refute_match(/(?:yay|paru)[^\n]*--noconfirm/, text)
     refute_includes text, "cat > ~/.config/systemd"
     refute_includes text, "systemctl --user edit"
+  end
+
+  def test_brainstorm_answering_policy_is_guided_by_default_and_binds_every_write
+    files = Hive::AgentSkills::CanonicalSkill.new.rendered_canonical_files
+    route = files.fetch("SKILL.md")
+    policy = files.fetch("references/brainstorm-answering.md")
+    scenarios = files.fetch("references/brainstorm-answering-scenarios.md")
+
+    assert_includes route, "waiting brainstorm input"
+    assert_includes route, "brainstorm-answering.md"
+    assert_includes policy, "Guided is the default"
+    assert_includes policy, "YOLO requires explicit opt-in"
+    assert_includes policy, "hive status --json"
+    assert_includes policy, "returned project and task order"
+    assert_includes policy, "project_load_failed"
+    assert_includes policy, "unknown"
+    assert_includes policy, "hive answer TASK --project PROJECT --json"
+    assert_includes policy, "`brainstorm.md` slot truth"
+    assert_includes policy, "Status-only discovery is read-only"
+    assert_includes policy, "Q{ordinal}/{slot_count}"
+    assert_includes policy, "Current user instructions and settled answers"
+    assert_includes policy, "Hive safety contracts and verified repository facts"
+    assert_includes policy, "Task material and authoritative dossiers"
+    assert_includes policy, "Agent inference"
+    assert_includes policy, "unresolved conflict"
+    assert_includes policy, "`approve`"
+    assert_includes policy, "replacement text"
+    assert_includes policy, "`skip`"
+    assert_includes policy, "`later`"
+    assert_includes policy, "retain its opaque binding"
+    assert_includes policy, "bare `approve` or `continue`"
+    assert_includes policy, "continue scanning after an ambiguous slot"
+    assert_includes policy, "fresh inventory before every write"
+    assert_includes policy, "original full-status order remains the traversal authority"
+    assert_includes policy, "scanned, written, and escalated"
+    assert_includes policy, "one ambiguous question at a time"
+    assert_includes policy, "explicit `continue`"
+    assert_includes policy, "explicit `continue` may resume the same paused YOLO run"
+    assert_includes policy, "written, idempotent, stale, ambiguous, conflict, or lock_busy"
+    assert_includes policy, "fresh `hive status --json` snapshot after every write"
+    assert_includes policy, "Never dispatch a stage from this answer flow"
+    assert_includes policy, "Native Telegram `/answer` and Hive web forms remain literal-answer surfaces"
+    assert_includes policy, "brainstorm-answering-scenarios.md"
+    assert_includes scenarios, "Status-only inventory and preview"
+    assert_includes scenarios, "Guided approval writes one bound recommendation"
+    assert_includes scenarios, "YOLO writes safe later slots past ambiguity"
+    assert_includes scenarios, "scanned: 5"
+    assert_includes scenarios, "written: 3"
+    assert_includes scenarios, "escalated: 2"
+    assert_includes scenarios, "Missing `A` header"
+    assert_includes scenarios, "Same number across rounds"
+    assert_includes scenarios, "Final slot proves completion without dispatch"
+    assert_includes scenarios, "2026-07-25"
+    assert_includes scenarios, "OpenClaw, Claude, Codex, and Pi"
+    refute_match(/chat[_ -]?id|message[_ -]?id|username|@[a-z0-9_]+/i,
+                 scenarios[/### S12.*\z/m])
+
+    evidence_order = [
+      "Current user instructions and settled answers",
+      "Hive safety contracts and verified repository facts",
+      "Task material and authoritative dossiers",
+      "Agent inference"
+    ].map { |phrase| policy.index(phrase) }
+    assert_equal evidence_order.sort, evidence_order
   end
 
   def test_rejects_escaping_or_missing_canonical_references

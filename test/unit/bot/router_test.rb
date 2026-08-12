@@ -663,9 +663,19 @@ class HiveBotRouterTest < Minitest::Test
   end
 
   def test_slash_answer_returns_start_answer_action_not_immediate_start
-    result = @router.handle(update(text: "/answer slug-260514-abcd"))
+    row = Hive::Bot::StatusWatcher::Row.new(
+      project: "hive", slug: "slug-260514-abcd", id: 1, stage: "2-brainstorm",
+      workflow: "coding"
+    )
+    router = build_test_router(
+      bot_config: { "chat_id_allowlist" => [ 12345 ] },
+      status_snapshot_provider: -> { [ row ] }
+    )
+
+    result = router.handle(update(text: "/answer slug-260514-abcd"))
 
     assert_equal :start_answer, result.action
+    assert_equal "hive", result.project
     assert_equal "slug-260514-abcd", result.slug
     assert_equal :path_b, result.mode
   end

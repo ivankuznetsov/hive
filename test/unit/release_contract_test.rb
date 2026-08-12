@@ -91,6 +91,11 @@ class ReleaseContractTest < Minitest::Test
     publish_docs = read("openclaw/README.md")
     release_docs = read("docs/RELEASING.md")
 
+    assert_equal "0.1.4", canonical.version
+    assert_equal 16, canonical.reference_paths.size
+    assert_equal 16, projection.fetch("files").keys.grep(%r{\Areferences/}).size
+    assert_equal 16,
+                 Dir.glob(File.join(ROOT, "openclaw/skills/hive/references/*.md")).size
     assert_equal canonical.version, openclaw.fetch("version")
     assert_equal canonical.version, projection.fetch("skill_version")
     assert_equal canonical.canonical_digest, projection.fetch("canonical_digest")

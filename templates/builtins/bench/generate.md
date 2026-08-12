@@ -43,8 +43,16 @@ write_limits_reached() {
     printf '\n## Status\n\n'
     printf '%s\n\n' "$1"
     printf 'Hive will retry this stage after the provider cooldown at %s.\n\n' "$retry_after"
-    printf '<!-- ERROR reason=limits_reached message="benchmark candidate or judge hit provider quota" retry_after="%s" -->\n' "$retry_after"
   } >>"$STATE_FILE"
+  ruby -rhive/markers -e '
+    Hive::Markers.set(
+      ARGV.fetch(0),
+      :error,
+      "reason" => "limits_reached",
+      "message" => "benchmark candidate or judge hit provider quota",
+      "retry_after" => ARGV.fetch(1)
+    )
+  ' "$STATE_FILE" "$retry_after"
 }
 
 write_complete() {

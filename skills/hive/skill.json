@@ -3,7 +3,7 @@
   "schema": "hive-canonical-skill",
   "schema_version": 1,
   "name": "hive",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "references": [
     "references/workflow-creator.md",
     "references/workflow-creator-example.md",
@@ -14,6 +14,8 @@
     "references/workflow-testing.md",
     "references/workflow-common-mistakes.md",
     "references/status-and-watch.md",
+    "references/brainstorm-answering.md",
+    "references/brainstorm-answering-scenarios.md",
     "references/workflow-actions.md",
     "references/recovery.md",
     "references/setup-and-platforms.md",

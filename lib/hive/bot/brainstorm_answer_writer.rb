@@ -1,3 +1,4 @@
+require "base64"
 require "hive/lock"
 require "hive/markers"
 require "hive/bot/brainstorm_parser"
@@ -28,6 +29,7 @@ module Hive
 
       LOCK_RETRY_DEADLINE_SEC = 5
       LOCK_RETRY_SLEEP_SEC = 0.05
+      MARKER_LOCK_TIMEOUT_SEC = 5
 
       def append!(brainstorm_path:, question_n:, answer_text:, logger: nil)
         task_folder = File.dirname(brainstorm_path)
@@ -83,6 +85,47 @@ module Hive
         result
       end
 
+      # Exact-slot counterpart used by the identity-bound CLI. The caller must
+      # already hold this task's lock; keeping lock acquisition outside this
+      # method lets identity, stage, generation, and fingerprint validation live
+      # in the same critical section as the atomic write.
+      #
+      # Ordinals are one-based physical document positions, so a later round's
+      # Q1 can be selected without first filling an earlier round's Q1.
+      def write_at_ordinal_under_lock!(brainstorm_path:, ordinal:, answer_text:)
+        ordinal = begin
+          Integer(ordinal)
+        rescue ArgumentError, TypeError
+          return :question_not_found
+        end
+        return :question_not_found unless ordinal.positive?
+
+        Hive::Markers.with_markers_lock(
+          brainstorm_path, create: false, timeout: MARKER_LOCK_TIMEOUT_SEC
+        ) do
+          content = normalize_lone_cr(File.read(brainstorm_path, encoding: "UTF-8").scrub)
+          parsed = Hive::Bot::BrainstormParser.parse_text(content)
+          target = parsed[ordinal - 1]
+          next :question_not_found unless target
+          next :already_answered if target.answered?
+
+          lines = content.lines
+          question_line_index = question_line_index_for_ordinal(lines, ordinal)
+          next :question_not_found unless question_line_index
+
+          slot = find_empty_answer_slot_after(lines, question_line_index)
+          new_lines = if slot
+            fill_answer_slot(lines, slot, answer_text, content)
+          else
+            insert_answer_slot_after(
+              lines, question_line_index, target.n, answer_text, content
+            )
+          end
+          Hive::Markers.write_atomic(brainstorm_path, new_lines.join)
+          :written
+        end
+      end
+
       # Returns [result_symbol, holder_metadata_or_nil].
       #
       # Result symbol is the terminal RESULTS value when the write was
@@ -93,34 +136,36 @@ module Hive
       # the result is nil (and the retry loop in append! re-spins).
       def try_append(task_folder, brainstorm_path, question_n, answer_text)
         result = Hive::Lock.with_task_lock(task_folder, "bot" => "brainstorm_answer") do
-          content = File.exist?(brainstorm_path) ? File.read(brainstorm_path, encoding: "UTF-8") : ""
-          parsed = Hive::Bot::BrainstormParser.parse_text(content)
-          if !parsed.any? { |question| question.n == question_n }
-            next :question_not_found
-          end
-          if !parsed.any? { |question| question.n == question_n && question.answer.nil? }
-            next :already_answered
-          end
+          Hive::Markers.with_markers_lock(brainstorm_path, create: false) do
+            content = File.exist?(brainstorm_path) ? File.read(brainstorm_path, encoding: "UTF-8").scrub : ""
+            parsed = Hive::Bot::BrainstormParser.parse_text(content)
+            if !parsed.any? { |question| question.n == question_n }
+              next :question_not_found
+            end
+            if !parsed.any? { |question| question.n == question_n && question.answer.nil? }
+              next :already_answered
+            end
 
-          lines = content.lines
-          slot = find_empty_answer_slot(lines, question_n, parsed)
-          if slot
-            new_lines = fill_answer_slot(lines, slot, answer_text, content)
-          else
-            # Q{n} is unanswered (the earlier guards verified Q{n} is
-            # present and its answer is nil) but has NO `### A{n}.` header
-            # at all — the brainstorm agent emitted the question without a
-            # fillable answer block. Rather than dead-end with
-            # `:answer_slot_missing` (which left the operator unable to
-            # answer and, with the daemon's answers-pending gate, held the
-            # task indefinitely — issue #269), CREATE the slot at the end
-            # of the Q-block and write the answer into it.
-            new_lines = insert_answer_slot(lines, question_n, parsed, answer_text, content)
-            next :answer_slot_missing unless new_lines
-          end
+            lines = content.lines
+            slot = find_empty_answer_slot(lines, question_n, parsed)
+            if slot
+              new_lines = fill_answer_slot(lines, slot, answer_text, content)
+            else
+              # Q{n} is unanswered (the earlier guards verified Q{n} is
+              # present and its answer is nil) but has NO `### A{n}.` header
+              # at all — the brainstorm agent emitted the question without a
+              # fillable answer block. Rather than dead-end with
+              # `:answer_slot_missing` (which left the operator unable to
+              # answer and, with the daemon's answers-pending gate, held the
+              # task indefinitely — issue #269), CREATE the slot at the end
+              # of the Q-block and write the answer into it.
+              new_lines = insert_answer_slot(lines, question_n, parsed, answer_text, content)
+              next :answer_slot_missing unless new_lines
+            end
 
-          Hive::Markers.write_atomic(brainstorm_path, new_lines.join)
-          :written
+            Hive::Markers.write_atomic(brainstorm_path, new_lines.join)
+            :written
+          end
         end
         [ result, nil ]
       rescue Hive::ConcurrentRunError => e
@@ -137,9 +182,8 @@ module Hive
       # Write `answer_text` into an existing empty `### A` slot.
       def fill_answer_slot(lines, slot, answer_text, content)
         newline = newline_for(content)
-        if slot[:answer_line_index] >= 0 && !lines[slot[:answer_line_index]].to_s.end_with?(newline)
-          lines[slot[:answer_line_index]] = "#{lines[slot[:answer_line_index]]}#{newline}"
-        end
+        lines[slot[:answer_line_index]] =
+          "#{Hive::Bot::BrainstormParser.encoded_answer_header(slot.fetch(:question_n))}#{newline}"
 
         answer_lines = answer_body(answer_text, newline).lines
         lines[0..slot[:answer_line_index]] + answer_lines + lines[slot[:body_end_index]..].to_a
@@ -157,6 +201,11 @@ module Hive
         q_idx = target_question_line_index(lines, parsed, question_n)
         return nil unless q_idx
 
+        insert_answer_slot_after(lines, q_idx, question_n, answer_text, content)
+      end
+      private_class_method :insert_answer_slot
+
+      def insert_answer_slot_after(lines, q_idx, question_n, answer_text, content)
         newline = newline_for(content)
         insert_idx = q_idx + 1
         insert_idx += 1 while insert_idx < lines.length && !block_boundary?(lines[insert_idx])
@@ -166,11 +215,11 @@ module Hive
           lines[insert_idx - 1] = "#{lines[insert_idx - 1]}#{newline}"
         end
 
-        slot_lines = [ "#{Hive::Bot::BrainstormParser.answer_header(question_n)}#{newline}" ] +
+        slot_lines = [ "#{Hive::Bot::BrainstormParser.encoded_answer_header(question_n)}#{newline}" ] +
                      answer_body(answer_text, newline).lines
         lines[0...insert_idx] + slot_lines + lines[insert_idx..].to_a
       end
-      private_class_method :insert_answer_slot
+      private_class_method :insert_answer_slot_after
 
       # Locate the empty A-section to fill for question_n. Q-context-
       # aware: walks forward from the Q{n} header that the parser
@@ -194,6 +243,11 @@ module Hive
         q_idx = target_question_line_index(lines, parsed, question_n)
         return nil unless q_idx
 
+        find_empty_answer_slot_after(lines, q_idx)
+      end
+      private_class_method :find_empty_answer_slot
+
+      def find_empty_answer_slot_after(lines, q_idx)
         scan = q_idx + 1
         while scan < lines.length
           stripped = lines[scan].chomp
@@ -204,7 +258,19 @@ module Hive
         end
         nil
       end
-      private_class_method :find_empty_answer_slot
+      private_class_method :find_empty_answer_slot_after
+
+      def question_line_index_for_ordinal(lines, ordinal)
+        seen = 0
+        lines.each_with_index do |line, idx|
+          next unless QUESTION_RE.match?(line.chomp)
+
+          seen += 1
+          return idx if seen == ordinal
+        end
+        nil
+      end
+      private_class_method :question_line_index_for_ordinal
 
       # Map the parser's view of "first unanswered Q with this number"
       # back to a line index in the raw file. Multiple Q{n} can exist
@@ -238,7 +304,12 @@ module Hive
         end
         return nil unless body.join.strip.empty?
 
-        { answer_line_index: idx, body_end_index: body_end }
+        match = ANSWER_RE.match(lines[idx].chomp)
+        {
+          answer_line_index: idx,
+          body_end_index: body_end,
+          question_n: match[1].to_i
+        }
       end
       private_class_method :empty_slot_starting_at
 
@@ -249,15 +320,42 @@ module Hive
       private_class_method :block_boundary?
 
       def answer_body(answer_text, newline)
-        text = answer_text.to_s.rstrip
-        text.empty? ? newline : "#{text}#{newline}"
+        text = answer_text.to_s.gsub("\r\n", "\n").gsub("\r", "\n").rstrip
+        return newline if text.empty?
+
+        text.lines(chomp: true).map do |line|
+          encoded = escape_answer_line?(line) ? encode_answer_line(line) : line
+          "#{encoded}#{newline}"
+        end.join
       end
       private_class_method :answer_body
+
+      def escape_answer_line?(line)
+        line.start_with?(Hive::Bot::BrainstormParser::ANSWER_ESCAPE_PREFIX) ||
+          line.include?("\\") || line.include?("<!--") || structural_heading?(line)
+      end
+      private_class_method :escape_answer_line?
+
+      def encode_answer_line(line)
+        encoded = Base64.urlsafe_encode64(line, padding: false)
+        "#{Hive::Bot::BrainstormParser::ANSWER_ESCAPE_PREFIX}#{encoded}"
+      end
+      private_class_method :encode_answer_line
+
+      def structural_heading?(line)
+        ROUND_RE.match?(line) || QUESTION_RE.match?(line) || ANSWER_RE.match?(line)
+      end
+      private_class_method :structural_heading?
 
       def newline_for(content)
         content.include?("\r\n") ? "\r\n" : "\n"
       end
       private_class_method :newline_for
+
+      def normalize_lone_cr(content)
+        content.to_s.gsub(/\r(?!\n)/, "\n")
+      end
+      private_class_method :normalize_lone_cr
     end
   end
 end

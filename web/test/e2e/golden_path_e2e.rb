@@ -126,7 +126,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # a row element across live updates.
     slug = task_slug_from_grid!(slug_prefix)
     visit "/tasks/#{@project}/#{slug}"
-    answer_field = find("textarea[name='answers[1]']", wait: 45)
+    answer_field = find("textarea[data-question-number='1']", wait: 45)
     assert_text "Ship the sample feature?"
     # Answer only AFTER the daemon has observed the round-1 owner complete:
     # the edit baseline is seeded from the state file's mtime after legacy

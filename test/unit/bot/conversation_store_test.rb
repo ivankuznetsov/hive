@@ -11,10 +11,14 @@ class HiveBotConversationStoreTest < Minitest::Test
   end
 
   def test_start_and_get_by_chat_and_slug
-    state = store.start(chat_id: 123, slug: "slug", question_n: 2, mode: :path_b)
+    state = store.start(
+      chat_id: 123, slug: "slug", question_n: 2,
+      binding: "opaque-slot-binding", mode: :path_b
+    )
 
     assert_equal state, store.get(chat_id: 123, slug: "slug")
     assert_equal 2, state.question_n
+    assert_equal "opaque-slot-binding", state.binding
     assert_equal :path_b, state.mode
   end
 

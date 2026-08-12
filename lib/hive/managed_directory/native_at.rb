@@ -11,7 +11,12 @@ module Hive
 
       def self.platform_flags(platform)
         if platform.include?("linux")
-          { directory: 0o200000, cloexec: 0o2000000 }.freeze
+          directory = if platform.start_with?("aarch64-", "arm64-")
+            0o40000
+          else
+            0o200000
+          end
+          { directory: directory, cloexec: 0o2000000 }.freeze
         elsif platform.include?("darwin")
           { directory: 0x00100000, cloexec: 0x01000000 }.freeze
         end

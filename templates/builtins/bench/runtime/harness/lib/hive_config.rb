@@ -8,10 +8,9 @@ module HiveBench
   # configuration run through ACTUAL hive — not a reimplemented prompt.
   #
   # The brainstorm is seeded frozen (same requirements for every candidate), so
-  # plan/execute/review are the live stages. Only claude takes a model flag in
-  # hive (`claude.model`, and it must be the CLI id e.g. `claude-opus-4-8`, not
-  # hive's short `opus-4.8`); codex runs its subscription model and pi its
-  # provider model, so their `claude_model` is nil and simply omitted.
+  # plan/execute/review are the live stages. Candidate identities are declared
+  # through Hive's provider-neutral `models:` map; Hive's Agent CLI runtime is
+  # solely responsible for compiling provider-native model and effort flags.
   #
   # Hive specifics baked in from the Stage A/B bring-up:
   #   - mode: headless         (no tmux in the container)
@@ -31,7 +30,10 @@ module HiveBench
     #   "pi"), claude_model (CLI id or nil), review_max_passes, review_wall_clock_sec,
     #   reviewers (Array), ci_command (String or nil).
     def to_h(candidate, worktree_root: DEFAULT_WORKTREE_ROOT, default_branch: DEFAULT_BRANCH)
-      {
+      config = {
+        # Keep Hive's legacy Claude fields as a fallback for heterogeneous
+        # reviewer panels whose provider-specific identities cannot share one
+        # `models.review_reviewers` route. Live stages still use exact routes.
         "claude" => { "mode" => "headless", "model" => candidate.claude_model,
                       "effort" => candidate.claude_effort }.compact,
         "default_branch" => default_branch,
@@ -43,6 +45,61 @@ module HiveBench
         "open_pr" => { "agent" => candidate.review },
         "review" => review_config(candidate)
       }
+      models = {}
+      add_route(models, "plan", route_for(candidate, candidate.plan, "plan"))
+      add_route(models, "execute", route_for(candidate, candidate.execute, "execute"))
+
+      # `review` is a coarse parent for calls that can use different providers,
+      # especially mixed reviewer panels. Route the candidate-owned calls
+      # exactly so its model cannot leak into a Grok/Claude/Codex peer reviewer.
+      review_route = route_for(candidate, candidate.review, "review")
+      add_route(models, "open_pr", review_route)
+      %w[review_ci review_triage review_fix].each do |stage|
+        add_route(models, stage, review_route)
+      end
+      add_route(models, "review_reviewers", shared_reviewer_route(config.dig("review", "reviewers")))
+      config["models"] = models unless models.empty?
+      config
+    end
+
+    def add_route(models, stage, route)
+      models[stage] = route.dup unless route.empty?
+    end
+
+    def route_for(candidate, agent, stage)
+      case agent
+      when "claude"
+        { "model" => candidate.claude_model, "effort" => candidate.claude_effort }.compact
+      when "codex"
+        {
+          "model" => candidate.codex_models&.fetch(stage, nil) || candidate.codex_model,
+          "effort" => candidate.codex_efforts&.fetch(stage, nil) || candidate.codex_effort
+        }.compact
+      when "pi"
+        { "model" => candidate.pi_models&.fetch(stage, nil) }.compact
+      when "grok"
+        { "model" => candidate.grok_model, "effort" => candidate.grok_effort }.compact
+      else
+        {}
+      end
+    end
+
+    # Hive's built-in reviewer identity is one routing key for the whole panel.
+    # Route a field only when doing so preserves every reviewer's declaration;
+    # the other field then comes from each reviewer spec and Agent CLI Runtime
+    # renders both for that provider. `inherit` is a no-flag activation value.
+    def shared_reviewer_route(reviewers)
+      specs = Array(reviewers).select { |reviewer| reviewer.is_a?(Hash) && reviewer["kind"] != "linter" }
+      return {} if specs.empty?
+
+      efforts = specs.map { |reviewer| reviewer["effort"] }
+      return { "effort" => efforts.first } if efforts.all? && efforts.uniq.one?
+
+      models = specs.map { |reviewer| reviewer["model"] }
+      return { "model" => models.first } if models.all? && models.uniq.one?
+      return { "effort" => "inherit" } if efforts.none? && models.any?
+
+      {}
     end
 
     # PROD review STRUCTURE on the CANDIDATE'S OWN MODELS (maintainer decision
@@ -82,13 +139,14 @@ module HiveBench
         { "name" => "#{agent}-ce-code-review", "kind" => "agent", "agent" => agent,
           "skill" => "ce-code-review", "output_basename" => "#{agent}-ce-code-review",
           "prompt_template" => CE_TEMPLATE_BY_AGENT.fetch(agent, "reviewer_claude_ce_code_review.md.erb"),
-          "budget_usd" => 50, "timeout_sec" => 7200 }
+          "budget_usd" => 50, "timeout_sec" => 7200 }.merge(route_for(candidate, agent, "review"))
       end
       if agents.include?("claude")
         set << { "name" => "pr-review-toolkit", "kind" => "agent", "agent" => "claude",
                  "skill" => "pr-review-toolkit:review-pr", "output_basename" => "pr-review-toolkit",
                  "prompt_template" => "reviewer_pr_review_toolkit.md.erb",
                  "budget_usd" => 50, "timeout_sec" => 7200 }
+               .merge(route_for(candidate, "claude", "review"))
       end
       set
     end

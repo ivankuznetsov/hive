@@ -22,54 +22,21 @@ cd /work || exit 3
 
 stage() { echo "HB_STAGE $1 rc=$2"; }
 
-# Open-model candidates: hive has no pi model config, so a pi shim injects
-# `--model $HB_PI_MODEL` — set per hive verb below from HB_PI_MODEL_<STAGE>,
-# which is how a mixed pair (glm plans, kimi implements) works. hive's pi
-# preflight also insists on a non-empty ~/.pi/agent/auth.json; pi itself
-# authenticates via the OPENROUTER_API_KEY env, so a marker file satisfies it.
-if [ -n "${HB_PI_MODEL_PLAN:-}${HB_PI_MODEL_EXECUTE:-}${HB_PI_MODEL_REVIEW:-}" ]; then
+# Pi's mounted transport extension requests tool streaming from OpenRouter.
+# Model identity remains in Hive's native routing and reaches Pi through the
+# shared Agent CLI runtime. Hive's preflight also insists on a non-empty
+# ~/.pi/agent/auth.json; Pi itself authenticates via OPENROUTER_API_KEY.
+if [ -f /opt/hb/pi-tool-stream.ts ]; then
   PI_REAL="$(command -v pi)"
   cat >/work/.hb/bin/pi <<PI
 #!/usr/bin/env bash
-exec "$PI_REAL" \${HB_PI_MODEL:+--model "\$HB_PI_MODEL"} --extension /opt/hb/pi-tool-stream.ts "\$@"
+exec "$PI_REAL" --extension /opt/hb/pi-tool-stream.ts "\$@"
 PI
   chmod +x /work/.hb/bin/pi
   mkdir -p "$HOME/.pi/agent"
   [ -s "$HOME/.pi/agent/auth.json" ] || \
     echo '{"openrouter":{"type":"api-key","via":"OPENROUTER_API_KEY env"}}' >"$HOME/.pi/agent/auth.json"
-  echo "HB_NOTE pi_models plan=${HB_PI_MODEL_PLAN:-} execute=${HB_PI_MODEL_EXECUTE:-} review=${HB_PI_MODEL_REVIEW:-}"
-fi
-
-# Mixed Codex-model candidates: Hive has one `codex` agent profile, so a shim
-# applies model and effort pins selected per Hive verb below. This lets one cell
-# use Sol for plan/review and Terra for execution without exposing the operator's
-# personal Codex config to the container.
-if [ -n "${HB_CODEX_MODEL_PLAN:-}${HB_CODEX_MODEL_EXECUTE:-}${HB_CODEX_MODEL_REVIEW:-}${HB_CODEX_EFFORT_PLAN:-}${HB_CODEX_EFFORT_EXECUTE:-}${HB_CODEX_EFFORT_REVIEW:-}" ]; then
-  HB_CODEX_REAL="$(command -v codex)"
-  export HB_CODEX_REAL
-  cat >/work/.hb/bin/codex <<'CODEX'
-#!/usr/bin/env bash
-args=()
-[ -n "${HB_CODEX_MODEL:-}" ] && args+=(-m "$HB_CODEX_MODEL")
-[ -n "${HB_CODEX_EFFORT:-}" ] && args+=(-c "model_reasoning_effort=\"$HB_CODEX_EFFORT\"")
-exec "$HB_CODEX_REAL" "${args[@]}" "$@"
-CODEX
-  chmod +x /work/.hb/bin/codex
-  echo "HB_NOTE codex_models plan=${HB_CODEX_MODEL_PLAN:-}/${HB_CODEX_EFFORT_PLAN:-} execute=${HB_CODEX_MODEL_EXECUTE:-}/${HB_CODEX_EFFORT_EXECUTE:-} review=${HB_CODEX_MODEL_REVIEW:-}/${HB_CODEX_EFFORT_REVIEW:-}"
-fi
-
-# Grok candidates: hive's grok profile passes no model/effort flags, so a shim
-# injects `-m $HB_GROK_MODEL --reasoning-effort $HB_GROK_EFFORT` (same pattern
-# as the pi shim; grok's default model would drift with CLI releases, and the
-# effort pin is the candidate definition).
-if [ -n "${HB_GROK_MODEL:-}${HB_GROK_EFFORT:-}" ]; then
-  GROK_REAL="$(command -v grok)"
-  cat >/work/.hb/bin/grok <<GROK
-#!/usr/bin/env bash
-exec "$GROK_REAL" \${HB_GROK_MODEL:+-m "\$HB_GROK_MODEL"} \${HB_GROK_EFFORT:+--reasoning-effort "\$HB_GROK_EFFORT"} "\$@"
-GROK
-  chmod +x /work/.hb/bin/grok
-  echo "HB_NOTE grok_pin model=${HB_GROK_MODEL:-} effort=${HB_GROK_EFFORT:-}"
+  echo "HB_NOTE pi_tool_stream enabled"
 fi
 
 # BEGIN grok-auth-preflight
@@ -237,9 +204,7 @@ if [ "${HB_RESUME_EXECUTE:-0}" = "1" ]; then
   echo "HB_NOTE plan_reused"
   echo "HB_NOTE execute_resumed"
 else
-  HB_PI_MODEL="${HB_PI_MODEL_PLAN:-}" \
-  HB_CODEX_MODEL="${HB_CODEX_MODEL_PLAN:-}" HB_CODEX_EFFORT="${HB_CODEX_EFFORT_PLAN:-}" \
-    hive plan "/work/.hive-state/stages/2-brainstorm/$SLUG" --json >/work/.hb/plan.json 2>>/work/.hb/stage.err
+  hive plan "/work/.hive-state/stages/2-brainstorm/$SLUG" --json >/work/.hb/plan.json 2>>/work/.hb/stage.err
   stage plan $?
 
   # /ce-plan ends WAITING when it raised open questions. With no human in the loop,
@@ -254,9 +219,7 @@ fi
 
 # 2. EXECUTE — real develop -> worktree off base_commit.
 if [ -n "$PLAN_TASK" ] && [ "$PLAN_TASK" != "." ]; then
-  HB_PI_MODEL="${HB_PI_MODEL_EXECUTE:-}" \
-  HB_CODEX_MODEL="${HB_CODEX_MODEL_EXECUTE:-}" HB_CODEX_EFFORT="${HB_CODEX_EFFORT_EXECUTE:-}" \
-    hive develop "$PLAN_TASK" --json >/work/.hb/develop.json 2>>/work/.hb/stage.err
+  hive develop "$PLAN_TASK" --json >/work/.hb/develop.json 2>>/work/.hb/stage.err
   stage develop $?
 fi
 
@@ -305,13 +268,9 @@ exit 0
 GH
   chmod +x /work/.hb/bin/gh
 
-  HB_PI_MODEL="${HB_PI_MODEL_REVIEW:-}" \
-  HB_CODEX_MODEL="${HB_CODEX_MODEL_REVIEW:-}" HB_CODEX_EFFORT="${HB_CODEX_EFFORT_REVIEW:-}" \
-    hive open-pr "$(task_dir)" --json >/work/.hb/open_pr.json 2>>/work/.hb/stage.err
+  hive open-pr "$(task_dir)" --json >/work/.hb/open_pr.json 2>>/work/.hb/stage.err
   stage open-pr $?
-  HB_PI_MODEL="${HB_PI_MODEL_REVIEW:-}" \
-  HB_CODEX_MODEL="${HB_CODEX_MODEL_REVIEW:-}" HB_CODEX_EFFORT="${HB_CODEX_EFFORT_REVIEW:-}" \
-    hive review "$(task_dir)" --json >/work/.hb/review.json 2>>/work/.hb/stage.err
+  hive review "$(task_dir)" --json >/work/.hb/review.json 2>>/work/.hb/stage.err
   REVIEW_RC=$?
   stage review "$REVIEW_RC"
 

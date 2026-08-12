@@ -474,6 +474,34 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "current", result.dig("tasks", 0, "freshness", "scheduler_status")
   end
 
+  def test_scheduler_match_accepts_unicode_marker_attrs_from_binary_task_scan
+    message = "Claude stopped — retry the review"
+    source_task = task(
+      action: "error",
+      slug: "unicode-marker",
+      marker: "error",
+      attrs: { "message" => message.b }
+    )
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot.dig("tasks", 0)["marker_attrs"] = {
+      "message" => message,
+      "marker_id" => "marker-unicode-marker"
+    }
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "complete", result.fetch("completeness")
+    assert_equal "current", result.dig("tasks", 0, "freshness", "scheduler_status")
+  end
+
   def test_scheduler_dispositions_map_to_closed_operational_states
     expectations = {
       "provider_hold" => [ "waiting_on_provider_or_scheduler", "provider" ],

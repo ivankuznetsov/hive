@@ -666,6 +666,11 @@ owner/remediation, phase, retry count, terminal outcome/time, bounded routing
 admission observation, and immutable source terminal-receipt identity. Its
 closed recovery union distinguishes ordinary marker recovery from markerless
 initial route exhaustion keyed by task generation and frozen policy digest.
+Expected marker attrs are normalized through the policy-free `Hive::Recovery`
+compatibility boundary before JSON persistence. Live binary marker scans and
+JSON-restored UTF-8 attrs therefore compare by the same valid UTF-8 bytes, so
+non-ASCII provider diagnostics cannot create a false `generation_conflict` or
+make the operational scheduler snapshot appear stale.
 The one-off recovery migration upgrades pending v1-v4 deliveries before the runtime queue
 opens; queue readers accept v5 only and contain no inferred-generation
 compatibility path. Identity-bound recovery requests do not expire; the

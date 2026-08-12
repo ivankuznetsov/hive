@@ -1,6 +1,7 @@
 require "test_helper"
 require "digest"
 require "json"
+require "hive/attempts/decision_index"
 require "hive/attempts/store"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
@@ -631,6 +632,72 @@ class RecoveryMigrationTest < Minitest::Test
     end
   end
 
+  def test_daily_parity_includes_attempts_already_moved_to_permanent_proof
+    with_tmp_dir do |state_home|
+      terminal = terminal_attempt(current_attempt(
+        attempt_id: "proof-only-daily", accepted_at: NOW
+      ))
+      write_v3_proof(state_home, terminal)
+      current = Hive::Attempts::Record.new(
+        Hive::Attempts::RecordMigration.convert_v3(legacy_v3(terminal))
+      )
+      Hive::Attempts::DecisionIndex.new(
+        root: File.join(state_home, "attempts", "v3", "decision-indexes")
+      ).record_acceptance(current)
+
+      result = migrate(state_home)
+      store = Hive::Attempts::Store.new(
+        root: File.join(state_home, "attempts", "v4"), create_directories: false
+      )
+
+      assert_equal 0, result.dig("attempts", "source_count")
+      assert_equal current.to_h, store.permanent_proofs.fetch("proof-only-daily").to_h
+      assert_equal 1, store.decision_index.daily_count(project: "demo", date: NOW.to_date)
+    end
+  end
+
+  def test_daily_parity_rejects_accounting_without_a_durable_record
+    acceptance = {
+      "accepted_at" => NOW.iso8601(6), "project" => "demo", "refunded" => false
+    }
+    store = daily_parity_store(acceptances: { "missing" => acceptance })
+
+    error = assert_raises(Hive::Recovery::Migration::Error) do
+      migration.send(:durable_daily_counts, store, date: NOW.to_date)
+    end
+
+    assert_includes error.message, "daily accounting attempt missing has no matching durable record"
+  end
+
+  def test_daily_parity_rejects_a_refund_that_disagrees_with_the_record
+    record = Hive::Attempts::Record.new(current_attempt(attempt_id: "refund-mismatch"))
+    acceptance = {
+      "accepted_at" => record["accepted_at"], "project" => record["project"],
+      "refunded" => true
+    }
+    store = daily_parity_store(
+      acceptances: { record.attempt_id => acceptance }, records: { record.attempt_id => record }
+    )
+
+    error = assert_raises(Hive::Recovery::Migration::Error) do
+      migration.send(:durable_daily_counts, store, date: NOW.to_date)
+    end
+
+    assert_includes error.message, "daily accounting refund disagrees with durable attempt"
+  end
+
+  def test_daily_parity_rejects_an_unreadable_index
+    store = daily_parity_store(
+      error: Hive::Attempts::StoreError.new("injected daily index failure")
+    )
+
+    error = assert_raises(Hive::Recovery::Migration::Error) do
+      migration.send(:durable_daily_counts, store, date: NOW.to_date)
+    end
+
+    assert_equal "daily accounting index is unreadable: injected daily index failure", error.message
+  end
+
   def test_blocks_hot_removal_when_generated_indexes_do_not_match_the_scan
     with_tmp_dir do |state_home|
       write_v3_record(state_home, terminal_attempt(current_attempt(attempt_id: "terminal")))
@@ -852,6 +919,23 @@ class RecoveryMigrationTest < Minitest::Test
   end
 
   private
+
+  def migration
+    Hive::Recovery::Migration.new(state_home: "/unused")
+  end
+
+  def daily_parity_store(acceptances: {}, records: {}, error: nil)
+    index = Object.new
+    index.define_singleton_method(:daily_acceptances) do |**|
+      raise error if error
+
+      acceptances
+    end
+    Object.new.tap do |store|
+      store.define_singleton_method(:decision_index) { index }
+      store.define_singleton_method(:fetch) { |attempt_id| records[attempt_id] }
+    end
+  end
 
   def migrate(state_home)
     observer = Object.new

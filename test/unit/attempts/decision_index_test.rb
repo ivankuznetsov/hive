@@ -1,4 +1,5 @@
 require_relative "../../test_helper"
+require "hive/attempts/capability"
 require "hive/attempts/decision_index"
 require "hive/provider_routing"
 
@@ -42,6 +43,20 @@ class AttemptsDecisionIndexTest < Minitest::Test
     ], restarted.routing_decisions
     refute_includes all_bytes, "stdout"
     refute_includes all_bytes, "credential"
+  end
+
+  def test_daily_acceptances_expose_point_accounting_without_mutable_aliases
+    record = Hive::Attempts::Record.new(current_attempt)
+    @index.record_acceptance(record)
+
+    acceptances = @index.daily_acceptances(date: NOW.to_date)
+    assert_equal({
+      "accepted_at" => record["accepted_at"],
+      "project" => "demo",
+      "refunded" => false
+    }, acceptances.fetch("attempt-1"))
+    assert_predicate acceptances, :frozen?
+    assert_predicate acceptances.fetch("attempt-1"), :frozen?
   end
 
   def test_new_admission_observation_replaces_the_previous_projection
@@ -183,6 +198,20 @@ class AttemptsDecisionIndexTest < Minitest::Test
       decision_id: id,
       decided_at: NOW
     )
+  end
+
+  def current_attempt
+    Hive::Attempts::Record.launching(
+      attempt_id: "attempt-1", request_id: "request-1",
+      predecessor_attempt_id: nil,
+      task_id: "42", project: "demo", task_slug: "task",
+      intended_stage: "4-execute", task_generation: "generation-1",
+      progress_token: "progress-1", provider: "codex",
+      worker_argv: [ "hive", "run", "task" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
+      starting_revision: nil, retry_charge: 0, inherited_outputs: [],
+      launch_timeout_sec: 30, now: NOW
+    ).to_h
   end
 
   def request

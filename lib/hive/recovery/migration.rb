@@ -520,7 +520,10 @@ module Hive
           )
         end
 
-        expected = Hive::Attempts::CapacitySnapshot.build(store: store, scan: scan, now: now)
+        expected = Hive::Attempts::CapacitySnapshot.build(
+          store: store, scan: scan, now: now,
+          daily_counts: durable_daily_counts(store, date: now.utc.to_date)
+        )
         actual = Hive::Attempts::CapacitySnapshot.build_from_live_reservations(
           scan: scan, reservations: index.live_reservations,
           daily_counts: index.daily_counts(date: now.utc.to_date)
@@ -544,6 +547,30 @@ module Hive
           "reserved" => snapshot.reserved_attempt_ids.sort,
           "invalid" => snapshot.invalid_count
         }
+      end
+
+      # Daily admission accounting outlives the bounded hot-record window.
+      # Validate each retained counter by point-fetching its hot record or
+      # immutable proof without enumerating uncharged historical proof.
+      def durable_daily_counts(store, date:)
+        counts = Hash.new(0)
+        store.decision_index.daily_acceptances(date: date).each do |attempt_id, acceptance|
+          record = store.fetch(attempt_id)
+          unless record && record["accepted_at"] == acceptance.fetch("accepted_at") &&
+                 record["project"] == acceptance.fetch("project")
+            raise Error, "daily accounting attempt #{attempt_id} has no matching durable record"
+          end
+
+          refunded = record.receipt &&
+            record.receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
+          unless acceptance.fetch("refunded") == !!refunded
+            raise Error, "daily accounting refund disagrees with durable attempt #{attempt_id}"
+          end
+          counts[[ record["project"], date ]] += 1 unless refunded
+        end
+        counts.to_h
+      rescue Hive::Attempts::StoreError, KeyError => error
+        raise Error, "daily accounting index is unreadable: #{error.message}"
       end
 
       def semantic_key(record)

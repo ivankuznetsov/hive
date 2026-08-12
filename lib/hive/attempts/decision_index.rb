@@ -183,14 +183,21 @@ module Hive
 
       def daily_counts(date:)
         utc_date = date_value(date)
-        value = read_value(DAILY_ACCOUNTING, accounting_key(utc_date))
-        return {}.freeze unless value
-
         counts = Hash.new(0)
-        value.fetch("attempts").each_value do |acceptance|
+        daily_acceptances(date: utc_date).each_value do |acceptance|
           counts[[ acceptance.fetch("project"), utc_date ]] += 1 unless acceptance["refunded"]
         end
         counts.to_h.freeze
+      end
+
+      def daily_acceptances(date:)
+        utc_date = date_value(date)
+        value = read_value(DAILY_ACCOUNTING, accounting_key(utc_date))
+        return {}.freeze unless value
+
+        value.fetch("attempts").to_h do |attempt_id, acceptance|
+          [ attempt_id.dup.freeze, acceptance.dup.freeze ]
+        end.freeze
       end
 
       # The host-wide admission lock is the transaction boundary for these

@@ -2,12 +2,13 @@ require "test_helper"
 require "hive/plan_review/policy"
 
 class PlanReviewPolicyTest < Minitest::Test
-  FakeSignals = Data.define(:skip_eligible?, :mandatory_reasons, :evidence) do
+  FakeSignals = Data.define(:skip_eligible?, :mandatory_reasons, :evidence, :plan_path) do
     def to_h
       {
         "skip_eligible" => skip_eligible?,
         "mandatory_reasons" => mandatory_reasons,
-        "evidence" => evidence
+        "evidence" => evidence,
+        "plan_path" => plan_path
       }
     end
   end
@@ -93,6 +94,20 @@ class PlanReviewPolicyTest < Minitest::Test
     assert_match(/\A[0-9a-f]{64}\z/, a.policy_fingerprint)
   end
 
+  def test_fingerprint_does_not_change_when_the_task_folder_moves_between_stages
+    plan = signals(skip: false, plan_path: "/tmp/project/.hive-state/stages/3-plan/demo/plan.md")
+    moved = signals(skip: false, plan_path: "/tmp/project/.hive-state/stages/4-execute/demo/plan.md")
+
+    first = Hive::PlanReview::Policy.evaluate(
+      workflow_id: "coding", signals: plan, config: config
+    )
+    second = Hive::PlanReview::Policy.evaluate(
+      workflow_id: "coding", signals: moved, config: config
+    )
+
+    assert_equal first.policy_fingerprint, second.policy_fingerprint
+  end
+
   private
 
   def config
@@ -106,11 +121,12 @@ class PlanReviewPolicyTest < Minitest::Test
     }
   end
 
-  def signals(skip:, mandatory: [], evidence: {})
+  def signals(skip:, mandatory: [], evidence: {}, plan_path: "/tmp/plan.md")
     FakeSignals.new(
       skip_eligible?: skip,
       mandatory_reasons: mandatory,
-      evidence: { "declared_files" => [ "lib/example.rb" ] }.merge(evidence)
+      evidence: { "declared_files" => [ "lib/example.rb" ] }.merge(evidence),
+      plan_path:
     )
   end
 end

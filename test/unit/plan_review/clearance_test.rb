@@ -1,0 +1,52 @@
+require "test_helper"
+require "hive/plan_review/clearance"
+
+class PlanReviewClearanceTest < Minitest::Test
+  def test_manual_finding_waits_for_answer_before_revision
+    finding = build_finding("manual")
+    result = Hive::PlanReview::Clearance.evaluate(
+      level: "standard", coverage: complete_coverage, findings: [ finding ],
+      adapter_outcomes: %w[success success], verification_outcome: nil,
+      revision_required: false, revision_complete: false,
+      verification_complete: false
+    )
+
+    assert_equal "awaiting_decision", result.state
+    assert_match(/answer manual/, result.required_action)
+    refute result.execution_allowed
+  end
+
+  def test_verification_blocker_stops_without_requesting_another_revision
+    result = Hive::PlanReview::Clearance.evaluate(
+      level: "standard", coverage: complete_coverage, findings: [],
+      adapter_outcomes: %w[success success], verification_outcome: "success",
+      revision_required: true, revision_complete: true,
+      verification_complete: true,
+      verification_blockers: [ { "reason" => "verification_finding" } ]
+    )
+
+    assert_equal "blocked", result.state
+    assert_equal "blocked", result.outcome
+    assert_match(/new linked plan/, result.required_action)
+  end
+
+  private
+
+  def build_finding(classification)
+    Hive::PlanReview::Finding.new(
+      "source" => "coherence", "classification" => classification, "risk" => "medium",
+      "title" => "Question", "description" => "Clarify the plan.",
+      "evidence" => {
+        "path" => "plan.md", "start_line" => 1, "end_line" => 1,
+        "anchor_digest" => "a" * 64
+      },
+      "lifecycle" => "open", "display_order" => 1
+    )
+  end
+
+  def complete_coverage
+    %w[whole_document adversarial].map do |name|
+      { "name" => name, "required" => true, "status" => "completed" }
+    end
+  end
+end

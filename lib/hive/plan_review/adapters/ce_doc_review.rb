@@ -5,7 +5,7 @@ require "json"
 require "securerandom"
 require "timeout"
 require "hive/agent_profiles"
-require "hive/agent_skills/manifest"
+require "hive/agent_skills"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/result_parser"
 require "hive/secret_patterns"
@@ -68,10 +68,10 @@ module Hive
         end
 
         def initialize(runner:, capability_probe: method(:default_capability_probe),
-                       manifest: Hive::AgentSkills::Manifest.load)
+                       capability_resolver: Hive::AgentSkills.method(:capability))
           @runner = runner
           @capability_probe = capability_probe
-          @manifest = manifest
+          @capability_resolver = capability_resolver
         end
 
         def call(request)
@@ -146,7 +146,7 @@ module Hive
         def capability_for(request)
           return { "status" => "present", "diagnostic" => nil } if request.kind == "adversarial"
 
-          contract = @manifest.capability(CAPABILITY).agent(request.reviewer.fetch("provider"))
+          contract = @capability_resolver.call(CAPABILITY, request.reviewer.fetch("provider"))
           stringify(@capability_probe.call(
             agent: request.reviewer.fetch("provider"),
             invocation: contract.invocation,

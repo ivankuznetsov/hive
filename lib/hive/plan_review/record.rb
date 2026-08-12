@@ -15,7 +15,9 @@ module Hive
       PROJECTION_KEYS = (COMMON_KEYS + %w[
         version candidate_plan_digest state outcome attempt_ids current_attempt_id coverage findings
         decisions routes artifacts blockers required_action degradation_reason execution_allowed updated_at
+        policy_reasons level_sources retry_at
       ]).freeze
+      OPTIONAL_PROJECTION_KEYS = %w[policy_reasons level_sources retry_at].freeze
       KINDS = %w[manifest projection].freeze
       STATES = %w[
         uninitialized skipped reviewing retry_scheduled awaiting_decision revising verifying cleared
@@ -64,7 +66,7 @@ module Hive
           raise InvalidRecord, "plan review kind must be one of #{KINDS.inspect}"
         end
         allowed = kind == "manifest" ? MANIFEST_KEYS : PROJECTION_KEYS
-        missing = allowed - data.keys
+        missing = allowed - OPTIONAL_PROJECTION_KEYS - data.keys
         unknown = data.keys - allowed
         raise InvalidRecord, "plan review record missing fields: #{missing.join(', ')}" unless missing.empty?
         raise InvalidRecord, "plan review record has unknown fields: #{unknown.join(', ')}" unless unknown.empty?
@@ -108,6 +110,7 @@ module Hive
         end
         validate_arrays!
         validate_artifacts!
+        validate_optional_projection_fields!
         parse_time!(self["updated_at"], "updated_at")
 
         executable = EXECUTABLE_STATES.include?(state) && outcome == state && self["blockers"].empty?
@@ -149,6 +152,16 @@ module Hive
             raise InvalidRecord, "invalid plan review artifact reference"
           end
         end
+      end
+
+      def validate_optional_projection_fields!
+        if data.key?("policy_reasons") && !self["policy_reasons"].is_a?(Array)
+          raise InvalidRecord, "plan review policy_reasons must be an Array"
+        end
+        if data.key?("level_sources") && !self["level_sources"].is_a?(Hash)
+          raise InvalidRecord, "plan review level_sources must be a mapping"
+        end
+        parse_time!(self["retry_at"], "retry_at") if self["retry_at"]
       end
 
       def parse_time!(value, label)

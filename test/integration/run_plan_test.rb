@@ -37,8 +37,19 @@ class RunPlanTest < Minitest::Test
         plan_md = File.join(plan_dir, "plan.md")
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = plan_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          files:
+            - lib/demo.rb
+            - test/demo_test.rb
+          ---
           ## Overview
           test
+
+          ## Test scenarios
+          - The focused test passes.
+
+          ## Rollback
+          Revert the local change; it is reversible.
 
           ## Implementation Units
           - U1: foo
@@ -46,6 +57,9 @@ class RunPlanTest < Minitest::Test
         MD
         capture_io { Hive::Commands::Run.new(plan_dir).call }
         assert_equal :complete, Hive::Markers.current(plan_md).name
+        review = JSON.parse(File.read(File.join(plan_dir, "plan-review", "current.json")))
+        assert_equal "skipped", review.fetch("state")
+        assert_equal true, review.fetch("execution_allowed")
         events = File.readlines(File.join(plan_dir, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
         event_types = events.map { |event| event.fetch("event_type") }
         assert_includes event_types, "round_complete",
@@ -74,14 +88,35 @@ class RunPlanTest < Minitest::Test
 
         plan_md = File.join(plan_dir, "plan.md")
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = plan_md
-        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Overview\nstub\n<!-- WAITING -->\n"
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = low_risk_plan("WAITING")
         capture_io { Hive::Commands::Run.new(plan_dir).call }
         assert_equal :waiting, Hive::Markers.current(plan_md).name
+        review = JSON.parse(File.read(File.join(plan_dir, "plan-review", "current.json")))
+        assert_equal "skipped", review.fetch("state")
         events = File.readlines(File.join(plan_dir, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
         event_types = events.map { |event| event.fetch("event_type") }
         assert_includes event_types, "round_waiting",
                         "plan stage must emit round_waiting on WAITING markers (symmetry with brainstorm)"
       end
     end
+  end
+
+  private
+
+  def low_risk_plan(marker)
+    <<~MD
+      ---
+      files:
+        - lib/demo.rb
+        - test/demo_test.rb
+      ---
+      ## Overview
+      stub
+      ## Test scenarios
+      - The focused test passes.
+      ## Rollback
+      Revert the local change; it is reversible.
+      <!-- #{marker} -->
+    MD
   end
 end

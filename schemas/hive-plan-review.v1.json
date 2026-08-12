@@ -40,6 +40,9 @@
     "degradation_reason": {
       "enum": ["partial_coverage", "review_unavailable", "terminal_failure", null]
     },
+    "policy_reasons": { "type": "array", "items": { "type": "object" } },
+    "level_sources": { "type": "object", "additionalProperties": { "type": ["string", "null"] } },
+    "retry_at": { "type": ["string", "null"], "format": "date-time" },
     "execution_allowed": { "type": "boolean" },
     "created_at": { "type": "string", "format": "date-time" },
     "updated_at": { "type": "string", "format": "date-time" }

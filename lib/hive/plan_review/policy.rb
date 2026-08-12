@@ -54,7 +54,7 @@ module Hive
         fingerprint_input = {
           "classifier_version" => version,
           "workflow_id" => workflow_id.to_s,
-          "signals" => signals.to_h,
+          "signals" => signals.to_h.reject { |key, _value| key.to_s == "plan_path" },
           "policy" => policy_affecting_config(settings),
           "level_sources" => sources
         }

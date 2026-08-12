@@ -20,7 +20,7 @@ module Hive
     # Sole producer and transition owner for ERROR / REVIEW_ERROR recovery.
     # Adapters submit an observed row; this coordinator re-resolves it under
     # the task lock, applies the shared cooldown and safety policy, then
-    # persists one restartable v4 request before any marker mutation.
+    # persists one restartable v5 request before any marker mutation.
     class RecoveryCoordinator
       LIFECYCLE_STATES = %w[
         queued cooldown running blocked terminal unavailable

@@ -152,6 +152,15 @@ module Hive
 
         ready_result = mark_pr_ready(task, pr_url, cfg)
         return ready_result if ready_result
+        if (context = Hive::Attempts::Context.current)
+          Hive::Stages::Base.record_task_activity(
+            task, kind: "pr_observed",
+            operation_id: "publication:#{context.attempt_id}:ready",
+            correlation_id: "publication:#{context.attempt_id}",
+            reason: "pull request marked ready", source: "finalize",
+            payload: { "pr_state" => "ready" }
+          )
+        end
 
         write_summary(task, worktree_path, branch, pr_url, cfg)
         { commit: "pr_finalized", status: :complete }

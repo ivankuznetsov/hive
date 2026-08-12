@@ -50,6 +50,7 @@ module Hive
                                               cfg: cfg)
           return handle_secret_scan_result(task, marker.attrs["pr_url"], scan, "open_pr") if scan.fetch_failed || scan.hits.any?
 
+          record_pr_observation(task, existing, "open")
           return { commit: "open_pr_already_open", status: :complete }
         end
 
@@ -108,6 +109,7 @@ module Hive
                             pr_url: pr_url, is_draft: "false", merged: "true")
 
           write_merged_summary(task, merged)
+          record_pr_observation(task, merged, "merged", kind: "merge_observed")
           return { commit: "open_pr_already_merged", status: :complete }
         end
 
@@ -129,6 +131,12 @@ module Hive
         launch_arguments = Hive::Stages::Base.implementation_launch_arguments(identity, profile)
 
         Hive::Gh.push_branch!(worktree_path, branch, cfg: cfg)
+        Hive::Stages::Base.record_task_activity(
+          task, kind: "push_observed",
+          operation_id: "push:#{Hive::Attempts::Context.current&.attempt_id || 'legacy'}:#{head_oid}",
+          reason: "task branch pushed", source: "open_pr",
+          payload: { "branch" => branch, "commit_oid" => head_oid }
+        )
 
         prompt = render_prompt(task, worktree_path, branch,
                                base_branch: dependency_pr_base_branch(task, cfg))
@@ -181,7 +189,29 @@ module Hive
         scan_result = handle_secret_scan_result(task, canonical_url, scan, "open_pr")
         return scan_result if scan_result
 
+        record_pr_observation(
+          task,
+          { "number" => marker.attrs["pr_number"], "headRefOid" => local_head_oid(worktree_path) },
+          "open"
+        )
         { commit: "pr_opened_draft", status: :complete }
+      end
+
+      def record_pr_observation(task, pr, state, kind: "pr_observed")
+        context = Hive::Attempts::Context.current
+        return false unless context
+
+        number = pr["number"]
+        Hive::Stages::Base.record_task_activity(
+          task, kind: kind,
+          operation_id: "publication:#{context.attempt_id}:#{kind}:#{number || state}",
+          correlation_id: "publication:#{number || context.attempt_id}",
+          reason: "pull request #{state}", source: "open_pr",
+          payload: {
+            "pr_number" => number, "pr_state" => state,
+            "commit_oid" => pr["headRefOid"]
+          }
+        )
       end
 
       def spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path,

@@ -18,6 +18,9 @@ require "hive/worktree"
 require "hive/attempts/context"
 require "hive/agent_observation"
 require "hive/context_provenance"
+require "hive/task_activity"
+require "hive/brainstorm_parser"
+require "hive/task_workspace/bounded_reader"
 require "hive/implementation_identity/store"
 
 module Hive
@@ -405,6 +408,7 @@ module Hive
 
       def with_stage_events(task, cfg: nil)
         stage = stage_label(task)
+        record_stage_activity(task, stage, "entered")
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
@@ -430,6 +434,8 @@ module Hive
           end
         end
         marker = Hive::Markers.current(task.state_file)
+        record_stage_activity(task, stage, "exited", marker: marker)
+        record_waiting_questions(task, stage, marker)
         emit_marker_event(task, stage, marker)
         Hive::Events.emit(
           task_folder: task.folder,
@@ -635,6 +641,7 @@ module Hive
       # mask the original exception the caller is propagating.
       def emit_rescue_close(task, stage, error_message)
         stage ||= stage_label(task)
+        record_stage_activity(task, stage, "failed", error: error_message)
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
@@ -651,6 +658,87 @@ module Hive
         )
       rescue StandardError
         nil
+      end
+
+      def record_stage_activity(task, stage, transition, marker: nil, error: nil)
+        payload = {
+          "transition" => transition,
+          "marker" => marker&.name&.to_s,
+          "error_class" => error.to_s.split(":", 2).first.to_s.byteslice(0, 128)
+        }
+        context = Hive::Attempts::Context.current
+        return false unless context
+
+        suffix = transition == "entered" ? "enter" : "exit"
+        record_task_activity(
+          task, kind: "stage_transition",
+          operation_id: "stage:#{context.attempt_id}:#{suffix}",
+          correlation_id: context.attempt_id,
+          reason: "stage #{transition}", source: "stage_service", payload: payload,
+          stage: stage
+        )
+      end
+
+      def record_task_activity(task, kind:, operation_id:, reason:, source:, payload: {},
+                               evidence: [], correlation_id: nil, stage: nil,
+                               occurred_at: nil)
+        context = Hive::Attempts::Context.current
+        return false unless context && context.attempt_id && context.task_generation
+
+        workflow = task.respond_to?(:workflow) ? task.workflow : nil
+        workflow = workflow.id if workflow.respond_to?(:id)
+        activity = Hive::TaskActivity.new(
+          task_folder: task.folder,
+          task: { "id" => task.respond_to?(:id) ? task.id : nil, "slug" => task.slug },
+          workflow: workflow.to_s.empty? ? "coding" : workflow.to_s,
+          stage: context.intended_stage.to_s.empty? ? (stage || stage_label(task)) : context.intended_stage,
+          attempt_id: context.attempt_id,
+          task_generation: context.task_generation,
+          ownership_generation: context.ownership_generation,
+          attempt_store: Hive::Attempts::Store.new
+        )
+        activity.record(
+          kind: kind, operation_id: operation_id,
+          correlation_id: correlation_id,
+          reason: reason, source: source,
+          payload: payload, evidence: evidence,
+          occurred_at: occurred_at
+        )
+        true
+      rescue Hive::TaskActivity::Error, SystemCallError, IOError
+        false
+      end
+
+      def record_waiting_questions(task, stage, marker)
+        return false unless task.respond_to?(:stage_name) && task.stage_name == "brainstorm"
+        return false unless marker.name == :waiting
+
+        reference = File.basename(task.state_file)
+        read = Hive::TaskWorkspace::BoundedReader.new(root: task.folder).read(
+          reference, max_bytes: 512 * 1024
+        )
+        return false if read.truncated || read.binary
+
+        questions = Hive::BrainstormParser.parse_text(read.content)
+        questions.each_with_index do |question, index|
+          fingerprint = Hive::BrainstormParser.question_fingerprint(question.text)
+          record_task_activity(
+            task, kind: "question_asked",
+            operation_id: "question:#{Hive::Attempts::Context.current.attempt_id}:#{fingerprint}",
+            correlation_id: "question:#{fingerprint}",
+            reason: "brainstorm question asked", source: "stage_service",
+            stage: stage,
+            payload: {
+              "question_id" => "Q#{index + 1}", "round" => question.round,
+              "question_number" => question.n,
+              "question_fingerprint" => fingerprint
+            },
+            evidence: [ { "evidence_ref" => reference, "kind" => "question_slot" } ]
+          )
+        end
+        true
+      rescue Hive::TaskWorkspace::SourceError, Hive::Error, SystemCallError, IOError
+        false
       end
 
       def stage_label(task)

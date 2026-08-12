@@ -10,6 +10,7 @@ require "hive/task"
 require "hive/task_action"
 require "hive/task_meta"
 require "hive/task_resolver"
+require "hive/task_activity"
 
 module Hive
   module Commands
@@ -111,6 +112,8 @@ module Hive
       def do_call
         validate_arguments!
         task = resolve_task
+        activity = Hive::TaskActivity.for_task(task, clock: @clock)
+        reconcile_decision_operations(activity, task)
         stage = resolve_human_stage!(task)
         outcome = resolve_outcome!(stage)
         state_body = self.class.read_state_file(File.join(task.folder, stage.state_file))
@@ -143,7 +146,94 @@ module Hive
           )
         end
 
-        outcome.complete ? complete!(task, stage, outcome, @decision_id) : return_to_stage!(task, stage, outcome, @decision_id)
+        @decision_operation = begin_decision_operation(
+          activity, task, stage, outcome, @decision_id
+        )
+        outcome.complete ? complete!(task, stage, outcome, @decision_id) :
+          return_to_stage!(task, stage, outcome, @decision_id)
+      end
+
+      def begin_decision_operation(activity, task, stage, outcome, decision_id)
+        return nil unless activity
+
+        activity.begin_operation(
+          kind: "decision_recorded",
+          operation_id: "decision:#{decision_id}:#{outcome.name}",
+          source: "command_service", reason: "human workflow decision recorded",
+          precondition: { "stage" => stage.dir, "decision_id" => decision_id },
+          expected_postcondition: {
+            "decision_id" => decision_id, "outcome" => outcome.name
+          }
+        )
+      end
+
+      def complete_decision_operation(operation, task, record)
+        return unless operation
+
+        operation.complete!(
+          result: {
+            "decision_id" => record.fetch("decision_id"),
+            "outcome" => record.fetch("outcome")
+          },
+          task_folder: task.folder, occurred_at: Time.iso8601(record.fetch("decided_at")),
+          payload: {
+            "decision" => record.fetch("outcome"),
+            "decision_id" => record.fetch("decision_id"),
+            "to_stage" => record["to"]
+          }
+        )
+      end
+
+      def reconcile_decision_operations(activity, task)
+        return unless activity
+
+        decisions, waiting = current_decision_fingerprints(task)
+        activity.reconcile_operations! do |receipt|
+          next :defer unless receipt["activity_kind"] == "decision_recorded" &&
+            receipt["source"] == "command_service"
+
+          if (match = decisions.find do |candidate|
+            candidate.fetch("fingerprint") == receipt["expected_postcondition_fingerprint"]
+          end)
+            { status: :committed, result: match.fetch("value") }
+          elsif waiting.include?(receipt["precondition_fingerprint"])
+            :not_committed
+          else
+            :ambiguous
+          end
+        end
+      rescue Hive::TaskActivity::Error, SystemCallError, IOError
+        nil
+      end
+
+      def current_decision_fingerprints(task)
+        decisions = []
+        waiting = []
+        task.workflow.stages.each do |candidate_stage|
+          path = File.join(task.folder, candidate_stage.state_file)
+          body = self.class.read_state_file(path)
+          next unless body
+
+          if (record = self.class.latest_record_from_content(body))
+            value = {
+              "decision_id" => record["decision_id"], "outcome" => record["outcome"]
+            }
+            decisions << {
+              "value" => value,
+              "fingerprint" => Hive::TaskActivity.fingerprint(value)
+            }
+          end
+          marker = Hive::Markers.current_from_content(body)
+          if marker.name == :waiting && !marker.attrs["decision_id"].to_s.empty?
+            waiting << Hive::TaskActivity.fingerprint(
+              "stage" => candidate_stage.dir,
+              "decision_id" => marker.attrs["decision_id"].to_s
+            )
+          end
+        rescue Hive::InvalidTaskPath, SystemCallError, IOError
+          next
+        end
+        [ decisions, waiting ]
       end
 
       def validate_arguments!
@@ -248,7 +338,9 @@ module Hive
           end
         end
 
-        emit_success(task, stage, outcome, record, applied: true)
+        current = Hive::Task.new(task.folder)
+        complete_decision_operation(@decision_operation, current, record)
+        emit_success(current, stage, outcome, record, applied: true)
       end
 
       def validate_publishable_artifact!(artifact_path, task_folder, stage, outcome)
@@ -323,6 +415,7 @@ module Hive
         end
 
         moved = Hive::Task.new(File.join(task.hive_state_path, "stages", target.dir, task.slug))
+        complete_decision_operation(@decision_operation, moved, record)
         emit_success(moved, stage, outcome, record, applied: true)
       end
 
@@ -360,7 +453,9 @@ module Hive
           end
         end
 
-        emit_success(Hive::Task.new(task.folder), stage, outcome, record, applied: true)
+        current = Hive::Task.new(task.folder)
+        complete_decision_operation(@decision_operation, current, record)
+        emit_success(current, stage, outcome, record, applied: true)
       end
 
       def validate_current_decision!(task, stage, decision_id)

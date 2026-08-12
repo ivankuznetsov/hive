@@ -40,4 +40,44 @@ class HiveRecoveryAPITest < Minitest::Test
       end
     end
   end
+
+  def test_recover_records_request_and_outcome_without_observation_token
+    observation_row = {
+      "folder" => "/tmp/demo/.hive-state/stages/4-execute/task",
+      "slug" => "task", "stage" => "4-execute", "marker" => "ERROR",
+      "state_file_mtime" => Time.utc(2026, 8, 12, 12),
+      "attempt_id" => "attempt-1", "task_generation" => 3
+    }
+    records = []
+    operation = Object.new
+    operation.define_singleton_method(:complete!) { |**args| records << [ :complete, args ] }
+    activity = Object.new
+    activity.define_singleton_method(:begin_operation) do |**args|
+      records << [ :begin, args ]
+      operation
+    end
+    activity.define_singleton_method(:record) { |**args| records << [ :record, args ] }
+    coordinator = Object.new
+    coordinator.define_singleton_method(:observation_token_for) { |_observation| "a" * 64 }
+    coordinator.define_singleton_method(:request) do |**_args|
+      Hive::Daemon::RecoveryCoordinator::Receipt.new(
+        status: "queued", request_id: "request-1", attempt_id: nil,
+        phase: "admitted", failure_origin: "limits_reached",
+        next_eligible_at: "2026-08-12T13:00:00Z", owner: "scheduler",
+        reason: nil, remediation: nil, retry_count: 1, provider_hint: nil
+      )
+    end
+
+    with_replaced_singleton_method(Hive::Recovery::API, :activity_for, ->(*) { activity }) do
+      result = Hive::Recovery::API.recover!(
+        row: observation_row, coordinator: coordinator,
+        now: Time.utc(2026, 8, 12, 12)
+      )
+      assert_equal "queued", result.status
+    end
+
+    assert_equal %i[begin complete record], records.map(&:first)
+    refute records.flatten.any? { |value| value == "a" * 64 }
+    assert_equal "queued", records.last.last.dig(:payload, "outcome")
+  end
 end

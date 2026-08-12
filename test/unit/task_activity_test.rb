@@ -113,6 +113,126 @@ class TaskActivityTest < Minitest::Test
     assert_includes error.message, "disk unavailable"
   end
 
+  def test_operation_receipt_is_durable_before_mutation_and_completes_once
+    with_activity do |activity, dir|
+      operation = activity.begin_operation(
+        kind: "decision_recorded", operation_id: "decision:visit-1:approve",
+        source: "command_service", reason: "decision approved",
+        precondition: { "decision" => "visit-1", "state" => "waiting" },
+        expected_postcondition: { "state" => "complete" }
+      )
+      receipt_path = File.join(
+        dir, Hive::TaskActivity::OPERATION_DIRECTORY,
+        "#{Digest::SHA256.hexdigest(operation.operation_id)}.json"
+      )
+      pending = JSON.parse(File.read(receipt_path))
+      assert_equal "pending", pending.fetch("state")
+      assert_equal 0o600, File.stat(receipt_path).mode & 0o777
+
+      first = operation.complete!(
+        result: { "state" => "complete" },
+        payload: { "decision" => "approve" }, occurred_at: NOW
+      )
+      completed = JSON.parse(File.read(receipt_path))
+      assert_equal "complete", completed.fetch("state")
+      assert_equal first.event_id, completed.fetch("event_id")
+
+      summary = activity.reconcile_operations! { flunk "complete receipt must not resolve" }
+      assert_equal 0, summary.fetch("completed")
+      records = File.readlines(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME))
+      assert_equal 1, records.length
+    end
+  end
+
+  def test_committed_receipt_replays_missing_append_idempotently
+    with_activity do |activity, dir|
+      operation = activity.begin_operation(
+        kind: "approval_recorded", operation_id: "approval:visit-2",
+        source: "command_service", reason: "approval recorded",
+        precondition: "waiting", expected_postcondition: "approved"
+      )
+      failing = Object.new
+      failing.define_singleton_method(:record) { |**| raise Hive::TaskActivity::AppendFailed, "crash" }
+      assert_raises(Hive::TaskActivity::AppendFailed) do
+        operation.complete!(result: "approved", occurred_at: NOW, activity: failing)
+      end
+
+      receipt_path = Dir[File.join(dir, Hive::TaskActivity::OPERATION_DIRECTORY, "*.json")].first
+      assert_equal "committed_pending_activity", JSON.parse(File.read(receipt_path)).fetch("state")
+      first = activity.reconcile_operations! { flunk "committed receipt must replay directly" }
+      second = activity.reconcile_operations! { flunk "completed receipt must be ignored" }
+
+      assert_equal 1, first.fetch("completed")
+      assert_equal 0, second.fetch("completed")
+      record = JSON.parse(File.read(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME)))
+      assert_equal "approval_recorded", record.dig("payload", "activity_kind")
+    end
+  end
+
+  def test_pending_reconciliation_never_invents_success_and_appends_ambiguity_gap
+    with_activity do |activity, dir|
+      not_committed = activity.begin_operation(
+        kind: "retry_requested", operation_id: "retry:not-committed",
+        source: "recovery_service", reason: "retry requested",
+        precondition: "blocked", expected_postcondition: "scheduled"
+      )
+      ambiguous = activity.begin_operation(
+        kind: "operator_action", operation_id: "action:ambiguous",
+        source: "operator", reason: "operator action",
+        precondition: "waiting", expected_postcondition: "advanced"
+      )
+      summary = activity.reconcile_operations! do |receipt|
+        receipt.fetch("operation_id") == not_committed.operation_id ? :not_committed : :ambiguous
+      end
+
+      assert_equal 1, summary.fetch("gaps")
+      records = File.readlines(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME)).map do |line|
+        JSON.parse(line)
+      end
+      assert_equal [ "activity_gap" ], records.map { |row| row.dig("payload", "activity_kind") }
+      states = Dir[File.join(dir, Hive::TaskActivity::OPERATION_DIRECTORY, "*.json")].map do |path|
+        JSON.parse(File.read(path)).fetch("state")
+      end
+      assert_equal %w[aborted gap], states.sort
+    end
+  end
+
+  def test_operation_receipt_scan_is_bounded_and_refuses_symlinks
+    with_activity do |activity, dir|
+      activity.begin_operation(
+        kind: "operator_action", operation_id: "action:one", source: "operator",
+        reason: "action", precondition: "a", expected_postcondition: "b"
+      )
+      operations = File.join(dir, Hive::TaskActivity::OPERATION_DIRECTORY)
+      File.symlink("/etc/passwd", File.join(operations, "#{'f' * 64}.json"))
+
+      summary = activity.reconcile_operations!(max_receipts: 2, max_bytes: 128 * 1024) do
+        :not_committed
+      end
+
+      assert_includes summary.fetch("diagnostics").map { |row| row.fetch("reason") },
+                      "operation_receipt_invalid"
+    end
+  end
+
+  def test_aborted_operation_keeps_history_and_retry_gets_a_distinct_identity
+    with_activity do |activity, dir|
+      attributes = {
+        kind: "retry_requested", operation_id: "retry:task-1",
+        source: "recovery_service", reason: "retry requested",
+        precondition: "blocked", expected_postcondition: "queued"
+      }
+      first = activity.begin_operation(**attributes)
+      first.abort!(reason: "not committed")
+      second = activity.begin_operation(**attributes)
+
+      assert_equal "retry:task-1", first.operation_id
+      assert_equal "retry:task-1:retry:1", second.operation_id
+      assert_equal 2, Dir[File.join(dir, Hive::TaskActivity::OPERATION_DIRECTORY, "*.json")].length
+      assert_equal "pending", second.receipt.fetch("state")
+    end
+  end
+
   private
 
   def with_activity(task_generation: 3)

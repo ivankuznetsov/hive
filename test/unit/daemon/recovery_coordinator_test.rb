@@ -25,6 +25,37 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   )
   FakeGeneration = Data.define(:progress_token, :task_generation)
 
+  def test_default_resolver_reuses_canonical_folder_for_historical_workflow_stage
+    with_tmp_global_config do |home|
+      project_root = File.join(home, "project-a")
+      folder = File.join(
+        project_root, ".hive-state", "stages", "4-execute", "historical-task"
+      )
+      FileUtils.mkdir_p(folder)
+      File.write(
+        File.join(home, "config.yml"),
+        {
+          "registered_projects" => [
+            {
+              "name" => "project-a", "path" => project_root,
+              "hive_state_path" => File.join(project_root, ".hive-state")
+            }
+          ]
+        }.to_yaml
+      )
+      coordinator = Hive::Daemon::RecoveryCoordinator.new(state_home: home)
+
+      resolved = coordinator.send(
+        :resolve_task,
+        project: "project-a", slug: "not-a-search-target",
+        folder: folder, stage: "4-execute"
+      )
+
+      assert_equal File.realpath(folder), resolved.folder
+      assert_equal "historical-task", resolved.slug
+    end
+  end
+
   def test_shared_hourly_cooldown_ignores_later_provider_reset_hint
     with_fixture(marker_attrs: {
       "reason" => "limits_reached",

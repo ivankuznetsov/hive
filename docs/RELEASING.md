@@ -48,10 +48,10 @@ To publish an approved version:
    `components/agent-cli-runtime/lib/agent_cli_runtime/version.rb` and its
    package changelog in a package PR. Run the package tests and exact candidate
    verifier.
-2. Merge the package PR while leaving `hive.gemspec`, Hive's lockfiles, and
-   Hive's dependency loading unchanged. During the temporary duplication
-   window, any contract correction shared with Hive's internal implementation
-   must land in lockstep and remain covered by package/Hive parity tests.
+2. Merge the package PR. Hive consumes the compatible 0.1.x line directly, so
+   ordinary patch releases require no second implementation or dependency
+   cutover. A future incompatible release needs a separate Hive adapter change,
+   held until the new package bytes pass remote verification.
 3. Record the full protected-`main` commit and verify that the version is not
    already present on RubyGems. Confirm the component tag ruleset is active and
    that `agent-cli-runtime-release` still requires the intended reviewers and

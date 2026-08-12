@@ -43,7 +43,7 @@ module Hive
             adapter: adapter_name,
             id: binding,
             selector_name: nil,
-            environment: selector_scrub
+            environment: selector_scrub.merge(profile.subscription_environment)
           )
         end
 
@@ -54,8 +54,9 @@ module Hive
                 "provider launch binding #{binding.inspect} for #{adapter_name} is unavailable; " \
                 "configure #{selector} as an existing absolute directory"
         end
-        launch_environment = selector_scrub.merge(key => File.expand_path(path))
-        profile.credential_environment_keys.each { |name| launch_environment[name] = nil }
+        launch_environment = selector_scrub
+          .merge(key => File.expand_path(path))
+          .merge(profile.credential_environment_keys.to_h { |name| [ name, nil ] })
         Binding.new(
           adapter: adapter_name,
           id: binding,

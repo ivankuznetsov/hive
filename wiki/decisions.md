@@ -179,8 +179,8 @@ operator-ward device flows: the one-time code is entered at the provider, the
 CLI polls in the background, and the status frame keeps polling until the child
 exits instead of showing a paste-back form. `gh`'s device-flow prompt asks for
 a bare Enter before polling, so the relay auto-answers that prompt.
-Grok follows the same operator-ward shape via `grok login --device-auth` and
-also supports non-interactive `XAI_API_KEY` authentication.
+Grok follows the same operator-ward shape via `grok login --device-auth`.
+Hive deliberately does not select the CLI's separate API-key mode.
 For Pi, Hive web validates that the submitted token JSON is a non-empty object
 and writes it to `~/.pi/agent/auth.json` with mode `0600`. The container sets
 `HOME=/data/home`, so `~/.claude`, `~/.codex`, `~/.pi`, `~/.grok`, and `~/.config/gh`

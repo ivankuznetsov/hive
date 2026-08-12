@@ -1,16 +1,12 @@
+require "agent_cli_runtime"
 require "hive/agent_profiles"
-require "hive/permission_scope"
-require "hive/secret_patterns"
 
 module Hive
-  # Provider-neutral contract between Hive orchestration and an AgentProfile.
-  #
-  # This component compiles one immutable request into argv/stdin and
-  # normalizes provider observations. It deliberately does not spawn
-  # processes, enforce workflow timeouts, accept artifacts, retry work, or
-  # decide whether a stage succeeded; those remain Hive policy.
+  # Stable Hive compatibility facade over the published agent-cli-runtime gem.
+  # Hive adds only workflow policy that the provider-neutral package must not
+  # own: admitted model routing and named subscription/session bindings.
   module AgentRuntime
-    DIAGNOSTIC_BYTES = 512
+    DIAGNOSTIC_BYTES = AgentCliRuntime::DIAGNOSTIC_BYTES
 
     module Immutable
       module_function
@@ -26,44 +22,32 @@ module Hive
     end
     private_constant :Immutable
 
-    CapabilityEvidence = Data.define(
-      :capability, :supported, :provider, :launcher_identity, :arguments, :diagnostic
-    ) do
-      def initialize(capability:, supported:, provider:, launcher_identity:,
-                     arguments: [], diagnostic: nil)
-        super(
-          capability: capability.to_sym,
-          supported: supported == true,
-          provider: provider.to_sym,
-          launcher_identity: Immutable.string(launcher_identity),
-          arguments: Immutable.values(arguments),
-          diagnostic: diagnostic.nil? ? nil : Immutable.string(diagnostic)
-        )
-      end
-    end
+    CapabilityEvidence = AgentCliRuntime::CapabilityEvidence
+    CompiledInvocation = AgentCliRuntime::CompiledInvocation
+    ObservableResult = AgentCliRuntime::ObservableResult
 
     Request = Data.define(
       :profile, :prompt, :permission_mode, :permission_arguments,
-      :add_dirs, :require_add_dirs,
-      :allowed_tools, :disallowed_tools, :max_budget_usd,
-      :model, :effort, :pin_model, :identity_arguments,
-      :routing_arguments,
-      :capabilities, :raw_cli_arguments, :trusted_cli_arguments,
-      :executable, :command_prefix, :include_output_format
+      :add_dirs, :require_add_dirs, :allowed_tools, :disallowed_tools,
+      :max_budget_usd, :model, :effort, :pin_model, :identity_arguments,
+      :routing_arguments, :capabilities, :raw_cli_arguments,
+      :trusted_cli_arguments, :executable, :command_prefix,
+      :include_output_format
     ) do
-      def initialize(profile:, prompt:, permission_mode: nil, permission_arguments: nil, add_dirs: [],
+      def initialize(profile:, prompt:, permission_mode: nil,
+                     permission_arguments: nil, add_dirs: [],
                      require_add_dirs: false, allowed_tools: nil,
                      disallowed_tools: nil, max_budget_usd: nil,
                      model: nil, effort: nil, pin_model: true,
                      identity_arguments: [], routing_arguments: nil,
-                     capabilities: [],
-                     raw_cli_arguments: [], trusted_cli_arguments: [],
-                     executable: nil, command_prefix: [],
-                     include_output_format: true)
+                     capabilities: [], raw_cli_arguments: [],
+                     trusted_cli_arguments: [], executable: nil,
+                     command_prefix: [], include_output_format: true)
         super(
           profile: profile,
           prompt: Immutable.string(prompt),
-          permission_mode: permission_mode.nil? ? nil : Immutable.string(permission_mode),
+          permission_mode:
+            permission_mode.nil? ? nil : Immutable.string(permission_mode),
           permission_arguments:
             permission_arguments.nil? ? nil : Immutable.values(permission_arguments),
           add_dirs: Immutable.values(add_dirs),
@@ -86,49 +70,18 @@ module Hive
       end
     end
 
-    CompiledInvocation = Data.define(
-      :argv, :stdin_data, :provider, :launcher_identity, :capability_evidence
-    ) do
-      def initialize(argv:, stdin_data:, provider:, launcher_identity:, capability_evidence:)
-        super(
-          argv: Immutable.values(argv),
-          stdin_data: stdin_data.nil? ? nil : Immutable.string(stdin_data),
-          provider: provider.to_sym,
-          launcher_identity: Immutable.string(launcher_identity),
-          capability_evidence: Array(capability_evidence).freeze
-        )
-      end
-    end
-
+    # Preserve Hive's smaller historic probe value while the package owns the
+    # richer local diagnostic contract exposed by AgentCliRuntime::ProbeResult.
     ProbeResult = Data.define(
       :provider, :launcher_identity, :version, :capability_evidence
     ) do
-      def initialize(provider:, launcher_identity:, version:, capability_evidence:)
+      def initialize(provider:, launcher_identity:, version:,
+                     capability_evidence:)
         super(
           provider: provider.to_sym,
           launcher_identity: Immutable.string(launcher_identity),
           version: version.nil? ? nil : Immutable.string(version),
           capability_evidence: Array(capability_evidence).freeze
-        )
-      end
-    end
-
-    ObservableResult = Data.define(
-      :provider, :launcher_identity, :exit_code, :timed_out, :status,
-      :usage, :final_message, :diagnostic, :provider_signal
-    ) do
-      def initialize(provider:, launcher_identity:, exit_code:, timed_out:,
-                     status:, usage:, final_message:, diagnostic:, provider_signal: nil)
-        super(
-          provider: provider.to_sym,
-          launcher_identity: Immutable.string(launcher_identity),
-          exit_code: exit_code,
-          timed_out: timed_out == true,
-          status: status&.to_sym,
-          usage: usage&.dup&.freeze,
-          final_message: final_message.nil? ? nil : Immutable.string(final_message),
-          diagnostic: diagnostic.nil? ? nil : Immutable.string(diagnostic),
-          provider_signal: provider_signal&.dup&.freeze
         )
       end
     end
@@ -150,77 +103,99 @@ module Hive
 
     def compile(request)
       unless request.is_a?(Request)
-        raise ArgumentError, "request must be a Hive::AgentRuntime::Request"
+        compilation_error!(nil, ArgumentError.new(
+          "request must be a Hive::AgentRuntime::Request"
+        ))
       end
 
       profile = request.profile
-      evidence = []
-      require_headless!(profile, evidence)
-      routing = routing_arguments(profile, request, evidence)
-
-      argv = [ request.executable || profile.bin ]
-      argv.concat(routing.fetch(:global))
-      prompt_style = profile_prompt_style(profile)
-      if profile.headless_flag
-        argv << profile.headless_flag
-        argv << request.prompt if prompt_style == :headless_flag_value
+      require_headless!(profile)
+      runtime = runtime_profile(profile)
+      unless runtime
+        compilation_error!(profile, ArgumentError.new(
+          "agent profile #{profile_name(profile).inspect} has no agent-cli-runtime profile"
+        ))
       end
 
-      argv.concat(
-        permission_arguments(
-          profile, request.permission_mode, evidence,
-          trusted_arguments: request.permission_arguments
-        )
+      routing = routing_arguments(profile, request)
+      identity = legacy_identity_arguments(profile, request)
+      named_evidence = request.capabilities.map do |capability|
+        require_capability!(profile, capability)
+      end
+      named_arguments = named_evidence.flat_map(&:arguments)
+
+      public_request = AgentCliRuntime::Request.new(
+        profile: runtime,
+        prompt: request.prompt,
+        permission_mode: request.permission_mode,
+        permission_arguments: request.permission_arguments,
+        add_dirs: request.add_dirs,
+        require_add_dirs: request.require_add_dirs,
+        allowed_tools: supported_tool_scope(profile, :allowed, request.allowed_tools),
+        disallowed_tools:
+          supported_tool_scope(profile, :disallowed, request.disallowed_tools),
+        max_budget_usd:
+          profile.respond_to?(:budget_flag) && profile.budget_flag ?
+            request.max_budget_usd : nil,
+        identity_arguments:
+          identity.fetch(:arguments) + routing.fetch(:subcommand) +
+          named_arguments,
+        raw_cli_arguments: request.raw_cli_arguments,
+        trusted_cli_arguments: request.trusted_cli_arguments,
+        executable: request.executable,
+        command_prefix: request.command_prefix,
+        include_output_format: request.include_output_format
       )
-      argv.concat(directory_arguments(profile, request, evidence))
-      argv.concat(tool_scope_arguments(profile, request))
-      argv.concat(budget_arguments(profile, request.max_budget_usd))
-      argv.concat(identity_arguments(profile, request, evidence))
-      argv.concat(routing.fetch(:subcommand))
 
-      request.capabilities.each do |capability|
-        capability_evidence = require_capability!(profile, capability)
-        evidence << capability_evidence
-        argv.concat(capability_evidence.arguments)
+      invocation = AgentCliRuntime.compile(public_request)
+      argv = invocation.argv.dup
+      unless routing.fetch(:global).empty?
+        argv.insert(request.command_prefix.length + 1, *routing.fetch(:global))
       end
-
-      unless request.raw_cli_arguments.empty?
-        unless raw_cli_arguments_supported?(profile)
-          unsupported!(
-            profile, :raw_cli_arguments,
-            "agent profile #{profile_name(profile).inspect} does not accept raw CLI arguments",
-            evidence
-          )
-        end
-        evidence << supported_evidence(profile, :raw_cli_arguments, request.raw_cli_arguments)
-        argv.concat(request.raw_cli_arguments)
-      end
-      argv.concat(request.trusted_cli_arguments)
-
-      if request.include_output_format && profile.respond_to?(:output_format_flags)
-        argv.concat(Array(profile.output_format_flags))
-      end
-      argv << (prompt_style == :stdin ? "-" : request.prompt) unless prompt_style == :headless_flag_value
-
       CompiledInvocation.new(
-        argv: request.command_prefix + argv,
-        stdin_data: prompt_style == :stdin ? request.prompt : nil,
-        provider: profile_name(profile),
-        launcher_identity: launcher_identity(profile),
-        capability_evidence: evidence
+        argv: argv,
+        stdin_data: invocation.stdin_data,
+        provider: invocation.provider,
+        launcher_identity: invocation.launcher_identity,
+        capability_evidence:
+          invocation.capability_evidence + identity.fetch(:evidence) +
+          routing.fetch(:evidence) + named_evidence
       )
     rescue Error
       raise
+    rescue AgentCliRuntime::UnsupportedCapability => e
+      raise_runtime_error!(UnsupportedCapability, profile, e)
+    rescue AgentCliRuntime::Error => e
+      compilation_error!(profile, e)
     rescue StandardError => e
-      profile = request.profile if request.is_a?(Request)
-      compilation_error!(profile, :compilation, e)
+      compilation_error!(profile, e)
     end
 
     def prepare!(profile, launch_binding: nil)
-      version = profile.check_version!
-      Hive::AgentProfiles::LaunchBindings.with_preflight_environment(launch_binding) do
-        profile.preflight!
+      public_profile = runtime_profile(profile)
+      version = nil
+      if public_profile
+        Hive::AgentProfiles::LaunchBindings.with_preflight_environment(
+          launch_binding
+        ) do
+          version =
+            if profile.respond_to?(:check_version!)
+              profile.check_version!
+            else
+              public_profile.check_version!(env: ENV)
+            end
+          require_auth_configuration!(public_profile) if
+            profile.respond_to?(:auth_configuration_required?) &&
+            profile.auth_configuration_required?
+          profile.preflight! if profile.respond_to?(:preflight!)
+        end
+      else
+        version = profile.check_version!
+        Hive::AgentProfiles::LaunchBindings.with_preflight_environment(
+          launch_binding
+        ) { profile.preflight! }
       end
+
       ProbeResult.new(
         provider: profile_name(profile),
         launcher_identity: launcher_identity(profile),
@@ -233,12 +208,10 @@ module Hive
       )
     rescue Error
       raise
+    rescue AgentCliRuntime::Error => e
+      raise_runtime_error!(ProbeError, profile, e, capability: :probe)
     rescue StandardError => e
-      evidence = unsupported_evidence(profile, :probe, safe_diagnostic(e))
-      raise ProbeError.new(
-        "agent profile #{profile_name(profile).inspect} probe failed: #{evidence.diagnostic}",
-        evidence: evidence
-      ), cause: e
+      raise_runtime_error!(ProbeError, profile, e, capability: :probe)
     end
 
     def require_capability!(profile, capability)
@@ -246,23 +219,27 @@ module Hive
       supported_evidence(profile, capability, arguments)
     rescue Error
       raise
-    rescue StandardError => e
-      evidence = unsupported_evidence(profile, capability, safe_diagnostic(e))
-      raise UnsupportedCapability.new(
-        "agent profile #{profile_name(profile).inspect} cannot provide " \
-        "#{capability.to_sym.inspect}: #{evidence.diagnostic}",
-        evidence: evidence
-      ), cause: e
+    rescue AgentCliRuntime::Error, StandardError => e
+      raise_runtime_error!(
+        UnsupportedCapability, profile, e, capability: capability
+      )
     end
 
     def extract_usage(profile, event)
-      usage = profile.extract_usage_event(event)
-      normalize_usage(usage)
+      public_profile = runtime_profile(profile)
+      if public_profile
+        AgentCliRuntime.extract_usage(public_profile, event)
+      else
+        normalize_usage(profile.extract_usage_event(event))
+      end
     rescue StandardError
       nil
     end
 
     def observe(profile, result)
+      public_profile = runtime_profile(profile)
+      return AgentCliRuntime.observe(public_profile, result) if public_profile
+
       raw = result.is_a?(Hash) ? result : {}
       ObservableResult.new(
         provider: profile_name(profile),
@@ -277,159 +254,134 @@ module Hive
       )
     end
 
-    def require_headless!(profile, evidence)
-      supported = !profile.respond_to?(:headless_supported) || profile.headless_supported
-      return evidence << supported_evidence(profile, :headless) if supported
+    def runtime_profile(profile)
+      return profile if profile.is_a?(AgentCliRuntime::Profile)
+      return profile.runtime_profile if profile.respond_to?(:runtime_profile)
 
-      unsupported!(
-        profile, :headless,
-        "agent profile #{profile_name(profile).inspect} is not headless-supported",
-        evidence
+      nil
+    end
+    private_class_method :runtime_profile
+
+    def require_auth_configuration!(profile)
+      environment = ENV.to_h
+      if profile.name == :grok
+        # Hive binds CLI subscription/session state. API-key support remains a
+        # package compatibility feature for independent consumers.
+        environment.delete("XAI_API_KEY")
+        environment.delete("GROK_CODE_XAI_API_KEY")
+      end
+      auth = profile.auth_configuration(env: environment)
+      return if auth.configured?
+
+      evidence = AgentCliRuntime::CapabilityEvidence.new(
+        capability: :auth_configuration,
+        supported: false,
+        provider: profile.name,
+        launcher_identity: profile.launcher_identity,
+        diagnostic: auth.diagnostic ||
+          "local subscription/session configuration is missing"
       )
+      raise AgentCliRuntime::ProbeError.new(
+        evidence.diagnostic, evidence: evidence
+      )
+    end
+    private_class_method :require_auth_configuration!
+
+    def require_headless!(profile)
+      supported =
+        !profile.respond_to?(:headless_supported) || profile.headless_supported
+      return if supported
+
+      evidence = unsupported_evidence(
+        profile, :headless,
+        "agent profile #{profile_name(profile).inspect} is not headless-supported"
+      )
+      raise UnsupportedCapability.new(evidence.diagnostic, evidence: evidence)
     end
     private_class_method :require_headless!
 
-    def permission_arguments(profile, permission_mode, evidence, trusted_arguments: nil)
-      arguments =
-        if trusted_arguments
-          trusted_arguments
-        elsif profile.respond_to?(:permission_flags)
-          profile.permission_flags(permission_mode)
-        elsif profile.respond_to?(:permission_skip_flag) && profile.permission_skip_flag
-          [ profile.permission_skip_flag ]
-        else
-          []
-        end
-      capability = permission_mode&.tr("-", "_")&.to_sym || :permission_bypass
-      evidence << supported_evidence(profile, capability, arguments)
-      arguments
-    rescue ArgumentError => e
-      capability = permission_mode&.tr("-", "_")&.to_sym || :permission
-      unsupported!(profile, capability, e.message, evidence)
-    end
-    private_class_method :permission_arguments
-
-    def directory_arguments(profile, request, evidence)
-      return [] if request.add_dirs.empty?
-
-      flag = profile.respond_to?(:add_dir_flag) ? profile.add_dir_flag : nil
-      unless flag
-        if request.require_add_dirs
-          unsupported!(
-            profile, :add_directory,
-            "agent profile #{profile_name(profile).inspect} cannot constrain additional directories",
-            evidence
-          )
-        end
-        evidence << unsupported_evidence(
-          profile, :add_directory,
-          "unsupported; directories intentionally omitted"
-        )
-        return []
-      end
-
-      arguments = request.add_dirs.flat_map { |directory| [ flag, directory ] }
-      evidence << supported_evidence(profile, :add_directory, arguments)
-      arguments
-    end
-    private_class_method :directory_arguments
-
-    def tool_scope_arguments(profile, request)
-      flags = profile.respond_to?(:tool_scope_flags) ? profile.tool_scope_flags : {}
-      arguments = []
-      if (value = Hive::PermissionScope.tool_csv(request.allowed_tools)) && flags[:allowed]
-        arguments.concat([ flags[:allowed], value ])
-      end
-      if (value = Hive::PermissionScope.tool_csv(request.disallowed_tools)) && flags[:disallowed]
-        arguments.concat([ flags[:disallowed], value ])
-      end
-      arguments
-    end
-    private_class_method :tool_scope_arguments
-
-    def budget_arguments(profile, max_budget_usd)
-      flag = profile.respond_to?(:budget_flag) ? profile.budget_flag : nil
-      flag && max_budget_usd ? [ flag, max_budget_usd.to_s ] : []
-    end
-    private_class_method :budget_arguments
-
-    def identity_arguments(profile, request, evidence)
+    def legacy_identity_arguments(profile, request)
+      evidence = []
       arguments = request.identity_arguments.dup
-      return arguments unless request.model || request.effort
-
+      return { arguments:, evidence: } unless request.model || request.effort
       unless request.model
-        unsupported!(
-          profile, :effort, "effort requires an explicit model in an invocation request", evidence
+        package_unsupported!(
+          profile, :effort,
+          "effort requires an explicit model in an invocation request"
         )
       end
       if request.pin_model &&
-         (!profile.respond_to?(:model_argument_builder) || !profile.model_argument_builder)
-        unsupported!(
+         (!profile.respond_to?(:model_argument_builder) ||
+          !profile.model_argument_builder)
+        package_unsupported!(
           profile, :model,
-          "agent profile #{profile_name(profile).inspect} cannot pin a model",
-          evidence
+          "agent profile #{profile_name(profile).inspect} cannot pin a model"
         )
       end
       if request.effort &&
-         (!profile.respond_to?(:effort_argument_builder) || !profile.effort_argument_builder)
-        unsupported!(
+         (!profile.respond_to?(:effort_argument_builder) ||
+          !profile.effort_argument_builder)
+        package_unsupported!(
           profile, :effort,
-          "agent profile #{profile_name(profile).inspect} cannot set reasoning effort",
-          evidence
+          "agent profile #{profile_name(profile).inspect} cannot set reasoning effort"
         )
       end
 
       identity = profile.identity_arguments(
-        model: request.model, effort: request.effort, pin_model: request.pin_model
+        model: request.model, effort: request.effort,
+        pin_model: request.pin_model
       )
-      evidence << supported_evidence(profile, :model, identity.native_arguments)
-      evidence << supported_evidence(profile, :effort) if request.effort
       arguments.concat(identity.native_arguments)
+      evidence << supported_evidence(
+        profile, :model, identity.native_arguments
+      )
+      evidence << supported_evidence(profile, :effort) if request.effort
+      { arguments:, evidence: }
     end
-    private_class_method :identity_arguments
+    private_class_method :legacy_identity_arguments
 
-    def routing_arguments(profile, request, evidence)
-      return { global: [], subcommand: [] } unless request.routing_arguments
+    def package_unsupported!(profile, capability, diagnostic)
+      evidence = unsupported_evidence(profile, capability, diagnostic)
+      raise AgentCliRuntime::UnsupportedCapability.new(
+        evidence.diagnostic, evidence: evidence
+      )
+    end
+    private_class_method :package_unsupported!
+
+    def routing_arguments(profile, request)
+      empty = { global: [], subcommand: [], evidence: [] }
+      return empty unless request.routing_arguments
       if !request.identity_arguments.empty? || request.model || request.effort
         raise ArgumentError,
-              "routing_arguments cannot be combined with legacy identity model/effort arguments"
+              "routing_arguments cannot be combined with legacy identity " \
+              "model/effort arguments"
       end
       unless profile.respond_to?(:validate_routing_arguments!)
-        unsupported!(
+        evidence = unsupported_evidence(
           profile, :model_routing,
-          "agent profile #{profile_name(profile).inspect} does not support model routing",
-          evidence
+          "agent profile #{profile_name(profile).inspect} does not support model routing"
         )
+        raise UnsupportedCapability.new(evidence.diagnostic, evidence: evidence)
       end
 
       arguments = profile.validate_routing_arguments!(request.routing_arguments)
-      native_arguments = arguments.native_arguments
-      evidence << supported_evidence(profile, :model_routing, native_arguments)
       {
         global: arguments.global_arguments,
-        subcommand: arguments.subcommand_arguments
+        subcommand: arguments.subcommand_arguments,
+        evidence: [
+          supported_evidence(profile, :model_routing, arguments.native_arguments)
+        ]
       }
     end
     private_class_method :routing_arguments
 
-    def profile_prompt_style(profile)
-      profile.respond_to?(:prompt_style) && profile.prompt_style ? profile.prompt_style : :positional
-    end
-    private_class_method :profile_prompt_style
+    def supported_tool_scope(profile, scope, tools)
+      return nil if Array(tools).empty?
+      flags = profile.respond_to?(:tool_scope_flags) ? profile.tool_scope_flags : {}
 
-    def raw_cli_arguments_supported?(profile)
-      profile.respond_to?(:raw_cli_arguments_supported?) && profile.raw_cli_arguments_supported?
+      flags.key?(scope) ? tools : nil
     end
-    private_class_method :raw_cli_arguments_supported?
-
-    def launcher_identity(profile)
-      if profile.respond_to?(:launcher_identity) && profile.launcher_identity
-        profile.launcher_identity
-      else
-        "AgentProfile/v1:#{profile_name(profile)}"
-      end
-    end
-    private_class_method :launcher_identity
+    private_class_method :supported_tool_scope
 
     def supported_evidence(profile, capability, arguments = [])
       CapabilityEvidence.new(
@@ -447,25 +399,37 @@ module Hive
         capability: capability,
         supported: false,
         provider: profile_name(profile),
-        launcher_identity: profile ? launcher_identity(profile) : "unknown",
-        diagnostic: diagnostic
+        launcher_identity: launcher_identity(profile),
+        diagnostic: safe_diagnostic(diagnostic)
       )
     end
     private_class_method :unsupported_evidence
 
-    def unsupported!(profile, capability, diagnostic, evidence)
-      item = unsupported_evidence(profile, capability, safe_diagnostic(diagnostic))
-      evidence << item
-      raise UnsupportedCapability.new(item.diagnostic, evidence: item)
+    def raise_runtime_error!(error_class, profile, error, capability: nil)
+      package_evidence = error.respond_to?(:evidence) ? error.evidence : nil
+      effective_capability =
+        capability || package_evidence&.capability || :compilation
+      evidence = unsupported_evidence(
+        profile, effective_capability,
+        package_evidence&.diagnostic || error
+      )
+      message =
+        if error_class == ProbeError
+          "agent profile #{profile_name(profile).inspect} probe failed: #{evidence.diagnostic}"
+        elsif error_class == UnsupportedCapability
+          "agent profile #{profile_name(profile).inspect} cannot provide " \
+            "#{effective_capability.to_sym.inspect}: #{evidence.diagnostic}"
+        else
+          "agent invocation compilation failed: #{evidence.diagnostic}"
+        end
+      raise error_class.new(message, evidence: evidence), cause: error
     end
-    private_class_method :unsupported!
+    private_class_method :raise_runtime_error!
 
-    def compilation_error!(profile, capability, error)
-      evidence = unsupported_evidence(profile, capability, safe_diagnostic(error))
-      raise CompilationError.new(
-        "agent invocation compilation failed: #{evidence.diagnostic}",
-        evidence: evidence
-      ), cause: error
+    def compilation_error!(profile, error)
+      raise_runtime_error!(
+        CompilationError, profile, error, capability: :compilation
+      )
     end
     private_class_method :compilation_error!
 
@@ -486,11 +450,7 @@ module Hive
     private_class_method :normalize_usage
 
     def safe_diagnostic(value)
-      redacted = Hive::SecretPatterns.redact(value.respond_to?(:message) ? value.message : value.to_s)
-      return nil if redacted.empty?
-      return redacted if redacted.bytesize <= DIAGNOSTIC_BYTES
-
-      redacted.byteslice(0, DIAGNOSTIC_BYTES).to_s.force_encoding(Encoding::UTF_8).scrub("?")
+      AgentCliRuntime::Redactor.diagnostic(value)
     end
     private_class_method :safe_diagnostic
 
@@ -498,5 +458,14 @@ module Hive
       profile&.respond_to?(:name) ? profile.name : :unknown
     end
     private_class_method :profile_name
+
+    def launcher_identity(profile)
+      if profile&.respond_to?(:launcher_identity) && profile.launcher_identity
+        profile.launcher_identity
+      else
+        "AgentProfile/v1:#{profile_name(profile)}"
+      end
+    end
+    private_class_method :launcher_identity
   end
 end

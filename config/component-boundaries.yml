@@ -753,21 +753,20 @@ components:
       - lib/hive/agent_profiles.rb
       - lib/hive/agent_profiles
     state_contracts:
-      - "Provider executable, version, capability, and observable result evidence"
+      - "Published agent-cli-runtime profiles own provider executable, version, capability, probe, decoding, and observable result evidence"
       - "Named account bindings resolve to external adapter contexts only at launch; raw binding paths are not durable values"
       - "Only allowlisted structured adapter transport envelopes can produce bounded provider signals"
     schema_contracts:
-      - "Provider profile constructor and registry extension point remain compatible"
+      - "Hive profile constructor, registry extension point, and runtime value constants remain forwarding-compatible"
     lock_contracts:
-      - "Version/capability probes are bounded and reap descendant process groups"
+      - "agent-cli-runtime version/capability probes are bounded and reap descendant process groups"
     component_dependencies: []
     allowed_hive_dependencies:
       - hive/implementation_identity
-      - hive/permission_scope
-      - hive/secret_patterns
+      - hive/model_routing
       - hive/skill_check
     internal_collaborators:
-      - Hive::AgentProfiles::UsageExtractors
+      - AgentCliRuntime
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
@@ -786,6 +785,7 @@ components:
       - test/unit/agent_runtime_test.rb
       - test/unit/agent_profile_test.rb
       - test/unit/agent_profiles_test.rb
+      - test/unit/agent_cli_runtime_component_test.rb
       - test/unit/agent_profiles/error_normalizers_test.rb
       - test/unit/agent_profiles/launch_bindings_test.rb
       - test/unit/agent_profile_modes_test.rb

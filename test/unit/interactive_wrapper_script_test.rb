@@ -8,7 +8,7 @@ class InteractiveWrapperScriptTest < Minitest::Test
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)
 
   def teardown
-    %w[HIVE_FAKE_CLAUDE_LOG_DIR ANTHROPIC_API_KEY CLAUDE_API_KEY
+    %w[HIVE_FAKE_CLAUDE_LOG_DIR ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY
        HIVE_SCREENOTE_BASE_URL].each { |key| ENV.delete(key) }
   end
 
@@ -26,6 +26,7 @@ class InteractiveWrapperScriptTest < Minitest::Test
       env = {
         "HIVE_FAKE_CLAUDE_LOG_DIR" => log_dir,
         "ANTHROPIC_API_KEY" => "parent-anthropic-key",
+        "ANTHROPIC_AUTH_TOKEN" => "parent-anthropic-token",
         "CLAUDE_API_KEY" => "parent-claude-key",
         "HIVE_SCREENOTE_BASE_URL" => "https://screenote.parent"
       }
@@ -42,6 +43,7 @@ class InteractiveWrapperScriptTest < Minitest::Test
       argv_log = File.read(File.join(log_dir, "fake-claude-argv.log"))
       assert_includes argv_log, "cwd=#{dir}"
       assert_includes argv_log, "env_ANTHROPIC_API_KEY=__unset__"
+      assert_includes argv_log, "env_ANTHROPIC_AUTH_TOKEN=__unset__"
       assert_includes argv_log, "env_CLAUDE_API_KEY=__unset__"
       assert_includes argv_log, "env_HIVE_SCREENOTE_BASE_URL=__unset__"
       refute_includes argv_log, "https://screenote.parent"

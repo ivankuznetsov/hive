@@ -239,6 +239,12 @@ class ComponentBoundariesTest < Minitest::Test
                     "Hive::AgentRuntime::ObservableResult"
     assert_includes agent_abi.dig("public_contract", "errors"),
                     "Hive::AgentRuntime::UnsupportedCapability"
+    assert_equal [ "AgentCliRuntime" ],
+                 agent_abi.fetch("internal_collaborators")
+    assert_includes agent_abi.fetch("allowed_hive_dependencies"),
+                    "hive/model_routing"
+    refute_includes agent_abi.fetch("allowed_hive_dependencies"),
+                    "hive/secret_patterns"
     assert_empty agent_abi.fetch("migration_exceptions")
 
     artifact_firewall = contract.component("agent-artifact-firewall")

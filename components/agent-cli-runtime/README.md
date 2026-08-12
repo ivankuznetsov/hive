@@ -9,7 +9,7 @@ provider JSON events, and exposes an honest local diagnostic command.
 ## Install
 
 ```ruby
-gem "agent-cli-runtime", "~> 0.1.0"
+gem "agent-cli-runtime", "~> 0.1.1"
 ```
 
 ```ruby

@@ -1,97 +1,66 @@
 require "test_helper"
-require "hive/agent_profiles"
+require "hive/agent_runtime"
 
-# Coverage for the pi profile's PI_PREFLIGHT lambda. Closes doc-review
-# finding #3 — every error path translates to Hive::AgentError so callers
-# only need to rescue one error class.
 class PiPreflightTest < Minitest::Test
   include HiveTestHelper
 
-  def with_fake_pi_home
-    Dir.mktmpdir("fake-pi-home") do |home|
-      FileUtils.mkdir_p(File.join(home, ".pi", "agent"))
-      prev_home = ENV["HOME"]
-      ENV["HOME"] = home
-      begin
-        yield(home)
-      ensure
-        ENV["HOME"] = prev_home
+  def test_hive_pi_profile_uses_the_package_profile
+    assert_same AgentCliRuntime::Profiles.fetch(:pi),
+                Hive::AgentProfiles.lookup(:pi).runtime_profile
+    refute Hive::AgentProfiles.const_defined?(:PI_PREFLIGHT, false)
+  end
+
+  def test_package_auth_probe_distinguishes_missing_and_configured_sessions
+    with_tmp_dir do |home|
+      profile = Hive::AgentProfiles.lookup(:pi).runtime_profile
+      auth_dir = File.join(home, ".pi", "agent")
+      FileUtils.mkdir_p(auth_dir)
+      path = File.join(auth_dir, "auth.json")
+
+      assert_equal :missing,
+                   profile.auth_configuration(home:, env: {}).status
+      File.write(path, "{  }")
+      assert_equal :missing,
+                   profile.auth_configuration(home:, env: {}).status
+      File.write(path, '{"provider":"configured"}')
+      assert_equal :configured,
+                   profile.auth_configuration(home:, env: {}).status
+    end
+  end
+
+  def test_hive_prepare_delegates_pi_prerequisite_failure_to_package
+    with_pi_fixture(auth: nil) do |environment|
+      with_env(environment) do
+        error = assert_raises(Hive::AgentRuntime::ProbeError) do
+          Hive::AgentRuntime.prepare!(Hive::AgentProfiles.lookup(:pi))
+        end
+        assert_equal :probe, error.evidence.capability
       end
     end
   end
 
-  def auth_path_for(home)
-    File.join(home, ".pi", "agent", "auth.json")
-  end
-
-  def test_raises_when_auth_file_missing
-    with_fake_pi_home do |_home|
-      err = assert_raises(Hive::AgentError) { Hive::AgentProfiles::PI_PREFLIGHT.call }
-      assert_match(/auth\.json not found/, err.message)
-      assert_match(/Run `pi` interactively/, err.message)
-    end
-  end
-
-  def test_raises_when_auth_file_empty
-    with_fake_pi_home do |home|
-      File.write(auth_path_for(home), "")
-      err = assert_raises(Hive::AgentError) { Hive::AgentProfiles::PI_PREFLIGHT.call }
-      assert_match(/no provider configured/, err.message)
-    end
-  end
-
-  def test_raises_when_auth_file_is_empty_object
-    with_fake_pi_home do |home|
-      File.write(auth_path_for(home), "{}")
-      err = assert_raises(Hive::AgentError) { Hive::AgentProfiles::PI_PREFLIGHT.call }
-      assert_match(/no provider configured/, err.message)
-    end
-  end
-
-  def test_raises_when_auth_file_is_whitespace_padded_empty_object
-    with_fake_pi_home do |home|
-      File.write(auth_path_for(home), "  {  }  \n")
-      err = assert_raises(Hive::AgentError) { Hive::AgentProfiles::PI_PREFLIGHT.call }
-      assert_match(/no provider configured/, err.message)
-    end
-  end
-
-  def test_returns_nil_when_auth_file_has_real_content
-    with_fake_pi_home do |home|
-      File.write(auth_path_for(home), %({"provider":"google","token":"abc"}))
-      assert_nil Hive::AgentProfiles::PI_PREFLIGHT.call
-    end
-  end
-
-  def test_translates_home_resolution_failure_to_agent_error
-    original_resolver = Hive::SkillCheck::Pi.method(:resolve_agent_dir)
-    Hive::SkillCheck::Pi.define_singleton_method(:resolve_agent_dir) do |_environment|
-      raise ArgumentError, "could not find home directory"
-    end
-
-    err = assert_raises(Hive::AgentError) { Hive::AgentProfiles::PI_PREFLIGHT.call }
-    assert_match(/cannot resolve home directory/, err.message)
-    assert_match(/Set \$HOME/, err.message)
-  ensure
-    Hive::SkillCheck::Pi.define_singleton_method(:resolve_agent_dir, original_resolver) if original_resolver
-  end
-
-  def test_translates_unreadable_auth_file_to_agent_error
-    skip "running as root: file mode 000 still readable" if Process.uid.zero?
-
-    with_fake_pi_home do |home|
-      path = auth_path_for(home)
-      File.write(path, "{}")
-      File.chmod(0o000, path)
-      begin
-        err = assert_raises(Hive::AgentError) { Hive::AgentProfiles::PI_PREFLIGHT.call }
-        # Either "cannot read" (Errno::EACCES caught) or "no provider"
-        # (if File.read somehow succeeds in a test env). Both translate
-        # to AgentError, which is the contract.
-        assert_match(/cannot read|no provider configured/, err.message)
-      ensure
-        File.chmod(0o600, path) # restore so the tmpdir cleanup can rm
+  def test_hive_prepare_accepts_configured_pi_subscription
+    with_pi_fixture(auth: '{"provider":"configured"}') do |environment|
+      with_env(environment) do
+        result = Hive::AgentRuntime.prepare!(Hive::AgentProfiles.lookup(:pi))
+        assert_equal :pi, result.provider
+        assert_equal "99.0.0", result.version
       end
+    end
+  end
+
+  private
+
+  def with_pi_fixture(auth:)
+    with_tmp_dir do |home|
+      bin = File.join(home, "pi")
+      File.write(bin, "#!/bin/sh\nprintf '%s\\n' 'pi 99.0.0'\n")
+      FileUtils.chmod(0o755, bin)
+      auth_dir = File.join(home, ".pi", "agent")
+      FileUtils.mkdir_p(auth_dir)
+      File.write(File.join(auth_dir, "auth.json"), auth) if auth
+      yield("HOME" => home, "HIVE_PI_BIN" => bin,
+            "PI_CODING_AGENT_DIR" => nil)
     end
   end
 end

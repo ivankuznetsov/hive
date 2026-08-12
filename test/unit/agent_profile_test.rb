@@ -41,6 +41,16 @@ class AgentProfileTest < Minitest::Test
     profile = make_profile(credential_environment_keys: %w[CUSTOM_TOKEN])
     assert_equal %w[CUSTOM_TOKEN], profile.credential_environment_keys
     assert_predicate profile.credential_environment_keys, :frozen?
+    assert_equal({ "CUSTOM_TOKEN" => nil }, profile.subscription_environment)
+    assert_equal({ "CUSTOM_TOKEN" => "" },
+                 profile.subscription_environment(unset_value: ""))
+    assert_predicate profile.subscription_environment, :frozen?
+
+    session_path = make_profile(
+      credential_environment_keys: %w[CUSTOM_API_KEY CUSTOM_AUTH_PATH]
+    )
+    assert_equal({ "CUSTOM_API_KEY" => nil },
+                 session_path.subscription_environment)
 
     assert_raises(ArgumentError) do
       make_profile(credential_environment_keys: [ "not-valid" ])
@@ -534,7 +544,6 @@ class AgentProfileTest < Minitest::Test
     err = assert_raises(Hive::AgentError) { profile.check_version! }
 
     assert_match(/could not parse/, err.message)
-    assert_match(/version unavailable/, err.message)
   end
 
   def test_check_version_raises_when_binary_not_runnable
@@ -744,64 +753,18 @@ class AgentProfileTest < Minitest::Test
       end
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
 
-      assert_includes error.message, "capability check timed out"
+      assert_includes error.message, "capability check could not run"
       assert_operator elapsed, :<, 1.0
       pid = Integer(File.read(pid_path), 10)
       assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
     end
   end
 
-  def test_bounded_capture_tolerates_pipe_close_races
-    profile = make_profile
-    stdin_closed = false
-    stdin = Object.new
-    stdin.define_singleton_method(:close) { stdin_closed = true }
-    stdin.define_singleton_method(:closed?) { stdin_closed }
-    pipe = lambda do
-      Object.new.tap do |io|
-        io.define_singleton_method(:read) { "" }
-        io.define_singleton_method(:closed?) { false }
-        io.define_singleton_method(:close) { raise IOError, "already closed" }
-      end
-    end
-    waiter = Object.new
-    waiter.define_singleton_method(:alive?) { false }
-    waiter.define_singleton_method(:value) { :status }
-    replacement = lambda do |*_argv, **_options|
-      [ stdin, pipe.call, pipe.call, waiter ]
-    end
-
-    result = with_replaced_singleton_method(Open3, :popen3, replacement) do
-      profile.send(:bounded_capture3, "fake", timeout_sec: 0.1)
-    end
-
-    assert_equal [ "", "", :status ], result
-  end
-
-  def test_capture_cleanup_tolerates_concurrent_pipe_closure
-    profile = make_profile
-    unreadable = Object.new
-    unreadable.define_singleton_method(:read) { raise IOError, "closed" }
-    assert_equal "", profile.send(:capture_reader, unreadable).value
-
-    closing = Object.new
-    closing.define_singleton_method(:closed?) { false }
-    closing.define_singleton_method(:close) { raise IOError, "closed" }
-    assert_empty profile.send(:stop_capture_readers, [], closing)
-  end
-
-  def test_process_group_probes_handle_exit_and_permission_races
-    profile = make_profile
-    missing = lambda { |_signal, _pid| raise Errno::ESRCH }
-    with_replaced_singleton_method(Process, :kill, missing) do
-      assert_nil profile.send(:signal_capture_process_group, "TERM", 123)
-      refute profile.send(:capture_process_group_alive?, 123)
-    end
-
-    denied = lambda { |_signal, _pid| raise Errno::EPERM }
-    with_replaced_singleton_method(Process, :kill, denied) do
-      assert profile.send(:capture_process_group_alive?, 123)
-    end
+  def test_process_probe_implementation_is_not_duplicated_in_hive_profile
+    refute_includes Hive::AgentProfile.private_instance_methods,
+                    :bounded_capture3
+    assert_includes AgentCliRuntime::Profile.private_instance_methods,
+                    :bounded_capture3
   end
 
   def test_cli_capability_binary_disappearing_after_version_check_is_explicit
@@ -952,13 +915,13 @@ class AgentProfileTest < Minitest::Test
   end
 
   def with_version_check_timeout(seconds)
-    original = Hive::AgentProfile::VERSION_CHECK_TIMEOUT_SEC
-    Hive::AgentProfile.send(:remove_const, :VERSION_CHECK_TIMEOUT_SEC)
-    Hive::AgentProfile.const_set(:VERSION_CHECK_TIMEOUT_SEC, seconds)
+    original = AgentCliRuntime::Profile::CAPTURE_TIMEOUT_SECONDS
+    AgentCliRuntime::Profile.send(:remove_const, :CAPTURE_TIMEOUT_SECONDS)
+    AgentCliRuntime::Profile.const_set(:CAPTURE_TIMEOUT_SECONDS, seconds)
     yield
   ensure
-    Hive::AgentProfile.send(:remove_const, :VERSION_CHECK_TIMEOUT_SEC)
-    Hive::AgentProfile.const_set(:VERSION_CHECK_TIMEOUT_SEC, original)
+    AgentCliRuntime::Profile.send(:remove_const, :CAPTURE_TIMEOUT_SECONDS)
+    AgentCliRuntime::Profile.const_set(:CAPTURE_TIMEOUT_SECONDS, original)
   end
 
   def test_verify_skill_reports_not_applicable_or_delegates

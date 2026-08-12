@@ -224,17 +224,18 @@ class AgentCliRuntimeComponentTest < Minitest::Test
 
   def test_local_builtin_probe_outcomes_match_hive_boundary
     with_tmp_dir do |home|
-      FileUtils.mkdir_p(File.join(home, ".pi", "agent"))
-      File.write(
-        File.join(home, ".pi", "agent", "auth.json"),
-        '{"provider":"configured"}'
-      )
-      overrides = {
-        "HOME" => home,
-        "ANTHROPIC_API_KEY" => "configured",
-        "OPENAI_API_KEY" => "configured",
-        "XAI_API_KEY" => "configured"
-      }
+      credential_paths = %w[
+        .claude/.credentials.json
+        .codex/auth.json
+        .pi/agent/auth.json
+        .grok/auth.json
+      ]
+      credential_paths.each do |relative_path|
+        path = File.join(home, relative_path)
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, '{"provider":"configured"}')
+      end
+      overrides = { "HOME" => home }
       {
         claude: "HIVE_CLAUDE_BIN",
         codex: "HIVE_CODEX_BIN",
@@ -322,15 +323,19 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     end
   end
 
-  def test_package_only_change_does_not_enter_hive_dependency_graph
+  def test_hive_cutover_uses_the_released_dependency_and_package_profiles
     spec = Gem::Specification.load(File.expand_path("../../hive.gemspec", __dir__))
+    dependency = spec.runtime_dependencies.find do |candidate|
+      candidate.name == "agent-cli-runtime"
+    end
 
-    refute(
-      spec.runtime_dependencies.any? do |dependency|
-        dependency.name == "agent-cli-runtime"
-      end
-    )
-    refute File.read(File.expand_path("../../lib/hive.rb", __dir__))
+    refute_nil dependency
+    assert dependency.requirement.satisfied_by?(Gem::Version.new("0.1.1"))
+    assert File.read(File.expand_path("../../lib/hive.rb", __dir__))
                .include?('require "agent_cli_runtime"')
+    %i[claude codex pi grok].each do |provider|
+      assert_same AgentCliRuntime::Profiles.fetch(provider),
+                  Hive::AgentProfiles.lookup(provider).runtime_profile
+    end
   end
 end

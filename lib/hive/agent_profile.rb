@@ -1,52 +1,31 @@
-require "open3"
-require "timeout"
+require "agent_cli_runtime"
 require "hive/implementation_identity"
 require "hive/model_routing"
 
 module Hive
-  # Per-CLI invocation contract for a headless agent.
+  # Hive policy layered over an AgentCliRuntime::Profile.
   #
-  # Replaces the previous class-level singleton on Hive::Agent that hardcoded
-  # claude-only flags. Each profile is a frozen value object that captures
-  # everything Hive::Agent#build_cmd needs to spawn one specific CLI: which
-  # binary, which flags, how to detect status, what version is required.
-  #
-  # See docs/notes/headless-agent-cli-matrix.md for the source of truth on
-  # each CLI's flag mapping. Profiles ship in lib/hive/agent_profiles/.
+  # The package owns provider compatibility: executable discovery, permission
+  # flags, version/capability probes, configuration metadata, usage decoding,
+  # and native model/effort arguments. Hive keeps workflow-facing policy such
+  # as skills, model routing, status detection, and default-model resolution.
   class AgentProfile
-    PROMPT_STYLES = %i[positional headless_flag_value stdin].freeze
+    PROMPT_STYLES = AgentCliRuntime::Profile::PROMPT_STYLES
     ROUTING_ARGUMENT_PLACEMENTS = %i[global subcommand].freeze
     STRUCTURED_OUTPUT_PROTOCOLS = %i[grok_end].freeze
-    WORKSPACE_WRITE_PERMISSION_MODE = "workspace-write".freeze
-    READ_ONLY_PERMISSION_MODE = "read-only".freeze
+    WORKSPACE_WRITE_PERMISSION_MODE =
+      AgentCliRuntime::Profile::WORKSPACE_WRITE_PERMISSION_MODE
+    READ_ONLY_PERMISSION_MODE = AgentCliRuntime::Profile::READ_ONLY_PERMISSION_MODE
+    VERSION_CHECK_TIMEOUT_SEC = AgentCliRuntime::Profile::CAPTURE_TIMEOUT_SECONDS
     TOOL_SCOPE_FLAGS_UNSET = Object.new.freeze
     LEGACY_CLAUDE_TOOL_SCOPE_FLAGS = {
       allowed: "--allowedTools",
       disallowed: "--disallowedTools"
     }.freeze
     private_constant :TOOL_SCOPE_FLAGS_UNSET, :LEGACY_CLAUDE_TOOL_SCOPE_FLAGS
-    # Status-detection modes. handle_exit branches on these:
-    #
-    # - :state_file_marker -- read the marker on task.state_file (today's
-    #   claude behavior; agent writes the terminal marker itself).
-    # - :exit_code_only -- exit 0 = :ok, anything else = :error. No file
-    #   inspection. Used by CI-fix loops where the agent's role is "make the
-    #   command succeed."
-    # - :output_file_exists -- exit 0 AND expected_output file present and
-    #   non-empty = :ok. Used by reviewer/triage spawns where the artifact
-    #   the agent must produce is the success criterion.
-    STATUS_DETECTION_MODES = %i[state_file_marker exit_code_only output_file_exists].freeze
 
-    # Hard cap for `bin --version` invocation in check_version!. Hive picks
-    # 10s as a balance: well above any sane CLI's startup time, well below
-    # the per-stage timeouts the runner enforces around spawn_and_wait.
-    VERSION_CHECK_TIMEOUT_SEC = 10
-    CAPTURE_POLL_INTERVAL_SEC = 0.01
-    CAPTURE_TERM_GRACE_SEC = 0.2
-    CAPTURE_REAP_GRACE_SEC = 0.2
-    VERSION_TOKEN_PATTERN =
-      /(?<![0-9A-Za-z])v?(\d+\.\d+\.\d+(?:[.-][0-9A-Za-z]+)*)(?![0-9A-Za-z])/
-    private_constant :VERSION_TOKEN_PATTERN
+    STATUS_DETECTION_MODES =
+      %i[state_file_marker exit_code_only output_file_exists].freeze
 
     RoutingArguments = Data.define(
       :profile_name, :stage, :model, :effort, :provenance,
@@ -77,120 +56,31 @@ module Hive
       end
     end
 
-    attr_reader :prompt_style
-    attr_reader :name, :bin_default, :env_bin_override_key,
-                :headless_flag, :permission_skip_flag, :add_dir_flag,
-                :budget_flag, :output_format_flags, :version_flag,
-                :skill_syntax_format, :headless_supported, :min_version,
-                :status_detection_mode, :usage_extractor,
-                :workspace_write_flags, :read_only_flags, :cli_capabilities,
-                :initial_context_tokens, :default_model_resolver,
-                :model_argument_builder, :effort_argument_builder,
-                :launcher_identity, :policy_capabilities,
+    attr_reader :runtime_profile, :env_bin_override_key,
+                :skill_syntax_format, :headless_supported,
+                :status_detection_mode, :initial_context_tokens,
+                :default_model_resolver, :policy_capabilities,
                 :routed_effort_values, :routing_argument_placement,
                 :routed_model_argument_builder, :routed_effort_argument_builder,
-                :tool_scope_flags,
-                :structured_output_protocol, :credential_environment_keys,
-                :configuration_environment_key, :default_configuration_directory
+                :structured_output_protocol, :cli_capabilities
 
-    # Public API — do not break.
-    #
-    # `Hive::AgentProfiles.register(name, AgentProfile.new(...))` is the
-    # documented extension point for projects that ship their own headless
-    # agent CLI. The kwargs of `AgentProfile.new` are therefore a public
-    # contract: a custom profile registered today MUST keep working when
-    # hive ships a new field.
-    #
-    # Required kwargs (passing one of these is the cost of registering at
-    # all — every profile genuinely needs them):
-    #   name:                 Symbol identifier (e.g. :claude, :codex, :pi, :grok)
-    #   bin_default:          String path to the binary (env override key
-    #                         supplied via env_bin_override_key:)
-    #   headless_flag:        flag/word that selects headless mode
-    #   version_flag:         flag for `<bin> --version`-style probe
-    #   skill_syntax_format:  Kernel#format spec used by reviewers to
-    #                         render the CE skill invocation
-    #
-    # Optional kwargs (every one MUST stay optional — adding a 7th
-    # required kwarg silently breaks every custom registration):
-    #   env_bin_override_key:  default nil (no env var override)
-    #   permission_skip_flag:  default nil (no permission gate)
-    #   add_dir_flag:          default nil (no --add-dir support)
-    #   budget_flag:           default nil (no native budget cap)
-    #   output_format_flags:   default [] (none required)
-    #   headless_supported:    default true
-    #   min_version:           default nil (no version gate)
-    #   preflight:             default nil (no extra pre-spawn check)
-    #   usage_extractor:       default nil (no token-usage extraction)
-    #   workspace_write_flags: default nil (profile cannot guarantee a
-    #                          root-confined writable workspace)
-    #   read_only_flags:       default nil (profile cannot guarantee a
-    #                          read-only workspace)
-    #   cli_capabilities:      default {}. Maps a named, opt-in capability to
-    #                          the CLI flags that implement it. Capability
-    #                          users must call require_cli_capability!, which
-    #                          verifies the installed binary advertises every
-    #                          flag before returning them.
-    #   initial_context_tokens: default 0. Conservative admission reserve for
-    #                           provider-owned context sent before the first
-    #                           streamed usage event.
-    #   tool_scope_flags:      default {} except for a profile named :claude,
-    #                          where omission preserves the legacy
-    #                          --allowedTools/--disallowedTools mapping. Pass
-    #                          an explicit {} to opt out. Maps
-    #                          :allowed/:disallowed tool scopes to the
-    #                          provider's corresponding flags.
-    #   raw_cli_arguments_supported: default false. Explicit opt-in for
-    #                          legacy provider-native argv passthrough.
-    #   structured_output_protocol: default nil. Explicitly opts a profile
-    #                          into a provider stream shape that can replace
-    #                          ordinary assistant text. Today only
-    #                          :grok_end is supported.
-    #   credential_environment_keys: default []. Agent-compatibility inventory
-    #                          of ambient credential/token variables that an
-    #                          orchestrator must remove for a named isolated
-    #                          subscription/session binding.
-    #   configuration_environment_key: default nil. Environment variable that
-    #                          relocates the CLI-owned subscription/session
-    #                          configuration directory.
-    #   default_configuration_directory: default nil. Home-relative fallback
-    #                          used when the relocation variable is absent.
-    #   prompt_style:          default :stdin for a profile named :codex,
-    #                          otherwise :positional (backward compatible
-    #                          with pre-profile-style custom registrations)
-    #   status_detection_mode: default :output_file_exists (the most
-    #                          common mode across shipped profiles —
-    #                          codex and pi both use it; only claude
-    #                          deviates with :state_file_marker. A custom
-    #                          profile that doesn't override this still
-    #                          gets a sane "did the agent write the
-    #                          expected output file?" success criterion)
-    #
-    # Policy: future kwargs MUST have defaults to preserve backward
-    # compat for custom profiles. Bumping a default to a different value
-    # is a soft break (existing registrations keep working but get
-    # different behavior); reserve bumps for genuine bug fixes and call
-    # them out in the changelog.
-    def initialize(name:, bin_default:, headless_flag:, version_flag:,
-                   skill_syntax_format:,
-                   env_bin_override_key: nil, permission_skip_flag: nil,
-                   add_dir_flag: nil, budget_flag: nil,
-                   output_format_flags: [],
+    # Existing custom profile registrations remain source compatible. Shipped
+    # profiles pass runtime_profile: so their compatibility definition comes
+    # directly from agent-cli-runtime rather than being repeated in Hive.
+    def initialize(name: nil, bin_default: nil, headless_flag: nil,
+                   version_flag: nil, skill_syntax_format:,
+                   runtime_profile: nil, env_bin_override_key: nil,
+                   auth_configuration_required: false,
+                   permission_skip_flag: nil, add_dir_flag: nil,
+                   budget_flag: nil, output_format_flags: [],
                    headless_supported: true, min_version: nil,
                    status_detection_mode: :output_file_exists,
-                   preflight: nil,
-                   usage_extractor: nil,
-                   skill_verifier: nil,
-                   workspace_write_flags: nil,
-                   read_only_flags: nil,
-                   cli_capabilities: {},
-                   initial_context_tokens: 0,
-                   prompt_style: nil,
-                   default_model_resolver: nil,
-                   model_argument_builder: nil,
-                   effort_argument_builder: nil,
-                   launcher_identity: nil,
-                   policy_capabilities: [],
+                   preflight: nil, usage_extractor: nil, skill_verifier: nil,
+                   workspace_write_flags: nil, read_only_flags: nil,
+                   cli_capabilities: {}, initial_context_tokens: 0,
+                   prompt_style: nil, default_model_resolver: nil,
+                   model_argument_builder: nil, effort_argument_builder: nil,
+                   launcher_identity: nil, policy_capabilities: [],
                    routed_effort_values: nil,
                    routing_argument_placement: :subcommand,
                    routed_model_argument_builder: nil,
@@ -201,122 +91,133 @@ module Hive
                    credential_environment_keys: [],
                    configuration_environment_key: nil,
                    default_configuration_directory: nil)
-      prompt_style ||= name.to_sym == :codex ? :stdin : :positional
-      unless PROMPT_STYLES.include?(prompt_style)
+      effective_name = runtime_profile&.name || name
+      raise ArgumentError, "missing keyword: :name" if effective_name.nil?
+
+      prompt_style ||= effective_name.to_sym == :codex ? :stdin : :positional
+      validate_hive_policy!(
+        prompt_style:, status_detection_mode:, initial_context_tokens:,
+        routing_argument_placement:, structured_output_protocol:
+      )
+
+      scope_flags =
+        if tool_scope_flags.equal?(TOOL_SCOPE_FLAGS_UNSET)
+          effective_name.to_sym == :claude ? LEGACY_CLAUDE_TOOL_SCOPE_FLAGS : {}
+        else
+          tool_scope_flags
+        end
+      normalized_cli_capabilities = normalize_cli_capabilities(cli_capabilities)
+
+      @runtime_profile = runtime_profile || AgentCliRuntime::Profile.new(
+        name: effective_name,
+        bin_default: required_runtime_value(bin_default, :bin_default),
+        env_bin_override_keys: Array(env_bin_override_key).compact,
+        headless_flag: required_runtime_value(headless_flag, :headless_flag),
+        permission_skip_flag: permission_skip_flag,
+        workspace_write_flags: Array(workspace_write_flags),
+        read_only_flags: Array(read_only_flags),
+        add_dir_flag: add_dir_flag,
+        tool_scope_flags: scope_flags,
+        budget_flag: budget_flag,
+        output_format_flags: output_format_flags,
+        version_flag: required_runtime_value(version_flag, :version_flag),
+        min_version: min_version,
+        prompt_style: prompt_style,
+        model_argument_builder: model_argument_builder,
+        effort_argument_builder: effort_argument_builder,
+        launcher_identity: launcher_identity || "AgentProfile/v1:#{effective_name}",
+        usage_extractor: usage_extractor,
+        cli_capabilities: normalized_cli_capabilities,
+        raw_cli_arguments_supported: raw_cli_arguments_supported,
+        credential_environment_keys: credential_environment_keys,
+        configuration_environment_key: configuration_environment_key,
+        default_configuration_directory: default_configuration_directory
+      )
+      unless @runtime_profile.is_a?(AgentCliRuntime::Profile)
         raise ArgumentError,
-              "unknown prompt_style: #{prompt_style.inspect}; valid: #{PROMPT_STYLES.inspect}"
+              "runtime_profile must be an AgentCliRuntime::Profile"
       end
 
-      unless STATUS_DETECTION_MODES.include?(status_detection_mode)
-        raise ArgumentError,
-              "unknown status_detection_mode: #{status_detection_mode.inspect}; " \
-              "valid: #{STATUS_DETECTION_MODES.inspect}"
-      end
-
-      unless initial_context_tokens.is_a?(Integer) && initial_context_tokens >= 0
-        raise ArgumentError, "initial_context_tokens must be a non-negative Integer"
-      end
-      unless ROUTING_ARGUMENT_PLACEMENTS.include?(routing_argument_placement)
-        raise ArgumentError,
-              "unknown routing_argument_placement: #{routing_argument_placement.inspect}; " \
-              "valid: #{ROUTING_ARGUMENT_PLACEMENTS.inspect}"
-      end
-      if structured_output_protocol &&
-         !STRUCTURED_OUTPUT_PROTOCOLS.include?(structured_output_protocol.to_sym)
-        raise ArgumentError,
-              "unknown structured_output_protocol: #{structured_output_protocol.inspect}; " \
-              "valid: #{STRUCTURED_OUTPUT_PROTOCOLS.inspect}"
-      end
-
-      @name = name
-      @bin_default = bin_default
-      @env_bin_override_key = env_bin_override_key
-      @headless_flag = headless_flag
-      @permission_skip_flag = permission_skip_flag
-      @add_dir_flag = add_dir_flag
-      @budget_flag = budget_flag
-      @output_format_flags = Array(output_format_flags).freeze
-      @version_flag = version_flag
+      @env_bin_override_key =
+        env_bin_override_key || @runtime_profile.env_bin_override_keys.find do |key|
+          key.start_with?("HIVE_")
+        end
+      @auth_configuration_required = auth_configuration_required == true
       @skill_syntax_format = skill_syntax_format
-      @headless_supported = headless_supported
-      @min_version = min_version
+      @headless_supported = headless_supported == true
       @status_detection_mode = status_detection_mode
       @preflight = preflight
-      @usage_extractor = usage_extractor || ->(_event) { nil }
       @skill_verifier = skill_verifier
-      @workspace_write_flags = Array(workspace_write_flags).freeze
-      @read_only_flags = Array(read_only_flags).freeze
-      @cli_capabilities = normalize_cli_capabilities(cli_capabilities)
+      @cli_capabilities = normalized_cli_capabilities
       @initial_context_tokens = initial_context_tokens
-      @prompt_style = prompt_style
       @default_model_resolver = default_model_resolver
-      @model_argument_builder = model_argument_builder
-      @effort_argument_builder = effort_argument_builder
-      @launcher_identity = (launcher_identity || "AgentProfile/v1:#{name}").to_s.freeze
       @policy_capabilities = Array(policy_capabilities).map(&:to_sym).uniq.freeze
       @routed_effort_values =
-        routed_effort_values && Array(routed_effort_values).map { |value| value.to_s.freeze }.uniq.freeze
+        routed_effort_values && Array(routed_effort_values)
+          .map { |value| value.to_s.freeze }.uniq.freeze
       @routing_argument_placement = routing_argument_placement
-      @routed_model_argument_builder = routed_model_argument_builder || @model_argument_builder
-      @routed_effort_argument_builder = routed_effort_argument_builder || @effort_argument_builder
-      @tool_scope_flags = normalize_tool_scope_flags(
-        default_tool_scope_flags(name, tool_scope_flags)
-      )
-      @raw_cli_arguments_supported = raw_cli_arguments_supported == true
+      @routed_model_argument_builder =
+        routed_model_argument_builder || @runtime_profile.model_argument_builder
+      @routed_effort_argument_builder =
+        routed_effort_argument_builder || @runtime_profile.effort_argument_builder
       @structured_output_protocol = structured_output_protocol&.to_sym
-      @credential_environment_keys = normalize_credential_environment_keys(
-        credential_environment_keys
-      )
-      @configuration_environment_key = normalize_configuration_environment_key(
-        configuration_environment_key
-      )
-      @default_configuration_directory = normalize_default_configuration_directory(
-        default_configuration_directory
-      )
-
       freeze
     end
 
-    def configuration_directory(home: nil, environment: ENV)
-      if @configuration_environment_key
-        configured = environment[@configuration_environment_key].to_s
-        unless configured.empty?
-          unless File.absolute_path?(configured)
-            raise ArgumentError,
-                  "#{@configuration_environment_key} must be an absolute directory"
-          end
-          return File.expand_path(configured)
-        end
-      end
-      return nil unless @default_configuration_directory
-
-      base = home || environment["HOME"]
-      base = Dir.home if base.to_s.empty?
-      File.expand_path(@default_configuration_directory, base)
+    %i[
+      name bin_default headless_flag permission_skip_flag workspace_write_flags
+      read_only_flags add_dir_flag tool_scope_flags budget_flag
+      output_format_flags version_flag min_version prompt_style
+      model_argument_builder effort_argument_builder launcher_identity
+      credential_environment_keys configuration_environment_key
+      default_configuration_directory
+    ].each do |method_name|
+      define_method(method_name) { @runtime_profile.public_send(method_name) }
     end
 
-    # Verifies whether `invocation` (e.g. "/plan",
-    # "/ce-plan" or legacy "/compound-engineering:ce-plan") resolves to a real on-disk
-    # skill/command for this agent. Profiles supply a callable via the
-    # `skill_verifier:` constructor kwarg (typically one of the
-    # `Hive::SkillCheck::*` modules). When no verifier is supplied the
-    # default is `[:not_applicable, ...]` — the honest answer for an
-    # agent with no slash-command-resolution model.
-    #
-    # `project_root` lets profiles probe project-level overrides
-    # (`<repo>/.claude/skills/...` etc.); it may be nil for global
-    # checks.
+    def bin
+      @runtime_profile.bin(env: ENV)
+    end
+
+    def permission_flags(permission_mode = nil)
+      @runtime_profile.permission_flags(permission_mode)
+    end
+
+    def workspace_write_supported?
+      !workspace_write_flags.empty?
+    end
+
+    def read_only_supported?
+      !read_only_flags.empty?
+    end
+
+    def raw_cli_arguments_supported?
+      @runtime_profile.raw_cli_arguments_supported?
+    end
+
+    def auth_configuration_required?
+      @auth_configuration_required
+    end
+
+    # Hive launches CLI subscriptions/sessions only. The compatibility
+    # package inventories every ambient provider credential name so Hive can
+    # remove it without keeping a second provider-specific list.
+    def subscription_environment(unset_value: nil)
+      credential_environment_keys.reject { |key| key.end_with?("_AUTH_PATH") }.to_h do |key|
+        [ key, unset_value ]
+      end.freeze
+    end
+
+    def configuration_directory(home: nil, environment: ENV)
+      @runtime_profile.configuration_directory(home:, env: environment)
+    end
+
     def verify_skill(invocation, project_root: nil)
       return [ :not_applicable, "no skill verifier configured for this profile" ] unless @skill_verifier
 
       @skill_verifier.call(invocation, project_root: project_root)
     end
 
-    # Render a configured skill name for this profile. Stage configs
-    # historically store full Claude/Codex slash invocations (`/plan`,
-    # `/plugin:name`), while reviewer configs store bare names. Profiles
-    # with a non-default syntax, such as pi's `/skill:<name>`, need the
-    # bare skill name in both cases.
     def format_skill_invocation(skill)
       raw = normalize_legacy_compound_engineering_invocation(skill.to_s)
       if raw.start_with?("/")
@@ -324,8 +225,9 @@ module Hive
 
         raw = raw.delete_prefix("/")
       end
-      raw = raw.split(":", 2).last if @skill_syntax_format != "/%{skill}" && raw.include?(":")
-
+      if @skill_syntax_format != "/%{skill}" && raw.include?(":")
+        raw = raw.split(":", 2).last
+      end
       format(@skill_syntax_format, skill: raw)
     end
 
@@ -333,109 +235,58 @@ module Hive
       raw.sub(%r{\A/?compound-engineering:(ce-[A-Za-z0-9-]+)\z}, '\1')
     end
 
-    # Resolved binary path: env override (if env_bin_override_key set and
-    # the env var is non-empty) else bin_default.
-    def bin
-      key = @env_bin_override_key
-      return @bin_default unless key
-
-      override = ENV[key]
-      override && !override.empty? ? override : @bin_default
-    end
-
-    # Permission CLI flags for a spawn, shared by the headless `-p` path
-    # (Agent#build_cmd) and the interactive tmux path
-    # (ClaudeLauncher#wrapper_command) so the two never diverge. For the
-    # claude profile, `bypassPermissions` resolves to the legacy
-    # `--dangerously-skip-permissions` flag — identical to a headless
-    # spawn — while any other mode uses `--permission-mode <mode>`. A nil
-    # mode (or any non-claude profile) falls back to the profile's plain
-    # permission_skip_flag, preserving pre-permission_mode behavior.
-    def permission_flags(permission_mode = nil)
-      if permission_mode == WORKSPACE_WRITE_PERMISSION_MODE
-        unless workspace_write_supported?
-          raise ArgumentError, "agent profile #{@name.inspect} cannot enforce workspace-write sandboxing"
-        end
-
-        return @workspace_write_flags.dup
-      end
-      if permission_mode == READ_ONLY_PERMISSION_MODE
-        unless read_only_supported?
-          raise ArgumentError, "agent profile #{@name.inspect} cannot enforce read-only sandboxing"
-        end
-
-        return @read_only_flags.dup
-      end
-      return [] unless @permission_skip_flag
-      return [ @permission_skip_flag ] unless @name == :claude && permission_mode
-      return [ @permission_skip_flag ] if permission_mode == "bypassPermissions"
-
-      [ "--permission-mode", permission_mode ]
-    end
-
-    def workspace_write_supported?
-      !@workspace_write_flags.empty?
-    end
-
-    def read_only_supported?
-      !@read_only_flags.empty?
-    end
-
-    def raw_cli_arguments_supported?
-      @raw_cli_arguments_supported
-    end
-
     def concrete_default_model(cfg: nil, project_root: nil, home: nil)
       unless @default_model_resolver
         raise Hive::ImplementationIdentity::ResolutionError,
-              "agent profile #{@name.inspect} cannot resolve a concrete default model"
+              "agent profile #{name.inspect} cannot resolve a concrete default model"
       end
 
-      value = @default_model_resolver.call(cfg: cfg, project_root: project_root, home: home)
+      value = @default_model_resolver.call(cfg:, project_root:, home:)
       Hive::ImplementationIdentity.normalize_model(value, concrete: true)
     rescue Hive::ImplementationIdentity::Error
       raise
     rescue StandardError => e
       raise Hive::ImplementationIdentity::ResolutionError,
-            "agent profile #{@name.inspect} default-model resolution failed: #{e.message}"
+            "agent profile #{name.inspect} default-model resolution failed: #{e.message}"
     end
 
+    # Keep Hive's durable identity value and its stricter model syntax while
+    # delegating native argument rendering to the package profile.
     def identity_arguments(model:, effort:, pin_model: true)
-      normalized_model = Hive::ImplementationIdentity.normalize_model(model, concrete: true)
+      normalized_model =
+        Hive::ImplementationIdentity.normalize_model(model, concrete: true)
       requested_effort = Hive::ImplementationIdentity.normalize_effort(effort)
-      native_arguments = []
-      if pin_model
-        unless @model_argument_builder
-          raise Hive::ImplementationIdentity::ResolutionError,
-                "agent profile #{@name.inspect} cannot pin model #{normalized_model.inspect}"
-        end
-        native_arguments.concat(@model_argument_builder.call(normalized_model))
-      end
-
-      effort_supported = !@effort_argument_builder.nil?
-      effective_effort = nil
-      if requested_effort && effort_supported
-        native_arguments.concat(@effort_argument_builder.call(requested_effort))
-        effective_effort = requested_effort
-      end
+      package_identity = @runtime_profile.identity_arguments(
+        model: normalized_model,
+        effort: effort_argument_builder ? requested_effort : nil,
+        pin_model: pin_model
+      )
+      native_arguments = Hive::ImplementationIdentity.validate_native_arguments(
+        package_identity.native_arguments
+      )
 
       Hive::ImplementationIdentity::LaunchArguments.new(
         model: normalized_model,
         requested_effort: requested_effort,
-        effective_effort: effective_effort,
-        effort_supported: effort_supported,
-        model_pinned: pin_model,
-        native_arguments: Hive::ImplementationIdentity.validate_native_arguments(native_arguments)
+        effective_effort: package_identity.effective_effort,
+        effort_supported: package_identity.effort_supported,
+        model_pinned: package_identity.model_pinned,
+        native_arguments: native_arguments
       )
+    rescue AgentCliRuntime::UnsupportedCapability => e
+      message =
+        if e.message.include?("cannot pin a model")
+          "agent profile #{name.inspect} cannot pin model #{normalized_model.inspect}"
+        else
+          e.message
+        end
+      raise Hive::ImplementationIdentity::ResolutionError, message, cause: e
     end
 
-    # Validate one exact/coarse control produced by ModelRouting's reachable
-    # call projection. Current/legacy fallbacks deliberately do not use this
-    # strict path: unsupported effort remains observable-but-unrendered for
-    # legacy implementation identities.
     def validate_routed_control!(control, source: nil)
       unless control.is_a?(Hive::ModelRouting::EffectiveControl)
-        raise ArgumentError, "routed control must be a Hive::ModelRouting::EffectiveControl"
+        raise ArgumentError,
+              "routed control must be a Hive::ModelRouting::EffectiveControl"
       end
 
       value = normalize_routed_value(control.value, control_path(control, source))
@@ -445,16 +296,16 @@ module Hive
 
         raise Hive::ConfigError,
               "#{control_path(control, source)} requests model selection, but agent profile " \
-              "#{@name.inspect} does not support model selection"
+              "#{name.inspect} does not support model selection"
       when :effort
         unless @routed_effort_argument_builder
           raise Hive::ConfigError,
                 "#{control_path(control, source)} requests reasoning effort, but agent profile " \
-                "#{@name.inspect} does not support reasoning effort"
+                "#{name.inspect} does not support reasoning effort"
         end
         if @routed_effort_values && !@routed_effort_values.include?(value)
           raise Hive::ConfigError,
-                "#{control_path(control, source)} for agent profile #{@name.inspect} must be one of " \
+                "#{control_path(control, source)} for agent profile #{name.inspect} must be one of " \
                 "#{@routed_effort_values.inspect}; got #{control.value.inspect}"
         end
         value
@@ -463,21 +314,16 @@ module Hive
       end
     end
 
-    # Atomically validate and render an active ModelRouting resolution. The
-    # returned typed value keeps provider-native global arguments separate
-    # from subcommand arguments so Codex controls can precede `exec`/`review`.
-    # Inactive/unscoped resolutions return nil and therefore cannot reorder
-    # legacy argv.
     def routing_arguments(resolution, source: nil)
       unless resolution.is_a?(Hive::ModelRouting::Resolution)
-        raise ArgumentError, "routing resolution must be a Hive::ModelRouting::Resolution"
+        raise ArgumentError,
+              "routing resolution must be a Hive::ModelRouting::Resolution"
       end
       return nil unless resolution.active?
-      if resolution.provider &&
-         resolution.provider.to_s != @name.to_s
+      if resolution.provider && resolution.provider.to_s != name.to_s
         raise Hive::ConfigError,
               "model routing selected provider #{resolution.provider.inspect}, but agent profile " \
-              "#{@name.inspect} was chosen; models may not change providers"
+              "#{name.inspect} was chosen; models may not change providers"
       end
 
       Hive::ModelRouting.fetch(resolution.stage)
@@ -487,14 +333,10 @@ module Hive
 
         validate_routed_control!(
           Hive::ModelRouting::EffectiveControl.new(
-            stage: resolution.stage,
-            profile: @name,
-            provider: resolution.provider,
-            field: field,
-            value: resolution.public_send(field),
-            provenance: provenance
+            stage: resolution.stage, profile: name, provider: resolution.provider,
+            field: field, value: resolution.public_send(field), provenance: provenance
           ),
-          source: source
+          source:
         )
       end
 
@@ -505,401 +347,224 @@ module Hive
       append_routing_argument(
         native_arguments, @routed_effort_argument_builder, resolution.effort, "effort"
       )
-      native_arguments = Hive::ImplementationIdentity.validate_native_arguments(native_arguments)
-      global_arguments = @routing_argument_placement == :global ? native_arguments : []
-      subcommand_arguments = @routing_argument_placement == :subcommand ? native_arguments : []
+      native_arguments =
+        Hive::ImplementationIdentity.validate_native_arguments(native_arguments)
+      global_arguments =
+        @routing_argument_placement == :global ? native_arguments : []
+      subcommand_arguments =
+        @routing_argument_placement == :subcommand ? native_arguments : []
 
       RoutingArguments.new(
-        profile_name: @name,
-        stage: resolution.stage,
-        model: resolution.model,
-        effort: resolution.effort,
-        provenance: resolution.provenance,
-        global_arguments: global_arguments,
-        subcommand_arguments: subcommand_arguments
+        profile_name: name, stage: resolution.stage, model: resolution.model,
+        effort: resolution.effort, provenance: resolution.provenance,
+        global_arguments:, subcommand_arguments:
       )
     end
 
     def validate_routing_arguments!(arguments)
       unless arguments.is_a?(RoutingArguments)
-        raise ArgumentError, "routing_arguments must be an AgentProfile::RoutingArguments"
-      end
-      unless arguments.profile_name == @name.to_sym
         raise ArgumentError,
-              "routing arguments for profile #{arguments.profile_name.inspect} cannot be used with #{@name.inspect}"
+              "routing_arguments must be an AgentProfile::RoutingArguments"
+      end
+      unless arguments.profile_name == name.to_sym
+        raise ArgumentError,
+              "routing arguments for profile #{arguments.profile_name.inspect} " \
+              "cannot be used with #{name.inspect}"
       end
 
       Hive::ModelRouting.fetch(arguments.stage)
       expected = routing_arguments(
         Hive::ModelRouting::Resolution.new(
-          stage: arguments.stage,
-          provider: @name,
-          model: arguments.model,
-          effort: arguments.effort,
-          provenance: arguments.provenance
+          stage: arguments.stage, provider: name, model: arguments.model,
+          effort: arguments.effort, provenance: arguments.provenance
         )
       )
       unless expected == arguments
         raise ArgumentError,
-              "routing arguments do not match agent profile #{@name.inspect} native rendering"
+              "routing arguments do not match agent profile #{name.inspect} native rendering"
       end
       arguments
     end
 
-    # Return the argv for an explicitly declared CLI capability, but only
-    # after the installed binary proves it supports the flags. This keeps a
-    # caller from silently weakening a security boundary when an operator
-    # overrides the profile binary or pins an older version.
     def require_cli_capability!(capability)
-      name = capability.to_sym
-      flags = @cli_capabilities[name]
+      capability_name = capability.to_sym
+      flags = @cli_capabilities[capability_name]
       unless flags
         raise Hive::AgentError,
-              "agent profile #{@name.inspect} does not declare CLI capability #{name.inspect}"
+              "agent profile #{name.inspect} does not declare CLI capability " \
+              "#{capability_name.inspect}"
       end
 
-      version = check_version!
-      key = [ bin, version, name, flags ]
-      unless self.class.send(:capability_cache)[key]
-        help = capture_help!(flags)
-        option_flags = flags.select { |argument| argument.start_with?("-") }
-        missing = option_flags.reject { |flag| cli_flag_advertised?(help, flag) }
-        unless missing.empty?
-          raise Hive::AgentError,
-                "#{@name} #{version} does not advertise required #{name} capability " \
-                "(missing #{missing.join(', ')})"
-        end
-        self.class.send(:capability_cache)[key] = true
-      end
-
-      flags.dup
+      check_version!
+      profile = capability_runtime_profile
+      AgentCliRuntime.require_capability!(profile, capability_name).arguments
+    rescue Hive::AgentError
+      raise
+    rescue AgentCliRuntime::Error => e
+      raise Hive::AgentError, e.message, cause: e
     end
 
-    # Project-config override keys that may appear under
-    # `agents.<name>.<key>` in <hive-state>/config.yml. Each maps to an
-    # AgentProfile constructor kwarg. Unknown keys raise so a typo in
-    # config is surfaced loudly instead of silently ignored.
     OVERRIDE_KEYS = {
       "bin" => :bin_default,
       "env_override" => :env_bin_override_key,
       "min_version" => :min_version
     }.freeze
 
-    # Return a new frozen profile with the given override keys applied.
-    # `overrides_hash` is a sub-hash of `agents.<name>` from the merged
-    # project config; nil/empty hashes return self unchanged.
-    #
-    # Validates every override key against OVERRIDE_KEYS; an unknown
-    # key raises Hive::ConfigError so a typo (`min_versn:`) fails the
-    # spawn at lookup time rather than silently keeping the old value.
     def with_overrides(overrides_hash)
       return self if overrides_hash.nil? || overrides_hash.empty?
       unless overrides_hash.is_a?(Hash)
         raise Hive::ConfigError,
-              "agents.#{@name} override must be a Hash; got #{overrides_hash.class}"
+              "agents.#{name} override must be a Hash; got #{overrides_hash.class}"
       end
 
-      kwargs = construction_kwargs
+      runtime_overrides = {}
       overrides_hash.each do |key, value|
         kwarg = OVERRIDE_KEYS[key.to_s]
         unless kwarg
           raise Hive::ConfigError,
-                "agents.#{@name}.#{key} is not a recognized override key " \
+                "agents.#{name}.#{key} is not a recognized override key " \
                 "(known: #{OVERRIDE_KEYS.keys.inspect})"
         end
-        kwargs[kwarg] = value
+        runtime_overrides[kwarg] = value
       end
-      self.class.new(**kwargs)
+
+      overridden_runtime = RuntimeProfileOverride.new(
+        @runtime_profile,
+        bin_default: runtime_overrides.fetch(:bin_default, bin_default),
+        env_bin_override_key:
+          runtime_overrides.fetch(:env_bin_override_key, @env_bin_override_key),
+        min_version: runtime_overrides.fetch(:min_version, min_version)
+      )
+      self.class.new(
+        **construction_kwargs.merge(
+          runtime_profile: overridden_runtime,
+          env_bin_override_key:
+            runtime_overrides.fetch(:env_bin_override_key, @env_bin_override_key)
+        )
+      )
     end
 
-    # Verify the installed binary's version meets min_version.
-    #
-    # Cached per (bin, min_version) pair so repeated spawns in one process
-    # don't re-fork the binary. Returns the parsed version string on success.
-    # Raises Hive::AgentError on missing binary, parse failure, or version
-    # below min_version. Profiles without min_version skip the comparison.
     def check_version!
-      cache_key = [ bin, @min_version ]
-      cached = (self.class.send(:version_cache))[cache_key]
+      cache_key = [ bin, min_version ]
+      cached = self.class.send(:version_cache)[cache_key]
       return cached if cached
 
       unless @headless_supported
         raise Hive::AgentError,
-              "agent profile #{@name.inspect} is not headless-supported; " \
+              "agent profile #{name.inspect} is not headless-supported; " \
               "cannot run from a non-interactive context"
       end
 
-      # Hard timeout protects against wrapper binaries that prompt for
-      # credentials or hang on first run. Without this, spawn_agent's
-      # preflight could block indefinitely outside the per-stage timeout.
-      begin
-        out, _err, status = bounded_capture3(
-          bin, @version_flag, timeout_sec: VERSION_CHECK_TIMEOUT_SEC
-        )
-      rescue Errno::ENOENT, Errno::EACCES => e
-        raise Hive::AgentError, "#{@name} binary not runnable: #{bin} (#{e.class.name.split('::').last}: #{e.message})"
-      rescue Timeout::Error
-        raise Hive::AgentError,
-              "#{@name} version check timed out after #{VERSION_CHECK_TIMEOUT_SEC}s: #{bin} #{@version_flag}"
-      end
-      raise Hive::AgentError, "#{@name} binary not runnable: #{bin}" unless status.success?
-
-      versions = out.scan(VERSION_TOKEN_PATTERN).flatten.uniq
-      if versions.empty?
-        raise Hive::AgentError,
-              "could not parse #{@name} #{@version_flag} output: #{out.inspect}"
-      end
-      if versions.length > 1
-        raise Hive::AgentError,
-              "ambiguous #{@name} #{@version_flag} output: #{versions.join(', ')}"
-      end
-      version = versions.fetch(0)
-
-      if @min_version
-        cmp = version_tuple(version) <=> version_tuple(@min_version)
-        if cmp.nil? || cmp.negative?
-          raise Hive::AgentError,
-                "#{@name} #{version} below minimum #{@min_version}"
-        end
-      end
-
+      version = @runtime_profile.check_version!(env: ENV)
       self.class.send(:version_cache)[cache_key] = version
+    rescue AgentCliRuntime::Error => e
+      raise Hive::AgentError, e.message, cause: e
     end
 
-    # Pre-flight hook for profiles that need extra checks beyond version
-    # (e.g., pi requires the user to be logged in to a provider). Profiles
-    # supply a Proc at construction via the `preflight:` kwarg; if absent
-    # this is a no-op. The Proc receives no arguments and may raise
-    # Hive::AgentError to abort the spawn before the binary runs.
     def preflight!
       @preflight&.call
       nil
     end
 
     def extract_usage_event(event)
-      @usage_extractor.call(event)
+      @runtime_profile.extract_usage_event(event)
     rescue StandardError
       nil
     end
 
+    class << self
+      def reset_version_cache!
+        @version_cache = nil
+      end
+
+      private
+
+      def version_cache
+        @version_cache ||= {}
+      end
+    end
+
     private
+
+    def required_runtime_value(value, keyword)
+      return value unless value.nil?
+
+      raise ArgumentError, "missing keyword: :#{keyword}"
+    end
+
+    def validate_hive_policy!(prompt_style:, status_detection_mode:,
+                              initial_context_tokens:,
+                              routing_argument_placement:,
+                              structured_output_protocol:)
+      unless PROMPT_STYLES.include?(prompt_style)
+        raise ArgumentError,
+              "unknown prompt_style: #{prompt_style.inspect}; valid: #{PROMPT_STYLES.inspect}"
+      end
+      unless STATUS_DETECTION_MODES.include?(status_detection_mode)
+        raise ArgumentError,
+              "unknown status_detection_mode: #{status_detection_mode.inspect}; " \
+              "valid: #{STATUS_DETECTION_MODES.inspect}"
+      end
+      unless initial_context_tokens.is_a?(Integer) && initial_context_tokens >= 0
+        raise ArgumentError,
+              "initial_context_tokens must be a non-negative Integer"
+      end
+      unless ROUTING_ARGUMENT_PLACEMENTS.include?(routing_argument_placement)
+        raise ArgumentError,
+              "unknown routing_argument_placement: #{routing_argument_placement.inspect}; " \
+              "valid: #{ROUTING_ARGUMENT_PLACEMENTS.inspect}"
+      end
+      return unless structured_output_protocol &&
+                    !STRUCTURED_OUTPUT_PROTOCOLS.include?(structured_output_protocol.to_sym)
+
+      raise ArgumentError,
+            "unknown structured_output_protocol: #{structured_output_protocol.inspect}; " \
+            "valid: #{STRUCTURED_OUTPUT_PROTOCOLS.inspect}"
+    end
 
     def normalize_cli_capabilities(capabilities)
       unless capabilities.is_a?(Hash)
-        raise ArgumentError, "cli_capabilities must be a Hash; got #{capabilities.class}"
+        raise ArgumentError,
+              "cli_capabilities must be a Hash; got #{capabilities.class}"
       end
 
-      capabilities.each_with_object({}) do |(name, raw_flags), normalized|
+      capabilities.each_with_object({}) do |(capability_name, raw_flags), normalized|
         flags = Array(raw_flags).map(&:to_s).reject(&:empty?)
         if flags.empty?
-          raise ArgumentError, "CLI capability #{name.inspect} must declare at least one flag"
+          raise ArgumentError,
+                "CLI capability #{capability_name.inspect} must declare at least one flag"
         end
-        normalized[name.to_sym] = flags.freeze
+        normalized[capability_name.to_sym] = flags.freeze
       end.freeze
     end
 
-    def normalize_credential_environment_keys(values)
-      keys = Array(values).map(&:to_s)
-      invalid = keys.find { |key| !key.match?(/\A[A-Z][A-Z0-9_]*\z/) }
-      raise ArgumentError, "invalid credential environment key #{invalid.inspect}" if invalid
-      raise ArgumentError, "credential environment keys must be unique" if keys.uniq.length != keys.length
-
-      keys.map(&:freeze).freeze
-    end
-
-    def normalize_configuration_environment_key(value)
-      return nil if value.nil?
-
-      key = value.to_s
-      unless key.match?(/\A[A-Z][A-Z0-9_]*\z/)
-        raise ArgumentError, "invalid configuration environment key #{key.inspect}"
-      end
-      key.freeze
-    end
-
-    def normalize_default_configuration_directory(value)
-      return nil if value.nil?
-
-      path = value.to_s
-      if path.empty? || File.absolute_path?(path)
-        raise ArgumentError, "default configuration directory must be relative"
-      end
-      path.freeze
-    end
-
-    def normalize_tool_scope_flags(flags)
-      unless flags.is_a?(Hash)
-        raise ArgumentError, "tool_scope_flags must be a Hash; got #{flags.class}"
-      end
-
-      flags.each_with_object({}) do |(scope, raw_flag), normalized|
-        name = scope.to_sym
-        unless %i[allowed disallowed].include?(name)
-          raise ArgumentError, "unknown tool scope #{scope.inspect}; valid: [:allowed, :disallowed]"
-        end
-        flag = raw_flag.to_s
-        raise ArgumentError, "tool scope #{scope.inspect} must declare a flag" if flag.empty?
-
-        normalized[name] = flag.freeze
-      end.freeze
-    end
-
-    def default_tool_scope_flags(name, flags)
-      return flags unless flags.equal?(TOOL_SCOPE_FLAGS_UNSET)
-      return LEGACY_CLAUDE_TOOL_SCOPE_FLAGS if name.to_sym == :claude
-
-      {}
-    end
-
-    def capture_help!(capability_flags)
-      out, err, status = bounded_capture3(
-        bin, *capability_flags, "--help", timeout_sec: VERSION_CHECK_TIMEOUT_SEC
+    def capability_runtime_profile
+      AgentCliRuntime::Profile.new(
+        name: name, bin_default: bin_default,
+        env_bin_override_keys: @runtime_profile.env_bin_override_keys,
+        headless_flag: headless_flag, version_flag: version_flag,
+        min_version: min_version, cli_capabilities: @cli_capabilities
       )
-      unless status.success?
-        raise Hive::AgentError,
-              "#{@name} capability check failed: #{([ bin, *capability_flags, '--help' ]).join(' ')}"
-      end
-
-      "#{out}\n#{err}"
-    rescue Errno::ENOENT, Errno::EACCES => e
-      raise Hive::AgentError,
-            "#{@name} capability check could not run #{bin} (#{e.class.name.split('::').last}: #{e.message})"
-    rescue Timeout::Error
-      raise Hive::AgentError,
-            "#{@name} capability check timed out after #{VERSION_CHECK_TIMEOUT_SEC}s: #{bin}"
     end
 
-    # Capture one short-lived CLI probe under a real process-group deadline.
-    # `Timeout.timeout { Open3.capture3(...) }` interrupts only the Ruby caller;
-    # Open3's pipe readers can still wait forever for a hung child or descendant.
-    # Owning the pipes and waiter gives timeout a bounded TERM/KILL escalation
-    # and reap window before control returns to version/capability callers.
-    def bounded_capture3(*argv, timeout_sec:)
-      stdin, stdout, stderr, waiter = Open3.popen3(*argv, pgroup: true)
-      stdin.close
-      readers = [ capture_reader(stdout), capture_reader(stderr) ]
-      deadline = monotonic_now + timeout_sec
-
-      loop do
-        unless waiter.alive?
-          status = waiter.value
-          return [ readers[0].value, readers[1].value, status ] if readers.none?(&:alive?)
-        end
-
-        remaining = deadline - monotonic_now
-        raise Timeout::Error if remaining <= 0
-
-        sleep [ CAPTURE_POLL_INTERVAL_SEC, remaining ].min
-      end
-    rescue Timeout::Error
-      terminate_capture_process_group(waiter) if waiter
-      stop_capture_readers(readers, stdout, stderr)
-      raise
-    ensure
-      [ stdin, stdout, stderr ].each do |io|
-        io.close if io && !io.closed?
-      rescue IOError
-        nil
-      end
-    end
-
-    def capture_reader(io)
-      Thread.new do
-        Thread.current.report_on_exception = false
-        io.read
-      rescue IOError
-        ""
-      end
-    end
-
-    def terminate_capture_process_group(waiter)
-      pid = waiter.pid
-      signal_capture_process_group("TERM", pid)
-      deadline = monotonic_now + CAPTURE_TERM_GRACE_SEC
-      while capture_process_group_alive?(pid) && monotonic_now < deadline
-        sleep CAPTURE_POLL_INTERVAL_SEC
-      end
-      signal_capture_process_group("KILL", pid) if capture_process_group_alive?(pid)
-      waiter.join(CAPTURE_REAP_GRACE_SEC)
-    end
-
-    def stop_capture_readers(readers, *streams)
-      Array(readers).each { |reader| reader.join(CAPTURE_REAP_GRACE_SEC) }
-      streams.each do |stream|
-        stream.close if stream && !stream.closed?
-      rescue IOError
-        nil
-      end
-      Array(readers).each { |reader| reader.kill if reader.alive? }
-    end
-
-    def signal_capture_process_group(signal, pid)
-      Process.kill(signal, -Integer(pid))
-    rescue Errno::ESRCH, Errno::ECHILD
-      nil
-    end
-
-    def capture_process_group_alive?(pid)
-      Process.kill(0, -Integer(pid))
-      true
-    rescue Errno::ESRCH, Errno::ECHILD
-      false
-    rescue Errno::EPERM
-      true
-    end
-
-    def monotonic_now
-      Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    end
-
-    def cli_flag_advertised?(help, flag)
-      help.match?(/(?<![A-Za-z0-9_-])#{Regexp.escape(flag)}(?![A-Za-z0-9_-])/)
-    end
-
-    def version_tuple(version_string)
-      version_string.split(".").map(&:to_i)
-    end
-
-    # Snapshot of every kwarg the constructor takes, so with_overrides
-    # can build a sibling profile that differs only in the overridden
-    # fields. Mirrored 1:1 against `initialize`'s kwarg list — adding
-    # a new field requires updating both spots.
     def construction_kwargs
       {
-        name: @name,
-        bin_default: @bin_default,
-        env_bin_override_key: @env_bin_override_key,
-        headless_flag: @headless_flag,
-        permission_skip_flag: @permission_skip_flag,
-        add_dir_flag: @add_dir_flag,
-        budget_flag: @budget_flag,
-        output_format_flags: @output_format_flags.dup,
-        version_flag: @version_flag,
         skill_syntax_format: @skill_syntax_format,
+        env_bin_override_key: @env_bin_override_key,
+        auth_configuration_required: @auth_configuration_required,
         headless_supported: @headless_supported,
-        min_version: @min_version,
         status_detection_mode: @status_detection_mode,
         preflight: @preflight,
-        usage_extractor: @usage_extractor,
         skill_verifier: @skill_verifier,
-        workspace_write_flags: @workspace_write_flags.dup,
-        read_only_flags: @read_only_flags.dup,
         cli_capabilities: @cli_capabilities.transform_values(&:dup),
         initial_context_tokens: @initial_context_tokens,
-        prompt_style: @prompt_style,
         default_model_resolver: @default_model_resolver,
-        model_argument_builder: @model_argument_builder,
-        effort_argument_builder: @effort_argument_builder,
-        launcher_identity: @launcher_identity,
         policy_capabilities: @policy_capabilities.dup,
         routed_effort_values: @routed_effort_values&.dup,
         routing_argument_placement: @routing_argument_placement,
         routed_model_argument_builder: @routed_model_argument_builder,
         routed_effort_argument_builder: @routed_effort_argument_builder,
-        tool_scope_flags: @tool_scope_flags.dup,
-        raw_cli_arguments_supported: @raw_cli_arguments_supported,
-        structured_output_protocol: @structured_output_protocol,
-        credential_environment_keys: @credential_environment_keys.dup
+        structured_output_protocol: @structured_output_protocol
       }
     end
 
@@ -912,7 +577,8 @@ module Hive
 
     def normalize_routed_value(value, path)
       unless value.is_a?(String) || value.is_a?(Symbol)
-        raise Hive::ConfigError, "#{path} must be a non-blank scalar; got #{value.inspect}"
+        raise Hive::ConfigError,
+              "#{path} must be a non-blank scalar; got #{value.inspect}"
       end
 
       normalized = value.to_s.strip
@@ -928,21 +594,89 @@ module Hive
       source ? "#{path} in #{source}" : path
     end
 
-    class << self
-      def reset_version_cache!
-        @version_cache = nil
-        @capability_cache = nil
+    # Package Profile is intentionally immutable. This typed proxy preserves
+    # the published provider behavior while applying Hive's three supported
+    # project-local executable/version overrides.
+    class RuntimeProfileOverride < AgentCliRuntime::Profile
+      DELEGATED_METHODS = %i[
+        name env_bin_override_keys headless_flag permission_skip_flag
+        workspace_write_flags read_only_flags add_dir_flag tool_scope_flags
+        budget_flag output_format_flags version_flag prompt_style
+        model_argument_builder effort_argument_builder launcher_identity
+        cli_capabilities declared_capability_support
+        credential_environment_keys configuration_environment_key
+        default_configuration_directory permission_flags identity_arguments
+        raw_cli_arguments_supported? auth_configuration extract_usage_event
+        configuration_directory
+      ].freeze
+
+      def initialize(base, bin_default:, env_bin_override_key:, min_version:)
+        @base = base
+        @bin_default_override = bin_default.to_s.dup.freeze
+        @env_bin_override_keys = Array(env_bin_override_key).compact
+          .map { |key| key.to_s.dup.freeze }.freeze
+        @min_version_override = min_version&.to_s&.dup&.freeze
+        freeze
       end
 
-      private
+      attr_reader :env_bin_override_keys
 
-      def version_cache
-        @version_cache ||= {}
+      DELEGATED_METHODS.each do |method_name|
+        next if method_name == :env_bin_override_keys
+
+        define_method(method_name) do |*args, **kwargs, &block|
+          @base.public_send(method_name, *args, **kwargs, &block)
+        end
       end
 
-      def capability_cache
-        @capability_cache ||= {}
+      def bin_default
+        @bin_default_override
+      end
+
+      def min_version
+        @min_version_override
+      end
+
+      def bin(env: ENV)
+        key = @env_bin_override_keys.find { |candidate| !env[candidate].to_s.empty? }
+        key ? env.fetch(key) : @bin_default_override
+      end
+
+      def binary_installed?(env: ENV)
+        executable = bin(env:)
+        if executable.include?(File::SEPARATOR)
+          return File.file?(executable) && File.executable?(executable)
+        end
+
+        env.fetch("PATH", "").split(File::PATH_SEPARATOR).any? do |directory|
+          candidate = File.join(directory, executable)
+          File.file?(candidate) && File.executable?(candidate)
+        end
+      rescue ArgumentError
+        false
+      end
+
+      def check_version!(env: ENV)
+        profile = AgentCliRuntime::Profile.new(
+          name: name, bin_default: @bin_default_override,
+          env_bin_override_keys: @env_bin_override_keys,
+          headless_flag: headless_flag, version_flag: version_flag,
+          min_version: @min_version_override
+        )
+        profile.check_version!(env:)
+      end
+
+      def require_cli_capability!(capability)
+        profile = AgentCliRuntime::Profile.new(
+          name: name, bin_default: @bin_default_override,
+          env_bin_override_keys: @env_bin_override_keys,
+          headless_flag: headless_flag, version_flag: version_flag,
+          min_version: @min_version_override,
+          cli_capabilities: cli_capabilities
+        )
+        profile.require_cli_capability!(capability)
       end
     end
+    private_constant :RuntimeProfileOverride
   end
 end

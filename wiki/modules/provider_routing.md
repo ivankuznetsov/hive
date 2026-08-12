@@ -3,7 +3,7 @@ title: Hive::ProviderRouting policy
 type: module
 source: lib/hive/provider_routing.rb, lib/hive/provider_routing/*.rb
 created: 2026-08-10
-updated: 2026-08-11
+updated: 2026-08-12
 tags: [config, provider-accounts, routing, policy, validation]
 ---
 
@@ -45,12 +45,12 @@ canonicalized, and only one can therefore use `default`. An explicit policy vali
 absolute directory before it can enter a route. Missing or inaccessible named
 bindings are configuration errors rather than eligible candidates that fail
 after commitment.
-Named bindings additionally remove the selected agent-compatibility profile's
+Default and named bindings remove the selected agent-compatibility profile's
 recognized ambient credential variables for the child process. For Pi this
 ensures route identity comes from the selected subscription/session directory
-rather than an inherited API key or token. The variable inventory belongs to
-`agent-cli-runtime` and is parity-tested against Hive's temporary internal
-profile copy.
+rather than an inherited API key or token. The variable inventory comes
+directly from Hive's published `agent-cli-runtime` dependency; Hive has no
+second profile inventory.
 Cooldown values are bounded and keyed by the closed account-health taxonomy.
 
 The registry is dormant unless a project declares an explicit pool. A malformed

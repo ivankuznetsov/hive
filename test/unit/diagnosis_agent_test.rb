@@ -599,7 +599,7 @@ end
 
 def test_spawn_profile_builds_codex_command_and_pipes_prompt_to_stdin
   agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
-  profile = CommandProfile.new(
+  profile = command_profile(
     name: :codex,
     bin: "codex",
     headless_flag: "exec",
@@ -609,8 +609,11 @@ def test_spawn_profile_builds_codex_command_and_pipes_prompt_to_stdin
     prompt_style: :stdin
   )
   captured = nil
-  agent.define_singleton_method(:run_with_timeout) do |cmd, cwd, stdin_data, timeout_sec|
-    captured = { cmd: cmd, cwd: cwd, stdin_data: stdin_data, timeout_sec: timeout_sec }
+  agent.define_singleton_method(:run_with_timeout) do |cmd, cwd, stdin_data, timeout_sec, environment|
+    captured = {
+      cmd: cmd, cwd: cwd, stdin_data: stdin_data,
+      timeout_sec: timeout_sec, environment: environment
+    }
     "ok"
   end
 
@@ -625,20 +628,25 @@ def test_spawn_profile_builds_codex_command_and_pipes_prompt_to_stdin
                captured[:cmd]
   assert_equal "diagnose", captured[:stdin_data]
   assert_equal 12, captured[:timeout_sec]
+  assert_nil captured[:environment].fetch("OPENAI_API_KEY")
 end
 
-def test_build_cmd_omits_optional_flags_for_plain_prompt_profiles
+def test_build_cmd_omits_optional_flags_for_positional_profiles
   agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
-  profile = CommandProfile.new(name: :claude, bin: "claude")
+  profile = command_profile(
+    name: :claude,
+    bin: "claude",
+    headless_flag: "--headless"
+  )
 
   cmd = agent.send(:build_cmd, profile, "diagnose", [ @folder ], nil)
 
-  assert_equal [ "claude", "diagnose" ], cmd
+  assert_equal [ "claude", "--headless", "diagnose" ], cmd
 end
 
 def test_build_cmd_attaches_grok_diagnosis_prompt_to_single_flag
   agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
-  profile = CommandProfile.new(
+  profile = command_profile(
     name: :grok,
     bin: "grok",
     headless_flag: "-p",
@@ -760,6 +768,28 @@ end
 
 private
 
+def command_profile(name:, bin:, headless_flag: nil,
+                    permission_skip_flag: nil, add_dir_flag: nil,
+                    budget_flag: nil, prompt_style: nil)
+  credential_environment_keys = {
+    claude: %w[ANTHROPIC_API_KEY],
+    codex: %w[OPENAI_API_KEY],
+    grok: %w[XAI_API_KEY]
+  }.fetch(name, [])
+  Hive::AgentProfile.new(
+    name: name,
+    bin_default: bin,
+    headless_flag: headless_flag,
+    permission_skip_flag: permission_skip_flag,
+    add_dir_flag: add_dir_flag,
+    budget_flag: budget_flag,
+    prompt_style: prompt_style,
+    version_flag: "--version",
+    skill_syntax_format: "/%{skill}",
+    credential_environment_keys: credential_environment_keys
+  )
+end
+
 FakeProfile = Struct.new(:name, keyword_init: true) do
   attr_reader :calls
 
@@ -776,12 +806,6 @@ FakeProfile = Struct.new(:name, keyword_init: true) do
     calls << :preflight
   end
 end
-
-CommandProfile = Struct.new(
-  :name, :bin, :headless_flag, :permission_skip_flag, :add_dir_flag, :budget_flag,
-  :prompt_style,
-  keyword_init: true
-)
 
 class FakeLockFile
   attr_reader :closed

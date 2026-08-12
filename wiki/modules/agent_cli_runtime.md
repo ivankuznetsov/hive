@@ -3,7 +3,7 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-08-11
+updated: 2026-08-12
 tags: [agent, runtime, component, gem, cli]
 ---
 
@@ -29,6 +29,9 @@ The companion `configuration_environment_key`,
 describes the CLI-owned subscription/session directory. The extracted package
 owns these provider-specific names; it does not provision API keys or choose an
 authentication mode.
+Hive uses that inventory to remove ambient API credentials from child launches
+and select CLI subscription/session state. That is Hive policy, not a package
+restriction for independent consumers.
 
 Compilation returns argv and optional stdin without executing a process.
 Requested controls fail closed with `UnsupportedCapability` when a profile
@@ -72,15 +75,21 @@ budgets, or contain Hive defaults and skills. It can load and run without
 `hive-cli` or Hive constants. Direct standard-library gem dependencies are
 declared in its gemspec.
 
-Until the post-publication cutover, `Hive::AgentRuntime` remains authoritative
-inside Hive and focused parity tests compare the package against it. This
-temporary duplication is bounded to the publish-first window; the held cutover
-will preserve promised Hive constants as forwarding adapters and remove the
-internal copy only after RubyGems verification and separate merge authority.
-The parity boundary includes the built-in credential-environment inventories
-and configuration-directory metadata, so Hive launch binding isolation and
-session-alias detection cannot drift from the extracted compatibility profiles
-during that window.
+Hive consumes `agent-cli-runtime ~> 0.1.1` directly. Source development resolves
+the monorepo component path; installed Hive and the packaged Web lock resolve
+the same compatible release from RubyGems. `Hive::AgentRuntime` preserves its
+public request, probe, error, and result names as a forwarding facade, while
+`Hive::AgentProfile` wraps package profiles with only Hive-owned skill, model
+routing, default-model, status, and policy metadata. The four built-in Hive
+profiles reference the package's profile objects instead of copying provider
+flags, probes, usage extractors, or configuration metadata.
+
+The published 0.1.1 candidate was built from canonical commit
+`590fe343f585705651f277ddf198fcf4aa65f135`, published by the protected
+component workflow, and independently fetched from RubyGems with SHA-256
+`f1b833320397e63268ebc9c739f790b42e2f767d6d0e69bed728f220913da5a2`.
+Fresh isolated installation, require, executable-version, and JSON probe
+checks matched the retained workflow artifact before Hive's cutover.
 
 ## Development and release
 
@@ -124,7 +133,7 @@ here.
 
 ## Compatibility
 
-The initial public line is 0.1.x on Ruby 3.4 or newer, tested on Linux and
+The public line is 0.1.x on Ruby 3.4 or newer, tested on Linux and
 macOS. Additive fields are compatible within 0.1.x. Removing or changing an
 existing public field, flag mapping, event meaning, or executable contract
 requires a new minor release while pre-1.0. A published bad version is fixed

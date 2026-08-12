@@ -205,17 +205,13 @@ module Hive
         )
       end
 
-      # Auth is satisfied by an env API key OR an on-disk token persisted by
-      # the CLI's own login flow (`claude setup-token` / `codex login`). The
+      # Hive uses CLI subscription/session state, never ambient API keys. The
       # on-disk probe reuses Hive::AgentProfiles.logged_in? (the same artifact
-      # check the agent profiles use), so a token-authenticated user — who has
-      # no env var set — is no longer reported as a false negative (plan U1).
+      # check the agent profiles use), so a subscription-authenticated user is
+      # recognized while an exported key cannot make diagnostics report ready.
       # CODEX_HOME is intentionally NOT treated as an auth signal: it only
       # points at the config dir and is set even when no credential exists.
       def agent_authenticated?(name)
-        env_keys = name == "claude" ? %w[ANTHROPIC_API_KEY CLAUDE_API_KEY] : %w[OPENAI_API_KEY]
-        return true if env_keys.any? { |key| @env[key].to_s != "" }
-
         Hive::AgentProfiles.logged_in?(name, home: @env.fetch("HOME", Dir.home))
       end
 

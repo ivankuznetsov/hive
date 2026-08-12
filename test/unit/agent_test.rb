@@ -94,9 +94,32 @@ class AgentTest < Minitest::Test
       assert_equal policy.allowed_tools.join(","), cmd[cmd.index("--allowedTools") + 1]
       assert_equal policy.settings_path, cmd[cmd.index("--settings") + 1]
       assert_equal "", cmd[cmd.index("--setting-sources") + 1]
-      assert_equal policy.environment, agent.child_environment.reject { |key, _| key == "HIVE_SCREENOTE_BASE_URL" }
+      expected_scrubbed = [
+        "HIVE_SCREENOTE_BASE_URL",
+        *Hive::AgentProfiles.lookup(:claude).credential_environment_keys
+      ]
+      assert_equal policy.environment,
+                   agent.child_environment.reject { |key, _| expected_scrubbed.include?(key) }
       assert_nil agent.child_environment.fetch("HIVE_SCREENOTE_BASE_URL")
+      Hive::AgentProfiles.lookup(:claude).credential_environment_keys.each do |key|
+        assert_nil agent.child_environment.fetch(key)
+      end
       assert_equal policy.directories, agent.add_dirs
+    end
+  end
+
+  def test_headless_child_environment_scrubs_profile_api_credentials
+    with_tmp_dir do |dir|
+      profile = Hive::AgentProfiles.lookup(:grok)
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test", max_budget_usd: nil,
+        timeout_sec: 5, profile: profile
+      )
+
+      profile.subscription_environment.each_key do |key|
+        assert_nil agent.child_environment.fetch(key)
+      end
+      refute agent.child_environment.key?("GROK_AUTH_PATH")
     end
   end
 

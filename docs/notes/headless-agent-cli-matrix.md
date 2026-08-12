@@ -4,7 +4,11 @@
 **Spike unit:** U11 (per `docs/plans/2026-04-25-001-feat-5-review-stage-plan.md`)
 **Purpose:** Document the headless invocation contract for every agent CLI hive evaluates as a candidate `AgentProfile` in U12, so the user can pick any supported CLI per role (CI-fix, reviewer, triage, fix, browser-test) per project config.
 
-This doc is the authoritative source for the `AgentProfile` instances under `lib/hive/agent_profiles/` (created in U12). If a CLI's behavior changes upstream, update this doc and the corresponding profile in lockstep.
+This is the historical design/verification matrix for Hive's profile policy.
+Current provider compatibility facts are owned by the published
+`agent-cli-runtime` profiles; Hive's adapters reference them and add only
+workflow policy. If a CLI changes upstream, update and release that component,
+then update any affected Hive policy here.
 
 ## Routed model and effort capabilities
 
@@ -220,8 +224,9 @@ those fragments verbatim so leading spaces survive. The current stream does
 not report token counts, so Hive records usage only if a future event includes
 a real usage object—it does not fabricate a zero-token session.
 
-Authentication supports `XAI_API_KEY`, the backward-compatible
-`GROK_CODE_XAI_API_KEY`, or `grok login --device-auth`. An absolute `GROK_HOME`
+The Grok CLI supports multiple authentication mechanisms, but Hive launches
+the CLI-managed subscription/session established by `grok login --device-auth`
+and removes ambient API-key variables. An absolute `GROK_HOME`
 relocates the default `~/.grok` state directory, while an absolute `GROK_AUTH_PATH`
 selects the credential file directly and takes precedence over `GROK_HOME`.
 Hive rejects relative path overrides so preflight and a child spawned in another

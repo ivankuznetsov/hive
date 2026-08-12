@@ -3,11 +3,37 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-10
+updated: 2026-08-12
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
+
+## Task workspace forward evidence and live-provider gaps (2026-08-12)
+
+- Tasks admitted before the task-workspace capture seams normally have no
+  historical repository/wiki/context receipt, exact child-session identity,
+  provider-reported actual model, or attempt-attributed usage. The workspace
+  deliberately reports those fields as missing, partial, unavailable, or
+  unattributed; no timestamp, prompt, argv, log, artifact prose, or current
+  checkout is a trustworthy backfill source.
+- `observed_at_launch` proves what the controller captured, while
+  `agent_asserted_used` proves only that a validated attempt-bound receipt was
+  promoted. Even matching digests do not prove the model consumed every
+  selected reference. Providers that do not emit structured actual-model or
+  usage data remain unavailable until a durable observation lands.
+- Publication behavior is deterministic against injected bounded transports.
+  No live credentialed GitHub refresh or live-provider task is required for
+  repository verification, and no such run should be cited as implemented
+  proof. Authentication, rate limits, deleted branches, and cache staleness
+  remain honest advisory states in production.
+- The dependency workspace view projects the connected subset of the reused
+  bounded status snapshot. If that snapshot lacks other projects or exhausts a
+  cap, the component remains partial rather than starting a new fleet scan.
+  This is an operator explanation of the existing scalar `depends_on` model,
+  not a durable DAG or publication authority.
+
+See [[modules/task_workspace]].
 
 ## Provider-routing trusted captures (updated 2026-08-11)
 

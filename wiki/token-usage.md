@@ -1,9 +1,9 @@
 ---
 title: Token Usage Stats
 type: observability
-source: lib/hive/agent.rb, lib/hive/usage_db.rb, lib/hive/patrol/token_budget.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
+source: lib/hive/agent.rb, lib/hive/usage_db.rb, lib/hive/task_workspace/resources.rb, lib/hive/patrol/token_budget.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-24
-updated: 2026-07-22
+updated: 2026-08-12
 tags: [observability, tui, sqlite, agent]
 ---
 
@@ -53,10 +53,34 @@ Schema:
 | `project_slug` | `task.project_name`, intentionally path-independent so multiple checkouts collapse. |
 | `task_slug` | Hive task slug. |
 | `stage` | Stage name at spawn time, for example `4-execute`. |
+| `attempt_id` / `session_id` | Nullable exact durable attribution for workspace-aware launches. A partial unique index makes a non-null session idempotent. |
+| `task_generation` | Nullable task generation bound to that attempt/session observation. |
+| `source` | Nullable symbolic producer of the attributed observation. |
 | `started_at` / `ended_at` | UTC ISO8601 timestamps. |
 | `input` / `output` / `cached` | Token counters. Claude cached tokens are cache-read plus cache-creation input tokens. |
 
-Indexes cover `started_at`, `(project_slug, started_at)`, and `(task_slug, started_at)`.
+Indexes cover `started_at`, `(project_slug, started_at)`, and `(task_slug,
+started_at)`. Schema v2 evolves the existing database transactionally through
+`PRAGMA user_version`, retains every legacy row, and uses a busy timeout plus
+bounded retry for concurrent migration/writes. Legacy rows remain explicitly
+unattributed: Hive never joins them to an attempt from similar timestamps.
+Session writes are idempotent upserts, and an exact attributed read failure is
+`available: false`, not zero usage.
+
+## Task workspace resource truth
+
+The task workspace keeps configured guards and observed use separate. Each
+resource identifies its kind, unit, scope, configuration source, enforcement
+state, configured value, observed value, and reset/retry timing. Monetary API
+caps, subscription-backed budget-equivalent guards, token ceilings, launch
+quotas, and wall-clock timeouts never collapse into one budget. In particular,
+a subscription-backed `budget_usd` guard is not described as billed spend.
+
+Remaining headroom is computed only when configured and observed values have
+the same trustworthy unit and scope. Unknown persistence, live usage that has
+not yet landed, and unattributed legacy rows remain unavailable rather than
+zero. Aggregation deduplicates by exact session ID before rolling up to the
+attempt. See [[modules/task_workspace]].
 
 ## Aggregates
 
@@ -111,5 +135,6 @@ See [[commands/tui]] for the broader TUI mode and keybinding contract.
 - [[commands/tui]]
 - [[modules/agent]]
 - [[modules/agent_profile]]
+- [[modules/task_workspace]]
 - [[stages/index]]
 - [[gaps]]

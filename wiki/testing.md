@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, bin/hive-patrol-installed-live-smoke, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate,patrol_evidence}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-08-10
+updated: 2026-08-12
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, terminal-outcomes, release-proof, bounded-storage]
 ---
 
@@ -1125,6 +1125,36 @@ proofs: the former archives committed `HEAD:web`, while the latter needs the
 pinned browser binaries and retains task-local media plus its exact-SHA
 manifest.
 
+## Task workspace verification
+
+The read-only task workspace is verified in layers. Root unit coverage under
+`test/unit/task_workspace/` pins field provenance/conflicts, descriptor-safe
+bounded reads, schema validation, attempt/session attribution, typed resources,
+timeline ordering/cursors/noise grouping, connected dependency bounds,
+artifact handling, publication/cache isolation, and the shared builder.
+Context provenance, activity reconciliation, task-journal checkpoints,
+attempt dispatch, UsageDb migration, dependency admission, worktree/Git, and
+status/TUI correspondence tests cover their capture and compatibility seams.
+
+Rails model/integration tests assert authenticated HTML/JSON parity, exact
+target resolution, archived read-only behavior, per-panel degradation, signed
+timeline pagination, canonical action routes, publication refresh auth/CSRF,
+and zero remote reads from ordinary page/JSON/broadcast paths. The Playwright
+`task_workspace_test.rb` plus existing pipeline and kanban suites exercise
+1280x800, 3840x1400, 375x812, 320x568, and effective 320-CSS-pixel reflow;
+keyboard traversal, 24-pixel targets, dependency forest/table parity,
+focus/caret/disclosure/scroll preservation, permanent log/diff/publication
+frames, and non-repeating material announcements.
+
+During implementation, run the smallest named files first. Before handoff run
+`bundle exec rake test` from the repository root, then the Web application's
+complete Rails and system suites plus its lint/security checks. Tests inject
+GitHub transports and clocks and use disposable Hive/project roots; they must
+not contact a live provider, GitHub account, task store, or usage database.
+The packaged-Web bootstrap archives committed `HEAD:web`, so it is reserved
+for changes to that packaging boundary rather than ordinary view changes. See
+[[modules/task_workspace]].
+
 ## Launch-path fixtures
 
 `test/unit/launch_path_fixture_test.rb` pins the public Build and Content
@@ -1139,5 +1169,6 @@ provider replays and timing remain separate verification gates.
 
 - [[architecture]]
 - [[modules/agent]]
+- [[modules/task_workspace]]
 - [[e2e]]
 - [[gaps]]

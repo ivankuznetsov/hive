@@ -35,6 +35,15 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     with_tmp_dir { |dir| fixture_artifacts(dir).verify! }
   end
 
+  def test_live_agent_builder_loads_without_hive_runtime_dependencies
+    builder = File.expand_path("../../../packaging/live_agent_skills/build.rb", __dir__)
+    stdout, stderr, status = Open3.capture3(RbConfig.ruby, "--disable-gems", builder)
+
+    refute status.success?
+    assert_empty stdout
+    assert_equal "usage: build.rb CANDIDATE_SHA GEM SOURCE_ARCHIVE OUTPUT_DIR\n", stderr
+  end
+
   def test_rejects_a_non_full_candidate_sha_before_building
     error = assert_raises(HiveReleaseCandidate::Error) do
       HiveReleaseCandidate::Artifacts.new(

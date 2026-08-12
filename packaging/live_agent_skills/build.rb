@@ -2,7 +2,6 @@
 # frozen_string_literal: true
 
 $LOAD_PATH.unshift(File.expand_path("../../lib", __dir__))
-require "hive"
 require "hive/agent_skills/canonical_skill"
 require_relative "proof"
 

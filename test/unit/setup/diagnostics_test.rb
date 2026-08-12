@@ -131,6 +131,29 @@ class SetupDiagnosticsTest < Minitest::Test
     end
   end
 
+  def test_agent_api_key_does_not_replace_cli_subscription_session
+    Dir.mktmpdir("hive-diag") do |dir|
+      %w[git tmux gh claude codex node npm sqlite3].each do |name|
+        executable(dir, name)
+      end
+      runner = ->(argv) {
+        [ "#{File.basename(argv.first)} 9.9.9", "", Status.new(true) ]
+      }
+      Dir.mktmpdir("hive-home") do |home|
+        env = {
+          "PATH" => dir,
+          "HOME" => home,
+          "ANTHROPIC_API_KEY" => "unused"
+        }
+        row = Hive::Setup::Diagnostics.new(
+          path: dir, runner: runner, ruby_version: "3.4.1", env: env
+        ).run.results.find { |result| result.name == "claude" }
+
+        assert_equal "unauthenticated", row.status
+      end
+    end
+  end
+
   def test_result_rejects_unknown_status
     assert_raises(ArgumentError) do
       Hive::Setup::Diagnostics::Result.new(name: "x", status: "bogus", detail: "d",

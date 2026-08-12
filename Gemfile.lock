@@ -2,6 +2,7 @@ PATH
   remote: .
   specs:
     hive-cli (0.7.0)
+      agent-cli-runtime (~> 0.1.1)
       base64 (>= 0.2)
       bubbletea (= 0.1.4)
       bundler (= 2.7.2)
@@ -17,6 +18,14 @@ PATH
       thor (~> 1.3)
       tzinfo (~> 2.0)
       unicode-display_width (~> 3.2)
+
+PATH
+  remote: components/agent-cli-runtime
+  specs:
+    agent-cli-runtime (0.1.1)
+      json (>= 2.7, < 3.0)
+      open3 (~> 0.2)
+      timeout (>= 0.4, < 1.0)
 
 GEM
   remote: https://rubygems.org/
@@ -111,6 +120,7 @@ GEM
     multipart-post (2.4.1)
     net-http (0.9.1)
       uri (>= 0.11.1)
+    open3 (0.2.1)
     parallel (2.1.0)
     parser (3.3.11.1)
       ast (~> 2.4.1)
@@ -163,6 +173,7 @@ GEM
       faraday-multipart (~> 1.0)
       zeitwerk (~> 2.6)
     thor (1.5.0)
+    timeout (0.6.1)
     tzinfo (2.0.6)
       concurrent-ruby (~> 1.0)
     unicode-display_width (3.2.0)
@@ -178,6 +189,7 @@ PLATFORMS
   x86_64-linux-musl
 
 DEPENDENCIES
+  agent-cli-runtime!
   brakeman (~> 8.0)
   bundler-audit (~> 0.9)
   hive-cli!

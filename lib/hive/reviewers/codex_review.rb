@@ -180,7 +180,7 @@ module Hive
           end
 
           run = run_codex_review(
-            profile.bin, prompt, spawn_timeout || configured_timeout, routing_arguments
+            profile, prompt, spawn_timeout || configured_timeout, routing_arguments
           )
           break if usable_review?(run)
           break if attempts >= max_attempts
@@ -469,11 +469,11 @@ module Hive
       # The codex binary's existence is already proven by `check_version!`
       # (the caller's preflight), so a spawn-time ENOENT is unreachable here
       # — we deliberately do not re-rescue it.
-      def run_codex_review(bin, prompt, timeout_sec, routing_arguments = nil)
+      def run_codex_review(profile, prompt, timeout_sec, routing_arguments = nil)
         global_arguments = routing_arguments&.global_arguments || []
         subcommand_arguments = routing_arguments&.subcommand_arguments || []
         argv = [
-          bin,
+          profile.bin,
           *global_arguments,
           "review",
           *subcommand_arguments,
@@ -483,7 +483,11 @@ module Hive
         ]
 
         pipe_r, pipe_w = IO.pipe
-        pid = Process.spawn(*argv, chdir: ctx.worktree_path, pgroup: true, out: pipe_w, err: pipe_w)
+        pid = Process.spawn(
+          profile.subscription_environment,
+          *argv,
+          chdir: ctx.worktree_path, pgroup: true, out: pipe_w, err: pipe_w
+        )
         pipe_w.close
 
         capture_run(pipe_r, pid, timeout_sec)

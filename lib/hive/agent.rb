@@ -185,7 +185,10 @@ module Hive
         @runtime_cli_flags = []
         @child_environment = SCRUBBED_CHILD_ENV
       end
-      @child_environment = @child_environment.merge(launch_environment || {}).freeze
+      @child_environment = @child_environment
+        .merge(launch_environment || {})
+        .merge(@profile.subscription_environment)
+        .freeze
       @launch_arguments = normalize_launch_arguments(launch_arguments)
       supplied_identity_arguments =
         Hive::ImplementationIdentity.validate_native_arguments(identity_arguments)

@@ -4,13 +4,13 @@ require "hive/agent_profiles/launch_bindings"
 class AgentProfilesLaunchBindingsTest < Minitest::Test
   include HiveTestHelper
 
-  def test_default_binding_preserves_existing_adapter_environment
+  def test_default_binding_scrubs_ambient_adapter_credentials
     binding = Hive::AgentProfiles::LaunchBindings.resolve(
       adapter: "codex", binding_id: "default", environment: {}
     )
 
     assert binding.default?
-    assert_empty binding.environment
+    assert_equal({ "OPENAI_API_KEY" => nil }, binding.environment)
     assert_nil binding.selector_name
   end
 
@@ -112,12 +112,14 @@ class AgentProfilesLaunchBindingsTest < Minitest::Test
     end
   end
 
-  def test_default_pi_binding_preserves_ambient_subscription_environment
+  def test_default_pi_binding_scrubs_ambient_provider_credentials
     binding = Hive::AgentProfiles::LaunchBindings.resolve(
       adapter: "pi", binding_id: "default",
       environment: { "OPENAI_API_KEY" => "ambient-credential" }
     )
 
-    refute binding.environment.key?("OPENAI_API_KEY")
+    Hive::AgentProfiles.lookup(:pi).credential_environment_keys.each do |key|
+      assert_nil binding.environment.fetch(key)
+    end
   end
 end

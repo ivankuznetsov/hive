@@ -74,6 +74,18 @@ class AgentRuntimeTest < Minitest::Test
     end
   end
 
+  LegacyUsageProfile = Struct.new(
+    :name, :launcher_identity, :usage, keyword_init: true
+  ) do
+    def extract_usage_event(_event)
+      usage
+    end
+  end
+
+  RuntimeProfileAdapter = Struct.new(
+    :name, :launcher_identity, :runtime_profile, keyword_init: true
+  )
+
   def test_existing_custom_profile_constructor_compiles_without_new_keywords
     profile = custom_profile
     request = Hive::AgentRuntime::Request.new(profile: profile, prompt: "work")
@@ -117,6 +129,36 @@ class AgentRuntimeTest < Minitest::Test
 
     assert_evidence error, :compilation
     assert_equal :unknown, error.evidence.provider
+  end
+
+  def test_compile_rejects_profile_without_package_runtime
+    profile = Struct.new(:name, :headless_supported).new(:custom, true)
+
+    error = assert_raises(Hive::AgentRuntime::CompilationError) do
+      compile(profile)
+    end
+
+    assert_match(/has no agent-cli-runtime profile/, error.message)
+  end
+
+  def test_compile_wraps_package_runtime_errors
+    runtime_class = Class.new(AgentCliRuntime::Profile) do
+      def permission_flags(_permission_mode = nil)
+        raise AgentCliRuntime::Error, "synthetic package compilation failure"
+      end
+    end
+    runtime = runtime_class.new(
+      name: :custom,
+      bin_default: "custom-agent",
+      headless_flag: "-p",
+      version_flag: "--version"
+    )
+
+    error = assert_raises(Hive::AgentRuntime::CompilationError) do
+      compile(runtime)
+    end
+
+    assert_match(/synthetic package compilation failure/, error.message)
   end
 
   def test_typed_routing_rejects_legacy_identity_channels
@@ -331,6 +373,25 @@ class AgentRuntimeTest < Minitest::Test
     assert result.capability_evidence.all?(&:supported)
   end
 
+  def test_prepare_uses_package_probe_for_adapter_without_hive_version_method
+    runtime = AgentCliRuntime::Profile.new(
+      name: :custom,
+      bin_default: File.expand_path("../fixtures/fake-claude", __dir__),
+      headless_flag: "-p",
+      version_flag: "--version"
+    )
+    adapter = RuntimeProfileAdapter.new(
+      name: :custom,
+      launcher_identity: "adapter/v1",
+      runtime_profile: runtime
+    )
+
+    result = Hive::AgentRuntime.prepare!(adapter)
+
+    assert_equal "2.1.118", result.version
+    assert_equal "adapter/v1", result.launcher_identity
+  end
+
   def test_named_capability_failure_returns_bounded_redacted_diagnostic
     secret = "sk-#{'z' * 40}"
     profile = FailingCapabilityProfile.new(
@@ -397,6 +458,28 @@ class AgentRuntimeTest < Minitest::Test
     assert_includes observation.diagnostic, "[REDACTED:generic_api_key]"
   end
 
+  def test_legacy_observation_fallback_normalizes_hashes_and_non_hashes
+    profile = LegacyUsageProfile.new(
+      name: :legacy, launcher_identity: "legacy/v1", usage: nil
+    )
+    result = {
+      exit_code: 3,
+      timed_out: true,
+      status: "failed",
+      usage: { "input" => -1, "output" => 2, "cached" => 3, "model" => :legacy },
+      final_message: "stopped",
+      limit_text: "api_key=#{'b' * 30}",
+      provider_signal: "limit"
+    }
+
+    observation = Hive::AgentRuntime.observe(profile, result)
+
+    assert_equal :failed, observation.status
+    assert_equal({ input: 0, output: 2, cached: 3, model: "legacy" }, observation.usage)
+    assert_includes observation.diagnostic, "[REDACTED:generic_api_key]"
+    assert_nil Hive::AgentRuntime.observe(profile, nil).usage
+  end
+
   def test_usage_extraction_normalizes_profile_event
     profile = custom_profile(
       usage_extractor: ->(_event) {
@@ -414,6 +497,14 @@ class AgentRuntimeTest < Minitest::Test
     profile = FailingUsageProfile.new(
       name: :custom,
       launcher_identity: "custom/v1"
+    )
+
+    assert_nil Hive::AgentRuntime.extract_usage(profile, { "type" => "usage" })
+  end
+
+  def test_legacy_usage_extraction_rejects_non_hash_payload
+    profile = LegacyUsageProfile.new(
+      name: :legacy, launcher_identity: "legacy/v1", usage: "not usage"
     )
 
     assert_nil Hive::AgentRuntime.extract_usage(profile, { "type" => "usage" })

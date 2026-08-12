@@ -1,3 +1,4 @@
+require "agent_cli_runtime"
 require_relative "hive/version"
 require_relative "hive/errors"
 

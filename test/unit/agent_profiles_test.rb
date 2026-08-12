@@ -277,13 +277,13 @@ class AgentProfilesTest < Minitest::Test
     end
   end
 
-  def test_grok_logged_in_ignores_unused_relative_paths_with_api_key
+  def test_grok_logged_in_requires_a_subscription_session_not_an_api_key
     with_env(
       "GROK_AUTH_PATH" => "auth.json",
       "GROK_HOME" => "relative/grok-home",
       "XAI_API_KEY" => "test-key"
     ) do
-      assert Hive::AgentProfiles.logged_in?(:grok)
+      refute Hive::AgentProfiles.logged_in?(:grok)
     end
   end
 

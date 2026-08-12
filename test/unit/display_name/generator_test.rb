@@ -168,6 +168,24 @@ class DisplayNameGeneratorTest < Minitest::Test
     end
   end
 
+  def test_codex_profile_removes_ambient_api_key_from_child
+    with_tmp_dir do |root|
+      key_capture = File.join(root, "openai-key.txt")
+      script = <<~SH
+        #!/bin/sh
+        printf '%s' "${OPENAI_API_KEY-unset}" > #{key_capture}
+        printf 'Subscription-only name\n'
+      SH
+
+      with_env("OPENAI_API_KEY" => "ambient-api-key") do
+        with_generator(agent: "codex", script: script, commit: false) do |gen|
+          assert_equal "Subscription-only name", gen.send(:generate_name)
+          assert_equal "unset", File.read(key_capture)
+        end
+      end
+    end
+  end
+
   def test_streaming_text_events_are_accumulated_into_one_display_name
     script = <<~'SH'
       #!/bin/sh

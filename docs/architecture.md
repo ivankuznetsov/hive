@@ -108,7 +108,14 @@ not warn.
 
 ## Agents
 
-Hive has built-in agent profiles for `claude`, `codex`, `pi`, and `grok`. A profile defines the binary, version check, prompt-delivery style, add-dir behavior, skill invocation syntax, and status-detection mode. Stage runners look up the configured profile before spawning the subprocess. Grok runs headlessly with `grok -p <prompt> --always-approve --output-format streaming-json`; it accepts `XAI_API_KEY` or device-login credentials, honors an absolute `GROK_HOME`, and lets an absolute `GROK_AUTH_PATH` select the credential file directly with higher precedence.
+Hive has built-in agent profiles for `claude`, `codex`, `pi`, and `grok`. The
+published `agent-cli-runtime` gem owns each CLI's compatibility facts; Hive's
+profile wrapper adds workflow policy such as skills, routing, and status
+detection. Stage runners use CLI-managed subscription/session state and scrub
+ambient provider API credentials before spawning. Grok runs headlessly with
+`grok -p <prompt> --always-approve --output-format streaming-json`, honors an
+absolute `GROK_HOME`, and lets an absolute `GROK_AUTH_PATH` select the session
+file directly with higher precedence.
 
 Default new-project setup uses `claude` for planning, `codex` for execute, a normal reviewer set that can include Claude, Codex, and PR review toolkit agents, and a narrower patrol PR reviewer set that defaults to Codex only. The profile details live in [wiki/modules/agent_profile.md](../wiki/modules/agent_profile.md).
 

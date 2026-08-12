@@ -56,6 +56,7 @@ if has_arg "review" "$@"; then
     {
       echo "---"
       echo "cwd=$(pwd)"
+      printf 'openai_api_key=%s\n' "${OPENAI_API_KEY-unset}"
       for a in "$@"; do
         printf 'arg=%s\n' "$a"
       done

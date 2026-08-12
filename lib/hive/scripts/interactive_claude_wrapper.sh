@@ -105,6 +105,7 @@ fi
 cd "$cwd"
 
 unset ANTHROPIC_API_KEY
+unset ANTHROPIC_AUTH_TOKEN
 unset CLAUDE_API_KEY
 # Threat model: hive passes the Screenote base_url to claude explicitly (and
 # the OAuth token rides a 0600 temp MCP config that's deleted right after the

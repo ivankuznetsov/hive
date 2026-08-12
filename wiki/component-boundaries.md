@@ -27,7 +27,7 @@ the first and primary consumer.
 | Workflow Creator Execution | `boundary-ready` (deterministic U14 substrate) | `require "./packaging/live_agent_skills/workflow_creator_execution"` → `HiveLiveAgentProof::WorkflowCreatorExecution` | [[component-boundaries]] |
 | Workflow Creator Live Orchestration | `boundary-ready` (U15 runner; authenticated exact-head proof remains optional and authorization-gated) | `require "./packaging/live_agent_skills/workflow_creator_live_setup"` → `HiveLiveAgentProof::WorkflowCreatorLiveSetup` | [[component-boundaries]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
-| Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
+| Agent ABI | `boundary-ready`; consumes published `agent-cli-runtime` | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
 | Skillpack | `boundary-ready` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
 | Safe Agent Git Gate | `boundary-ready` | `require "hive/agent_git_gate"` → `Hive::AgentGitGate` | [[modules/agent_git_gate]] |
@@ -356,13 +356,17 @@ finalizes the U1b primary receipt. The workflow and smoke remain adapters. An au
 passing artifact is still exact-head and explicit-authorization evidence; the
 catalog row does not make that optional network proof a normal CI gate.
 
-The `Agent ABI` is boundary-ready below orchestration. `AgentRuntime` exposes
-immutable request, compiled invocation, capability/probe evidence, and
-observable-result values while preserving `AgentProfile.new(...)` and
-`AgentProfiles.register` as extension points. Claude, Codex, Pi, Grok, and
-custom profiles remain adapters inside the boundary. Hive owns process
-lifetime, timeouts, retries, workflow selection, artifact acceptance, and
-stage success.
+The `Agent ABI` is boundary-ready below orchestration. The published
+`agent-cli-runtime` gem owns provider profiles, compilation, bounded probes,
+capability checks, usage decoding, redaction, and observable-result values.
+`Hive::AgentRuntime` forwards those mechanisms while preserving its request,
+probe, error, and result constants; `AgentProfile.new(...)` and
+`AgentProfiles.register` remain extension points. Hive's adapters own model
+routing, skills, defaults, subscription bindings, status detection, process
+lifetime, retries, artifact acceptance, and stage success. Hive derives its
+subscription-only child-environment scrub from the package profile inventory;
+the package itself remains neutral about which supported authentication mode a
+consumer selects.
 
 The `Agent Artifact Firewall` is boundary-ready below stage policy. Its
 immutable manifest declares protected anchors, permitted writable roots,
@@ -378,16 +382,17 @@ custody only: it is not an OS sandbox, a write monitor, a multi-file
 transaction, or the Safe Agent Git Gate.
 
 `Hive::SecretPatterns` remains shared lower-level Hive infrastructure rather
-than component-owned state. Both the Agent ABI and Artifact Firewall use it for
-bounded diagnostics, while the firewall also accepts an injected redactor.
+than component-owned state. The Artifact Firewall uses it for bounded
+diagnostics and accepts an injected redactor; the Agent ABI now uses the
+package-owned redactor.
 
-The package-only extraction lives at `components/agent-cli-runtime/` and
+The canonical package source lives at `components/agent-cli-runtime/` and
 publishes the neutral `AgentCliRuntime` namespace plus the bounded
-`agent-runtime` diagnostic executable. Until the separately held Hive cutover,
-`Hive::AgentRuntime` remains Hive's authoritative implementation and package
-parity tests prevent the temporary publication-window copy from drifting.
-Landing the package does not change Hive's gem dependency graph. See
-[[modules/agent_cli_runtime]] for the public surface and release boundary.
+`agent-runtime` diagnostic executable. Hive declares the compatible 0.1.1
+dependency, resolves the component path in monorepo development, resolves the
+RubyGems release in packaged Web installs, and contains no second provider
+runtime implementation. See [[modules/agent_cli_runtime]] for the public
+surface and release boundary.
 
 Its public standalone repository is deliberately a one-way distribution
 projection. Scheduled main snapshots and manually requested release snapshots

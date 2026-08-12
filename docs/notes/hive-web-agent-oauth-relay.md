@@ -23,7 +23,7 @@ Commands:
 - Claude: `claude setup-token`
 - Codex: `codex login --device-auth`
 - Pi: web form writes non-empty JSON to `~/.pi/agent/auth.json`
-- Grok: `grok login --device-auth` or `XAI_API_KEY`
+- Grok: `grok login --device-auth`
 
 In the Hivebox distribution, credential survival is a Docker bind-mount
 property: Hivebox sets

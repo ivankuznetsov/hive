@@ -713,6 +713,9 @@ module Hive
         return false unless task.respond_to?(:stage_name) && task.stage_name == "brainstorm"
         return false unless marker.name == :waiting
 
+        context = Hive::Attempts::Context.current
+        return false unless context&.attempt_id
+
         reference = File.basename(task.state_file)
         read = Hive::TaskWorkspace::BoundedReader.new(root: task.folder).read(
           reference, max_bytes: 512 * 1024
@@ -724,7 +727,7 @@ module Hive
           fingerprint = Hive::BrainstormParser.question_fingerprint(question.text)
           record_task_activity(
             task, kind: "question_asked",
-            operation_id: "question:#{Hive::Attempts::Context.current.attempt_id}:#{fingerprint}",
+            operation_id: "question:#{context.attempt_id}:#{fingerprint}",
             correlation_id: "question:#{fingerprint}",
             reason: "brainstorm question asked", source: "stage_service",
             stage: stage,

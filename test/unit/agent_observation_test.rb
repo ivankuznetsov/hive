@@ -76,6 +76,18 @@ class AgentObservationTest < Minitest::Test
     assert_empty activity.records
   end
 
+  def test_missing_timeout_remains_unavailable
+    activity = Activity.new
+    observation = Hive::AgentObservation.new(
+      task: task, context: context, session_id: "session-4", role: "execute",
+      provider: "codex", timeout_sec: nil, guards: guards, activity: activity,
+      clock: -> { NOW }
+    )
+
+    assert observation.start!
+    assert_nil activity.records.first.dig(:payload, "timeout_sec")
+  end
+
   private
 
   def task

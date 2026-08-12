@@ -27,7 +27,7 @@ module Hive
       @provider = identifier(provider, "provider")
       @requested_model = optional_text(requested_model)
       @requested_effort = optional_text(requested_effort)
-      @timeout_sec = positive_number(timeout_sec, "timeout_sec")
+      @timeout_sec = optional_positive_number(timeout_sec, "timeout_sec")
       @guards = normalize_guards(guards)
       @clock = clock
       @attempt_store = attempt_store
@@ -244,6 +244,12 @@ module Hive
       number = Float(value)
       raise ArgumentError, "#{label} must be positive" unless number.positive?
       number % 1 == 0 ? number.to_i : number
+    end
+
+    def optional_positive_number(value, label)
+      return nil if value.nil?
+
+      positive_number(value, label)
     end
 
     def numeric_or_nil(value)

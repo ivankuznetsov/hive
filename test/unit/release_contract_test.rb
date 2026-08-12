@@ -257,6 +257,10 @@ class ReleaseContractTest < Minitest::Test
     assert_equal [ "select-candidate", "install-gate" ],
                  jobs.fetch("release-finalize").fetch("needs")
     assert_includes selector_body, 'candidate_sha="$(git rev-parse "${GITHUB_REF}^{commit}")"'
+    assert_includes selector_body,
+                    %(ruby --disable-gems -Ilib -e 'require "hive/version"; print Hive::VERSION')
+    refute_includes selector_body,
+                    %(ruby -Ilib -e 'require "hive"; print Hive::VERSION')
     assert_includes selector_body, "commits/${candidate_sha}/check-runs?per_page=100"
     assert_includes selector_body, "select_release_candidate.rb select"
     assert_includes selector_body, "select_release_candidate.rb verify"

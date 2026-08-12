@@ -48,7 +48,7 @@ jobs:
             echo "repository main branch is not protected" >&2
             exit 1
           fi
-          source_version="$(ruby -Ilib -e 'require "hive"; print Hive::VERSION')"
+          source_version="$(ruby --disable-gems -Ilib -e 'require "hive/version"; print Hive::VERSION')"
           if test "$source_version" != "$version"; then
             echo "tag version $version does not match source version $source_version" >&2
             exit 1

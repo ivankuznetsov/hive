@@ -410,6 +410,9 @@ agent-skill, and managed-web filenames for the tag version and target SHA. The
 source archive must declare that version through the canonical
 `lib/hive/version.rb` source, and it must remain newer than the catalog-pinned
 latest stable version already proven by the blocking candidate gate.
+The tag selector also reads that dependency-free version leaf with RubyGems
+disabled before candidate selection; it does not load the top-level Hive
+runtime or require installed runtime dependencies merely to compare the tag.
 Tag-time source inspection accepts the optional single canonical PAX global
 header emitted by `git archive` for the exact candidate SHA. It independently
 rejects duplicate or malformed global metadata and still rejects links and

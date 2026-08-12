@@ -1,6 +1,7 @@
 require "time"
 require "hive/attempts/storage_health"
 require "hive/operational_action"
+require "hive/recovery"
 require "hive/workflows"
 require "hive/task_closure"
 require "hive/terminal_outcome"
@@ -506,17 +507,7 @@ module Hive
     end
 
     def canonical_scheduler_value(value)
-      case value
-      when Hash
-        value.keys.map(&:to_s).sort.to_h do |key|
-          original = value.key?(key) ? key : value.keys.find { |candidate| candidate.to_s == key }
-          [ key, canonical_scheduler_value(value.fetch(original)) ]
-        end
-      when Array
-        value.map { |entry| canonical_scheduler_value(entry) }
-      else
-        value
-      end
+      Hive::Recovery.canonical_wire_value(value)
     end
 
     def add_scheduler_join_issue(code:, project:, task:, message:)

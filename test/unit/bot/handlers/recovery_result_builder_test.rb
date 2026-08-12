@@ -117,6 +117,26 @@ class HiveBotRecoveryResultBuilderTest < Minitest::Test
     end
   end
 
+  def test_retry_verb_uses_the_tasks_pinned_historical_descriptor
+    workflow = Hive::Workflow.new(
+      id: :architecture,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "inbox", index: 1, state_file: "brief.md", kind: :inert
+        ),
+        Hive::Workflow::Stage.new(
+          name: "review", index: 2, state_file: "review.md", kind: :council,
+          reviewers: [ Hive::Workflow::Reviewer.new(name: "one", prompt: "Review.") ],
+          council: Hive::Workflow::Council.new(quorum: 1)
+        )
+      ]
+    )
+
+    assert_equal "run", Hive::Recovery::RetryPolicy.verb_for(
+      "2-review", workflow: "architecture", descriptor: workflow
+    )
+  end
+
   def test_build_short_circuits_for_generic_terminal_stage
     with_registered_workflow(research_workflow) do
       result = Hive::Bot::Handlers::RecoveryResultBuilder.build(

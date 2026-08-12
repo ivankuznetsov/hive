@@ -11,7 +11,7 @@ module Hive
     module RetryPolicy
       module_function
 
-      def verb_for(stage, workflow: nil, project: nil)
+      def verb_for(stage, workflow: nil, project: nil, descriptor: nil)
         stage = stage.to_s
         if Hive::Workflows.coding_id?(workflow)
           return nil if stage == "9-done" # coding-scoped: archived coding tasks have no retry verb
@@ -19,7 +19,7 @@ module Hive
           return Hive::Workflows.verb_arriving_at(stage)
         end
 
-        descriptor = resolve_descriptor(workflow, project: project)
+        descriptor ||= resolve_descriptor(workflow, project: project)
         return "run" unless descriptor
 
         resolved_stage = descriptor.stage_for_dir(stage)

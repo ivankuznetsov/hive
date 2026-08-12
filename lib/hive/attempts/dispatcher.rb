@@ -110,7 +110,8 @@ module Hive
       def dispatch_request(request, interactive: false, now: @clock.call,
                            admission_view: nil)
         task = @task_resolver.call(request)
-        intended_stage = intended_stage_for(request.argv, task)
+        argv = request_worker_argv(request, task)
+        intended_stage = intended_stage_for(argv, task)
         generation = Generation.resolve(
           task: task, project: request.project, intended_stage: intended_stage,
           task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil,
@@ -119,7 +120,7 @@ module Hive
         predecessor_id = request.respond_to?(:predecessor_attempt_id) ? request.predecessor_attempt_id : nil
         predecessor = predecessor_id && @store.fetch(predecessor_id)
         return dispatch_successor(
-          predecessor: predecessor, task: task, project: request.project, argv: request.argv,
+          predecessor: predecessor, task: task, project: request.project, argv: argv,
           request_id: request.request_id, provider: provider_for(task),
           inherited_outputs: request.inherited_outputs,
           retry_charge: recovery_retry_charge(request), interactive: interactive,
@@ -128,7 +129,7 @@ module Hive
 
         dispatch(
           task: task, project: request.project, intended_stage: intended_stage,
-          argv: request.argv, request_id: request.request_id, provider: provider_for(task),
+          argv: argv, request_id: request.request_id, provider: provider_for(task),
           interactive: interactive, generation: generation,
           inherited_outputs: request.respond_to?(:inherited_outputs) ? request.inherited_outputs : [],
           now: now, admission_view: admission_view
@@ -553,7 +554,23 @@ module Hive
       end
 
       def resolve_request_task(request)
-        Hive::TaskResolver.new(request.slug, project_filter: request.project).resolve
+        recovery = request.respond_to?(:recovery) ? request.recovery : nil
+        folder = recovery["canonical_task_folder"].to_s if recovery.is_a?(Hash)
+        target = folder.to_s.empty? ? request.slug : folder
+        expected_stage = request.expected_stage if
+          !folder.to_s.empty? && request.respond_to?(:expected_stage)
+        Hive::TaskResolver.new(
+          target, project_filter: request.project, stage_filter: expected_stage
+        ).resolve
+      end
+
+      def request_worker_argv(request, task)
+        recovery = request.respond_to?(:recovery) ? request.recovery : nil
+        folder = recovery["canonical_task_folder"].to_s if recovery.is_a?(Hash)
+        argv = request.argv
+        return argv if folder.to_s.empty? || argv.length < 3 || argv.first != "hive"
+
+        argv.dup.tap { |canonical| canonical[2] = task.folder }
       end
 
       def provider_for(task)

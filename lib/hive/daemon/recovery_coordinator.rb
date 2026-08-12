@@ -337,7 +337,7 @@ module Hive
           @request_queue.write_request!(
             project: value(row, :project),
             slug: value(row, :slug),
-            argv: retry_argv(row),
+            argv: retry_argv(row, task: locked_task),
             requestor: requestor,
             chat_id: chat_id,
             update_id: update_id,
@@ -1154,12 +1154,14 @@ module Hive
         Hive::Recovery.marker_attrs_match?(marker.attrs, expected)
       end
 
-      def retry_argv(row)
+      def retry_argv(row, task: nil)
         stage = value(row, :stage).to_s
         project = value(row, :project).to_s
         slug = value(row, :slug).to_s
+        descriptor = task.workflow if task&.respond_to?(:workflow)
         verb = Hive::Recovery::RetryPolicy.verb_for(
-          stage, workflow: value(row, :workflow), project: project
+          stage, workflow: value(row, :workflow), project: project,
+          descriptor: descriptor
         )
         raise Hive::Error, "no retry verb for stage #{stage}" unless verb
 

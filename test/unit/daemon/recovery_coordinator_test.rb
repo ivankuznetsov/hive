@@ -81,6 +81,38 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_retry_argv_classifies_a_historical_stage_from_the_pinned_descriptor
+    workflow = Hive::Workflow.new(
+      id: :architecture,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "inbox", index: 1, state_file: "brief.md", kind: :inert
+        ),
+        Hive::Workflow::Stage.new(
+          name: "review", index: 2, state_file: "review.md", kind: :council,
+          reviewers: [ Hive::Workflow::Reviewer.new(name: "one", prompt: "Review.") ],
+          council: Hive::Workflow::Council.new(quorum: 1)
+        )
+      ]
+    )
+    task = Struct.new(:workflow).new(workflow)
+    row = FakeRow.new(
+      project: "hive", slug: "historical-task", folder: "/tmp/historical-task",
+      state_file: "/tmp/historical-task/review.md", stage: "2-review",
+      workflow: "architecture", marker: "error", marker_attrs: {},
+      state_file_mtime: NOW, live_task_lock: false, attempt_id: nil,
+      task_generation: nil, suggested_command: ""
+    )
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(
+      state_home: "/tmp/hive-historical-retry-argv"
+    )
+
+    assert_equal(
+      %w[hive run historical-task --project hive --stage 2-review --json],
+      coordinator.send(:retry_argv, row, task: task)
+    )
+  end
+
   def test_request_before_cooldown_returns_cooldown_without_writing
     with_fixture(mtime: NOW - 3599) do |coordinator, row, state_home|
       receipt = coordinator.request(

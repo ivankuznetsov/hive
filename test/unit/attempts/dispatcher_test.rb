@@ -9,11 +9,11 @@ class AttemptsDispatcherTest < Minitest::Test
   CLAIM_CAPABILITY = "c" * 64
   FakeTask = Struct.new(
     :id, :slug, :state_file, :stage_index, :stage_name, :project_root, :worktree_path,
-    :workflow, keyword_init: true
+    :workflow, :folder, keyword_init: true
   )
   FakeRequest = Struct.new(
     :slug, :project, :argv, :request_id, :task_generation,
-    :predecessor_attempt_id, :inherited_outputs, :recovery,
+    :predecessor_attempt_id, :inherited_outputs, :recovery, :expected_stage,
     keyword_init: true
   )
 
@@ -570,6 +570,38 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal lost.attempt_id, successor.attempt["predecessor_attempt_id"]
       assert_equal 3, successor.attempt["retry_charge"]
       assert_equal 2, launcher.launched.size
+    end
+  end
+
+  def test_recovery_dispatch_resolves_and_runs_the_canonical_historical_folder
+    with_dispatcher do |dispatcher, _launcher, task|
+      task.folder = File.dirname(task.state_file)
+      task.stage_name = "review"
+      request = FakeRequest.new(
+        slug: task.slug, project: "demo",
+        argv: [ "hive", "run", task.slug, "--stage", "4-review", "--json" ],
+        request_id: "historical-recovery", inherited_outputs: [],
+        expected_stage: "4-review",
+        recovery: { "canonical_task_folder" => task.folder }
+      )
+      resolver_args = nil
+      resolver = Struct.new(:task) { def resolve = task }.new(task)
+      factory = lambda do |target, **options|
+        resolver_args = [ target, options ]
+        resolver
+      end
+      dispatcher.define_singleton_method(:provider_for) { |_task| "codex" }
+
+      result = with_replaced_singleton_method(Hive::TaskResolver, :new, factory) do
+        dispatcher.dispatch_request(request, now: NOW)
+      end
+
+      assert_equal [
+        task.folder,
+        { project_filter: "demo", stage_filter: "4-review" }
+      ], resolver_args
+      assert_equal task.folder, result.attempt["worker_argv"].fetch(2)
+      assert_equal "4-review", result.attempt["intended_stage"]
     end
   end
 

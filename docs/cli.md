@@ -110,7 +110,7 @@ returns every flat patch and supersession receipt.
 | `hive workflow install honeycomb/NAME[@REF]` | Verify and atomically select a reviewed package. |
 | `hive workflow list` | Show built-in, authored, selected, and retained workflows with integrity/provenance; JSON v2 includes the active managed configuration and redacted input availability. |
 | `hive workflow update NAME [--dry-run]` | Report a semantic/security diff and atomically advance after consent. |
-| `hive workflow remove NAME` | Disable a managed selection while retaining task-pinned generations. |
+| `hive workflow remove NAME` | Remove a managed selection after all owned tasks are finished, archived, or reset. |
 | `hive workflow publish ID --version X.Y.Z --dry-run --json` | Build, consumer-validate, and security-lint the immutable Honeycomb package without remote or receipt effects. |
 | `hive workflow publish ID --version X.Y.Z --expected-release-digest SHA256 --json` | Submit or reconcile the exact confirmed package through the schema-v2 lifecycle. |
 | `hive tree` | Print the Thor command tree. |

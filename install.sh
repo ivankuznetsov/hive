@@ -297,6 +297,23 @@ daemon_autostart_setup() {
   fi
 }
 
+# An installed binary owns the state transition for every registered project.
+# Run it before daemon setup so no newly started daemon can dispatch a retained
+# task against a stale managed-workflow generation.
+migrate_registered_projects() {
+  local migrate_help
+  if ! migrate_help="$("${gem_home}/bin/hive" help migrate 2>/dev/null)" ||
+     [[ "$migrate_help" != *"--all"* ]]; then
+    log "installed Hive ${version} predates fleet migration; no automatic project migration is available"
+    return 0
+  fi
+
+  log "migrating registered projects with installed Hive"
+  if ! "${gem_home}/bin/hive" migrate --all; then
+    die "automatic project migration failed; resolve the reported project error and run '${gem_home}/bin/hive migrate --all'"
+  fi
+}
+
 qmd_install_enabled() {
   case "$INSTALL_QMD" in
     0|false|False|FALSE|no|No|NO) return 1 ;;
@@ -409,6 +426,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "dry run: would download ${gem_url}"
   log "dry run: would verify SHA256SUMS and write ${data_home}/install-channel"
   log "dry run: would gem install --install-dir ${gem_home} ${gem_file}"
+  log "dry run: would run ${gem_home}/bin/hive migrate --all before daemon startup"
   log "dry run: would run ${link_path} daemon install to enable daemon autostart"
   if qmd_install_enabled; then
     log "dry run: would npm install --global --prefix ${data_home}/qmd ${QMD_NPM_PACKAGE}"
@@ -667,6 +685,7 @@ else
 fi
 
 runtime_preflight
+migrate_registered_projects
 daemon_autostart_setup
 
 log "installed hive ${version} (hive-cli rubygem)"

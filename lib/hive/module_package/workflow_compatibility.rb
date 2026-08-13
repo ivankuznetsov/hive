@@ -62,6 +62,15 @@ module Hive
         @store.configuration(name, digest, cfg: @project_config)
       end
 
+      # Materialize an admitted candidate before the activation transaction so
+      # retained-task migration can resolve and lock its target generation.
+      # The selected pointer remains unchanged until #activate! commits.
+      def stage!(candidate:, configuration:)
+        @store.place_generation(candidate.package_root, candidate.resolution)
+        @store.place_configuration(configuration)
+        true
+      end
+
       def activate!(candidate:, configuration:, expected_current:, commit:, admit: true)
         if admit
           admit_runtime!(

@@ -22,7 +22,8 @@ class TaskTest < Minitest::Test
         workflow_manifest_digest: #{'b' * 64}
       YAML
       error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
-      assert_includes error.message, "manifest"
+      assert_includes error.message, "not selected"
+      assert_includes error.message, "hive migrate"
     end
   end
 
@@ -46,6 +47,41 @@ class TaskTest < Minitest::Test
       with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
         error = assert_raises(Hive::UnsupportedProjectConfigError) { task.send(:resolve_workflow) }
         assert_includes error.message, "Unknown top-level key `reviewres`"
+      end
+    end
+  end
+
+  def test_managed_task_refuses_historical_generation_before_runtime_lookup
+    with_tmp_dir do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(
+        File.join(hive_state, "config.yml"),
+        Hive::Config::DEFAULTS.merge("hive_state_path" => ".hive-state").to_yaml
+      )
+      folder = File.join(hive_state, "stages", "1-inbox", "managed-260812-aaaa")
+      Hive::TaskMeta.write(
+        folder, id: 1, slug: File.basename(folder), display_name: "Managed",
+        workflow: "demo", workflow_commit: "a" * 40,
+        workflow_manifest_digest: "b" * 64,
+        workflow_configuration_digest: "c" * 64
+      )
+      store = Object.new
+      store.define_singleton_method(:selected) do |_name, cfg:|
+        {
+          "source_commit" => "d" * 40,
+          "manifest_digest" => "e" * 64,
+          "configuration_digest" => "f" * 64
+        }
+      end
+      store.define_singleton_method(:workflow) do |*|
+        flunk "historical workflow must not reach runtime lookup"
+      end
+
+      with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
+        error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+        assert_includes error.message, "requires migration"
+        assert_includes error.message, "hive migrate"
       end
     end
   end

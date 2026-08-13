@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-07-27
+updated: 2026-08-13
 tags: [command, workflow, authoring, validation, human-stage, honeycomb, registry, archive, retention]
 ---
 
@@ -62,12 +62,23 @@ interactive operator accept the defaults or edit each slot's agent, model, and
 effort. Changing an agent recomputes its model/effort suggestions before those
 prompts, and entering `unpinned` clears a pin. Mapping output names absent
 model/effort pins as `unpinned`. New tasks copy the
-catalog commit, release digest, and configuration digest into `meta.yml`;
-update/remove retain every identity referenced by an in-flight task. When the
+catalog commit, release digest, and configuration digest into `meta.yml`.
+Install/update immediately migrate every retained task for that workflow to the
+selected generation and configuration. The task's semantic stage name is the
+stable key, so inserted or reordered stages move the folder to the selected
+numeric position; a changed state-file name moves the existing artifact with
+the task. Candidate validation, destination preflight, and task-lock
+reservation happen before pointer activation. The pointer and retained-task
+changes land in one state commit, so a removed/renamed occupied stage or a live
+task lock leaves the previous selection executable. Stale nonterminal dispatch
+requests are removed, and request identity fencing rejects any delivery that
+raced the cutover.
+Unreferenced old generations are deleted after the cutover, and remove refuses
+while any retained task still names the workflow. When the
 selected pointer is a legacy schema-v1 lock, Hive derives its compatibility
 configuration from the project's effective agent profiles and durably stores
-the snapshot before writing task metadata, so a later schema-v2 update cannot
-strand the task's configuration pin.
+the snapshot before writing task metadata; the next migration rewrites any
+older task pin to that current snapshot.
 
 Install binds activation to the still-absent selection observed after package
 validation. An already-selected exact generation and configuration returns
@@ -80,9 +91,10 @@ the store rechecks the selected identity inside the mutation lock. A changed
 baseline raises retryable `ConcurrentRunError` instead of applying an action to
 an unreviewed selection.
 
-Activation/commit failures remain failures and trigger best-effort candidate
-cleanup; if cleanup also fails, it is logged without replacing the original
-exception. Once update/remove commits the selection change, later cleanup,
+Activation/migration commit failures remain failures and roll back both the
+selected pointer and retained-task filesystem changes before best-effort
+candidate cleanup; if cleanup also fails, it is logged without replacing the
+original exception. Once update/remove commits the selection change, later cleanup,
 cleanup-commit, or cache-refresh failures return the successful status with a
 `warnings` array. Hive Web renders those warnings after redirect so retry cannot
 produce a misleading "not installed" result.
@@ -142,12 +154,14 @@ write. Interactive refusal is a successful `cancelled` no-op; missing
 non-interactive consent is `consent_required`/USAGE.
 
 `list` emits orthogonal `origin`, `selection`, `integrity`, and
-`catalog_visibility` fields, including tampered/malformed and retained entries.
+`catalog_visibility` fields, including tampered/malformed entries. A retained
+row can still appear as diagnostic evidence after an interrupted or manually
+mutated store, but runtime will not dispatch it; run `hive migrate` to converge.
 JSON schema v2 adds the selected configuration digest, its stable-slot
 agent/model/effort mappings and fingerprints, and each declared optional
 input's authorized slots, environment-variable binding, and availability.
-Environment values are never emitted. Task-retained rows expose their pinned
-configuration digest when present but omit active mapping/input details;
+Environment values are never emitted. Diagnostic retained rows expose their
+pinned configuration digest when present but omit active mapping/input details;
 built-in and authored rows keep their generation-free shape. Its offline
 visibility is `unknown_offline`.
 

@@ -86,10 +86,6 @@ module Hive
       File.join(workflow_publish_root, "bundles")
     end
 
-    def workflow_publish_locks_root
-      File.join(workflow_publish_root, "locks")
-    end
-
     def workflow_publish_objects_root
       File.join(workflow_publish_root, "objects")
     end

@@ -117,8 +117,6 @@ module Hive
         :payload, :availability, :token, :last_success_at, :error,
         :scan_count, :generation
       ) do
-        def fresh? = availability == "fresh"
-        def degraded? = availability == "degraded"
         def unavailable? = availability == "unavailable"
 
         def to_h

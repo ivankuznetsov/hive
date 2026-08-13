@@ -194,7 +194,7 @@ class ReviewSuppressionTest < Minitest::Test
     end
   end
 
-  def test_read_active_keys_counts_checked_and_ignores_unchecked_tombstones
+  def test_read_active_entries_counts_checked_and_ignores_unchecked_tombstones
     with_suppression_task do |ctx|
       key = Suppression.key_for("lib/foo.rb leaks stale state", severity: "high")
       other = Suppression.key_for("lib/bar.rb stale tombstone", severity: "medium")
@@ -208,21 +208,21 @@ class ReviewSuppressionTest < Minitest::Test
         - [ ] Medium: lib/bar.rb stale tombstone <!-- fp=#{other} first-pass=01 -->
       MD
 
-      keys = Suppression.read_active_keys(ctx)
+      keys = Suppression.read_active_entries(ctx).keys.to_set
 
       assert_includes keys, key
       refute_includes keys, other
     end
   end
 
-  def test_read_active_keys_returns_empty_for_unreadable_suppression_doc
+  def test_read_active_entries_returns_empty_for_unreadable_suppression_doc
     with_suppression_task do |ctx|
       FileUtils.rm_f(Suppression.suppressed_path(ctx))
       FileUtils.mkdir_p(Suppression.suppressed_path(ctx))
 
       keys = nil
       _out, err = capture_io do
-        keys = Suppression.read_active_keys(ctx)
+        keys = Suppression.read_active_entries(ctx).keys.to_set
       end
 
       assert_empty keys
@@ -274,7 +274,7 @@ class ReviewSuppressionTest < Minitest::Test
     end
   end
 
-  def test_read_active_keys_hashes_operator_added_line_without_fp
+  def test_read_active_entries_hashes_operator_added_line_without_fp
     with_suppression_task do |ctx|
       expected = Suppression.key_for("lib/foo.rb leaks stale state", severity: "high")
       File.write(Suppression.suppressed_path(ctx), <<~MD)
@@ -284,11 +284,11 @@ class ReviewSuppressionTest < Minitest::Test
         - [x] High: lib/foo.rb leaks stale state
       MD
 
-      assert_includes Suppression.read_active_keys(ctx), expected
+      assert_includes Suppression.read_active_entries(ctx).keys, expected
     end
   end
 
-  def test_read_active_keys_uses_section_severity_for_operator_line_without_inline_severity
+  def test_read_active_entries_uses_section_severity_for_operator_line_without_inline_severity
     with_suppression_task do |ctx|
       expected = Suppression.key_for("lib/foo.rb leaks stale state", severity: "high")
       File.write(Suppression.suppressed_path(ctx), <<~MD)
@@ -298,7 +298,7 @@ class ReviewSuppressionTest < Minitest::Test
         - [x] lib/foo.rb leaks stale state
       MD
 
-      assert_includes Suppression.read_active_keys(ctx), expected
+      assert_includes Suppression.read_active_entries(ctx).keys, expected
     end
   end
 
@@ -495,7 +495,7 @@ class ReviewSuppressionTest < Minitest::Test
         - [x] Critical: lib/foo.rb bad
       MD
 
-      refute_empty Suppression.read_active_keys(ctx)
+      refute_empty Suppression.read_active_entries(ctx)
 
       reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-01.md")
       File.write(reviewer, "## High\n- [x] RESOLVED/NO-FIX: lib/other.rb thing: rationale\n")

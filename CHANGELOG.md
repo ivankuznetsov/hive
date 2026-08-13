@@ -2,6 +2,18 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.7.2
+
+- Migrated retained tasks onto their selected workflow generation during
+  install and `hive update`, removing historical runtime dispatch while
+  preserving task state and rejecting stale delivery requests. (#1001)
+- Fixed fleet migration deadlocking while loading a task under the workflow
+  mutation lock, so upgrades now complete and remain idempotent. (#1021)
+- Fixed recovery resolving tasks stored under historical workflow folder
+  layouts, allowing pre-update tasks to reach the migration path. (#995)
+- Updated sqlite3 to 2.9.6 to address GHSA-mwm8-39rw-8826 in the CLI and
+  packaged web dependency closures.
+
 ## 0.7.1
 
 - Added provider-health circuits and durable, policy-bound route selection so

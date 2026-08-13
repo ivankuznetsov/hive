@@ -77,7 +77,7 @@ depends_on: api:base-task-260716-abcd
 completed_at: 2026-07-24T12:00:00Z
 ```
 
-`Hive::Task#id`, `#display_name`, `#display_label`, `#depends_on`,
+`Hive::Task#id`, `#display_name`, `#depends_on`,
 `#completed_at`, and the optional workflow selector are derived from this
 sidecar. `completed_at` is optional for active and legacy tasks. Once present it
 is an exact UTC ISO 8601 timestamp and `TaskMeta.write_completed_at_once`
@@ -1147,8 +1147,9 @@ Since 2026-05-22, `Hive::Stages::DIRS` has all nine slots filled in order; `Stag
 Its stable identity is the task/project, task generation, implementation
 base/head, changed-path digest, and classifier version. Hive classifies
 user-visible paths or an explicit visual-proof request as `required`; other
-work is `not_applicable`. Agents cannot demote the result. A demotion records a
-confirmed operator, rationale, timestamp, and the same task generation.
+work is `not_applicable`. The result is deterministic and has no runtime
+promotion or demotion API; the nullable `override` field remains empty for v1
+receipt compatibility.
 
 When required, new `media/capture-manifest.json` receipts use the
 provider-neutral `hive-artifact-capture` v2 contract and must identify the same

@@ -6,9 +6,9 @@ repairs, overwrites, or partially merges an existing workflow.
 
 ## Gate before mutation
 
-The minimum Hive version: 0.7.1. First run `hive version` and parse
+The minimum Hive version: 0.7.2. First run `hive version` and parse
 the bare semantic version. If it is older, stop before inspecting or writing
-project workflow paths and say exactly: “Hive 0.7.1 or newer is
+project workflow paths and say exactly: “Hive 0.7.2 or newer is
 required; run `hive update`, then retry.” Do not invent a compatibility adapter.
 
 After the version passes, run `hive workflow list --json` in the target project

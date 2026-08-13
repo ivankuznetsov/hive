@@ -65,7 +65,7 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
           request_id: "request-1", state_home: state_home, entrypoint: entrypoint
         )
 
-        assert reference.queued?
+        assert_equal :queued, reference.status
         assert_equal 1, Hive::Daemon::DispatchRequestQueue.pending(state_home: state_home).size
       end
     end
@@ -93,7 +93,7 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
           request_id: "request-no-route", state_home: state_home, entrypoint: entrypoint
         )
 
-        assert reference.queued?
+        assert_equal :queued, reference.status
         assert_nil reference.attempt_id
         assert_equal 1,
                      Hive::Daemon::DispatchRequestQueue.pending(state_home: state_home).size
@@ -194,7 +194,7 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
           entrypoint: entrypoint
         )
 
-        assert reference.queued?
+        assert_equal :queued, reference.status
       end
 
       request = Hive::Daemon::DispatchRequestQueue.pending(state_home: state_home).fetch(0)

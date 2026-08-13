@@ -212,25 +212,6 @@ module Hive
         @progress_store.path(project_root)
       end
 
-      # Gives PrMergeWatcher a bounded slice of this dispatcher's shared
-      # architecture-intake deadline before it starts its own gh state poll.
-      # Projects without enabled architecture intake retain the watcher's
-      # bounded fallback because their archive path does not consume this
-      # reconciler's budget.
-      def watcher_poll_timeout(project:, now:, maximum:)
-        limit = positive_float!(maximum, "watcher poll timeout")
-        entry = Array(@registry.call).find { |candidate| candidate["name"] == project.to_s }
-        return limit unless entry
-
-        cfg = @config_loader.call(entry.fetch("path"))
-        return limit unless intake_enabled?(cfg)
-
-        timeout = timeout_for_deadline(shared_tick_deadline(now))
-        timeout && [ timeout, limit ].min
-      rescue StandardError
-        limit || Float(maximum)
-      end
-
       private
 
       def hive_state_path_for(project_root)

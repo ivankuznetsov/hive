@@ -9,7 +9,7 @@ class AgentProfilesLaunchBindingsTest < Minitest::Test
       adapter: "codex", binding_id: "default", environment: {}
     )
 
-    assert binding.default?
+    assert_equal "default", binding.id
     assert_equal({ "OPENAI_API_KEY" => nil }, binding.environment)
     assert_nil binding.selector_name
   end

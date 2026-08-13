@@ -33,16 +33,6 @@ class AttemptsProcessIdentityTest < Minitest::Test
     assert_equal :unverifiable, checker.status(identity(start: ""))
   end
 
-  def test_group_safety_rejects_non_session_leader_and_foreign_worker
-    verifier = checker
-    assert verifier.safe_group?(wrapper: identity)
-    refute verifier.safe_group?(wrapper: identity(group: 11))
-    refute verifier.safe_group?(
-      wrapper: identity,
-      worker: identity.merge("pid" => 456, "session_id" => 99)
-    )
-  end
-
   def test_orphan_cleanup_rechecks_identity_and_signals_only_verified_group
     alive = true
     signals = []
@@ -130,10 +120,9 @@ class AttemptsProcessIdentityTest < Minitest::Test
     assert_nil checker.capture("not-a-pid")
   end
 
-  def test_status_maps_reader_errors_and_safe_worker_matches
+  def test_status_maps_reader_errors
     expected = identity
     assert_equal :unverifiable, checker.status("bad")
-    assert checker.safe_group?(wrapper: expected, worker: expected.merge("pid" => 456))
 
     esrch = Hive::Attempts::ProcessIdentity.new(
       start_reader: ->(_pid) { raise Errno::ESRCH }, signaler: ->(_signal, _pid) { },

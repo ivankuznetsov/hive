@@ -189,10 +189,6 @@ module Hive
       meta[:base_branch]
     end
 
-    def display_label
-      display_name || slug
-    end
-
     def worktree_path
       # An explicit pointer is authoritative for every workflow. Generic
       # managed workflows may create a worktree before coding's 4-execute

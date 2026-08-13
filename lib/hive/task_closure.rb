@@ -146,12 +146,6 @@ module Hive
         }
       end
 
-      def valid_for_transition?(task, receipt_digest:, project: nil)
-        !transition_evidence(
-          task, receipt_digest: receipt_digest, project: project
-        ).nil?
-      end
-
       def transition_evidence(task, receipt_digest:, project: nil)
         result = read(task, project: project)
         return nil unless result.valid?

@@ -574,6 +574,7 @@ class InstallScriptTest < Minitest::Test
     write_executable(File.join(fake_bin, "ruby"), <<~'SH')
       #!/bin/sh
       case "$*" in
+        *'RUBY_VERSION.to_f >= 3.4'*) exit 0 ;;
         *'print RUBY_VERSION'*) printf '3.4.7' ;;
         *) exec /usr/bin/ruby "$@" ;;
       esac

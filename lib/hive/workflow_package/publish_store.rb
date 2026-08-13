@@ -282,14 +282,6 @@ module Hive
         )
       end
 
-      def symbol_identity(receipt)
-        {
-          registry: receipt.registry, name: receipt.name, version: receipt.version,
-          package_digest: receipt.package_digest, release_digest: receipt.release_digest,
-          lint_contract: receipt.lint_contract
-        }
-      end
-
       def secure_equal?(left, right)
         left.bytesize == right.bytesize &&
           left.bytes.zip(right.bytes).reduce(0) { |memo, (a, b)| memo | (a ^ b) }.zero?

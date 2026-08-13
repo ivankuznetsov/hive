@@ -268,13 +268,6 @@ module Hive
         raise PublishRecoveryError, "publication bundle is missing or unreadable"
       end
 
-      def secure_file!(path)
-        read_secure_file(
-          path, max_bytes: Manifest::MAX_FILE_BYTES,
-          message: "publication state file is linked, special, or not owned by the current user"
-        ).last
-      end
-
       def read_secure_file(path, max_bytes:, message:, mode: nil)
         SafeFile.read(
           path, max_bytes: max_bytes, error_class: PublishRecoveryError,

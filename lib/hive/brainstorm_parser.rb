@@ -122,10 +122,6 @@ module Hive
       parsed.select { |question| question.answer.nil? }
     end
 
-    def question_for(parsed, question_n)
-      parsed.find { |question| question.n == question_n }
-    end
-
     # Normalize layout-only differences before binding a presented question to
     # a durable fingerprint. NFC closes canonically-equivalent Unicode forms
     # without compatibility-folding distinct glyphs such as ①/1 or x²/x2;
@@ -143,15 +139,8 @@ module Hive
       )
     end
 
-    # Canonical heading strings. Centralized here so supervisor copy,
-    # writer fallback messages, and any future renderer share one
-    # source of truth. If the brainstorm.md format ever changes (e.g.
-    # `### Q{n}.` becomes `### Q{n}:`), these are the single place to
-    # update.
-    def question_header(n)
-      "### Q#{n}."
-    end
-
+    # Canonical answer heading string shared by the writer fallback and any
+    # future renderer.
     def answer_header(n)
       "### A#{n}."
     end

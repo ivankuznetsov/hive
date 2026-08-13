@@ -237,10 +237,6 @@ module Hive
         Scan.new(records: records.freeze, invalid_records: invalid.freeze)
       end
 
-      def for_generation(task_generation)
-        scan.records.select { |record| record.task_generation == task_generation }
-      end
-
       def claim(observed, owner:, claim_capability:, first_heartbeat_timeout_sec:, now:)
         raise CompareAndSwapFailed, "launch claim deadline expired" if observed.active_deadline && now > observed.active_deadline
         mutate(observed, allowed_states: [ "launching" ]) do |data|

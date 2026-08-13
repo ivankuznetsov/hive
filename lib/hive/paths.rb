@@ -62,10 +62,6 @@ module Hive
       File.join(workflow_publish_root, "receipts")
     end
 
-    def workflow_publish_bundles_root
-      File.join(workflow_publish_root, "bundles")
-    end
-
     def workflow_publish_locks_root
       File.join(workflow_publish_root, "locks")
     end

@@ -101,7 +101,7 @@ class HivePatrolFingerprintTest < Minitest::Test
     end
   end
 
-  def test_complete_findings_can_be_compared_without_a_ledger
+  def test_semantic_signatures_compare_without_a_ledger
     first = finding
     first.fingerprint = ""
     first.root_cause = "The scheduler lease remains claimed after launch rejection."
@@ -110,10 +110,17 @@ class HivePatrolFingerprintTest < Minitest::Test
     second.title = "Nil user crash in the request route"
     second.root_cause = "Launch rejection leaves the scheduler lease claimed."
 
-    assert Hive::Patrol::Fingerprint.semantically_same?(first, second)
+    first_signature = Hive::Patrol::Fingerprint.semantic_signature(first)
+    second_signature = Hive::Patrol::Fingerprint.semantic_signature(second)
+    assert Hive::Patrol::Fingerprint.semantically_same_signature?(
+      first_signature, second_signature
+    )
 
     second.category = "security"
-    refute Hive::Patrol::Fingerprint.semantically_same?(first, second)
+    second_signature = Hive::Patrol::Fingerprint.semantic_signature(second)
+    refute Hive::Patrol::Fingerprint.semantically_same_signature?(
+      first_signature, second_signature
+    )
   end
 
   # ── compatibility pins ─────────────────────────────────────────────────

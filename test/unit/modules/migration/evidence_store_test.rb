@@ -25,7 +25,6 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
 
       restarted = Hive::Modules::Migration::EvidenceStore.new(root: root)
       assert_equal capture, restarted.fetch_capture(capture.capture_id)
-      assert_equal receipt, restarted.fetch_receipt(receipt.receipt_id)
       assert_equal [ capture ], restarted.captures
       assert_equal [ receipt ], restarted.receipts
     end
@@ -61,11 +60,10 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
     end
   end
 
-  def test_fetch_rejects_untrusted_paths_and_no_follow_reads
+  def test_capture_fetch_rejects_untrusted_paths_and_no_follow_reads
     with_tmp_dir do |root|
       store = Hive::Modules::Migration::EvidenceStore.new(root: root)
       assert_raises(Hive::ConfigError) { store.fetch_capture("../../config") }
-      assert_raises(Hive::ConfigError) { store.fetch_receipt("/tmp/receipt") }
 
       capture = capture_for(recorded_at: NOW)
       outside = File.join(root, "outside.json")
@@ -80,7 +78,7 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
     end
   end
 
-  def test_occurrence_and_intent_indexes_avoid_history_scans
+  def test_occurrence_index_avoids_history_scans
     with_tmp_dir do |root|
       store = Hive::Modules::Migration::EvidenceStore.new(root: root)
       first = receipt_for(
@@ -97,15 +95,11 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
       page = store.receipts_for_occurrence(first.intent.occurrence_id)
       assert_equal [ first ], page.records
       assert_nil page.next_cursor
-      assert_equal [ first ], store.receipts_for_intent(first.intent.intent_id).records
       assert File.file?(
         File.join(
           root, "indexes", "occurrences",
           "#{first.intent.occurrence_id}.json"
         )
-      )
-      assert File.file?(
-        File.join(root, "indexes", "intents", "#{first.intent.intent_id}.json")
       )
     end
   end

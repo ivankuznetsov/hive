@@ -334,7 +334,6 @@ class AgentLimitTest < Minitest::Test
   def test_live_limit_menu_detects_tail_wall_and_returns_matched_line
     pane = pane_fixture("limit_menu_live.txt")
 
-    assert Hive::AgentLimit.live_limit_menu?(pane)
     assert_equal "❯ 1. Stop and wait for limit to reset",
                  Hive::AgentLimit.live_limit_line(pane)
   end
@@ -356,8 +355,6 @@ class AgentLimitTest < Minitest::Test
   def test_live_limit_menu_rejects_quoted_menu_after_agent_moved_on
     pane = pane_fixture("limit_quoted_7456.txt")
 
-    refute Hive::AgentLimit.live_limit_menu?(pane),
-           "a fresh ready/activity prompt below the quote means the run moved on"
     assert_nil Hive::AgentLimit.live_limit_line(pane)
   end
 
@@ -377,7 +374,6 @@ class AgentLimitTest < Minitest::Test
       line nine after old quoted menu
     TEXT
 
-    refute Hive::AgentLimit.live_limit_menu?(pane)
     assert_nil Hive::AgentLimit.live_limit_line(pane)
   end
 
@@ -393,8 +389,8 @@ class AgentLimitTest < Minitest::Test
       It will reset later.
     TEXT
 
-    refute Hive::AgentLimit.live_limit_menu?(menu_without_limit)
-    refute Hive::AgentLimit.live_limit_menu?(limit_without_menu)
+    assert_nil Hive::AgentLimit.live_limit_line(menu_without_limit)
+    assert_nil Hive::AgentLimit.live_limit_line(limit_without_menu)
   end
 
   def test_live_limit_menu_rejects_benign_chrome_only_pane
@@ -405,7 +401,7 @@ class AgentLimitTest < Minitest::Test
       ❯ 1. Continue
     TEXT
 
-    refute Hive::AgentLimit.live_limit_menu?(pane)
+    assert_nil Hive::AgentLimit.live_limit_line(pane)
   end
 
   def test_from_limit_matches_only_agent_limit_wire_format

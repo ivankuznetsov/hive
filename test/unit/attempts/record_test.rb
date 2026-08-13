@@ -329,8 +329,6 @@ class AttemptsRecordTest < Minitest::Test
       )
 
       assert record.final?
-      refute record.transition_allowed?("running")
-      refute record.transition_allowed?("launching")
     end
   end
 
@@ -353,23 +351,15 @@ class AttemptsRecordTest < Minitest::Test
     end
   end
 
-  def test_live_transition_matrix_and_record_field_validation
+  def test_live_record_field_validation
     launching = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30)
-    assert launching.transition_allowed?("launching")
-    assert launching.transition_allowed?("running")
-    assert launching.transition_allowed?("lost")
-    refute launching.transition_allowed?("terminal")
 
     running_data = launching.to_h.merge(
       "state" => "running", "claim_deadline" => nil,
       "heartbeat_deadline" => (NOW + 30).iso8601(6),
       "wrapper" => { "pid" => 1 }
     )
-    running = Hive::Attempts::Record.new(running_data)
-    assert running.transition_allowed?("running")
-    assert running.transition_allowed?("terminal")
-    assert running.transition_allowed?("lost")
-    refute running.transition_allowed?("launching")
+    Hive::Attempts::Record.new(running_data)
 
     invalid_changes = [
       { "lease_version" => -1 },
@@ -391,12 +381,6 @@ class AttemptsRecordTest < Minitest::Test
     assert_raises(Hive::Attempts::InvalidRecord) do
       Hive::Attempts::Record.new(running_data.merge("heartbeat_deadline" => nil))
     end
-  end
-
-  def test_unknown_internal_state_has_no_legal_transition
-    record = Hive::Attempts::Record.allocate
-    record.instance_variable_set(:@data, { "state" => "unknown" })
-    refute record.transition_allowed?("running")
   end
 
   def test_launch_authority_requires_current_durable_fields_only

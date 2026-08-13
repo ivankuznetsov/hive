@@ -304,7 +304,6 @@ module Hive
       def hooks = data.fetch("hooks")
       def settings = data.fetch("settings")
       def permissions = data.fetch("permissions")
-      def event_names = hooks.flat_map { |hook| hook.fetch("events") }.uniq.sort.freeze
       def file_entries = data.fetch("files").map { |path, sha256| { "path" => path, "sha256" => sha256 } }
 
       private

@@ -12,7 +12,6 @@ class ModulePackageManifestTest < Minitest::Test
 
       assert_equal "patrol", manifest.name
       assert_equal "1.0.0", manifest.version
-      assert_equal %w[project.registered task.completed], manifest.event_names
       assert_equal %w[scheduled-scan setup task-completed], manifest.hooks.map { |hook| hook.fetch("id") }
       assert_equal document.fetch("release_sha256"), manifest.digest
       assert_equal Hive::WorkflowPackage::CanonicalYAML.dump(document), manifest.bytes

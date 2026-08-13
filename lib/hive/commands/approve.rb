@@ -136,10 +136,12 @@ module Hive
       def begin_approval_operation(activity, task, destination, marker, direction)
         return nil unless activity
 
+        rejection = direction == "backward"
         activity.begin_operation(
-          kind: "approval_recorded",
-          operation_id: "approve:#{task.stage_index}-#{task.stage_name}:#{destination}:#{direction}",
-          source: "command_service", reason: "task stage approval recorded",
+          kind: rejection ? "rejection_recorded" : "approval_recorded",
+          operation_id: "#{rejection ? 'reject' : 'approve'}:#{task.stage_index}-#{task.stage_name}:#{destination}:#{direction}",
+          source: "command_service",
+          reason: rejection ? "task stage rejection recorded" : "task stage approval recorded",
           precondition: {
             "stage" => "#{task.stage_index}-#{task.stage_name}",
             "marker" => marker.name.to_s
@@ -168,7 +170,7 @@ module Hive
         )
         current_precondition_fingerprint = Hive::TaskActivity.fingerprint(current_precondition)
         activity.reconcile_operations! do |receipt|
-          next :defer unless receipt["activity_kind"] == "approval_recorded" &&
+          next :defer unless %w[approval_recorded rejection_recorded].include?(receipt["activity_kind"]) &&
             receipt["source"] == "command_service"
 
           if receipt["expected_postcondition_fingerprint"] == current_fingerprint
@@ -349,7 +351,8 @@ module Hive
               new_folder = move_task!(task, dest_stage)
             end
             cleanup_orphan_task_lock(new_folder)
-            commit_action = "approve #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
+            verb = stage_for_dest!(task, dest_stage).index < task.stage_index ? "reject" : "approve"
+            commit_action = "#{verb} #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
             record_commit_or_rollback!(
               task, dest_stage, new_folder, commit_action,
               completion_snapshot: completion_snapshot, completion_time: completion_time
@@ -623,7 +626,8 @@ module Hive
         if @json
           puts JSON.generate(success_payload(task, dest_stage, new_folder, marker, commit_action, direction))
         else
-          puts "hive: approved #{task.slug}"
+          verb = direction == "backward" ? "rejected" : "approved"
+          puts "hive: #{verb} #{task.slug}"
           puts "  from: #{task.folder}"
           puts "  to:   #{new_folder}"
           # Hint goes to stderr so a `| jq` consumer doesn't get prose mixed

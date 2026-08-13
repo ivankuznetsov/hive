@@ -14,6 +14,7 @@ module Hive
       CHECKPOINT_BASENAME = "task-projection.checkpoint.json".freeze
       CHECKPOINT_SCHEMA = "hive-task-projection-checkpoint".freeze
       CHECKPOINT_SCHEMA_VERSION = 1
+      CHECKPOINT_ANCHOR_BYTES = 4 * 1024
 
       BoundedRead = Data.define(
         :projection, :state, :diagnostics, :truncated, :journal_cursor,
@@ -124,11 +125,9 @@ module Hive
       private
 
       def publish_checkpoint(binding:, bytes:, projection:)
-        records = binding.fetch("records").map do |record|
-          record.reject { |key, _| key.to_s.start_with?("__") }
-        end
         stat = File.stat(journal_path) if File.exist?(journal_path)
         cursor = binding.fetch("cursor")
+        prefix = bytes.byteslice(0, cursor).to_s
         document = {
           "schema" => CHECKPOINT_SCHEMA,
           "schema_version" => CHECKPOINT_SCHEMA_VERSION,
@@ -139,10 +138,15 @@ module Hive
             "event_id" => binding.fetch("event_id"),
             "device" => stat&.dev,
             "inode" => stat&.ino,
-            "prefix_hash" => ::Digest::SHA256.hexdigest(bytes.byteslice(0, cursor).to_s)
+            "head_hash" => ::Digest::SHA256.hexdigest(
+              prefix.byteslice(0, CHECKPOINT_ANCHOR_BYTES).to_s
+            ),
+            "tail_hash" => ::Digest::SHA256.hexdigest(
+              prefix.byteslice([ cursor - CHECKPOINT_ANCHOR_BYTES, 0 ].max,
+                                CHECKPOINT_ANCHOR_BYTES).to_s
+            )
           },
-          "snapshot" => projection.to_h,
-          "records" => records
+          "snapshot" => projection.to_h
         }
         body = "#{Hive::TaskProjection.canonical_json(document)}\n"
         limit = Hive::TaskWorkspace::Limits.new.fetch(:projection_snapshot_bytes)
@@ -171,8 +175,7 @@ module Hive
         end
         return { "valid" => false, "reason" => "checkpoint_oversized" } unless
           document["state"] == "current"
-        unless document["snapshot"].is_a?(Hash) && document["records"].is_a?(Array) &&
-               document["journal"].is_a?(Hash)
+        unless document["snapshot"].is_a?(Hash) && document["journal"].is_a?(Hash)
           return { "valid" => false, "reason" => "checkpoint_invalid" }
         end
 
@@ -210,6 +213,13 @@ module Hive
             cursor: cursor
           )
         end
+        if suffix.empty?
+          projection = marker ? base_projection.with_marker(marker) : base_projection
+          return BoundedRead.new(
+            projection: projection, state: "current", diagnostics: [],
+            truncated: false, journal_cursor: current_size, journal_records: []
+          )
+        end
         event_count = suffix.lines.count { |line| !line.strip.empty? }
         if event_count > event_limit
           return degraded_from_projection(
@@ -222,19 +232,23 @@ module Hive
           )
         end
 
-        encoded_prefix = checkpoint.fetch("records").map { |record| JSON.generate(record) }.join("\n")
-        encoded_prefix = "#{encoded_prefix}\n" unless encoded_prefix.empty?
-        replayed = Hive::TaskProjection.replay_journal(
-          "#{encoded_prefix}#{suffix}", attempt_store: @attempt_store
-        )
+        replayed = Hive::TaskProjection.replay_journal(suffix, attempt_store: @attempt_store)
+        records = checkpoint_seed_records(base_projection) + replayed.records
         projection = @projector.project(
-          records: replayed.records,
+          records: records,
           cursor: current_size,
           # The exact full-file digest belongs to the checkpoint at its
           # cursor. A suffix replay does not fabricate a replacement digest.
           journal_hash: suffix.empty? ? journal["hash"] : nil,
           marker: marker
         )
+        projection_data = projection.to_h
+        projection_data["provenance"]["authoritative_event_count"] =
+          base_projection.to_h.dig("provenance", "authoritative_event_count").to_i +
+          replayed.records.length
+        projection_data["provenance"]["legacy_event_count"] =
+          base_projection.to_h.dig("provenance", "legacy_event_count").to_i
+        projection = Hive::TaskProjection.from_data(projection_data)
         BoundedRead.new(
           projection: projection, state: "current", diagnostics: [],
           truncated: false, journal_cursor: current_size,
@@ -305,19 +319,125 @@ module Hive
           return false unless journal["device"].nil? || stat.dev == journal["device"]
           return false unless journal["inode"].nil? || stat.ino == journal["inode"]
 
-          digest = ::Digest::SHA256.new
-          offset = 0
-          while offset < cursor
-            chunk = io.pread([ 64 * 1024, cursor - offset ].min, offset)
-            return false if chunk.empty?
-
-            digest.update(chunk)
-            offset += chunk.bytesize
-          end
-          digest.hexdigest == journal["prefix_hash"]
+          head = io.pread([ cursor, CHECKPOINT_ANCHOR_BYTES ].min, 0).to_s
+          tail_offset = [ cursor - CHECKPOINT_ANCHOR_BYTES, 0 ].max
+          tail = io.pread(cursor - tail_offset, tail_offset).to_s
+          ::Digest::SHA256.hexdigest(head) == journal["head_hash"] &&
+            ::Digest::SHA256.hexdigest(tail) == journal["tail_hash"]
         end
       rescue SystemCallError, IOError
         false
+      end
+
+      def checkpoint_seed_records(projection)
+        data = projection.to_h
+        attempts = Array(data.dig("journal", "attempts"))
+        task = data["task"]
+        conditions = (Array(data.dig("conditions", "current")) +
+                      Array(data.dig("conditions", "history"))).sort_by do |fact|
+          [ fact["transitioned_at"].to_s, fact["event_id"].to_s ]
+        end
+        records = conditions.filter_map do |fact|
+          next if fact["event_id"].nil?
+
+          attempt = attempts.find { |row| row["attempt_id"] == fact["attempt_id"] }
+          {
+            "schema" => Hive::TaskJournal::Envelope::SCHEMA,
+            "schema_version" => Hive::TaskJournal::Envelope::SCHEMA_VERSION,
+            "event_id" => fact["event_id"], "event_type" => "condition_observed",
+            "occurred_at" => fact["transitioned_at"], "observed_at" => fact["transitioned_at"],
+            "task" => task, "stage" => attempt&.dig("stage"),
+            "attempt_id" => fact["attempt_id"],
+            "task_generation" => fact["task_generation"],
+            "ownership_generation" => fact["ownership_generation"],
+            "commit_generation" => fact["commit_generation"],
+            "reason" => fact["reason"], "evidence" => fact["evidence"],
+            "provenance" => fact["provenance"],
+            "payload" => fact.fetch("payload", {}).merge(
+              "condition" => fact["condition"],
+              "state" => fact["original_state"] || fact["state"]
+            ),
+            "__attempt" => attempt,
+            "__attempt_lineage" => attempts
+          }
+        end
+        records.concat(checkpoint_identity_records(data, attempts, task))
+        records.concat(checkpoint_operator_records(data, task))
+        if data.dig("compatibility", "baseline_present")
+          records << checkpoint_envelope(
+            data, task, event_id: "checkpoint-legacy-baseline", event_type: "legacy_baseline"
+          )
+        end
+        records
+      end
+
+      def checkpoint_identity_records(data, attempts, task)
+        identity = data.fetch("implementation_identity", {})
+        records = Array(identity["history"]).map do |entry|
+          checkpoint_identity_envelope(
+            data, attempts, task, entry, "implementation_identity_captured"
+          )
+        end
+        records.concat(identity.fetch("stages", {}).values.map do |entry|
+          checkpoint_identity_envelope(
+            data, attempts, task, entry, "implementation_stage_resolved"
+          )
+        end)
+        records.concat(Array(identity["fallback_warnings"]).map do |warning|
+          checkpoint_envelope(
+            data, task, event_id: warning["event_id"],
+            event_type: "implementation_identity_fallback",
+            generation: warning["generation"], reason: warning["reason"]
+          )
+        end)
+        current_attempt = data.dig("identity", "attempt_id")
+        if current_attempt
+          records << checkpoint_envelope(
+            data, task, event_id: "checkpoint-attempt-#{current_attempt}",
+            event_type: "activity_recorded",
+            payload: { "activity_kind" => "attempt_admitted" },
+            attempt_id: current_attempt
+          ).merge("__attempt_lineage" => attempts)
+        end
+        records
+      end
+
+      def checkpoint_identity_envelope(data, attempts, task, entry, event_type)
+        payload = entry.reject { |key, _| %w[event_id resolved_attempt].include?(key) }
+        checkpoint_envelope(
+          data, task, event_id: entry["event_id"], event_type: event_type,
+          generation: entry["generation"], attempt_id: entry["resolved_attempt"],
+          payload: { "identity" => payload }
+        ).merge("__attempt_lineage" => attempts)
+      end
+
+      def checkpoint_operator_records(data, task)
+        Array(data["condition_overrides"]).map do |entry|
+          checkpoint_envelope(
+            data, task, event_id: entry["event_id"], event_type: "operator_action",
+            generation: entry["task_generation"], attempt_id: entry["attempt_id"],
+            reason: entry["reason"], payload: entry.slice(
+              "transition", "from_stage", "to_stage", "source_command", "waived_diagnostics"
+            )
+          )
+        end
+      end
+
+      def checkpoint_envelope(data, task, event_id:, event_type:, generation: nil,
+                              attempt_id: nil, reason: "checkpoint_seed", payload: {})
+        {
+          "schema" => Hive::TaskJournal::Envelope::SCHEMA,
+          "schema_version" => Hive::TaskJournal::Envelope::SCHEMA_VERSION,
+          "event_id" => event_id, "event_type" => event_type,
+          "occurred_at" => "1970-01-01T00:00:00.000000Z",
+          "observed_at" => "1970-01-01T00:00:00.000000Z",
+          "task" => task, "stage" => nil,
+          "attempt_id" => attempt_id || data.dig("identity", "attempt_id"),
+          "task_generation" => generation || data.dig("identity", "task_generation"),
+          "commit_generation" => data.dig("identity", "commit_generation"),
+          "reason" => reason, "evidence" => [],
+          "provenance" => { "source" => "checkpoint" }, "payload" => payload
+        }
       end
 
       def journal_suffix(cursor, limit)

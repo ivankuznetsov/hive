@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/task_workspace/timeline"
+require "json_schemer"
 
 class TaskWorkspaceTimelineTest < Minitest::Test
   SECRET = "timeline-test-secret-that-is-at-least-thirty-two-bytes".freeze
@@ -186,6 +187,72 @@ class TaskWorkspaceTimelineTest < Minitest::Test
     first = newest.call
 
     assert_equal({ "task_journal" => 512 }, newest.source_before(first.fetch("older_cursor")))
+  end
+
+  def test_material_cursor_replays_a_physical_window_before_advancing_it
+    records = 5.times.map do |index|
+      activity("event-#{index}", "stage_transition",
+               at: (Time.utc(2026, 8, 12, 12) + index).iso8601)
+    end
+    projector = Hive::TaskWorkspace::Timeline.new(
+      task_identity: { "project" => "demo", "slug" => "task", "task_id" => "42" },
+      journal_records: records, event_records: [],
+      source_positions: { "task_journal" => { "start" => 100, "end" => 200 } },
+      source_truncated: { "task_journal" => true },
+      limits: Hive::TaskWorkspace::Limits.new(timeline_material_items: 2),
+      cursor_codec: Hive::TaskWorkspace::Timeline::CursorCodec.new(secret: SECRET)
+    )
+
+    first = projector.call
+    second = projector.call(cursor: first.fetch("older_cursor"))
+    third = projector.call(cursor: second.fetch("older_cursor"))
+
+    assert_equal({ "task_journal" => 200 }, projector.source_before(first.fetch("older_cursor")))
+    assert_equal({ "task_journal" => 200 }, projector.source_before(second.fetch("older_cursor")))
+    assert_equal({ "task_journal" => 100 }, projector.source_before(third.fetch("older_cursor")))
+
+    late = activity("late", "stage_transition", at: "2026-08-13T12:00:00Z")
+    older_window = timeline(journal: [ late ], limits: Hive::TaskWorkspace::Limits.new(
+      timeline_material_items: 2
+    ))
+    assert_equal "late", older_window.call(cursor: third.fetch("older_cursor"))
+                                     .dig("records", 0, "event_id")
+  end
+
+  def test_hostile_event_fields_are_normalized_to_the_registered_record_schema
+    huge = "/home/operator/" + ("x" * 10_000)
+    events = 101.times.map do |index|
+      event("duplicate-#{index}", "stage_exit", at: "2026-08-12T12:00:00Z",
+            correlation: "same").merge(
+        "stage" => [ "invalid" ], "attempt_id" => { "invalid" => true },
+        "task_generation" => 1.5, "source" => huge,
+        "operation_id" => huge
+      )
+    end
+    panel = timeline(events: events).call
+    record = panel.fetch("records").first
+
+    assert_nil record.fetch("stage")
+    assert_nil record.fetch("attempt_id")
+    assert_nil record.fetch("task_generation")
+    assert_operator record.fetch("source_refs").length, :<=, 100
+    refute_includes JSON.generate(record), "/home/operator"
+
+    document = Hive::TaskWorkspace::Snapshot.new(
+      generated_at: "2026-08-12T12:00:00Z",
+      task: { "project" => "demo", "slug" => "task", "id" => 42,
+              "stage" => "4-execute", "generation" => 1 },
+      status: { "state" => "current", "freshness" => "fresh",
+                "observed_at" => "2026-08-12T12:00:00Z", "diagnostics" => [] },
+      decision: { "posture" => "investigate", "reason" => nil,
+                  "action" => { "kind" => nil, "label" => nil,
+                                "enabled" => false, "reason" => nil } },
+      panels: { "timeline" => panel }
+    ).to_h
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace")))
+    )
+    assert schemer.valid?(document), schemer.validate(document).to_a.inspect
   end
 
   private

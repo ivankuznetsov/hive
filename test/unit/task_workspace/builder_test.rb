@@ -22,6 +22,8 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     def recovery_action_visible? = @attributes["recovery_visible"] == true
     def recovery_action_enabled? = @attributes["recovery_enabled"] == true
     def recovery = @attributes["recovery"]
+    def recovery_primary_label = @attributes["recovery_label"]
+    def recovery_context = Array(@attributes["recovery_context"])
     def dispatch_action = @attributes["dispatch_action"]
   end
 
@@ -85,6 +87,37 @@ class TaskWorkspaceBuilderTest < Minitest::Test
       assert_equal "partial", snapshot.dig("status", "state")
       assert_equal "investigate", snapshot.dig("decision", "posture")
       refute snapshot.dig("decision", "action", "enabled")
+    end
+  end
+
+  def test_attempt_or_resource_integrity_degradation_fails_actions_closed
+    with_fixture do |native, task|
+      snapshot = builder(native, task, questions: 1, usage_available: false).call
+
+      assert_equal "partial", snapshot.dig("panels", "resources", "state")
+      assert_equal "investigate", snapshot.dig("decision", "posture")
+      refute snapshot.dig("decision", "action", "enabled")
+    end
+  end
+
+  def test_operator_questions_recovery_and_diagnostic_are_normalized_in_the_snapshot
+    with_fixture do |native, task|
+      attributes = task.instance_variable_get(:@attributes)
+      attributes["recovery_visible"] = true
+      attributes["recovery_enabled"] = true
+      attributes["diagnostic"] = { "summary" => "failed at /home/operator/task" }
+      question = Struct.new(:n, :text, :binding, :ordinal).new(
+        1, "Where?", "binding-1", 0
+      )
+
+      snapshot = builder(
+        native, task, questions: 1, questions_payload: [ question ]
+      ).call
+
+      assert_equal "Where?", snapshot.dig("operator", "questions", 0, "text")
+      assert snapshot.dig("operator", "recovery", "action_visible")
+      assert_nil snapshot.dig("operator", "recovery", "status")
+      assert_equal "failed at [REDACTED:path]", snapshot.dig("operator", "diagnostic_summary")
     end
   end
 
@@ -179,7 +212,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
   def builder(native, task, questions:, limits: Hive::TaskWorkspace::Limits.new,
               status_availability: "fresh", status_error: nil,
               projection_state: "current", projection_diagnostics: [],
-              projection_truncated: false)
+              projection_truncated: false, usage_available: true, questions_payload: nil)
     events = Array.new(@material_events || 1) do |index|
       {
         "schema" => "hive-task-journal-event", "schema_version" => 1,
@@ -233,12 +266,12 @@ class TaskWorkspaceBuilderTest < Minitest::Test
           )
         end
       end.new(nil),
-      usage_reader: ->(**) { { available: false } },
+      usage_reader: ->(**) { { available: usage_available, sessions: [], unattributed_count: 0 } },
       current_context_observation: {
         "observed_at" => "2026-08-12T12:00:00Z",
         "repository" => nil, "wiki" => nil
       },
-      questions_count: questions, daemon_enabled: true,
+      questions_count: questions, questions: questions_payload, daemon_enabled: true,
       clock: -> { Time.utc(2026, 8, 12, 12) }
     )
   end

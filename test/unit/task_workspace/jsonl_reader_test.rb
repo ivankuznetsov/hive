@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/task_workspace/jsonl_reader"
+require "hive/task_workspace/timeline"
 
 class TaskWorkspaceJsonlReaderTest < Minitest::Test
   include HiveTestHelper
@@ -43,6 +44,23 @@ class TaskWorkspaceJsonlReaderTest < Minitest::Test
       assert result.truncated
       assert_includes result.diagnostics.filter_map { |row| row.dig("details", "cap") },
                       "journal_suffix_bytes"
+    end
+  end
+
+  def test_raw_record_cap_cannot_evict_older_material_records
+    with_tmp_dir do |root|
+      rows = [ { "event_id" => "material", "event_type" => "stage_exit" } ] +
+             4.times.map { |index| { "event_id" => "noise-#{index}", "event_type" => "heartbeat" } }
+      File.write(File.join(root, "events.jsonl"), rows.map { |row| JSON.generate(row) }.join("\n") + "\n")
+      result = Hive::TaskWorkspace::JsonlReader.new(
+        root: root, reference: "events.jsonl", max_bytes: 10_000,
+        max_records: 2, source: "event_stream",
+        preserve: Hive::TaskWorkspace::Timeline.method(:material_record?)
+      ).call
+
+      assert_equal %w[material noise-2 noise-3], result.records.map { |row| row.fetch("event_id") }
+      assert_equal 0, result.window_start
+      assert result.truncated
     end
   end
 

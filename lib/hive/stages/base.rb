@@ -907,7 +907,7 @@ module Hive
           )
         )
         result = nil
-        observation.start!
+        start_session_observation!(observation)
         begin
           result = run_with_agent_custody(agent_custody) do
             agent_result = Hive::Agent.new(
@@ -1084,7 +1084,7 @@ module Hive
         )
         result = nil
         started_at = Time.now.utc.iso8601
-        observation.start!
+        start_session_observation!(observation)
         begin
           result = run_with_agent_custody(agent_custody) do
             Hive::ClaudeLauncher.launch!(
@@ -1261,6 +1261,13 @@ module Hive
           requested_model: requested_model, requested_effort: requested_effort,
           timeout_sec: timeout_sec, guards: guards
         )
+      end
+
+      def start_session_observation!(observation)
+        return true if observation.start!
+        return true unless observation.available?
+
+        raise Hive::AgentError, "failed to record durable agent session start"
       end
 
       def requested_model(context, routing_arguments, launch_arguments, fallback)

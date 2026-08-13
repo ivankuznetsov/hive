@@ -177,6 +177,8 @@ class TasksTest < ActionDispatch::IntegrationTest
         assert_select ".task-header", text: /#{Regexp.escape(@slug.sub(/-\d{6}-\h{4}\z/, "").tr("-", " "))}/i
         assert_select "img[src*='source=archive']", minimum: 1
         assert_select "form[action*='source=archive']", minimum: 1
+        assert_select "form[action*='source=archive'] button:not([disabled])", count: 0,
+                      message: "archived task mutation controls must fail closed"
         assert_select(
           "turbo-frame[id^='task-log-'][data-controller='poll']",
           { count: 0 },
@@ -197,6 +199,38 @@ class TasksTest < ActionDispatch::IntegrationTest
         assert_response :conflict
         assert_match(/worktree unavailable/i, response.body)
       end
+    end
+  end
+
+  test "every archived task mutation endpoint is read-only" do
+    folder = stage_dir(@project, "9-done").join(@slug)
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug), folder)
+    Hive::TaskMeta.rewrite(folder.to_s, completed_at: Time.now.utc - (10 * 86_400))
+
+    mutation_requests = {
+      "approval" => [ task_approve_path(@project, @slug, source: "archive"),
+                      { from: "9-done", force: "1" } ],
+      "rejection" => [ task_reject_path(@project, @slug, source: "archive"),
+                       { from: "9-done" } ],
+      "drop" => [ task_drop_path(@project, @slug, source: "archive"),
+                  { from: "9-done" } ],
+      "run" => [ task_run_path(@project, @slug, source: "archive"),
+                 { action_name: "run", stage: "9-done" } ],
+      "recovery" => [ task_recover_path(@project, @slug, source: "archive"), {} ],
+      "closure" => [ task_closure_path(@project, @slug, source: "archive"),
+                     { reason: "already_delivered" } ],
+      "intervention" => [ task_intervene_path(@project, @slug, source: "archive"),
+                          { message: "No mutation", binding: "slot" } ],
+      "answers" => [ task_answers_path(@project, @slug, source: "archive"),
+                     { answers: { "slot" => "No mutation" } } ],
+      "publication" => [ task_publication_path(@project, @slug, source: "archive"), {} ]
+    }
+
+    mutation_requests.each do |name, (path, params)|
+      post path, params: params
+      assert_response :unprocessable_entity, "#{name} must reject archived tasks"
+      assert_match(/archived tasks are read-only/i, response.body, name)
+      assert folder.directory?, "#{name} must leave the archived task intact"
     end
   end
 
@@ -824,13 +858,19 @@ class TasksTest < ActionDispatch::IntegrationTest
     folder = stage_dir(@project, "2-brainstorm").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n### Q2. Acceptance?\n\n### A2.\n\n")
 
+    get task_path(@project, @slug, format: :json)
+    operator_questions = response.parsed_body.dig("operator", "questions")
+    assert_equal [ "Scope?", "Acceptance?" ], operator_questions.map { |row| row.fetch("text") }
+
     get "/tasks/#{@project}/#{@slug}"
 
     assert_response :success
     assert_select ".qa-item", 2, "each open question must get its own answer field"
-    assert_select "textarea[data-question-number='1']", 1
-    assert_select "textarea[data-question-number='2']", 1
-    assert_match "Scope?", response.body
+    operator_questions.each do |question|
+      assert_select ".qa-question", text: /#{Regexp.escape(question.fetch("text"))}/
+      assert_select "textarea[data-question-number=?][name=?]",
+                    question.fetch("n").to_s, "answers[#{question.fetch('binding')}]", count: 1
+    end
   end
 
   test "submitted answers land under the right question headers" do
@@ -1060,7 +1100,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_redirected_to "/login"
   end
 
-  test "task HTML composes the same normalized workspace with permanent lazy evidence owners" do
+  test "task HTML composes the same normalized workspace with correctly owned evidence frames" do
     get task_path(@project, @slug, format: :json)
     workspace = response.parsed_body
 
@@ -1074,7 +1114,10 @@ class TasksTest < ActionDispatch::IntegrationTest
       assert_select "#workspace-#{panel}", 1, "#{panel} must be represented exactly once"
     end
     assert_select "turbo-frame[id^='task-diff-'][data-turbo-permanent]", 1
-    assert_select "turbo-frame[id^='task-publication-'][data-turbo-permanent][loading='lazy'][src]", 1
+    assert_select "turbo-frame[id^='task-publication-'][refresh='morph']", 1
+    assert_select "turbo-frame[id^='task-publication-'][data-turbo-permanent]", count: 0
+    assert_select "turbo-frame[id^='task-publication-'][src]", count: 0
+    assert_select "turbo-frame[id^='task-timeline-inspection-'][data-turbo-permanent]", 1
     assert_select ".workspace-table-scroll[role='region'][tabindex='0']", minimum: 1
     assert_select "#task-workspace-announcement[role='status'][aria-live='polite']", 1
     refute_includes response.body, stage_dir(@project, "1-inbox").to_s
@@ -1114,6 +1157,13 @@ class TasksTest < ActionDispatch::IntegrationTest
       records.map { |record| JSON.generate(record) }.join("\n") + "\n"
     )
 
+    get task_path(@project, @slug)
+    assert_response :success
+    assert_select "#workspace-timeline > ol.timeline-list", 1,
+                  "the current timeline must remain outside drill-down navigation"
+    assert_select "#workspace-timeline a[data-turbo-frame^='task-timeline-inspection-']",
+                  minimum: 1
+
     get "/tasks/#{@project}/#{@slug}/timeline.json"
     assert_response :success
     first = JSON.parse(response.body)
@@ -1135,6 +1185,13 @@ class TasksTest < ActionDispatch::IntegrationTest
     raw = JSON.parse(response.body)
     assert_equal 20, raw.fetch("records").length
     assert raw.fetch("truncated")
+
+    get task_timeline_path(@project, @slug), params: { cursor: first.fetch("older_cursor") }
+    assert_response :success
+    assert_select "turbo-frame[id^='task-timeline-inspection-']", 1
+    assert_select ".timeline-inspection", 1
+    assert_select "a[href='#workspace-timeline'][data-turbo-frame='_top']",
+                  text: "Return to current timeline"
 
     get "/tasks/#{@project}/#{@slug}/timeline.json",
         params: { cursor: "#{first.fetch('older_cursor')}x" }

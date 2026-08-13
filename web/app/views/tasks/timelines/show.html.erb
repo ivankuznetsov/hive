@@ -1,3 +1,15 @@
-<%= turbo_frame_tag "task-timeline-page" do %>
-  <%= render "tasks/timeline_page", timeline: @timeline %>
+<% inspection_frame_id = stable_dom_id("task-timeline-inspection", @project.name, @task.slug) %>
+<%= turbo_frame_tag inspection_frame_id do %>
+  <section class="workspace-panel timeline-inspection" aria-labelledby="timeline-inspection-heading">
+    <div class="workspace-panel-heading">
+      <div>
+        <h3 id="timeline-inspection-heading">Timeline inspection</h3>
+        <p class="muted">Bounded older history or raw operational observations.</p>
+      </div>
+      <%= link_to "Return to current timeline", "#workspace-timeline",
+            class: "btn btn-secondary", data: { turbo_frame: "_top" } %>
+    </div>
+    <%= render "tasks/timeline_page", timeline: @timeline,
+          inspection_frame_id: inspection_frame_id %>
+  </section>
 <% end %>

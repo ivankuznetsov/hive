@@ -12,9 +12,8 @@
   <% if Array(timeline["records"]).empty? && Array(timeline["noise_groups"]).empty? %>
     <p class="workspace-empty">No material activity has been captured for this task.</p>
   <% else %>
-    <%= turbo_frame_tag "task-timeline-page" do %>
-      <%= render "tasks/timeline_page", timeline: timeline %>
-    <% end %>
+    <%= render "tasks/timeline_page", timeline: timeline,
+          inspection_frame_id: stable_dom_id("task-timeline-inspection", @project.name, @task.slug) %>
   <% end %>
 
   <% if Array(timeline["diagnostics"]).any? %>
@@ -24,3 +23,6 @@
     </details>
   <% end %>
 </section>
+
+<%= turbo_frame_tag stable_dom_id("task-timeline-inspection", @project.name, @task.slug),
+      class: "workspace-wide", data: { turbo_permanent: true } %>

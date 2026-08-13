@@ -10,10 +10,79 @@ class AgentObservationTest < Minitest::Test
   )
 
   class Activity
-    attr_reader :records
+    attr_reader :records, :operations
 
-    def initialize = @records = []
+    def initialize
+      @records = []
+      @operations = []
+    end
+
     def record(**attrs) = @records << attrs
+
+    def reconcile_operations!
+      yield({}) if block_given?
+      { "processed" => 0, "completed" => 0, "gaps" => 0, "diagnostics" => [] }
+    end
+
+    def begin_operation(**attrs)
+      @operations << attrs
+      activity = self
+      Object.new.tap do |operation|
+        operation.define_singleton_method(:complete!) do |payload:, evidence:, occurred_at:,
+                                                         correlation_id:, **|
+          activity.record(
+            kind: attrs.fetch(:kind), operation_id: attrs.fetch(:operation_id),
+            correlation_id: correlation_id, reason: attrs.fetch(:reason),
+            source: attrs.fetch(:source), occurred_at: occurred_at,
+            payload: payload, evidence: evidence
+          )
+        end
+      end
+    end
+  end
+
+  class FlakyTerminalActivity < Activity
+    attr_reader :reconciliations
+
+    def initialize
+      super
+      @reconciliations = 0
+      @pending_terminal = nil
+    end
+
+    def reconcile_operations!
+      @reconciliations += 1
+      if @pending_terminal
+        record(**@pending_terminal)
+        @pending_terminal = nil
+        return { "processed" => 1, "completed" => 1, "gaps" => 0, "diagnostics" => [] }
+      end
+      super
+    end
+
+    def begin_operation(**attrs)
+      activity = self
+      Object.new.tap do |operation|
+        committed = false
+        operation.define_singleton_method(:complete!) do |payload:, evidence:, occurred_at:,
+                                                         correlation_id:, **|
+          committed = true
+          activity.instance_variable_set(:@pending_terminal, {
+            kind: attrs.fetch(:kind), operation_id: attrs.fetch(:operation_id),
+            correlation_id: correlation_id, reason: attrs.fetch(:reason),
+            source: attrs.fetch(:source), occurred_at: occurred_at,
+            payload: payload, evidence: evidence
+          })
+          raise Hive::TaskActivity::AppendFailed, "first append failed"
+        end
+        operation.define_singleton_method(:reconcile!) do
+          next false unless committed
+
+          activity.reconcile_operations!
+          true
+        end
+      end
+    end
   end
 
   def test_emits_one_start_and_one_terminal_record_with_requested_and_actual_identity
@@ -34,11 +103,13 @@ class AgentObservationTest < Minitest::Test
     start = activity.records.first
     finish = activity.records.last
     assert_equal "session-1", start.fetch(:correlation_id)
+    assert_equal "session-1", finish.fetch(:correlation_id)
     assert_equal "gpt-requested", start.dig(:payload, "requested_model")
     assert_equal "gpt-actual", finish.dig(:payload, "actual_model")
     assert_equal "succeeded", finish.dig(:payload, "outcome")
     assert_equal({ "input" => 10, "output" => 4, "cached" => 2 },
                  finish.dig(:payload, "usage"))
+    assert_equal "session_finished", activity.operations.fetch(0).fetch(:kind)
   end
 
   def test_exception_timeout_and_resource_exhaustion_are_distinct_terminal_facts
@@ -73,6 +144,76 @@ class AgentObservationTest < Minitest::Test
     refute observation.available?
     refute observation.start!
     refute observation.finish!(status: :ok)
+    assert_empty activity.records
+  end
+
+  def test_claude_timeout_status_is_a_timed_out_terminal_fact
+    activity = Activity.new
+    observation = Hive::AgentObservation.new(
+      task: task, context: context, session_id: "session-timeout", role: "execute",
+      provider: "claude", timeout_sec: 30, guards: guards,
+      activity: activity, clock: -> { NOW }
+    )
+
+    assert observation.start!
+    assert observation.finish!(status: :timeout, error_message: "deadline reached")
+
+    payload = activity.records.last.fetch(:payload)
+    assert_equal true, payload.fetch("timed_out")
+    assert_equal "timed_out", payload.fetch("outcome")
+    assert_equal "timed_out", payload.fetch("health")
+    assert_equal false, payload.fetch("live")
+  end
+
+  def test_terminal_append_uses_a_replayable_operation_receipt
+    activity = Activity.new
+    observation = Hive::AgentObservation.new(
+      task: task, context: context, session_id: "session-replay", role: "execute",
+      provider: "codex", timeout_sec: 30, guards: guards,
+      activity: activity, clock: -> { NOW }
+    )
+
+    observation.start!
+    observation.finish!(status: :ok)
+
+    operation = activity.operations.fetch(0)
+    assert_equal "session:session-replay:finish", operation.fetch(:operation_id)
+    assert_equal({ "session_id" => "session-replay", "live" => true },
+                 operation.fetch(:precondition))
+    assert_equal({ "session_id" => "session-replay", "live" => false },
+                 operation.fetch(:expected_postcondition))
+  end
+
+  def test_failed_terminal_append_is_reconciled_before_returning
+    activity = FlakyTerminalActivity.new
+    observation = Hive::AgentObservation.new(
+      task: task, context: context, session_id: "session-recovered", role: "execute",
+      provider: "codex", timeout_sec: 30, guards: guards,
+      activity: activity, clock: -> { NOW }
+    )
+
+    assert observation.start!
+    assert observation.finish!(status: :ok)
+
+    assert_operator activity.reconciliations, :>=, 2
+    assert_equal %w[session_started session_finished],
+                 activity.records.map { |record| record.fetch(:kind) }
+  end
+
+  def test_finish_refuses_to_append_without_a_durable_start
+    activity = Activity.new
+    activity.define_singleton_method(:record) do |**attrs|
+      raise Hive::TaskActivity::AppendFailed, "start failed" if attrs[:kind] == "session_started"
+      super(**attrs)
+    end
+    observation = Hive::AgentObservation.new(
+      task: task, context: context, session_id: "session-no-start", role: "execute",
+      provider: "codex", timeout_sec: 30, guards: guards,
+      activity: activity, clock: -> { NOW }
+    )
+
+    refute observation.finish!(status: :ok)
+    assert_empty activity.operations
     assert_empty activity.records
   end
 

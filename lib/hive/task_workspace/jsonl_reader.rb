@@ -16,7 +16,7 @@ module Hive
       )
 
       def initialize(root:, reference:, max_bytes:, max_records:, source:,
-                     redactor: Hive::SecretPatterns.method(:redact))
+                     redactor: Hive::SecretPatterns.method(:redact), preserve: nil)
         @root = File.realpath(File.expand_path(root))
         raise ArgumentError, "JSONL reader root must be a directory" unless File.directory?(@root)
 
@@ -28,6 +28,7 @@ module Hive
 
         @source = source.to_s
         @redactor = redactor
+        @preserve = preserve || ->(_record) { false }
       rescue SystemCallError => e
         raise ArgumentError, "invalid JSONL reader root: #{e.class}"
       end
@@ -92,20 +93,13 @@ module Hive
         end
         nonempty = lines.each_index.reject { |index| lines[index].empty? }
         observed_records = nonempty.length
-        if nonempty.length > @max_records
-          nonempty = nonempty.last(@max_records)
-          offset = line_offsets.fetch(nonempty.first)
-          diagnostics << cap_diagnostic("journal_events", observed_records, limit: @max_records)
-          truncated = true
-        end
-
-        records = []
+        parsed = []
         malformed = 0
         nonempty.each do |index|
           line = lines.fetch(index)
           value = JSON.parse(line)
           if value.is_a?(Hash)
-            records << redact_value(value)
+            parsed << [ index, redact_value(value) ]
           else
             malformed += 1
           end
@@ -113,6 +107,15 @@ module Hive
           malformed += 1
         end
         diagnostics << diagnostic("malformed_record", "count" => malformed) if malformed.positive?
+        if parsed.length > @max_records
+          preserved, ordinary = parsed.partition { |_index, record| @preserve.call(record) }
+          retained = (preserved + ordinary.last(@max_records)).uniq(&:first).sort_by(&:first)
+          diagnostics << cap_diagnostic("journal_events", observed_records, limit: @max_records)
+          truncated = true
+        else
+          retained = parsed
+        end
+        records = retained.map(&:last)
 
         Result.new(
           records: records.freeze,

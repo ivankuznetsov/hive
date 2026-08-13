@@ -12,12 +12,12 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
 
   teardown { StatusBroadcaster.stop! }
 
-  test "one semantic workspace reflows from wide desktop through an effective 320 CSS pixel viewport" do
+  test "one semantic workspace reflows from wide desktop through actual 400 percent zoom" do
     sign_in!
     visit task_path(@project, @slug)
     assert_selector "#workspace-summary", wait: 10
 
-    [ [ 1280, 800 ], [ 3840, 1400 ], [ 375, 812 ], [ 320, 568 ] ].each do |width, height|
+    [ [ 1280, 800 ], [ 3840, 1400 ], [ 375, 812 ] ].each do |width, height|
       page.current_window.resize_to(width, height)
       metrics = page.evaluate_script(<<~JS)
         (() => {
@@ -45,6 +45,39 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
       end
     end
 
+    page.current_window.resize_to(1280, 800)
+    page.driver.with_playwright_page do |playwright_page|
+      cdp = playwright_page.context.new_cdp_session(playwright_page)
+      cdp.send_message("Emulation.setDeviceMetricsOverride", params: {
+        width: 320, height: 200, deviceScaleFactor: 4, mobile: false
+      })
+    end
+    zoomed = page.evaluate_script(<<~JS)
+      (() => {
+        const root = document.documentElement
+        return {
+          viewport: root.clientWidth,
+          deviceScaleFactor: window.devicePixelRatio,
+          documentWidth: root.scrollWidth,
+          clippedPanels: Array.from(document.querySelectorAll(".workspace-panel, .workspace-summary"))
+            .filter((panel) => {
+              const rect = panel.getBoundingClientRect()
+              return rect.left < -1 || rect.right > root.clientWidth + 1
+            }).length,
+          columns: getComputedStyle(document.querySelector(".task-workspace-grid")).gridTemplateColumns
+        }
+      })()
+    JS
+    assert_equal 4, zoomed.fetch("deviceScaleFactor"),
+                 "Playwright must apply a real 400% Chromium device scale"
+    assert_in_delta 320, zoomed.fetch("viewport"), 1,
+                    "400% scale on 1280 physical pixels must expose 320 CSS pixels"
+    assert_operator zoomed.fetch("documentWidth"), :<=, zoomed.fetch("viewport") + 1,
+                    "task workspace overflowed at actual 400% browser zoom"
+    assert_equal 0, zoomed.fetch("clippedPanels"),
+                 "a workspace panel was clipped at actual 400% browser zoom"
+    refute_match(/\s/, zoomed.fetch("columns"), "400% zoom must reflow to one column")
+
     assert_selector "#status-stream-owner > .task-header > h1", count: 1
     assert_selector "#workspace-attempts h2", text: "Attempts and resources"
     assert_selector "#workspace-provenance h2", text: "Context provenance"
@@ -63,6 +96,81 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
         .map((element) => ({ text: element.textContent.trim(), width: element.offsetWidth, height: element.offsetHeight }))
     JS
     assert_empty undersized, "named controls must meet the 24 CSS pixel minimum"
+  end
+
+  test "pushed morphs preserve the exact Q&A selection range" do
+    brainstorm = stage_dir(@project, "2-brainstorm").join(@slug)
+    FileUtils.mv(@folder, brainstorm)
+    @folder = brainstorm
+    @folder.join("brainstorm.md").write(
+      "### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n"
+    )
+    sign_in!
+    visit task_path(@project, @slug)
+    field = find("textarea[data-question-number='1']", wait: 10)
+    field_name = field[:name]
+    wait_for_live_status
+    Timeout.timeout(5) do
+      sleep 0.01 until page.evaluate_script(<<~JS)
+        Boolean(window.Stimulus.getControllerForElementAndIdentifier(
+          document.querySelector("#task-state"), "answers"
+        ))
+      JS
+    end
+    stable_version = nil
+    stable_since = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    Timeout.timeout(5) do
+      loop do
+        current_version = find("#status-stream-owner", visible: :all)["data-status-version"]
+        now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        if current_version == stable_version
+          break if now - stable_since >= 0.5
+        else
+          stable_version = current_version
+          stable_since = now
+        end
+        sleep 0.05
+      end
+    end
+    field = find("textarea[data-question-number='1']")
+    page.execute_script(<<~JS, field)
+      arguments[0].focus()
+      arguments[0].value = "precise selection"
+      arguments[0].dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }))
+      arguments[0].setSelectionRange(2, 9)
+      arguments[0].dispatchEvent(new Event("select", { bubbles: true }))
+    JS
+
+    idea_path = @folder.join("idea.md")
+    idea_path.write(idea_path.read.sub("Keep exact", "Refresh exact"))
+    create_task!(@project, "Selection refresh trigger")
+    assert_selector ".idea-text", text: /Refresh exact/, wait: 10
+
+    selection = nil
+    Timeout.timeout(5) do
+      loop do
+        selection = page.evaluate_script(<<~JS)
+          (() => {
+            const field = document.querySelector("textarea[data-question-number='1']")
+            return {
+              value: field.value,
+              name: field.name,
+              focused: document.activeElement === field,
+              start: field.selectionStart,
+              end: field.selectionEnd
+            }
+          })()
+        JS
+        break if selection.values_at("value", "start", "end") ==
+                 [ "precise selection", 2, 9 ]
+        sleep 0.01
+      end
+    end
+    assert_equal field_name, selection.fetch("name"),
+                 "the normalized question binding must remain stable across the morph"
+    assert_equal "precise selection", selection.fetch("value")
+    assert_equal 2, selection.fetch("start")
+    assert_equal 9, selection.fetch("end")
   end
 
   test "keyboard users can reach disclosures and the semantic dependency alternative" do
@@ -86,7 +194,7 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
                     text: /Authoritative bounded node and edge relationships/
   end
 
-  test "pushed morphs preserve workspace ownership and announce only material changes" do
+  test "pushed morphs preserve workspace ownership and announce only safe decisions" do
     @folder.join("brainstorm.md").write("draft context\n")
     sign_in!
     page.current_window.resize_to(1280, 600)
@@ -121,12 +229,10 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
 
     Hive::Markers.set(@folder.join("idea.md").to_s, :complete)
     create_task!(@project, "Material workspace refresh trigger")
-    assert_selector "#workspace-summary-heading", text: "Approve", wait: 10
-    Timeout.timeout(5) do
-      sleep 0.01 until page.evaluate_script(
-        "document.querySelector('#task-workspace-announcement').textContent.includes('Approve')"
-      )
-    end
+    assert_selector "#workspace-summary-heading", text: "Investigate", wait: 10
+    assert_equal "", page.evaluate_script(
+      "document.querySelector('#task-workspace-announcement').textContent"
+    ), "a marker must not announce approval while attempt/resource evidence is missing"
     assert find("details[data-workspace-disclosure-key='provenance-diagnostics']")[:open]
     assert_equal "provenance-diagnostics",
                  page.evaluate_script("document.activeElement.closest('details')?.dataset.workspaceDisclosureKey")

@@ -176,6 +176,22 @@ class TaskWorkspacePublicationCacheTest < Minitest::Test
     end
   end
 
+  def test_explicit_refresh_replaces_a_malformed_cache_entry
+    with_tmp_dir do |root|
+      cache = build_cache(root)
+      cache.refresh(identity) { observation }
+      path = cache.send(:entry_path, cache.send(:normalize_identity, identity))
+      File.write(path, "{not-json")
+      calls = 0
+
+      result = cache.refresh(identity) { calls += 1; observation }
+
+      assert_equal 1, calls
+      assert_equal "current", result.fetch("state")
+      assert_equal observation.fetch("head_oid"), cache.read(identity).dig("observation", "head_oid")
+    end
+  end
+
   private
 
   def build_cache(root, credential: "credential-token", project: { "name" => "demo" },

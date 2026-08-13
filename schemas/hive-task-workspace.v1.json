@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema", "schema_version", "generated_at", "task", "status",
-    "decision", "panels"
+    "operator", "decision", "panels"
   ],
   "properties": {
     "schema": { "const": "hive-task-workspace" },
@@ -14,6 +14,7 @@
     "generated_at": { "type": "string", "format": "date-time" },
     "task": { "$ref": "#/$defs/Task" },
     "status": { "$ref": "#/$defs/Status" },
+    "operator": { "$ref": "#/$defs/Operator" },
     "decision": { "$ref": "#/$defs/Decision" },
     "panels": { "$ref": "#/$defs/Panels" }
   },
@@ -151,6 +152,36 @@
             "reason": { "type": ["string", "null"], "maxLength": 4096 }
           }
         }
+      }
+    },
+    "OperatorQuestion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["n", "text", "binding", "ordinal"],
+      "properties": {
+        "n": { "type": ["integer", "string"] },
+        "text": { "$ref": "#/$defs/SafeString" },
+        "binding": { "$ref": "#/$defs/SafeString" },
+        "ordinal": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "OperatorRecovery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "primary_label", "context", "action_visible", "action_enabled"],
+      "properties": {
+        "status": { "$ref": "#/$defs/StringOrNull" },
+        "primary_label": { "$ref": "#/$defs/StringOrNull" },
+        "context": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/SafeString" } },
+        "action_visible": { "type": "boolean" },
+        "action_enabled": { "type": "boolean" }
+      }
+    },
+    "Operator": {
+      "type": "object", "additionalProperties": false,
+      "required": ["questions", "recovery", "diagnostic_summary"],
+      "properties": {
+        "questions": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/OperatorQuestion" } },
+        "recovery": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/OperatorRecovery" }] },
+        "diagnostic_summary": { "$ref": "#/$defs/StringOrNull" }
       }
     },
     "StringOrNull": {
@@ -411,7 +442,7 @@
     },
     "LocalPublication": {
       "type": "object", "additionalProperties": false,
-      "required": ["state", "repository", "branch", "expected_branch", "base_branch", "base_oid", "head_oid", "base_state", "dirty", "commits", "commits_truncated", "push"],
+      "required": ["state", "repository", "branch", "expected_branch", "base_branch", "base_oid", "observed_base_oid", "head_oid", "base_state", "dirty", "commits", "commits_truncated", "push"],
       "properties": {
         "state": { "$ref": "#/$defs/State" },
         "repository": { "$ref": "#/$defs/StringOrNull" },
@@ -419,6 +450,7 @@
         "expected_branch": { "$ref": "#/$defs/StringOrNull" },
         "base_branch": { "$ref": "#/$defs/StringOrNull" },
         "base_oid": { "$ref": "#/$defs/StringOrNull" },
+        "observed_base_oid": { "$ref": "#/$defs/StringOrNull" },
         "head_oid": { "$ref": "#/$defs/StringOrNull" },
         "base_state": { "type": "string", "enum": ["ancestor", "divergent", "unavailable"] },
         "dirty": { "type": ["boolean", "null"] },

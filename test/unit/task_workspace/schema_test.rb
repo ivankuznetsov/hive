@@ -30,6 +30,8 @@ class TaskWorkspaceSchemaTest < Minitest::Test
     assert_empty schemer.validate(document).to_a
     assert_equal Hive::TaskWorkspace.canonical_json(document), snapshot.to_json
     assert_equal Hive::TaskWorkspace::PANEL_NAMES.sort, document.fetch("panels").keys.sort
+    assert_equal({ "questions" => [], "recovery" => nil, "diagnostic_summary" => nil },
+                 document.fetch("operator"))
     assert_equal "unavailable", document.dig("panels", "attempts", "state")
   end
 

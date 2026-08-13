@@ -89,6 +89,10 @@ module Hive
       candidate_ref = candidate_reference(context.attempt_id)
       if safe_file?(task.folder, final_ref) && !safe_file?(task.folder, candidate_ref)
         receipt = read_json_nofollow(task.folder, final_ref, max_bytes: MAX_RECEIPT_BYTES)
+        record_selection_activity(
+          activity || activity_for_context(task, context, clock: clock),
+          receipt: receipt, reference: final_ref, attempt_id: context.attempt_id
+        )
         return result(:already_promoted, receipt: receipt)
       end
       return result(:missing, reason: "receipt_not_provided") unless
@@ -98,18 +102,9 @@ module Hive
       receipt = ContextReceipt.validate_agent!(candidate, task: task, context: context)
       persisted = write_immutable(task.folder, final_ref, receipt)
       remove_candidate(task.folder, candidate_ref)
-      record_activity(
+      record_selection_activity(
         activity || activity_for_context(task, context, clock: clock),
-        kind: "context_selection_reported",
-        operation_id: "context-selection:#{context.attempt_id}",
-        reason: "agent asserted selected context",
-        occurred_at: persisted.fetch("captured_at"),
-        evidence: [ { "kind" => "agent_receipt", "reference" => final_ref } ],
-        payload: {
-          "quality" => "agent_asserted_used",
-          "reference_count" => persisted.dig("selection", "references").length,
-          "query_count" => persisted.dig("selection", "queries").length
-        }
+        receipt: persisted, reference: final_ref, attempt_id: context.attempt_id
       )
       result(:promoted, receipt: persisted)
     rescue ContextReceipt::InvalidReceipt => e
@@ -216,6 +211,22 @@ module Hive
       nil
     end
 
+    def record_selection_activity(activity, receipt:, reference:, attempt_id:)
+      record_activity(
+        activity,
+        kind: "context_selection_reported",
+        operation_id: "context-selection:#{attempt_id}",
+        reason: "agent asserted selected context",
+        occurred_at: receipt.fetch("captured_at"),
+        evidence: [ { "kind" => "agent_receipt", "reference" => reference } ],
+        payload: {
+          "quality" => "agent_asserted_used",
+          "reference_count" => receipt.dig("selection", "references").length,
+          "query_count" => receipt.dig("selection", "queries").length
+        }
+      )
+    end
+
     def compatible_context?(task, context)
       return false unless context && task.respond_to?(:folder) && task.respond_to?(:project_root)
 
@@ -259,7 +270,7 @@ module Hive
         payload.bytesize > MAX_RECEIPT_BYTES
 
       directory = receipt_directory(root)
-      path = File.join(root, reference)
+      path = contained_receipt_path(root, reference)
       if File.exist?(path)
         existing = read_json_nofollow(root, reference, max_bytes: MAX_RECEIPT_BYTES)
         return existing if canonical(existing) == canonical(receipt)
@@ -274,7 +285,14 @@ module Hive
         io.flush
         io.fsync
       end
-      File.rename(temporary, path)
+      begin
+        File.link(temporary, path)
+      rescue Errno::EEXIST
+        existing = read_json_nofollow(root, reference, max_bytes: MAX_RECEIPT_BYTES)
+        return existing if canonical(existing) == canonical(receipt)
+
+        raise UnsafeReceipt, "receipt_conflict"
+      end
       fsync_directory(directory)
       receipt
     ensure

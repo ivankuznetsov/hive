@@ -34,7 +34,7 @@
           <%= link_to "Inspect bounded raw members",
                 task_timeline_path(@project.name, @task.slug,
                   raw_cursor: group.fetch("raw_cursor"), source: @task_source),
-                data: { turbo_frame: "task-timeline-page" } %>
+                data: { turbo_frame: inspection_frame_id } %>
         </li>
       <% end %>
     </ul>
@@ -45,5 +45,5 @@
   <%= link_to "Load older history",
         task_timeline_path(@project.name, @task.slug,
           cursor: timeline.fetch("older_cursor"), source: @task_source),
-        class: "btn btn-secondary", data: { turbo_frame: "task-timeline-page" } %>
+        class: "btn btn-secondary", data: { turbo_frame: inspection_frame_id } %>
 <% end %>

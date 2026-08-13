@@ -20,6 +20,8 @@ export default class extends Controller {
   disconnect() {
     document.removeEventListener("turbo:before-render", this.snapshot)
     document.removeEventListener("turbo:render", this.restore)
+    if (this.scrollRestoreFrame) cancelAnimationFrame(this.scrollRestoreFrame)
+    this.scrollRestoreFrame = null
   }
 
   signatureValueChanged() {
@@ -77,7 +79,13 @@ export default class extends Controller {
     }
 
     const scroll = this.scrollPosition
-    if (scroll) requestAnimationFrame(() => window.scrollTo(scroll.x, scroll.y))
+    if (this.scrollRestoreFrame) cancelAnimationFrame(this.scrollRestoreFrame)
+    if (scroll) {
+      this.scrollRestoreFrame = requestAnimationFrame(() => {
+        this.scrollRestoreFrame = null
+        if (this.element.isConnected) window.scrollTo(scroll.x, scroll.y)
+      })
+    }
     this.disclosures = null
     this.focused = null
     this.scrollPosition = null

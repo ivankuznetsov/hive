@@ -32,6 +32,19 @@ module Hive
         check_state merge_state context_kind
       ].freeze
 
+      class << self
+        def material_record?(record)
+          value = record.to_h.transform_keys(&:to_s)
+          kind = value["event_type"].to_s
+          MATERIAL_JOURNAL_TYPES.include?(kind) || MATERIAL_EVENT_TYPES.include?(kind) ||
+            MATERIAL_ACTIVITY_KINDS.include?(kind) ||
+            (kind == "activity_recorded" &&
+             MATERIAL_ACTIVITY_KINDS.include?(value.dig("payload", "activity_kind").to_s))
+        rescue StandardError
+          false
+        end
+      end
+
       class InvalidCursor < Hive::Error; end
 
       class CursorCodec
@@ -107,13 +120,14 @@ module Hive
         material_limit = @limits.fetch(:timeline_material_items)
         remaining_material = material.drop(material_limit)
         material = material.first(material_limit)
-        groups = group_noise(noise).first(@limits.fetch(:timeline_noise_groups))
+        all_groups = group_noise(noise)
+        groups = all_groups.first(@limits.fetch(:timeline_noise_groups))
         material, groups, byte_truncated, material_byte_truncated, observed_bytes =
           enforce_byte_budget(material, groups)
 
         material_truncated = remaining_material.any? || material_byte_truncated ||
                              @source_truncated.values.any? { |value| value == true }
-        noise_truncated = group_noise(noise).length > groups.length
+        noise_truncated = all_groups.length > groups.length
         truncated = material_truncated || noise_truncated || byte_truncated
         diagnostics << cap_diagnostic(
           "timeline_material_items", @limits.fetch(:timeline_material_items),
@@ -121,17 +135,21 @@ module Hive
         ) if material_truncated
         diagnostics << cap_diagnostic(
           "timeline_noise_groups", @limits.fetch(:timeline_noise_groups),
-          group_noise(noise).length
+          all_groups.length
         ) if noise_truncated
         diagnostics << cap_diagnostic(
           "timeline_bytes", @limits.fetch(:timeline_bytes), observed_bytes
         ) if byte_truncated
 
-        older_cursor = if material_truncated && material.any?
-          encode_cursor(
-            "kind" => "material", "before" => sort_key(material.last),
-            "source_before" => @source_positions
-          )
+        older_cursor = if material_truncated
+          in_window = remaining_material.any? || material_byte_truncated
+          if !in_window || material.any?
+            encode_cursor(
+              "kind" => "material",
+              "before" => in_window ? sort_key(material.last) : nil,
+              "source_before" => source_boundaries(in_window: in_window)
+            )
+          end
         end
         state = if items.empty?
           diagnostics.empty? ? "missing" : "unavailable"
@@ -194,7 +212,7 @@ module Hive
         )
         return nil unless occurred && ingested
 
-        source = record.dig("provenance", "source").to_s
+        source = bounded_text(record.dig("provenance", "source"), 256)
         source = "task_journal" if source.empty?
         payload = stringify(record["payload"] || {})
         {
@@ -209,12 +227,12 @@ module Hive
           "ingested_at" => iso(ingested),
           "ordering_at" => iso(occurred),
           "external_clock_unverified" => false,
-          "task_generation" => record["task_generation"],
-          "attempt_id" => record["attempt_id"],
-          "stage" => record["stage"],
-          "correlation_id" => payload["correlation_id"],
-          "operation_id" => payload["operation_id"],
-          "supersedes_event_id" => payload["supersedes_event_id"],
+          "task_generation" => safe_generation(record["task_generation"]),
+          "attempt_id" => nullable_text(record["attempt_id"], 4 * 1024),
+          "stage" => nullable_text(record["stage"], 256),
+          "correlation_id" => nullable_text(payload["correlation_id"], 4 * 1024),
+          "operation_id" => nullable_text(payload["operation_id"], 4 * 1024),
+          "supersedes_event_id" => nullable_text(payload["supersedes_event_id"], 4 * 1024),
           "details" => safe_details(payload),
           "source_refs" => [ safe_identifier(record["event_id"], prefix: "journal") ]
         }
@@ -225,7 +243,7 @@ module Hive
 
       def normalize_event(value, index, diagnostics)
         record = stringify(value)
-        kind = record["event_type"].to_s
+        kind = bounded_text(record["event_type"], 256)
         return nil if kind.empty?
 
         occurred = parse_time(record["occurred_at"] || record["ts"], "event_stream", diagnostics)
@@ -233,7 +251,8 @@ module Hive
                               "event_stream", diagnostics)
         return nil unless occurred && ingested
 
-        external = %w[provider_external github].include?(record["source"].to_s)
+        raw_source = bounded_text(record["source"], 256)
+        external = %w[provider_external github].include?(raw_source)
         verified = external && (occurred - ingested).abs <= @limits.fetch(:timeline_clock_skew_seconds)
         ordering = external && !verified ? ingested : occurred
         event_id = safe_identifier(record["event_id"], prefix: "event-#{index}")
@@ -243,18 +262,18 @@ module Hive
           "summary" => label(kind),
           "material" => MATERIAL_EVENT_TYPES.include?(kind) || MATERIAL_ACTIVITY_KINDS.include?(kind),
           "source" => "event_stream",
-          "source_kind" => record["source"].to_s.empty? ? "event_stream" : record["source"].to_s,
+          "source_kind" => raw_source.empty? ? "event_stream" : raw_source,
           "source_quality" => "observational",
           "occurred_at" => iso(occurred),
           "ingested_at" => iso(ingested),
           "ordering_at" => iso(ordering),
           "external_clock_unverified" => external && !verified,
-          "task_generation" => record["task_generation"],
-          "attempt_id" => record["attempt_id"],
-          "stage" => record["stage"],
-          "correlation_id" => record["correlation_id"],
-          "operation_id" => record["operation_id"],
-          "supersedes_event_id" => record["supersedes_event_id"],
+          "task_generation" => safe_generation(record["task_generation"]),
+          "attempt_id" => nullable_text(record["attempt_id"], 4 * 1024),
+          "stage" => nullable_text(record["stage"], 256),
+          "correlation_id" => nullable_text(record["correlation_id"], 4 * 1024),
+          "operation_id" => nullable_text(record["operation_id"], 4 * 1024),
+          "supersedes_event_id" => nullable_text(record["supersedes_event_id"], 4 * 1024),
           "details" => safe_details(record),
           "source_refs" => [ event_id ]
         }
@@ -286,7 +305,8 @@ module Hive
             [ item["source"] == "task_journal" ? 0 : 1, sort_key(item) ]
           end
           primary = ranked.first.dup
-          primary["source_refs"] = duplicates.flat_map { |item| item["source_refs"] }.uniq.sort
+          primary["source_refs"] = duplicates.flat_map { |item| item["source_refs"] }
+                                             .uniq.sort.first(100)
           if duplicates.map { |item| item["source"] }.uniq.length > 1
             primary["cross_source_duplicate"] = true
           end
@@ -304,6 +324,12 @@ module Hive
       end
 
       def group_noise(items)
+        grouped_noise_with_members(items).map do |group|
+          group.reject { |key, _| key == "members" }
+        end
+      end
+
+      def grouped_noise_with_members(items)
         ordered = items.sort_by { |item| sort_key(item) }
         groups = []
         ordered.each do |item|
@@ -332,7 +358,7 @@ module Hive
         end
         groups.reverse.map do |group|
           group = group.dup
-          group.delete("__members")
+          group["members"] = group.delete("__members")
           group.delete("__signature")
           group["raw_cursor"] = encode_cursor(
             "kind" => "raw_group", "group_id" => group.fetch("group_id")
@@ -367,6 +393,8 @@ module Hive
 
       def apply_cursor(items, token)
         cursor = decode_cursor(token, expected_kind: "material")
+        return items if cursor["before"].nil?
+
         before = Array(cursor["before"])
         raise InvalidCursor, "timeline cursor boundary is invalid" unless before.length == 3
 
@@ -415,23 +443,6 @@ module Hive
         [ accepted_material, accepted_groups, truncated, material_truncated, bytes ]
       end
 
-      def grouped_noise_with_members(items)
-        groups = group_noise(items)
-        by_group = groups.to_h { |group| [ group.fetch("group_id"), group.merge("members" => []) ] }
-        items.each do |item|
-          group = groups.find do |candidate|
-            candidate["kind"] == item["kind"] && candidate["summary"] == item["summary"] &&
-              candidate["source_kind"] == item["source_kind"] &&
-              Time.iso8601(item.fetch("ordering_at")).between?(
-                Time.iso8601(candidate.fetch("first_at")),
-                Time.iso8601(candidate.fetch("last_at"))
-              )
-          end
-          by_group.fetch(group.fetch("group_id"))["members"] << item if group
-        end
-        by_group.values
-      end
-
       def sort_key(item)
         [ item.fetch("ordering_at"), item.fetch("event_id"), item.fetch("source") ]
       end
@@ -439,7 +450,7 @@ module Hive
       def safe_details(payload)
         payload.each_with_object({}) do |(key, value), result|
           next unless SAFE_DETAIL_KEYS.include?(key.to_s)
-          next unless value.nil? || value.is_a?(String) || value.is_a?(Numeric) ||
+          next unless value.nil? || value.is_a?(String) || finite_numeric?(value) ||
             value == true || value == false
 
           result[key.to_s] = value.is_a?(String) ? safe_reason(value, fallback: nil) : value
@@ -451,6 +462,38 @@ module Hive
         text = fallback.to_s if text.empty?
         text = text.byteslice(0, 4 * 1024).to_s.scrub
         text.gsub(%r{(?<![A-Za-z0-9])/(?:[^\s/]+/)*[^\s]*}, "[REDACTED:path]")
+      end
+
+      def bounded_text(value, limit)
+        return "" unless value.is_a?(String) || value.is_a?(Symbol) || value.is_a?(Numeric)
+
+        safe_reason(value, fallback: nil).byteslice(0, limit).to_s.scrub
+      end
+
+      def nullable_text(value, limit)
+        return nil if value.nil?
+
+        text = bounded_text(value, limit)
+        text.empty? ? nil : text
+      end
+
+      def safe_generation(value)
+        return value if value.is_a?(Integer)
+        return bounded_text(value, 256) if value.is_a?(String) || value.is_a?(Symbol)
+
+        nil
+      end
+
+      def finite_numeric?(value)
+        value.is_a?(Numeric) && (!value.respond_to?(:finite?) || value.finite?)
+      end
+
+      def source_boundaries(in_window:)
+        @source_positions.to_h do |source, position|
+          value = position.is_a?(Hash) ? stringify(position) : { "start" => position }
+          boundary = in_window ? value["end"] : value["start"]
+          [ source, boundary ]
+        end.compact
       end
 
       def label(kind)

@@ -33,6 +33,12 @@ class ContextProvenanceTest < Minitest::Test
     end
   end
 
+  class FailingActivityRecorder < ActivityRecorder
+    def record(**)
+      raise Hive::TaskActivity::AppendFailed, "disk unavailable"
+    end
+  end
+
   def test_launch_receipt_preserves_repository_and_wiki_identity
     with_fixture do |task, attempt, _context|
       activity = ActivityRecorder.new
@@ -142,6 +148,104 @@ class ContextProvenanceTest < Minitest::Test
       )
       assert_equal :rejected, oversized.status
       assert_equal "receipt_too_large", oversized.reason
+    end
+  end
+
+  def test_agent_receipt_rejects_absolute_host_paths_in_every_context_string_family
+    with_fixture do |task, _attempt, context|
+      url_receipt = agent_receipt(task, context)
+      url_receipt["repository"] = repository_context(
+        repository: "https://github.com/example/demo"
+      )
+      assert Hive::ContextProvenance::ContextReceipt.validate_agent!(
+        url_receipt, task: task, context: context
+      )
+
+      mutations = {
+        reference_label: ->(row) { row["selection"]["references"] = [
+          { "path" => "wiki/index.md", "kind" => "wiki", "label" => "read /home/alice/wiki" }
+        ] },
+        query: ->(row) { row["selection"]["queries"] = [
+          { "query" => "inspect /home/alice/project", "result_labels" => [ "index" ] }
+        ] },
+        result_label: ->(row) { row["selection"]["queries"] = [
+          { "query" => "workspace", "result_labels" => [ "C:\\Users\\alice\\wiki" ] }
+        ] },
+        rationale: ->(row) { row["selection"]["rationale"] = "source=/tmp/private-note" },
+        repository: ->(row) { row["repository"] = repository_context(
+          repository: "/home/alice/project"
+        ) },
+        wiki: ->(row) { row["wiki"] = wiki_context(identifier: "/home/alice/wiki") },
+        diagnostic: ->(row) { row["diagnostics"] = [
+          { "code" => "agent_note", "detail" => "opened /etc/passwd" }
+        ] },
+        repository_diagnostic: ->(row) { row["repository"] = repository_context(
+          diagnostics: [ { "code" => "agent_note", "detail" => "at /var/tmp/repo" } ]
+        ) },
+        wiki_diagnostic: ->(row) { row["wiki"] = wiki_context(
+          diagnostics: [ { "code" => "agent_note", "detail" => "at \\\\host\\share\\wiki" } ]
+        ) }
+      }
+
+      mutations.each do |_label, mutate|
+        receipt = agent_receipt(task, context)
+        mutate.call(receipt)
+        assert_raises(Hive::ContextProvenance::ContextReceipt::InvalidReceipt) do
+          Hive::ContextProvenance::ContextReceipt.validate_agent!(
+            receipt, task: task, context: context
+          )
+        end
+      end
+    end
+  end
+
+  def test_already_promoted_retry_repairs_missing_selection_activity
+    with_fixture do |task, _attempt, context|
+      write_candidate(task, context, agent_receipt(task, context))
+      failed = Hive::ContextProvenance.promote_agent_receipt(
+        task: task, context: context, activity: FailingActivityRecorder.new,
+        clock: -> { NOW }
+      )
+      assert_equal :promoted, failed.status
+
+      activity = ActivityRecorder.new
+      retried = Hive::ContextProvenance.promote_agent_receipt(
+        task: task, context: context, activity: activity, clock: -> { NOW }
+      )
+
+      assert_equal :already_promoted, retried.status
+      assert_equal [ "context_selection_reported" ],
+                   activity.calls.map { |call| call.fetch(:kind) }
+    end
+  end
+
+  def test_immutable_write_never_replaces_a_concurrent_receipt
+    with_fixture do |task, _attempt, context|
+      reference = Hive::ContextProvenance.promoted_reference(context.attempt_id)
+      contender = agent_receipt(task, context).tap do |row|
+        row["selection"]["rationale"] = "The concurrent writer won."
+      end
+      original_link = File.method(:link)
+      link_with_contender = lambda do |source, destination|
+        competing = "#{source}.competing"
+        File.write(competing, JSON.pretty_generate(contender) + "\n")
+        original_link.call(competing, destination)
+        original_link.call(source, destination)
+      ensure
+        File.delete(competing) if competing && File.exist?(competing)
+      end
+
+      with_replaced_singleton_method(File, :link, link_with_contender) do
+        error = assert_raises(Hive::ContextProvenance::UnsafeReceipt) do
+          Hive::ContextProvenance.write_immutable(
+            task.folder, reference, agent_receipt(task, context)
+          )
+        end
+        assert_equal "receipt_conflict", error.reason
+      end
+
+      persisted = JSON.parse(File.read(File.join(task.folder, reference)))
+      assert_equal "The concurrent writer won.", persisted.dig("selection", "rationale")
     end
   end
 
@@ -303,6 +407,22 @@ class ContextProvenanceTest < Minitest::Test
         "references" => [], "queries" => [], "rationale" => "No additional context selected."
       },
       "diagnostics" => []
+    }
+  end
+
+  def repository_context(repository: "github.com/example/demo", diagnostics: [])
+    {
+      "state" => "partial", "head_oid" => "a" * 40,
+      "branch" => "feature", "repository" => repository,
+      "observed_from" => "local_git", "diagnostics" => diagnostics
+    }
+  end
+
+  def wiki_context(identifier: "b" * 64, diagnostics: [])
+    {
+      "state" => "partial", "identity_kind" => "bounded_digest",
+      "identifier" => identifier, "file_count" => 1, "byte_count" => 12,
+      "truncated" => false, "diagnostics" => diagnostics
     }
   end
 

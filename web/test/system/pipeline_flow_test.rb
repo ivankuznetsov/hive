@@ -85,7 +85,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     end
   end
 
-  test "login gate, composer with image, live stream update, approve" do
+  test "login gate, composer with image, live stream update, safe task controls" do
     # Unauthenticated → login page, nothing leaks.
     visit "/"
     assert_selector "h1", text: "Hive web", wait: 5
@@ -138,8 +138,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_operator all(".task-row").size, :>, row_count_before,
                     "the new row must arrive over the stream, not a reload"
 
-    # Approve through the task page (force-free path is gated; the grid is
-    # the redirect target).
+    # The task page must fail closed until exact attempt/resource evidence is
+    # available, even though the underlying force route remains a sharp tool.
     task_href = "/tasks/#{@project}/#{folder.basename}"
     assert_selector ".task-row a[href='#{task_href}']", text: "Browser test idea", wait: 5
     visit task_href
@@ -150,10 +150,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # Advanced section at the bottom, confirm-gated.
     assert_no_button "Approve", exact: true, wait: 0
     find(".advanced summary").click
-    accept_confirm { within(".advanced") { click_button "Force approve" } }
-    assert_selector ".flash-notice", text: "Approved", wait: 5
-    assert stage_dir(@project, "2-brainstorm").children.any? { |c| c.basename.to_s.start_with?("browser-test-idea") },
-           "approve must move the task into 2-brainstorm"
+    within(".advanced") { assert_button "Force approve", disabled: true }
+    assert folder.directory?, "disabled controls must leave the inbox task in place"
   end
 
   test "a failed Turbo submission keeps the draft and staged attachment" do
@@ -653,28 +651,22 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_selector ".qa-question", text: /Deadline/
   end
 
-  test "typing in the Q&A survives a pushed morph refresh" do
+  test "degraded Q&A controls remain disabled across a pushed morph refresh" do
     folder = move_to_brainstorm(create_task!(@project, "Focus probe"))
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
     sign_in!
     visit "/tasks/#{@project}/#{folder.basename}"
 
-    field = find("textarea[data-question-number='1']", wait: 5)
+    assert_field "Answer to question 1", disabled: true, wait: 5
     wait_for_live_status
-    field.fill_in with: "typing slowly"
     # Change the task's OWN visible context without changing the bound question,
     # then force a broadcast → morph. Waiting for that updated context proves the
-    # morph actually landed before we assert survival — without it every
-    # assertion could pass against the pre-morph DOM.
+    # morph actually landed before we assert the safety state survives.
     idea_path = folder.join("idea.md")
     idea_path.write(idea_path.read.gsub("Focus probe", "Context refreshed"))
     create_task!(@project, "Refresh trigger")
     assert_selector ".idea-text", text: /Context refreshed/, wait: 10
-    assert_equal "typing slowly", find("textarea[data-question-number='1']").value,
-                 "a pushed morph must not discard typed-but-unsent input"
-    field.send_keys(" still here")
-    assert_equal "typing slowly still here", find("textarea[data-question-number='1']").value,
-                 "focus must remain in the field across refreshes"
+    assert_field "Answer to question 1", disabled: true, with: ""
   end
 
   test "pasting an image attaches it like the TUI" do

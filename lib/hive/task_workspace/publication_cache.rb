@@ -90,7 +90,16 @@ module Hive
           )
         end
 
-        existing = read_entry(path, identity)
+        existing = begin
+          read_entry(path, identity)
+        rescue SourceError => e
+          # An explicit, serialized refresh is the repair boundary for a
+          # malformed entry. Do not let corrupt advisory bytes wedge this key.
+          raise unless %w[cache_json_invalid cache_identity_invalid cache_entry_oversized]
+                       .include?(e.reason)
+
+          nil
+        end
         now = utc_time(@clock.call)
         if existing && (next_refresh = next_refresh_at(existing)) && now < next_refresh
           retry_at = next_refresh.iso8601(6)

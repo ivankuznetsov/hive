@@ -5,6 +5,7 @@ class Tasks::BaseController < ApplicationController
 
   before_action :load_project
   before_action :load_task
+  before_action :reject_archived_mutation!
 
   private
 
@@ -34,7 +35,13 @@ class Tasks::BaseController < ApplicationController
     @task = Task.new(project: @project, attributes: result.attributes)
   end
 
-  def task_workspace_builder(questions_count: nil, daemon_enabled: nil)
+  def reject_archived_mutation!
+    return unless action_name == "create" && @task_source
+
+    raise Hive::Error, "archived tasks are read-only"
+  end
+
+  def task_workspace_builder(questions_count: nil, questions: nil, daemon_enabled: nil)
     Hive::TaskWorkspace::Builder.new(
       task: @task, native_task: @native_task, project: @project.name,
       status_availability: @status_availability,
@@ -44,6 +51,7 @@ class Tasks::BaseController < ApplicationController
       publication_cache: publication_cache_for_current_credential,
       cursor_codec: task_workspace_cursor_codec,
       questions_count: questions_count,
+      questions: questions,
       daemon_enabled: daemon_enabled.nil? ? @project.daemon_enabled? : daemon_enabled,
       archive: @task_source.present?
     )

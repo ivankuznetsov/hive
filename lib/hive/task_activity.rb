@@ -231,19 +231,32 @@ module Hive
 
       entries = Dir.children(directory).grep(/\A[0-9a-f]{64}\.json\z/).sort
       diagnostics = []
-      if entries.length > max_receipts
+      selected = []
+      entries.each do |entry|
+        operation = Operation.open!(activity: self, filename: entry)
+        next if operation.terminal?
+
+        selected << [ entry, operation ]
+        break if selected.length > max_receipts
+      rescue InvalidActivity, SystemCallError, IOError, JSON::ParserError => e
+        diagnostics << {
+          "source" => "task_journal", "reason" => "operation_receipt_invalid",
+          "reference" => entry, "detail" => safe_error(e)
+        }
+      end
+      if selected.length > max_receipts
         diagnostics << {
           "source" => "task_journal", "reason" => "limit_exhausted",
           "cap" => "operation_receipts", "limit" => max_receipts,
-          "observed" => entries.length
+          "observed" => selected.length
         }
-        entries = entries.first(max_receipts)
+        selected = selected.first(max_receipts)
       end
       consumed = 0
       completed = 0
       gaps = 0
-      entries.each do |entry|
-        operation = Operation.open!(activity: self, filename: entry)
+      processed = 0
+      selected.each do |entry, operation|
         consumed += operation.bytes
         if consumed > max_bytes
           diagnostics << {
@@ -253,7 +266,7 @@ module Hive
           }
           break
         end
-        next if operation.terminal?
+        processed += 1
 
         if operation.committed?
           operation.replay!
@@ -284,7 +297,7 @@ module Hive
         }
       end
       {
-        "processed" => entries.length, "completed" => completed,
+        "processed" => processed, "completed" => completed,
         "gaps" => gaps, "diagnostics" => diagnostics
       }
     end
@@ -558,7 +571,7 @@ module Hive
       end
 
       def complete!(result:, reason: nil, payload: {}, evidence: [], occurred_at: nil,
-                    task_folder: nil, activity: nil)
+                    correlation_id: nil, task_folder: nil, activity: nil)
         relocate!(task_folder) if task_folder
         activity ||= @activity
         return nil if receipt["state"] == "complete" &&
@@ -570,6 +583,7 @@ module Hive
           "committed_at" => stable_time,
           "result_fingerprint" => normalized_result_fingerprint(result),
           "record_reason" => reason || receipt.fetch("reason"),
+          "record_correlation_id" => correlation_id || operation_id,
           "record_payload" => sanitize_record_value(payload),
           "record_evidence" => sanitize_record_value(Array(evidence))
         )
@@ -582,7 +596,7 @@ module Hive
         result = activity.record(
           kind: receipt.fetch("activity_kind"),
           operation_id: operation_id,
-          correlation_id: operation_id,
+          correlation_id: receipt.fetch("record_correlation_id", operation_id),
           reason: receipt.fetch("record_reason"),
           source: receipt.fetch("source"),
           occurred_at: receipt.fetch("committed_at"),
@@ -596,6 +610,13 @@ module Hive
         )
         update!("state" => "complete", "event_id" => result.event_id)
         result
+      end
+
+      def reconcile!
+        return false unless committed?
+
+        replay!
+        true
       end
 
       def abort!(reason:)
@@ -670,6 +691,10 @@ module Hive
         end
         unless receipt["operation_id"].to_s.match?(%r{\A[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\z})
           raise InvalidActivity, "operation receipt id is invalid"
+        end
+        if receipt["record_correlation_id"] &&
+           !receipt["record_correlation_id"].to_s.match?(%r{\A[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\z})
+          raise InvalidActivity, "operation receipt correlation id is invalid"
         end
         unless KINDS.include?(receipt["activity_kind"].to_s) &&
                SOURCE_KINDS.include?(receipt["source"].to_s)

@@ -4,10 +4,6 @@ class Tasks::PublicationsController < Tasks::BaseController
   end
 
   def create
-    if @task_source
-      raise Hive::Error, "archived task publication observations are read-only"
-    end
-
     token = session[:github_token].to_s
     if token.empty?
       @refresh_notice = "Connect GitHub before refreshing remote publication state."

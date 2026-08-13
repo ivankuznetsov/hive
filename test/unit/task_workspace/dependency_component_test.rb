@@ -70,6 +70,17 @@ class TaskWorkspaceDependencyComponentTest < Minitest::Test
     assert_equal "divergent", panel.fetch("edges").first.fetch("stack_divergence")
   end
 
+  def test_numeric_dependency_targets_use_the_task_id_index
+    indexed = context(project(tasks: [
+      task("base", id: 101), task("child", id: 102, depends_on: "101")
+    ]))
+
+    panel = component(indexed, slug: "child").call
+
+    assert_equal [ [ "app:child", "app:base" ] ],
+                 panel.fetch("edges").map { |edge| [ edge["from"], edge["to"] ] }
+  end
+
   def test_connected_nodes_receive_individual_stack_and_publication_observations
     indexed = context(project(tasks: [ task("base"), task("child", depends_on: "base") ]))
     observed = []
@@ -94,6 +105,27 @@ class TaskWorkspaceDependencyComponentTest < Minitest::Test
     assert_nil base.dig("stack", "pr_number")
     assert_equal 42, child.dig("stack", "pr_number")
     assert_equal "aligned", base.dig("stack", "divergence")
+  end
+
+  def test_publication_observations_share_the_component_deadline
+    indexed = context(project(tasks: [ task("base"), task("child", depends_on: "base") ]))
+    now = 0.0
+    deadlines = []
+    reader = lambda do |task_snapshot, _project_snapshot, deadline:|
+      deadlines << [ task_snapshot.slug, deadline ]
+      now = 3.0
+      {}
+    end
+    panel = Hive::TaskWorkspace::DependencyComponent.new(
+      context: indexed, project: "app", slug: "child",
+      git_observation_reader: reader, monotonic_clock: -> { now },
+      limits: Hive::TaskWorkspace::Limits.new(dependency_deadline_seconds: 2)
+    ).call
+
+    assert_equal 1, deadlines.length
+    assert_equal 2.0, deadlines.first.last
+    assert_includes panel.fetch("diagnostics").filter_map { |row| row["cap"] },
+                    "dependency_deadline_seconds"
   end
 
   def test_node_cap_keeps_deterministic_partial_sentinel

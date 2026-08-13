@@ -77,11 +77,13 @@ class TaskWorkspacePublicationTest < Minitest::Test
         [ "#{@head}\n", 0 ]
       when [ "branch", "--show-current" ]
         [ "#{@branch}\n", 0 ]
-      when [ "status", "--porcelain=v1", "--untracked-files=no" ]
+      when [ "status", "--porcelain=v1", "--untracked-files=all" ]
         [ @dirty ? " M changed.rb\n" : "", 0 ]
       else
         if args.first(2) == [ "merge-base", "--is-ancestor" ]
           [ "", 0 ]
+        elsif args.first(3) == [ "rev-parse", "--verify", "--quiet" ] && args.last == "main"
+          [ "#{'c' * 40}\n", 0 ]
         elsif args.first == "log"
           [ [ @head, @head[0, 8], "Ship safely", "2026-08-12T12:00:00Z" ].join("\0") + "\x1e", 0 ]
         elsif args.first(3) == [ "rev-parse", "--verify", "--quiet" ]
@@ -171,6 +173,16 @@ class TaskWorkspacePublicationTest < Minitest::Test
         assert_equal publication_state, panel.fetch("publication_state")
         assert_equal push_state, panel.dig("local", "push", "state")
       end
+    end
+  end
+
+  def test_untracked_files_make_the_worktree_dirty_and_current_base_is_observed_separately
+    with_task do |task|
+      panel = service(task, runner: GitRunner.new(dirty: true)).call
+
+      assert panel.dig("local", "dirty")
+      assert_equal "c" * 40, panel.dig("local", "observed_base_oid")
+      assert_includes panel.to_s, "observed_base_oid"
     end
   end
 

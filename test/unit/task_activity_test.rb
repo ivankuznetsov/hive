@@ -215,6 +215,37 @@ class TaskActivityTest < Minitest::Test
     end
   end
 
+  def test_operation_receipt_cap_is_applied_after_terminal_receipts_are_skipped
+    with_activity do |activity, _dir|
+      ids = (1..20).map { |number| "action:cap-order:#{number}" }
+                     .sort_by { |id| Digest::SHA256.hexdigest(id) }
+      completed_ids = ids.first(2)
+      pending_id = ids.last
+      completed_ids.each do |operation_id|
+        operation = activity.begin_operation(
+          kind: "operator_action", operation_id: operation_id, source: "operator",
+          reason: "action", precondition: "before", expected_postcondition: "after"
+        )
+        operation.complete!(result: "after", occurred_at: NOW)
+      end
+      activity.begin_operation(
+        kind: "operator_action", operation_id: pending_id, source: "operator",
+        reason: "action", precondition: "before", expected_postcondition: "after"
+      )
+
+      reconciled = []
+      summary = activity.reconcile_operations!(max_receipts: 1) do |receipt|
+        reconciled << receipt.fetch("operation_id")
+        :not_committed
+      end
+
+      assert_equal [ pending_id ], reconciled
+      assert_equal 1, summary.fetch("processed")
+      refute_includes summary.fetch("diagnostics").map { |row| row["cap"] },
+                      "operation_receipts"
+    end
+  end
+
   def test_aborted_operation_keeps_history_and_retry_gets_a_distinct_identity
     with_activity do |activity, dir|
       attributes = {

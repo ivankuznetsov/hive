@@ -23,6 +23,7 @@ module Hive
         @limits = limits
         @monotonic_clock = monotonic_clock
         @started_at = @monotonic_clock.call
+        @deadline = @started_at + @limits.fetch(:dependency_deadline_seconds)
       end
 
       def call
@@ -45,12 +46,23 @@ module Hive
 
         edges, placeholders, edge_diagnostics = build_edges(nodes_by_id)
         diagnostics.concat(edge_diagnostics)
+        truncated ||= edge_diagnostics.any? do |row|
+          row["cap"] == "dependency_deadline_seconds"
+        end
         nodes_by_id = nodes_by_id.merge(placeholders)
         selection = connected_selection(target_id, nodes_by_id, edges, diagnostics)
         truncated ||= selection.fetch(:truncated)
         selected_nodes = selection.fetch(:node_ids).filter_map { |id| nodes_by_id[id] }
         selected_edges = selection.fetch(:edges)
-        selected_nodes.each { |node| project_stack!(node, diagnostics) }
+        selected_nodes.each do |node|
+          break if deadline_exhausted!(diagnostics)
+
+          project_stack!(node, diagnostics)
+          if deadline_exhausted!(diagnostics)
+            truncated = true
+            break
+          end
+        end
         selected_edges.each do |edge|
           source = selected_nodes.find { |node| node["id"] == edge["from"] }
           edge["stack_divergence"] = source.dig("stack", "divergence") if
@@ -153,14 +165,24 @@ module Hive
       def build_edges(nodes)
         placeholders = {}
         diagnostics = []
-        edges = nodes.values.filter_map do |node|
+        numeric_targets = {}
+        nodes.values.each do |node|
+          break if deadline_exhausted!(diagnostics)
+          next unless node["kind"] == "task" && node["task_id"]
+
+          numeric_targets[[ node["project"], node["task_id"].to_s ]] ||= node
+        end
+        edges = []
+        nodes.values.each do |node|
+          break if deadline_exhausted!(diagnostics)
+
           reference_value = node["depends_on"]
           next if reference_value.nil?
 
           begin
             reference = Hive::Dependencies.parse_reference(reference_value)
             target_project = reference.explicit_project ? reference.project : node.fetch("project")
-            target = resolve_target(nodes, target_project, reference.task)
+            target = resolve_target(nodes, numeric_targets, target_project, reference.task)
             unless target
               target_id = "missing:#{Digest::SHA256.hexdigest("#{target_project}:#{reference.task}")[0, 20]}"
               placeholders[target_id] ||= missing_node(
@@ -170,25 +192,24 @@ module Hive
               diagnostics << diagnostic("dependency_task_missing", reference.to_s)
               target = placeholders.fetch(target_id)
             end
-            edge(node, target, reference)
+            edges << edge(node, target, reference)
           rescue Hive::Dependencies::InvalidReference
             target_id = "missing:#{Digest::SHA256.hexdigest(reference_value.to_s)[0, 20]}"
             placeholders[target_id] ||= missing_node(
               target_id, reason: "dependency_reference_invalid", slug: reference_value.to_s
             )
             diagnostics << diagnostic("dependency_reference_invalid", reference_value.to_s)
-            edge(node, placeholders.fetch(target_id), nil, invalid_reference: reference_value.to_s)
+            edges << edge(
+              node, placeholders.fetch(target_id), nil, invalid_reference: reference_value.to_s
+            )
           end
         end
         [ edges, placeholders, diagnostics ]
       end
 
-      def resolve_target(nodes, project, reference)
+      def resolve_target(nodes, numeric_targets, project, reference)
         if reference.to_s.match?(/\A\d+\z/)
-          nodes.values.find do |node|
-            node["kind"] == "task" && node["project"] == project &&
-              node["task_id"].to_s == reference.to_s
-          end
+          numeric_targets[[ project, reference.to_s ]]
         else
           nodes[qualify(project, reference)]
         end
@@ -452,12 +473,22 @@ module Hive
         return if @git_observations.key?(node.fetch("id"))
 
         task, project = @node_sources[node.fetch("id")]
-        value = @git_observation_reader.call(task, project)
+        value = if accepts_deadline?(@git_observation_reader)
+          @git_observation_reader.call(task, project, deadline: @deadline)
+        else
+          @git_observation_reader.call(task, project)
+        end
         @git_observations[node.fetch("id")] = stringify_keys(value || {})
         node["stack"] = stack_projection(node.fetch("id"))
       rescue StandardError => e
         diagnostics << diagnostic("git_observation_unavailable", "#{node['id']}:#{e.class}")
         node["stack"] = stack_projection(node.fetch("id"))
+      end
+
+      def accepts_deadline?(reader)
+        reader.parameters.any? do |kind, name|
+          kind == :keyrest || %i[key keyreq].include?(kind) && name == :deadline
+        end
       end
 
       def oid_or_nil(value)
@@ -526,8 +557,9 @@ module Hive
       end
 
       def deadline_exhausted!(diagnostics)
-        elapsed = @monotonic_clock.call - @started_at
-        return false if elapsed <= @limits.fetch(:dependency_deadline_seconds)
+        observed_at = @monotonic_clock.call
+        elapsed = observed_at - @started_at
+        return false if observed_at <= @deadline
 
         diagnostics << cap_diagnostic(
           "dependency_deadline_seconds",

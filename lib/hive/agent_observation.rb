@@ -42,6 +42,7 @@ module Hive
       return false unless available?
       return true if @started
 
+      reconcile_terminal_operations!
       @started_at = normalize_time(@clock.call)
       append(
         kind: "session_started", operation_id: "session:#{session_id}:start",
@@ -62,26 +63,41 @@ module Hive
       return false if @finished
 
       result = (result || {}).to_h.merge(attributes)
-      start! unless @started
+      return false unless @started || start!
       ended_at = normalize_time(@clock.call)
       resource = resource_observation(result)
-      append(
+      payload = base_payload.merge(
+        "started_at" => @started_at, "ended_at" => ended_at,
+        "live" => false, "health" => health(result, exception),
+        "outcome" => outcome(result, exception),
+        "actual_model" => actual_model(result),
+        "timed_out" => timed_out?(result),
+        "resource_observation" => resource,
+        "usage" => normalized_usage(result[:usage]),
+        "guards" => @guards
+      )
+      operation = @activity.begin_operation(
         kind: "session_finished", operation_id: "session:#{session_id}:finish",
-        reason: "agent session finished", occurred_at: ended_at,
-        payload: base_payload.merge(
-          "started_at" => @started_at, "ended_at" => ended_at,
-          "live" => false, "health" => health(result, exception),
-          "outcome" => outcome(result, exception),
-          "actual_model" => actual_model(result),
-          "timed_out" => result[:timed_out] == true,
-          "resource_observation" => resource,
-          "usage" => normalized_usage(result[:usage]),
-          "guards" => @guards
-        )
+        source: "agent_runtime", reason: "agent session finished",
+        precondition: { "session_id" => session_id, "live" => true },
+        expected_postcondition: { "session_id" => session_id, "live" => false }
+      )
+      operation.complete!(
+        result: payload, occurred_at: ended_at, correlation_id: session_id,
+        payload: payload,
+        evidence: [ { "kind" => "runtime_receipt", "reference" => "sessions/#{session_id}" } ]
       )
       @finished = true
       true
     rescue Hive::TaskActivity::Error
+      begin
+        if operation&.reconcile!
+          @finished = true
+          return true
+        end
+      rescue Hive::TaskActivity::Error
+        nil
+      end
       false
     end
 
@@ -95,6 +111,10 @@ module Hive
         evidence: [ { "kind" => "runtime_receipt", "reference" => "sessions/#{session_id}" } ],
         payload: payload
       )
+    end
+
+    def reconcile_terminal_operations!
+      @activity.reconcile_operations! { :defer }
     end
 
     def base_payload
@@ -189,7 +209,7 @@ module Hive
     end
 
     def outcome(result, exception)
-      return "timed_out" if result[:timed_out] == true
+      return "timed_out" if timed_out?(result)
       return "failed" if exception
 
       status = result[:status].to_s
@@ -200,11 +220,15 @@ module Hive
     end
 
     def health(result, exception)
-      return "timed_out" if result[:timed_out] == true
+      return "timed_out" if timed_out?(result)
       return "error" if exception || %w[error failed].include?(result[:status].to_s)
       return "unavailable" if result[:status].to_s.empty?
 
       "completed"
+    end
+
+    def timed_out?(result)
+      result[:timed_out] == true || result[:status].to_s == "timeout"
     end
 
     def identifier(value, label)

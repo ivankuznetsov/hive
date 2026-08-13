@@ -20,7 +20,7 @@ module Hive
 
       def initialize(task:, expected_repository: nil, expected_root: nil,
                      cache: nil, limits: Limits.new, pointer_reader: nil,
-                     runner: nil,
+                     runner: nil, deadline: nil,
                      monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
         @task = task
         @expected_repository = canonical_repository(expected_repository)
@@ -31,6 +31,9 @@ module Hive
         @runner = runner || method(:run_command)
         @monotonic_clock = monotonic_clock
         @started_at = @monotonic_clock.call
+        @deadline = [
+          @started_at + @limits.fetch(:local_git_deadline_seconds), deadline
+        ].compact.min
         @remaining_bytes = @limits.fetch(:local_git_bytes)
       end
 
@@ -166,7 +169,8 @@ module Hive
         if branch != pointer.fetch("branch")
           diagnostics << diagnostic("branch_mismatch")
         end
-        dirty = !git_value(path, [ "status", "--porcelain=v1", "--untracked-files=no" ]).empty?
+        dirty = !git_value(path, [ "status", "--porcelain=v1", "--untracked-files=all" ]).empty?
+        observed_base_oid = observe_base_ref(path, pointer["base_branch"], diagnostics)
         base_state = observe_base(path, pointer["base_oid"], head, diagnostics)
         commits = observe_commits(path, pointer["base_oid"], head, diagnostics)
         push = observe_tracking(path, pointer.fetch("branch"), head, diagnostics)
@@ -177,6 +181,7 @@ module Hive
           "expected_branch" => pointer.fetch("branch"),
           "base_branch" => pointer["base_branch"],
           "base_oid" => pointer["base_oid"],
+          "observed_base_oid" => observed_base_oid,
           "head_oid" => head,
           "base_state" => base_state,
           "dirty" => dirty,
@@ -187,6 +192,22 @@ module Hive
       rescue SourceError => e
         diagnostics << e.diagnostic
         unavailable_local
+      end
+
+      def observe_base_ref(path, base_branch, diagnostics)
+        return nil unless base_branch
+
+        out, _err, status, _metadata = git_capture(
+          path, [ "rev-parse", "--verify", "--quiet", base_branch ], allow_exit: [ 0, 1 ]
+        )
+        return nil if status.exitstatus == 1
+
+        oid = valid_oid_or_nil(out.strip)
+        diagnostics << diagnostic("base_ref_invalid", nil, source: "local_git") unless oid
+        oid
+      rescue SourceError => e
+        diagnostics << e.diagnostic
+        nil
       end
 
       def observe_base(path, base_oid, head, diagnostics)
@@ -456,8 +477,7 @@ module Hive
       end
 
       def git_capture(path, args, allow_exit: [ 0 ])
-        remaining_time = @limits.fetch(:local_git_deadline_seconds) -
-                         (@monotonic_clock.call - @started_at)
+        remaining_time = @deadline - @monotonic_clock.call
         if remaining_time <= 0
           raise SourceError.new(
             source: "local_git", reason: "limit_exhausted",
@@ -607,7 +627,8 @@ module Hive
         {
           "state" => "unavailable", "repository" => @expected_repository,
           "branch" => nil, "expected_branch" => @task.slug.to_s,
-          "base_branch" => nil, "base_oid" => nil, "head_oid" => nil,
+          "base_branch" => nil, "base_oid" => nil, "observed_base_oid" => nil,
+          "head_oid" => nil,
           "base_state" => "unavailable", "dirty" => nil, "commits" => [],
           "commits_truncated" => false,
           "push" => { "state" => "unavailable", "tracking_oid" => nil,

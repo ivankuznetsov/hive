@@ -1136,15 +1136,18 @@ Context provenance, activity reconciliation, task-journal checkpoints,
 attempt dispatch, UsageDb migration, dependency admission, worktree/Git, and
 status/TUI correspondence tests cover their capture and compatibility seams.
 
-Rails model/integration tests assert authenticated HTML/JSON parity, exact
-target resolution, archived read-only behavior, per-panel degradation, signed
+Rails model/integration tests assert authenticated HTML/JSON operator-state
+parity, exact target resolution, every archived mutation route's read-only
+boundary, per-panel degradation, signed
 timeline pagination, canonical action routes, publication refresh auth/CSRF,
 and zero remote reads from ordinary page/JSON/broadcast paths. The Playwright
 `task_workspace_test.rb` plus existing pipeline and kanban suites exercise
-1280x800, 3840x1400, 375x812, 320x568, and effective 320-CSS-pixel reflow;
+1280x800, 3840x1400, 375x812, and real Chromium 400% device-scale emulation at
+an effective 320-CSS-pixel viewport;
 keyboard traversal, 24-pixel targets, dependency forest/table parity,
-focus/caret/disclosure/scroll preservation, permanent log/diff/publication
-frames, and non-repeating material announcements.
+focus/exact-selection/disclosure/scroll preservation, permanent log/diff and
+timeline-inspection frames, morph-owned publication facts, and non-repeating
+material announcements.
 
 During implementation, run the smallest named files first. Before handoff run
 `bundle exec rake test` from the repository root, then the Web application's

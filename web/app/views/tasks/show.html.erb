@@ -61,9 +61,7 @@
       <%= render "tasks/diff_frame",
             project: @project, task: @task, task_source: @task_source %>
       <%= turbo_frame_tag stable_dom_id("task-publication", @project.name, @task.slug),
-            src: task_publication_path(@project.name, @task.slug, source: @task_source),
-            loading: :lazy,
-            data: { turbo_permanent: true } do %>
+            refresh: "morph" do %>
         <%= render "tasks/publication",
               publication: @workspace.dig("panels", "publication"),
               refresh_available: @publication_refresh_available,

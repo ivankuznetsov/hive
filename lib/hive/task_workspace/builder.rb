@@ -34,6 +34,7 @@ module Hive
                      projection_store: nil, projection_read: nil,
                      event_reader: nil, journal_reader: nil, usage_reader: Hive::UsageDb,
                      current_context_observation: nil, questions_count: nil,
+                     questions: nil,
                      daemon_enabled: true, archive: false,
                      clock: -> { Time.now.utc })
         @task = task
@@ -55,6 +56,7 @@ module Hive
         @usage_reader = usage_reader
         @current_context_observation = current_context_observation
         @questions_count = questions_count
+        @questions = questions
         @daemon_enabled = daemon_enabled == true
         @archive = archive == true
         @clock = clock
@@ -93,6 +95,8 @@ module Hive
           "artifacts" => artifacts
         }
         status = status_payload(read)
+        action_evidence_current = status["state"] == "current" &&
+                                  decision_panels_current?(attempts, resources)
 
         snapshot_with_budget(
           generated_at: now,
@@ -103,9 +107,10 @@ module Hive
               task_value("condition_task_generation") || task_value("task_generation")
           },
           status: status,
+          operator: operator_payload,
           decision: decision_payload(
             attempts: attempts, resources: resources,
-            action_evidence_current: status["state"] == "current" && !read.truncated
+            action_evidence_current: action_evidence_current
           ),
           panels: panels
         )
@@ -194,10 +199,14 @@ module Hive
           },
           journal_records: journal.records,
           event_records: events.records,
-          source_positions: {}.tap do |positions|
-            positions["task_journal"] = journal.window_start if journal.truncated
-            positions["event_stream"] = events.window_start if events.truncated
-          end,
+          source_positions: {
+            "task_journal" => {
+              "start" => journal.window_start, "end" => journal.window_end
+            },
+            "event_stream" => {
+              "start" => events.window_start, "end" => events.window_end
+            }
+          },
           source_truncated: {
             "task_journal" => journal.truncated,
             "event_stream" => events.truncated
@@ -221,7 +230,8 @@ module Hive
         reader ||= JsonlReader.new(
           root: @native_task.folder, reference: reference,
           max_bytes: @limits.fetch(:journal_suffix_bytes),
-          max_records: @limits.fetch(:journal_events), source: source
+          max_records: @limits.fetch(:journal_events), source: source,
+          preserve: Timeline.method(:material_record?)
         )
         result = before.nil? ? reader.call : reader.call(before: before)
         if result.records.empty? && result.observed_bytes.zero? && fallback_records.any? && before.nil?
@@ -268,16 +278,20 @@ module Hive
         ).call
       end
 
-      def dependency_git_observation(task, project)
+      def dependency_git_observation(task, project, deadline: nil)
         panel = if @dependency_publication_reader
-          @dependency_publication_reader.call(task, project)
+          if accepts_deadline?(@dependency_publication_reader)
+            @dependency_publication_reader.call(task, project, deadline: deadline)
+          else
+            @dependency_publication_reader.call(task, project)
+          end
         else
           candidate = DependencyTask.new(task.folder, project.path, task.slug)
           Publication.new(
             task: candidate,
             expected_repository: project.repository_identity,
             cache: project.name.to_s == @project ? @publication_cache : nil,
-            limits: @limits
+            limits: @limits, deadline: deadline
           ).call
         end
         git_observation_from_publication(panel)
@@ -299,7 +313,7 @@ module Hive
           "repository" => local["repository"],
           "base_branch" => local["base_branch"],
           "base_oid" => local["base_oid"],
-          "observed_base_oid" => local["base_state"] == "ancestor" ? local["base_oid"] : nil,
+          "observed_base_oid" => local["observed_base_oid"],
           "current_branch" => local["branch"],
           "head_oid" => local["head_oid"],
           "pr_number" => pr.is_a?(Hash) ? pr["number"] : nil
@@ -371,6 +385,69 @@ module Hive
         }
       end
 
+      def decision_panels_current?(attempts, resources)
+        current_id = attempts["current_attempt_id"].to_s
+        current_attempt_present = !current_id.empty? && Array(attempts["records"]).any? do |attempt|
+          attempt["attempt_id"].to_s == current_id && attempt["current"] == true
+        end
+        current_attempt_present && attempts["state"] == "current" &&
+          attempts["truncated"] != true &&
+          %w[current exhausted retry-after].include?(resources["state"]) &&
+          resources["truncated"] != true
+      end
+
+      def accepts_deadline?(reader)
+        reader.parameters.any? do |kind, name|
+          kind == :keyrest || %i[key keyreq].include?(kind) && name == :deadline
+        end
+      end
+
+      def operator_payload
+        recovery = @task.respond_to?(:recovery) ? @task.recovery : nil
+        recovery_visible = task_predicate(:recovery_action_visible?)
+        {
+          "questions" => Array(@questions).first(100).filter_map do |question|
+            n = question_value(question, :n)
+            n = operator_text(n, 256) if n.is_a?(String) || n.is_a?(Symbol)
+            next unless n.is_a?(Integer) || n.is_a?(String)
+            text = operator_text(question_value(question, :text), 16 * 1024)
+            binding = operator_text(question_value(question, :binding), 16 * 1024)
+            ordinal = Integer(question_value(question, :ordinal), exception: false)
+            next if n.nil? || text.empty? || binding.empty? || ordinal.nil?
+
+            { "n" => n, "text" => text, "binding" => binding, "ordinal" => ordinal }
+          end,
+          "recovery" => (recovery || recovery_visible) && {
+            "status" => operator_text(recovery&.dig("status"), 128, nil_if_empty: true),
+            "primary_label" => operator_text(
+              @task.respond_to?(:recovery_primary_label) ? @task.recovery_primary_label : nil, 512
+            ),
+            "context" => Array(
+              @task.respond_to?(:recovery_context) ? @task.recovery_context : []
+            ).first(20).map { |item| operator_text(item, 4 * 1024) },
+            "action_visible" => recovery_visible,
+            "action_enabled" => task_predicate(:recovery_action_enabled?)
+          },
+          "diagnostic_summary" => operator_text(
+            task_value("diagnostic").is_a?(Hash) ? task_value("diagnostic")["summary"] : nil,
+            4 * 1024, nil_if_empty: true
+          )
+        }
+      end
+
+      def question_value(question, name)
+        question.respond_to?(name) ? question.public_send(name) : question[name.to_s] || question[name]
+      rescue StandardError
+        nil
+      end
+
+      def operator_text(value, limit, nil_if_empty: false)
+        text = Hive::SecretPatterns.redact(value.to_s).force_encoding(Encoding::UTF_8).scrub("")
+        text = text.byteslice(0, limit).to_s.force_encoding(Encoding::UTF_8).scrub("")
+        text = text.gsub(%r{(?<![A-Za-z0-9])/(?:[^\s/]+/)*[^\s]*}, "[REDACTED:path]")
+        nil_if_empty && text.empty? ? nil : text
+      end
+
       def action_enabled(evidence_current:)
         return [ false, "Archived tasks are read-only." ] if @archive
         unless evidence_current
@@ -433,13 +510,13 @@ module Hive
         TaskWorkspace.panel(name, &block)
       end
 
-      def snapshot_with_budget(generated_at:, task:, status:, decision:, panels:)
+      def snapshot_with_budget(generated_at:, task:, status:, operator:, decision:, panels:)
         candidates = %w[artifacts dependencies timeline provenance attempts resources publication]
         working = JSON.parse(JSON.generate(panels))
         loop do
           return Snapshot.new(
             generated_at: generated_at, task: task, status: status,
-            decision: decision, panels: working, limits: @limits
+            operator: operator, decision: decision, panels: working, limits: @limits
           ).to_h
         rescue ArgumentError => e
           raise unless e.message.include?("workspace_bytes")

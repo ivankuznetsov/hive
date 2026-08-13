@@ -6,7 +6,7 @@ module Hive
     class Snapshot
       attr_reader :data
 
-      def initialize(generated_at:, task:, status:, decision:, panels:, limits: Limits.new)
+      def initialize(generated_at:, task:, status:, decision:, panels:, operator: {}, limits: Limits.new)
         @limits = limits
         @data = TaskWorkspace.canonical(
           "schema" => SCHEMA,
@@ -14,6 +14,7 @@ module Hive
           "generated_at" => normalize_time(generated_at),
           "task" => normalize_task(task),
           "status" => normalize_status(status),
+          "operator" => normalize_operator(operator),
           "decision" => normalize_decision(decision),
           "panels" => normalize_panels(panels)
         )
@@ -84,6 +85,36 @@ module Hive
             "enabled" => action["enabled"] == true,
             "reason" => action["reason"]&.to_s
           }
+        }
+      end
+
+      def normalize_operator(value)
+        operator = value.to_h.transform_keys(&:to_s)
+        questions = Array(operator["questions"]).first(100).map do |question|
+          row = question.to_h.transform_keys(&:to_s)
+          number = row["n"]
+          unless number.is_a?(Integer) || number.is_a?(String)
+            raise ArgumentError, "workspace operator question number is invalid"
+          end
+          {
+            "n" => number, "text" => row.fetch("text").to_s,
+            "binding" => row.fetch("binding").to_s, "ordinal" => Integer(row.fetch("ordinal"))
+          }
+        end
+        recovery = operator["recovery"]
+        recovery = if recovery
+          row = recovery.to_h.transform_keys(&:to_s)
+          {
+            "status" => row["status"]&.to_s,
+            "primary_label" => row["primary_label"]&.to_s,
+            "context" => Array(row["context"]).first(20).map(&:to_s),
+            "action_visible" => row["action_visible"] == true,
+            "action_enabled" => row["action_enabled"] == true
+          }
+        end
+        {
+          "questions" => questions, "recovery" => recovery,
+          "diagnostic_summary" => operator["diagnostic_summary"]&.to_s
         }
       end
 

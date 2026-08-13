@@ -212,6 +212,9 @@ module Hive
         string = Hive::SecretPatterns.redact(value)
         raise InvalidReceipt, "#{label} is required" if string.empty?
         raise InvalidReceipt, "#{label} exceeds #{max_bytes} bytes" if string.bytesize > max_bytes
+        if absolute_host_path?(string)
+          raise InvalidReceipt, "#{label} contains an absolute host path"
+        end
 
         string
       end
@@ -265,6 +268,12 @@ module Hive
         else
           value
         end
+      end
+
+      def absolute_host_path?(value)
+        value.match?(%r{(?<![A-Za-z0-9./])/(?:[^\s/]+/)*[^\s/]+}) ||
+          value.match?(%r{(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s]+}) ||
+          value.match?(%r{(?<![A-Za-z0-9\\])\\\\[^\s\\/]+[\\/][^\s]+})
       end
 
       def safe_message(error)

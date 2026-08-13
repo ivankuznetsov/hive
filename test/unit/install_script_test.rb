@@ -392,6 +392,13 @@ class InstallScriptTest < Minitest::Test
     )
   end
 
+  def test_qmd_startup_timeout_is_visible_and_skips_publication
+    assert_optional_qmd_failure(
+      qmd_hang: "version", qmd_timeout_seconds: 1,
+      expected_warning: "qmd startup check timed out after 1s"
+    )
+  end
+
   def test_custom_qmd_version_requires_integrity
     Dir.mktmpdir("hive-installer-qmd-custom-no-integrity") do |dir|
       npm_args = File.join(dir, "npm-args")
@@ -718,6 +725,7 @@ class InstallScriptTest < Minitest::Test
           cat > "$prefix/bin/qmd" <<'QMD'
 #!/bin/sh
 if [ "${1:-}" = "--version" ]; then
+  [ "${HIVE_INSTALL_TEST_QMD_HANG:-}" = "version" ] && /usr/bin/sleep 5
   [ "${HIVE_INSTALL_TEST_QMD_VERSION_FAILURE:-}" = "1" ] && exit 44
   printf 'qmd 2.5.3\n'
 fi

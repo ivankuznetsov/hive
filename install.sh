@@ -493,7 +493,8 @@ install_qmd() {
     return 0
   fi
 
-  if run_with_timeout "$QMD_TIMEOUT_SECONDS" "$qmd_stage_bin" --version >/dev/null 2>&1; then
+  if qmd_version="$(run_with_timeout "$QMD_TIMEOUT_SECONDS" \
+    "$qmd_stage_bin" --version 2>/dev/null)"; then
     :
   else
     rc=$?
@@ -576,7 +577,6 @@ install_qmd() {
     fi
   fi
 
-  qmd_version="$("$qmd_bin" --version 2>/dev/null || true)"
   log "qmd: installed ${qmd_version:-${QMD_NPM_PACKAGE}}"
 }
 

@@ -156,7 +156,7 @@ class AttemptsStoreTest < Minitest::Test
       scan = store.scan
       assert_empty scan.records
       assert_equal 2, scan.invalid_records.size
-      assert scan.invalid_records.all?(&:capacity_reservation?)
+      assert_equal %w[broken.json newer.json], scan.invalid_records.map { |record| File.basename(record.path) }
     end
   end
 

@@ -178,7 +178,7 @@ class TasksTest < ActionDispatch::IntegrationTest
         assert_select "img[src*='source=archive']", minimum: 1
         assert_select "form[action*='source=archive']", minimum: 1
         assert_select(
-          "#task-log[data-controller='poll']",
+          "turbo-frame[id^='task-log-'][data-controller='poll']",
           { count: 0 },
           "an archived task log is immutable and must not trigger status work every 3 seconds"
         )
@@ -1022,7 +1022,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     with_replaced_singleton_method(GithubApi, :new, api_factory) do
       get task_publication_path(@project, @slug)
       assert_response :success
-      assert_select "turbo-frame#task-publication", 1
+      assert_select "turbo-frame[id^='task-publication-']", 1
       assert_select ".publication-panel", text: /Worktree unavailable/i
 
       get task_publication_path(@project, @slug, format: :json)
@@ -1073,8 +1073,8 @@ class TasksTest < ActionDispatch::IntegrationTest
     %w[attempts provenance timeline dependencies artifacts publication].each do |panel|
       assert_select "#workspace-#{panel}", 1, "#{panel} must be represented exactly once"
     end
-    assert_select "turbo-frame#task-diff[data-turbo-permanent]", 1
-    assert_select "turbo-frame#task-publication[data-turbo-permanent][loading='lazy'][src]", 1
+    assert_select "turbo-frame[id^='task-diff-'][data-turbo-permanent]", 1
+    assert_select "turbo-frame[id^='task-publication-'][data-turbo-permanent][loading='lazy'][src]", 1
     assert_select ".workspace-table-scroll[role='region'][tabindex='0']", minimum: 1
     assert_select "#task-workspace-announcement[role='status'][aria-live='polite']", 1
     refute_includes response.body, stage_dir(@project, "1-inbox").to_s
@@ -1170,7 +1170,8 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal 1, refreshes.length
     assert_equal 1, remote_calls.length
     assert_equal "github.com/acme/demo", remote_calls.first.fetch(:repository)
-    assert_select "turbo-frame#task-publication", 1
+    assert_select "turbo-frame[id^='task-publication-']", 1
+    assert_select "form[data-turbo-frame^='task-publication-']", 1
   ensure
     Task.define_method(:publication, original_publication) if original_publication
   end

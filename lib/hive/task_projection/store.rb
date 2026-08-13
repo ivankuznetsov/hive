@@ -14,7 +14,6 @@ module Hive
       CHECKPOINT_BASENAME = "task-projection.checkpoint.json".freeze
       CHECKPOINT_SCHEMA = "hive-task-projection-checkpoint".freeze
       CHECKPOINT_SCHEMA_VERSION = 1
-      PREFIX_SENTINEL_BYTES = 4 * 1024
 
       BoundedRead = Data.define(
         :projection, :state, :diagnostics, :truncated, :journal_cursor,
@@ -140,11 +139,7 @@ module Hive
             "event_id" => binding.fetch("event_id"),
             "device" => stat&.dev,
             "inode" => stat&.ino,
-            "head_hash" => sentinel_hash(bytes, 0, [ cursor, PREFIX_SENTINEL_BYTES ].min),
-            "tail_hash" => sentinel_hash(
-              bytes, [ cursor - PREFIX_SENTINEL_BYTES, 0 ].max,
-              [ cursor, PREFIX_SENTINEL_BYTES ].min
-            )
+            "prefix_hash" => ::Digest::SHA256.hexdigest(bytes.byteslice(0, cursor).to_s)
           },
           "snapshot" => projection.to_h,
           "records" => records
@@ -310,12 +305,16 @@ module Hive
           return false unless journal["device"].nil? || stat.dev == journal["device"]
           return false unless journal["inode"].nil? || stat.ino == journal["inode"]
 
-          head_length = [ cursor, PREFIX_SENTINEL_BYTES ].min
-          tail_offset = [ cursor - PREFIX_SENTINEL_BYTES, 0 ].max
-          head = io.pread(head_length, 0)
-          tail = io.pread(head_length, tail_offset)
-          ::Digest::SHA256.hexdigest(head) == journal["head_hash"] &&
-            ::Digest::SHA256.hexdigest(tail) == journal["tail_hash"]
+          digest = ::Digest::SHA256.new
+          offset = 0
+          while offset < cursor
+            chunk = io.pread([ 64 * 1024, cursor - offset ].min, offset)
+            return false if chunk.empty?
+
+            digest.update(chunk)
+            offset += chunk.bytesize
+          end
+          digest.hexdigest == journal["prefix_hash"]
         end
       rescue SystemCallError, IOError
         false
@@ -333,7 +332,7 @@ module Hive
             before.dev == path_stat.dev && before.ino == path_stat.ino
           return [ "", before.size, true ] if before.size < cursor
 
-          suffix = io.pread(limit + 1, cursor)
+          suffix = before.size == cursor ? "" : io.pread(limit + 1, cursor).to_s
           after = io.stat
           raise IOError, "journal changed during bounded read" unless
             before.dev == after.dev && before.ino == after.ino && before.size == after.size &&
@@ -423,10 +422,6 @@ module Hive
           lock&.flock(File::LOCK_UN)
           lock&.close
         end
-      end
-
-      def sentinel_hash(bytes, offset, length)
-        ::Digest::SHA256.hexdigest(bytes.byteslice(offset, length).to_s)
       end
 
       def replay(binding, marker:)

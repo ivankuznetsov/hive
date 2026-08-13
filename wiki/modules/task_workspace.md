@@ -3,7 +3,7 @@ title: Task workspace projection
 type: module
 source: lib/hive/task_workspace.rb, lib/hive/task_workspace/, lib/hive/context_provenance.rb, lib/hive/task_activity.rb, schemas/hive-task-workspace.v1.json, schemas/hive-context-receipt.v1.json, web/app/controllers/tasks/, web/app/views/tasks/
 created: 2026-08-12
-updated: 2026-08-12
+updated: 2026-08-13
 tags: [task, web, projection, provenance, attempts, timeline, dependencies, publication]
 ---
 
@@ -83,11 +83,14 @@ Git result becomes a panel diagnostic; it cannot turn the task route into a
 
 The agent writes only the candidate
 `context-receipts/<attempt-id>.json.next`. The controller descriptor-opens,
-validates binding/schema/containment/size, redacts, atomically promotes, and
-journals it. Current repository/Wiki identity is observed separately and may
-mark the historical receipt stale. Legacy tasks without receipts stay missing
-or partial; the projector never reconstructs selection from current files,
-prompts, argv, prose, logs, or timestamps.
+validates allowlisted repository/Wiki field types as well as
+binding/schema/containment/size, redacts, atomically promotes, and journals it.
+Promoted context, projection-checkpoint, activity-operation, and journal
+receipts are protected throughout agent custody. Current repository/Wiki
+identity is observed separately and may mark the historical receipt stale.
+Legacy tasks without receipts stay missing or partial; the projector never
+reconstructs selection from current files, prompts, argv, prose, logs, or
+timestamps.
 
 ## Attempts, sessions, and resources
 
@@ -159,7 +162,11 @@ source references, and task-journal evidence wins cross-source duplicates.
 Material events and operational noise have separate count/byte budgets. Noise
 with the same normalized identity is grouped only within 60 seconds. Signed,
 opaque, task-bound cursors expose older material pages and at most 20 raw group
-members; a cursor cannot select a path, change a limit, or be replayed against
+members. Material cursors retain bounded source-byte boundaries, so pagination
+can seek earlier journal and event windows instead of filtering only the newest
+suffix. Byte-budget omissions also issue an older cursor, while raw-group
+cursors retain only the stable group identity and stay within their own decode
+limit. A cursor cannot select a path, change a limit, or be replayed against
 another task. Corrections append `supersedes_event_id`; history is never
 rewritten.
 
@@ -173,11 +180,15 @@ authoritative.
 
 Same-repository edges may display strict worktree base/head evidence as a
 stacked Git relationship. Cross-project edges are labelled scheduling-only.
-Missing/inaccessible nodes, blocked edges, cycles, divergent expected versus
-observed OIDs, and every cap produce explicit partial placeholders. A rooted
-spanning forest renders each node once; additional/back/cyclic edges are
-cross-references. The semantic node/edge table is always the complete bounded
-representation and remains authoritative when the visual layer is ignored.
+Each selected connected task receives its own bounded local publication
+observation, so ancestor and descendant branch, base, head, and PR absence are
+not inferred from the root. Missing/inaccessible nodes, blocked edges, cycles,
+divergent expected versus observed OIDs, and every cap produce explicit partial
+placeholders. Selection applies node/edge/depth/deadline limits before iterative
+cycle analysis. A rooted spanning forest renders each node once;
+additional/back/cyclic edges are cross-references. The semantic node/edge table
+is always the complete bounded representation and remains authoritative when
+the visual layer is ignored.
 
 ## Publication and artifacts
 
@@ -200,7 +211,8 @@ credential principal, project registration, canonical repository/PR, and
 expected head. Reads distinguish cold, fresh, stale, failed, rate-limited,
 expired, deleted, merged, and divergent observations. A failed refresh may
 retain an older successful observation with both states visible. Refresh is
-single-flight and limited to once per identity per 60 seconds.
+single-flight, has one ten-second total request deadline, and is limited by both
+the local interval and a later GitHub `Retry-After` deadline.
 
 Artifacts use descriptor-based no-follow reads over known workflow files, with
 per-file and aggregate limits, binary/encoding detection, redaction, and stable
@@ -223,10 +235,11 @@ readers.
 | Publication cache | 256 KiB entry; 32 MiB/principal; fresh 2 min; stale 24 h |
 
 Every limit diagnostic names the exhausted cap and observed amount. A valid
-task-projection checkpoint anchors a known journal prefix and permits only the
-bounded suffix replay in a Web request. Missing, changed, torn, or over-limit
-checkpoint evidence degrades the workspace instead of moving a full journal
-rebuild into HTTP.
+task-projection checkpoint anchors the complete immutable journal prefix with a
+streamed digest and permits only the bounded suffix replay in a Web request.
+An exactly current checkpoint has an ordinary empty suffix. Missing, changed,
+torn, or over-limit checkpoint evidence degrades the workspace instead of
+moving a full journal rebuild into HTTP.
 
 ## Decision and Web interaction
 
@@ -241,16 +254,24 @@ The decision posture is a read-only explanation over canonical facts:
    `investigate`.
 
 The existing `_primary_actions` forms remain the only controls. Every mutation
-re-resolves and revalidates current state at its existing boundary.
+re-resolves and revalidates current state at its existing boundary, and all
+rendered task mutation controls fail closed whenever the workspace evidence is
+partial, stale, truncated, conflicting, or unavailable.
 
-The task page renders the decision summary before lower evidence, then
+The versioned workspace schema defines closed, typed records for attempts,
+resources, timeline entries, dependency nodes/edges, publication facts, and
+artifacts rather than accepting arbitrary panel mappings. The task page renders
+the decision summary before lower evidence, then
 attempt/resource, provenance, timeline, dependency, change/publication,
 artifact/media, and log panels. Stable DOM identities and the task-workspace
 Stimulus controller preserve focus, caret, scroll, and disclosure choices
 across pushed morphs. Diff, publication, and log frames are permanent owners.
 Only a changed decision/status/resource signature enters the polite live
-region. Tables scroll inside the page, identifiers wrap, and the layout reflows
-to one column at narrow widths without removing decisive state or controls.
+region. Permanent frame identities include project and task identity, and the
+diff live region contains only its concise state summary rather than patch
+content. Tables scroll inside the page, identifiers wrap, and the layout
+reflows to one column at narrow widths without removing decisive state or
+controls.
 
 ## Tests
 

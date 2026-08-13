@@ -14,7 +14,7 @@
       <%= button_to "Refresh GitHub",
             task_publication_path(@project.name, @task.slug, source: @task_source),
             class: "btn-secondary",
-            form: { data: { turbo_frame: "task-publication" } } %>
+            form: { data: { turbo_frame: stable_dom_id("task-publication", @project.name, @task.slug) } } %>
     <% end %>
   </div>
 

@@ -35,7 +35,10 @@ module Hive
 
       def git(root, args, timeout_sec: COMMAND_TIMEOUT_SECONDS)
         output, status, overflow = capture_command(
-          [ "git", "-C", root, *args ], timeout_sec: timeout_sec,
+          [
+            "git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+            "-c", "diff.external=", "-c", "core.pager=cat", "-C", root, *args
+          ], timeout_sec: timeout_sec,
           max_bytes: MAX_OUTPUT_BYTES
         )
         return nil unless status&.success? && !overflow
@@ -48,7 +51,10 @@ module Hive
       def capture_command(argv, timeout_sec:, max_bytes:)
         reader, writer = IO.pipe
         pid = Process.spawn(
-          { "GIT_TERMINAL_PROMPT" => "0", "GIT_OPTIONAL_LOCKS" => "0" },
+          {
+            "GIT_CONFIG_NOSYSTEM" => "1", "GIT_CONFIG_GLOBAL" => File::NULL,
+            "GIT_TERMINAL_PROMPT" => "0", "GIT_OPTIONAL_LOCKS" => "0"
+          },
           *argv, in: :close, out: writer, err: File::NULL, pgroup: true
         )
         writer.close

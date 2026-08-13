@@ -23,6 +23,10 @@ module Hive
       MAX_QUERIES = 20
       MAX_RATIONALE_BYTES = 4 * 1024
       MAX_TEXT_BYTES = 512
+      STATES = %w[current partial missing unavailable conflicting].freeze
+      WIKI_IDENTITY_KINDS = %w[
+        git_tree managed_receipt bounded_digest missing unavailable
+      ].freeze
 
       module_function
 
@@ -36,7 +40,9 @@ module Hive
         unless receipt["quality"] == "agent_asserted_used"
           raise InvalidReceipt, "agent receipt quality is invalid"
         end
-        Time.iso8601(receipt.fetch("captured_at").to_s)
+        captured_at = receipt.fetch("captured_at")
+        raise InvalidReceipt, "captured_at must be a string" unless captured_at.is_a?(String)
+        Time.iso8601(captured_at)
         validate_binding!(receipt.fetch("binding"), task: task, context: context)
         receipt["repository"] = validate_repository(receipt["repository"])
         receipt["wiki"] = validate_wiki(receipt["wiki"])
@@ -68,8 +74,8 @@ module Hive
       def validate_selection!(selection, project_root:)
         selection = stringify(selection)
         exact_keys!(selection, SELECTION_KEYS, "context selection")
-        references = Array(selection["references"])
-        queries = Array(selection["queries"])
+        references = typed_array(selection["references"], "selected references")
+        queries = typed_array(selection["queries"], "context queries")
         raise InvalidReceipt, "too many selected references" if references.length > MAX_REFERENCES
         raise InvalidReceipt, "too many context queries" if queries.length > MAX_QUERIES
 
@@ -84,7 +90,7 @@ module Hive
         normalized_queries = queries.map do |entry|
           row = stringify(entry)
           exact_keys!(row, QUERY_KEYS, "context query")
-          labels = Array(row["result_labels"])
+          labels = typed_array(row["result_labels"], "context result labels")
           raise InvalidReceipt, "too many context result labels" if labels.length > MAX_REFERENCES
           {
             "query" => text(row.fetch("query"), "context query"),
@@ -102,7 +108,9 @@ module Hive
       end
 
       def validate_reference!(value, project_root:)
-        reference = value.to_s.tr("\\", "/")
+        raise InvalidReceipt, "selected context reference must be a string" unless value.is_a?(String)
+
+        reference = value.tr("\\", "/")
         path = Pathname.new(reference)
         if reference.empty? || reference.include?("\0") || path.absolute? ||
            path.each_filename.any? { |part| part == ".." } || Hive::SecretPatterns.match?(reference)
@@ -130,7 +138,18 @@ module Hive
         row = stringify(value)
         allowed = %w[state head_oid branch repository observed_from diagnostics]
         exact_keys!(row, allowed, "repository context")
-        row
+        {
+          "state" => enum(row.fetch("state"), STATES, "repository state"),
+          "head_oid" => oid(row["head_oid"], "repository head OID"),
+          "branch" => optional_text(row["branch"], "repository branch", max_bytes: 255),
+          "repository" => optional_text(
+            row["repository"], "repository identity", max_bytes: 1_024
+          ),
+          "observed_from" => enum(
+            row.fetch("observed_from"), %w[local_git], "repository observation source"
+          ),
+          "diagnostics" => validate_diagnostics(row.fetch("diagnostics"))
+        }
       end
 
       def validate_wiki(value)
@@ -138,11 +157,26 @@ module Hive
         row = stringify(value)
         allowed = %w[state identity_kind identifier file_count byte_count truncated diagnostics]
         exact_keys!(row, allowed, "wiki context")
-        row
+        {
+          "state" => enum(row.fetch("state"), STATES, "wiki state"),
+          "identity_kind" => enum(
+            row.fetch("identity_kind"), WIKI_IDENTITY_KINDS, "wiki identity kind"
+          ),
+          "identifier" => optional_text(
+            row["identifier"], "wiki identifier", max_bytes: 1_024
+          ),
+          "file_count" => optional_nonnegative_integer(row["file_count"], "wiki file count"),
+          "byte_count" => optional_nonnegative_integer(row["byte_count"], "wiki byte count"),
+          "truncated" => boolean(row.fetch("truncated"), "wiki truncation flag"),
+          "diagnostics" => validate_diagnostics(row.fetch("diagnostics"))
+        }
       end
 
       def validate_diagnostics(value)
-        Array(value).first(20).map do |entry|
+        diagnostics = typed_array(value, "context diagnostics")
+        raise InvalidReceipt, "too many context diagnostics" if diagnostics.length > 20
+
+        diagnostics.map do |entry|
           row = stringify(entry)
           exact_keys!(row, %w[code detail], "context diagnostic")
           { "code" => identifier(row.fetch("code"), "diagnostic code"),
@@ -166,19 +200,60 @@ module Hive
       end
 
       def identifier(value, label)
-        text = value.to_s
-        unless text.match?(/\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z/)
+        unless value.is_a?(String) && value.match?(/\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z/)
           raise InvalidReceipt, "#{label} is invalid"
         end
-        text
+        Hive::SecretPatterns.redact(value)
       end
 
       def text(value, label, max_bytes: MAX_TEXT_BYTES)
-        string = Hive::SecretPatterns.redact(value.to_s)
+        raise InvalidReceipt, "#{label} must be a string" unless value.is_a?(String)
+
+        string = Hive::SecretPatterns.redact(value)
         raise InvalidReceipt, "#{label} is required" if string.empty?
         raise InvalidReceipt, "#{label} exceeds #{max_bytes} bytes" if string.bytesize > max_bytes
 
         string
+      end
+
+      def optional_text(value, label, max_bytes: MAX_TEXT_BYTES)
+        return nil if value.nil?
+
+        text(value, label, max_bytes: max_bytes)
+      end
+
+      def enum(value, allowed, label)
+        raise InvalidReceipt, "#{label} is invalid" unless value.is_a?(String) && allowed.include?(value)
+
+        value
+      end
+
+      def oid(value, label)
+        return nil if value.nil?
+        unless value.is_a?(String) && value.match?(/\A[0-9a-f]{40,64}\z/)
+          raise InvalidReceipt, "#{label} is invalid"
+        end
+
+        value
+      end
+
+      def optional_nonnegative_integer(value, label)
+        return nil if value.nil?
+        raise InvalidReceipt, "#{label} is invalid" unless value.is_a?(Integer) && value >= 0
+
+        value
+      end
+
+      def boolean(value, label)
+        raise InvalidReceipt, "#{label} is invalid" unless value == true || value == false
+
+        value
+      end
+
+      def typed_array(value, label)
+        raise InvalidReceipt, "#{label} must be an array" unless value.is_a?(Array)
+
+        value
       end
 
       def stringify(value)

@@ -303,6 +303,38 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
+  def test_bounded_read_hashes_the_complete_checkpoint_prefix
+    with_tmp_dir do |dir|
+      records = 20.times.map { |index| condition_event("event-#{index}") }
+      write_journal(dir, records)
+      store = projection_store(dir)
+      store.rebuild!
+      bytes = File.binread(store.journal_path)
+      middle = bytes.bytesize / 2
+      replacement = bytes.getbyte(middle) == 32 ? "x" : " "
+      bytes.setbyte(middle, replacement.ord)
+      File.binwrite(store.journal_path, bytes)
+
+      result = store.read_bounded
+
+      assert_equal "stale", result.state
+      assert_equal "checkpoint_prefix_changed", result.diagnostics.first.fetch("reason")
+    end
+  end
+
+  def test_bounded_read_accepts_an_empty_suffix_after_rebuild
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      expected = store.rebuild!
+
+      result = store.read_bounded
+
+      assert_equal "current", result.state
+      assert_equal expected.to_h, result.projection.to_h
+    end
+  end
+
   def test_bounded_read_fails_closed_when_suffix_exceeds_its_budget
     with_tmp_dir do |dir|
       write_journal(dir, [ condition_event("event-1") ])

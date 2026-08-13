@@ -4,6 +4,25 @@ require "hive/task_workspace/jsonl_reader"
 class TaskWorkspaceJsonlReaderTest < Minitest::Test
   include HiveTestHelper
 
+  def test_pages_to_an_earlier_bounded_window_without_losing_records
+    with_tmp_dir do |dir|
+      path = File.join(dir, "events.jsonl")
+      File.write(path, 20.times.map { |index| JSON.generate("id" => index, "body" => "x" * 30) }.join("\n") + "\n")
+      reader = Hive::TaskWorkspace::JsonlReader.new(
+        root: dir, reference: "events.jsonl", max_bytes: 250,
+        max_records: 4, source: "event_stream"
+      )
+
+      first = reader.call
+      second = reader.call(before: first.window_start)
+
+      assert first.truncated
+      assert second.truncated
+      assert_operator second.records.last.fetch("id"), :<, first.records.first.fetch("id")
+      assert_operator second.window_end, :<=, first.window_start
+    end
+  end
+
   def test_keeps_the_newest_complete_bounded_records_and_redacts_values
     with_tmp_dir do |root|
       rows = 8.times.map do |index|

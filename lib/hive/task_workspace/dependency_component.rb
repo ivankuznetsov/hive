@@ -12,12 +12,14 @@ module Hive
     # or remote call. Scheduling edges and stacked-Git evidence remain distinct.
     class DependencyComponent
       def initialize(context:, project:, slug:, git_observations: {},
-                     limits: Limits.new,
+                     git_observation_reader: nil, limits: Limits.new,
                      monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
         @context = context
         @project = project.to_s
         @slug = slug.to_s
         @git_observations = stringify_keys(git_observations)
+        @git_observation_reader = git_observation_reader
+        @node_sources = {}
         @limits = limits
         @monotonic_clock = monotonic_clock
         @started_at = @monotonic_clock.call
@@ -44,11 +46,17 @@ module Hive
         edges, placeholders, edge_diagnostics = build_edges(nodes_by_id)
         diagnostics.concat(edge_diagnostics)
         nodes_by_id = nodes_by_id.merge(placeholders)
-        mark_cycles!(edges)
         selection = connected_selection(target_id, nodes_by_id, edges, diagnostics)
         truncated ||= selection.fetch(:truncated)
         selected_nodes = selection.fetch(:node_ids).filter_map { |id| nodes_by_id[id] }
         selected_edges = selection.fetch(:edges)
+        selected_nodes.each { |node| project_stack!(node, diagnostics) }
+        selected_edges.each do |edge|
+          source = selected_nodes.find { |node| node["id"] == edge["from"] }
+          edge["stack_divergence"] = source.dig("stack", "divergence") if
+            edge["relationship"] == "stacked" && source
+        end
+        mark_cycles!(selected_edges)
         selected_nodes << truncation_node(diagnostics) if truncated
         selected_nodes.sort_by! { |node| [ node["kind"] == "sentinel" ? 1 : 0, node["id"] ] }
         selected_edges.sort_by! { |edge| [ edge["from"], edge["to"], edge["id"] ] }
@@ -116,6 +124,7 @@ module Hive
               next
             end
             nodes[id] = project_node(task, project)
+            @node_sources[id] = [ task, project ]
             node_layers[id] = layer
           end
           break if entries > @limits.fetch(:dependency_entries) ||
@@ -215,23 +224,32 @@ module Hive
       def mark_cycles!(edges)
         outgoing = edges.group_by { |edge| edge["from"] }
         visited = {}
-        active = {}
-        walk = lambda do |node_id|
-          visited[node_id] = true
-          active[node_id] = true
-          Array(outgoing[node_id]).sort_by { |edge| edge["id"] }.each do |edge|
-            target = edge["to"]
-            if active[target]
-              edge["cycle"] = true
-              edge["state"] = "cyclic"
-            elsif !visited[target]
-              walk.call(target)
+        edges.map { |edge| edge["from"] }.uniq.sort.each do |node_id|
+          next if visited[node_id]
+
+          active = {}
+          stack = [ [ node_id, false ] ]
+          until stack.empty?
+            current, exiting = stack.pop
+            if exiting
+              active.delete(current)
+              next
+            end
+            next if visited[current]
+
+            visited[current] = true
+            active[current] = true
+            stack << [ current, true ]
+            Array(outgoing[current]).sort_by { |edge| edge["id"] }.reverse_each do |edge|
+              target = edge["to"]
+              if active[target]
+                edge["cycle"] = true
+                edge["state"] = "cyclic"
+              elsif !visited[target]
+                stack << [ target, false ]
+              end
             end
           end
-          active.delete(node_id)
-        end
-        edges.map { |edge| edge["from"] }.uniq.sort.each do |node_id|
-          walk.call(node_id) unless visited[node_id]
         end
       end
 
@@ -426,6 +444,20 @@ module Hive
           "observed_head_oid" => oid_or_nil(value["head_oid"]),
           "pr_number" => value["pr_number"], "divergence" => divergence
         }
+      end
+
+      def project_stack!(node, diagnostics)
+        return unless node["kind"] == "task"
+        return unless @git_observation_reader
+        return if @git_observations.key?(node.fetch("id"))
+
+        task, project = @node_sources[node.fetch("id")]
+        value = @git_observation_reader.call(task, project)
+        @git_observations[node.fetch("id")] = stringify_keys(value || {})
+        node["stack"] = stack_projection(node.fetch("id"))
+      rescue StandardError => e
+        diagnostics << diagnostic("git_observation_unavailable", "#{node['id']}:#{e.class}")
+        node["stack"] = stack_projection(node.fetch("id"))
       end
 
       def oid_or_nil(value)

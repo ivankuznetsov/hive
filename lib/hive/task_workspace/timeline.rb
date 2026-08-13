@@ -73,11 +73,14 @@ module Hive
       end
 
       def initialize(task_identity:, journal_records:, event_records:, legacy_records: [],
-                     limits: Limits.new, cursor_codec:, clock: -> { Time.now.utc })
+                     source_positions: {}, source_truncated: {}, limits: Limits.new,
+                     cursor_codec:, clock: -> { Time.now.utc })
         @task_identity = stringify(task_identity)
         @journal_records = Array(journal_records)
         @event_records = Array(event_records)
         @legacy_records = Array(legacy_records)
+        @source_positions = stringify(source_positions)
+        @source_truncated = stringify(source_truncated)
         @limits = limits
         @cursor_codec = cursor_codec
         @clock = clock
@@ -105,9 +108,11 @@ module Hive
         remaining_material = material.drop(material_limit)
         material = material.first(material_limit)
         groups = group_noise(noise).first(@limits.fetch(:timeline_noise_groups))
-        material, groups, byte_truncated, observed_bytes = enforce_byte_budget(material, groups)
+        material, groups, byte_truncated, material_byte_truncated, observed_bytes =
+          enforce_byte_budget(material, groups)
 
-        material_truncated = remaining_material.any?
+        material_truncated = remaining_material.any? || material_byte_truncated ||
+                             @source_truncated.values.any? { |value| value == true }
         noise_truncated = group_noise(noise).length > groups.length
         truncated = material_truncated || noise_truncated || byte_truncated
         diagnostics << cap_diagnostic(
@@ -123,7 +128,10 @@ module Hive
         ) if byte_truncated
 
         older_cursor = if material_truncated && material.any?
-          encode_cursor("kind" => "material", "before" => sort_key(material.last))
+          encode_cursor(
+            "kind" => "material", "before" => sort_key(material.last),
+            "source_before" => @source_positions
+          )
         end
         state = if items.empty?
           diagnostics.empty? ? "missing" : "unavailable"
@@ -141,6 +149,15 @@ module Hive
           "truncated" => truncated,
           "observed_bytes" => observed_bytes
         )
+      end
+
+      private
+
+      public
+
+      def source_before(token)
+        cursor = decode_cursor(token, expected_kind: "material")
+        stringify(cursor["source_before"] || {})
       end
 
       private
@@ -315,11 +332,10 @@ module Hive
         end
         groups.reverse.map do |group|
           group = group.dup
-          members = group.delete("__members")
+          group.delete("__members")
           group.delete("__signature")
           group["raw_cursor"] = encode_cursor(
-            "kind" => "raw_group", "group_id" => group.fetch("group_id"),
-            "member_ids" => members.map { |item| item.fetch("event_id") }
+            "kind" => "raw_group", "group_id" => group.fetch("group_id")
           )
           group
         end
@@ -329,19 +345,23 @@ module Hive
         cursor = decode_cursor(token, expected_kind: "raw_group")
         diagnostics = []
         items = normalized_items(diagnostics).reject { |item| item["material"] }
-        by_id = items.to_h { |item| [ item.fetch("event_id"), item ] }
-        member_ids = Array(cursor["member_ids"])
+        group = grouped_noise_with_members(items).find do |candidate|
+          candidate.fetch("group_id") == cursor.fetch("group_id")
+        end
+        raise InvalidCursor, "timeline noise group is unavailable" unless group
+
+        members = group.fetch("members")
         limit = @limits.fetch(:timeline_raw_members)
-        records = member_ids.first(limit).filter_map do |event_id|
-          by_id[event_id]&.reject { |key, _| key == "material" }
+        records = members.first(limit).map do |item|
+          item.reject { |key, _| key == "material" }
         end
         {
           "state" => diagnostics.empty? ? "current" : "partial",
           "records" => records,
           "group_id" => cursor.fetch("group_id"),
           "diagnostics" => diagnostics,
-          "truncated" => member_ids.length > limit,
-          "observed_count" => member_ids.length
+          "truncated" => members.length > limit,
+          "observed_count" => members.length
         }
       end
 
@@ -372,10 +392,12 @@ module Hive
         accepted_material = []
         accepted_groups = []
         truncated = false
+        material_truncated = false
         material.each do |item|
           size = JSON.generate(item).bytesize
           if bytes + size > limit
             truncated = true
+            material_truncated = true
             break
           end
           accepted_material << item
@@ -390,7 +412,24 @@ module Hive
           accepted_groups << group
           bytes += size
         end
-        [ accepted_material, accepted_groups, truncated, bytes ]
+        [ accepted_material, accepted_groups, truncated, material_truncated, bytes ]
+      end
+
+      def grouped_noise_with_members(items)
+        groups = group_noise(items)
+        by_group = groups.to_h { |group| [ group.fetch("group_id"), group.merge("members" => []) ] }
+        items.each do |item|
+          group = groups.find do |candidate|
+            candidate["kind"] == item["kind"] && candidate["summary"] == item["summary"] &&
+              candidate["source_kind"] == item["source_kind"] &&
+              Time.iso8601(item.fetch("ordering_at")).between?(
+                Time.iso8601(candidate.fetch("first_at")),
+                Time.iso8601(candidate.fetch("last_at"))
+              )
+          end
+          by_group.fetch(group.fetch("group_id"))["members"] << item if group
+        end
+        by_group.values
       end
 
       def sort_key(item)

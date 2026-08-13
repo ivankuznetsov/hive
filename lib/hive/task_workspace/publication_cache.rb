@@ -92,14 +92,12 @@ module Hive
 
         existing = read_entry(path, identity)
         now = utc_time(@clock.call)
-        if existing && refresh_too_soon?(existing, now)
-          retry_at = utc_time(
-            Time.parse(existing.fetch("refreshed_at")) +
-              @limits.fetch(:publication_refresh_interval_seconds)
-          ).iso8601(6)
+        if existing && (next_refresh = next_refresh_at(existing)) && now < next_refresh
+          retry_at = next_refresh.iso8601(6)
+          reason = server_retry_at(existing) == next_refresh ? "server_retry_after" : "refresh_interval"
           return present_entry(existing).merge(
             "refresh_state" => "retry-after", "retry_at" => retry_at,
-            "diagnostics" => [ diagnostic("refresh_interval", nil, "retry_at" => retry_at) ]
+            "diagnostics" => [ diagnostic(reason, nil, "retry_at" => retry_at) ]
           )
         end
 
@@ -264,7 +262,7 @@ module Hive
           "observation" => entry["observation"],
           "observed_at" => entry["observed_at"],
           "refreshed_at" => entry["refreshed_at"],
-          "retry_at" => nil,
+          "retry_at" => future_retry_at(entry, now)&.iso8601(6),
           "diagnostics" => error ? [ error ] : []
         }
       end
@@ -454,9 +452,32 @@ module Hive
         files
       end
 
-      def refresh_too_soon?(entry, now)
+      def next_refresh_at(entry)
         refreshed = parse_time(entry["refreshed_at"])
-        refreshed && now - refreshed < @limits.fetch(:publication_refresh_interval_seconds)
+        return unless refreshed
+
+        [
+          refreshed + @limits.fetch(:publication_refresh_interval_seconds),
+          server_retry_at(entry, refreshed: refreshed)
+        ].compact.max
+      end
+
+      def server_retry_at(entry, refreshed: parse_time(entry["refreshed_at"]))
+        value = entry.dig("last_error", "details", "retry_after")
+        return if value.to_s.empty? || !refreshed
+
+        if value.to_s.match?(/\A\d+\z/)
+          refreshed + Integer(value)
+        else
+          parse_time(value)
+        end
+      rescue ArgumentError, TypeError
+        nil
+      end
+
+      def future_retry_at(entry, now)
+        retry_at = server_retry_at(entry)
+        retry_at if retry_at && retry_at > now
       end
 
       def refresh_diagnostic(error, now)

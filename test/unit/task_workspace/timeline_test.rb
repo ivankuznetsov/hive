@@ -144,6 +144,50 @@ class TaskWorkspaceTimelineTest < Minitest::Test
     assert_includes caps, "timeline_noise_groups"
   end
 
+  def test_byte_truncation_keeps_an_older_material_cursor
+    records = 3.times.map do |index|
+      activity(
+        "event-#{index}", "stage_transition",
+        at: (Time.utc(2026, 8, 12, 12) + index).iso8601,
+        correlation: "transition-#{index}", reason: "x" * 300
+      )
+    end
+    limits = Hive::TaskWorkspace::Limits.new(
+      timeline_material_items: 10, timeline_bytes: 1_000
+    )
+
+    panel = timeline(journal: records, limits: limits).call
+
+    assert panel.fetch("truncated")
+    refute_nil panel.fetch("older_cursor")
+  end
+
+  def test_noise_group_cursor_stays_decodable_for_large_groups
+    events = 2_000.times.map do |index|
+      event("heartbeat-#{index}-#{'x' * 200}", "heartbeat", at: "2026-08-12T12:00:00Z")
+    end
+    projector = timeline(events: events)
+    group = projector.call.fetch("noise_groups").first
+
+    assert_operator group.fetch("raw_cursor").bytesize, :<,
+                    Hive::TaskWorkspace::Timeline::CursorCodec::MAX_TOKEN_BYTES
+    assert_equal 20, projector.call(raw_cursor: group.fetch("raw_cursor")).fetch("records").length
+  end
+
+  def test_material_cursor_carries_source_window_boundaries
+    newest = Hive::TaskWorkspace::Timeline.new(
+      task_identity: { "project" => "demo", "slug" => "task", "task_id" => "42" },
+      journal_records: [ activity("new", "stage_transition", at: "2026-08-12T12:01:00Z") ],
+      event_records: [], source_positions: { "task_journal" => 512 },
+      source_truncated: { "task_journal" => true },
+      limits: Hive::TaskWorkspace::Limits.new(timeline_material_items: 10),
+      cursor_codec: Hive::TaskWorkspace::Timeline::CursorCodec.new(secret: SECRET)
+    )
+    first = newest.call
+
+    assert_equal({ "task_journal" => 512 }, newest.source_before(first.fetch("older_cursor")))
+  end
+
   private
 
   def timeline(journal: [], events: [], limits: Hive::TaskWorkspace::Limits.new,

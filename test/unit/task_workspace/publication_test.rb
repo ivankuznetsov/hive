@@ -5,6 +5,20 @@ require "hive/task_workspace/publication"
 class TaskWorkspacePublicationTest < Minitest::Test
   include HiveTestHelper
 
+  def test_local_git_failures_scrub_absolute_paths_from_diagnostics
+    with_task do |task|
+      runner = lambda do |_argv, **_kwargs|
+        status = Hive::TaskWorkspace::Publication::Status.new(success?: false, exitstatus: 128)
+        [ "", "fatal: unsafe repository at /home/operator/private/demo", status, {} ]
+      end
+      panel = service(task, runner: runner).call
+
+      serialized = JSON.generate(panel)
+      refute_includes serialized, "/home/operator/private/demo"
+      assert_includes serialized, "[REDACTED:path]"
+    end
+  end
+
   FakeTask = Data.define(:folder, :project_root, :slug)
 
   class FakeCache

@@ -79,6 +79,27 @@ class TaskWorkspacePublicationCacheTest < Minitest::Test
     end
   end
 
+  def test_server_retry_after_extends_the_local_refresh_interval
+    with_tmp_dir do |root|
+      now = Time.utc(2026, 8, 12, 12)
+      cache = build_cache(root, clock: -> { now })
+      cache.refresh(identity) do
+        raise Hive::TaskWorkspace::PublicationCache::RefreshError.new(
+          "rate_limited", retry_after: "300"
+        )
+      end
+      calls = 0
+
+      now += 61
+      limited = cache.refresh(identity) { calls += 1; observation }
+
+      assert_equal 0, calls
+      assert_equal "retry-after", limited.fetch("refresh_state")
+      assert_equal "server_retry_after", limited.dig("diagnostics", 0, "reason")
+      assert_equal "2026-08-12T12:05:00.000000Z", limited.fetch("retry_at")
+    end
+  end
+
   def test_credential_project_pr_and_head_rollovers_cannot_reuse_an_entry
     with_tmp_dir do |root|
       first = build_cache(root)

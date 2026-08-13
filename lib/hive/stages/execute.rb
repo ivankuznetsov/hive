@@ -39,7 +39,9 @@ module Hive
       # so it's deliberately NOT in the SHA-protected set here.
       PROTECTED_FILES = %w[
         plan.md worktree.yml task-journal.jsonl task-projection.json
+        task-projection.checkpoint.json
       ].freeze
+      CONTROLLER_RECEIPT_DIRECTORIES = %w[context-receipts activity-operations].freeze
       UNRESOLVED_IDENTITY = Object.new.freeze
 
       def run!(task, cfg)
@@ -142,7 +144,7 @@ module Hive
 
         custody_manifest = Hive::ArtifactFirewall::Manifest.new(
           root: task.folder,
-          protected_anchors: PROTECTED_FILES,
+          protected_anchors: execute_protected_files(task),
           permitted_writable_roots: [ task.folder, worktree_path ]
         )
         agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
@@ -256,6 +258,28 @@ module Hive
           commit: "execute_complete", status: :execute_complete,
           research: research_mode, research_evidence: final_message_present
         )
+      end
+
+      def execute_protected_files(task)
+        paths = PROTECTED_FILES.dup
+        CONTROLLER_RECEIPT_DIRECTORIES.each do |directory|
+          root = File.join(task.folder, directory)
+          next unless File.directory?(root)
+
+          Dir.children(root).sort.each do |name|
+            next if directory == "context-receipts" && name.end_with?(".json.next")
+
+            reference = File.join(directory, name)
+            stat = File.lstat(File.join(task.folder, reference))
+            paths << reference if stat.file? && !stat.symlink?
+          rescue Errno::ENOENT
+            paths << reference
+          end
+        end
+        if (context = Hive::Attempts::Context.current)
+          paths << Hive::ContextProvenance.promoted_reference(context.attempt_id)
+        end
+        paths.uniq.freeze
       end
 
       def apply_execute_outcome(task, cfg, worktree_path, baseline_head,

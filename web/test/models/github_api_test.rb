@@ -114,6 +114,42 @@ class GithubApiTest < ActiveSupport::TestCase
     end
   end
 
+  test "publication enforces one total request deadline" do
+    transport = Transport.new do |**|
+      sleep 0.05
+      GithubApi::Response.new(code: "200", headers: {}, body: JSON.generate(graphql_document))
+    end
+
+    error = assert_raises(GithubApi::ReadError) do
+      GithubApi.new("token", transport: transport, total_timeout: 0.01).pull_request(
+        repository: "github.com/acme/demo", number: 42, expected_head: "a" * 40
+      )
+    end
+
+    assert_equal "deadline_exceeded", error.reason
+  end
+
+  test "legacy expected and error contexts remain pending and failing" do
+    document = graphql_document
+    contexts = document.dig(
+      "data", "repository", "pullRequest", "commits", "nodes", 0,
+      "commit", "statusCheckRollup", "contexts"
+    )
+    contexts["pageInfo"]["hasNextPage"] = false
+    contexts["nodes"] = [
+      { "__typename" => "StatusContext", "context" => "awaiting", "state" => "EXPECTED" },
+      { "__typename" => "StatusContext", "context" => "broken", "state" => "ERROR" }
+    ]
+    response = GithubApi::Response.new(code: "200", headers: {}, body: JSON.generate(document))
+
+    checks = GithubApi.new("token", transport: Transport.new(response)).pull_request(
+      repository: "github.com/acme/demo", number: 42, expected_head: "a" * 40
+    ).fetch("checks")
+
+    assert_equal [ "PENDING", "COMPLETED" ], checks.map { |check| check.fetch("status") }
+    assert_equal [ "", "FAILURE" ], checks.map { |check| check.fetch("conclusion") }
+  end
+
   private
 
   def graphql_document

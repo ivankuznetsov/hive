@@ -101,8 +101,8 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     artifact.find("summary").click
     assert artifact[:open]
     execute_script(<<~JS)
-      document.querySelector("#task-publication").__workspaceOwned = true
-      document.querySelector("#task-diff").__workspaceOwned = true
+      document.querySelector("turbo-frame[id^='task-publication-']").__workspaceOwned = true
+      document.querySelector("turbo-frame[id^='task-diff-']").__workspaceOwned = true
       document.querySelector("details[data-workspace-disclosure-key='provenance-diagnostics'] summary").focus()
       window.scrollTo(0, Math.min(500, document.documentElement.scrollHeight - innerHeight))
     JS
@@ -115,8 +115,8 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     assert_equal "", page.evaluate_script("document.querySelector('#task-workspace-announcement').textContent")
     assert find("details[data-workspace-disclosure-key='provenance-diagnostics']")[:open]
     assert find("details[data-artifact-name='brainstorm.md']")[:open]
-    assert page.evaluate_script("document.querySelector('#task-publication').__workspaceOwned")
-    assert page.evaluate_script("document.querySelector('#task-diff').__workspaceOwned")
+    assert page.evaluate_script("document.querySelector(\"turbo-frame[id^='task-publication-']\").__workspaceOwned")
+    assert page.evaluate_script("document.querySelector(\"turbo-frame[id^='task-diff-']\").__workspaceOwned")
     assert_in_delta original_scroll, page.evaluate_script("window.scrollY"), 2
 
     Hive::Markers.set(@folder.join("idea.md").to_s, :complete)

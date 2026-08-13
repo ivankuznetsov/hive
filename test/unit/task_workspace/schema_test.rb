@@ -70,10 +70,30 @@ class TaskWorkspaceSchemaTest < Minitest::Test
     assert_includes error.message, "forbidden"
   end
 
+  def test_each_panel_rejects_untyped_records_and_unknown_panel_properties
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace")))
+    )
+    Hive::TaskWorkspace::PANEL_NAMES.each do |panel_name|
+      document = valid_document
+      document["panels"][panel_name]["records"] = [ { "unexpected" => true } ]
+      refute schemer.valid?(document), "#{panel_name} accepted an untyped record"
+    end
+
+    document = valid_document
+    document["panels"]["attempts"]["unexpected"] = true
+    refute schemer.valid?(document)
+  end
+
   def test_schema_accepts_the_documented_per_artifact_string_ceiling
     document = valid_document
     document["panels"]["artifacts"] = {
-      "state" => "partial", "records" => [ { "content" => "a" * (400 * 1024) } ],
+      "state" => "partial", "records" => [ {
+        "name" => "artifact.md", "reference" => "artifact.md",
+        "content" => "a" * (400 * 1024), "bytes" => 400 * 1024,
+        "truncated" => true, "invalid_encoding" => false, "binary" => false,
+        "diagnostics" => []
+      } ],
       "diagnostics" => [], "truncated" => true
     }
     schemer = JSONSchemer.schema(

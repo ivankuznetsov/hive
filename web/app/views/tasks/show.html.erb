@@ -60,7 +60,7 @@
     <div class="workspace-wide workspace-change-grid" aria-label="Change and publication evidence">
       <%= render "tasks/diff_frame",
             project: @project, task: @task, task_source: @task_source %>
-      <%= turbo_frame_tag "task-publication",
+      <%= turbo_frame_tag stable_dom_id("task-publication", @project.name, @task.slug),
             src: task_publication_path(@project.name, @task.slug, source: @task_source),
             loading: :lazy,
             data: { turbo_permanent: true } do %>
@@ -81,7 +81,7 @@
         <h2>Log</h2>
         <%# data-turbo-permanent: page morphs must never touch the frame — Turbo
             would otherwise reload the operator-owned tail on every push. %>
-        <%= turbo_frame_tag "task-log",
+        <%= turbo_frame_tag stable_dom_id("task-log", @project.name, @task.slug),
               src: task_log_path(@project.name, @task["slug"], source: @task_source),
               refresh: "morph",
               data: (@task_source ?
@@ -104,7 +104,8 @@
     <%= button_to "Reject",
           task_reject_path(@project.name, @task["slug"], source: @task_source),
           params: { from: @task["stage"] }, class: "btn-danger",
-          disabled: !@status_fresh, aria: { disabled: (!@status_fresh).to_s },
+          disabled: !@status_fresh || !@workspace_action_evidence_current,
+          aria: { disabled: (!@status_fresh || !@workspace_action_evidence_current).to_s },
           data: { turbo_confirm: "Send #{@task["slug"]} back a stage?" } %>
   </div>
   <% unless @task.passable? %>
@@ -116,7 +117,8 @@
       <%= button_to "Force approve",
             task_approve_path(@project.name, @task["slug"], source: @task_source),
             params: { from: @task["stage"], force: "1" }, class: "btn-secondary",
-            disabled: !@status_fresh, aria: { disabled: (!@status_fresh).to_s },
+            disabled: !@status_fresh || !@workspace_action_evidence_current,
+            aria: { disabled: (!@status_fresh || !@workspace_action_evidence_current).to_s },
             data: { turbo_confirm: "Advance #{@task["slug"]} even though the stage isn't marked complete?" } %>
     </div>
   <% end %>
@@ -128,7 +130,8 @@
     <%= button_to "Drop",
           task_drop_path(@project.name, @task["slug"], source: @task_source),
           params: { from: @task["stage"] }, class: "btn-danger",
-          disabled: !@status_fresh, aria: { disabled: (!@status_fresh).to_s },
+          disabled: !@status_fresh || !@workspace_action_evidence_current,
+          aria: { disabled: (!@status_fresh || !@workspace_action_evidence_current).to_s },
           data: { turbo_confirm: "Permanently delete #{@task["slug"]}? This cannot be undone." } %>
   </div>
 </details>

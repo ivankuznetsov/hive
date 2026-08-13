@@ -164,6 +164,65 @@ class ContextProvenanceTest < Minitest::Test
     end
   end
 
+  def test_agent_receipt_types_and_redacts_repository_and_wiki_assertions
+    with_fixture do |task, _attempt, context|
+      candidate = agent_receipt(task, context)
+      candidate["repository"] = {
+        "state" => "partial", "head_oid" => "a" * 40,
+        "branch" => "token sk-#{'a' * 30}",
+        "repository" => "github.com/example/demo", "observed_from" => "local_git",
+        "diagnostics" => [ { "code" => "agent_note", "detail" => "ghp_#{'b' * 36}" } ]
+      }
+      candidate["wiki"] = {
+        "state" => "partial", "identity_kind" => "bounded_digest",
+        "identifier" => "c" * 64, "file_count" => 1, "byte_count" => 12,
+        "truncated" => false, "diagnostics" => []
+      }
+      write_candidate(task, context, candidate)
+
+      result = Hive::ContextProvenance.promote_agent_receipt(
+        task: task, context: context, clock: -> { NOW }
+      )
+
+      assert_equal :promoted, result.status
+      refute_includes JSON.generate(result.receipt), "sk-#{'a' * 30}"
+      refute_includes JSON.generate(result.receipt), "ghp_"
+
+      wrong_selection_type = agent_receipt(task, context)
+      wrong_selection_type["selection"]["references"] = "wiki/index.md"
+      assert_raises(Hive::ContextProvenance::ContextReceipt::InvalidReceipt) do
+        Hive::ContextProvenance::ContextReceipt.validate_agent!(
+          wrong_selection_type, task: task, context: context
+        )
+      end
+
+      malformed = agent_receipt(task, context)
+      malformed["wiki"] = candidate["wiki"].merge("truncated" => "false")
+      write_candidate(task, context, malformed)
+      File.delete(File.join(task.folder, "context-receipts", "attempt-1.json"))
+      assert_equal :rejected, Hive::ContextProvenance.promote_agent_receipt(
+        task: task, context: context, clock: -> { NOW }
+      ).status
+    end
+  end
+
+  def test_repository_git_reads_disable_repository_local_execution_hooks
+    captured = []
+    replacement = lambda do |argv, timeout_sec:, max_bytes:|
+      captured << [ argv, timeout_sec, max_bytes ]
+      [ "", Struct.new(:success?).new(true), false ]
+    end
+    with_replaced_singleton_method(
+      Hive::ContextProvenance::RepositorySnapshot, :capture_command, replacement
+    ) do
+      Hive::ContextProvenance::RepositorySnapshot.git("/tmp/demo", %w[status --porcelain])
+    end
+
+    argv = captured.fetch(0).fetch(0)
+    assert_includes argv.each_cons(2).to_a, [ "-c", "core.fsmonitor=false" ]
+    assert_includes argv.each_cons(2).to_a, [ "-c", "core.hooksPath=/dev/null" ]
+  end
+
   def test_prompt_appendix_is_attempt_bound_bounded_and_optional
     with_fixture do |task, _attempt, context|
       prompt = "Keep the required artifact and write <!-- COMPLETE -->."

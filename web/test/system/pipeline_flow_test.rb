@@ -509,7 +509,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # observable, but must not restart/cancel that navigation until Turbo
     # clears its busy state.
     execute_script(<<~JS)
-      const frame = document.querySelector("#task-log")
+      const frame = document.querySelector("turbo-frame[id^='task-log-']")
       document.body.dataset.busyPollRequests = "0"
       document.addEventListener("turbo:before-fetch-request", (event) => {
         if (event.target !== frame) return
@@ -524,11 +524,11 @@ class PipelineFlowTest < ApplicationSystemTestCase
       frame.setAttribute("busy", "")
       frame.setAttribute("aria-busy", "true")
     JS
-    busy_ticks = page.evaluate_script("Number(document.querySelector('#task-log').dataset.pollTicks || 0)")
-    assert_selector "#task-log[data-poll-ticks='#{busy_ticks + 2}']", wait: 10
+    busy_ticks = page.evaluate_script("Number(document.querySelector(\"turbo-frame[id^='task-log-']\").dataset.pollTicks || 0)")
+    assert_selector "turbo-frame[id^='task-log-'][data-poll-ticks='#{busy_ticks + 2}']", wait: 10
     assert_selector "body[data-busy-poll-requests='0']", visible: :all
     execute_script(<<~JS)
-      const frame = document.querySelector("#task-log")
+      const frame = document.querySelector("turbo-frame[id^='task-log-']")
       frame.removeAttribute("busy")
       frame.removeAttribute("aria-busy")
     JS
@@ -549,8 +549,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # timer firing (including paused ones) in data-poll-ticks, so waiting
     # for the counter to advance is an explicit wait, not a sleep — and a
     # deleted readerBusy() would fail the absence assertions below.
-    ticks = page.evaluate_script("Number(document.querySelector('#task-log').dataset.pollTicks || 0)")
-    assert_selector "#task-log[data-poll-ticks='#{ticks + 2}']", wait: 10
+    ticks = page.evaluate_script("Number(document.querySelector(\"turbo-frame[id^='task-log-']\").dataset.pollTicks || 0)")
+    assert_selector "turbo-frame[id^='task-log-'][data-poll-ticks='#{ticks + 2}']", wait: 10
     assert_selector "pre[data-tail-follow][data-following='false']"
     assert_no_text "marker-while-reading"
     assert_equal 0, page.evaluate_script("document.querySelector('pre[data-tail-follow]').scrollTop"),

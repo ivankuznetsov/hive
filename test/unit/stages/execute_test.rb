@@ -299,6 +299,24 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_execute_custody_protects_controller_workspace_receipts
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      FileUtils.mkdir_p(File.join(task.folder, "context-receipts"))
+      FileUtils.mkdir_p(File.join(task.folder, "activity-operations"))
+      File.write(File.join(task.folder, "context-receipts", "older.launch.json"), "launch\n")
+      File.write(File.join(task.folder, "context-receipts", "current.json.next"), "candidate\n")
+      File.write(File.join(task.folder, "activity-operations", "operation.json"), "operation\n")
+
+      protected = Hive::Stages::Execute.execute_protected_files(task)
+
+      assert_includes protected, "task-projection.checkpoint.json"
+      assert_includes protected, "context-receipts/older.launch.json"
+      assert_includes protected, "activity-operations/operation.json"
+      refute_includes protected, "context-receipts/current.json.next"
+    end
+  end
+
   def test_run_pass_keeps_controller_journal_writes_outside_implementer_custody
     with_tmp_dir do |dir|
       task = build_task(dir)

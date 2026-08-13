@@ -11,7 +11,8 @@ module Hive
     # fail. Newest records are retained when either limit is exceeded.
     class JsonlReader
       Result = Data.define(
-        :records, :diagnostics, :truncated, :observed_bytes, :observed_records
+        :records, :diagnostics, :truncated, :observed_bytes, :observed_records,
+        :window_start, :window_end
       )
 
       def initialize(root:, reference:, max_bytes:, max_records:, source:,
@@ -31,38 +32,50 @@ module Hive
         raise ArgumentError, "invalid JSONL reader root: #{e.class}"
       end
 
-      def call
+      def call(before: nil)
         path = contained_path
-        before = File.lstat(path)
-        if before.symlink?
+        path_stat = File.lstat(path)
+        if path_stat.symlink?
           raise SourceError.new(source: @source, reason: "symlink_refused")
         end
-        unless before.file? && !before.symlink?
+        unless path_stat.file? && !path_stat.symlink?
           raise SourceError.new(source: @source, reason: "not_regular")
         end
 
         flags = File::RDONLY
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
-        raw, offset = File.open(path, flags) do |io|
+        raw, offset, window_end = File.open(path, flags) do |io|
           opened = io.stat
-          unless opened.file? && opened.dev == before.dev && opened.ino == before.ino
+          unless opened.file? && opened.dev == path_stat.dev && opened.ino == path_stat.ino
             raise SourceError.new(source: @source, reason: "descriptor_changed")
           end
 
-          offset = [ opened.size - @max_bytes, 0 ].max
-          bytes = io.pread([ opened.size - offset, @max_bytes ].min, offset).to_s
+          window_end = before.nil? ? opened.size : Integer(before)
+          unless window_end.between?(0, opened.size)
+            raise SourceError.new(source: @source, reason: "cursor_boundary_invalid")
+          end
+          offset = [ window_end - @max_bytes, 0 ].max
+          bytes = io.pread(window_end - offset, offset).to_s
           after = io.stat
           unless stable?(opened, after)
             raise SourceError.new(source: @source, reason: "source_changed")
           end
-          [ bytes, offset ]
+          [ bytes, offset, window_end ]
         end
 
         diagnostics = []
         truncated = offset.positive?
         if offset.positive?
-          raw = raw.split("\n", 2).fetch(1, "")
-          diagnostics << cap_diagnostic("journal_suffix_bytes", before.size)
+          fragment_bytes = raw.index("\n")
+          if fragment_bytes
+            fragment_bytes += 1
+            raw = raw.byteslice(fragment_bytes..).to_s
+            offset += fragment_bytes
+          else
+            raw = ""
+            offset = window_end
+          end
+          diagnostics << cap_diagnostic("journal_suffix_bytes", path_stat.size)
         end
         unless raw.empty? || raw.end_with?("\n")
           raw = raw.lines[0...-1].join
@@ -70,17 +83,26 @@ module Hive
           truncated = true
         end
 
-        lines = raw.lines(chomp: true).reject(&:empty?)
-        observed_records = lines.length
-        if lines.length > @max_records
-          lines = lines.last(@max_records)
+        lines = raw.lines(chomp: true)
+        line_offsets = []
+        cursor = offset
+        lines.each do |line|
+          line_offsets << cursor
+          cursor += line.bytesize + 1
+        end
+        nonempty = lines.each_index.reject { |index| lines[index].empty? }
+        observed_records = nonempty.length
+        if nonempty.length > @max_records
+          nonempty = nonempty.last(@max_records)
+          offset = line_offsets.fetch(nonempty.first)
           diagnostics << cap_diagnostic("journal_events", observed_records, limit: @max_records)
           truncated = true
         end
 
         records = []
         malformed = 0
-        lines.each do |line|
+        nonempty.each do |index|
+          line = lines.fetch(index)
           value = JSON.parse(line)
           if value.is_a?(Hash)
             records << redact_value(value)
@@ -96,20 +118,22 @@ module Hive
           records: records.freeze,
           diagnostics: diagnostics.freeze,
           truncated: truncated,
-          observed_bytes: before.size,
-          observed_records: observed_records
+          observed_bytes: path_stat.size,
+          observed_records: observed_records,
+          window_start: offset, window_end: window_end
         )
       rescue Errno::ENOENT
         Result.new(
           records: [].freeze, diagnostics: [].freeze, truncated: false,
-          observed_bytes: 0, observed_records: 0
+          observed_bytes: 0, observed_records: 0, window_start: 0, window_end: 0
         )
       rescue Errno::ELOOP
         failed("symlink_refused")
       rescue SourceError => e
         Result.new(
           records: [].freeze, diagnostics: [ e.diagnostic ].freeze,
-          truncated: false, observed_bytes: 0, observed_records: 0
+          truncated: false, observed_bytes: 0, observed_records: 0,
+          window_start: 0, window_end: 0
         )
       rescue SystemCallError, IOError => e
         failed("read_failed", "error_class" => e.class.name)
@@ -162,7 +186,8 @@ module Hive
         Result.new(
           records: [].freeze,
           diagnostics: [ diagnostic(reason, details) ].freeze,
-          truncated: false, observed_bytes: 0, observed_records: 0
+          truncated: false, observed_bytes: 0, observed_records: 0,
+          window_start: 0, window_end: 0
         )
       end
 

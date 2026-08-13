@@ -41,7 +41,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
       assert_equal "answer", snapshot.dig("decision", "posture")
       assert snapshot.dig("decision", "action", "enabled")
       assert_equal "hive-task-workspace", snapshot.fetch("schema")
-      assert_equal "partial", snapshot.dig("status", "state")
+      assert_equal "current", snapshot.dig("status", "state")
       assert_equal "attempt-1", snapshot.dig("panels", "attempts", "current_attempt_id")
       assert_equal "stage_transition", snapshot.dig("panels", "timeline", "records", 0, "kind")
     end
@@ -59,6 +59,32 @@ class TaskWorkspaceBuilderTest < Minitest::Test
       refute_includes snapshot.to_s, "/private/config.yml"
       refute snapshot.to_s.include?("suggested_command")
       refute snapshot.to_s.include?("observation_token")
+    end
+  end
+
+  def test_partial_projection_evidence_disables_actions_even_with_a_fresh_status_feed
+    with_fixture do |native, task|
+      snapshot = builder(
+        native, task, questions: 1, projection_state: "partial",
+        projection_diagnostics: [
+          { "source" => "task_projection", "reason" => "checkpoint_invalid",
+            "message" => "bounded projection is invalid", "details" => {} }
+        ]
+      ).call
+
+      assert_equal "partial", snapshot.dig("status", "state")
+      assert_equal "investigate", snapshot.dig("decision", "posture")
+      refute snapshot.dig("decision", "action", "enabled")
+    end
+  end
+
+  def test_truncated_projection_evidence_disables_actions_even_when_marked_current
+    with_fixture do |native, task|
+      snapshot = builder(native, task, questions: 1, projection_truncated: true).call
+
+      assert_equal "partial", snapshot.dig("status", "state")
+      assert_equal "investigate", snapshot.dig("decision", "posture")
+      refute snapshot.dig("decision", "action", "enabled")
     end
   end
 
@@ -151,7 +177,9 @@ class TaskWorkspaceBuilderTest < Minitest::Test
   end
 
   def builder(native, task, questions:, limits: Hive::TaskWorkspace::Limits.new,
-              status_availability: "fresh", status_error: nil)
+              status_availability: "fresh", status_error: nil,
+              projection_state: "current", projection_diagnostics: [],
+              projection_truncated: false)
     events = Array.new(@material_events || 1) do |index|
       {
         "schema" => "hive-task-journal-event", "schema_version" => 1,
@@ -179,12 +207,9 @@ class TaskWorkspaceBuilderTest < Minitest::Test
       }
     }
     read = Hive::TaskWorkspace::Builder::ProjectionRead.new(
-      projection: projection, state: "partial",
-      diagnostics: [
-        { "source" => "task_projection", "reason" => "checkpoint_missing",
-          "message" => "bounded projection has no checkpoint", "details" => {} }
-      ],
-      truncated: false, journal_cursor: 0, journal_records: events
+      projection: projection, state: projection_state,
+      diagnostics: projection_diagnostics,
+      truncated: projection_truncated, journal_cursor: 0, journal_records: events
     )
     attempt = {
       "attempt_id" => "attempt-1", "project" => "demo",
@@ -204,7 +229,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
         def call
           Hive::TaskWorkspace::JsonlReader::Result.new(
             records: [], diagnostics: [], truncated: false,
-            observed_bytes: 0, observed_records: 0
+            observed_bytes: 0, observed_records: 0, window_start: 0, window_end: 0
           )
         end
       end.new(nil),

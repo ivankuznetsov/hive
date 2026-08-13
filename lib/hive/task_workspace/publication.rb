@@ -505,7 +505,7 @@ module Hive
         unless allow_exit.include?(status.exitstatus)
           raise SourceError.new(
             source: "local_git", reason: "git_failed",
-            message: "git exited #{status.exitstatus}: #{safe_text(err, 4 * 1024)}"
+            message: scrub_paths("git exited #{status.exitstatus}: #{safe_text(err, 4 * 1024)}")
           )
         end
         [ out.to_s, err.to_s, status, metadata ]
@@ -665,10 +665,17 @@ module Hive
         Hive::SecretPatterns.redact(source.force_encoding(Encoding::UTF_8).scrub(""))
       end
 
+      def scrub_paths(value)
+        value.to_s.gsub(
+          %r{(?<![A-Za-z0-9])(?:/[A-Za-z0-9._~+@%=-]+)+(?:/[A-Za-z0-9._~+@%=-]*)?},
+          "[REDACTED:path]"
+        ).gsub(%r{(?<![A-Za-z0-9])[A-Za-z]:[\\/](?:[^\s:]+[\\/]?)+}, "[REDACTED:path]")
+      end
+
       def diagnostic(reason, message = nil, source: "publication", **details)
         {
           "source" => source, "reason" => reason,
-          "message" => Hive::SecretPatterns.redact(message.to_s),
+          "message" => scrub_paths(Hive::SecretPatterns.redact(message.to_s)),
           "details" => details.transform_keys(&:to_s)
         }
       end

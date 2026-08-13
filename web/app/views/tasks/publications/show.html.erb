@@ -1,4 +1,4 @@
-<%= turbo_frame_tag "task-publication" do %>
+<%= turbo_frame_tag stable_dom_id("task-publication", @project.name, @task.slug) do %>
   <%= render "tasks/publication",
         publication: @publication,
         refresh_available: @publication_refresh_available,

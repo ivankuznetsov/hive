@@ -70,6 +70,32 @@ class TaskWorkspaceDependencyComponentTest < Minitest::Test
     assert_equal "divergent", panel.fetch("edges").first.fetch("stack_divergence")
   end
 
+  def test_connected_nodes_receive_individual_stack_and_publication_observations
+    indexed = context(project(tasks: [ task("base"), task("child", depends_on: "base") ]))
+    observed = []
+    reader = lambda do |task_snapshot, _project_snapshot|
+      observed << task_snapshot.slug
+      {
+        "repository" => "github.com/acme/app", "base_branch" => "main",
+        "base_oid" => "a" * 40, "observed_base_oid" => "a" * 40,
+        "current_branch" => task_snapshot.slug, "head_oid" => "b" * 40,
+        "pr_number" => task_snapshot.slug == "base" ? nil : 42
+      }
+    end
+
+    panel = Hive::TaskWorkspace::DependencyComponent.new(
+      context: indexed, project: "app", slug: "child",
+      git_observation_reader: reader, monotonic_clock: -> { 0.0 }
+    ).call
+
+    assert_equal %w[base child], observed.sort
+    base = panel.fetch("records").find { |node| node["id"] == "app:base" }
+    child = panel.fetch("records").find { |node| node["id"] == "app:child" }
+    assert_nil base.dig("stack", "pr_number")
+    assert_equal 42, child.dig("stack", "pr_number")
+    assert_equal "aligned", base.dig("stack", "divergence")
+  end
+
   def test_node_cap_keeps_deterministic_partial_sentinel
     indexed = context(project(tasks: [
       task("a"), task("b", depends_on: "a"), task("c", depends_on: "b"),

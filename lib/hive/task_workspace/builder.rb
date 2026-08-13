@@ -9,6 +9,7 @@ require "hive/task_workspace/attempts"
 require "hive/task_workspace/dependency_component"
 require "hive/task_workspace/jsonl_reader"
 require "hive/task_workspace/provenance"
+require "hive/task_workspace/publication"
 require "hive/task_workspace/resources"
 require "hive/task_workspace/timeline"
 
@@ -23,13 +24,15 @@ module Hive
         :projection, :state, :diagnostics, :truncated, :journal_cursor,
         :journal_records
       )
+      DependencyTask = Data.define(:folder, :project_root, :slug)
 
       def initialize(task:, native_task:, project:, status_availability: "fresh",
                      status_last_success_at: nil, status_error: nil,
                      dependency_context: nil, publication_cache: nil,
+                     dependency_publication_reader: nil,
                      cursor_codec:, limits: Limits.new, attempt_store: nil,
                      projection_store: nil, projection_read: nil,
-                     event_reader: nil, usage_reader: Hive::UsageDb,
+                     event_reader: nil, journal_reader: nil, usage_reader: Hive::UsageDb,
                      current_context_observation: nil, questions_count: nil,
                      daemon_enabled: true, archive: false,
                      clock: -> { Time.now.utc })
@@ -41,12 +44,14 @@ module Hive
         @status_error = status_error
         @dependency_context = dependency_context
         @publication_cache = publication_cache
+        @dependency_publication_reader = dependency_publication_reader
         @cursor_codec = cursor_codec
         @limits = limits
         @projection_store = projection_store
         @supplied_projection_read = projection_read
         @attempt_store = attempt_store
         @event_reader = event_reader
+        @journal_reader = journal_reader
         @usage_reader = usage_reader
         @current_context_observation = current_context_observation
         @questions_count = questions_count
@@ -87,6 +92,7 @@ module Hive
           "dependencies" => dependencies, "publication" => publication,
           "artifacts" => artifacts
         }
+        status = status_payload(read)
 
         snapshot_with_budget(
           generated_at: now,
@@ -96,8 +102,11 @@ module Hive
             "generation" => projection.dig("identity", "task_generation") ||
               task_value("condition_task_generation") || task_value("task_generation")
           },
-          status: status_payload(read),
-          decision: decision_payload(attempts: attempts, resources: resources),
+          status: status,
+          decision: decision_payload(
+            attempts: attempts, resources: resources,
+            action_evidence_current: status["state"] == "current" && !read.truncated
+          ),
           panels: panels
         )
       end
@@ -159,32 +168,40 @@ module Hive
         }
       end
 
-      def event_result
-        @event_result ||= begin
-          reader = @event_reader || JsonlReader.new(
-            root: @native_task.folder, reference: "events.jsonl",
-            max_bytes: @limits.fetch(:journal_suffix_bytes),
-            max_records: @limits.fetch(:journal_events), source: "event_stream"
-          )
-          reader.call
-        rescue StandardError => e
-          JsonlReader::Result.new(
-            records: [],
-            diagnostics: [ diagnostic("event_stream", "bounded_event_read_failed", e.class.name) ],
-            truncated: false, observed_bytes: 0, observed_records: 0
-          )
-        end
-      end
-
       def timeline_panel(read:, cursor: nil, raw_cursor: nil)
-        events = event_result
+        decoder = Timeline.new(
+          task_identity: {
+            "project" => @project, "slug" => task_value("slug"),
+            "task_id" => task_value("id")
+          },
+          journal_records: [], event_records: [],
+          limits: @limits, cursor_codec: @cursor_codec, clock: @clock
+        )
+        before = cursor ? decoder.source_before(cursor) : {}
+        journal = timeline_source_result(
+          @journal_reader,
+          reference: Hive::TaskJournal::JOURNAL_BASENAME, source: "task_journal",
+          before: before["task_journal"], fallback_records: read.journal_records
+        )
+        events = timeline_source_result(
+          @event_reader, reference: "events.jsonl", source: "event_stream",
+          before: before["event_stream"]
+        )
         value = Timeline.new(
           task_identity: {
             "project" => @project, "slug" => task_value("slug"),
             "task_id" => task_value("id")
           },
-          journal_records: read.journal_records,
+          journal_records: journal.records,
           event_records: events.records,
+          source_positions: {}.tap do |positions|
+            positions["task_journal"] = journal.window_start if journal.truncated
+            positions["event_stream"] = events.window_start if events.truncated
+          end,
+          source_truncated: {
+            "task_journal" => journal.truncated,
+            "event_stream" => events.truncated
+          },
           limits: @limits, cursor_codec: @cursor_codec, clock: @clock
         ).call(cursor: cursor, raw_cursor: raw_cursor)
         diagnostics = Array(value["diagnostics"]) + Array(read.diagnostics) +
@@ -197,6 +214,30 @@ module Hive
             "state" => state, "diagnostics" => diagnostics.uniq,
             "truncated" => value["truncated"] == true || read.truncated || events.truncated
           )
+        )
+      end
+
+      def timeline_source_result(reader, reference:, source:, before:, fallback_records: [])
+        reader ||= JsonlReader.new(
+          root: @native_task.folder, reference: reference,
+          max_bytes: @limits.fetch(:journal_suffix_bytes),
+          max_records: @limits.fetch(:journal_events), source: source
+        )
+        result = before.nil? ? reader.call : reader.call(before: before)
+        if result.records.empty? && result.observed_bytes.zero? && fallback_records.any? && before.nil?
+          return JsonlReader::Result.new(
+            records: fallback_records, diagnostics: [], truncated: false,
+            observed_bytes: 0, observed_records: fallback_records.length,
+            window_start: 0, window_end: 0
+          )
+        end
+        result
+      rescue StandardError => e
+        JsonlReader::Result.new(
+          records: [],
+          diagnostics: [ diagnostic(source, "bounded_#{source}_read_failed", e.class.name) ],
+          truncated: false, observed_bytes: 0, observed_records: 0,
+          window_start: 0, window_end: 0
         )
       end
 
@@ -222,25 +263,46 @@ module Hive
         DependencyComponent.new(
           context: @dependency_context, project: @project,
           slug: task_value("slug"), git_observations: git_observations(publication),
+          git_observation_reader: method(:dependency_git_observation),
           limits: @limits
         ).call
       end
 
+      def dependency_git_observation(task, project)
+        panel = if @dependency_publication_reader
+          @dependency_publication_reader.call(task, project)
+        else
+          candidate = DependencyTask.new(task.folder, project.path, task.slug)
+          Publication.new(
+            task: candidate,
+            expected_repository: project.repository_identity,
+            cache: project.name.to_s == @project ? @publication_cache : nil,
+            limits: @limits
+          ).call
+        end
+        git_observation_from_publication(panel)
+      end
+
       def git_observations(publication)
+        observation = git_observation_from_publication(publication)
+        return {} if observation.empty?
+
+        { "#{@project}:#{task_value('slug')}" => observation }
+      end
+
+      def git_observation_from_publication(publication)
         local = publication["local"]
         pr = publication["pull_request"]
         return {} unless local.is_a?(Hash)
 
         {
-          "#{@project}:#{task_value('slug')}" => {
-            "repository" => local["repository"],
-            "base_branch" => local["base_branch"],
-            "base_oid" => local["base_oid"],
-            "observed_base_oid" => nil,
-            "current_branch" => local["branch"],
-            "head_oid" => local["head_oid"],
-            "pr_number" => pr.is_a?(Hash) ? pr["number"] : nil
-          }
+          "repository" => local["repository"],
+          "base_branch" => local["base_branch"],
+          "base_oid" => local["base_oid"],
+          "observed_base_oid" => local["base_state"] == "ancestor" ? local["base_oid"] : nil,
+          "current_branch" => local["branch"],
+          "head_oid" => local["head_oid"],
+          "pr_number" => pr.is_a?(Hash) ? pr["number"] : nil
         }
       end
 
@@ -251,12 +313,16 @@ module Hive
         when "partial" then "partial"
         else "unavailable"
         end
-        state = case [ freshness, read.state.to_s ]
-        in [ "unavailable", _ ] then "unavailable"
-        in [ "stale", _ ] then "stale"
-        in [ _, "stale" ] then "stale"
-        in [ _, "partial" ] then "partial"
-        else "current"
+        state = if read.truncated
+          "partial"
+        else
+          case [ freshness, read.state.to_s ]
+          in [ "unavailable", _ ] then "unavailable"
+          in [ "stale", _ ] then "stale"
+          in [ _, "stale" ] then "stale"
+          in [ _, "partial" ] then "partial"
+          else "current"
+          end
         end
         diagnostics = Array(read.diagnostics)
         unless @status_availability.empty? || @status_availability == "fresh"
@@ -275,15 +341,14 @@ module Hive
         }
       end
 
-      def decision_payload(attempts:, resources:)
+      def decision_payload(attempts:, resources:, action_evidence_current:)
         action_kind = task_value("action")&.to_s
         action_label = task_value("action_label")&.to_s
-        fresh = @status_availability.empty? || @status_availability == "fresh"
-        enabled, action_reason = action_enabled(fresh: fresh)
+        enabled, action_reason = action_enabled(evidence_current: action_evidence_current)
         posture, reason = if @archive
           [ "investigate", "Archived task evidence is read-only." ]
-        elsif !fresh
-          [ "investigate", "Action-driving status evidence is #{@status_availability.tr('_', ' ')}." ]
+        elsif !action_evidence_current
+          [ "investigate", "Action-driving workspace evidence is degraded or incomplete." ]
         elsif question_count.positive?
           [ "answer", "#{question_count} required #{question_count == 1 ? 'question is' : 'questions are'} unanswered." ]
         elsif task_predicate(:passable?)
@@ -306,9 +371,11 @@ module Hive
         }
       end
 
-      def action_enabled(fresh:)
+      def action_enabled(evidence_current:)
         return [ false, "Archived tasks are read-only." ] if @archive
-        return [ false, "Refresh the status observation before acting." ] unless fresh
+        unless evidence_current
+          return [ false, "Refresh complete workspace evidence before acting." ]
+        end
         return [ true, nil ] if question_count.positive?
         return [ true, nil ] if task_predicate(:passable?)
         if task_predicate(:recovery_action_visible?)

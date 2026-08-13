@@ -1,5 +1,6 @@
 require "json"
 require "net/http"
+require "timeout"
 require "uri"
 require "hive/gh"
 
@@ -10,6 +11,7 @@ class GithubApi
   API = "https://api.github.com".freeze
   OPEN_TIMEOUT = 5
   READ_TIMEOUT = 10
+  TOTAL_TIMEOUT = 10
   MAX_PAGES = 3
   PER_PAGE = 100
   PUBLICATION_RESPONSE_BYTES = 256 * 1024
@@ -33,11 +35,12 @@ class GithubApi
   NETWORK_ERRORS = Hive::Web::GithubAuth::NETWORK_ERRORS
 
   def initialize(token, transport: nil, open_timeout: OPEN_TIMEOUT,
-                 read_timeout: READ_TIMEOUT)
+                 read_timeout: READ_TIMEOUT, total_timeout: TOTAL_TIMEOUT)
     @token = token
     @transport = transport || method(:perform_request)
     @open_timeout = open_timeout
     @read_timeout = read_timeout
+    @total_timeout = total_timeout
   end
 
   # The operator's repositories, most recently pushed first. Paginated up to
@@ -136,11 +139,13 @@ class GithubApi
   end
 
   def request_json(uri, request, max_bytes: nil)
-    response = @transport.call(
-      uri: uri, request: request,
-      open_timeout: @open_timeout, read_timeout: @read_timeout,
-      max_bytes: max_bytes
-    )
+    response = Timeout.timeout(@total_timeout) do
+      @transport.call(
+        uri: uri, request: request,
+        open_timeout: @open_timeout, read_timeout: @read_timeout,
+        max_bytes: max_bytes
+      )
+    end
     code = Integer(response.code)
     retry_after = response.headers.to_h["retry-after"] || response.headers.to_h["Retry-After"]
     remaining = response.headers.to_h["x-ratelimit-remaining"] ||
@@ -161,6 +166,8 @@ class GithubApi
     JSON.parse(response.body)
   rescue JSON::ParserError
     raise ReadError.new("response_invalid", "GitHub API returned an unparseable response")
+  rescue Timeout::Error
+    raise ReadError.new("deadline_exceeded", "GitHub API request exceeded its total deadline")
   rescue *NETWORK_ERRORS => e
     raise ReadError.new("network_failed", "could not reach GitHub (#{e.class})")
   end
@@ -217,10 +224,20 @@ class GithubApi
       }
     when "StatusContext"
       state = node["state"].to_s
+      status, conclusion = case state
+      when "PENDING", "EXPECTED"
+        [ "PENDING", "" ]
+      when "ERROR", "FAILURE"
+        [ "COMPLETED", "FAILURE" ]
+      when "SUCCESS"
+        [ "COMPLETED", "SUCCESS" ]
+      else
+        [ "COMPLETED", state ]
+      end
       {
         "name" => node["context"].to_s,
-        "status" => state == "PENDING" ? "PENDING" : "COMPLETED",
-        "conclusion" => state,
+        "status" => status,
+        "conclusion" => conclusion,
         "url" => node["targetUrl"].to_s
       }
     end

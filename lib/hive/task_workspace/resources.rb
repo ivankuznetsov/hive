@@ -114,6 +114,13 @@ module Hive
             "cached" => integer(row[:cached])
           }
         end.sort_by { |row| row["session_id"] }
+        if sessions.empty?
+          return {
+            "record_kind" => "usage", "attempt_id" => attempt["attempt_id"],
+            "state" => "missing", "sessions" => [], "totals" => nil,
+            "unattributed_count" => response[:unattributed_count]
+          }
+        end
         totals = sessions.each_with_object(
           { "input" => 0, "output" => 0, "cached" => 0, "tokens" => 0 }
         ) do |row, sum|

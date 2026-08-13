@@ -2,6 +2,16 @@ require "test_helper"
 require "hive/task_workspace/resources"
 
 class TaskWorkspaceResourcesTest < Minitest::Test
+  def test_available_usage_without_attributed_sessions_is_missing_not_zero
+    panel = Hive::TaskWorkspace::Resources.new(
+      attempts_panel: attempts_panel(guards: []),
+      usage_reader: ->(**) { { available: true, sessions: [], unattributed_count: 2 } }
+    ).call
+
+    usage = panel.fetch("records").find { |record| record["record_kind"] == "usage" }
+    assert_equal "missing", usage.fetch("state")
+    assert_nil usage.fetch("totals")
+  end
   def test_subscription_budget_is_not_spend_and_unmatched_units_have_no_headroom
     usage = lambda do |attempt_id:, task_generation:, project_slug:, task_slug:|
       assert_equal "attempt-1", attempt_id

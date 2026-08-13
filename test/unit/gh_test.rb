@@ -1279,43 +1279,6 @@ def test_list_open_prs_raises_on_gh_error
   end
 end
 
-def test_repo_name_with_owner_uses_the_actual_origin_push_url
-  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  captured = nil
-  with_env("GH_REPO" => "attacker/spoofed") do
-    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
-      captured = [ cmd, kwargs ]
-      [ "git@github.com:owner/repo.git\n", "", status ]
-    }) do
-      assert_equal "owner/repo", Hive::Gh.repo_name_with_owner("/tmp/repo", cfg: { "cfg" => true })
-    end
-  end
-
-  assert_equal(
-    [ "git", "-C", "/tmp/repo", "remote", "get-url", "--push", "--all", "origin" ],
-    captured.first
-  )
-  refute captured.last.key?(:chdir)
-  assert_equal({ "cfg" => true }, captured.last.fetch(:cfg))
-end
-
-def test_repo_name_with_owner_raises_when_origin_lookup_fails
-  status = Hive::Gh::CommandStatus.new(exitstatus: 1)
-  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "", "no remote", status ] }) do
-    err = assert_raises(Hive::GhError) { Hive::Gh.repo_name_with_owner("/tmp/repo") }
-    assert_match(/git remote get-url.*failed/, err.message)
-    assert_match(/no remote/, err.message)
-  end
-end
-
-def test_repo_name_with_owner_raises_on_unsupported_origin
-  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "/tmp/local.git\n", "", status ] }) do
-    err = assert_raises(Hive::GhError) { Hive::Gh.repo_name_with_owner("/tmp/repo") }
-    assert_match(/not a supported GitHub remote/, err.message)
-  end
-end
-
 def test_repository_identity_binds_slug_and_https_host
   status = Hive::Gh::CommandStatus.new(exitstatus: 0)
   captured = nil
@@ -1346,6 +1309,16 @@ def test_repository_identity_rejects_multiple_origin_push_urls
       Hive::Gh.repository_identity("/tmp/repo")
     end
     assert_match(/returned 2 records/, error.message)
+  end
+end
+
+def test_repository_identity_rejects_unsupported_origin
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "/tmp/local.git\n", "", status ] }) do
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.repository_identity("/tmp/repo")
+    end
+    assert_match(/not a supported GitHub remote/, error.message)
   end
 end
 

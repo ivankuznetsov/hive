@@ -520,10 +520,6 @@ module Hive
       raise Hive::GhError, "`gh pr list` returned unparseable JSON: #{e.message}"
     end
 
-    def repo_name_with_owner(worktree_path, cfg: nil)
-      repository_identity(worktree_path, cfg: cfg).fetch("repository")
-    end
-
     def repository_identity(worktree_path, cfg: nil, timeout_sec: nil, managed: false)
       repository_identity_from_remote(
         origin_push_url(

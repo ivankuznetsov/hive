@@ -661,6 +661,41 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_remove_nonterminal_for_task_invalidates_stale_dispatches_but_keeps_receipts
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      at = Time.utc(2026, 8, 12, 12)
+      Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --stage 4-review --project hive --json],
+        requestor: "healer", request_id: "pending-old-stage",
+        recovery: recovery_payload, state_home: dir, now: at
+      )
+      Q.write_request!(
+        project: "hive", slug: "retry-task", argv: %w[hive run retry-task],
+        requestor: "daemon", request_id: "claimed-old-stage", state_home: dir, now: at
+      )
+      Q.claim("claimed-old-stage", pid: 123, state_home: dir, now: at)
+      Q.write_request!(
+        project: "hive", slug: "retry-task", argv: %w[hive run retry-task],
+        requestor: "healer", request_id: "terminal-proof",
+        recovery: recovery_payload(phase: "terminal", terminal_at: at.iso8601(6)),
+        state_home: dir, now: at
+      )
+      Q.write_request!(
+        project: "hive", slug: "other-task", argv: %w[hive run other-task],
+        requestor: "daemon", request_id: "other-task-request", state_home: dir, now: at
+      )
+
+      assert_equal 2, Q.remove_nonterminal_for_task(
+        project: "hive", slug: "retry-task", state_home: dir
+      )
+      assert_nil Q.fetch("pending-old-stage", state_home: dir)
+      assert_nil Q.fetch("claimed-old-stage", state_home: dir)
+      refute_nil Q.fetch("terminal-proof", state_home: dir)
+      refute_nil Q.fetch("other-task-request", state_home: dir)
+    end
+  end
+
   def test_terminal_recovery_retention_is_bounded_and_new_generation_supersedes_old
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       old_at = Time.utc(2026, 7, 1, 12)

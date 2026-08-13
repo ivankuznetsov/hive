@@ -5,9 +5,11 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
   include HiveTestHelper
 
   FakeTask = Struct.new(
-    :slug, :project_root, :project_name, :stage_index, :stage_name,
+    :id, :slug, :project_root, :project_name, :stage_index, :stage_name,
     keyword_init: true
-  )
+  ) do
+    def state_file = File.join(project_root, "task.md")
+  end
 
   def test_local_admission_claims_delivery_with_attempt_reference
     with_tmp_dir do |state_home|
@@ -150,5 +152,28 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
       [ "demo-task", { project_filter: "demo", stage_filter: "4-execute" } ]
     ], constructor_calls
     assert_nil Hive::Bot::DispatchRequestWriter.stage_filter_for(%w[hive run demo-task])
+  end
+
+  def test_write_current_binds_the_delivery_to_the_observed_task_identity
+    with_tmp_dir do |state_home|
+      task = FakeTask.new(
+        id: 42, slug: "demo-task", project_root: "/tmp/demo", project_name: "demo",
+        stage_index: 4, stage_name: "execute"
+      )
+
+      with_replaced_singleton_method(
+        Hive::Bot::DispatchRequestWriter, :resolve_task, ->(**_kwargs) { task }
+      ) do
+        Hive::Bot::DispatchRequestWriter.write_current!(
+          project: "demo", slug: "demo-task", argv: %w[hive run demo-task],
+          request_id: "request-current", state_home: state_home
+        )
+      end
+
+      request = Hive::Daemon::DispatchRequestQueue.pending(state_home: state_home).fetch(0)
+      assert_equal 42, request.task_id
+      assert_equal "4-execute", request.expected_stage
+      assert_match(/\A[0-9a-f]{64}\z/, request.task_generation)
+    end
   end
 end

@@ -6249,6 +6249,28 @@ end
     end
   end
 
+  def test_bound_dispatch_request_rejects_a_changed_task_generation
+    dispatcher, = make_dispatcher(rows: [])
+    task = Struct.new(:id, :stage_index, :stage_name, :slug).new(42, 4, "execute", "demo-task")
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { task }
+    request = Q::Request.new(
+      project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+      task_id: 42, expected_stage: "4-execute", task_generation: "old-generation"
+    )
+    generation = Struct.new(:task_generation).new("current-generation")
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, ->(**) { generation }) do
+        refute dispatcher.send(:bound_task_request_current?, request)
+        request.task_generation = "current-generation"
+        assert dispatcher.send(:bound_task_request_current?, request)
+        request.expected_stage = "3-plan"
+        refute dispatcher.send(:bound_task_request_current?, request)
+      end
+    end
+  end
+
   def test_dispatch_request_rejected_when_argv_not_allowlisted
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(

@@ -3,6 +3,7 @@ require "hive/workflow_package/managed_store"
 require "hive/workflow_package/registry_client"
 require "hive/workflow_package/canonical_yaml"
 require "hive/task"
+require "hive/workflow_package/task_migrator"
 require "hive/workflows/loader"
 
 class WorkflowPackageManagedStoreTest < Minitest::Test
@@ -111,7 +112,7 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
     end
   end
 
-  def test_loader_discovers_selection_and_task_pin_resolves_after_removal
+  def test_loader_discovers_selection_but_runtime_rejects_a_task_after_removal
     with_tmp_dir do |dir|
       hive_state = File.join(dir, ".hive-state")
       package = File.join(dir, "package")
@@ -129,14 +130,13 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
                           workflow_manifest_digest: resolution.manifest_digest)
       store.remove_selection("demo")
 
-      resolved = Hive::Task.new(task)
-      assert_equal :demo, resolved.workflow.id
-      assert_equal resolution.source_commit, resolved.workflow_commit
-      assert resolved.managed_workflow?
+      error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(task) }
+      assert_match(/is not selected/, error.message)
+      assert_match(/run hive migrate/, error.message)
     end
   end
 
-  def test_task_pins_configuration_while_selected_mapping_changes
+  def test_task_requires_migration_when_the_selected_mapping_changes
     with_tmp_dir do |dir|
       hive_state = File.join(dir, ".hive-state")
       FileUtils.mkdir_p(hive_state)
@@ -165,19 +165,23 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
       new_configuration = Hive::WorkflowPackage::Configuration.build(raw, generation: generation)
       store.activate(resolution, configuration: new_configuration, expected_current: store.selected("demo"))
 
-      resolved = Hive::Task.new(task)
-      assert_equal old_configuration.digest, resolved.workflow_configuration_digest
-      assert_equal "codex", resolved.workflow.stage_named("work").agent
+      error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(task) }
+      assert_match(/requires migration/, error.message)
       assert_equal new_configuration.digest, store.selected("demo").fetch("configuration_digest")
 
-      store.remove_selection("demo")
-      store.cleanup_unreferenced("demo")
-      assert File.file?(store.configuration_path("demo", old_configuration.digest))
-      refute File.exist?(store.configuration_path("demo", new_configuration.digest))
+      migration = Hive::WorkflowPackage::TaskMigrator.new(
+        hive_state, store: store, cfg: Hive::Config.load(dir), recovery_pruner: ->(*) { }
+      ).call
+      assert_equal 1, migration.task_count
+      resolved = Hive::Task.new(task)
+      assert_equal new_configuration.digest, resolved.workflow_configuration_digest
+      assert_equal "claude", resolved.workflow.stage_named("work").agent
+      refute File.exist?(store.configuration_path("demo", old_configuration.digest))
+      assert File.file?(store.configuration_path("demo", new_configuration.digest))
     end
   end
 
-  def test_legacy_v1_lock_and_tasks_derive_stable_configuration_without_bricking
+  def test_legacy_v1_lock_and_tasks_are_migrated_to_the_derived_current_configuration
     with_tmp_dir do |dir|
       hive_state = File.join(dir, ".hive-state")
       package = File.join(dir, "package")
@@ -208,7 +212,7 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
         old_task, id: 1, slug: File.basename(old_task), display_name: nil, workflow: "demo",
         workflow_commit: resolution.source_commit, workflow_manifest_digest: resolution.manifest_digest
       )
-      assert_equal :demo, Hive::Task.new(old_task).workflow.id
+      assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(old_task) }
 
       pinned_task = File.join(hive_state, "stages", "1-inbox", "pinned-260718-bbbb")
       Hive::TaskMeta.write(
@@ -216,7 +220,12 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
         workflow_commit: resolution.source_commit, workflow_manifest_digest: resolution.manifest_digest,
         workflow_configuration_digest: selected.fetch("configuration_digest")
       )
-      store.remove_selection("demo")
+      migration = Hive::WorkflowPackage::TaskMigrator.new(
+        hive_state, store: store, cfg: Hive::Config.load(dir), recovery_pruner: ->(*) { }
+      ).call
+      assert_equal 1, migration.task_count
+      assert_equal selected.fetch("configuration_digest"),
+                   Hive::Task.new(old_task).workflow_configuration_digest
       assert_equal "claude", Hive::Task.new(pinned_task).workflow.stage_named("work").agent
     end
   end

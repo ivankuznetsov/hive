@@ -617,6 +617,23 @@ module Hive
         0
       end
 
+      # A task workflow migration changes both its canonical folder and task
+      # generation. Old pending/claimed requests must not keep replaying the
+      # pre-migration stage. Terminal recovery documents are evidence receipts,
+      # so retain them until the ordinary bounded-retention pass removes them.
+      def remove_nonterminal_for_task(project:, slug:, state_home: Hive::Paths.state_home)
+        request_files(directory(state_home: state_home)).filter_map do |path|
+          parsed = parse_file(path)
+          next if parsed.is_a?(Symbol)
+          next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
+          next if parsed.recovery&.fetch("phase", nil) == "terminal"
+
+          parsed.request_id
+        end.uniq.count { |request_id| remove(request_id, state_home: state_home) }
+      rescue Errno::ENOENT
+        0
+      end
+
       def prune_terminal_recoveries(now: Time.now,
                                     retention_sec: TERMINAL_RECOVERY_RETENTION_SEC,
                                     state_home: Hive::Paths.state_home)

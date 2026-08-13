@@ -49,10 +49,15 @@ module Hive
             end
             ensure_reviewed_configuration!(resolver)
             if same_generation && current.fetch("configuration_digest") == resolver.configuration.digest
-              return emit(payload(resolution, resolver, "already_installed"), human_lines: [
+              migration = migrate_managed_tasks!(resolution.name)
+              report = payload(resolution, resolver, "already_installed")
+              report["warnings"] = migration.warnings unless migration.warnings.empty?
+              return emit(report, human_lines: [
                 "hive: honeycomb/#{resolution.name} is already installed at #{resolution.source_commit}",
-                *optional_input_disclosure(resolver.inputs)
-              ])
+                migration_line(migration),
+                *optional_input_disclosure(resolver.inputs),
+                *warning_lines(migration.warnings)
+              ].compact)
             end
             if current && !same_generation
               raise UpdateRequired,
@@ -74,14 +79,26 @@ module Hive
               return emit(disclosure, human_lines: [ "hive: high-risk install cancelled; no project state changed" ])
             end
 
-            workflow_compatibility.activate!(
+            migration = activate_with_task_migration!(
               candidate: candidate, configuration: resolver.configuration,
               expected_current: current,
-              commit: -> { commit_state(resolution.name, "installed") },
-              admit: false
+              action: "installed"
             )
-            workflow_compatibility.reset_cache!
-            emit(payload(resolution, resolver, "installed"), human_lines: human_disclosure(resolution, resolver))
+            warnings = migration.warnings.dup
+            retained = post_commit_step(warnings, "unreferenced generation cleanup") do
+              workflow_compatibility.cleanup_unreferenced(resolution.name)
+            end
+            post_commit_step(warnings, "cleanup state commit") do
+              commit_state(resolution.name, "cleaned")
+            end if retained
+            post_commit_step(warnings, "workflow cache refresh") { workflow_compatibility.reset_cache! }
+            report = payload(resolution, resolver, "installed")
+            report["warnings"] = warnings unless warnings.empty?
+            emit(
+              report,
+              human_lines: human_disclosure(resolution, resolver) +
+                [ migration_line(migration) ].compact + warning_lines(warnings)
+            )
           end
         end
 
@@ -112,6 +129,13 @@ module Hive
             "mappings" => resolver.mappings,
             "optional_inputs" => resolver.inputs
           }
+        end
+
+        def migration_line(migration)
+          return unless migration&.task_count&.positive?
+
+          "migrated retained tasks: #{migration.task_count} " \
+            "(#{migration.moved_count} stage#{migration.moved_count == 1 ? '' : 's'} moved)"
         end
 
         def human_disclosure(resolution, resolver, verb: "installed")

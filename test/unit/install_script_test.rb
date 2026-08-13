@@ -69,12 +69,35 @@ class InstallScriptTest < Minitest::Test
 
       assert status.success?, err
       assert_includes File.binread(paths.fetch(:wrapper)), "hive-managed: install-wrapper/v1"
-      assert_equal "#!/bin/sh\nexit 0\n", File.binread(paths.fetch(:shim))
+      assert_includes File.binread(paths.fetch(:shim)), 'printf \'%s\\n\' "$*"'
       assert File.executable?(paths.fetch(:wrapper))
       assert File.executable?(paths.fetch(:hv))
       assert File.executable?(paths.fetch(:shim))
       assert_empty Dir.glob(File.join(File.dirname(paths.fetch(:wrapper)), ".*wrapper.*"))
       assert_empty Dir.glob(File.join(File.dirname(paths.fetch(:shim)), ".hive-shim.*"))
+    end
+  end
+
+  def test_installer_migrates_all_projects_before_daemon_setup
+    Dir.mktmpdir("hive-installer-migration") do |dir|
+      _out, err, status = run_installer(dir, "none")
+
+      assert status.success?, err
+      calls = File.readlines(File.join(dir, "hive-args"), chomp: true)
+      assert_equal "migrate --all", calls.fetch(0)
+      assert_equal "daemon install --json", calls.fetch(1)
+    end
+  end
+
+  def test_installer_fails_closed_when_automatic_project_migration_fails
+    Dir.mktmpdir("hive-installer-migration-failure") do |dir|
+      _out, err, status = run_installer(dir, "migration")
+
+      refute status.success?
+      assert_includes err, "automatic project migration failed"
+      assert_includes err, "hive migrate --all"
+      calls = File.readlines(File.join(dir, "hive-args"), chomp: true)
+      assert_equal [ "migrate --all" ], calls
     end
   end
 
@@ -197,7 +220,8 @@ class InstallScriptTest < Minitest::Test
       "HIVE_VERSION" => hive_version,
       "HIVE_INSTALL_QMD" => "0",
       "HIVE_INSTALL_TEST_FAILURE" => failure,
-      "HIVE_INSTALL_TEST_COSIGN_ARGS" => cosign_args
+      "HIVE_INSTALL_TEST_COSIGN_ARGS" => cosign_args,
+      "HIVE_INSTALL_TEST_HIVE_ARGS" => File.join(dir, "hive-args")
     }.compact
     Open3.capture3(
       env,
@@ -272,7 +296,17 @@ class InstallScriptTest < Minitest::Test
       done
       [[ "$HIVE_INSTALL_TEST_FAILURE" == "missing_bin" ]] && exit 0
       /usr/bin/mkdir -p "$bindir"
-      printf '#!/bin/sh\nexit 0\n' > "$bindir/hive"
+      cat > "$bindir/hive" <<'HIVE'
+      #!/bin/sh
+      printf '%s\n' "$*" >> "$HIVE_INSTALL_TEST_HIVE_ARGS"
+      if [ "$1" = "migrate" ] && [ "$HIVE_INSTALL_TEST_FAILURE" = "migration" ]; then
+        exit 79
+      fi
+      if [ "$1" = "daemon" ]; then
+        printf '{"outcome":"unchanged"}\n'
+      fi
+      exit 0
+      HIVE
       /usr/bin/chmod 755 "$bindir/hive"
     SH
     write_executable(File.join(fake_bin, "mv"), <<~'SH')

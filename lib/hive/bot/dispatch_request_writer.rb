@@ -2,6 +2,7 @@ require "time"
 require "hive/paths"
 require "hive/daemon/dispatch_request_queue"
 require "hive/attempts/api"
+require "hive/attempts/generation"
 require "hive/recovery/api"
 require "hive/task"
 require "hive/task_resolver"
@@ -25,7 +26,7 @@ module Hive
       def write!(project:, slug:, argv:, chat_id: nil, update_id: nil,
                  trigger: nil, request_id: generate_request_id,
                  task_generation: nil, predecessor_attempt_id: nil,
-                 inherited_outputs: [],
+                 inherited_outputs: [], task_id: nil, expected_stage: nil,
                  state_home: Hive::Paths.state_home, now: Time.now)
         Hive::Daemon::DispatchRequestQueue.write_request!(
           project: project,
@@ -39,8 +40,21 @@ module Hive
           task_generation: task_generation,
           predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs,
+          task_id: task_id,
+          expected_stage: expected_stage,
           state_home: state_home,
           now: now
+        )
+      end
+
+      # Queue a task action bound to the task identity observed now. The daemon
+      # rejects the delivery if the task advances or a workflow migration
+      # changes its stage/generation before the queue is consumed.
+      def write_current!(project:, slug:, argv:, **attributes)
+        task = resolve_task(project: project, slug: slug, argv: argv)
+        write!(
+          project: project, slug: slug, argv: argv,
+          **attributes, **identity_for(task, project: project, argv: argv)
         )
       end
 
@@ -52,13 +66,14 @@ module Hive
                     trigger: nil, request_id: generate_request_id,
                     state_home: Hive::Paths.state_home, now: Time.now,
                     entrypoint: nil)
+        task = resolve_task(project: project, slug: slug, argv: argv)
         write!(
           project: project, slug: slug, argv: argv,
           chat_id: chat_id, update_id: update_id, trigger: trigger,
-          request_id: request_id, state_home: state_home, now: now
+          request_id: request_id, state_home: state_home, now: now,
+          **identity_for(task, project: project, argv: argv)
         )
 
-        task = resolve_task(project: project, slug: slug, argv: argv)
         intended_stage = intended_stage_for(argv, task)
         result = (entrypoint || Hive::Attempts::API.new).dispatch(
           task: task,
@@ -155,6 +170,18 @@ module Hive
         return "#{task.stage_index}-#{task.stage_name}" if verb == "run"
 
         Hive::Workflows.for_verb(verb).fetch(:target)
+      end
+
+      def identity_for(task, project:, argv:)
+        expected_stage = "#{task.stage_index}-#{task.stage_name}"
+        generation = Hive::Attempts::Generation.resolve(
+          task: task, project: project, intended_stage: intended_stage_for(argv, task)
+        )
+        {
+          task_id: task.respond_to?(:id) ? task.id : nil,
+          expected_stage: expected_stage,
+          task_generation: generation.task_generation
+        }
       end
     end
   end

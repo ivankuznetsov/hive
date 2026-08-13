@@ -247,6 +247,10 @@ module Hive
           end.sort_by { |artifact| artifact.fetch("file") },
           "cleanup" => cleanup.to_h.sort.to_h,
           "diagnostic" => redacted(diagnostic),
+          # The built-in recorder always renders a synthetic Hivebox fixture.
+          # It is useful for controller diagnostics, never for product claims.
+          "evidence_role" =>
+            recorder.to_h["kind"] == "project_provider" ? "claim_evidence" : "diagnostic_only",
           "evidence" => evidence.to_h
         }
       end

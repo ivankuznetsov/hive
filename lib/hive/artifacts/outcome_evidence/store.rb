@@ -7,6 +7,7 @@ require "hive/attempts/store"
 require "hive/artifacts/outcome_evidence/document"
 require "hive/artifacts/outcome_evidence/identity"
 require "hive/artifacts/outcome_evidence/legacy_capture_reader"
+require "hive/artifacts/outcome_evidence/proof"
 
 module Hive
   module Artifacts
@@ -76,13 +77,21 @@ module Hive
             raise StoreError, "requirement generation contradicts its append-only path"
           end
 
-          entries = Array(evidence).map { |entry| canonical_evidence(entry) }
           status = status.to_s
+          raw_entries = Array(evidence)
+          if status == "accepted" && raw_entries.any? do |entry|
+               entry.respond_to?(:to_h) && entry.to_h.transform_keys(&:to_s)["kind"] == "legacy_capture"
+             end
+            raise StoreError, "legacy capture cannot establish accepted outcome evidence"
+          end
+          entries = raw_entries.map do |entry|
+            Proof.admit!(
+              entry, task_folder: @task.folder,
+              expected_head: requirement.dig("implementation", "implementation_head")
+            )
+          end
           if status == "accepted" && entries.empty?
             raise StoreError, "accepted outcome evidence requires at least one evidence entry"
-          end
-          if status == "accepted" && entries.any? { |entry| entry["kind"] == "legacy_capture" }
-            raise StoreError, "legacy capture cannot establish accepted outcome evidence"
           end
           diagnostic = diagnostic&.to_s
           if status == "rejected" && diagnostic.to_s.empty?
@@ -121,7 +130,7 @@ module Hive
             label: "outcome-evidence attempt"
           )
           validate_publication!(requirement, attempt, generation, attempt_id)
-          validate_retained_evidence!(attempt)
+          validate_retained_evidence!(requirement, attempt)
 
           document = {
             "schema" => SCHEMAS.fetch(:current),
@@ -172,7 +181,7 @@ module Hive
           validate_publication!(
             requirement, attempt, pointer.fetch("generation"), pointer.fetch("attempt_id")
           )
-          validate_retained_evidence!(attempt)
+          validate_retained_evidence!(requirement, attempt)
           true
         rescue StoreError, SystemCallError
           false
@@ -268,35 +277,6 @@ module Hive
           raise StoreError, e.message
         end
 
-        def canonical_evidence(value)
-          unless value.respond_to?(:to_h)
-            raise StoreError, "outcome evidence entries must be objects"
-          end
-          entry = value.to_h.transform_keys(&:to_s)
-          allowed = %w[kind summary path sha256 bytes]
-          unknown = entry.keys - allowed
-          raise StoreError, "outcome evidence contains unknown keys: #{unknown.join(', ')}" unless unknown.empty?
-
-          result = {
-            "kind" => entry.fetch("kind").to_s,
-            "summary" => entry.fetch("summary").to_s
-          }
-          if entry.key?("path")
-            result["path"] = Identity.validate_changed_path!(entry.fetch("path"))
-          end
-          result["sha256"] = validate_digest!(entry["sha256"], "evidence SHA-256") if entry.key?("sha256")
-          if entry.key?("bytes")
-            bytes = Integer(entry["bytes"])
-            raise StoreError, "evidence bytes must be positive" unless bytes.positive?
-            result["bytes"] = bytes
-          end
-          result
-        rescue KeyError => e
-          raise StoreError, "outcome evidence is missing #{e.key}"
-        rescue ArgumentError, TypeError, ResolutionError => e
-          raise StoreError, e.message
-        end
-
         def generation_for(identity, task_generation, recovery_epoch)
           Digest::SHA256.hexdigest(
             [
@@ -389,29 +369,15 @@ module Hive
           end
         end
 
-        def validate_retained_evidence!(attempt)
+        def validate_retained_evidence!(requirement, attempt)
           attempt.fetch("evidence").each do |entry|
-            next unless entry["path"]
-
-            path = Identity.validate_changed_path!(entry.fetch("path"))
-            candidate = File.join(@task.folder, path)
-            stat = File.lstat(candidate)
-            unless stat.file? && !stat.symlink?
-              raise StoreError, "retained evidence #{path.inspect} must be a regular file"
+            canonical = Proof.admit!(
+              entry, task_folder: @task.folder,
+              expected_head: requirement.dig("implementation", "implementation_head")
+            )
+            unless canonical == entry
+              raise StoreError, "retained outcome evidence is not canonical"
             end
-            real_task = File.realpath(@task.folder)
-            real_candidate = File.realpath(candidate)
-            unless real_candidate.start_with?("#{real_task}#{File::SEPARATOR}")
-              raise StoreError, "retained evidence #{path.inspect} escapes the task folder"
-            end
-            if entry["bytes"] && entry["bytes"] != stat.size
-              raise StoreError, "retained evidence #{path.inspect} byte size changed"
-            end
-            if entry["sha256"] && entry["sha256"] != Digest::SHA256.file(candidate).hexdigest
-              raise StoreError, "retained evidence #{path.inspect} digest changed"
-            end
-          rescue Errno::ENOENT, Errno::ELOOP
-            raise StoreError, "retained evidence #{path.inspect} is unavailable"
           end
         end
 

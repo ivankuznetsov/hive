@@ -9,9 +9,6 @@ class OutcomeEvidenceStoreTest < Minitest::Test
 
   def test_round_trips_a_universal_append_only_generation_and_atomic_current_pointer
     with_store do |store, task, controller|
-      evidence_path = File.join(task.folder, "evidence", "test.json")
-      FileUtils.mkdir_p(File.dirname(evidence_path))
-      File.binwrite(evidence_path, "verified")
       requirement = store.open_generation!(
         identity: identity
       )
@@ -26,14 +23,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
         generation: generation,
         attempt_id: "attempt-1",
         status: "accepted",
-        evidence: [
-          {
-            "kind" => "test", "summary" => "Focused contract passed",
-            "path" => "evidence/test.json",
-            "sha256" => Digest::SHA256.file(evidence_path).hexdigest,
-            "bytes" => File.size(evidence_path)
-          }
-        ]
+        evidence: [ document_evidence(task) ]
       )
       pointer = store.publish_current!(
         generation: generation, attempt_id: attempt.fetch("attempt_id")
@@ -121,7 +111,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
 
   def test_path_traversal_and_interrupted_pointer_publication_fail_closed
     with_store do |store, task, controller|
-      first = accepted_generation(store, attempt_id: "first")
+      first = accepted_generation(store, task, attempt_id: "first")
       first_pointer = store.publish_current!(generation: first, attempt_id: "first")
 
       controller["recovery_epoch"] = 2
@@ -134,7 +124,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       end
       store.append_attempt!(
         generation: second, attempt_id: "second", status: "accepted",
-        evidence: [ { "kind" => "command", "summary" => "verified" } ]
+        evidence: [ document_evidence(task, claims: [ "claim-second" ]) ]
       )
 
       current_path = File.join(task.folder, "outcome-evidence", "current.json")
@@ -199,12 +189,42 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     }
   end
 
-  def accepted_generation(store, attempt_id:)
+  def accepted_generation(store, task, attempt_id:)
     generation = store.open_generation!(identity: identity).fetch("generation")
     store.append_attempt!(
       generation: generation, attempt_id: attempt_id, status: "accepted",
-      evidence: [ { "kind" => "command", "summary" => "verified" } ]
+      evidence: [ document_evidence(task, claims: [ "claim-first" ]) ]
     )
     generation
+  end
+
+  def document_evidence(task, claims: %w[claim-a claim-b])
+    root = File.join(task.folder, "evidence")
+    FileUtils.mkdir_p(root)
+    original = File.join(root, "report.md")
+    review = File.join(root, "report.txt")
+    File.write(original, "# Verification\n\nAll checks passed.\n")
+    File.write(review, "Verification\n\nAll checks passed.\n")
+    {
+      "kind" => "document", "summary" => "Focused contract passed",
+      "claims" => claims,
+      "source" => {
+        "type" => "task", "name" => "artifact-agent",
+        "source_sha" => identity.fetch("implementation_head")
+      },
+      "representations" => [
+        representation(task, original, role: "original", media_type: "text/markdown"),
+        representation(task, review, role: "review", media_type: "text/plain")
+      ]
+    }
+  end
+
+  def representation(task, path, role:, media_type:)
+    {
+      "role" => role, "media_type" => media_type,
+      "path" => Pathname.new(path).relative_path_from(Pathname.new(task.folder)).to_s,
+      "sha256" => Digest::SHA256.file(path).hexdigest,
+      "bytes" => File.size(path)
+    }
   end
 end

@@ -467,8 +467,22 @@ Honeycomb projections.
   (redcarpet, GFM tables/fenced code; raw HTML escaped at render AND
   sanitized after; leading YAML front matter and standalone
   `Hive::Markers::MARKER_RE` comments dropped, while non-marker comments and
-  fenced examples of markers remain visible as escaped text). Visual media from
-  `7-artifacts` renders in a dedicated Demo section before the text artifacts:
+  fenced examples of markers remain visible as escaped text). A valid
+  `outcome-evidence/current.json` renders before text artifacts as an
+  **Outcome evidence** package: user-meaningful claims, required proof kinds,
+  admitted originals/review representations, independent verdict reasons,
+  changed-path traceability, exclusions, attempt history, role
+  agent/model/effort, and reviewer capability. Rails revalidates the complete
+  pointer/requirement/attempt digest chain and every retained proof before
+  display; invalid packages show one integrity warning and no proof. Evidence
+  files are served only through their admitted attempt ID and SHA-256 at
+  `GET /tasks/:project/:slug/evidence/:attempt_id/:digest`; the model repeats
+  package validation, verifies size/hash again with `NOFOLLOW`, and maps only
+  the closed safe media types before streaming. Blocked packages show the exact
+  generation-and-recovery-digest `hive evidence recover` command.
+
+  Legacy visual media from `7-artifacts` follows in a visibly labelled
+  `Legacy diagnostic` Demo section:
   captured PNG/JPEG/GIF files are served from
   `GET /tasks/:project/:slug/media/:filename` and shown as an inline gallery
   with captions plus screenote links when the manifest carries
@@ -723,8 +737,10 @@ removal-retention disclosure,
 running/stopped daemon banner behavior plus descriptor-derived terminal-stage
 suppression,
 plain-vs-deep health semantics, the oversized diff cap/truncation notice,
-media route streaming/refusal cases, and captured/skipped/failed Demo
-rendering. Repos coverage pins the workflow select's built-in fresh list and
+media route streaming/refusal cases, accepted outcome-evidence projection,
+tamper fail-closed behavior, hash-bound evidence serving, and
+captured/skipped/failed legacy Demo rendering. Repos coverage pins the workflow
+select's built-in fresh list and
 that posting `settings[workflow]` writes the same real `default_workflow` that
 CLI init writes.
 `web/test/system/` runs Capybara +

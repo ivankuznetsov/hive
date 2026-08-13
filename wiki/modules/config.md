@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-08-10
+updated: 2026-08-14
 tags: [config, yaml, validation]
 ---
 
@@ -110,7 +110,47 @@ bindings are expanded and canonicalized, including symlink resolution when the
 target exists, so two symbolic aliases cannot silently share one billing
 context while claiming separate account concurrency and fallback.
 
-## Project artifact capture provider
+## Outcome-evidence roles and project capture provider
+
+`artifacts.evidence` configures three fresh contexts without changing their
+security ownership:
+
+```yaml
+artifacts:
+  agent: claude
+  evidence:
+    max_recaptures: 2
+    inference:
+      permissions: read-only
+      # agent: codex
+      # model: gpt-5.6-sol
+      # effort: high
+    producer:
+      agent: codex
+    reviewer:
+      permissions: read-only
+      # agent: codex
+      capabilities:
+        proof_kinds: [screenshot, video, terminal, document]
+        temporal_video: true
+```
+
+Each role inherits `artifacts.agent` unless it names its own `agent`, and may
+independently select `model` and `effort` through the normal model-routing
+boundary. `max_recaptures` is an integer from 0 through 2 and counts targeted
+recaptures after the initial package. Inference and reviewer permissions are
+fixed to `read-only`; config cannot widen them. Producer writes are always
+controller-scoped to the active evidence root, so there is no producer
+`permissions` escape hatch. The reviewer capability object is closed:
+`proof_kinds` is a unique nonempty subset of `screenshot`, `video`, `terminal`,
+and `document`, while `temporal_video` is boolean. A generated requirement that
+the configured reviewer or producer cannot safely handle becomes an explicit
+semantic blocker before capture begins.
+
+These roles control the authoritative outcome-evidence package described in
+[[stages/artifacts]]. `artifacts.capture.provider` remains the optional runtime
+used to create project-owned media bytes; a capture manifest is not completion
+authority by itself.
 
 Hive checkouts need no declaration: the complete locked Hivebox web layout
 selects the built-in recorder. A conventional project can declare one
@@ -202,7 +242,22 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
   "plan"       => { "agent" => "claude" },
   "execute"    => { "agent" => "claude" },  # rendered template recommends `codex`
   "open_pr"    => {},
-  "artifacts"  => { "agent" => "claude", "capture" => { "provider" => nil } },
+  "artifacts"  => {
+    "agent" => "claude",
+    "evidence" => {
+      "max_recaptures" => 2,
+      "inference" => { "permissions" => "read-only" },
+      "producer" => { "agent" => "codex" },
+      "reviewer" => {
+        "permissions" => "read-only",
+        "capabilities" => {
+          "proof_kinds" => %w[screenshot video terminal document],
+          "temporal_video" => true
+        }
+      }
+    },
+    "capture" => { "provider" => nil }
+  },
   "finalize"   => { "agent" => "claude" },
   "agents" => {
     "claude" => { "bin" => "claude", "env_override" => "HIVE_CLAUDE_BIN", "min_version" => "2.1.118" },

@@ -161,9 +161,9 @@ artifacts:
       # agent: codex
       # model: gpt-5.6-sol
       # effort: high
-    producer: {}
-      # Writes are always controller-scoped to this attempt's evidence root.
-      # agent: claude
+    # Writes are always controller-scoped to this attempt's evidence root.
+    producer:
+      agent: codex
     reviewer:
       permissions: read-only
       # agent: codex

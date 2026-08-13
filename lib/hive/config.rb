@@ -126,7 +126,7 @@ module Hive
           "inference" => { "permissions" => "read-only" },
           # Producer writes are controller-scoped at run time to the active
           # generation workspace. Projects cannot weaken that boundary.
-          "producer" => {},
+          "producer" => { "agent" => "codex" },
           "reviewer" => {
             "permissions" => "read-only",
             "capabilities" => {

@@ -1462,6 +1462,7 @@ class ConfigTest < Minitest::Test
                    "artifacts agent must default to claude per plan U1"
       assert_equal "read-only", cfg.dig("artifacts", "evidence", "inference", "permissions")
       assert_equal 2, cfg.dig("artifacts", "evidence", "max_recaptures")
+      assert_equal "codex", cfg.dig("artifacts", "evidence", "producer", "agent")
       assert_nil cfg.dig("artifacts", "evidence", "producer", "permissions")
       assert_equal true, cfg.dig("artifacts", "evidence", "reviewer", "capabilities", "temporal_video")
       assert_nil cfg.dig("artifacts", "capture", "provider")

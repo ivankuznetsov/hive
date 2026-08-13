@@ -1185,6 +1185,60 @@ and content digests; replacement media becomes authoritative only when the new
 manifest is published, after which superseded task-owned provider files may be
 removed.
 
+## Outcome-evidence package
+
+Capture applicability receipts are no longer `7-artifacts` completion
+authority. The authoritative package is task-local and generation-scoped:
+
+```text
+<task>/outcome-evidence/
+├── current.json
+├── recovery.json                         # present after operator recovery
+├── generations/
+│   └── <generation>/
+│       ├── requirement.json
+│       └── attempts/
+│           ├── attempt-01-<nonce>.json
+│           └── attempt-02-<nonce>.json
+└── work/
+    └── <generation>/<attempt>/...        # retained proof representations
+```
+
+`requirement.json` and attempt documents are create-once, strict-schema JSON.
+The generation SHA-256 binds project/task, durable numeric task generation,
+controller recovery epoch, controller implementation base and head, and the
+NUL-delimited changed-path digest. Requirements retain the independently
+inferred claims/exclusions, complete changed-path traceability, actor identity,
+and the reviewer's declared proof capabilities. Attempts retain the producer,
+admitted proof descriptors, independent reviewer, every inspected SHA-256, and
+exact per-target verdicts.
+
+Each proof is one of `screenshot`, `video`, `terminal`, or `document`; it binds
+one or more claim IDs and the frozen implementation head. Exactly one original
+and one reviewer representation are required, with bounded supplemental
+storyboards allowed for video. Retained bytes stay inside the task folder and
+are rechecked for containment, regular-file status, media type/structure, size,
+SHA-256, safe content, and source provenance whenever the package is published
+or displayed. Built-in synthetic Hivebox capture is diagnostic-only.
+
+`current.json` is the sole replaceable publication pointer. It includes the
+requirement digest, complete ordered attempt ID/digest history, accepted or
+blocked status, and—when blocked—failed claims, reviewer rationales, recovery
+digest, and epoch. Publication is terminal only after all pointed-to documents,
+proof bytes, and semantic-review structure revalidate. Hivebox uses that same
+reader and fails closed to an integrity warning instead of rendering or serving
+tampered evidence.
+
+Capability, reviewer, and recapture-exhaustion blockers write semantic
+`ERROR` reasons (`outcome_evidence_capability_blocked`,
+`outcome_evidence_review_blocked`, or
+`outcome_evidence_recaptures_exhausted`) and are excluded from automatic daemon
+retry. `hive evidence recover` must match both the current generation and its
+recovery digest. It atomically advances `recovery.json` without changing the
+blocked history; the normal generation-guarded `workflow.retry` action then
+starts the new epoch. Replaying the same observed blocker is idempotent, while a
+stale generation or digest is rejected.
+
 See [[stages/index]] for one page per stage.
 
 ## Backlinks

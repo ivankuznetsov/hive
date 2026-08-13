@@ -17,11 +17,13 @@ module HiveReleaseCandidate
     def initialize(
       repo_root: ENV.fetch("HIVE_RC_REPO_ROOT", Dir.pwd),
       cache_root: ENV.fetch("HIVE_RC_CACHE_ROOT", "/cache"),
-      run_root: ENV.fetch("HIVE_RC_RUN_ROOT", "/run")
+      run_root: ENV.fetch("HIVE_RC_RUN_ROOT", "/run"),
+      tagged_lock_fetcher: nil
     )
       @repo_root = File.expand_path(repo_root)
       @cache_root = File.expand_path(cache_root)
       @run_root = File.expand_path(run_root)
+      @tagged_lock_fetcher = tagged_lock_fetcher || method(:download_tagged_lock)
       @catalog = BaselineCatalog.load(
         File.join(@repo_root, "packaging/release_candidate/baselines.yml")
       )
@@ -133,10 +135,7 @@ module HiveReleaseCandidate
     end
 
     def stage_dependency_closures(row)
-      locks = row.packages.to_h do |role, package|
-        source_root = export_tag(package.fetch("tag"), row.id, role)
-        [ role == "observer" ? "observer" : "producer", File.binread(File.join(source_root, "Gemfile.lock")) ]
-      end
+      locks = tagged_lock_contents(row)
       offline = row.dependency_closure.fetch("offline_cache")
       manifest_path = File.join(@repo_root, offline.fetch("manifest_path"))
       manifest_content = File.binread(manifest_path)
@@ -174,6 +173,33 @@ module HiveReleaseCandidate
           }
         ]
       end
+    end
+
+    def tagged_lock_contents(row)
+      row.packages.to_h do |role, package|
+        lock_role = role == "observer" ? "observer" : "producer"
+        descriptor = row.dependency_closure.fetch(
+          role == "observer" ? "observer_lock" : "lock"
+        )
+        tag = descriptor.fetch("source_tag")
+        unless package.fetch("tag") == tag
+          raise Error, "#{row.id} #{lock_role} dependency lock tag mismatch"
+        end
+
+        content = @tagged_lock_fetcher.call(tag)
+        unless Digest::SHA256.hexdigest(content) == descriptor.fetch("sha256")
+          raise Error, "#{row.id} #{lock_role} dependency lock digest mismatch"
+        end
+        [ lock_role, content ]
+      end
+    end
+
+    def download_tagged_lock(tag)
+      repository = BaselineCatalog::REPOSITORY
+      url = "https://raw.githubusercontent.com/#{repository}/#{tag}/Gemfile.lock"
+      URI.open(url, "rb", &:read)
+    rescue OpenURI::HTTPError, SystemCallError => e
+      raise UnavailableError, "cannot stage #{tag} Gemfile.lock: #{e.message}"
     end
 
     def stage_targets(row, candidate_manifest, closures)
@@ -345,19 +371,6 @@ module HiveReleaseCandidate
       status.success?
     rescue Errno::ENOENT
       raise UnavailableError, "cosign is required to authenticate baseline assets"
-    end
-
-    def export_tag(tag, row_id, role)
-      root = File.join(@cache_root, "sources", row_id, role)
-      return root if File.directory?(root)
-
-      FileUtils.mkdir_p(root, mode: 0o700)
-      run!("git", "fetch", "--depth=1", "origin", "refs/tags/#{tag}:refs/tags/#{tag}",
-           chdir: @repo_root)
-      archive = File.join(@cache_root, "sources", "#{row_id}-#{role}.tar")
-      run!("git", "archive", "--format=tar", "--output", archive, tag, chdir: @repo_root)
-      run!("tar", "-xf", archive, "-C", root)
-      root
     end
 
     def run!(*argv, chdir: @repo_root, env: {})

@@ -101,6 +101,24 @@ module Hive
         raise UsageError, "refactor patrol query --cursor is invalid"
       end
 
+      def recent_envelope(project:, project_root:, limit: nil)
+        page_limit = self.class.normalize_limit(limit)
+        indexed = @store.recent_job_query_page(limit: page_limit)
+        jobs = indexed.fetch("jobs")
+        success_envelope(project, project_root, "recent").merge(
+          "count" => indexed.fetch("total"),
+          "page" => {
+            "cursor" => nil,
+            "limit" => page_limit,
+            "returned" => jobs.size,
+            "total" => indexed.fetch("total"),
+            "has_more" => indexed.fetch("has_more"),
+            "next_cursor" => nil
+          },
+          "jobs" => jobs.map { |job| summary(job) }
+        )
+      end
+
       def show_envelope(project:, project_root:, job_id:, limit: nil, full: false)
         id = self.class.validate_job_id!(job_id)
         history_limit = full ? nil : self.class.normalize_limit(limit)

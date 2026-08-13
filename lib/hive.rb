@@ -58,6 +58,7 @@ module Hive
       # `Hive::Commands::Daemon#queue_command`.
       "hive-daemon-queue" => 1,
       "hive-patrol" => 3,
+      "hive-patrol-findings" => 1,
       "hive-patrol-finding" => 3,
       "hive-refactor-patrol" => 3,
       "hive-refactor-patrol-jobs" => 1,

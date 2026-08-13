@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-07-22
+updated: 2026-08-13
 tags: [command, patrol, review, pr, json]
 ---
 
@@ -15,7 +15,15 @@ tags: [command, patrol, review, pr, json]
 hive patrol my-project
 hive patrol my-project --dry-run
 hive patrol my-project --json
+hive patrol my-project --list --json
 ```
+
+`--list` is read-only: it returns lifecycle counts and at most 25 active-first,
+newest-first finding summaries without starting a scan. The command and Hive
+Web read the same writer-maintained projection rather than parsing the complete
+finding corpus. Patrol creates or repairs that projection in its writer
+lifecycle; an interrupted rebuild leaves a dirty marker and read surfaces fail
+closed until the next Patrol cycle repairs it.
 
 `PROJECT` is a registered project name from the global config. The project must opt in through `<project>/.hive-state/config.yml`:
 
@@ -85,6 +93,9 @@ reviewer/fixer agent is created.
 8. Open a PR only when validation passed, the changed paths pass the review fix guardrail, and title, body, and the exact validated base-to-head diff pass secret scanning. The local head/cleanliness, remote base, leased branch push, remote head, and created PR identity are checked fail-closed. Immediately after creation Hive records `reconciliation_pending` with the exact PR URL and patch/base/head/worktree receipt; lookup lag, authentication failure, or restart reuses only that validated patch. The fingerprint becomes `open` only after exact URL/base/head reconciliation and review handoff settle.
 9. Unless `patrol.review_prs: false`, keep the patrol worktree and create a synthetic `.hive-state/stages/6-review/patrol-.../` task with display name `Patrol: <finding title>`, `task.md`, `worktree.yml`, `pr.md`, and `reviews/`, so the normal daemon/TUI review flow picks it up. Handoff occurs only after the created or retried PR reports the exact validated head, default-branch name, and base OID, followed by one final live remote head/base check immediately before task publication. A failed handoff retry whose base has advanced therefore cannot create a stale-base review task. The PR body and `task.md` carry the observed before/after result and label root-cause text as agent-reported. A failed handoff preserves and reuses the exact validated patch rather than rebuilding a different commit. Patrol tasks use `patrol.review.reviewers` instead of the normal `review.reviewers`; fresh projects default that list to `codex-native-review` (`kind: codex_review`), with Codex/Claude CE `ce-code-review` entries as init-time opt-ins.
 10. Persist `last_run_at`, the active-snapshot marker, batch cursor, exact reviewer errors, finding lifecycle transitions, and closed per-attempt outcomes. `last_scanned_sha` advances only after every feature in the SHA-bound sweep has been reviewed; reviewer contract failures remain visible, pin the attempted SHA at the first failed feature (including cursor zero), and leave the unfinished suffix eligible for retry.
+11. Rebuild the bounded finding-query projection after authoritative finding
+    writes. This writer-side work may inspect the full registry; Web and
+    `--list` never do.
 
 `--dry-run` bypasses the validation-command preflight because it cannot ship
 code, then stops after map + review + scored candidate selection. It updates
@@ -101,6 +112,11 @@ That evidence drives the current policy: component ownership instead of overlapp
 With `--json`, the command emits a single `hive-patrol.v3` envelope. The v3
 contract adds the lifecycle-aware skip reasons and fix preflight outcomes;
 `hive-patrol.v1` and `.v2` remain pinned for older consumers:
+
+With `--list --json`, the read-only query instead emits the registered
+`hive-patrol-findings.v1` contract. Its 25-item projection contains only
+bounded finding summaries; full evidence and reproduction payloads remain in
+Patrol's authoritative store and are not exposed by the health surface.
 
 ```json
 {

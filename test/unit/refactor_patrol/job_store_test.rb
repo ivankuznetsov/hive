@@ -39,6 +39,174 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_obsolete_unpublished_source_is_terminalized_once
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+
+      assert_equal :retired, store.retire_obsolete_source!(
+        "pr-7-stable",
+        merge_sha: "b" * 40,
+        trunk_sha: "c" * 40,
+        now: T0 + 1
+      )
+
+      retired = store.read_job("pr-7-stable")
+      assert retired.fetch("complete")
+      assert_equal "complete", retired.fetch("state")
+      assert_equal "source_no_longer_on_trunk", retired.fetch("zero_reason")
+      retirement = retired.fetch("attempts").last
+      assert_equal "source_retirement", retirement.fetch("kind")
+      assert_equal "source_no_longer_on_trunk", retirement.fetch("reason")
+      assert_equal "b" * 40, retirement.dig("evidence", "merge_sha")
+      assert_equal "c" * 40, retirement.dig("evidence", "trunk_sha")
+      assert_empty store.claimable_jobs(now: T0 + 1_000_000)
+
+      assert_equal :already_terminal, store.retire_obsolete_source!(
+        "pr-7-stable",
+        merge_sha: "b" * 40,
+        trunk_sha: "c" * 40,
+        now: T0 + 2
+      )
+      assert_equal retired, store.read_job("pr-7-stable")
+    end
+  end
+
+  def test_obsolete_source_retirement_rejects_a_different_merge_commit
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      before = store.read_job("pr-7-stable")
+
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.retire_obsolete_source!(
+          "pr-7-stable",
+          merge_sha: "d" * 40,
+          trunk_sha: "c" * 40,
+          now: T0 + 1
+        )
+      end
+
+      assert_match(/does not match the job merge commit/, error.message)
+      assert_equal before, store.read_job("pr-7-stable")
+    end
+  end
+
+  def test_obsolete_source_retirement_fails_closed_when_claim_resolution_errors
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      store.claim_discovery!(
+        "pr-7-stable", owner: "runner", analysis_sha: "c" * 40, now: T0
+      )
+
+      status = store.obsolete_source_retirement_status(
+        "pr-7-stable",
+        claim_resolver: ->(_claim) { raise "resolver unavailable" }
+      )
+
+      assert_equal :claim_active, status
+    end
+  end
+
+  def test_obsolete_source_terminalizes_all_unpublished_actions_together
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.write_job!(classified_job(
+        "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => true }
+      ))
+      initialized = store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => "accepted", "kind" => "fix" },
+          { "thesis_id" => "accepted", "kind" => "issue", "family_id" => "af1-#{'f' * 64}" }
+        ],
+        now: T0
+      )
+      assert_equal 2, initialized.fetch("actions").size
+
+      assert_equal :retired, store.retire_obsolete_source!(
+        "job-1",
+        merge_sha: "b" * 40,
+        trunk_sha: "c" * 40,
+        now: T0 + 1
+      )
+
+      retired = store.read_job("job-1")
+      assert retired.fetch("complete")
+      assert_nil retired.fetch("zero_reason")
+      assert retired.fetch("actions").all? { |action| action.fetch("terminal") }
+      assert_equal [ "source_no_longer_on_trunk" ],
+                   retired.fetch("actions").map { |action| action.fetch("outcome") }.uniq
+    end
+  end
+
+  def test_obsolete_source_retires_unpublished_siblings_and_fences_surviving_continuations
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.write_job!(classified_job(
+        "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => true }
+      ))
+      initialized = store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => "accepted", "kind" => "fix" },
+          { "thesis_id" => "accepted", "kind" => "issue", "family_id" => "af1-#{'f' * 64}" }
+        ],
+        now: T0
+      )
+      fix = initialized.fetch("actions").find { |action| action.fetch("kind") == "fix" }
+      issue = initialized.fetch("actions").find { |action| action.fetch("kind") == "issue" }
+      token = store.claim_action!(
+        "job-1", fix.fetch("canonical_action_id"), owner: "runner", now: T0
+      )
+      store.record_creation_intent!(
+        token,
+        intent: {
+          "operation" => "create_pr",
+          "canonical_action_id" => fix.fetch("canonical_action_id"),
+          "repository" => "acme/demo",
+          "branch" => "hive-refactor/#{fix.fetch('canonical_action_id')}",
+          "commit_sha" => "d" * 40
+        },
+        now: T0 + 1
+      )
+
+      resolver = ->(_claim) { :resolved }
+      assert_equal :retireable,
+                   store.obsolete_source_retirement_status(
+                     "job-1", claim_resolver: resolver
+                   )
+      assert_equal :retired, store.retire_obsolete_source!(
+        "job-1",
+        merge_sha: "b" * 40,
+        trunk_sha: "c" * 40,
+        now: T0 + 2,
+        claim_resolver: resolver
+      )
+      retired = store.read_job("job-1")
+      refute retired.fetch("complete")
+      survivor = retired.fetch("actions").find do |action|
+        action.fetch("canonical_action_id") == fix.fetch("canonical_action_id")
+      end
+      sibling = retired.fetch("actions").find do |action|
+        action.fetch("canonical_action_id") == issue.fetch("canonical_action_id")
+      end
+      refute survivor.fetch("terminal")
+      assert sibling.fetch("terminal")
+      assert_equal "source_no_longer_on_trunk", sibling.fetch("outcome")
+      assert_equal :continuation_required,
+                   store.obsolete_source_retirement_status("job-1")
+
+      continuation = store.claim_action!(
+        "job-1", fix.fetch("canonical_action_id"), owner: "reconciler",
+        authority: true, now: T0 + 3
+      )
+      assert continuation.fetch(:continuation_only),
+             "source retirement must override a caller's full authority"
+    end
+  end
+
   def test_effect_recovery_delegates_the_store_minted_receipt_contract
     with_tmp_dir do |dir|
       calls = []
@@ -121,6 +289,12 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_equal 2, second.fetch("total")
       refute second.fetch("has_more")
       assert_equal 3, store.job_query_page(limit: 100).fetch("total")
+
+      recent = store.recent_job_query_page(limit: 2)
+      assert_equal %w[job-3 job-2], recent.fetch("job_ids")
+      assert_equal recent.fetch("job_ids"),
+                   recent.fetch("jobs").map { |job| job.fetch("job_id") }
+      assert recent.fetch("has_more")
     end
   end
 

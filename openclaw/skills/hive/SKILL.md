@@ -1,7 +1,7 @@
 ---
 name: hive
 description: "Operate Hive task pipelines and pre-release QA through its native CLI. Use when an agent needs to answer current Hive or Hive-bench status, identify the exact active task and blocker owner, discover or answer waiting brainstorm questions in Guided or explicit YOLO mode, follow work through bounded transitions, create a new project-local workflow from an ordinary-language request, inspect candidate QA evidence, advance a fresh routine recommendation, diagnose recovery state, initialize or configure Hive, or explain what requires operator action across registered projects."
-version: "0.1.4"
+version: "0.1.5"
 user-invocable: true
 metadata:
   openclaw:
@@ -16,8 +16,8 @@ metadata:
 <!-- hive-managed: canonical-skill-projection/v1
 platform: openclaw
 invocation: /hive
-skill-version: 0.1.4
-canonical-digest: 7960f06a2572e543a66864c36b137236562442a1c6f2eb833c463419125458ee
+skill-version: 0.1.5
+canonical-digest: cb86207d63d6e89a6473e4dc29cd6da25f417d02a823bf40ff0ad0a02be6dc9f
 hive-version: 0.7.2
 -->
 
@@ -74,6 +74,8 @@ rollback without the operator's explicit direction.
 - Read [brainstorm-answering.md](references/brainstorm-answering.md) for waiting brainstorm input, read-only discovery, Guided/default answering, explicit YOLO answering, binding-safe persistence, and completion reporting.
 - Read [workflow-actions.md](references/workflow-actions.md) for task creation, direct workflow verbs, daemon ownership, closed actions, and completion checks.
 - Read [recovery.md](references/recovery.md) for diagnosis, coordinator ownership, provider holds, stale workers, migration, and guarded recovery.
+- Read [patrol-health.md](references/patrol-health.md) when inspecting ordinary
+  Patrol findings or Architecture Patrol jobs, blockers, and accepted theses.
 - Read [setup-and-platforms.md](references/setup-and-platforms.md) for installation, initialization, agent-skill setup, and platform invocation conventions.
 - Read [release-candidate-qa.md](references/release-candidate-qa.md) for semantic E2E discovery, local candidate evidence, bounded hosted collection, retry semantics, and the explicit hosted-dispatch boundary.
 - Read [safety.md](references/safety.md) before any admin, force, credential, external-publication, deployment, or release-sensitive operation.

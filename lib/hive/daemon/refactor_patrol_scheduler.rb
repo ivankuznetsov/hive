@@ -268,6 +268,58 @@ module Hive
         end
         manifest_path = candidate.fetch(:manifest_path)
         assert_manifest_matches!(manifest_path, aggregate)
+        branch = cfg["default_branch"].to_s
+        raise ReservationBlocked.new("missing_default_branch") if branch.empty?
+        if phase == :discovery && @owner_process_start_time.to_s.empty?
+          evidence = { "owner_pid" => @owner_pid }
+          block(
+            entry, aggregate, reason: "process_identity_unavailable",
+            evidence: evidence, now: now, phase: phase
+          )
+          raise ReservationBlocked.new("process_identity_unavailable", evidence)
+        end
+
+        analysis_sha = begin
+          @checkout_guard_factory.call(entry.fetch("path"), branch)
+                                 .validate_and_snapshot!(
+                                   merge_sha: aggregate.dig("source", "merge_sha"),
+                                   analysis_sha: aggregate["analysis_sha"]
+                                 ).fetch("analysis_sha")
+        rescue Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk => error
+          retirement = if @dry_run
+            :retired
+          else
+            @discovery_transitions.retire(
+              entry: entry,
+              store: store,
+              aggregate: aggregate,
+              merge_sha: error.merge_sha,
+              trunk_sha: error.trunk_sha,
+              now: now,
+              claim_resolver: @claim_resolver
+            )
+          end
+          if retirement == :retired || retirement == :already_terminal
+            evidence = {
+              "merge_sha" => error.merge_sha,
+              "trunk_sha" => error.trunk_sha,
+              "retirement" => retirement.to_s
+            }
+            @events << {
+              status: :retired,
+              project: entry.fetch("name"),
+              job_id: aggregate.fetch("job_id"),
+              reason: "source_no_longer_on_trunk",
+              evidence: evidence
+            }
+            raise ReservationBlocked.new("source_no_longer_on_trunk", evidence)
+          end
+          raise unless phase == :action && retirement == :continuation_required
+
+          aggregate = store.read_job(aggregate.fetch("job_id"))
+          aggregate.fetch("analysis_sha")
+        end
+
         capture = reserve_occurrence(
           store, entry, aggregate, migration, now
         )
@@ -299,23 +351,6 @@ module Hive
             dispatch_token: token
           )
         end
-        branch = cfg["default_branch"].to_s
-        raise ReservationBlocked.new("missing_default_branch") if branch.empty?
-        if @owner_process_start_time.to_s.empty?
-          evidence = { "owner_pid" => @owner_pid }
-          block(
-            entry, aggregate, reason: "process_identity_unavailable",
-            evidence: evidence, now: now, phase: phase
-          )
-          raise ReservationBlocked.new("process_identity_unavailable", evidence)
-        end
-
-        snapshot = @checkout_guard_factory.call(entry.fetch("path"), branch)
-                                          .validate_and_snapshot!(
-                                            merge_sha: aggregate.dig("source", "merge_sha"),
-                                            analysis_sha: aggregate["analysis_sha"]
-                                          )
-        analysis_sha = snapshot.fetch("analysis_sha")
         token = if @dry_run
           { job_id: aggregate.fetch("job_id"), owner: @owner, generation: 0, dry_run: true }
         else

@@ -54,6 +54,8 @@ rollback without the operator's explicit direction.
 - Read [brainstorm-answering.md](references/brainstorm-answering.md) for waiting brainstorm input, read-only discovery, Guided/default answering, explicit YOLO answering, binding-safe persistence, and completion reporting.
 - Read [workflow-actions.md](references/workflow-actions.md) for task creation, direct workflow verbs, daemon ownership, closed actions, and completion checks.
 - Read [recovery.md](references/recovery.md) for diagnosis, coordinator ownership, provider holds, stale workers, migration, and guarded recovery.
+- Read [patrol-health.md](references/patrol-health.md) when inspecting ordinary
+  Patrol findings or Architecture Patrol jobs, blockers, and accepted theses.
 - Read [setup-and-platforms.md](references/setup-and-platforms.md) for installation, initialization, agent-skill setup, and platform invocation conventions.
 - Read [release-candidate-qa.md](references/release-candidate-qa.md) for semantic E2E discovery, local candidate evidence, bounded hosted collection, retry semantics, and the explicit hosted-dispatch boundary.
 - Read [safety.md](references/safety.md) before any admin, force, credential, external-publication, deployment, or release-sensitive operation.

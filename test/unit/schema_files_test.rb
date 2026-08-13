@@ -2146,6 +2146,40 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
+  def test_hive_patrol_findings_contract_validates_success_and_error_envelopes
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol-findings")))
+    )
+    store = Object.new
+    store.define_singleton_method(:finding_query_projection) do
+      {
+        "total" => 1, "counts" => { "active" => 1 },
+        "items" => [
+          {
+            "id" => "finding-1", "feature_id" => "feature-1",
+            "category" => "bug", "severity" => "high",
+            "confidence" => "high", "title" => "Broken boundary",
+            "description" => "Evidence", "lifecycle_state" => "active",
+            "lifecycle_updated_at" => "2026-08-13T12:00:00Z"
+          }
+        ],
+        "truncated" => false
+      }
+    end
+    store.define_singleton_method(:state) do
+      { "last_run_at" => nil, "feature_review_active" => false }
+    end
+    success = Hive::Patrol::FindingQuery.new(store).list_envelope(
+      project: "demo", project_root: "/tmp/demo"
+    )
+    error = Hive::Patrol::FindingQuery.error_envelope(
+      Hive::ConfigError.new("unavailable")
+    )
+
+    assert_empty schemer.validate(success).to_a
+    assert_empty schemer.validate(error).to_a
+  end
+
   def test_hive_patrol_success_required_keys_match_producer_emission
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort

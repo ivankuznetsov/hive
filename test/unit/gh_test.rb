@@ -75,6 +75,19 @@ class GhUnitTest < Minitest::Test
     assert_match(/max_stdout_bytes must be non-negative/, error.message)
   end
 
+  def test_capture3_silences_mise_wrappers_for_machine_readable_github_output
+    previous = ENV.delete("MISE_QUIET")
+    out, _err, status = Hive::Gh.capture3(
+      RbConfig.ruby, "-e", "STDOUT.write(ENV.fetch('MISE_QUIET', 'missing'))",
+      timeout_sec: 5
+    )
+
+    assert status.success?
+    assert_equal "1", out
+  ensure
+    ENV["MISE_QUIET"] = previous if previous
+  end
+
   def test_capture3_can_stream_stdout_directly_to_private_file
     with_tmp_dir do |dir|
       path = File.join(dir, "stdout.txt")

@@ -56,6 +56,10 @@ module Hive
         @blocks.block(...)
       end
 
+      def retire(...)
+        @blocks.retire(...)
+      end
+
       def reconcile_recorded(...)
         @context.reconcile_recorded(...)
       end

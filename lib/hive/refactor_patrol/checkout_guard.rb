@@ -6,10 +6,22 @@ module Hive
   module RefactorPatrol
     # Pins discovery to an exact committed default-branch snapshot without
     # consulting or mutating the operator's working checkout. When origin is
-    # configured, a successful fetch is required so new jobs use remote trunk;
-    # retries may supply their already-durable analysis SHA directly.
+    # configured, every validation fetches remote trunk for source reachability;
+    # retries still reuse their already-durable analysis SHA.
     class CheckoutGuard
       FULL_OID = /\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/i
+
+      class SourceNoLongerOnTrunk < Hive::GitError
+        attr_reader :merge_sha, :trunk_sha
+
+        def initialize(merge_sha:, trunk_sha:)
+          @merge_sha = merge_sha.to_s
+          @trunk_sha = trunk_sha.to_s
+          super(
+            "current trunk commit #{@trunk_sha} does not contain merge commit #{@merge_sha}"
+          )
+        end
+      end
 
       def initialize(project_root, default_branch:)
         @project_root = File.expand_path(project_root)
@@ -18,13 +30,22 @@ module Hive
       end
 
       def validate_and_snapshot!(merge_sha:, analysis_sha: nil)
+        trunk_sha = current_default_sha!
+        unless @git.ancestor?(merge_sha, trunk_sha)
+          raise SourceNoLongerOnTrunk.new(
+            merge_sha: merge_sha,
+            trunk_sha: trunk_sha
+          )
+        end
+
         analysis_sha = if analysis_sha.to_s.empty?
-          current_default_sha!
+          trunk_sha
         else
           resolve_pinned_commit!(analysis_sha)
         end
         unless @git.ancestor?(merge_sha, analysis_sha)
-          raise Hive::GitError, "analysis commit #{analysis_sha} does not contain merge commit #{merge_sha}"
+          raise Hive::GitError,
+                "analysis commit #{analysis_sha} does not contain merge commit #{merge_sha}"
         end
 
         { "analysis_sha" => analysis_sha }.freeze

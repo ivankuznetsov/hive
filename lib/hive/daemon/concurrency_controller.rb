@@ -343,10 +343,6 @@ module Hive
         @running.size + @external_running_global
       end
 
-      def quarantined?(project:, slug:)
-        @quarantine.include?([ project, slug ])
-      end
-
       def project_dropped?(project)
         @dropped_projects.include?(project)
       end

@@ -2,6 +2,7 @@ require "open3"
 require "fileutils"
 require "hive/config"
 require "hive/git_ops"
+require "hive/secret_patterns"
 
 module Hive
   module Stages
@@ -15,7 +16,9 @@ module Hive
     module AutoCommit
       AUTO_COMMIT_SCOPE_GLOB_FLAGS = File::FNM_PATHNAME | File::FNM_DOTMATCH
       AutoCommitScopeViolation = Data.define(:path, :reason)
+      AutoCommitSafetyViolation = Data.define(:path, :reason)
       AUTO_COMMIT_OP_TIMEOUT_SEC = 300
+      AUTO_COMMIT_BLOB_SCAN_MAX_BYTES = 1024 * 1024
       AUTO_COMMIT_SIGNING_ERROR_PATTERNS = [
         /gpg/i,
         /pinentry/i,
@@ -133,6 +136,104 @@ module Hive
         details = violations.first(5).map { |v| "#{v.path}: #{v.reason}" }.join("; ")
         suffix = violations.size > 5 ? "; and #{violations.size - 5} more" : ""
         "auto-commit scope check failed: #{details}#{suffix}"
+      end
+
+      # Filename allowlists answer only whether a staged path belongs to the
+      # feature. They do not make the staged object safe. Inspect the exact
+      # index snapshot before committing so a worktree symlink cannot smuggle
+      # an external target into history and newly added credential material
+      # cannot pass merely because its filename is allowed.
+      def auto_commit_safety_violations(worktree_path, paths)
+        entries = staged_index_entries(worktree_path, paths)
+        return entries unless entries[:success]
+
+        violations = entries[:entries].filter_map do |entry|
+          next if %w[100644 100755].include?(entry[:mode])
+
+          AutoCommitSafetyViolation.new(
+            path: entry[:path],
+            reason: if entry[:mode] == "120000"
+                      "staged symlinks are not eligible for automatic commit"
+                    else
+                      "staged mode #{entry[:mode]} is not eligible for automatic commit"
+                    end
+          )
+        end
+
+        secrets = staged_blob_secret_violations(worktree_path, entries[:entries])
+        return secrets unless secrets[:success]
+
+        { success: true, violations: (violations + secrets[:violations]).uniq }
+      end
+
+      def staged_index_entries(worktree_path, paths)
+        # Enumerate the index and exact-match in Ruby. Passing filenames back
+        # to Git as pathspecs is unsafe even after path normalization: a legal
+        # name such as `:(literal)foo.gemspec` changes Git's matching grammar.
+        argv = [ "git", "-C", worktree_path, "ls-files", "--stage", "-z" ]
+        result = capture_git_with_timeout(argv, label: "git ls-files --stage")
+        return result unless result[:success]
+
+        expected = paths.to_h { |path| [ path, true ] }
+        entries = result[:stdout].split("\0").filter_map do |record|
+          next if record.empty?
+
+          metadata, path = record.split("\t", 2)
+          mode, object_id, stage = metadata.to_s.split(" ", 3)
+          unless path && mode&.match?(/\A\d{6}\z/) && object_id&.match?(/\A[0-9a-f]+\z/) && stage&.match?(/\A[0-3]\z/)
+            return { success: false, message: "git ls-files --stage returned malformed index data" }
+          end
+
+          next unless expected.key?(path)
+
+          { mode: mode, object_id: object_id, stage: stage, path: path }
+        end
+        { success: true, entries: entries }
+      end
+
+      # Scan each exact staged regular-file blob. Diff-line scanning misses
+      # binary blobs entirely, so the safety boundary reads the index object
+      # itself and refuses oversized blobs that cannot be boundedly inspected.
+      # Diagnostics contain only path and detector names, never blob bytes.
+      def staged_blob_secret_violations(worktree_path, entries)
+        violations = entries.filter_map do |entry|
+          next unless %w[100644 100755].include?(entry[:mode])
+
+          size = capture_git_with_timeout(
+            [ "git", "-C", worktree_path, "cat-file", "-s", entry[:object_id] ],
+            label: "git cat-file -s"
+          )
+          return size unless size[:success]
+
+          bytes = Integer(size[:stdout].to_s.strip, exception: false)
+          unless bytes && bytes <= AUTO_COMMIT_BLOB_SCAN_MAX_BYTES
+            next AutoCommitSafetyViolation.new(
+              path: entry[:path],
+              reason: "staged blob exceeds the #{AUTO_COMMIT_BLOB_SCAN_MAX_BYTES}-byte safety scan limit"
+            )
+          end
+
+          blob = capture_git_with_timeout(
+            [ "git", "-C", worktree_path, "cat-file", "blob", entry[:object_id] ],
+            label: "git cat-file blob"
+          )
+          return blob unless blob[:success]
+
+          names = Hive::SecretPatterns.scan(blob[:stdout]).map { |hit| hit.fetch(:name) }.uniq
+          next if names.empty?
+
+          AutoCommitSafetyViolation.new(
+            path: entry[:path],
+            reason: "staged content matches secret detectors: #{names.join(', ')}"
+          )
+        end
+        { success: true, violations: violations.uniq }
+      end
+
+      def auto_commit_safety_failure_message(violations)
+        details = violations.first(5).map { |violation| "#{violation.path}: #{violation.reason}" }.join("; ")
+        suffix = violations.size > 5 ? "; and #{violations.size - 5} more" : ""
+        "auto-commit safety check failed: #{details}#{suffix}"
       end
 
       def auto_commit_sign_policy_for(cfg)

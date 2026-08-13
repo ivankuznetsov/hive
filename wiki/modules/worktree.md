@@ -1,9 +1,9 @@
 ---
 title: Hive::Worktree
 type: module
-source: lib/hive/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/agent_git_gate.rb, lib/hive/stages/agent_worktree.rb
+source: lib/hive/worktree.rb, lib/hive/commands/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/agent_git_gate.rb, lib/hive/stages/agent_worktree.rb
 created: 2026-04-25
-updated: 2026-08-06
+updated: 2026-08-13
 tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
 ---
 
@@ -202,6 +202,28 @@ credentials or agent output.
 
 `execute_base_head` records the worktree HEAD immediately after 4-execute creates the task branch. Execute completion compares later HEADs against this baseline, not just against the current spawn's starting HEAD, so a dirty-worktree pause can be recovered by cleaning the worktree without requiring a second empty commit.
 
+## Residue recovery command
+
+`hive worktree status <slug> [--json]` exposes the owned worktree's exact
+porcelain entries, residue paths, branch, HEAD, and untracked count. The
+mutating verbs are admitted only while the task carries either `ERROR
+reason=ensure_clean_on_exit_failed` or `EXECUTE_WAITING
+reason=dirty_worktree`, and they run under the task lock:
+
+```text
+hive worktree commit-residue <slug> [--message "one line"] [--json]
+hive worktree discard-residue <slug> [--paths path [path ...]] [--json]
+hive worktree repair <slug> --strategy commit|discard [--json]
+```
+
+Commit recovery reuses the full CleanExit scope, symlink, secret-content, and
+signing policy gates. Discard recovery accepts only normalized paths that are
+currently dirty; without `--paths` it uses the marker's losslessly encoded,
+bounded residue-path array (with legacy comma-delimited fallback). It restores
+tracked paths from `HEAD` and cleans only the named untracked paths. Neither mutation clears the marker: the returned
+`next_action` requires a fresh `hive status --json`, followed by that
+snapshot's generation-guarded `workflow.retry` action.
+
 ## Path-prefix validation
 
 `validate_pointer_path(path, expected_root)`:
@@ -221,10 +243,12 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 - `Stages::Done#run!` — reads pointer to print cleanup instructions.
 - `Hive::Commands::AdhocReview` — materializes a PR head at the normal worktree root before creating a synthetic `6-review` task.
 - `Hive::Babysitter::Worktree` — delegates PR-head materialization here while keeping babysitter-specific cleanup and fork policy around it.
+- `Hive::Commands::Worktree` — inspects and repairs residue only through a strictly owned coding worktree pointer.
 
 ## Tests
 
 - `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), explicit remote-head fetching despite a same-named tag, stalled-transport process-group timeout, empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.
+- `test/unit/commands/worktree_test.rb` — exact status output, guarded commit/discard, secret refusal, marker preservation, and explicit repair strategy.
 - `test/unit/draft_pr_receipt_test.rb` — versioned initialization, exact and
   identity-only advanced-phase resume, duplicate/malformed/symlink rejection,
   root containment, and per-field contradictory-state rejection.

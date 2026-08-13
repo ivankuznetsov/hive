@@ -140,11 +140,16 @@ class CleanExitCoverageGapsTest < Minitest::Test
                                            ->(_cfg) { :inherit }) do
               with_replaced_singleton_method(Hive::Stages::AutoCommit, :auto_commit_sign_policy_failure,
                                              ->(_p, _s) { nil }) do
-                with_replaced_singleton_method(Hive::Stages::AutoCommit, :auto_commit_git_commit,
-                                               ->(_p, _s, _m) { fake_commit }) do
-                  out = run_clean_exit
-                  assert_equal :git_failed, out[:status], "commit failure → :git_failed; line 76"
-                  assert_match(/signature required/, out[:message])
+                with_replaced_singleton_method(
+                  Hive::Stages::AutoCommit, :auto_commit_safety_violations,
+                  ->(_path, _paths) { { success: true, violations: [] } }
+                ) do
+                  with_replaced_singleton_method(Hive::Stages::AutoCommit, :auto_commit_git_commit,
+                                                 ->(_p, _s, _m) { fake_commit }) do
+                    out = run_clean_exit
+                    assert_equal :git_failed, out[:status], "commit failure → :git_failed; line 76"
+                    assert_match(/signature required/, out[:message])
+                  end
                 end
               end
             end

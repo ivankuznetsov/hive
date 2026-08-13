@@ -9,7 +9,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
   def row(action:, marker:, attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
           diagnostic: nil, id: nil, display_name: nil, pr_url: nil, workflow: "coding",
-          folder: "/tmp/slug-260514-abcd", state_file: nil, suggested_command: nil, next_action: nil)
+          folder: "/tmp/slug-260514-abcd", state_file: nil, suggested_command: nil, next_action: nil,
+          auto_residue: nil)
     Row.new(
       project: "hive",
       slug: slug,
@@ -26,7 +27,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
       suggested_command: suggested_command,
       next_action: next_action,
       diagnostic: diagnostic,
-      pr_url: pr_url
+      pr_url: pr_url,
+      auto_residue: auto_residue
     )
   end
 
@@ -771,6 +773,42 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_live_agent_skip_logged(logger, marker: "error", action: "archived", stage: "9-done")
   end
 
+  def test_archived_auto_residue_builds_no_action_fyi
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(
+        action: "archived", marker: "complete", stage: "9-done",
+        auto_residue: {
+          "commits" => 1, "path_count" => 2,
+          "paths" => [ "pr.md", "wiki/finalize.md" ],
+          "latest_head" => "abc", "latest_reason" => "finalize_backstop",
+          "latest_at" => "2026-08-13T00:00:00Z"
+        }
+      )
+    )
+
+    assert_includes notification.text,
+                    "Hive auto-committed residue: 1 commit(s) — pr.md, wiki/finalize.md"
+    assert_nil notification.keyboard
+  end
+
+  def test_auto_residue_appends_to_html_notification_with_escaped_paths
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(
+        action: "ready_for_review", marker: "complete", stage: "5-open-pr",
+        pr_url: "https://github.com/example/repo/pull/561",
+        auto_residue: {
+          "commits" => 1, "path_count" => 1, "paths" => [ "wiki/a&b.md" ],
+          "latest_head" => "abc", "latest_reason" => "stage_exit",
+          "latest_at" => "2026-08-13T00:00:00Z"
+        }
+      )
+    )
+
+    assert_equal :html, notification.parse_mode
+    assert_includes notification.text, "wiki/a&amp;b.md"
+    assert_equal "Approve", notification.keyboard.first.first.fetch(:text)
+  end
+
   def test_bug_9281_agent_running_error_fixture_is_suppressed_and_logged_once
     logger = StubLogger.new
     slug = "bug-agentlimit-false-positives-on-260623-a4df"
@@ -1007,6 +1045,21 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
     refute_equal Hive::Bot::NotificationBuilders.fingerprint(first),
                  Hive::Bot::NotificationBuilders.fingerprint(second)
+  end
+
+  def test_fingerprint_changes_when_auto_residue_changes
+    without_residue = row(action: "archived", marker: "complete", stage: "9-done")
+    with_residue = row(
+      action: "archived", marker: "complete", stage: "9-done",
+      auto_residue: {
+        "commits" => 1, "path_count" => 1, "paths" => [ "pr.md" ],
+        "latest_head" => "abc", "latest_reason" => "finalize_backstop",
+        "latest_at" => "2026-08-13T00:00:00Z"
+      }
+    )
+
+    refute_equal Hive::Bot::NotificationBuilders.fingerprint(without_residue),
+                 Hive::Bot::NotificationBuilders.fingerprint(with_residue)
   end
 
   def test_fingerprint_ignores_pr_url

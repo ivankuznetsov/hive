@@ -47,6 +47,7 @@ module Hive
       "hive-forget" => 1,
       "hive-drop" => 2,
       "hive-prune" => 1,
+      "hive-worktree" => 1,
       "hive-daemon-status" => 1,
       "hive-daemon-stop" => 1,
       "hive-daemon-enroll" => 1,

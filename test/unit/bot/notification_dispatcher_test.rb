@@ -14,7 +14,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
   RECOVERED_MESSAGE = "✅ Recovered: \"#42 Readable Recovery\" — Review".freeze
 
   def row(action: "needs_input", marker: "waiting", attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
-          id: nil, display_name: nil, pr_url: nil, workflow: "coding", project: "hive")
+          id: nil, display_name: nil, pr_url: nil, workflow: "coding", project: "hive", auto_residue: nil)
     Row.new(
       project: project,
       slug: slug,
@@ -28,7 +28,8 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       action_label: "Answer questions",
       folder: "/tmp/#{slug}",
       suggested_command: "hive brainstorm #{slug}",
-      pr_url: pr_url
+      pr_url: pr_url,
+      auto_residue: auto_residue
     )
   end
 
@@ -1213,6 +1214,24 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
 
     assert_empty telegram.messages,
                  "ready_to_X with daemon enabled must not produce a proactive Telegram message"
+  end
+
+  def test_auto_residue_fyi_is_not_suppressed_with_daemon_enabled
+    d = dispatcher(daemon_enabled: ->(_project) { true })
+    d.process_rows([
+      row(
+        action: "ready_to_plan", marker: "complete",
+        auto_residue: {
+          "commits" => 1, "path_count" => 1, "paths" => [ "wiki/a.md" ],
+          "latest_head" => "abc", "latest_reason" => "stage_exit",
+          "latest_at" => "2026-08-13T00:00:00Z"
+        }
+      )
+    ])
+
+    assert_equal 1, telegram.messages.size
+    assert_includes telegram.messages.first.fetch(:text), "Hive auto-committed residue"
+    assert_nil telegram.messages.first.fetch(:reply_markup)
   end
 
   def test_ready_action_fires_alert_when_daemon_disabled

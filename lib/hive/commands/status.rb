@@ -29,6 +29,7 @@ require "hive/operational_status"
 require "hive/daemon/operational_snapshot"
 require "hive/terminal_text"
 require "hive/tui/views/hyperlink"
+require "hive/events"
 
 module Hive
   module Commands
@@ -495,6 +496,12 @@ module Hive
                 projection.ordinary_rows
               end
             out = base.merge("tasks" => rows.map { |r| task_payload(r, now: now) })
+            out["config_summary"] = {
+              "stages" => {
+                "ensure_clean_on_exit" =>
+                  !config.is_a?(Hash) || config.dig("stages", "ensure_clean_on_exit") != false
+              }
+            }
             out["hidden_archived_task_count"] = projection.hidden_count unless @archive
             if include_archive_index
               # Internal cache handoff only. StateSource removes this key
@@ -632,6 +639,7 @@ module Hive
           "closure" => row.dig(:projection_data, "closure"),
           "condition_warning" => row[:condition_warning],
           "implementation_identity" => row[:implementation_identity],
+          "auto_residue" => Hive::Events.clean_exit_summary(row[:folder]),
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
           # 0 for every non-brainstorm / non-needs_input row. Lets an agent
           # or operator tell "the daemon is holding this brainstorm because

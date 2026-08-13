@@ -100,15 +100,20 @@ module Hive
       end
 
       def add_notification(row, out, present_unbuilt)
-        return if suppress_ready_action?(row)
-        return if suppress_daemon_plan_pause?(row)
-        return if suppress_active_conversation?(row)
+        suppressed = suppress_ready_action?(row) ||
+                     suppress_daemon_plan_pause?(row) ||
+                     suppress_active_conversation?(row)
+        return if suppressed && !NotificationBuilders.auto_residue?(row)
 
         # Fingerprint depends only on the row, not the notification, so compute
         # it before the build — that way a build failure can still record this
         # row as present-this-tick (see build_notification).
         fingerprint = NotificationBuilders.fingerprint(row)
-        notification = build_notification(row, fingerprint: fingerprint, present_unbuilt: present_unbuilt)
+        notification = if suppressed
+          NotificationBuilders.auto_residue_notification(row)
+        else
+          build_notification(row, fingerprint: fingerprint, present_unbuilt: present_unbuilt)
+        end
         return unless notification
 
         out[fingerprint] ||= { row: row, notification: notification }

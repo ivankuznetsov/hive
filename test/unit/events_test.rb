@@ -39,6 +39,63 @@ class EventsTest < Minitest::Test
     end
   end
 
+  def test_clean_exit_summary_reports_structured_events_from_current_run
+    with_tmp_dir do |dir|
+      Hive::Events.emit(task_folder: dir, slug: "residue-task", stage: "4-execute",
+                        event_type: :stage_enter, message: "enter")
+      Hive::Events.emit(
+        task_folder: dir, slug: "residue-task", stage: "4-execute",
+        event_type: :clean_exit_auto_committed, message: "head=abc paths=wiki/a.md,lib/b.rb",
+        data: {
+          head: "abc", reason: "stage_exit", paths: [ "wiki/a.md", "lib/b.rb" ], path_count: 2
+        }
+      )
+
+      assert_equal(
+        {
+          "commits" => 1, "path_count" => 2,
+          "paths" => [ "wiki/a.md", "lib/b.rb" ],
+          "latest_head" => "abc", "latest_reason" => "stage_exit",
+          "latest_at" => JSON.parse(File.readlines(File.join(dir, "events.jsonl")).last).fetch("ts")
+        },
+        Hive::Events.clean_exit_summary(dir)
+      )
+
+      Hive::Events.emit(task_folder: dir, slug: "residue-task", stage: "5-open-pr",
+                        event_type: :stage_enter, message: "next run")
+      assert_nil Hive::Events.clean_exit_summary(dir)
+    end
+  end
+
+  def test_clean_exit_summary_reads_legacy_message_metadata
+    with_tmp_dir do |dir|
+      Hive::Events.emit(
+        task_folder: dir, slug: "legacy-residue", stage: "8-finalize",
+        event_type: :clean_exit_auto_committed,
+        message: "reason=finalize_backstop head=def paths=pr.md,wiki/finalize.md"
+      )
+
+      summary = Hive::Events.clean_exit_summary(dir)
+      assert_equal 1, summary.fetch("commits")
+      assert_equal "def", summary.fetch("latest_head")
+      assert_equal "finalize_backstop", summary.fetch("latest_reason")
+      assert_equal [ "pr.md", "wiki/finalize.md" ], summary.fetch("paths")
+    end
+  end
+
+  def test_clean_exit_data_bounds_and_sanitizes_display_paths
+    long_path = "wiki/a\n#{'b' * 200}.md"
+
+    data = Hive::Events.clean_exit_data(
+      head: "abc", reason: "stage_exit", paths: [ long_path ] * 25
+    )
+
+    assert_equal 25, data.fetch(:path_count)
+    assert_equal Hive::Events::MAX_EVENT_PATHS, data.fetch(:paths).length
+    assert_operator data.fetch(:paths).first.bytesize, :<=, Hive::Events::MAX_EVENT_PATH_BYTES
+    refute_includes data.fetch(:paths).first, "\n"
+  end
+
   def test_unknown_event_type_raises
     with_tmp_dir do |dir|
       assert_raises(ArgumentError) do

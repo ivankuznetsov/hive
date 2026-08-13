@@ -139,6 +139,120 @@ class HiveStagesCleanExitTest < Minitest::Test
     end
   end
 
+  def test_allowed_path_symlink_returns_safety_violation_and_unstages
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      File.symlink("/tmp/operator-secret", File.join(worktree, "wiki", "reference.md"))
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_equal [ "wiki/reference.md" ], result[:paths]
+      assert_match(/staged symlinks/, result[:message])
+      assert_empty `git -C #{worktree} diff --cached --name-only`
+      assert File.symlink?(File.join(worktree, "wiki", "reference.md"))
+    end
+  end
+
+  def test_pathspec_magic_filename_cannot_hide_staged_symlink
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      File.symlink("/tmp/operator-secret", File.join(worktree, ":(literal)evil.gemspec"))
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_equal [ ":(literal)evil.gemspec" ], result[:paths]
+      assert_match(/staged symlinks/, result[:message])
+      assert_empty `git -C #{worktree} diff --cached --name-only`
+    end
+  end
+
+  def test_allowed_path_secret_content_returns_redacted_safety_violation
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      secret = "AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP"
+      File.write(File.join(worktree, "wiki", "migration-notes.md"), "#{secret}\n")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_equal [ "wiki/migration-notes.md" ], result[:paths]
+      assert_match(/secret detectors/, result[:message])
+      refute_includes result[:message], secret
+      assert_empty `git -C #{worktree} diff --cached --name-only`
+      assert File.exist?(File.join(worktree, "wiki", "migration-notes.md"))
+    end
+  end
+
+  def test_binary_allowed_path_secret_content_returns_redacted_safety_violation
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      secret = "AKIAABCDEFGHIJKLMNOP"
+      File.binwrite(File.join(worktree, "wiki", "migration-key.bin"), "\x00#{secret}\x00".b)
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_equal [ "wiki/migration-key.bin" ], result[:paths]
+      assert_match(/secret detectors/, result[:message])
+      refute_includes result[:message], secret
+      assert_empty `git -C #{worktree} diff --cached --name-only`
+    end
+  end
+
+  def test_safety_gate_still_applies_when_filename_scope_check_is_disabled
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      File.symlink("/tmp/operator-secret", File.join(worktree, "unrelated-link"))
+      cfg = deep_dup_default_cfg
+      cfg["review"]["fix"]["auto_commit"]["scope_check"]["enabled"] = false
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_equal [ "unrelated-link" ], result[:paths]
+    end
+  end
+
+  def test_safety_gate_rejects_gitlink_index_entries
+    object_id = "a" * 40
+    capture = lambda do |argv, **_kwargs|
+      if argv.include?("ls-files")
+        { success: true, stdout: "160000 #{object_id} 0\twiki/plugin\0" }
+      else
+        { success: true, stdout: "" }
+      end
+    end
+
+    with_replaced_singleton_method(Hive::Stages::AutoCommit, :capture_git_with_timeout, capture) do
+      result = Hive::Stages::AutoCommit.auto_commit_safety_violations(
+        "/worktree", [ "wiki/plugin" ]
+      )
+
+      assert_equal 1, result.fetch(:violations).length
+      assert_includes result.dig(:violations, 0).reason, "mode 160000"
+    end
+  end
+
   # Regression for the nested-Rails-app (`web/`) scope gap: a fix touching
   # `web/app/**` / `web/test/**` must auto-commit (those mirror the top-level
   # source/test allowlist), while sensitive nested dirs like `web/config/**`

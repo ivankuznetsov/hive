@@ -34,16 +34,6 @@ module Hive
       File.join(root, "operational", "daemon-snapshot.json")
     end
 
-    # Owner-private, versioned durable task-attempt state. RecoveryMigration
-    # moves the physical v3 tree here before current readers may open it.
-    def attempts_root
-      File.join(state_home, "attempts", "v4")
-    end
-
-    def attempt_records_root
-      File.join(attempts_root, "records")
-    end
-
     # Owner-private, host-global provider-account and exact-model health.
     # Explicit routing alone consults this state; legacy attempts bypass it.
     def provider_health_root
@@ -56,10 +46,6 @@ module Hive
 
     def workflow_publish_receipts_root
       File.join(workflow_publish_root, "receipts")
-    end
-
-    def workflow_publish_locks_root
-      File.join(workflow_publish_root, "locks")
     end
 
     def workflow_publish_objects_root

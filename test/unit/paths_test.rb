@@ -32,15 +32,11 @@ class PathsTest < Minitest::Test
                      Hive::Paths.operational_snapshot_path
         assert_equal File.join(dir, "cache", "hive"), Hive::Paths.cache_home
         assert_equal File.join(dir, "bin"), Hive::Paths.bin_home
-        attempts = File.join(dir, "state", "hive", "attempts", "v4")
-        assert_equal attempts, Hive::Paths.attempts_root
-        assert_equal File.join(attempts, "records"), Hive::Paths.attempt_records_root
         assert_equal File.join(dir, "state", "hive", "provider-health", "v1"),
                      Hive::Paths.provider_health_root
         publish = File.join(dir, "state", "hive", "workflow-publish", "v1")
         assert_equal publish, Hive::Paths.workflow_publish_root
         assert_equal File.join(publish, "receipts"), Hive::Paths.workflow_publish_receipts_root
-        assert_equal File.join(publish, "locks"), Hive::Paths.workflow_publish_locks_root
         assert_equal File.join(publish, "objects"), Hive::Paths.workflow_publish_objects_root
       end
     end

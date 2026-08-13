@@ -15,13 +15,13 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
     catalog = HiveReleaseCandidate::BaselineCatalog.load(CATALOG)
 
     assert_equal "latest-stable", catalog.latest_stable.id
-    assert_equal "0.7.0", catalog.latest_stable.version
+    assert_equal "0.7.1", catalog.latest_stable.version
     assert_equal(
-      2_024_960,
+      2_141_184,
       catalog.latest_stable.packages.fetch("producer").fetch("artifact").fetch("size")
     )
     assert_equal(
-      "758af399660112bf267f8bf050345f2f96690f316d5e24bf64bd9a6c73c95d64",
+      "962514b682286e700b8c5efc196fb01c619eaf093e2da4b6057c476a10762894",
       catalog.latest_stable.packages.fetch("producer").fetch("artifact").fetch("sha256")
     )
     legacy = catalog.fetch("legacy-bench-v041")
@@ -38,7 +38,7 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
     assert_match(/\A[0-9a-f]{64}\z/, catalog.digest)
     assert_match(/\A[0-9a-f]{64}\z/, catalog.dependency_closure_digest)
     assert_equal(
-      "fbd316c3a73d86e6993458690e424fc471e297b109df480ae4037a8147a50feb",
+      "3025ed304180b9e3b289c283593dd103b98f730128f0018fe318e8cf03ee4c57",
       catalog.latest_stable.packages.dig("producer", "authentication", "checksum", "sha256")
     )
   end
@@ -77,20 +77,20 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
   def test_latest_stable_freshness_fails_closed_without_floating_the_catalog
     catalog = HiveReleaseCandidate::BaselineCatalog.load(CATALOG)
 
-    fresh = catalog.freshness(observed_tag: "v0.7.0", observed_prerelease: false)
-    stale = catalog.freshness(observed_tag: "v0.7.1", observed_prerelease: false)
+    fresh = catalog.freshness(observed_tag: "v0.7.1", observed_prerelease: false)
+    stale = catalog.freshness(observed_tag: "v0.7.2", observed_prerelease: false)
 
     assert_equal "passed", fresh.fetch("status")
     assert_equal "failed", stale.fetch("status")
     assert_equal "baseline_catalog_stale", stale.fetch("reason")
-    assert_equal "v0.7.0", stale.fetch("catalog_tag")
-    assert_equal "v0.7.0", catalog.latest_stable.tag
+    assert_equal "v0.7.1", stale.fetch("catalog_tag")
+    assert_equal "v0.7.1", catalog.latest_stable.tag
   end
 
   def test_dependency_closure_rejects_lock_mismatch_and_incomplete_cache
     catalog = HiveReleaseCandidate::BaselineCatalog.load(CATALOG)
     entry = catalog.latest_stable
-    lock = run_git(ROOT, "show", "v0.7.0:Gemfile.lock")
+    lock = run_git(ROOT, "show", "v0.7.1:Gemfile.lock")
     filenames = catalog.send(:runtime_closure_filenames, { "producer" => lock })
     manifest = {
       "schema" => "hive-release-candidate-offline-gem-cache",
@@ -225,7 +225,7 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
       )
       File.write(
         File.join(repo, "lib/hive/version.rb"),
-        "module Hive; VERSION = \"0.7.0\"; end\n"
+        "module Hive; VERSION = \"0.7.1\"; end\n"
       )
       run_git(repo, "add", ".")
       run_git(repo, "commit", "-m", "fixture")
@@ -236,7 +236,7 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
       baseline = plan.fetch("inputs").fetch("baselines")
 
       assert_equal "available", baseline.fetch("status")
-      assert_equal "0.7.0", plan.fetch("baseline_version")
+      assert_equal "0.7.1", plan.fetch("baseline_version")
       assert_includes plan.fetch("blockers"), "candidate_not_newer"
       assert_equal catalog_digest, baseline.fetch("sha256")
       assert_match(/\A[0-9a-f]{64}\z/, baseline.fetch("catalog_dependency_closure_sha256"))
@@ -257,7 +257,7 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
       assert_equal sha, closure_fetch.first.fetch(2)
       assert_equal 4, closure_fetch.first.length
       assert_equal(
-        %w[v0.4.1 v0.4.2 v0.7.0],
+        %w[v0.4.1 v0.4.2 v0.7.1],
         release_fetches.map { |argv| File.basename(argv.fetch(-1)) }.uniq.sort
       )
       assert_equal before, Dir.glob(File.join(repo, "tmp", "**", "*")),

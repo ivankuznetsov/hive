@@ -100,7 +100,6 @@ class HiveBotTelegramTest < Minitest::Test
 
     assert_equal [ 1001, 1002 ], updates.map(&:update_id)
     assert_equal [ 12345, 12345 ], updates.map(&:chat_id)
-    assert updates.first.message?
     assert updates.first.text?
     assert_equal "/status", updates.first.text
     assert updates.last.callback_query?

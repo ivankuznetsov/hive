@@ -73,7 +73,7 @@ class PatrolModuleIntegrationTest < Minitest::Test
         )
 
         result = dispatcher.dispatch(module_name: "patrol", hook_id: "task-completed", event: event)
-        assert result.launched?
+        assert_equal "launch", result.decision.fetch("outcome")
         assert attempts.scan.records.fetch(0).module_hook?
         command = Hive::Commands::ModuleHook.from_argv(launcher.record["worker_argv"].drop(2))
         assert_equal 0, command.call

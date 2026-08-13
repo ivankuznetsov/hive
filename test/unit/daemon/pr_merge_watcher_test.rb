@@ -106,7 +106,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       results = watcher.observe(tasks.map { |task| row_for(task) }, now: T0)
 
       assert_equal [ :observed ], results.map { |result| result.fetch(:status) }.uniq
-      assert_equal 4, watcher.pending_count
       state = store.load(identity_for(tasks.first.project_root))
       assert_equal 4, state.fetch("candidates").length
       assert_equal true, state.dig("backlog", "complete")
@@ -147,7 +146,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
       assert_equal :observed, result.fetch(:status)
       assert_equal 2, result.fetch(:candidates)
-      assert_equal 2, watcher.pending_count
       assert_empty watcher.tick(now: T0)
       candidates = store.load(identity_for(tasks.first.project_root))
                         .fetch("candidates").values
@@ -183,7 +181,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       assert_equal :blocked, blocked.fetch(:status)
       assert_equal tasks.first.slug, blocked.fetch(:slug)
       assert_match(/canonical GitHub pull request/, blocked.fetch(:reason))
-      assert_equal 1, watcher.pending_count
       outcomes = store.load(identity_for(tasks.first.project_root))
                       .dig("backlog", "outcomes").values
       rejected = outcomes.find { |outcome| outcome.fetch("slug") == tasks.first.slug }
@@ -211,7 +208,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       result = restarted.tick(now: T0 + 61).first
 
       assert_equal :closed_unmerged, result.fetch(:status)
-      assert restarted.watching?(project: "app", slug: tasks.first.slug)
       assert_equal "CLOSED_UNMERGED",
                    restarted.state_for(project: "app", slug: tasks.first.slug)
     end
@@ -354,7 +350,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       state = store.load(identity_for(tasks.first.project_root))
       candidate = state.fetch("candidates").values.first
       assert_equal 26, candidate.dig("retry", "failures")
-      assert watcher.watching?(project: "app", slug: tasks.first.slug)
       assert_match(/offline/, candidate.dig("archive", "last_error"))
     end
   end
@@ -646,7 +641,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       result = watcher.tick(now: T0 + 1).first
       assert_equal :blocked, result.fetch(:status)
       assert_match(/ledger unreadable/, result.fetch(:reason))
-      refute watcher.watching?(project: "app", slug: task.slug)
+      assert_nil watcher.state_for(project: "app", slug: task.slug)
     end
   end
 

@@ -95,8 +95,6 @@ module Hive
         cursor_store.write(state, selected.last.folder) if selected.any?
         selected
       end
-
-      def reset_progress! = nil
     end
 
     def initialize(history: nil, batch_size: BATCH_SIZE,

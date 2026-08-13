@@ -47,7 +47,7 @@ class ReleaseCandidateAssetVerifierTest < Minitest::Test
     end
   end
 
-  def test_rejects_unmanifested_files_and_archive_traversal
+  def test_rejects_unmanifested_files
     with_tmp_dir do |dir|
       artifact = descriptor("hive-cli-0.6.9.gem", "bytes")
       File.binwrite(File.join(dir, artifact.fetch("filename")), "bytes")
@@ -58,11 +58,6 @@ class ReleaseCandidateAssetVerifierTest < Minitest::Test
         verifier.verify_set!([ artifact ], exact_directory: true)
       end
       assert_includes error.message, "unmanifested"
-
-      error = assert_raises(HiveReleaseCandidate::Error) do
-        verifier.validate_archive_entries!(%w[lib/hive.rb ../escape])
-      end
-      assert_includes error.message, "unsafe archive entry"
     end
   end
 

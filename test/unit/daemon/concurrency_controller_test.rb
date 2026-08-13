@@ -113,7 +113,7 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
 
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::CONFIG, completed_at: T0)
 
-    refute c.project_dropped?("hive")
+    refute_includes c.dropped_projects, "hive"
     assert_equal 0, c.daily_count_for("hive", T0),
                  "a patrol scan must not consume an ordinary task's daily quota"
     assert_equal :ok, c.can_dispatch?(project: "hive", slug: "ordinary-task", now: T0)
@@ -246,8 +246,6 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
              started_at: T0 + Hive::Daemon::ConcurrencyController::TRANSIENT_BACKOFF_SCHEDULE.size + 1000)
     c.record_completion(pid: next_pid, exit_code: Hive::ExitCodes::SOFTWARE,
                         completed_at: T0 + 100_000)
-    assert c.quarantined?(project: "p1", slug: "s1"),
-           "exhausted backoff schedule must transition to :quarantined"
     assert_equal :quarantined,
                  c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 1_000_000)
   end
@@ -262,8 +260,8 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     dispatch(c, 101, "p1", "s1", started_at: future)
     c.record_completion(pid: 101, exit_code: Hive::ExitCodes::SUCCESS, completed_at: future + 1)
 
-    refute c.quarantined?(project: "p1", slug: "s1"),
-           "SUCCESS after transient must clear the failure counter, not preserve it"
+    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: future + 2),
+                 "SUCCESS after transient must clear the failure counter, not preserve it"
   end
 
   def test_wrong_stage_triggers_short_cooldown
@@ -296,7 +294,6 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     dispatch(c, 100, "p1", "s1")
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::TEMPFAIL, completed_at: T0 + 1)
     assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 2)
-    refute c.quarantined?(project: "p1", slug: "s1")
   end
 
   # ── TASK_IN_ERROR clears running entry but doesn't quarantine ─────────
@@ -307,7 +304,7 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     c = make
     dispatch(c, 100, "p1", "s1")
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::TASK_IN_ERROR, completed_at: T0 + 1)
-    refute c.quarantined?(project: "p1", slug: "s1")
+    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 2)
     assert_equal 0, c.in_flight_count
   end
 
@@ -317,7 +314,6 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     c = make
     dispatch(c, 100, "p1", "s1")
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::USAGE, completed_at: T0 + 1)
-    assert c.quarantined?(project: "p1", slug: "s1")
     assert_equal :quarantined, c.can_dispatch?(project: "p1", slug: "s1",
                                                now: T0 + 1_000_000)
   end
@@ -328,7 +324,7 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     c = make
     dispatch(c, 100, "p1", "s1")
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::CONFIG, completed_at: T0 + 1)
-    assert c.project_dropped?("p1")
+    assert_includes c.dropped_projects, "p1"
     # Every task in the dropped project is now blocked, regardless of slug.
     assert_equal :project_dropped,
                  c.can_dispatch?(project: "p1", slug: "totally-different-slug", now: T0 + 100)
@@ -339,7 +335,7 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
   def test_record_project_dropped_direct_api
     c = make
     c.record_project_dropped(project: "p1")
-    assert c.project_dropped?("p1")
+    assert_includes c.dropped_projects, "p1"
   end
 
   def test_dropped_projects_returns_recorded_projects
@@ -426,8 +422,8 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
 
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0 + 1)
     assert_equal 1, c.in_flight_count
-    refute_includes c.running_pids, 100
-    assert_includes c.running_pids, 101
+    refute c.running_task?(project: "p1", slug: "s1")
+    assert c.running_task?(project: "p1", slug: "s2")
   end
 
   def test_running_task_detects_tracked_project_slug
@@ -620,7 +616,7 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     # slug would make that grow unbounded and never be read by the digest gate.
     c.record_completion(pid: 100, exit_code: 1, completed_at: T0)
 
-    refute c.quarantined?(project: "digest", slug: "2026-06-13")
+    assert_empty c.operational_snapshot(now: T0).fetch("quarantined")
     assert_equal :ok, c.can_dispatch_digest?(now: T0),
                  "the freed digest slot must be reusable with no residual per-date state"
   end
@@ -630,8 +626,8 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     dispatch(c, 100, "digest", "2026-06-13", kind: :digest)
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::CONFIG, completed_at: T0)
 
-    refute c.project_dropped?("digest"),
-           "a digest ConfigError must not drop a phantom 'digest' project"
+    refute_includes c.dropped_projects, "digest",
+                    "a digest ConfigError must not drop a phantom 'digest' project"
   end
 
   def test_digest_dispatch_does_not_leak_a_daily_count_entry

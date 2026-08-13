@@ -157,12 +157,10 @@ class TuiSubprocessTest < Minitest::Test
   end
 
   # F9: run_quiet! no longer touches the global INT/TERM trap chain.
-  # The previous install/restore pair only ever registered a
-  # `:placeholder` pgid (register_real_pgid was never called from
-  # this path), so the trap block always short-circuited and INT
-  # forwarding silently no-op'd anyway. Removing the install/restore
-  # also closes the concurrent-run_quiet! trap-chain race the
-  # /ce-code-review walkthrough flagged.
+  # The previous install/restore pair never registered a real pgid, so the
+  # trap block always short-circuited and INT forwarding silently no-op'd
+  # anyway. Removing the install/restore also closes the concurrent-run_quiet!
+  # trap-chain race the /ce-code-review walkthrough flagged.
   def test_run_quiet_does_not_modify_int_and_term_traps
     sentinel_int = proc { :sentinel_int }
     sentinel_term = proc { :sentinel_term }
@@ -183,9 +181,9 @@ class TuiSubprocessTest < Minitest::Test
   end
 
   def test_run_quiet_does_not_touch_subprocess_registry
-    Hive::Tui::SubprocessRegistry.register_placeholder
+    Hive::Tui::SubprocessRegistry.register(12_345)
     Hive::Tui::Subprocess.run_quiet!([ FAKE_CHILD ])
-    assert_equal :placeholder, Hive::Tui::SubprocessRegistry.current,
+    assert_equal 12_345, Hive::Tui::SubprocessRegistry.current,
       "run_quiet! must not write to or clear the registry — Open3 owns the child"
   ensure
     Hive::Tui::SubprocessRegistry.clear
@@ -206,17 +204,9 @@ class TuiSubprocessTest < Minitest::Test
       "kill_inflight! on empty registry should be a no-op returning nil"
   end
 
-  def test_registry_kill_inflight_is_noop_for_placeholder
-    Hive::Tui::SubprocessRegistry.register_placeholder
-    assert_nil Hive::Tui::SubprocessRegistry.kill_inflight!,
-      "kill_inflight! on :placeholder should not raise and should clear"
-    assert_nil Hive::Tui::SubprocessRegistry.current,
-      "kill_inflight! should clear the slot even when placeholder"
-  end
-
-  def test_registry_register_overwrites_placeholder
-    Hive::Tui::SubprocessRegistry.register_placeholder
-    assert_equal :placeholder, Hive::Tui::SubprocessRegistry.current
+  def test_registry_register_overwrites_previous_process_group
+    Hive::Tui::SubprocessRegistry.register(12_344)
+    assert_equal 12_344, Hive::Tui::SubprocessRegistry.current
     Hive::Tui::SubprocessRegistry.register(12_345)
     assert_equal 12_345, Hive::Tui::SubprocessRegistry.current
   ensure

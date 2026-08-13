@@ -124,7 +124,7 @@ class AttemptsStoreTest < Minitest::Test
             store = Hive::Attempts::Store.new(root: root)
             created = nil
             store.with_generation_lock("generation-1") do
-              existing = store.for_generation("generation-1")
+              existing = store.scan.records.select { |record| record.task_generation == "generation-1" }
               created = existing.first || store.create_launching(
                 **identity.merge(attempt_id: "attempt-#{index}"), launch_timeout_sec: 30, now: NOW
               )
@@ -141,7 +141,8 @@ class AttemptsStoreTest < Minitest::Test
       pids.each { |pid| Process.wait(pid) }
 
       assert_equal 1, ids.uniq.size
-      assert_equal 1, Hive::Attempts::Store.new(root: root).for_generation("generation-1").size
+      records = Hive::Attempts::Store.new(root: root).scan.records
+      assert_equal 1, records.count { |record| record.task_generation == "generation-1" }
     end
   end
 

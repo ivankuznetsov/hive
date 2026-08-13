@@ -9,10 +9,14 @@ staging tree. Native failures and bounded-subprocess timeouts keep the previous
 managed QMD intact, so optional repair cannot publish or leave behind an
 ABI-broken update. The bounded staging startup probe also supplies the version
 reported after activation, avoiding a second unbounded executable invocation.
+The authenticated Hive gem now owns a full npm dependency lock, and staging
+uses `npm ci` against the already verified QMD tarball. The installer rejects
+QMD version overrides that are not represented by that lock, so transitive
+dependency ranges cannot drift between otherwise identical Hive installs.
 
 Replaced GNU-only QMD-link canonicalization with Ruby `File.realpath` and
 normalizes a real-install prefix to an absolute path before deriving install
 locations or writing `install-prefix`. Added installer regressions for the
 package/integrity boundary, rebuild and native-probe failures, macOS-style
-`readlink -f` absence, startup timeout cleanup, and relative-prefix sidecars.
-Fixes #209, #210, #211, and #212.
+`readlink -f` absence, startup timeout cleanup, locked-closure validation, and
+relative-prefix sidecars. Fixes #209, #210, #211, and #212.

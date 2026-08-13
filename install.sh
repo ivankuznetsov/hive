@@ -10,11 +10,8 @@ INSTALL_QMD="${HIVE_INSTALL_QMD:-1}"
 DEFAULT_QMD_NPM_PACKAGE="@tobilu/qmd@2.5.3"
 DEFAULT_QMD_NPM_INTEGRITY="sha512-wUKc4pSPDbgs7mV7JYE8/Qj1pNXXatJFV8byTT/T3yLaoAXheFtWu0BgSWwoWGhRkMmxl5Qyitt66NHgbMyeBA=="
 QMD_NPM_PACKAGE="${HIVE_QMD_NPM_PACKAGE:-${DEFAULT_QMD_NPM_PACKAGE}}"
-QMD_NPM_INTEGRITY="${HIVE_QMD_NPM_INTEGRITY:-}"
+QMD_NPM_INTEGRITY="${HIVE_QMD_NPM_INTEGRITY:-${DEFAULT_QMD_NPM_INTEGRITY}}"
 QMD_TIMEOUT_SECONDS="${HIVE_QMD_TIMEOUT_SECONDS:-600}"
-if [[ "$QMD_NPM_PACKAGE" == "$DEFAULT_QMD_NPM_PACKAGE" && -z "$QMD_NPM_INTEGRITY" ]]; then
-  QMD_NPM_INTEGRITY="$DEFAULT_QMD_NPM_INTEGRITY"
-fi
 
 usage() {
   cat <<USAGE
@@ -38,12 +35,11 @@ Hive data directory and links it beside the \`hive\` executable. Set
 HIVE_INSTALL_QMD=0 to skip that step.
 
 QMD env knobs:
-  HIVE_QMD_NPM_PACKAGE  Override the npm package spec used for the QMD
-                        install. Must be an exact \`@tobilu/qmd@X.Y.Z\`
-                        version; defaults to \`${DEFAULT_QMD_NPM_PACKAGE}\`.
+  HIVE_QMD_NPM_PACKAGE  QMD package spec. Must match the release-owned
+                        dependency lock: \`${DEFAULT_QMD_NPM_PACKAGE}\`.
   HIVE_QMD_NPM_INTEGRITY
-                        Required sha512 integrity when overriding the default
-                        QMD version.
+                        QMD tarball integrity. Must match the release-owned
+                        dependency lock.
   HIVE_QMD_TIMEOUT_SECONDS
                         Timeout for each optional npm/QMD/Node subprocess;
                         defaults to ${QMD_TIMEOUT_SECONDS} seconds.
@@ -82,11 +78,8 @@ validate_inputs() {
   case "$INSTALL_QMD" in
     0|false|False|FALSE|no|No|NO) return 0 ;;
   esac
-  if ! [[ "$QMD_NPM_PACKAGE" =~ ^@tobilu/qmd@[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
-    die "invalid HIVE_QMD_NPM_PACKAGE '${QMD_NPM_PACKAGE}'; expected exact @tobilu/qmd@MAJOR.MINOR.PATCH[-pre]"
-  fi
-  if [[ -z "$QMD_NPM_INTEGRITY" ]]; then
-    die "HIVE_QMD_NPM_INTEGRITY is required when HIVE_QMD_NPM_PACKAGE overrides ${DEFAULT_QMD_NPM_PACKAGE}"
+  if [[ "$QMD_NPM_PACKAGE" != "$DEFAULT_QMD_NPM_PACKAGE" ]]; then
+    die "unsupported HIVE_QMD_NPM_PACKAGE '${QMD_NPM_PACKAGE}'; release dependency lock requires ${DEFAULT_QMD_NPM_PACKAGE}"
   fi
   if ! [[ "$QMD_NPM_INTEGRITY" =~ ^sha512-[A-Za-z0-9+/]+={0,2}$ ]]; then
     die "invalid HIVE_QMD_NPM_INTEGRITY; expected sha512-base64"
@@ -411,6 +404,7 @@ qmd_command_failed() {
 install_qmd() {
   local qmd_home qmd_bin qmd_link qmd_stage qmd_stage_bin qmd_package_json
   local qmd_download_dir qmd_pack_json qmd_tarball qmd_tarball_integrity qmd_backup
+  local qmd_lock_root qmd_install_root
   local existing_qmd_link active_qmd active_qmd_canon managed_qmd_canon qmd_version rc
   local qmd_had_original=0
   qmd_home="${data_home}/qmd"
@@ -424,6 +418,14 @@ install_qmd() {
 
   if ! command -v npm >/dev/null 2>&1; then
     warn "missing wiki dependency 'npm'; qmd was not installed — install Node.js/npm and rerun hive update"
+    return 0
+  fi
+
+  qmd_lock_root="${gem_home}/gems/hive-cli-${gem_version}/lib/hive/assets/qmd"
+  if [[ -f "${qmd_lock_root}/package.json" && -f "${qmd_lock_root}/package-lock.json" ]]; then
+    :
+  else
+    warn "release-owned qmd dependency lock is unavailable; qmd was not installed"
     return 0
   fi
 
@@ -463,9 +465,14 @@ install_qmd() {
   qmd_stage="$(mktemp -d "${data_home}/.qmd-stage.XXXXXX")"
   qmd_rollback_stage="$qmd_stage"
   qmd_stage_bin="${qmd_stage}/bin/qmd"
-  log "qmd: installing verified package into staging"
+  qmd_install_root="${qmd_stage}/lib"
+  mkdir -p "$qmd_install_root" "${qmd_stage}/bin"
+  cp "${qmd_lock_root}/package.json" "${qmd_install_root}/package.json"
+  cp "${qmd_lock_root}/package-lock.json" "${qmd_install_root}/package-lock.json"
+  cp "$qmd_tarball" "${qmd_install_root}/qmd.tgz"
+  log "qmd: installing verified package and locked dependency closure into staging"
   if run_with_timeout "$QMD_TIMEOUT_SECONDS" \
-    npm install --global --prefix "$qmd_stage" --no-audit --no-fund "$qmd_tarball"; then
+    npm ci --prefix "$qmd_install_root" --no-audit --no-fund; then
     :
   else
     rc=$?
@@ -473,12 +480,14 @@ install_qmd() {
     rm -rf "$qmd_stage"
     return 0
   fi
+  rm -f "${qmd_install_root}/qmd.tgz"
+  ln -s "../lib/node_modules/.bin/qmd" "$qmd_stage_bin"
 
-  # `npm install` may leave an existing native better-sqlite3 build in place
-  # after a Node upgrade. Rebuild explicitly so `hive update` repairs the
+  # A prior managed tree may carry a native better-sqlite3 build for an older
+  # Node ABI. Rebuild explicitly so `hive update` repairs the
   # NODE_MODULE_VERSION mismatch class of failures.
   if run_with_timeout "$QMD_TIMEOUT_SECONDS" \
-    npm rebuild --global --prefix "$qmd_stage" better-sqlite3; then
+    npm rebuild --prefix "$qmd_install_root" better-sqlite3; then
     :
   else
     rc=$?
@@ -626,8 +635,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "dry run: would run ${gem_home}/bin/hive migrate --all before daemon startup"
   log "dry run: would run ${link_path} daemon install to enable daemon autostart"
   if qmd_install_enabled; then
-    log "dry run: would npm install --global --prefix ${data_home}/qmd ${QMD_NPM_PACKAGE}"
-    log "dry run: would npm rebuild --global --prefix ${data_home}/qmd better-sqlite3"
+    log "dry run: would npm ci the release-owned QMD dependency lock under ${data_home}/qmd"
+    log "dry run: would npm rebuild --prefix ${data_home}/qmd/lib better-sqlite3"
     log "dry run: would link ${bin_home}/qmd"
   else
     log "dry run: would skip qmd install (HIVE_INSTALL_QMD=${INSTALL_QMD})"
@@ -635,6 +644,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   runtime_preflight
   exit 0
 fi
+
+# RubyGems canonicalizes prerelease versions in install directory names
+# (`1.2.3-rc.1` -> `1.2.3.pre.rc.1`). Resolve that spelling before changing
+# GEM_HOME so bundled callers and test harnesses cannot affect lookup.
+gem_version="$(ruby -rrubygems -e 'print Gem::Version.new(ARGV.fetch(0)).to_s' "${version#v}")"
 
 command -v cosign >/dev/null 2>&1 || die "missing installer prerequisite 'cosign'"
 

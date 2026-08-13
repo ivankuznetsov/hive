@@ -1,11 +1,13 @@
 require "test_helper"
 require "base64"
 require "digest"
+require "json"
 require "open3"
 
 class InstallScriptTest < Minitest::Test
   INSTALL_SCRIPT = File.expand_path("../../install.sh", __dir__)
   INSTALL_DOC = File.expand_path("../../install.md", __dir__)
+  QMD_LOCK_ROOT = File.expand_path("../../lib/hive/assets/qmd", __dir__)
   OLD_WRAPPER = <<~SH.freeze
     #!/bin/sh
     # hive-managed: install-wrapper/v1
@@ -248,38 +250,21 @@ class InstallScriptTest < Minitest::Test
       calls = File.readlines(npm_args, chomp: true)
       assert_includes File.read(INSTALL_SCRIPT), 'DEFAULT_QMD_NPM_PACKAGE="@tobilu/qmd@2.5.3"'
       assert calls.any? { |line| line.start_with?("pack @tobilu/qmd@2.5.3 ") }, calls.inspect
-      assert calls.any? { |line| line.include?("install --global") && line.end_with?(".tgz") },
-             calls.inspect
+      assert calls.any? { |line| line.start_with?("ci --prefix ") }, calls.inspect
       refute calls.any? { |line| line.start_with?("install ") && line.include?("@tobilu/qmd@") }, calls.inspect
+      assert File.exist?(File.join(dir, "prefix", "hive", "qmd", "lib", "package-lock.json"))
       assert_empty Dir.glob(File.join(dir, "prefix", "hive", ".qmd-{stage,backup}.*"))
     end
   end
 
-  def test_documented_qmd_repair_fails_closed_before_installing_mismatched_bytes
+  def test_documented_qmd_repair_uses_channel_updater_not_direct_npm_install
     block = File.read(INSTALL_DOC).match(
       %r{## Install / Repair QMD.*?```bash\n(?<body>.*?)\n```}m
     )
     refute_nil block
 
-    Dir.mktmpdir("hive-installer-qmd-doc") do |dir|
-      fake_bin = create_installer_fakes(dir)
-      npm_args = File.join(dir, "npm-args")
-      env = {
-        "PATH" => "#{fake_bin}:/usr/bin:/bin",
-        "HOME" => File.join(dir, "home"),
-        "XDG_DATA_HOME" => File.join(dir, "data"),
-        "XDG_BIN_HOME" => File.join(dir, "bin"),
-        "HIVE_INSTALL_TEST_NPM_ARGS" => npm_args
-      }
-
-      _out, _err, status = Open3.capture3(env, "/bin/bash", "-c", block[:body])
-
-      refute status.success?
-      calls = File.readlines(npm_args, chomp: true)
-      assert calls.any? { |line| line.start_with?("pack @tobilu/qmd@2.5.3 ") }
-      refute calls.any? { |line| line.start_with?("install ") }
-      refute_path_exists File.join(dir, "bin", "qmd")
-    end
+    assert_includes block[:body], "hive update"
+    refute_includes block[:body], "npm install"
   end
 
   def test_qmd_install_rejects_non_exact_or_foreign_package_specs_before_npm
@@ -292,9 +277,29 @@ class InstallScriptTest < Minitest::Test
       )
 
       refute status.success?
-      assert_includes err, "invalid HIVE_QMD_NPM_PACKAGE"
+      assert_includes err, "unsupported HIVE_QMD_NPM_PACKAGE"
       refute_path_exists npm_args
     end
+  end
+
+  def test_qmd_dependency_lock_pins_registry_versions_and_integrities
+    lock = JSON.parse(File.read(File.join(QMD_LOCK_ROOT, "package-lock.json")))
+    packages = lock.fetch("packages")
+    qmd = packages.fetch("node_modules/@tobilu/qmd")
+
+    assert_equal "2.5.3", qmd.fetch("version")
+    assert_equal "file:qmd.tgz", qmd.fetch("resolved")
+    assert_equal "sha512-wUKc4pSPDbgs7mV7JYE8/Qj1pNXXatJFV8byTT/T3yLaoAXheFtWu0BgSWwoWGhRkMmxl5Qyitt66NHgbMyeBA==",
+                 qmd.fetch("integrity")
+    registry_packages = packages.filter_map do |path, metadata|
+      next if path.empty? || metadata["link"] || metadata["resolved"].to_s.start_with?("file:")
+      next unless metadata["resolved"].to_s.start_with?("https://registry.npmjs.org/")
+
+      metadata
+    end
+    refute_empty registry_packages
+    assert registry_packages.all? { |metadata| metadata.fetch("version").match?(/\A\d+\.\d+\.\d+/) }
+    assert registry_packages.all? { |metadata| metadata.fetch("integrity").start_with?("sha512-") }
   end
 
   def test_disabled_qmd_ignores_an_unused_package_override
@@ -336,7 +341,7 @@ class InstallScriptTest < Minitest::Test
       assert status.success?, err
       assert_includes err, "qmd native rebuild"
       assert_equal "#!/bin/sh\nprintf 'old qmd\\n'\n", File.binread(qmd_bin)
-      assert_equal qmd_bin, File.realpath(qmd_link)
+      assert_equal File.realpath(qmd_bin), File.realpath(qmd_link)
       assert_empty Dir.glob(File.join(File.dirname(qmd_home), ".qmd-stage.*"))
     end
   end
@@ -399,7 +404,7 @@ class InstallScriptTest < Minitest::Test
     )
   end
 
-  def test_custom_qmd_version_requires_integrity
+  def test_custom_qmd_version_is_rejected_without_using_npm
     Dir.mktmpdir("hive-installer-qmd-custom-no-integrity") do |dir|
       npm_args = File.join(dir, "npm-args")
       _out, err, status = run_installer(
@@ -409,17 +414,17 @@ class InstallScriptTest < Minitest::Test
       )
 
       refute status.success?
-      assert_includes err, "HIVE_QMD_NPM_INTEGRITY is required"
+      assert_includes err, "release dependency lock requires @tobilu/qmd@2.5.3"
       refute_path_exists npm_args
     end
   end
 
-  def test_custom_qmd_version_rejects_malformed_integrity
+  def test_default_qmd_version_rejects_malformed_integrity
     Dir.mktmpdir("hive-installer-qmd-custom-bad-integrity") do |dir|
       npm_args = File.join(dir, "npm-args")
       _out, err, status = run_installer(
         dir, "none", install_qmd: true,
-        qmd_package: "@tobilu/qmd@2.5.2", qmd_integrity: "sha256-nope",
+        qmd_integrity: "sha256-nope",
         npm_args: npm_args
       )
 
@@ -429,7 +434,7 @@ class InstallScriptTest < Minitest::Test
     end
   end
 
-  def test_custom_qmd_version_accepts_matching_tarball_integrity
+  def test_custom_qmd_version_with_matching_tarball_integrity_is_still_rejected
     Dir.mktmpdir("hive-installer-qmd-custom-integrity") do |dir|
       npm_args = File.join(dir, "npm-args")
       _out, err, status = run_installer(
@@ -438,9 +443,9 @@ class InstallScriptTest < Minitest::Test
         npm_args: npm_args
       )
 
-      assert status.success?, err
-      assert File.readlines(npm_args, chomp: true).any? { |line| line.start_with?("pack @tobilu/qmd@2.5.2 ") }
-      assert File.symlink?(File.join(dir, "bin", "qmd"))
+      refute status.success?
+      assert_includes err, "release dependency lock requires @tobilu/qmd@2.5.3"
+      refute_path_exists npm_args
     end
   end
 
@@ -474,7 +479,7 @@ class InstallScriptTest < Minitest::Test
 
       assert status.success?, err
       refute_includes err, "existing qmd"
-      assert_equal qmd_bin, File.realpath(qmd_link)
+      assert_equal File.realpath(qmd_bin), File.realpath(qmd_link)
     end
   end
 
@@ -557,6 +562,7 @@ class InstallScriptTest < Minitest::Test
       "HIVE_INSTALL_TEST_QMD_MISSING_BIN" => qmd_missing_bin ? "1" : nil,
       "HIVE_INSTALL_TEST_QMD_VERSION_FAILURE" => qmd_version_failure ? "1" : nil,
       "HIVE_INSTALL_TEST_QMD_HANG" => qmd_hang,
+      "HIVE_INSTALL_TEST_QMD_ASSET_ROOT" => QMD_LOCK_ROOT,
       "HIVE_INSTALL_TEST_HIVE_ARGS" => File.join(dir, "hive-args")
     }.compact
     Open3.capture3(
@@ -621,10 +627,14 @@ class InstallScriptTest < Minitest::Test
       #!/bin/bash
       [[ "$HIVE_INSTALL_TEST_FAILURE" == "gem_failure" ]] && exit 42
       bindir=""
+      install_dir=""
       while [[ $# -gt 0 ]]; do
         if [[ "$1" == "--bindir" ]]; then
           shift
           bindir="$1"
+        elif [[ "$1" == "--install-dir" ]]; then
+          shift
+          install_dir="$1"
         fi
         shift
       done
@@ -650,6 +660,19 @@ class InstallScriptTest < Minitest::Test
       exit 0
       HIVE
       /usr/bin/chmod 755 "$bindir/hive"
+      asset_dir="$install_dir/gems/hive-cli-0.0.0/lib/hive/assets/qmd"
+      /usr/bin/mkdir -p "$asset_dir" "$install_dir/specifications"
+      /usr/bin/cp "$HIVE_INSTALL_TEST_QMD_ASSET_ROOT/package.json" "$asset_dir/package.json"
+      /usr/bin/cp "$HIVE_INSTALL_TEST_QMD_ASSET_ROOT/package-lock.json" "$asset_dir/package-lock.json"
+      cat > "$install_dir/specifications/hive-cli-0.0.0.gemspec" <<'GEMSPEC'
+      Gem::Specification.new do |spec|
+        spec.name = "hive-cli"
+        spec.version = "0.0.0"
+        spec.summary = "installer fixture"
+        spec.authors = ["Hive"]
+        spec.files = []
+      end
+      GEMSPEC
     SH
     write_executable(File.join(fake_bin, "mv"), <<~'SH')
       #!/bin/bash
@@ -707,7 +730,7 @@ class InstallScriptTest < Minitest::Test
           printf 'fixture qmd tarball\n' > "$destination/$filename"
           printf '[{"filename":"%s"}]\n' "$filename"
           ;;
-        install)
+        ci)
           [ "${HIVE_INSTALL_TEST_QMD_HANG:-}" = "install" ] && /usr/bin/sleep 5
           [ "${HIVE_INSTALL_TEST_QMD_INSTALL_FAILURE:-}" = "1" ] && exit 42
           prefix=""
@@ -718,11 +741,11 @@ class InstallScriptTest < Minitest::Test
             fi
             shift
           done
-          mkdir -p "$prefix/lib/node_modules/@tobilu/qmd/node_modules/better-sqlite3"
-          printf '{"name":"@tobilu/qmd"}\n' > "$prefix/lib/node_modules/@tobilu/qmd/package.json"
+          mkdir -p "$prefix/node_modules/@tobilu/qmd/node_modules/better-sqlite3"
+          printf '{"name":"@tobilu/qmd"}\n' > "$prefix/node_modules/@tobilu/qmd/package.json"
           [ "${HIVE_INSTALL_TEST_QMD_MISSING_BIN:-}" = "1" ] && exit 0
-          mkdir -p "$prefix/bin"
-          cat > "$prefix/bin/qmd" <<'QMD'
+          mkdir -p "$prefix/node_modules/.bin"
+          cat > "$prefix/node_modules/.bin/qmd" <<'QMD'
 #!/bin/sh
 if [ "${1:-}" = "--version" ]; then
   [ "${HIVE_INSTALL_TEST_QMD_HANG:-}" = "version" ] && /usr/bin/sleep 5
@@ -730,7 +753,7 @@ if [ "${1:-}" = "--version" ]; then
   printf 'qmd 2.5.3\n'
 fi
 QMD
-          chmod 755 "$prefix/bin/qmd"
+          chmod 755 "$prefix/node_modules/.bin/qmd"
           ;;
         rebuild)
           [ "${HIVE_INSTALL_TEST_QMD_REBUILD_FAILURE:-}" = "1" ] && exit 42

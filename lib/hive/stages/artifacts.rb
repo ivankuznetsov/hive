@@ -68,7 +68,8 @@ module Hive
           requirement = store.open_generation!(
             identity: identity,
             claims: proposal.fetch("claims"), exclusions: proposal.fetch("exclusions"),
-            inference: inference.fetch(:actor)
+            inference: inference.fetch(:actor),
+            reviewer_capabilities: reviewer_capabilities(cfg)
           )
         end
         generation = requirement.fetch("generation")
@@ -306,9 +307,7 @@ module Hive
       end
 
       def preflight_reviewer!(cfg, claims)
-        capabilities = evidence_role_config(cfg, "reviewer").fetch(
-          "capabilities", DEFAULT_REVIEW_CAPABILITIES
-        )
+        capabilities = reviewer_capabilities(cfg)
         kinds = Array(capabilities["proof_kinds"]).map(&:to_s)
         required = Array(claims).map { |claim| claim.fetch("proof_kind") }.uniq
         missing = required - kinds
@@ -320,6 +319,12 @@ module Hive
                 "artifacts evidence reviewer must inspect actual temporal video, not storyboard frames"
         end
         true
+      end
+
+      def reviewer_capabilities(cfg)
+        evidence_role_config(cfg, "reviewer").fetch(
+          "capabilities", DEFAULT_REVIEW_CAPABILITIES
+        )
       end
 
       def preflight_producer!(cfg, claims)

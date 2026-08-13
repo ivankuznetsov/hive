@@ -38,7 +38,8 @@ module Hive
           @controller_binding = controller_binding
         end
 
-        def open_generation!(identity:, claims:, exclusions:, inference:)
+        def open_generation!(identity:, claims:, exclusions:, inference:,
+                             reviewer_capabilities: nil)
           canonical = canonical_identity(identity)
           binding = controller_binding
           task_generation = binding.fetch("task_generation").to_s
@@ -59,6 +60,11 @@ module Hive
             implementation: canonical, claims: claims,
             exclusions: exclusions, inference: inference
           )
+          capabilities = canonical_reviewer_capabilities(
+            reviewer_capabilities || {
+              "proof_kinds" => Proof::KINDS, "temporal_video" => true
+            }
+          )
           document = {
             "schema" => SCHEMAS.fetch(:requirement),
             "schema_version" => 1,
@@ -73,6 +79,7 @@ module Hive
             "exclusions" => semantic.fetch("exclusions"),
             "traceability" => semantic.fetch("traceability"),
             "inference" => semantic.fetch("inference"),
+            "reviewer_capabilities" => capabilities,
             "created_at" => iso_time(@clock.call)
           }
           write_once(
@@ -380,7 +387,65 @@ module Hive
           LegacyCaptureReader.new(@task.folder).read
         end
 
+        def package
+          pointer = read_current!
+          generation = pointer.fetch("generation")
+          requirement_document = requirement(generation: generation)
+          unless requirement_document.values_at("task", "project", "generation") ==
+                 [ @task.slug.to_s, @project, generation ] && valid_pointer_digests?(pointer)
+            raise StoreError, "outcome-evidence current pointer contradicts its generation"
+          end
+          attempt_documents = attempts(generation: generation)
+          named_ids = pointer.fetch("attempts").map { |item| item.fetch("attempt_id") }
+          unless attempt_documents.map { |item| item.fetch("attempt_id") } == named_ids
+            raise StoreError, "outcome-evidence current pointer omits or reorders attempts"
+          end
+          attempt_documents.each do |attempt|
+            validate_retained_evidence!(requirement_document, attempt)
+          end
+          case pointer.fetch("status")
+          when "accepted"
+            raise StoreError, "accepted package failed publication validation" unless accepted?(generation: generation)
+          when "blocked"
+            expected = recovery_digest(
+              generation: generation, reason: pointer.fetch("reason"),
+              attempts: pointer.fetch("attempts"),
+              failed_claims: pointer.fetch("failed_claims"),
+              reviewer_reasons: pointer.fetch("reviewer_reasons")
+            )
+            unless pointer.fetch("recovery_digest") == expected &&
+                   attempt_documents.none? { |attempt| attempt.fetch("status") == "accepted" }
+              raise StoreError, "blocked package recovery binding is invalid"
+            end
+          else
+            raise StoreError, "outcome-evidence package status is invalid"
+          end
+          {
+            "current" => pointer,
+            "requirement" => requirement_document,
+            "attempts" => attempt_documents
+          }
+        end
+
         private
+
+        def canonical_reviewer_capabilities(value)
+          data = value.to_h.transform_keys(&:to_s)
+          unless data.keys.sort == %w[proof_kinds temporal_video]
+            raise StoreError, "reviewer capabilities must be a closed object"
+          end
+          kinds = Array(data.fetch("proof_kinds")).map(&:to_s)
+          unless kinds.any? && kinds.uniq == kinds && (kinds - Proof::KINDS).empty?
+            raise StoreError, "reviewer proof-kind capabilities are invalid"
+          end
+          temporal = data.fetch("temporal_video")
+          unless [ true, false ].include?(temporal)
+            raise StoreError, "reviewer temporal-video capability must be boolean"
+          end
+          { "proof_kinds" => kinds, "temporal_video" => temporal }
+        rescue NoMethodError, KeyError
+          raise StoreError, "reviewer capabilities must be a closed object"
+        end
 
         def existing_requirement(generation, canonical:, task_generation:, recovery_epoch:)
           path = requirement_path(generation)

@@ -2,9 +2,11 @@ require "test_helper"
 require "open3"
 require "tmpdir"
 require_relative "../../../test/support/workflow_helpers"
+require_relative "../support/outcome_evidence_helper"
 
 class TasksTest < ActionDispatch::IntegrationTest
   include HiveWorkflowTestHelper
+  include OutcomeEvidenceHelper
 
   setup do
     @project = create_hive_project!
@@ -460,11 +462,36 @@ class TasksTest < ActionDispatch::IntegrationTest
     get "/tasks/#{@project}/#{@slug}"
 
     assert_response :success
-    assert_select "section.demo h2", text: "Demo", count: 1
+    assert_select "section.demo h2", text: /Demo/, count: 1
+    assert_select ".legacy-label", text: "Legacy diagnostic", count: 1
     assert_select "img[src=?][alt=?]", "/tasks/#{@project}/#{@slug}/media/01-home.png", "Home page after load", count: 1
     assert_select "img[src=?][alt=?]", "/tasks/#{@project}/#{@slug}/media/demo.gif", "Dark mode toggle", count: 1
     assert_select "figcaption", text: /Home page after load/
     assert_select "a[href='https://screenote.test/shot']", text: "View / annotate on screenote", count: 1
+  end
+
+  test "task page leads with accepted claim evidence and serves admitted representations" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    result = write_accepted_outcome_evidence(
+      folder, slug: @slug, project: @project, project_root: folder.join("..", "..", "..", "..").cleanpath
+    )
+    refresh_status_feed!
+
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_response :success
+    assert_select "section.outcome-evidence h2", text: "Outcome evidence", count: 1
+    assert_select ".evidence-status--accepted", text: "accepted", count: 1
+    assert_select ".evidence-claim h3", text: /checkout confirmation/, count: 1
+    assert_select ".evidence-verdict--accepted", text: /directly explains/, count: 1
+    assert_select "details.evidence-audit summary", text: "Review history and provenance", count: 1
+    assert_operator response.body.index("Outcome evidence"), :<, response.body.index("Artifacts")
+
+    representation = result.fetch(:evidence).fetch("representations").last
+    get task_evidence_path(@project, @slug, "attempt-01-web", representation.fetch("sha256"))
+    assert_response :success
+    assert_equal "text/plain", response.media_type
+    assert_includes response.body, "Checkout outcome"
   end
 
   test "task page renders capture failed banner without broken images" do

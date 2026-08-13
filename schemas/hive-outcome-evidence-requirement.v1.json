@@ -7,7 +7,8 @@
   "required": [
     "schema", "schema_version", "task", "project", "task_generation",
     "recovery_epoch", "generation", "requirement", "implementation",
-    "claims", "exclusions", "traceability", "inference", "created_at"
+    "claims", "exclusions", "traceability", "inference",
+    "reviewer_capabilities", "created_at"
   ],
   "properties": {
     "schema": { "const": "hive-outcome-evidence-requirement" },
@@ -36,6 +37,7 @@
       }
     },
     "inference": { "$ref": "#/$defs/Actor" },
+    "reviewer_capabilities": { "$ref": "#/$defs/ReviewerCapabilities" },
     "created_at": { "type": "string", "format": "date-time", "maxLength": 64 }
   },
   "$defs": {
@@ -79,6 +81,17 @@
         "agent": { "$ref": "#/$defs/SafeId" },
         "model": { "type": "string", "minLength": 1, "maxLength": 128 },
         "effort": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "ReviewerCapabilities": {
+      "type": "object", "additionalProperties": false,
+      "required": ["proof_kinds", "temporal_video"],
+      "properties": {
+        "proof_kinds": {
+          "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true,
+          "items": { "enum": ["screenshot", "video", "terminal", "document"] }
+        },
+        "temporal_video": { "type": "boolean" }
       }
     },
     "Claim": {

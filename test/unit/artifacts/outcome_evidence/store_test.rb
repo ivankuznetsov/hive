@@ -32,6 +32,11 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       assert_equal generation, pointer.fetch("generation")
       assert_equal "accepted", pointer.fetch("status")
       assert_equal pointer, store.current
+      package = store.package
+      assert_equal "accepted", package.dig("current", "status")
+      assert_equal %w[screenshot video terminal document],
+                   package.dig("requirement", "reviewer_capabilities", "proof_kinds")
+      assert_equal [ "attempt-1" ], package.fetch("attempts").map { |item| item.fetch("attempt_id") }
       assert store.accepted?
       assert store.accepted_for_identity?(identity)
       refute store.accepted_for_identity?(identity.merge("implementation_head" => "c" * 40))
@@ -104,6 +109,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       assert_match(/\A[0-9a-f]{64}\z/, pointer.fetch("recovery_digest"))
       refute store.accepted?
       assert store.blocked_for_identity?(identity)
+      assert_equal "blocked", store.package.dig("current", "status")
     end
   end
 

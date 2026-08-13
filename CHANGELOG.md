@@ -11,6 +11,8 @@ All notable changes are documented here, newest first. Hive ships frequent micro
   mutation lock, so upgrades now complete and remain idempotent. (#1021)
 - Fixed recovery resolving tasks stored under historical workflow folder
   layouts, allowing pre-update tasks to reach the migration path. (#995)
+- Updated sqlite3 to 2.9.6 to address GHSA-mwm8-39rw-8826 in the CLI and
+  packaged web dependency closures.
 
 ## 0.7.1
 

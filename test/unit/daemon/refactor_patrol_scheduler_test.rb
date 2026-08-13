@@ -182,6 +182,32 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_exhausted_review_budget_pauses_discovery_without_blocking_actions
+    with_project do |dir, entry, store|
+      enqueue(store, job_id: "queued-review")
+      write_action_job(dir, store)
+      stages = []
+      budget = Object.new
+      budget.define_singleton_method(:remaining_launches) do |stage:|
+        stages << stage
+        0
+      end
+      instance = scheduler(
+        entry, store,
+        token_budget_factory: ->(_project_root, _cfg) { budget }
+      )
+
+      candidates = instance.candidates(now: T0)
+
+      assert_equal [ "action-job" ], candidates.map { |item| item.fetch(:job_id) }
+      assert_equal [ :action ], candidates.map { |item| item.fetch(:action_phase) }
+      assert_equal [ "refactor-patrol-review" ], stages
+      queued = store.read_job("queued-review")
+      assert_equal "queued", queued.fetch("state")
+      assert_empty queued.fetch("attempts")
+    end
+  end
+
   def test_malformed_action_child_result_records_durable_action_backoff
     with_project do |dir, entry, store|
       write_action_job(dir, store)
@@ -2133,13 +2159,14 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def scheduler(entry, store, claim_resolver: ->(_attempt) { :resolved })
+  def scheduler(entry, store, claim_resolver: ->(_attempt) { :resolved }, **options)
     Hive::Daemon::RefactorPatrolScheduler.new(
       registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
       job_store_factory: ->(_path) { store },
       repository_resolver: ->(_entry, _cfg) { repository_identity },
       checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a",
-      claim_resolver: claim_resolver
+      claim_resolver: claim_resolver,
+      **options
     )
   end
 

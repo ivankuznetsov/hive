@@ -32,6 +32,7 @@ module Hive
     # the discovery claim/fence lifecycle around its child process.
     class RefactorPatrolScheduler
       PATROL_STAGE = "refactor-patrol".freeze
+      REVIEW_STAGE = "refactor-patrol-review".freeze
       PATROL_SLUG_PREFIX = "refactor-patrol".freeze
       MODULE_SCHEDULE = "*/10 * * * *".freeze
       RETRY_BACKOFF_SEC = 60
@@ -63,7 +64,8 @@ module Hive
                      lease_sec: 7200, dry_run: false,
                      migration_authority: :legacy, migration_ownership: nil,
                      migration_snapshot: nil, evidence_store_factory: nil,
-                     event_publisher: nil, module_execution: nil)
+                     event_publisher: nil, module_execution: nil,
+                     token_budget_factory: nil)
         @registry = registry
         @config_loader = config_loader
         @job_store_factory = job_store_factory
@@ -106,6 +108,9 @@ module Hive
         end
         @event_publisher = event_publisher || Hive::Modules::EventPublisher.new
         @module_execution = module_execution
+        @token_budget_factory = token_budget_factory || lambda do |project_root, cfg|
+          Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
+        end
         @occurrence_lifecycle =
           Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle.new(
             migration_authority: @migration_authority,
@@ -155,7 +160,7 @@ module Hive
           unless recover_occurrences(store, entry, now)
             next [ entry.fetch("name"), [] ]
           end
-          discovery = if entry.dig("_refactor_patrol_cfg", "refactor_patrol", "enabled") == true
+          discovery = if discovery_available?(entry)
             store.claimable_jobs(now: now)
           else
             []
@@ -600,6 +605,14 @@ module Hive
           entry.fetch("path"),
           hive_state_path: entry.fetch("hive_state_path")
         )
+      end
+
+      def discovery_available?(entry)
+        cfg = entry.fetch("_refactor_patrol_cfg")
+        return false unless cfg.dig("refactor_patrol", "enabled") == true
+
+        @token_budget_factory.call(entry.fetch("path"), cfg)
+          .remaining_launches(stage: REVIEW_STAGE).positive?
       end
 
       def result_path_for(entry, job_id, phase)

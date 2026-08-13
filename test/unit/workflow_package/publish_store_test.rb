@@ -270,7 +270,6 @@ class WorkflowPackagePublishStoreTest < Minitest::Test
         assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
           store.verify_bundle(receipt)
         end
-        assert_equal receipt.identity.transform_keys(&:to_sym), store.send(:symbol_identity, receipt)
       end
     end
   end

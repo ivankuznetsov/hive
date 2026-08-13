@@ -53,15 +53,6 @@ module Hive
           append(receipts_root, receipt.receipt_id, receipt)
         end
 
-        def fetch_capture(capture_id)
-          capture_id = validated_id(capture_id, :capture)
-          read_record(
-            File.join(captures_root, "#{capture_id}.json"),
-            expected_id: capture_id,
-            type: PatrolCapture
-          )
-        end
-
         def captures
           records(captures_root, type: PatrolCapture)
         end

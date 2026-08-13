@@ -164,6 +164,31 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_runtime_ready_is_published_and_retained_on_later_records
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, _reader = build(path)
+
+      assembler.runtime_ready(now: T0)
+      ready = JSON.parse(File.binread(path))
+      assert_equal true, ready.fetch("runtime_ready")
+      assert_equal "complete", ready.fetch("phase")
+
+      assembler.begin_tick(now: T0 + 1)
+      started = JSON.parse(File.binread(path))
+      assert_equal true, started.fetch("runtime_ready")
+      assert_equal "started", started.fetch("phase")
+
+      assembler.shutdown(
+        admission_closed: true, drained: true,
+        child_inventory: [], now: T0 + 2
+      )
+      shutdown = JSON.parse(File.binread(path))
+      assert_equal true, shutdown.fetch("runtime_ready")
+      assert shutdown.key?("shutdown")
+    end
+  end
+
   def test_reconfigured_validity_is_measured_from_tick_completion
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")

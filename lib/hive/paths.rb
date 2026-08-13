@@ -44,24 +44,8 @@ module Hive
       File.join(attempts_root, "records")
     end
 
-    def attempt_logs_root
-      File.join(attempts_root, "logs")
-    end
-
-    def attempt_outputs_root
-      File.join(attempts_root, "outputs")
-    end
-
-    def attempt_generation_locks_root
-      File.join(attempts_root, "generation-locks")
-    end
-
     def attempt_proof_root
       File.join(attempts_root, "proof")
-    end
-
-    def attempt_decision_indexes_root
-      File.join(attempts_root, "decision-indexes")
     end
 
     # Owner-private, host-global provider-account and exact-model health.

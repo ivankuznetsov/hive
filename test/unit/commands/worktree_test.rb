@@ -150,6 +150,28 @@ class HiveCommandsWorktreeTest < Minitest::Test
     assert File.exist?(File.join(@worktree, "wiki", "residue.md"))
   end
 
+  def test_existing_secret_shaped_filename_is_redacted_from_status_and_commit_output
+    secret = "AKIAABCDEFGHIJKLMNOP"
+    path = "wiki/#{secret}.md"
+    FileUtils.mkdir_p(File.dirname(File.join(@worktree, path)))
+    File.write(File.join(@worktree, path), "baseline\n")
+    run!("git", "-C", @worktree, "add", "--", path)
+    run!("git", "-C", @worktree, "commit", "-m", "add legacy fixture", "--quiet")
+    File.write(File.join(@worktree, path), "changed\n")
+
+    status_payload = run_command("status")
+    status_json = JSON.generate(status_payload)
+    refute_includes status_json, secret
+    assert_equal [ "wiki/[REDACTED:aws_access_key].md" ], status_payload.fetch("residue_paths")
+    assert_equal "wiki/[REDACTED:aws_access_key].md",
+                 status_payload.fetch("porcelain").fetch(0).fetch("path")
+
+    commit_payload = run_command("commit-residue")
+    commit_json = JSON.generate(commit_payload)
+    refute_includes commit_json, secret
+    assert_equal [ "wiki/[REDACTED:aws_access_key].md" ], commit_payload.fetch("committed_paths")
+  end
+
   def test_discard_residue_removes_only_marker_recorded_paths
     FileUtils.mkdir_p(File.join(@worktree, "wiki"))
     FileUtils.mkdir_p(File.join(@worktree, "lib"))

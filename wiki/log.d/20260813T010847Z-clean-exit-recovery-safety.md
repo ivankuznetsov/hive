@@ -26,4 +26,5 @@ consumer mapping, notification suppression exceptions, and legacy-event
 compatibility. Independent review additionally pinned Git pathspec-magic
 filenames, binary secret blobs, literal-path discard, lossless marker path
 encoding, secret-shaped filename rejection and notification redaction, JSON
-usage errors, and the canonical recovery-skill route.
+usage errors, redaction of existing secret-shaped filenames across worktree
+status/commit/discard response fields, and the canonical recovery-skill route.

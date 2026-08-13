@@ -3,6 +3,7 @@ require "open3"
 require "base64"
 require "hive"
 require "hive/config"
+require "hive/events"
 require "hive/lock"
 require "hive/markers"
 require "hive/stages/auto_commit"
@@ -166,12 +167,12 @@ module Hive
           subject: (@message unless @message.to_s.empty?)
         )
         unless %i[clean auto_committed].include?(result[:status])
-          raise Hive::WorktreeError, result[:message].to_s
+          raise Hive::WorktreeError, display_message(result[:message])
         end
 
         status_payload(task, worktree_path, action: "commit-residue").merge(
           "commit" => result[:head],
-          "committed_paths" => Array(result[:paths]),
+          "committed_paths" => display_paths(result[:paths]),
           "commit_subject" => result[:commit_subject]
         )
       end
@@ -183,12 +184,12 @@ module Hive
         unknown = requested - dirty_paths
         unless unknown.empty?
           raise Hive::UsageError,
-                "refusing to discard paths not currently reported as residue: #{unknown.join(', ')}"
+                "refusing to discard paths not currently reported as residue: #{display_paths(unknown).join(', ')}"
         end
 
         restore_paths!(worktree_path, requested)
         status_payload(task, worktree_path, action: "discard-residue").merge(
-          "discarded_paths" => requested
+          "discarded_paths" => display_paths(requested)
         )
       end
 
@@ -243,6 +244,9 @@ module Hive
 
       def status_payload(task, worktree_path, action:)
         status = worktree_status(worktree_path)
+        display_entries = status.fetch("entries").map do |entry|
+          entry.merge("path" => display_path(entry.fetch("path")))
+        end
         {
           "schema" => envelope_schema,
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(envelope_schema),
@@ -256,8 +260,8 @@ module Hive
           "head" => git_capture(worktree_path, "rev-parse", "HEAD", label: "git rev-parse HEAD").strip,
           "clean" => status.fetch("entries").empty?,
           "untracked_count" => status.fetch("entries").count { |entry| entry.fetch("status") == "??" },
-          "residue_paths" => status.fetch("entries").map { |entry| entry.fetch("path") },
-          "porcelain" => status.fetch("entries"),
+          "residue_paths" => display_paths(status.fetch("entries").map { |entry| entry.fetch("path") }),
+          "porcelain" => display_entries,
           "next_action" => {
             "kind" => "refresh_status",
             "command" => "hive status --json",
@@ -289,9 +293,21 @@ module Hive
         result = Hive::Stages::AutoCommit.capture_git_with_timeout(
           [ "git", "--literal-pathspecs", "-C", worktree_path, *args ], label: label
         )
-        raise Hive::WorktreeError, result[:message].to_s unless result[:success]
+        raise Hive::WorktreeError, display_message(result[:message]) unless result[:success]
 
         result[:stdout].to_s
+      end
+
+      def display_paths(paths)
+        Array(paths).map { |path| display_path(path) }.uniq
+      end
+
+      def display_path(path)
+        Hive::Events.clean_exit_paths([ path ]).fetch(0)
+      end
+
+      def display_message(message)
+        Hive::SecretPatterns.redact(message.to_s)
       end
 
       def render_text(payload)

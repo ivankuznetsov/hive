@@ -1460,7 +1460,63 @@ class ConfigTest < Minitest::Test
                    "artifacts timeout must default to 3600 seconds per plan U1"
       assert_equal "claude", cfg.dig("artifacts", "agent"),
                    "artifacts agent must default to claude per plan U1"
+      assert_equal "read-only", cfg.dig("artifacts", "evidence", "inference", "permissions")
+      assert_equal 2, cfg.dig("artifacts", "evidence", "max_recaptures")
+      assert_nil cfg.dig("artifacts", "evidence", "producer", "permissions")
+      assert_equal true, cfg.dig("artifacts", "evidence", "reviewer", "capabilities", "temporal_video")
       assert_nil cfg.dig("artifacts", "capture", "provider")
+    end
+  end
+
+  def test_load_accepts_independent_outcome_evidence_role_overrides
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        artifacts:
+          evidence:
+            max_recaptures: 1
+            inference:
+              agent: codex
+              model: gpt-5.6-sol
+              effort: high
+              permissions: read-only
+            producer:
+              agent: claude
+            reviewer:
+              agent: codex
+              permissions: read-only
+              capabilities:
+                proof_kinds: [video, document]
+                temporal_video: true
+      YAML
+
+      evidence = Hive::Config.load(dir).dig("artifacts", "evidence")
+      assert_equal 1, evidence.fetch("max_recaptures")
+      assert_equal "codex", evidence.dig("inference", "agent")
+      assert_equal "claude", evidence.dig("producer", "agent")
+      assert_equal "codex", evidence.dig("reviewer", "agent")
+      assert_equal %w[video document], evidence.dig("reviewer", "capabilities", "proof_kinds")
+    end
+  end
+
+  def test_load_rejects_open_or_invalid_outcome_evidence_role_configuration
+    cases = [
+      "artifacts:\n  evidence: nope",
+      "artifacts:\n  evidence:\n    fourth_role: {}",
+      "artifacts:\n  evidence:\n    producer:\n      shell: true",
+      "artifacts:\n  evidence:\n    producer:\n      permissions: yolo",
+      "artifacts:\n  evidence:\n    max_recaptures: -1",
+      "artifacts:\n  evidence:\n    max_recaptures: 3",
+      "artifacts:\n  evidence:\n    max_recaptures: two",
+      "artifacts:\n  evidence:\n    reviewer:\n      capabilities:\n        proof_kinds: [storyboard]\n        temporal_video: true",
+      "artifacts:\n  evidence:\n    reviewer:\n      capabilities:\n        proof_kinds: [video]\n        temporal_video: maybe"
+    ]
+    cases.each do |yaml|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), yaml)
+        assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      end
     end
   end
 

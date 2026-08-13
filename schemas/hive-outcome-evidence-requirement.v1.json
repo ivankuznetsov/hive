@@ -6,7 +6,8 @@
   "additionalProperties": false,
   "required": [
     "schema", "schema_version", "task", "project", "task_generation",
-    "recovery_epoch", "generation", "requirement", "implementation", "created_at"
+    "recovery_epoch", "generation", "requirement", "implementation",
+    "claims", "exclusions", "traceability", "inference", "created_at"
   ],
   "properties": {
     "schema": { "const": "hive-outcome-evidence-requirement" },
@@ -18,11 +19,29 @@
     "generation": { "$ref": "#/$defs/Digest" },
     "requirement": { "const": "outcome_evidence_required" },
     "implementation": { "$ref": "#/$defs/Implementation" },
+    "claims": {
+      "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
+      "items": { "$ref": "#/$defs/Claim" }
+    },
+    "exclusions": {
+      "type": "array", "maxItems": 64, "uniqueItems": true,
+      "items": { "$ref": "#/$defs/Exclusion" }
+    },
+    "traceability": {
+      "type": "object", "minProperties": 1, "maxProperties": 10000,
+      "propertyNames": { "$ref": "#/$defs/SafePath" },
+      "additionalProperties": {
+        "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
+        "items": { "$ref": "#/$defs/SafeId" }
+      }
+    },
+    "inference": { "$ref": "#/$defs/Actor" },
     "created_at": { "type": "string", "format": "date-time", "maxLength": 64 }
   },
   "$defs": {
     "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "Oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "SafeId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
     "SafePath": {
       "type": "string", "minLength": 1, "maxLength": 4096,
       "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\u0000]+$"
@@ -50,6 +69,36 @@
           "uniqueItems": true, "items": { "$ref": "#/$defs/SafePath" }
         },
         "changed_paths_digest": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "Actor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["context_id", "agent", "model", "effort"],
+      "properties": {
+        "context_id": { "$ref": "#/$defs/SafeId" },
+        "agent": { "$ref": "#/$defs/SafeId" },
+        "model": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "effort": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "Claim": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "statement", "changed_paths", "proof_kind"],
+      "properties": {
+        "id": { "$ref": "#/$defs/SafeId" },
+        "statement": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "changed_paths": { "type": "array", "minItems": 1, "maxItems": 10000, "uniqueItems": true, "items": { "$ref": "#/$defs/SafePath" } },
+        "proof_kind": { "enum": ["screenshot", "video", "terminal", "document"] }
+      }
+    },
+    "Exclusion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "statement", "changed_paths", "reason"],
+      "properties": {
+        "id": { "$ref": "#/$defs/SafeId" },
+        "statement": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "changed_paths": { "type": "array", "minItems": 1, "maxItems": 10000, "uniqueItems": true, "items": { "$ref": "#/$defs/SafePath" } },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1024 }
       }
     }
   }

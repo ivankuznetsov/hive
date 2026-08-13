@@ -130,6 +130,33 @@ class TaskActionGenericTest < Minitest::Test
     assert_includes diagnostic.dig("suggested_next_action", "command"), "hive act workflow.retry"
   end
 
+  def test_outcome_evidence_block_exposes_the_exact_recovery_cas_before_workflow_retry
+    generation = "a" * 64
+    digest = "b" * 64
+    action = action_for(
+      "report", :error,
+      {
+        "reason" => "outcome_evidence_recaptures_exhausted",
+        "generation" => generation,
+        "recovery_digest" => digest,
+        "attempt_count" => "3",
+        "failed_claims" => "claim-flow"
+      },
+      project_name: "demo"
+    )
+
+    assert_equal "Blocked", action.label
+    diagnostic = action.diagnostic
+    assert_includes diagnostic.fetch("detail"), "3 admitted attempt(s)"
+    assert_includes diagnostic.fetch("detail"), "claim-flow"
+    command = diagnostic.dig("suggested_next_action", "command")
+    assert_equal(
+      "hive evidence recover demo:#{SLUG} --generation #{generation} --recovery-digest #{digest}",
+      command
+    )
+    refute_includes command, "workflow.retry"
+  end
+
   def test_council_marker_to_action_matrix
     fresh = action_for("review", :none, descriptor: council_workflow)
     assert_equal "ready_to_run", fresh.key

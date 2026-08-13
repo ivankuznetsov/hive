@@ -9,9 +9,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
 
   def test_round_trips_a_universal_append_only_generation_and_atomic_current_pointer
     with_store do |store, task, controller|
-      requirement = store.open_generation!(
-        identity: identity
-      )
+      requirement = store.open_generation!(**requirement_input)
       generation = requirement.fetch("generation")
 
       assert_equal "outcome_evidence_required", requirement.fetch("requirement")
@@ -23,30 +21,38 @@ class OutcomeEvidenceStoreTest < Minitest::Test
         generation: generation,
         attempt_id: "attempt-1",
         status: "accepted",
-        evidence: [ document_evidence(task) ]
+        evidence: [ document_evidence(task) ],
+        producer: actor("producer-1"),
+        review: accepted_review(task, actor("reviewer-1"))
       )
       pointer = store.publish_current!(
         generation: generation, attempt_id: attempt.fetch("attempt_id")
       )
 
       assert_equal generation, pointer.fetch("generation")
+      assert_equal "accepted", pointer.fetch("status")
       assert_equal pointer, store.current
       assert store.accepted?
+      assert store.accepted_for_identity?(identity)
+      refute store.accepted_for_identity?(identity.merge("implementation_head" => "c" * 40))
       assert_equal 0o600,
                    File.stat(File.join(task.folder, "outcome-evidence", "current.json")).mode & 0o777
     end
   end
 
   def test_recovery_epoch_changes_generation_and_attempts_are_write_once
-    with_store do |store, _task, controller|
-      first = store.open_generation!(identity: identity)
+    with_store do |store, task, controller|
+      first = store.open_generation!(**requirement_input)
       controller["recovery_epoch"] = 2
-      second = store.open_generation!(identity: identity)
+      second = store.open_generation!(**requirement_input)
       refute_equal first.fetch("generation"), second.fetch("generation")
 
       attempt = {
         generation: first.fetch("generation"), attempt_id: "attempt-1",
-        status: "rejected", evidence: [], diagnostic: "missing verification"
+        status: "revise", evidence: [ document_evidence(task) ],
+        producer: actor("producer-revise"),
+        review: revising_review(task, actor("reviewer-revise")),
+        diagnostic: "semantic review requested a targeted revision for claim-a"
       }
       original = store.append_attempt!(**attempt)
       assert_equal original, store.append_attempt!(**attempt)
@@ -56,9 +62,54 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     end
   end
 
+  def test_open_generation_is_idempotent_and_keeps_the_original_inference
+    with_store do |store, _task, _controller|
+      first = store.open_generation!(**requirement_input)
+      changed = requirement_input.merge(
+        inference: actor("inference-after-interruption"),
+        claims: [
+          {
+            "id" => "claim-other", "statement" => "A later inference must not rewrite durable claims.",
+            "proof_kind" => "document", "changed_paths" => identity.fetch("changed_paths")
+          }
+        ]
+      )
+
+      assert_equal first, store.open_generation!(**changed)
+      assert_equal "inference-1", first.dig("inference", "context_id")
+    end
+  end
+
+  def test_blocked_pointer_retains_attempt_history_and_a_guarded_recovery_digest
+    with_store do |store, task, _controller|
+      requirement = store.open_generation!(**requirement_input)
+      generation = requirement.fetch("generation")
+      attempt = store.append_attempt!(
+        generation: generation, attempt_id: "attempt-01-deadbeef", status: "revise",
+        evidence: [ document_evidence(task) ], producer: actor("producer-revise"),
+        review: revising_review(task, actor("reviewer-revise")),
+        diagnostic: "claim-a needs a clearer outcome explanation"
+      )
+
+      pointer = store.publish_blocked!(
+        generation: generation, reason: "recaptures_exhausted",
+        failed_claims: [ "claim-a" ],
+        reviewer_reasons: [ "The retained document does not directly demonstrate this bounded outcome." ],
+        attempt_ids: [ attempt.fetch("attempt_id") ]
+      )
+
+      assert_equal "blocked", pointer.fetch("status")
+      assert_equal [ "claim-a" ], pointer.fetch("failed_claims")
+      assert_equal 1, pointer.fetch("attempt_count")
+      assert_match(/\A[0-9a-f]{64}\z/, pointer.fetch("recovery_digest"))
+      refute store.accepted?
+      assert store.blocked_for_identity?(identity)
+    end
+  end
+
   def test_malformed_symlinked_oversize_and_legacy_inputs_never_become_accepted
     with_store do |store, task, _controller|
-      requirement = store.open_generation!(identity: identity)
+      requirement = store.open_generation!(**requirement_input)
       generation = requirement.fetch("generation")
 
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
@@ -115,7 +166,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       first_pointer = store.publish_current!(generation: first, attempt_id: "first")
 
       controller["recovery_epoch"] = 2
-      second = store.open_generation!(identity: identity).fetch("generation")
+      second = store.open_generation!(**requirement_input).fetch("generation")
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         store.append_attempt!(
           generation: second, attempt_id: "traversal", status: "accepted",
@@ -124,7 +175,8 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       end
       store.append_attempt!(
         generation: second, attempt_id: "second", status: "accepted",
-        evidence: [ document_evidence(task, claims: [ "claim-second" ]) ]
+        evidence: [ document_evidence(task, claims: [ "claim-a", "claim-b" ]) ],
+        producer: actor("producer-2"), review: accepted_review(task, actor("reviewer-2"))
       )
 
       current_path = File.join(task.folder, "outcome-evidence", "current.json")
@@ -190,10 +242,11 @@ class OutcomeEvidenceStoreTest < Minitest::Test
   end
 
   def accepted_generation(store, task, attempt_id:)
-    generation = store.open_generation!(identity: identity).fetch("generation")
+    generation = store.open_generation!(**requirement_input).fetch("generation")
     store.append_attempt!(
       generation: generation, attempt_id: attempt_id, status: "accepted",
-      evidence: [ document_evidence(task, claims: [ "claim-first" ]) ]
+      evidence: [ document_evidence(task) ], producer: actor("producer-accepted"),
+      review: accepted_review(task, actor("reviewer-accepted"))
     )
     generation
   end
@@ -217,6 +270,50 @@ class OutcomeEvidenceStoreTest < Minitest::Test
         representation(task, review, role: "review", media_type: "text/plain")
       ]
     }
+  end
+
+  def requirement_input
+    {
+      identity: identity,
+      claims: [
+        {
+          "id" => "claim-a", "statement" => "Users receive the first verified feature outcome.",
+          "proof_kind" => "document", "changed_paths" => [ "lib/feature.rb" ]
+        },
+        {
+          "id" => "claim-b", "statement" => "The regression path verifies the second feature outcome.",
+          "proof_kind" => "document", "changed_paths" => [ "test/feature_test.rb" ]
+        }
+      ],
+      exclusions: [],
+      inference: actor("inference-1")
+    }
+  end
+
+  def actor(context_id)
+    { "context_id" => context_id, "agent" => "claude" }
+  end
+
+  def accepted_review(task, reviewer)
+    hashes = document_evidence(task).fetch("representations").map { |item| item.fetch("sha256") }
+    {
+      "reviewer" => reviewer,
+      "inspected_hashes" => hashes,
+      "verdicts" => %w[claim-a claim-b].map do |id|
+        {
+          "target_id" => id, "verdict" => "accepted",
+          "reason" => "The retained document directly verifies this bounded outcome claim."
+        }
+      end
+    }
+  end
+
+  def revising_review(task, reviewer)
+    accepted_review(task, reviewer).tap do |review|
+      review.fetch("verdicts").first["verdict"] = "revise"
+      review.fetch("verdicts").first["reason"] =
+        "The retained document does not directly demonstrate this bounded outcome."
+    end
   end
 
   def representation(task, path, role:, media_type:)

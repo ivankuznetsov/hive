@@ -762,6 +762,30 @@ module Hive
       ).call
     end
 
+    desc "evidence SUBCOMMAND TARGET", "Recover an exact blocked outcome-evidence package"
+    long_desc <<~DESC
+      Subcommands:
+        recover TARGET --generation SHA256 --recovery-digest SHA256
+
+      Recovery is admitted only when both values match the current immutable
+      blocked package and its semantic ERROR marker. It preserves the exhausted
+      generation, advances a controller-owned epoch once, and instructs the
+      operator to use the normal generation-guarded workflow.retry action.
+    DESC
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :stage, type: :string,
+                   desc: "scope slug lookup to one stage, full or short form (#{STAGE_VOCABULARY})"
+    option :generation, type: :string, desc: "exact blocked package generation SHA-256"
+    option :recovery_digest, type: :string, desc: "exact blocked package recovery SHA-256"
+    def evidence(subcommand = nil, target = nil)
+      require "hive/commands/evidence"
+      Hive::Commands::Evidence.new(
+        subcommand, target,
+        project: options[:project], stage: options[:stage], json: options[:json],
+        generation: options[:generation], recovery_digest: options[:recovery_digest]
+      ).call
+    end
+
     desc "brainstorm TARGET", "Move an inbox task into brainstorm, or run an existing brainstorm task"
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"

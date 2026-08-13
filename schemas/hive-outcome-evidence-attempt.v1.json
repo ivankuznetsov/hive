@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema", "schema_version", "task", "project", "generation",
-    "attempt_id", "status", "evidence", "diagnostic", "recorded_at"
+    "attempt_id", "status", "evidence", "producer", "review", "diagnostic", "recorded_at"
   ],
   "properties": {
     "schema": { "const": "hive-outcome-evidence-attempt" },
@@ -15,11 +15,13 @@
     "project": { "type": "string", "minLength": 1, "maxLength": 255 },
     "generation": { "$ref": "#/$defs/Digest" },
     "attempt_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    "status": { "enum": ["accepted", "rejected"] },
+    "status": { "enum": ["accepted", "revise", "blocked"] },
     "evidence": {
       "type": "array", "maxItems": 1024,
       "items": { "$ref": "#/$defs/Evidence" }
     },
+    "producer": { "$ref": "#/$defs/Actor" },
+    "review": { "$ref": "#/$defs/Review" },
     "diagnostic": {
       "oneOf": [
         { "type": "null" },
@@ -30,9 +32,46 @@
   },
   "$defs": {
     "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "SafeId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
     "SafePath": {
       "type": "string", "minLength": 1, "maxLength": 4096,
       "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\u0000]+$"
+    },
+    "Actor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["context_id", "agent", "model", "effort"],
+      "properties": {
+        "context_id": { "$ref": "#/$defs/SafeId" },
+        "agent": { "$ref": "#/$defs/SafeId" },
+        "model": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "effort": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "Review": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reviewer", "inspected_hashes", "verdicts", "status", "accepted"],
+      "properties": {
+        "reviewer": { "$ref": "#/$defs/Actor" },
+        "inspected_hashes": {
+          "type": "array", "minItems": 1, "maxItems": 8192, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/Digest" }
+        },
+        "verdicts": {
+          "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/Verdict" }
+        },
+        "status": { "enum": ["accepted", "revise", "blocked"] },
+        "accepted": { "type": "boolean" }
+      }
+    },
+    "Verdict": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target_id", "verdict", "reason"],
+      "properties": {
+        "target_id": { "$ref": "#/$defs/SafeId" },
+        "verdict": { "enum": ["accepted", "revise", "blocked"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
     },
     "Evidence": {
       "type": "object",

@@ -89,6 +89,10 @@ class TerminalOutcomeTest < Minitest::Test
   def test_only_controller_owned_reasons_are_semantic_terminal_errors
     assert Hive::TerminalOutcome.semantic_error?("reason" => "terminal_outcome_blocked")
     assert Hive::TerminalOutcome.semantic_error?(reason: "terminal_outcome_invalid")
+    assert Hive::TerminalOutcome.semantic_error?(reason: "outcome_evidence_capability_blocked")
+    assert Hive::TerminalOutcome.semantic_error?(reason: "outcome_evidence_review_blocked")
+    assert Hive::TerminalOutcome.semantic_error?(reason: "outcome_evidence_recaptures_exhausted")
+    assert Hive::TerminalOutcome.blocked_error?(reason: "outcome_evidence_recaptures_exhausted")
     refute Hive::TerminalOutcome.semantic_error?("reason" => "terminal_outcome_future")
     refute Hive::TerminalOutcome.semantic_error?("reason" => "exit_code")
   end

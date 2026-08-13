@@ -44,20 +44,8 @@ module Hive
       File.join(attempts_root, "records")
     end
 
-    def attempt_logs_root
-      File.join(attempts_root, "logs")
-    end
-
-    def attempt_generation_locks_root
-      File.join(attempts_root, "generation-locks")
-    end
-
     def attempt_proof_root
       File.join(attempts_root, "proof")
-    end
-
-    def attempt_decision_indexes_root
-      File.join(attempts_root, "decision-indexes")
     end
 
     def attempt_pending_finalization_root

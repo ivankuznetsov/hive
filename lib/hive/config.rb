@@ -675,15 +675,6 @@ module Hive
     # config-load time but rejected at dispatch with a pointer to
     # review.ci.command (Hive::Reviewers.dispatch).
     REVIEWER_KINDS = %w[agent codex_review linter].freeze
-    # Agent backends offered by setup, in canonical listing/default order.
-    # The names are frozen so prompt selections cannot mutate shared values.
-    GLOBAL_AGENT_BACKENDS = %w[claude codex pi grok].map(&:freeze).freeze
-    # Recommended setup defaults when the operator accepts the prompt default
-    # or runs non-interactively.
-    DEFAULT_GLOBAL_AGENTS = %w[claude codex].map(&:freeze).freeze
-    # BackendPrompt consumes both constants directly, so keep its defaults
-    # representable by the canonical setup list.
-    raise "DEFAULT_GLOBAL_AGENTS must be a subset of GLOBAL_AGENT_BACKENDS: #{(DEFAULT_GLOBAL_AGENTS - GLOBAL_AGENT_BACKENDS).inspect} not in #{GLOBAL_AGENT_BACKENDS.inspect}" unless (DEFAULT_GLOBAL_AGENTS - GLOBAL_AGENT_BACKENDS).empty?
     # The last two stages of `Hive::Stages::DIRS` (lib/hive/stages.rb).
     # Kept as an explicit policy literal rather than derived via
     # `Hive::Stages::DIRS.last(2)` so a stage rename/addition is a

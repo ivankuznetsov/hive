@@ -627,17 +627,17 @@ class InstallScriptTest < Minitest::Test
       exec /usr/bin/ln "$@"
     SH
     write_executable(File.join(fake_bin, "npm"), <<~'SH')
-      #!/bin/bash
-      if [[ -n "${HIVE_INSTALL_TEST_NPM_ARGS:-}" ]]; then
+      #!/bin/sh
+      if [ -n "${HIVE_INSTALL_TEST_NPM_ARGS:-}" ]; then
         printf '%s\n' "$*" >> "$HIVE_INSTALL_TEST_NPM_ARGS"
       fi
       case "${1:-}" in
         pack)
-          [[ "${HIVE_INSTALL_TEST_QMD_HANG:-}" == "pack" ]] && /usr/bin/sleep 5
-          [[ "${HIVE_INSTALL_TEST_QMD_PACK_FAILURE:-}" == "1" ]] && exit 41
+          [ "${HIVE_INSTALL_TEST_QMD_HANG:-}" = "pack" ] && /usr/bin/sleep 5
+          [ "${HIVE_INSTALL_TEST_QMD_PACK_FAILURE:-}" = "1" ] && exit 41
           destination=""
-          while [[ $# -gt 0 ]]; do
-            if [[ "$1" == "--pack-destination" ]]; then
+          while [ "$#" -gt 0 ]; do
+            if [ "$1" = "--pack-destination" ]; then
               shift
               destination="$1"
             fi
@@ -648,11 +648,11 @@ class InstallScriptTest < Minitest::Test
           printf '[{"filename":"%s"}]\n' "$filename"
           ;;
         install)
-          [[ "${HIVE_INSTALL_TEST_QMD_HANG:-}" == "install" ]] && /usr/bin/sleep 5
-          [[ "${HIVE_INSTALL_TEST_QMD_INSTALL_FAILURE:-}" == "1" ]] && exit 42
+          [ "${HIVE_INSTALL_TEST_QMD_HANG:-}" = "install" ] && /usr/bin/sleep 5
+          [ "${HIVE_INSTALL_TEST_QMD_INSTALL_FAILURE:-}" = "1" ] && exit 42
           prefix=""
-          while [[ $# -gt 0 ]]; do
-            if [[ "$1" == "--prefix" ]]; then
+          while [ "$#" -gt 0 ]; do
+            if [ "$1" = "--prefix" ]; then
               shift
               prefix="$1"
             fi
@@ -660,7 +660,7 @@ class InstallScriptTest < Minitest::Test
           done
           mkdir -p "$prefix/lib/node_modules/@tobilu/qmd/node_modules/better-sqlite3"
           printf '{"name":"@tobilu/qmd"}\n' > "$prefix/lib/node_modules/@tobilu/qmd/package.json"
-          [[ "${HIVE_INSTALL_TEST_QMD_MISSING_BIN:-}" == "1" ]] && exit 0
+          [ "${HIVE_INSTALL_TEST_QMD_MISSING_BIN:-}" = "1" ] && exit 0
           mkdir -p "$prefix/bin"
           cat > "$prefix/bin/qmd" <<'QMD'
 #!/bin/sh
@@ -672,17 +672,17 @@ QMD
           chmod 755 "$prefix/bin/qmd"
           ;;
         rebuild)
-          [[ "${HIVE_INSTALL_TEST_QMD_REBUILD_FAILURE:-}" == "1" ]] && exit 42
+          [ "${HIVE_INSTALL_TEST_QMD_REBUILD_FAILURE:-}" = "1" ] && exit 42
           exit 0
           ;;
       esac
     SH
     write_executable(File.join(fake_bin, "node"), <<~'SH')
-      #!/bin/bash
-      if [[ -n "${HIVE_INSTALL_TEST_NODE_ARGS:-}" ]]; then
+      #!/bin/sh
+      if [ -n "${HIVE_INSTALL_TEST_NODE_ARGS:-}" ]; then
         printf '%s\n' "$*" > "$HIVE_INSTALL_TEST_NODE_ARGS"
       fi
-      [[ "${HIVE_INSTALL_TEST_QMD_NATIVE_FAILURE:-}" == "1" ]] && exit 43
+      [ "${HIVE_INSTALL_TEST_QMD_NATIVE_FAILURE:-}" = "1" ] && exit 43
       exit 0
     SH
     write_executable(File.join(fake_bin, "readlink"), <<~'SH')

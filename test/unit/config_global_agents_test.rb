@@ -4,19 +4,11 @@ require "hive/config"
 class ConfigGlobalAgentsTest < Minitest::Test
   include HiveTestHelper
 
-  def test_load_global_agents_defaults_when_key_absent
-    with_tmp_global_config do
-      assert_equal %w[claude codex], Hive::Config.load_global_agents
-    end
-  end
-
-  def test_write_and_load_global_agents_round_trips_in_backend_order
+  def test_write_global_agents_persists_backend_order
     with_tmp_global_config do |home|
       written = Hive::Config.write_global_agents!(%w[pi claude pi])
 
       assert_equal %w[claude pi], written
-      assert_equal %w[claude pi], Hive::Config.load_global_agents
-
       data = YAML.safe_load(File.read(File.join(home, "config.yml")))
       assert_equal %w[claude pi], data.dig("agents", "selected")
       assert_equal [], data.fetch("registered_projects")
@@ -38,82 +30,58 @@ class ConfigGlobalAgentsTest < Minitest::Test
     end
   end
 
-  def test_load_global_agents_rejects_malformed_agents_block
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), {
-        "registered_projects" => [],
-        "agents" => "claude"
-      }.to_yaml)
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_agents }
-      assert_match(/agents .* must be a Hash/, err.message)
-    end
-  end
-
-  def test_load_global_agents_rejects_malformed_selected_block
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), {
-        "registered_projects" => [],
-        "agents" => { "selected" => "claude" }
-      }.to_yaml)
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_agents }
-      assert_match(/agents\.selected .* must be an Array/, err.message)
-    end
-  end
-
-  def test_load_global_agents_rejects_unknown_backend
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), {
-        "registered_projects" => [],
-        "agents" => { "selected" => [ "claude", "unknown" ] }
-      }.to_yaml)
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_agents }
-      assert_match(/unknown backend "unknown"/, err.message)
-    end
-  end
-
-  def test_load_global_agents_rejects_blank_string_in_selected
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), {
-        "registered_projects" => [],
-        "agents" => { "selected" => [ "claude", "" ] }
-      }.to_yaml)
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_agents }
-      assert_match(/must contain non-empty strings/, err.message)
-    end
-  end
-
-  def test_load_global_agents_rejects_non_string_in_selected
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), {
-        "registered_projects" => [],
-        "agents" => { "selected" => [ 123 ] }
-      }.to_yaml)
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_agents }
-      assert_match(/must contain non-empty strings/, err.message)
-    end
-  end
-
-  def test_load_global_agents_rejects_empty_selected
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), {
-        "registered_projects" => [],
-        "agents" => { "selected" => [] }
-      }.to_yaml)
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_agents }
-      assert_match(/must list at least one backend/, err.message)
-    end
-  end
-
   def test_write_global_agents_rejects_empty_selection
     with_tmp_global_config do
       err = assert_raises(Hive::ConfigError) { Hive::Config.write_global_agents!([]) }
       assert_match(/must list at least one backend/, err.message)
+    end
+  end
+
+  def test_write_global_agents_rejects_non_array_selection
+    with_tmp_global_config do
+      err = assert_raises(Hive::ConfigError) { Hive::Config.write_global_agents!("claude") }
+      assert_match(/must be an Array/, err.message)
+    end
+  end
+
+  def test_write_global_agents_rejects_blank_backend
+    with_tmp_global_config do
+      err = assert_raises(Hive::ConfigError) do
+        Hive::Config.write_global_agents!([ "claude", "" ])
+      end
+      assert_match(/must contain non-empty strings/, err.message)
+    end
+  end
+
+  def test_write_global_agents_rejects_unknown_backend
+    with_tmp_global_config do
+      err = assert_raises(Hive::ConfigError) do
+        Hive::Config.write_global_agents!(%w[claude unknown])
+      end
+      assert_match(/unknown backend "unknown"/, err.message)
+    end
+  end
+
+  def test_write_global_agents_distinguishes_unregistered_backend
+    with_tmp_global_config do
+      with_restricted_registry(%i[claude]) do
+        err = assert_raises(Hive::ConfigError) do
+          Hive::Config.write_global_agents!(%w[codex])
+        end
+        assert_match(/"codex", which is valid but/, err.message)
+        assert_match(/not installed or registered/, err.message)
+        refute_match(/unknown backend/, err.message)
+      end
+    end
+  end
+
+  def test_write_global_agents_normalizes_names_case_insensitively
+    with_tmp_global_config do |home|
+      written = Hive::Config.write_global_agents!(%w[Claude CODEX])
+
+      assert_equal %w[claude codex], written
+      data = YAML.safe_load(File.read(File.join(home, "config.yml")))
+      assert_equal %w[claude codex], data.dig("agents", "selected")
     end
   end
 
@@ -152,79 +120,6 @@ class ConfigGlobalAgentsTest < Minitest::Test
 
     assert_equal %w[claude codex grok pi], names.sort
     assert(names.all?(String), "registered_agent_names must be strings, not symbols")
-  end
-
-  def test_load_global_agents_distinguishes_valid_but_unregistered_backend
-    # A backend that IS in GLOBAL_AGENT_BACKENDS but isn't registered on
-    # this machine (the synced-dotfiles case) gets the "valid but not
-    # installed here" message, NOT the typo-flavored "unknown backend" one.
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), {
-        "registered_projects" => [],
-        "agents" => { "selected" => [ "codex" ] }
-      }.to_yaml)
-
-      with_restricted_registry(%i[claude]) do
-        err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_agents }
-        assert_match(/"codex", which is valid but/, err.message)
-        assert_match(/not installed or registered/, err.message)
-        refute_match(/unknown backend/, err.message)
-      end
-    end
-  end
-
-  def test_load_global_agents_rejects_typo_with_unknown_backend_message
-    # A name not in GLOBAL_AGENT_BACKENDS at all keeps the typo-flavored
-    # "unknown backend" message — the other half of the message split.
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), {
-        "registered_projects" => [],
-        "agents" => { "selected" => [ "claud" ] }
-      }.to_yaml)
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_agents }
-      assert_match(/unknown backend "claud"/, err.message)
-      refute_match(/valid but/, err.message)
-    end
-  end
-
-  def test_load_global_agents_accepts_capitalized_names_case_insensitively
-    # The capitalization the setup prompt itself displays ([claude]) must
-    # load: normalize downcases before the allowed-list check.
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), {
-        "registered_projects" => [],
-        "agents" => { "selected" => %w[Claude CODEX] }
-      }.to_yaml)
-
-      assert_equal %w[claude codex], Hive::Config.load_global_agents
-    end
-  end
-
-  def test_load_global_agents_defaults_on_cold_start_without_config_file
-    # The genuine first-run path: no config.yml exists yet.
-    # with_tmp_global_config pre-writes one, so delete it to exercise the
-    # `File.exist?(path) ? load_global_config(path) : {}` branch that
-    # resolves to the built-in defaults.
-    with_tmp_global_config do |home|
-      File.delete(File.join(home, "config.yml"))
-
-      assert_equal %w[claude codex], Hive::Config.load_global_agents
-    end
-  end
-
-  def test_load_global_agents_defaults_when_selected_is_null
-    # A bare `selected:` (YAML key present, value null) is treated as "unset"
-    # and resolves to the defaults — deliberately asymmetric with the empty
-    # `selected: []` array, which raises (see test below).
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), {
-        "registered_projects" => [],
-        "agents" => { "selected" => nil }
-      }.to_yaml)
-
-      assert_equal %w[claude codex], Hive::Config.load_global_agents
-    end
   end
 
   def test_write_global_agents_overwrites_existing_selection_keeping_siblings

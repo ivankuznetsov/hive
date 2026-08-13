@@ -103,10 +103,6 @@ module Hive
       end
     end
 
-    def live_limit_menu?(pane)
-      !!live_limit_line(pane)
-    end
-
     def live_limit_line(pane)
       live_limit_match(pane)&.first
     end

@@ -24,7 +24,6 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
       assert_equal :duplicate, store.append_receipt(receipt).status
 
       restarted = Hive::Modules::Migration::EvidenceStore.new(root: root)
-      assert_equal capture, restarted.fetch_capture(capture.capture_id)
       assert_equal [ capture ], restarted.captures
       assert_equal [ receipt ], restarted.receipts
     end
@@ -60,10 +59,12 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
     end
   end
 
-  def test_capture_fetch_rejects_untrusted_paths_and_no_follow_reads
+  def test_retained_readers_reject_untrusted_identity_and_no_follow_reads
     with_tmp_dir do |root|
       store = Hive::Modules::Migration::EvidenceStore.new(root: root)
-      assert_raises(Hive::ConfigError) { store.fetch_capture("../../config") }
+      assert_raises(Hive::ConfigError) do
+        store.receipts_for_occurrence("../../config")
+      end
 
       capture = capture_for(recorded_at: NOW)
       outside = File.join(root, "outside.json")
@@ -71,9 +72,7 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
       path = File.join(root, "captures", "#{capture.capture_id}.json")
       File.symlink(outside, path)
 
-      error = assert_raises(Hive::ConfigError) do
-        store.fetch_capture(capture.capture_id)
-      end
+      error = assert_raises(Hive::ConfigError) { store.captures }
       assert_equal "patrol evidence is malformed", error.message
     end
   end
@@ -246,9 +245,7 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
         File.join(root, "captures", "#{foreign_id}.json"),
         Hive::Modules::Migration::PatrolEvidence.canonical(forged)
       )
-      error = assert_raises(Hive::ConfigError) do
-        store.fetch_capture(foreign_id)
-      end
+      error = assert_raises(Hive::ConfigError) { store.captures }
       assert_equal "patrol evidence is malformed", error.message
 
       File.write(File.join(root, "captures", "unexpected.json"), "{}")
@@ -362,9 +359,7 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
         "x" * (Hive::Modules::Migration::PatrolEvidence::MAX_CAPTURE_BYTES + 1)
       )
 
-      error = assert_raises(Hive::ConfigError) do
-        store.fetch_capture(capture.capture_id)
-      end
+      error = assert_raises(Hive::ConfigError) { store.captures }
       assert_equal "patrol evidence is malformed", error.message
 
       FileUtils.rm_r(File.join(root, "captures"))

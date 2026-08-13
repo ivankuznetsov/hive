@@ -1312,6 +1312,16 @@ def test_repository_identity_rejects_multiple_origin_push_urls
   end
 end
 
+def test_repository_identity_rejects_unsupported_origin
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "/tmp/local.git\n", "", status ] }) do
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.repository_identity("/tmp/repo")
+    end
+    assert_match(/not a supported GitHub remote/, error.message)
+  end
+end
+
 def test_repository_identity_rejects_credential_bearing_https_origin
   error = assert_raises(Hive::GhError) do
     Hive::Gh.repository_identity_from_remote(

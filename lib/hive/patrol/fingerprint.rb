@@ -142,14 +142,6 @@ module Hive
         end
       end
 
-      # Compare two complete finding records without requiring either one to
-      # have reached the PR/dismissal ledger. Discovery uses this before it
-      # persists a new record, so repeated model wording cannot accumulate as
-      # a second active finding merely because the first item has not shipped.
-      def semantically_same?(left, right)
-        semantically_same_signature?(semantic_signature(left), semantic_signature(right))
-      end
-
       def semantic_signature(finding)
         {
           fingerprint: finding.fingerprint.to_s,

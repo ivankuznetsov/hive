@@ -89,11 +89,12 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       )
       assert scheduler.pending?("p1")
       state = Hive::Patrol::StateStore.new(dir)
-      occurrence = state.each_reserved_occurrence.first
+      occurrence_id = dispatches.first.fetch(:command).split.last
+      occurrence = state.occurrence(occurrence_id)
       capture = state.occurrence_capture(occurrence.fetch("occurrence_id"))
       assert_equal "reserved", occurrence.fetch("phase")
       assert_equal capture.occurrence_id,
-                   dispatches.first.fetch(:command).split.last
+                   occurrence_id
       assert_equal entry.fetch("repository_identity"),
                    capture.project.fetch("repository")
 
@@ -884,7 +885,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       refute sched.pending?("p1"),
              "an ended child must not retain process-local dispatch ownership"
       refute_empty Hive::Patrol::StateStore.new(dir)
-                                          .each_reserved_occurrence.to_a,
+                                          .each_recovery_active_occurrence.to_a,
                    "the reserved occurrence remains the recovery authority"
     end
   end

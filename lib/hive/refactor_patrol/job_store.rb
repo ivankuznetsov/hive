@@ -353,14 +353,6 @@ module Hive
         raise CorruptRecord, "refactor patrol manifest is missing #{e.key.inspect}"
       end
 
-      # Expose independently due intake jobs so one old backoff-bound
-      # occurrence cannot hide later work.
-      def eligible_jobs(now: Time.now)
-        eligible_from(jobs, now: now).sort_by { |aggregate| scheduling_key(aggregate) }
-      rescue ArgumentError => e
-        raise InconsistentRecord, "refactor patrol job has invalid scheduling timestamp (#{e.message})"
-      end
-
       def eligible_from(records, now:)
         records.select do |aggregate|
           next false if aggregate.fetch("complete")
@@ -1433,14 +1425,6 @@ module Hive
         rebuild_indexes!.fetch("fingerprints")
       end
 
-      def action_index
-        read_derived_index(
-          action_index_path,
-          schema: JobIndexes::ACTION_SCHEMA,
-          collection: "actions"
-        ) { rebuild_indexes!.fetch("actions") }
-      end
-
       def fingerprint_index_path
         File.join(root, "indexes", "fingerprints.json")
       end
@@ -2163,10 +2147,6 @@ module Hive
         atomic_write(path, evidence)
       end
 
-      def jobs_dir
-        File.join(root, "jobs")
-      end
-
       def job_path(job_id)
         @job_files.job_path(validate_id!(job_id))
       end
@@ -2232,19 +2212,6 @@ module Hive
 
       def timestamp!(value, label, path)
         @record_validator.timestamp!(value, label, path)
-      end
-
-      def read_derived_index(path, schema:, collection:)
-        relative = @job_files.relative_path(path)
-        data = @job_files.read_json(relative, missing: true)
-        return yield unless data
-        unless data.is_a?(Hash) && data["schema"] == schema && data["schema_version"] == SCHEMA_VERSION &&
-               data[collection].is_a?(Hash) && (data.keys - %w[schema schema_version] - [ collection ]).empty?
-          return yield
-        end
-        data
-      rescue JSON::ParserError, SystemCallError, IOError
-        yield
       end
 
       def atomic_write(path, data)

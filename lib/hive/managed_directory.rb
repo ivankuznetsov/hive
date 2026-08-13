@@ -61,34 +61,6 @@ module Hive
       unsafe!
     end
 
-    # Descriptor-stable directory metadata probe. A missing directory is
-    # distinct from an unsafe symlink or non-directory binding.
-    def directory_metadata(relative = ".", missing: false)
-      components = relative_components(relative)
-      with_session(create_root: false) do |session|
-        session.with_directory(components, missing: missing) do |handle|
-          stat = IO.for_fd(
-            handle.directory.fileno, autoclose: false
-          ).stat
-          validate_directory!(stat)
-          {
-            mode: stat.mode & 0o777,
-            mtime: stat.mtime.utc
-          }.freeze
-        end
-      end
-    rescue MissingEntry
-      return nil if missing
-
-      unsafe!
-    rescue Errno::ENOENT
-      unsafe!
-    rescue Hive::ConfigError
-      raise
-    rescue SystemCallError, IOError, ArgumentError, TypeError
-      unsafe!
-    end
-
     # Returns :directory or :regular without following a symbolic link. This
     # is intentionally narrower than lstat: managed stores accept no other
     # entry kinds, and regular files must have exactly one link.
@@ -318,56 +290,6 @@ module Hive
             raise YieldFailure.new(error)
           end
           unsafe! unless opened == session.regular_identity_at(parent, name)
-          session.verify_binding!(parent)
-          result
-        end
-      end
-    rescue YieldFailure => failure
-      raise failure.error
-    rescue Hive::ConfigError
-      raise
-    rescue SystemCallError, IOError, ArgumentError, TypeError
-      unsafe!
-    ensure
-      lock&.flock(File::LOCK_UN) rescue nil
-      lock&.close rescue nil
-    end
-
-    # Attempts one descriptor-bound exclusive lock without waiting. A false
-    # return means another process owns the lock; all unsafe path conditions
-    # still raise exactly like `with_lock`.
-    def try_with_lock(relative)
-      parent_components, name = target_components(relative)
-      lock = nil
-
-      with_session(create_root: true) do |session|
-        session.with_directory(parent_components, create: true) do |parent|
-          before = session.regular_identity_at(parent, name)
-          lock = @native.open_file(
-            parent.directory,
-            name,
-            File::RDWR | File::CREAT,
-            mode: 0o600
-          )
-          validate_regular!(lock.stat)
-          lock.chmod(0o600)
-          opened = identity(lock.stat)
-          unsafe! unless before.nil? || before == opened
-          unsafe! unless opened ==
-            session.regular_identity_at(parent, name)
-          session.verify_binding!(parent)
-          next false unless
-            lock.flock(File::LOCK_EX | File::LOCK_NB)
-
-          unsafe! unless opened ==
-            session.regular_identity_at(parent, name)
-          result = begin
-            yield
-          rescue SystemCallError, IOError, ArgumentError, TypeError => error
-            raise YieldFailure.new(error)
-          end
-          unsafe! unless opened ==
-            session.regular_identity_at(parent, name)
           session.verify_binding!(parent)
           result
         end

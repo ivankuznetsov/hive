@@ -60,10 +60,6 @@ module Hive
       File.join(attempts_root, "proof")
     end
 
-    def attempt_decision_indexes_root
-      File.join(attempts_root, "decision-indexes")
-    end
-
     def attempt_pending_finalization_root
       File.join(attempts_root, "pending-finalization")
     end
@@ -80,10 +76,6 @@ module Hive
 
     def workflow_publish_receipts_root
       File.join(workflow_publish_root, "receipts")
-    end
-
-    def workflow_publish_bundles_root
-      File.join(workflow_publish_root, "bundles")
     end
 
     def workflow_publish_locks_root

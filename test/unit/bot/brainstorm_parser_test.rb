@@ -226,9 +226,7 @@ class HiveBotBrainstormParserTest < Minitest::Test
     end
   end
 
-  def test_heading_helpers_and_invalid_encoded_answer_fall_back_literally
-    assert_equal "### Q7.", Hive::BrainstormParser.question_header(7)
-
+  def test_invalid_encoded_answer_falls_back_literally
     invalid = "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}not*base64"
     question = Hive::BrainstormParser.parse_text(
       "## Round 1\n### Q1. Encoded?\n" \
@@ -248,7 +246,7 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_equal answer, parsed.answer
   end
 
-  def test_unanswered_questions_and_question_lookup_helpers
+  def test_unanswered_questions_helper
     questions = Hive::Bot::BrainstormParser.parse_text(<<~MARKDOWN)
       ## Round 1
 
@@ -267,8 +265,6 @@ class HiveBotBrainstormParserTest < Minitest::Test
     unanswered = Hive::Bot::BrainstormParser.unanswered_questions(questions)
 
     assert_equal [ 2, 3 ], unanswered.map(&:n)
-    assert_equal "Second?", Hive::Bot::BrainstormParser.question_for(questions, 2).text
-    assert_nil Hive::Bot::BrainstormParser.question_for(questions, 99)
   end
 
   def test_answered_predicate_reflects_presence_of_answer

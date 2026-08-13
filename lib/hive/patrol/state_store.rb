@@ -115,12 +115,6 @@ module Hive
         )
       end
 
-      def each_reserved_occurrence(&block)
-        return @occurrence_store.each_reserved unless block
-
-        @occurrence_store.each_reserved(&block)
-      end
-
       def each_projection_pending_occurrence(&block)
         return @occurrence_store.each_projection_pending unless block
 

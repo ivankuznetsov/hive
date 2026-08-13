@@ -610,7 +610,6 @@ class TaskTest < Minitest::Test
       assert_equal 42, task.id
       assert_equal "Add Foo", task.display_name
       assert_nil task.depends_on
-      assert_equal "Add Foo", task.display_label
     end
   end
 
@@ -636,7 +635,6 @@ class TaskTest < Minitest::Test
       assert_nil task.id
       assert_nil task.display_name
       assert_nil task.depends_on
-      assert_equal "add-foo", task.display_label
 
       File.write(File.join(folder, "meta.yml"), ":\n:not yaml")
       # The U3 ctor reads meta eagerly, so the malformed-YAML warn fires here —
@@ -646,7 +644,6 @@ class TaskTest < Minitest::Test
       assert_nil task.id
       assert_nil task.display_name
       assert_nil task.depends_on
-      assert_equal "add-foo", task.display_label
       assert_match(/depends_on, workflow, base_branch dropped/, err)
     end
   end

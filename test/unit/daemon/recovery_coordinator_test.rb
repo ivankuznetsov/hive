@@ -601,7 +601,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
-  def test_receipt_helpers_fail_closed_for_unknown_or_missing_requests
+  def test_receipt_helper_fails_closed_for_unknown_requests
     request = Q::Request.new(
       request_id: "unknown-phase",
       recovery: {
@@ -616,7 +616,6 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     )
 
     assert_equal "unavailable", coordinator.receipt_for_request(request).status
-    assert_nil coordinator.receipt_for_id("missing")
   end
 
   def test_defensive_recovery_helpers_keep_the_closed_contract

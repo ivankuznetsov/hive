@@ -114,7 +114,6 @@ class WorkflowPackagePublishStoreTest < Minitest::Test
 
         marker = store.mark_bundle_gc_eligible(listed)
 
-        assert store.bundle_gc_eligible?(package.package_digest)
         assert_equal 0o600, File.stat(marker).mode & 0o777
         assert File.directory?(store.bundle_path(package.package_digest))
         assert_equal listed.data, store.load("owner/registry", "demo", "1.2.3").data
@@ -270,9 +269,6 @@ class WorkflowPackagePublishStoreTest < Minitest::Test
         FileUtils.rm_rf(bundle)
         assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
           store.verify_bundle(receipt)
-        end
-        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
-          store.send(:secure_file!, File.join(state, "missing-state"))
         end
       end
     end

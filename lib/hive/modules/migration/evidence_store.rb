@@ -62,15 +62,6 @@ module Hive
           )
         end
 
-        def fetch_receipt(receipt_id)
-          receipt_id = validated_id(receipt_id, :receipt)
-          read_record(
-            File.join(receipts_root, "#{receipt_id}.json"),
-            expected_id: receipt_id,
-            type: EffectReceipt
-          )
-        end
-
         def captures
           records(captures_root, type: PatrolCapture)
         end

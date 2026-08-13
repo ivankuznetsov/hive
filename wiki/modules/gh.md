@@ -3,7 +3,7 @@ title: Hive::Gh
 type: module
 source: lib/hive/gh.rb, lib/hive/gh/repository_identity.rb, lib/hive/agent_git_gate.rb
 created: 2026-06-08
-updated: 2026-07-25
+updated: 2026-08-13
 tags: [github, gh, module, pr, closure, evidence]
 ---
 
@@ -57,7 +57,7 @@ shapes and fail-closed reconciliation rules out of unrelated GitHub callers.
 
 ## Subprocess Contract
 
-`capture3` uses `Process.spawn` with argv-form commands, never shell interpolation. It sets `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` so unattended daemon/babysitter paths fail instead of blocking on terminal prompts. The timeout comes from `cfg["gh"]["network_timeout_sec"]` when present and positive, otherwise defaults to `NETWORK_TIMEOUT_SEC = 60`. Each capture owns a process group, and the deadline covers both direct-process exit and stdout/stderr drain; timeout handling sends TERM and then KILL to the group. A helper that outlives `gh` while retaining a pipe therefore cannot stall a daemon reader indefinitely.
+`capture3` uses `Process.spawn` with argv-form commands, never shell interpolation. It sets `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` so unattended daemon/babysitter paths fail instead of blocking on terminal prompts. It also sets `MISE_QUIET=1`: a mise-managed `gh` shim must not prepend tool-version notices to JSON stdout. The timeout comes from `cfg["gh"]["network_timeout_sec"]` when present and positive, otherwise defaults to `NETWORK_TIMEOUT_SEC = 60`. Each capture owns a process group, and the deadline covers both direct-process exit and stdout/stderr drain; timeout handling sends TERM and then KILL to the group. A helper that outlives `gh` while retaining a pipe therefore cannot stall a daemon reader indefinitely.
 
 Push and remote-OID helpers validate branch names before constructing refspecs,
 and refuse empty, option-shaped, NUL-bearing, or newline-bearing remote targets.

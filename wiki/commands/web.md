@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-08-11
+updated: 2026-08-13
 tags: [command, web, rails, turbo, hivebox-container, archive, retention]
 ---
 
@@ -175,10 +175,9 @@ sharing the URL.
 A locally authenticated operator sees the
 complete primary navigation under the `hive` product identity and is labelled
 `Local`; GitHub-dependent repository browsing stays behind an explicit
-**Connect GitHub** action. At the 390px mobile breakpoint, all six primary
-capabilities fit beside the account action without starting inside a horizontal
-scroll overflow; spacing uses fixed small insets so Linux and local Chromium
-font metrics preserve the same visible set. Navigation state is grouped by the first segment of
+**Connect GitHub** action. At the 390px mobile breakpoint, all seven primary
+capabilities remain visible in a bounded four-column grid below the account
+action, without starting inside a horizontal scroll overflow. Navigation state is grouped by the first segment of
 Rails `controller_path`, so namespaced task, workflow, and Telegram resource
 controllers retain their parent section's active link when they render a
 complete page. Completing the optional GitHub connection from verified
@@ -200,13 +199,26 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
 
 The project-filtered **Modules** surface presents installed and historical
 module rows using the same redacted `Hive::Modules::Status` object as CLI
-list/status/inspect. Rails does not parse generation locks or patrol stores.
+list/status/inspect; that surface does not parse generation locks or patrol
+stores.
 Install, update, enable, disable, settings changes, and uninstall use the same
 preview-bound lifecycle service as CLI: signed receipts bind candidate/current
 identity, settings, hooks, bindings, cursors, and individual grants, and any
 drift returns a no-write preview-again response. `/workflows` remains the
 workflow authoring/selection surface and preserves its existing managed
 Honeycomb projections.
+
+- **Patrol (`/patrol`)** — A read-only project-filtered view combines ordinary
+  Patrol finding health with Architecture Patrol job health. Ordinary findings
+  come from Patrol's writer-maintained 25-row projection and are active-first
+  and newest-first; Architecture jobs use the newest page of the native durable
+  query index and show accepted finding summaries from a bounded detail sample.
+  Each section isolates read failures instead of failing the page. The response
+  renders at most 25 rows per patrol kind and enriches at most five Architecture
+  jobs; operators use `hive patrol PROJECT --list --json` and the paginated
+  `hive refactor-patrol` inspection commands for CLI evidence. The page has no
+  retry, archive, or mutation controls. Internal exceptions are redacted in
+  server logs and exposed to the browser only as a stable unavailable message.
 
 - **Status board and grid (`/board`, `/grid`, `/`)** — Board is the first-visit
   default. The view-switch forms store a signed browser preference that `/`
@@ -534,7 +546,7 @@ Honeycomb projections.
   through the adapter for the full preview/apply lifecycle.
   The known legacy-vs-v2 `workflow publish` gap is stated in the page instead
   of exposing a button that opens an unusable registry PR. At mobile widths the
-  primary header wraps to a second full-width row, keeping all five sections
+  primary header wraps to a second full-width row, keeping every section
   visible without document overflow while preserving the local GitHub-connect
   action.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:

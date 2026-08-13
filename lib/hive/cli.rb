@@ -926,7 +926,7 @@ module Hive
       ).call
     end
 
-    desc "patrol PROJECT", "Run one repository patrol scan cycle for a registered project"
+    desc "patrol PROJECT", "Run a patrol cycle or list recorded findings"
     long_desc <<~DESC
       Maps the registered project's repository into language-neutral
       component slices under <project>/.hive-state/patrol/, asks the
@@ -940,18 +940,22 @@ module Hive
       standard 6-review flow as a visible "Patrol: ..." task; set
       patrol.review_prs: false to keep PR-only output.
 
+      Use --list for a bounded, read-only finding summary shared with Hive Web.
       Use --dry-run to map and review without creating fix worktrees,
-      pushing branches, or opening PRs. With --json, emits
-      hive-patrol.v2.
+      pushing branches, or opening PRs. With --json, a cycle emits
+      hive-patrol.v3; --list emits hive-patrol-findings.v1.
     DESC
     option :dry_run, type: :boolean, default: false,
                      desc: "map and review, but do not fix, push, or open PRs"
+    option :list, type: :boolean, default: false,
+                  desc: "list bounded recorded finding health without running Patrol"
     option :occurrence_id, type: :string, hide: true
     def patrol(project)
       require "hive/commands/patrol"
       command_options = {
         json: options[:json],
-        dry_run: options[:dry_run]
+        dry_run: options[:dry_run],
+        list: options[:list]
       }
       occurrence_id = options[:occurrence_id]
       command_options[:occurrence_id] = occurrence_id unless occurrence_id.nil?

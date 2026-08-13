@@ -52,6 +52,13 @@ class HiveCliTest < Minitest::Test
     assert_includes out, "--skill"
   end
 
+  def test_patrol_help_distinguishes_cycle_and_findings_json_contracts
+    out, _err = capture_io { Hive::CLI.start([ "help", "patrol" ]) }
+
+    assert_includes out, "hive-patrol.v3"
+    assert_includes out, "hive-patrol-findings.v1"
+  end
+
   def test_doctor_help_advertises_v2_read_only_health_contract
     out, _err = capture_io { Hive::CLI.start([ "help", "doctor" ]) }
 
@@ -843,7 +850,13 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Patrol) do |calls|
       Hive::CLI.start([ "patrol", "proj", "--dry-run", "--json" ])
       assert_equal [ "proj" ], calls.first.fetch(:args)
-      assert_equal({ json: true, dry_run: true }, calls.first.fetch(:kwargs))
+      assert_equal({ json: true, dry_run: true, list: false }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::Patrol) do |calls|
+      Hive::CLI.start([ "patrol", "proj", "--list", "--json" ])
+      assert_equal [ "proj" ], calls.first.fetch(:args)
+      assert_equal({ json: true, dry_run: false, list: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::RefactorPatrol) do |calls|

@@ -30,7 +30,9 @@ module Hive
       ID_PATTERN = /\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\z/
       STATES = %w[queued analyzing classified acting blocked complete].freeze
       DISPOSITIONS = %w[accepted flagged suppressed].freeze
-      ZERO_REASONS = %w[no_mapped_slice no_theses all_suppressed].freeze
+      ZERO_REASONS = %w[
+        no_mapped_slice no_theses all_suppressed source_no_longer_on_trunk
+      ].freeze
       TOP_LEVEL_KEYS = %w[
         schema schema_version job_id occurrence_id intake_transition_id source
         analysis_sha policy state complete dispositions feature_results
@@ -93,8 +95,9 @@ module Hive
       JOB_TRANSITION_ATTEMPT_KEYS = %w[
         kind operation occurrence_id generation transitions recorded_at
       ].freeze
+      SOURCE_RETIREMENT_ATTEMPT_KIND = "source_retirement".freeze
       DIAGNOSTIC_ATTEMPT_KINDS =
-        %w[discovery_block action_block].freeze
+        [ "discovery_block", "action_block", SOURCE_RETIREMENT_ATTEMPT_KIND ].freeze
       JOB_TRANSITION_ATTEMPT_KIND = "job_transition".freeze
       TRANSITION_KEYS = %w[
         intent_id operation generation semantic_digest outcome error_code
@@ -637,6 +640,100 @@ module Hive
         end
       end
 
+      # A merged source commit that disappeared from the freshly fetched
+      # registered trunk cannot become actionable again by retrying. Retire
+      # unpublished work in one atomic transition so the scheduler cannot
+      # append an unbounded checkout-guard history. Only actions with linked or
+      # remote-effect continuation evidence survive, and the recorded
+      # retirement attempt permanently narrows their later claims to
+      # continuation-only authority.
+      def retire_obsolete_source!(job_id, merge_sha:, trunk_sha:, now: Time.now,
+                                  claim_resolver: nil, episode: nil,
+                                  transition: nil)
+        mutate_job(job_id) do |aggregate, path|
+          next [ aggregate, :already_terminal ] if aggregate.fetch("complete")
+          unless aggregate.dig("source", "merge_sha") == merge_sha.to_s
+            raise InconsistentRecord.new(
+              "obsolete source retirement does not match the job merge commit",
+              path: path
+            )
+          end
+          status = obsolete_source_retirement_status_for(
+            aggregate, claim_resolver: claim_resolver
+          )
+          next [ aggregate, status ] unless status == :retireable
+
+          timestamp = now.utc.iso8601
+          active_discovery = active_discovery_attempt(aggregate)
+          active_actions = aggregate.fetch("actions").filter_map do |action|
+            claim = active_action_claim(action)
+            [ action, claim ] if claim
+          end
+          @claim_transitions.finish!(
+            active_discovery,
+            state: "superseded",
+            outcome: "source_no_longer_on_trunk",
+            now: now,
+            touch_heartbeat: false
+          ) if active_discovery
+          active_actions.each do |_action, claim|
+            @claim_transitions.finish!(
+              claim,
+              state: "superseded",
+              outcome: "source_no_longer_on_trunk",
+              now: now,
+              touch_heartbeat: false
+            )
+          end
+          aggregate.fetch("actions").each do |action|
+            next if action.fetch("terminal")
+            next if obsolete_source_continuation?(aggregate, action)
+
+            action["outcome"] = "source_no_longer_on_trunk"
+            action["terminal"] = true
+            action["updated_at"] = timestamp if action.key?("updated_at")
+          end
+          generation = diagnostic_episode!(
+            aggregate, SOURCE_RETIREMENT_ATTEMPT_KIND, episode
+          )
+          aggregate.fetch("attempts") << {
+            "kind" => SOURCE_RETIREMENT_ATTEMPT_KIND,
+            "occurrence_id" => aggregate.fetch("occurrence_id"),
+            "generation" => generation,
+            "state" => "blocked",
+            "reason" => "source_no_longer_on_trunk",
+            "evidence" => {
+              "merge_sha" => merge_sha.to_s,
+              "trunk_sha" => trunk_sha.to_s
+            },
+            "transitions" => transition ? [
+              transition_record(
+                transition, generation: generation, now: now
+              )
+            ] : [],
+            "finished_at" => timestamp,
+            "next_eligible_at" => timestamp
+          }
+          aggregate["review_errors"] = []
+          aggregate["zero_reason"] = "source_no_longer_on_trunk" if
+            aggregate.fetch("actions").empty?
+          remaining = aggregate.fetch("actions").any? do |action|
+            !action.fetch("terminal")
+          end
+          aggregate["state"] = remaining ? "acting" : "complete"
+          aggregate["complete"] = !remaining
+          aggregate["updated_at"] = timestamp
+          [ aggregate, :retired ]
+        end
+      end
+
+      def obsolete_source_retirement_status(job_id, claim_resolver: nil)
+        aggregate = read_job(job_id)
+        obsolete_source_retirement_status_for(
+          aggregate, claim_resolver: claim_resolver
+        )
+      end
+
       def checkpoint_discovery!(token, envelope:, now: Time.now,
                                 backoff_sec: 60, transition: nil)
         payload = json_copy(envelope)
@@ -886,7 +983,7 @@ module Hive
             return nil
           end
 
-          continuation_only = authority != true
+          continuation_only = authority != true || source_obsolete?(aggregate)
           if continuation_only && !continuation_after_revocation?(action)
             action["outcome"] = "authority_revoked"
             action["updated_at"] = now.utc.iso8601 if action.key?("updated_at")
@@ -1373,6 +1470,11 @@ module Hive
         page.merge("jobs" => page.fetch("job_ids").map { |job_id| read_job(job_id) })
       end
 
+      def recent_job_query_page(limit:)
+        page = @job_query_index.recent_page(limit: limit)
+        page.merge("jobs" => page.fetch("job_ids").map { |job_id| read_job(job_id) })
+      end
+
       def incomplete_jobs?
         cursor = nil
         loop do
@@ -1701,6 +1803,49 @@ module Hive
         return if resolution == :unresolved
 
         raise StaleClaim, "refactor patrol claim owner is provably gone, replaced, or unverifiable"
+      end
+
+      def claim_resolved?(claim, claim_resolver)
+        claim_resolver&.call(json_copy(claim)) == :resolved
+      rescue StandardError
+        false
+      end
+
+      def obsolete_source_retirement_status_for(aggregate, claim_resolver:)
+        return :already_terminal if aggregate.fetch("complete")
+
+        claims = [ active_discovery_attempt(aggregate) ]
+        claims.concat(
+          aggregate.fetch("actions").filter_map do |action|
+            active_action_claim(action)
+          end
+        )
+        return :claim_active unless claims.compact.all? do |claim|
+          claim_resolved?(claim, claim_resolver)
+        end
+
+        pending = aggregate.fetch("actions").reject do |action|
+          action.fetch("terminal")
+        end
+        if source_obsolete?(aggregate) && pending.any? && pending.all? do |action|
+             obsolete_source_continuation?(aggregate, action)
+           end
+          return :continuation_required
+        end
+
+        :retireable
+      end
+
+      def source_obsolete?(aggregate)
+        aggregate.fetch("attempts").any? do |attempt|
+          attempt["kind"] == SOURCE_RETIREMENT_ATTEMPT_KIND &&
+            attempt["reason"] == "source_no_longer_on_trunk"
+        end
+      end
+
+      def obsolete_source_continuation?(aggregate, action)
+        action.fetch("owner_job_id") != aggregate.fetch("job_id") ||
+          continuation_after_revocation?(action)
       end
 
       def mutate_action_claim(token, now:)

@@ -19,6 +19,7 @@ Rails.application.routes.draw do
   get "board" => "status#index", defaults: { view: "board" }, as: :board
   get "grid" => "status#index", defaults: { view: "grid" }, as: :grid
   get "archive" => "status#archive", as: :archive
+  get "patrol" => "patrol#index", as: :patrol
   resource :status_view_preference, only: :create
   resource :daemon_repair, only: :create, path: "daemon/repair"
 

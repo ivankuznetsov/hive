@@ -809,7 +809,14 @@ module Hive
       end
       stdout_r, stdout_w = IO.pipe
       stderr_r, stderr_w = IO.pipe
-      env = { "GIT_TERMINAL_PROMPT" => "0", "GIT_SSH_COMMAND" => "ssh -o BatchMode=yes" }
+      env = {
+        "GIT_TERMINAL_PROMPT" => "0",
+        "GIT_SSH_COMMAND" => "ssh -o BatchMode=yes",
+        # mise-backed gh shims may announce the selected tool on stdout.
+        # Every Hive::Gh caller treats stdout as GitHub's machine-readable
+        # payload, so keep compatibility chatter on the shim side silent.
+        "MISE_QUIET" => "1"
+      }
       # A dedicated process group lets the deadline cover helpers that inherit
       # stdout/stderr after the direct gh process exits. Otherwise waitpid can
       # succeed while reader threads block forever on a descendant-held pipe.

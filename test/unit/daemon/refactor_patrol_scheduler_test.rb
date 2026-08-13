@@ -1470,6 +1470,177 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_source_missing_from_trunk_is_terminalized_without_retry_loop
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      guard_calls = 0
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
+        job_store_factory: ->(_path) { store },
+        repository_resolver: ->(_entry, _cfg) { repository_identity },
+        checkout_guard_factory: ->(*) {
+          Object.new.tap do |guard|
+            guard.define_singleton_method(:validate_and_snapshot!) do |merge_sha:, **|
+              guard_calls += 1
+              raise Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk.new(
+                merge_sha: merge_sha,
+                trunk_sha: "head"
+              )
+            end
+          end
+        }, owner: "daemon-a"
+      )
+
+      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
+      end
+
+      assert_equal "source_no_longer_on_trunk", error.reason
+      assert_equal 1, guard_calls
+      retired = store.read_job("job-7")
+      assert retired.fetch("complete")
+      assert_equal 1, retired.fetch("attempts").last.fetch("transitions").size,
+                   "retirement must use the qualified architecture transition gateway"
+      assert_empty scheduler.candidates(now: T0 + 10_000)
+      assert_equal 1, guard_calls, "a retired source must never re-enter checkout validation"
+    end
+  end
+
+  def test_dry_run_reports_obsolete_source_without_retiring_the_job
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      before = store.read_job("job-7")
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
+        job_store_factory: ->(_path) { store },
+        repository_resolver: ->(_entry, _cfg) { repository_identity },
+        checkout_guard_factory: ->(*) {
+          Object.new.tap do |guard|
+            guard.define_singleton_method(:validate_and_snapshot!) do |merge_sha:, **|
+              raise Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk.new(
+                merge_sha: merge_sha,
+                trunk_sha: "head"
+              )
+            end
+          end
+        },
+        owner: "daemon-a", dry_run: true
+      )
+
+      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
+      end
+
+      assert_equal "source_no_longer_on_trunk", error.reason
+      assert_equal "retired", error.evidence.fetch("retirement")
+      assert_equal before, store.read_job("job-7")
+    end
+  end
+
+  def test_source_missing_from_trunk_terminalizes_unpublished_action_plan_together
+    with_project do |dir, entry, store|
+      write_action_job(dir, store)
+      store.initialize_actions!(
+        "action-job",
+        specifications: [
+          { "thesis_id" => "accepted", "kind" => "fix" }
+        ],
+        now: T0
+      )
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
+        job_store_factory: ->(_path) { store },
+        repository_resolver: ->(_entry, _cfg) { repository_identity },
+        checkout_guard_factory: ->(*) {
+          Object.new.tap do |guard|
+            guard.define_singleton_method(:validate_and_snapshot!) do |merge_sha:, **|
+              raise Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk.new(
+                merge_sha: merge_sha,
+                trunk_sha: "head"
+              )
+            end
+          end
+        }, owner: "daemon-a"
+      )
+
+      candidate = scheduler.candidates(now: T0).find do |item|
+        item.fetch(:job_id) == "action-job"
+      end
+      assert_equal :action, candidate.fetch(:action_phase)
+      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        scheduler.reserve(candidate, now: T0)
+      end
+
+      assert_equal "source_no_longer_on_trunk", error.reason
+      retired = store.read_job("action-job")
+      assert retired.fetch("complete")
+      assert_nil retired.fetch("zero_reason")
+      assert retired.fetch("actions").all? { |action| action.fetch("terminal") }
+      assert_equal [ "source_no_longer_on_trunk" ],
+                   retired.fetch("actions").map { |action| action.fetch("outcome") }.uniq
+    end
+  end
+
+  def test_source_missing_from_trunk_repeats_idempotently_for_remote_continuation
+    with_project do |dir, entry, store|
+      write_action_job(dir, store)
+      initialized = store.initialize_actions!(
+        "action-job",
+        specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ],
+        now: T0
+      )
+      action_id = initialized.dig("actions", 0, "canonical_action_id")
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
+        job_store_factory: ->(_path) { store },
+        repository_resolver: ->(_entry, _cfg) { repository_identity },
+        checkout_guard_factory: ->(*) {
+          Object.new.tap do |guard|
+            guard.define_singleton_method(:validate_and_snapshot!) do |merge_sha:, **|
+              raise Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk.new(
+                merge_sha: merge_sha, trunk_sha: "head"
+              )
+            end
+          end
+        },
+        owner: "daemon-a", claim_resolver: ->(_claim) { :resolved }
+      )
+      candidate = scheduler.candidates(now: T0).find do |item|
+        item.fetch(:job_id) == "action-job"
+      end
+      token = store.claim_action!(
+        "action-job", action_id, owner: "crashed-runner", now: T0
+      )
+      store.record_creation_intent!(
+        token,
+        intent: {
+          "operation" => "create_pr", "canonical_action_id" => action_id,
+          "repository" => "acme/demo", "branch" => "hive-refactor/#{action_id}",
+          "commit_sha" => "d" * 40
+        },
+        now: T0
+      )
+
+      first = scheduler.reserve(candidate, now: T0)
+      second = scheduler.reserve(candidate, now: T0 + 1)
+
+      assert_equal :action, first.dig(:dispatch_token, :phase)
+      assert_equal :action, second.dig(:dispatch_token, :phase)
+      aggregate = store.read_job("action-job")
+      refute aggregate.fetch("complete")
+      refute aggregate.dig("actions", 0, "terminal")
+      retirements = aggregate.fetch("attempts").select do |attempt|
+        attempt["kind"] == "source_retirement"
+      end
+      assert_equal 1, retirements.size
+      claim = store.claim_action!(
+        "action-job", action_id, owner: "reconciler", authority: true,
+        now: T0 + 2
+      )
+      assert claim.fetch(:continuation_only)
+    end
+  end
+
   def test_cancel_ignores_a_claim_that_settled_after_dispatch_snapshot
     with_project do |_dir, entry, store|
       scheduler = scheduler(entry, store)

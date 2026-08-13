@@ -7,7 +7,7 @@ class TaskMutationsTest < ActiveSupport::TestCase
   teardown { reset_task_mutation_state }
 
   test "derives queueable actions from the canonical task action vocabulary" do
-    expected = Hive::TaskAction::READY_COMMANDS.select do |_action, verb|
+    expected = Hive::TaskAction::DISPATCH_COMMANDS.select do |_action, verb|
       Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS.include?(verb)
     end
 
@@ -26,6 +26,17 @@ class TaskMutationsTest < ActiveSupport::TestCase
 
     assert_equal %w[hive review demo-task --project demo --from 6-review], coding_result[:argv]
     assert_equal %w[hive run generic-task --project demo --stage 2-gather], generic_result[:argv]
+  end
+
+  test "maps projected plan review work to the plan review runner" do
+    subject = task(
+      "stage" => "3-plan", "workflow" => "coding", "action" => "plan_reviewing",
+      "suggested_command" => "hive plan-review-run demo-task"
+    )
+
+    result = subject.run!(expected_action: "plan_reviewing", expected_stage: "3-plan")
+
+    assert_equal %w[hive plan-review-run demo-task --project demo], result[:argv]
   end
 
   test "rejects unknown and non-queueable actions before writing" do

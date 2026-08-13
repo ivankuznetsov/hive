@@ -343,6 +343,16 @@ class TaskTest < ActiveSupport::TestCase
     assert_nil advancing.dispatch_action
     assert_nil advancing.run_verb
 
+    review = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: {
+        "stage" => "3-plan", "workflow" => "coding", "action" => "plan_reviewing",
+        "suggested_command" => "hive plan-review-run review-task"
+      }
+    )
+    assert_equal "plan_reviewing", review.dispatch_action
+    assert_equal "plan-review-run", review.run_verb
+
     Task::STAGE_DISPATCH_ACTIONS.each do |stage, action|
       task = Task.new(
         project: Project.new("name" => "alpha"),

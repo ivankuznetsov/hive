@@ -131,7 +131,7 @@ module Hive
           raise StoreError, "attempt worker command has no task target" if verb.empty? || target.empty?
 
           task = Hive::TaskResolver.new(target, project_filter: record["project"]).resolve
-          intended_stage = if %w[run approve].include?(verb)
+          intended_stage = if %w[run approve plan-review-run].include?(verb)
             "#{task.stage_index}-#{task.stage_name}"
           else
             Hive::Workflows.for_verb(verb).fetch(:target)

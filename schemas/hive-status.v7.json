@@ -418,7 +418,20 @@
         "outcome": {
           "enum": ["success", "partial_coverage", "unsupported", "provider_limit", "timeout", "retryable_failure", "terminal_failure", null]
         },
-        "retry_at": { "type": ["string", "null"], "format": "date-time" }
+        "retry_at": { "type": ["string", "null"], "format": "date-time" },
+        "recovery_reset": { "type": "boolean" },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["candidate", "status"],
+            "properties": {
+              "candidate": { "$ref": "#/$defs/PlanReviewRouteIdentity" },
+              "status": { "type": "string" },
+              "diagnostic": { "type": "string" }
+            }
+          }
+        }
       }
     },
     "PlanReviewArtifact": {

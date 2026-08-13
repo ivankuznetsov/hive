@@ -248,6 +248,10 @@ module Hive
     end.merge(
       Hive::Schemas::TaskActionKind::PLAN_REVIEW_DEGRADED => "develop"
     ).freeze
+    DISPATCH_COMMANDS = READY_COMMANDS.merge(
+      Hive::Schemas::TaskActionKind::PLAN_REVIEWING => "plan-review-run",
+      Hive::Schemas::TaskActionKind::PLAN_REVIEW_RETRY => "plan-review-run"
+    ).freeze
 
     attr_reader :task, :marker, :project_name, :projection
 

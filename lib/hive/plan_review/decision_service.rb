@@ -1,13 +1,16 @@
 require "json"
 require "time"
 require "hive/atomic_file"
+require "hive/config"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/decision"
 require "hive/plan_review/projection"
 require "hive/plan_review/store"
+require "hive/plan_review/transition_guard"
 require "hive/secret_patterns"
+require "hive/task"
 
 module Hive
   module PlanReview
@@ -19,7 +22,7 @@ module Hive
       end
 
       def initialize(task:, clock: -> { Time.now.utc }, task_locker: nil,
-                     commit_locker: nil, committer: nil)
+                     commit_locker: nil, committer: nil, freshness_checker: nil)
         @task = task
         @clock = clock
         @store = Store.new(task_folder: task.folder)
@@ -30,6 +33,7 @@ module Hive
           Hive::Lock.with_commit_lock(task.hive_state_path, &block)
         end
         @committer = committer || method(:commit!)
+        @freshness_checker = freshness_checker || method(:validate_current_freshness!)
       end
 
       def apply(action:, review_id:, task_generation:, policy_fingerprint:,
@@ -39,6 +43,7 @@ module Hive
         @commit_locker.call do
           @task_locker.call do
             current = @store.current
+            @freshness_checker.call(current)
             target = normalize_target(action, target_fingerprint, value, review_id, current)
             decision = build_decision(
               action:, review_id:, task_generation:, policy_fingerprint:,
@@ -344,6 +349,10 @@ module Hive
       end
 
       def reset_terminal_route(current)
+        if current["blockers"].any? { |entry| entry["reason"] == "verification_finding" }
+          raise InvalidAction,
+                "request_review cannot clear a verification finding; create a linked plan generation"
+        end
         route = current["routes"].reverse.find do |entry|
           %w[primary adversarial verification].include?(entry["role"]) &&
             !TRANSIENT_OUTCOMES.include?(entry["outcome"])
@@ -362,6 +371,16 @@ module Hive
           "recovery_reset" => true
         )
         current["routes"] + [ reset ]
+      end
+
+      def validate_current_freshness!(current)
+        task = Hive::Task.new(@task.folder)
+        freshness = TransitionGuard.freshness(
+          task:, projection: Projection.new(current), config: Hive::Config.load(task.project_root)
+        )
+        return if freshness.fetch("status") == "current"
+
+        raise StaleDecision, "plan review changed; refresh the current observation"
       end
 
       def timestamp = @clock.call.utc.iso8601(6)

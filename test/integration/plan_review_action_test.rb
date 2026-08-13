@@ -103,6 +103,54 @@ class PlanReviewActionIntegrationTest < Minitest::Test
     end
   end
 
+  def test_cli_rejects_an_exact_decision_after_the_canonical_plan_drifts
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io do
+          Hive::Commands::Init.new(dir).call
+          Hive::Commands::New.new(File.basename(dir), "stale plan review decision").call
+        end
+        inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
+        slug = File.basename(inbox)
+        folder = File.join(dir, ".hive-state", "stages", "3-plan", slug)
+        FileUtils.mkdir_p(File.dirname(folder))
+        FileUtils.mv(inbox, folder)
+        plan_path = File.join(folder, "plan.md")
+        File.write(plan_path, lifecycle_plan)
+        task = Hive::Task.new(folder)
+        initial = Hive::PlanReview::Orchestrator.new(
+          task:, cfg: Hive::Config.load(dir), planner_identity: planner_identity,
+          adapter: LifecycleAdapter.new(lifecycle_finding),
+          planner_revision: LifecycleRevision.new(lifecycle_plan),
+          route_resolver: method(:lifecycle_route),
+          clock: -> { Time.utc(2026, 8, 12, 12) }
+        ).advance!
+        assert_equal "awaiting_decision", initial.record.state
+        File.open(plan_path, "a") { |file| file << "\nExternal edit.\n" }
+        current = initial.record
+        command = Hive::Commands::PlanReview.new(
+          folder, "approve-finding", **command_arguments(current), json: true,
+          resolver: -> { task },
+          service_factory: lambda do |resolved|
+            Hive::PlanReview::DecisionService.new(
+              task: resolved,
+              task_locker: ->(&block) { block.call },
+              commit_locker: ->(&block) { block.call },
+              committer: ->(*) { }
+            )
+          end
+        )
+
+        out, _err, status = with_captured_exit { command.call }
+        payload = JSON.parse(out)
+
+        assert_equal Hive::ExitCodes::TEMPFAIL, status
+        assert_equal "stale_decision", payload.fetch("error_kind")
+        assert_empty Hive::PlanReview::Store.new(task_folder: folder).current["decisions"]
+      end
+    end
+  end
+
   def test_public_command_resumes_revision_verification_and_candidate_promotion
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -179,7 +227,8 @@ class PlanReviewActionIntegrationTest < Minitest::Test
         Hive::PlanReview::DecisionService.new(
           task: resolved, clock: -> { Time.utc(2026, 8, 12, 12) },
           task_locker: ->(&block) { block.call },
-          commit_locker: ->(&block) { block.call }, committer: ->(*) { }
+          commit_locker: ->(&block) { block.call }, committer: ->(*) { },
+          freshness_checker: ->(_current) { }
         )
       end,
       resumer: ->(_resolved) { Hive::PlanReview::Projection.new(store.current) }

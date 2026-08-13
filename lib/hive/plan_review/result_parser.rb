@@ -1,3 +1,4 @@
+require "digest"
 require "json"
 require "set"
 require "time"
@@ -41,7 +42,7 @@ module Hive
 
       module_function
 
-      def parse(bytes, expected: nil)
+      def parse(bytes, expected: nil, snapshot_bytes: nil)
         raw = bytes.to_s
         raise InvalidRecord, "plan review result exceeds the size limit" if raw.bytesize > MAX_BYTES
         raise InvalidRecord, "plan review result is not valid UTF-8" unless raw.dup.force_encoding(Encoding::UTF_8).valid_encoding?
@@ -63,6 +64,7 @@ module Hive
         validate_expected!(data, expected) if expected
 
         findings = Array(data["findings"]).map { |entry| Finding.build(entry) }
+        validate_finding_anchors!(findings, snapshot_bytes) if snapshot_bytes
         coverage = validate_coverage!(data["coverage"])
         lenses = validate_names!(data["selected_lenses"], "selected_lenses")
         residual = validate_residual_evidence!(data["residual_evidence"])
@@ -102,6 +104,29 @@ module Hive
           next if data[key.to_s] == value
 
           raise StaleObservation, "plan review result #{key} does not match its request"
+        end
+      end
+
+      def validate_finding_anchors!(findings, snapshot_bytes)
+        text = snapshot_bytes.to_s.dup.force_encoding(Encoding::UTF_8)
+        raise InvalidRecord, "plan review snapshot is not valid UTF-8" unless text.valid_encoding?
+
+        lines = text.lines(chomp: true)
+        findings.each do |finding|
+          evidence = finding["evidence"]
+          unless evidence.fetch("path") == "plan.md"
+            raise InvalidRecord, "finding evidence path must reference the immutable plan snapshot"
+          end
+          start_line = evidence.fetch("start_line")
+          end_line = evidence.fetch("end_line")
+          anchored = lines[(start_line - 1)..(end_line - 1)]
+          if anchored.nil? || anchored.length != end_line - start_line + 1
+            raise InvalidRecord, "finding evidence line range is outside the immutable plan snapshot"
+          end
+          digest = Digest::SHA256.hexdigest(anchored.join("\n").b)
+          unless digest == evidence.fetch("anchor_digest")
+            raise InvalidRecord, "finding evidence anchor does not match the immutable plan snapshot"
+          end
         end
       end
 

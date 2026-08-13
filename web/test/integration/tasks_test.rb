@@ -1143,7 +1143,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     coverage = [
       plan_review_coverage("whole_document", "completed", "3"),
       plan_review_coverage("adversarial", "completed", "4"),
-      plan_review_coverage("security", "failed", "5")
+      plan_review_coverage("security", "failed", "5", required: false)
     ]
     routes = [
       {
@@ -1186,9 +1186,9 @@ class TasksTest < ActionDispatch::IntegrationTest
     }
   end
 
-  def plan_review_coverage(name, status, digest_character)
+  def plan_review_coverage(name, status, digest_character, required: true)
     {
-      "name" => name, "required" => true, "status" => status,
+      "name" => name, "required" => required, "status" => status,
       "fingerprint" => "prc-#{digest_character * 64}",
       "reason" => status == "failed" ? "provider unavailable" : nil
     }

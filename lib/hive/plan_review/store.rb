@@ -26,6 +26,14 @@ module Hive
       def create_review!(record)
         record = coerce_record(record, kind: "manifest")
         path = File.join(review_root(record.review_id), "manifest.json")
+        if optional_lstat(path)
+          existing = ensure_review!(record.review_id)
+          comparable = ->(value) { value.to_h.reject { |key, _entry| key == "created_at" } }
+          unless comparable.call(existing) == comparable.call(record)
+            raise InvalidRecord, "immutable plan review manifest already exists with different identity"
+          end
+          return existing
+        end
         write_immutable(path, canonical_json(record.to_h), json: true)
         record
       end

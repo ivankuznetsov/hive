@@ -39,7 +39,7 @@ module TaskMutations
 
   extend ActiveSupport::Concern
 
-  STAGE_VERB_BY_ACTION = Hive::TaskAction::READY_COMMANDS.select do |_action, verb|
+  STAGE_VERB_BY_ACTION = Hive::TaskAction::DISPATCH_COMMANDS.select do |_action, verb|
     Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS.include?(verb)
   end.freeze
 
@@ -75,7 +75,9 @@ module TaskMutations
 
     verb = STAGE_VERB_BY_ACTION.fetch(action)
     argv = [ "hive", verb, slug, "--project", project.name ]
-    argv += [ verb == "run" ? "--stage" : "--from", stage ]
+    unless verb == "plan-review-run"
+      argv += [ verb == "run" ? "--stage" : "--from", stage ]
+    end
     reference = Hive::Bot::DispatchRequestWriter.dispatch!(
       project: project.name,
       slug:,

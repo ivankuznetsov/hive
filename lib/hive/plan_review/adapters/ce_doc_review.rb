@@ -12,6 +12,7 @@ require "hive/config"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/result_parser"
 require "hive/plan_review/route_resolver"
+require "hive/plan_review/workspace_scope"
 require "hive/secret_patterns"
 
 module Hive
@@ -31,6 +32,9 @@ module Hive
             require "hive/stages/base"
 
             profile = Hive::AgentProfiles.lookup(request.reviewer.fetch("provider"), cfg: @cfg)
+            scope = Hive::PlanReview::WorkspaceScope.launch_kwargs(
+              profile:, workspace: cwd, role: request.kind
+            )
             manifest = custody_manifest(cwd, output_path)
             snapshot = Hive::ArtifactFirewall.capture(manifest)
             result = nil
@@ -49,7 +53,8 @@ module Hive
                 status_mode: :output_file_exists,
                 cfg: @cfg,
                 model: request.reviewer["model"],
-                effort: request.reviewer["effort"]
+                effort: request.reviewer["effort"],
+                **scope
               )
             ensure
               report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
@@ -63,6 +68,11 @@ module Hive
             normalize_result(result, request)
           rescue Hive::ArtifactFirewall::Error => error
             { "status" => "terminal_failure", "diagnostic" => error.message }
+          rescue Hive::AgentError => error
+            {
+              "status" => "retryable_failure", "diagnostic" => error.message,
+              "actual_route" => request.reviewer
+            }
           end
 
           private
@@ -105,6 +115,7 @@ module Hive
               [ name, File.join(@task.folder, name) ]
             end
             protected["meta.yml"] = @task.meta_yml_path
+            protected["review-input"] = File.join(workspace, "plan.md")
             review_root = File.join(@task.folder, "plan-review")
             if File.directory?(review_root) && !File.symlink?(review_root)
               Dir.glob(File.join(review_root, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
@@ -143,6 +154,8 @@ module Hive
 
           before_digest = request.plan_digest
           disposable = prepare_disposable(request)
+          disposable_plan = File.join(disposable, "plan.md")
+          snapshot_bytes = File.binread(disposable_plan)
           output_path = File.join(disposable, OUTPUT_BASENAME)
           prompt = render_prompt(request, disposable, output_path, capability)
           runner_result = stringify(@runner.call(
@@ -157,6 +170,13 @@ module Hive
             return result(
               "terminal_failure",
               diagnostic: "reviewer mutated the immutable plan snapshot",
+              route_receipt: route_receipt(request, actual: runner_result["actual_route"])
+            )
+          end
+          unless File.binread(disposable_plan) == snapshot_bytes
+            return result(
+              "terminal_failure",
+              diagnostic: "reviewer mutated the immutable disposable plan snapshot",
               route_receipt: route_receipt(request, actual: runner_result["actual_route"])
             )
           end
@@ -178,7 +198,8 @@ module Hive
               "attempt_id" => request.attempt_id,
               "plan_digest" => request.plan_digest,
               "policy_fingerprint" => request.policy_fingerprint
-            }
+            },
+            snapshot_bytes:
           )
           result(
             parsed.outcome,
@@ -191,7 +212,15 @@ module Hive
             route_receipt: route_receipt(request, actual: runner_result["actual_route"])
           )
         rescue Timeout::Error
-          result("timeout", diagnostic: "plan review adapter timed out")
+          result(
+            "timeout", diagnostic: "plan review adapter timed out",
+            route_receipt: route_receipt(request)
+          )
+        rescue Hive::AgentError => e
+          result(
+            "retryable_failure", diagnostic: e.message,
+            route_receipt: route_receipt(request)
+          )
         rescue StaleObservation, InvalidRecord, Hive::ConfigError => e
           result("terminal_failure", diagnostic: e.message)
         rescue SystemCallError, IOError => e

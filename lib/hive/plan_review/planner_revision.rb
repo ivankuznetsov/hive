@@ -6,6 +6,7 @@ require "securerandom"
 require "hive/artifact_firewall"
 require "hive/markers"
 require "hive/plan_review/plan_signals"
+require "hive/plan_review/workspace_scope"
 require "hive/secret_patterns"
 
 module Hive
@@ -15,6 +16,13 @@ module Hive
 
       Result = Data.define(:outcome, :candidate_bytes, :candidate_digest, :route_receipt, :diagnostic) do
         def success? = outcome == "success"
+
+        def to_h
+          {
+            "outcome" => outcome, "candidate_digest" => candidate_digest,
+            "route_receipt" => route_receipt, "diagnostic" => diagnostic
+          }
+        end
       end
 
       class HiveRunner
@@ -27,6 +35,9 @@ module Hive
           require "hive/stages/base"
 
           profile = Hive::AgentProfiles.lookup(planner_identity.fetch("provider"), cfg: @cfg)
+          scope = Hive::PlanReview::WorkspaceScope.launch_kwargs(
+            profile:, workspace:, role: "planner_revision"
+          )
           protected = Hive::ArtifactFirewall::ORCHESTRATOR_OWNED.to_h do |name|
             [ name, File.join(@task.folder, name) ]
           end
@@ -40,15 +51,21 @@ module Hive
             required_outputs: { "candidate-plan" => output_path }
           )
           snapshot = Hive::ArtifactFirewall.capture(manifest)
-          result = Hive::Stages::Base.spawn_agent(
-            @task,
-            prompt:, add_dirs: [ workspace ], cwd: workspace,
-            max_budget_usd: @cfg.dig("budget_usd", "plan"),
-            timeout_sec:, log_label: "plan-review-revision",
-            profile:, expected_output: output_path, status_mode: :output_file_exists,
-            cfg: @cfg, model: planner_identity["model"], effort: planner_identity["effort"]
-          )
-          report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+          result = nil
+          report = nil
+          begin
+            result = Hive::Stages::Base.spawn_agent(
+              @task,
+              prompt:, add_dirs: [ workspace ], cwd: workspace,
+              max_budget_usd: @cfg.dig("budget_usd", "plan"),
+              timeout_sec:, log_label: "plan-review-revision",
+              profile:, expected_output: output_path, status_mode: :output_file_exists,
+              cfg: @cfg, model: planner_identity["model"], effort: planner_identity["effort"],
+              **scope
+            )
+          ensure
+            report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+          end
           if report.tampered?
             return {
               "status" => "terminal_failure",
@@ -66,6 +83,11 @@ module Hive
           }
         rescue Hive::ArtifactFirewall::Error => e
           { "status" => "terminal_failure", "diagnostic" => e.message }
+        rescue Hive::AgentError => e
+          {
+            "status" => "retryable_failure", "diagnostic" => e.message,
+            "actual_route" => planner_identity
+          }
         end
       end
 
@@ -76,26 +98,25 @@ module Hive
       end
 
       def call(review_id:, plan_bytes:, findings:, planner_identity:, timeout_sec:)
-        workspace = File.join(@task.folder, "plan-review", "reviews", review_id, "revision-workspace")
-        FileUtils.mkdir_p(workspace, mode: 0o700)
-        input_path = File.join(workspace, "input-plan.md")
-        output_path = File.join(workspace, "candidate-output.md")
-        File.binwrite(input_path, Hive::SecretPatterns.redact(plan_bytes.to_s))
-        File.chmod(0o600, input_path)
-        FileUtils.rm_f(output_path)
-        prompt = render_prompt(
-          input_path:, output_path:, findings:, review_id:, planner_identity:
-        )
-        observed = stringify(@runner.call(
-          prompt:, workspace:, output_path:, planner_identity:, timeout_sec:
-        ) || {})
-        unless observed["status"] == "success"
-          return result(observed.fetch("status", "terminal_failure"), nil, observed)
-        end
+        Dir.mktmpdir("hive-plan-revision-") do |workspace|
+          input_path = File.join(workspace, "input-plan.md")
+          output_path = File.join(workspace, "candidate-output.md")
+          File.binwrite(input_path, Hive::SecretPatterns.redact(plan_bytes.to_s))
+          File.chmod(0o600, input_path)
+          prompt = render_prompt(
+            input_path:, output_path:, findings:, review_id:, planner_identity:
+          )
+          observed = stringify(@runner.call(
+            prompt:, workspace:, output_path:, planner_identity:, timeout_sec:
+          ) || {})
+          unless observed["status"] == "success"
+            return result(observed.fetch("status", "terminal_failure"), nil, observed)
+          end
 
-        bytes = read_candidate!(output_path, workspace)
-        result("success", bytes, observed)
-      rescue InvalidRecord => e
+          bytes = read_candidate!(output_path, workspace)
+          return result("success", bytes, observed)
+        end
+      rescue InvalidRecord, Hive::ConfigError => e
         result("terminal_failure", nil, "diagnostic" => e.message)
       end
 

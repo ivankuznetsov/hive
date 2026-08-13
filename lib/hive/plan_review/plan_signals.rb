@@ -2,6 +2,7 @@ require "digest"
 require "pathname"
 require "yaml"
 require "hive/plan_review"
+require "hive/secret_patterns"
 
 module Hive
   module PlanReview
@@ -132,7 +133,10 @@ module Hive
           return {}
         end
         raw = text.byteslice(4, closing - 4)
-        return {} if raw.bytesize > 64 * 1024
+        if raw.bytesize > 64 * 1024
+          uncertainties << "frontmatter_too_large"
+          return {}
+        end
 
         value = YAML.safe_load(raw, permitted_classes: [], permitted_symbols: [], aliases: false) || {}
         unless value.is_a?(Hash)
@@ -178,8 +182,10 @@ module Hive
       end
 
       def section(text, name)
-        match = text.match(/^\#{1,6}\s+#{Regexp.escape(name)}\s*$\n(.*?)(?=^\#{1,6}\s+|\z)/im)
-        match ? match[1] : ""
+        label = Regexp.escape(name)
+        boundary = '(?=^#{1,6}\s+|^\*\*[^*\n]+:?\*\*\s*$|\z)'
+        pattern = /(?:^\#{1,6}\s+#{label}\s*$|^\*\*#{label}:?\*\*\s*$)\n(.*?)#{boundary}/im
+        text.scan(pattern).flatten.join("\n")
       end
 
       def mandatory_reasons(text, files, protected_paths, uncertainties)
@@ -193,6 +199,15 @@ module Hive
             "category" => category,
             "evidence" => path ? "path:#{path}" : bounded_excerpt(evidence_text, match.begin(0))
           }.freeze
+        end
+        if Hive::SecretPatterns.match?(evidence_text) &&
+           reasons.none? { |reason| reason.fetch("category") == "auth_secrets_permissions" }
+          reasons.unshift(
+            {
+              "category" => "auth_secrets_permissions",
+              "evidence" => "literal_credential_pattern"
+            }.freeze
+          )
         end
 
         normalized_patterns = Array(protected_paths).filter_map do |pattern|

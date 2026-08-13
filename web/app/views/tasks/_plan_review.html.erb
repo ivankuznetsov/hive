@@ -69,7 +69,7 @@
               <td><%= coverage.fetch("status").tr("_", " ") %></td>
               <td><%= coverage["reason"].presence || "—" %></td>
             </tr>
-            <% if summary["effective_level"] == "mandatory" && coverage.fetch("required") &&
+            <% if summary["effective_level"] == "mandatory" &&
                   %w[failed unsupported].include?(coverage.fetch("status")) %>
               <tr class="plan-review-action-row">
                 <td colspan="4">

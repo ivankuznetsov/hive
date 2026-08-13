@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-08-12
+updated: 2026-08-13
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -39,6 +39,11 @@ new/migrated task fails closed at execute entry.
 rollback/reversibility text, file count/locality, protected-path matches, and
 bounded risk text. It never executes project code and rejects symlinks,
 traversal, invalid UTF-8, oversized input, and malformed evidence.
+Declared-file and test evidence may use repeated Markdown headings or repeated
+bold labels such as `**Files:**` and `**Test scenarios:**`. Oversized YAML
+frontmatter remains explicit uncertainty rather than disappearing, and a
+recognized literal credential pattern always selects mandatory review even
+when nearby prose never says "secret" or "credential".
 
 | Level | Rule | Availability behavior |
 |---|---|---|
@@ -60,10 +65,19 @@ whole-document/specialist leg. The adversarial leg uses a separate prompt and
 route. Neither reviewer can publish canonical `plan.md`; malformed or free-form
 output has no clearance authority.
 
+Reviewer and original-planner revision launches are confined to disposable
+workspaces with provider-enforced workspace-write or exact Claude file-tool
+scope. A provider that cannot enforce either boundary is unavailable rather
+than inheriting a bypass-permissions default. The reviewed input is itself a
+protected anchor, so findings cannot be minted against a reviewer-mutated copy.
+
 The default adversarial request is native Grok Build, model `grok-4.6`, effort
 `high`. Every route records requested and actual provider, model, model family,
 effort, native launcher, capability result, outcome, attempt, retry time, and
-independence result. A fallback satisfies adversarial coverage only when both
+independence result. Route receipts retain the preferred request plus every
+probe attempt even when a later fallback is selected. Resolution continues
+past present same-family or unknown-family candidates in search of a configured
+attested different-family fallback. A fallback satisfies adversarial coverage only when both
 families are known and the actual reviewer family differs from the captured
 planner family. Same-family or unknown-family output remains evidence but its
 adversarial coverage row is forced to `failed`.
@@ -73,7 +87,9 @@ Adapter outcomes are closed: `success`, `partial_coverage`, `unsupported`,
 `unsupported` is stable and consumes no transient retry. Provider limits,
 timeouts, and retryable failures preserve retry metadata and use at most one
 initial attempt plus `plan_review.attempts.max_transient` retries for primary,
-adversarial, and verification legs. Missing retry hints receive bounded
+adversarial, verification, and original-planner revision legs. Provider-route
+exceptions are normalized into those durable attempt outcomes rather than
+escaping before retry evidence is written. Missing retry hints receive bounded
 exponential delay with deterministic jitter rather than a hot retry loop.
 
 ## Findings, revision, and verification
@@ -88,15 +104,23 @@ of four classes:
 - `manual`: requires an answer, then planner incorporation and verification;
 - `fyi`: retained as non-blocking evidence.
 
+The fingerprint binds classification, risk, source, and exact plan evidence,
+but deliberately excludes model-authored title, description, and excerpt
+prose. The adapter verifies each `plan.md` line range and its normalized
+line-range SHA-256 against the immutable reviewed snapshot before the finding
+can affect revision or approval policy.
+
 Accepted findings are batched into one `PlannerRevision` call using the
 captured planner provider/model/family/effort. That call writes only
 `candidate-plan.md`. Hive then runs one bounded disposition/regression
 verification leg. Each accepted finding requires explicit fingerprint-bound
 verification evidence; absence from a generic critique does not verify it. A
 remaining or newly discovered blocker stops the lineage; it
-cannot trigger a recursive second revision. A verified candidate is atomically
-promoted to canonical `plan.md` immediately before its matching terminal
-resolution is published.
+cannot trigger a recursive second revision. In particular, `request-review`
+cannot clear a verification-created finding without a new linked plan
+generation and planner incorporation. A verified candidate is atomically
+promoted to canonical `plan.md` under the task mutation lock immediately before
+its matching terminal resolution is published under that same lock.
 
 ## Durable identity and artifacts
 
@@ -124,6 +148,9 @@ content-addressed from `current.json`, redacted before publication, and checked
 for regular-file type, confinement, byte size, and SHA-256 digest on every
 authority-bearing read. Current projection publication is version-CAS under a
 task-local lock. A late result is retained but cannot replace a newer pointer.
+Deterministic manifest and terminal-resolution publication is crash-recoverable:
+a retry reuses an identical orphaned immutable artifact instead of conflicting
+on a fresh timestamp before `current.json` can advance.
 
 The logical review ID binds task identity, initial plan generation/digest,
 policy fingerprint, and prior lineage identity. Transient retries stay in that
@@ -172,7 +199,9 @@ Actions are `approve-finding`, `answer-finding`, `waive-coverage`,
 `downgrade-level`, `raise-level`, `retry`, and `request-review`. Every action is
 observation-bound and idempotent: an identical replay is a no-op, a stale
 observation exits temporary-failure, and a conflicting target decision is
-rejected. Waivers and downgrades require a human-readable reason. The JSON
+rejected. Both CLI and Web recheck the canonical plan, task generation, policy
+configuration, and run-level receipt inside the mutation lock before writing a
+decision. Waivers and downgrades require a human-readable reason. The JSON
 result is `hive-plan-review-action.v1`.
 
 Under ADR-008's local same-user trust model, direct CLI invocation is the
@@ -196,8 +225,11 @@ object; they do not derive a second policy result.
 Hive Web renders the same object on task detail, opens only current
 content-addressed safe artifacts, and posts the full observation identity to
 the shared `DecisionService`. Stale or conflicting posts refresh the current
-review without mutation. While a plan review applies, the generic force-approve
-control is hidden.
+review without mutation. Its Run action dispatches the projected
+`plan_reviewing` or due `plan_review_retry` command as `plan-review-run`, and a
+mandatory failed or unsupported coverage row exposes an exact waiver form even
+when that row began as configured optional coverage. While a plan review
+applies, the generic force-approve control is hidden.
 
 ## Tests and proof
 

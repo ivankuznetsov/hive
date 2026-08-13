@@ -12,6 +12,33 @@ class PlanReviewStoreTest < Minitest::Test
     end
   end
 
+  def test_orphaned_manifest_is_reused_across_a_crash_retry
+    with_store do |store|
+      first = manifest_record
+      store.create_review!(first)
+      retry_manifest = Hive::PlanReview::Record.new(
+        first.to_h.merge("created_at" => "2026-08-12T12:05:00.000000Z")
+      )
+
+      recovered = store.create_review!(retry_manifest)
+
+      assert_equal first.to_h, recovered.to_h
+      assert_equal first["created_at"], recovered["created_at"]
+    end
+  end
+
+  def test_orphaned_manifest_rejects_a_different_immutable_identity
+    with_store do |store|
+      first = manifest_record
+      store.create_review!(first)
+      changed = Hive::PlanReview::Record.new(
+        first.to_h.merge("plan_digest" => "f" * 64)
+      )
+
+      assert_raises(Hive::PlanReview::InvalidRecord) { store.create_review!(changed) }
+    end
+  end
+
   def test_attempt_history_is_immutable_and_projection_has_one_current_winner
     with_store do |store|
       manifest = manifest_record

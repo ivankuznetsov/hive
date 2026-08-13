@@ -75,6 +75,46 @@ class PlanReviewRouteResolverTest < Minitest::Test
     assert_equal "opus", resolution.candidate.fetch("model")
   end
 
+  def test_present_non_independent_candidate_does_not_hide_independent_fallback
+    candidates = [
+      candidate("codex", "gpt-5.6-sol", "openai"),
+      candidate("claude", "opus", "anthropic")
+    ]
+    resolution = Hive::PlanReview::RouteResolver.resolve(
+      role: "adversarial",
+      planner_identity: { "provider" => "openai", "family" => "openai" },
+      candidates:,
+      probe: ->(value) { { "status" => "present", "actual" => value } }
+    )
+
+    assert_equal "claude", resolution.candidate.fetch("provider")
+    assert resolution.receipt.fetch("independence_verified")
+    assert_equal 2, resolution.receipt.fetch("attempts").length
+    assert_equal "codex", resolution.receipt.dig("requested", "provider")
+  end
+
+  def test_non_independent_fallback_receipt_keeps_every_probe_attempt
+    candidates = [
+      candidate("codex", "gpt-5.6-sol", "openai"),
+      candidate("grok", "grok-4.6", "grok")
+    ]
+    resolution = Hive::PlanReview::RouteResolver.resolve(
+      role: "adversarial", planner_identity: { "family" => "openai" }, candidates:,
+      probe: lambda do |value|
+        if value.fetch("provider") == "codex"
+          { "status" => "present", "actual" => value }
+        else
+          { "status" => "unsupported", "diagnostic" => "missing" }
+        end
+      end
+    )
+
+    refute resolution.receipt.fetch("independence_verified")
+    assert_equal %w[present unsupported], resolution.receipt.fetch("attempts").map { |row|
+      row.fetch("status")
+    }
+  end
+
   def test_project_model_routing_overrides_the_configured_role_without_switching_provider
     cfg = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS)).merge(
       "models" => { "plan_review_adversarial" => { "model" => "grok-4.6-fast", "effort" => "xhigh" } }

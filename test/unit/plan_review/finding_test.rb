@@ -9,6 +9,12 @@ class PlanReviewFindingTest < Minitest::Test
 
     assert_equal first.fingerprint, retry_copy.fingerprint
     refute_equal first.fingerprint, changed_scope.fingerprint
+
+    paraphrased = finding(
+      "title" => "Rollback needs a guard",
+      "description" => "Add an explicit reversible fallback."
+    )
+    assert_equal first.fingerprint, paraphrased.fingerprint
   end
 
   def test_lifecycle_is_closed_and_answer_is_not_resolution

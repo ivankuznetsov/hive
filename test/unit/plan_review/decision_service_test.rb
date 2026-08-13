@@ -145,6 +145,24 @@ class PlanReviewDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_request_review_cannot_clear_a_verification_finding
+    blocker = {
+      "owner" => "operator", "reason" => "verification_finding",
+      "finding_fingerprint" => "prf-#{'f' * 64}"
+    }
+    with_service(routes: [ route("success").merge("role" => "verification") ],
+                 blockers: [ blocker ]) do |service, store, record|
+      error = assert_raises(Hive::PlanReview::InvalidAction) do
+        service.apply(**decision_arguments(
+          record, action: "request_review", authorized: false
+        ))
+      end
+
+      assert_includes error.message, "linked plan generation"
+      assert_equal 1, store.current["routes"].length
+    end
+  end
+
   def test_action_value_normalization_is_shared_by_cli_and_web_callers
     assert_equal({ "answer" => "yes" }, Hive::PlanReview::DecisionService.action_value(
       "answer-finding", answer: "yes"
@@ -190,16 +208,17 @@ class PlanReviewDecisionServiceTest < Minitest::Test
 
   private
 
-  def with_service(level: "standard", finding: nil, routes: [], real_task_lock: false)
+  def with_service(level: "standard", finding: nil, routes: [], blockers: [], real_task_lock: false)
     with_task do |task|
       store = Hive::PlanReview::Store.new(task_folder: task.folder)
       manifest = manifest_record(level:)
       store.create_review!(manifest)
-      record = projection_record(manifest, finding:, routes:)
+      record = projection_record(manifest, finding:, routes:, blockers:)
       store.publish_current!(record, expected_version: nil)
       options = {
         task:, clock: -> { Time.utc(2026, 8, 12, 12) },
-        commit_locker: ->(&block) { block.call }, committer: ->(*) { }
+        commit_locker: ->(&block) { block.call }, committer: ->(*) { },
+        freshness_checker: ->(_current) { }
       }
       options[:task_locker] = ->(&block) { block.call } unless real_task_lock
       service = Hive::PlanReview::DecisionService.new(**options)
@@ -229,7 +248,7 @@ class PlanReviewDecisionServiceTest < Minitest::Test
     )
   end
 
-  def projection_record(manifest, finding:, routes:)
+  def projection_record(manifest, finding:, routes:, blockers:)
     coverage = {
       "name" => "adversarial", "required" => true, "status" => "failed",
       "fingerprint" => Hive::PlanReview::Identity.coverage(
@@ -245,7 +264,7 @@ class PlanReviewDecisionServiceTest < Minitest::Test
         "current_attempt_id" => routes.last&.fetch("attempt_id"),
         "coverage" => [ coverage ], "findings" => Array(finding).map(&:to_h),
         "decisions" => [], "routes" => routes, "artifacts" => {},
-        "blockers" => [], "required_action" => "operator action",
+        "blockers" => blockers, "required_action" => "operator action",
         "degradation_reason" => nil, "execution_allowed" => false,
         "updated_at" => "2026-08-12T12:00:00Z"
       )

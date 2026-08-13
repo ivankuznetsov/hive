@@ -37,7 +37,7 @@ class Task
     "8" => "ready_to_finalize"
   }.freeze
   PASSABLE_MARKERS = Hive::Commands::Approve::VALID_TERMINAL_MARKERS.map(&:to_s).freeze
-  PLAN_REVIEW_ARTIFACT_KEYS = /\A(?:policy|candidate_plan|resolution|(?:primary|adversarial|verification)_(?:result|coverage|route)|decision_prd-[0-9a-f]{64})\z/
+  PLAN_REVIEW_ARTIFACT_KEYS = /\A(?:policy|candidate_plan|resolution|(?:primary|adversarial|verification)_(?:result|coverage|route)|planner_revision_(?:input|result|coverage|route)|decision_prd-[0-9a-f]{64})\z/
 
   attr_reader :project
 
@@ -297,6 +297,13 @@ class Task
       return self["action"].to_s == "ready_to_run" ? "ready_to_run" : nil
     end
 
+    projected = self["action"].to_s
+    if projected == Hive::Schemas::TaskActionKind::PLAN_REVIEWING ||
+       projected == Hive::Schemas::TaskActionKind::PLAN_REVIEW_RETRY &&
+         self["suggested_command"].to_s.start_with?("hive plan-review-run ")
+      return projected
+    end
+
     STAGE_DISPATCH_ACTIONS[self["stage"].to_s.split("-", 2).first]
   end
 
@@ -304,7 +311,7 @@ class Task
     action = dispatch_action
     return unless action
 
-    command = Hive::TaskAction::READY_COMMANDS.fetch(action)
+    command = Hive::TaskAction::DISPATCH_COMMANDS.fetch(action)
     command == "run" ? "stage" : command
   end
 

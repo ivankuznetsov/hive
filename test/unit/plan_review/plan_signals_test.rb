@@ -129,6 +129,83 @@ class PlanReviewPlanSignalsTest < Minitest::Test
     end
   end
 
+  def test_literal_credential_pattern_requires_mandatory_review
+    token = "sk-#{'A' * 24}"
+    with_plan(<<~PLAN) do |path, task_folder|
+      # Update a local fixture
+
+      **Files:**
+      - `lib/hive/parser.rb`
+      - `test/unit/parser_test.rb`
+
+      **Test scenarios:**
+      - focused parser test passes
+
+      **Rollback:**
+      Revert the change.
+
+      Fixture value: #{token}
+    PLAN
+      result = Hive::PlanReview::PlanSignals.analyze(plan_path: path, task_folder:)
+
+      assert_includes result.mandatory_reasons.map { |entry| entry.fetch("category") },
+                      "auth_secrets_permissions"
+      refute result.skip_eligible?
+    end
+  end
+
+  def test_repeated_bold_evidence_blocks_are_parsed
+    with_plan(<<~PLAN) do |path, task_folder|
+      # Local parser guard
+
+      **Files:**
+      - `lib/hive/parser.rb`
+
+      **Test scenarios:**
+      - accepts a valid input
+
+      **Files:**
+      - `test/unit/parser_test.rb`
+
+      **Test scenarios:**
+      - rejects an invalid input
+
+      **Rollback:**
+      Revert the commit; the change is reversible.
+    PLAN
+      result = Hive::PlanReview::PlanSignals.analyze(plan_path: path, task_folder:)
+
+      assert_equal %w[lib/hive/parser.rb test/unit/parser_test.rb], result.declared_files
+      assert_equal 2, result.test_scenarios.length
+      assert result.skip_eligible?
+    end
+  end
+
+  def test_oversized_frontmatter_is_uncertain_even_with_complete_markdown_evidence
+    oversized = "note: #{'x' * (64 * 1024)}"
+    with_plan(<<~PLAN) do |path, task_folder|
+      ---
+      #{oversized}
+      ---
+      # Local parser guard
+
+      **Files:**
+      - `lib/hive/parser.rb`
+      - `test/unit/parser_test.rb`
+
+      **Test scenarios:**
+      - focused parser test passes
+
+      **Rollback:**
+      Revert the commit.
+    PLAN
+      result = Hive::PlanReview::PlanSignals.analyze(plan_path: path, task_folder:)
+
+      assert_includes result.uncertainties, "frontmatter_too_large"
+      refute result.skip_eligible?
+    end
+  end
+
   def test_symlink_traversal_invalid_utf8_and_oversize_fail_conservatively
     Dir.mktmpdir("hive-plan-signals") do |task_folder|
       outside = File.join(File.dirname(task_folder), "outside-plan.md")

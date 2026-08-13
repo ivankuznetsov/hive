@@ -41,6 +41,29 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  class TransientRevision
+    attr_reader :calls
+
+    def initialize(candidate)
+      @candidate = candidate
+      @calls = []
+    end
+
+    def call(**arguments)
+      @calls << arguments
+      return Hive::PlanReview::PlannerRevision::Result.new(
+        outcome: "retryable_failure", candidate_bytes: nil, candidate_digest: nil,
+        route_receipt: arguments.fetch(:planner_identity), diagnostic: "route failed"
+      ) if @calls.length == 1
+
+      Hive::PlanReview::PlannerRevision::Result.new(
+        outcome: "success", candidate_bytes: @candidate,
+        candidate_digest: Digest::SHA256.hexdigest(@candidate),
+        route_receipt: arguments.fetch(:planner_identity), diagnostic: nil
+      )
+    end
+  end
+
   def test_skip_records_clearance_without_any_reviewer_call
     with_task(skip_plan) do |task, cfg|
       adapter = FakeAdapter.new { flunk "skip must not invoke a reviewer" }
@@ -66,8 +89,118 @@ class PlanReviewOrchestratorTest < Minitest::Test
       assert_equal %w[primary adversarial verification], adapter.calls.map(&:kind)
       assert_equal 1, revision.calls.length
       assert_equal revised, File.binread(File.join(task.folder, "plan.md"))
-      assert_equal 3, projection.record["attempt_ids"].length
+      assert_equal 4, projection.record["attempt_ids"].length
       assert_equal "verified", projection.record["findings"].first.fetch("lifecycle")
+    end
+  end
+
+  def test_planner_revision_failures_are_durable_and_retry_within_the_shared_bound
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      revision = TransientRevision.new(revised)
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+
+      first = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+
+      assert_equal "retry_scheduled", first.record.state
+      route = first.record["routes"].last
+      assert_equal "planner_revision", route.fetch("role")
+      assert_equal "retryable_failure", route.fetch("outcome")
+      assert route.fetch("retry_at")
+      assert first.record["artifacts"].fetch("planner_revision_result")
+
+      cleared = orchestrator(
+        task, cfg, adapter:, planner_revision: revision,
+        clock: -> { Time.utc(2026, 8, 12, 13) }
+      ).advance!
+
+      assert_equal "cleared", cleared.record.state
+      assert_equal 2, revision.calls.length
+      assert_equal 2, cleared.record["routes"].count { |entry|
+        entry["role"] == "planner_revision"
+      }
+    end
+  end
+
+  def test_selected_fallback_keeps_the_preferred_request_and_probe_history
+    with_task(standard_plan) do |task, cfg|
+      preferred = route_identity("grok", "grok-4.6", "grok", "preferred")
+      fallback = route_identity("codex", "gpt-5.6-sol", "openai", "fallback")
+      resolver = lambda do |role:, **|
+        next resolve_route(role:) unless role == "primary"
+
+        Hive::PlanReview::RouteResolver::Resolution.new(
+          status: "resolved", candidate: fallback,
+          receipt: {
+            "role" => role, "requested" => preferred, "actual" => fallback,
+            "capability_result" => "present", "independence_verified" => true,
+            "independence_reason" => "different_model_family",
+            "attempts" => [
+              { "candidate" => preferred, "status" => "unsupported" },
+              { "candidate" => fallback, "status" => "present" }
+            ]
+          }
+        )
+      end
+
+      projection = orchestrator(
+        task, cfg, adapter: success_adapter, route_resolver: resolver
+      ).advance!
+
+      primary = projection.record["routes"].find { |entry| entry["role"] == "primary" }
+      assert_equal preferred, primary.fetch("requested")
+      assert_equal fallback, primary.fetch("actual")
+      assert_equal %w[unsupported present], primary.fetch("attempts").map { |row| row.fetch("status") }
+    end
+  end
+
+  def test_candidate_promotion_and_resolution_hold_the_task_mutation_lock
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      runner = orchestrator(
+        task, cfg,
+        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+        planner_revision: FakeRevision.new(revised)
+      )
+      observed = []
+      promotion = runner.method(:promote_candidate!)
+      runner.define_singleton_method(:promote_candidate!) do |*arguments|
+        observed << Hive::Lock.task_lock_held?(task.folder)
+        promotion.call(*arguments)
+      end
+
+      projection = runner.advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal [ true ], observed
+    end
+  end
+
+  def test_resolution_publication_reuses_an_orphaned_immutable_artifact
+    with_task(standard_plan) do |task, cfg|
+      runner = orchestrator(task, cfg, adapter: success_adapter)
+      store = runner.instance_variable_get(:@store)
+      publish = store.method(:publish_current!)
+      failed = false
+      store.define_singleton_method(:publish_current!) do |record, expected_version:|
+        if record.state == "cleared" && !failed
+          failed = true
+          raise Errno::EIO, "simulated current pointer crash"
+        end
+        publish.call(record, expected_version:)
+      end
+
+      assert_raises(Errno::EIO) { runner.advance! }
+      orphan = Dir[File.join(store.root, "reviews", "*", "resolution-v*.json")].fetch(0)
+      orphan_bytes = File.binread(orphan)
+
+      recovered = orchestrator(
+        task, cfg, adapter: success_adapter,
+        clock: -> { Time.utc(2026, 8, 12, 13) }
+      ).advance!
+
+      assert_equal "cleared", recovered.record.state
+      assert_equal orphan_bytes, File.binread(orphan)
     end
   end
 
@@ -393,10 +526,11 @@ class PlanReviewOrchestratorTest < Minitest::Test
   private
 
   def orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(standard_plan),
+                   route_resolver: method(:resolve_route),
                    clock: -> { Time.utc(2026, 8, 12, 12) })
     Hive::PlanReview::Orchestrator.new(
       task:, cfg:, planner_identity: planner_identity, adapter:,
-      planner_revision:, route_resolver: method(:resolve_route),
+      planner_revision:, route_resolver:,
       clock:
     )
   end
@@ -415,6 +549,13 @@ class PlanReviewOrchestratorTest < Minitest::Test
         "capability_result" => "present", "independence_verified" => true
       }
     )
+  end
+
+  def route_identity(provider, model, family, route)
+    {
+      "provider" => provider, "model" => model, "family" => family,
+      "effort" => "high", "route" => route
+    }
   end
 
   def success_adapter(primary_findings: [], verification_findings: [])

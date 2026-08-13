@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb, lib/hive/task_action/diagnostic.rb, lib/hive/terminal_outcome.rb
 created: 2026-04-26
-updated: 2026-08-12
+updated: 2026-08-13
 tags: [module, status, action, classifier, human-stage, diagnostic, blocked, plan-review, terminal-outcomes]
 ---
 
@@ -156,6 +156,10 @@ maps lifecycle state without reimplementing policy:
 Invalid or digest-mismatched evidence projects a visible inert block. The
 action's label, blocker owner/reason, required action, and shell-escaped command
 therefore correspond to the command `TransitionGuard` will accept.
+`TaskAction::DISPATCH_COMMANDS` extends the ready-action vocabulary with only
+the active and due plan-review actions. Hive Web consumes that shared map, so a
+plan-review row queues `plan-review-run` without plan-stage `--from` arguments
+instead of falling back to `hive plan`.
 
 ## Command emission
 

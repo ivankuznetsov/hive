@@ -12,6 +12,7 @@ require "hive/paths"
 require "hive/repository_identity"
 require "hive/model_routing"
 require "hive/plan_review"
+require "hive/plan_review/finding"
 require "hive/provider_routing"
 require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
@@ -2350,10 +2351,14 @@ module Hive
                 "#{label}.id in #{describe_source(source_path)} must be a unique lowercase identifier"
         end
         validate_bounded_integer!(policy["version"], "#{label}.version", 1, 1_000_000, source_path)
-        unless policy["action"].is_a?(String) && !policy["action"].empty? &&
-               policy["risk"].is_a?(String) && !policy["risk"].empty?
+        unless policy["action"] == "approve_finding"
           raise ConfigError,
-                "#{label} in #{describe_source(source_path)} requires non-empty action and risk"
+                "#{label}.action in #{describe_source(source_path)} must be approve_finding"
+        end
+        unless Hive::PlanReview::Finding::RISKS.include?(policy["risk"])
+          raise ConfigError,
+                "#{label}.risk in #{describe_source(source_path)} must be one of " \
+                "#{Hive::PlanReview::Finding::RISKS.inspect}"
         end
         validate_path_glob_list!(policy["paths"], "#{label}.paths", source_path)
         unless policy["revoked"] == true || policy["revoked"] == false

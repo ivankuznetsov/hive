@@ -2,6 +2,7 @@ require "hive/agent_profiles"
 require "hive/agent_runtime"
 require "hive/model_routing"
 require "hive/plan_review"
+require "hive/plan_review/workspace_scope"
 require "hive/secret_patterns"
 
 module Hive
@@ -28,6 +29,7 @@ module Hive
         raise Hive::ConfigError, "plan review route requires at least one candidate" if candidates.empty?
 
         attempts = []
+        first_present = nil
         candidates.each do |candidate|
           observation = normalize_hash(probe.call(candidate))
           status = observation.fetch("status", "unsupported")
@@ -40,19 +42,21 @@ module Hive
 
           actual = normalize_observed_identity(observation["actual"])
           verified, reason = independence(planner_identity, actual)
-          return Resolution.new(
-            status: "resolved",
-            candidate: candidate.freeze,
-            receipt: {
-              "role" => role,
-              "requested" => candidates.first,
-              "actual" => actual,
-              "capability_result" => "present",
-              "independence_verified" => verified,
-              "independence_reason" => reason,
-              "attempts" => attempts.freeze
-            }.freeze
-          ).freeze
+          if verified
+            return resolved(
+              role:, requested: candidates.first, candidate:, actual:,
+              verified:, reason:, attempts:
+            )
+          end
+
+          first_present ||= { candidate:, actual:, verified:, reason: }
+        end
+
+        if first_present
+          return resolved(
+            role:, requested: candidates.first, attempts:,
+            **first_present
+          )
         end
 
         last = attempts.last || {}
@@ -66,7 +70,7 @@ module Hive
             "capability_result" => last.fetch("status", "unsupported"),
             "independence_verified" => false,
             "independence_reason" => "reviewer_family_unavailable",
-            "attempts" => attempts.freeze
+            "attempts" => immutable_attempts(attempts)
           }.freeze
         ).freeze
       end
@@ -96,6 +100,25 @@ module Hive
           ]
         end
       end
+
+      def immutable_attempts(attempts)
+        attempts.map { |attempt| attempt.dup.freeze }.freeze
+      end
+      private_class_method :immutable_attempts
+
+      def resolved(role:, requested:, candidate:, actual:, verified:, reason:, attempts:)
+        Resolution.new(
+          status: "resolved", candidate: candidate.freeze,
+          receipt: {
+            "role" => role, "requested" => requested, "actual" => actual,
+            "capability_result" => "present",
+            "independence_verified" => verified,
+            "independence_reason" => reason,
+            "attempts" => immutable_attempts(attempts)
+          }.freeze
+        ).freeze
+      end
+      private_class_method :resolved
 
       def configured_candidates(role, cfg)
         return default_candidates(role) unless cfg.is_a?(Hash) && cfg.dig("plan_review", "routes", role)
@@ -129,6 +152,12 @@ module Hive
 
       def default_probe(candidate)
         profile = Hive::AgentProfiles.lookup(candidate.fetch("provider"))
+        unless WorkspaceScope.supported?(profile)
+          return {
+            "status" => "unsupported",
+            "diagnostic" => "provider cannot enforce disposable workspace confinement"
+          }
+        end
         result = Hive::AgentRuntime.prepare!(profile)
         {
           "status" => "present",

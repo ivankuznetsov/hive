@@ -52,6 +52,32 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_rejects_unknown_plan_review_approval_action_and_risk
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      policy = <<~YAML
+        plan_review:
+          approval_policies:
+            - id: bounded_policy
+              version: 1
+              action: approve_finding
+              risk: low
+              paths: ["lib/hive/parser.rb"]
+              valid_from: "2026-08-12T00:00:00Z"
+              valid_until: "2026-08-13T00:00:00Z"
+              revoked: false
+      YAML
+      File.write(config_path, policy.sub("approve_finding", "approve_everything"))
+      assert_match(/action.*approve_finding/i,
+                   assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message)
+
+      File.write(config_path, policy.sub("risk: low", "risk: catastrophic"))
+      assert_match(/risk.*low.*critical/i,
+                   assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message)
+    end
+  end
+
   def test_registry_round_trips_repository_identity
     with_tmp_global_config do
       with_tmp_git_repo do |repo|

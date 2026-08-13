@@ -2,7 +2,10 @@ require "test_helper"
 require "hive/plan_review/planner_revision"
 
 class PlanReviewPlannerRevisionTest < Minitest::Test
+  include HiveTestHelper
+
   Task = Struct.new(:folder, keyword_init: true)
+  RunnerTask = Struct.new(:folder, :meta_yml_path, keyword_init: true)
 
   def test_accepts_one_complete_candidate_and_leaves_input_plan_untouched
     Dir.mktmpdir("hive-plan-revision") do |root|
@@ -70,6 +73,41 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
 
       assert_equal "terminal_failure", result.outcome
       assert_includes result.diagnostic, "size limit"
+    end
+  end
+
+  def test_production_runner_confines_revision_and_normalizes_provider_route_errors
+    Dir.mktmpdir("hive-plan-revision-runner") do |root|
+      meta = File.join(root, "meta.yml")
+      File.write(meta, "id: demo\n")
+      workspace = File.join(root, "workspace")
+      FileUtils.mkdir_p(workspace)
+      input = File.join(workspace, "input-plan.md")
+      output = File.join(workspace, "candidate-output.md")
+      File.write(input, "# Plan\n")
+      task = RunnerTask.new(folder: root, meta_yml_path: meta)
+      runner = Hive::PlanReview::PlannerRevision::HiveRunner.new(
+        task:, cfg: Hive::Config::DEFAULTS
+      )
+      identity = planner_identity.merge("provider" => "codex")
+      launch = nil
+      replacement = lambda do |_task, **kwargs|
+        launch = kwargs
+        raise Hive::ProviderRouteFailed, "route failed"
+      end
+
+      observed = nil
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
+        observed = runner.call(
+          prompt: "revise", workspace:, output_path: output,
+          planner_identity: identity, timeout_sec: 60
+        )
+      end
+
+      assert_equal Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE,
+                   launch.fetch(:permission_mode)
+      assert_equal "retryable_failure", observed.fetch("status")
+      assert_equal identity, observed.fetch("actual_route")
     end
   end
 

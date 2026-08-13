@@ -152,7 +152,7 @@ module Hive
 
       def intended_stage_for(argv, task)
         verb = Array(argv)[1].to_s
-        return "#{task.stage_index}-#{task.stage_name}" if verb == "run"
+        return "#{task.stage_index}-#{task.stage_name}" if %w[run plan-review-run].include?(verb)
 
         Hive::Workflows.for_verb(verb).fetch(:target)
       end

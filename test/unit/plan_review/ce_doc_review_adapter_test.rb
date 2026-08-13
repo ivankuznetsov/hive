@@ -11,7 +11,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       runner = lambda do |prompt:, cwd:, output_path:, request:, **|
         refute_equal File.dirname(plan_path), cwd
         assert_includes prompt, "ce-doc-review"
-        File.write(File.join(cwd, "plan.md"), "reviewer mutation")
+        File.write(File.join(cwd, "review-notes.md"), "reviewer scratch work")
         File.write(output_path, JSON.generate(valid_result(request)))
         { "status" => "ok", "actual_route" => request.reviewer }
       end
@@ -109,6 +109,20 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_provider_route_error_is_a_retryable_adapter_outcome_with_route_evidence
+    with_request do |request, _plan_path|
+      adapter = adapter_for(lambda do |**|
+        raise Hive::ProviderRouteFailed, "admitted route failed"
+      end)
+
+      result = adapter.call(request)
+
+      assert_equal "retryable_failure", result.outcome
+      assert_equal request.reviewer, result.route_receipt.fetch("requested")
+      assert_includes result.diagnostic, "admitted route failed"
+    end
+  end
+
   def test_output_is_read_with_the_parser_byte_bound
     with_request do |request, _plan_path|
       runner = lambda do |output_path:, **|
@@ -137,7 +151,9 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
         task:, cfg: Hive::Config::DEFAULTS
       )
       valid_payload = valid_result(request)
-      replacement = lambda do |_task, expected_output:, **|
+      launch = nil
+      replacement = lambda do |_task, expected_output:, **kwargs|
+        launch = kwargs
         File.write(current_path, "forged clearance\n")
         File.write(expected_output, JSON.generate(valid_payload))
         { status: :ok, usage: { model: request.reviewer.fetch("model") } }
@@ -156,6 +172,8 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       assert_equal "terminal_failure", observed.fetch("status")
       assert_includes observed.fetch("diagnostic"), "plan-review/current.json"
       assert_equal "authoritative\n", File.read(current_path)
+      assert_equal Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE,
+                   launch.fetch(:permission_mode)
     end
   end
 

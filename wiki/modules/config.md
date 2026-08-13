@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-08-12
+updated: 2026-08-13
 tags: [config, yaml, validation, plan-review]
 ---
 
@@ -188,7 +188,9 @@ name must exist in the model-routing registry.
 
 Approval-policy rows are also closed. Their unique ID/version, action, risk,
 relative paths, validity interval, and revocation flag must validate before the
-project loads. Runtime matching is exact and emits a consumption receipt; it
+project loads. `action` is exactly `approve_finding`, and `risk` is one of
+`low`, `medium`, `high`, or `critical`; unknown non-empty values fail config
+loading rather than producing a policy that can never match. Runtime matching is exact and emits a consumption receipt; it
 cannot lower a mandatory review. See [[modules/plan_review]].
 
 ## Condition authority

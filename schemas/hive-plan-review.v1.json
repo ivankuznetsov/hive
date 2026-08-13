@@ -218,7 +218,9 @@
         "role": { "$ref": "#/$defs/NonEmptyString" },
         "requested": { "type": "object" },
         "actual": { "type": "object" },
-        "independence_verified": { "type": "boolean" }
+        "independence_verified": { "type": "boolean" },
+        "recovery_reset": { "type": "boolean" },
+        "attempts": { "type": "array" }
       }
     },
     "Attempt": {

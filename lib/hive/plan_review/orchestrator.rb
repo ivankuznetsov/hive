@@ -4,6 +4,7 @@ require "json"
 require "time"
 require "tmpdir"
 require "hive/atomic_file"
+require "hive/lock"
 require "hive/plan_review/approval_policy"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/adapters/ce_doc_review"
@@ -107,6 +108,9 @@ module Hive
       end
 
       def resume_review(record, original_plan_bytes)
+        return terminal(record, state: "skipped", outcome: "skipped") if
+          record.effective_level == "skip"
+
         %w[primary adversarial].each do |role|
           record, pending = ensure_leg(record, role, original_plan_bytes)
           return Projection.new(record) if pending
@@ -149,16 +153,19 @@ module Hive
         accepted = accepted_findings(record)
         candidate_bytes = candidate_bytes(record)
         if !accepted.empty? && candidate_bytes.nil?
-          record = publish(
-            record, "state" => "revising", "outcome" => nil, "blockers" => [],
-            "required_action" => "revise plan with accepted findings",
-            "execution_allowed" => false
+          planner_route = latest_route(record, "planner_revision")
+          unless record.state == "retry_scheduled" && planner_route &&
+                 TRANSIENT_OUTCOMES.include?(planner_route["outcome"])
+            record = publish(
+              record, "state" => "revising", "outcome" => nil, "blockers" => [],
+              "required_action" => "revise plan with accepted findings",
+              "execution_allowed" => false
+            )
+          end
+          record, revision, pending = ensure_planner_revision(
+            record, original_plan_bytes, accepted
           )
-          revision = @planner_revision.call(
-            review_id: record.review_id, plan_bytes: original_plan_bytes,
-            findings: accepted, planner_identity: planner_identity(record),
-            timeout_sec: @cfg.dig("plan_review", "attempts", "timeout_sec")
-          )
+          return Projection.new(record) if pending
           unless revision.success?
             return terminal(
               record, state: "blocked", outcome: "blocked",
@@ -177,7 +184,6 @@ module Hive
             record,
             "candidate_plan_digest" => candidate_digest,
             "findings" => incorporated,
-            "routes" => record["routes"] + [ planner_revision_route(revision, record) ],
             "artifacts" => record["artifacts"].merge("candidate_plan" => candidate_ref),
             "state" => "verifying", "required_action" => "run disposition verification",
             "blockers" => [], "execution_allowed" => false
@@ -220,14 +226,20 @@ module Hive
           revision_complete: accepted.empty? || !record["candidate_plan_digest"].nil?,
           verification_complete: true, verification_blockers:
         )
-        promote_candidate!(record, candidate_bytes) if
-          clearance.execution_allowed && record["candidate_plan_digest"]
-        terminal(
-          record, state: clearance.state, outcome: clearance.outcome,
+        terminal_args = {
+          state: clearance.state, outcome: clearance.outcome,
           findings:, blockers: clearance.blockers,
           required_action: clearance.required_action,
           degradation_reason: clearance.degradation_reason
-        )
+        }
+        if clearance.execution_allowed && record["candidate_plan_digest"]
+          with_task_mutation_lock do
+            promote_candidate!(record, candidate_bytes)
+            terminal(record, **terminal_args)
+          end
+        else
+          terminal(record, **terminal_args)
+        end
       end
 
       def begin_review(current, policy, signals, generation, review_id)
@@ -242,7 +254,7 @@ module Hive
           "effective_level" => policy.effective_level,
           "created_at" => created_at
         )
-        @store.create_review!(manifest)
+        manifest = @store.create_review!(manifest)
         policy_ref = @store.write_review_artifact!(
           review_id:, basename: "policy-#{policy.policy_fingerprint}.json",
           content: policy.to_h.merge(
@@ -368,6 +380,60 @@ module Hive
         [ updated, adapter_result ]
       end
 
+      def ensure_planner_revision(record, plan_bytes, findings)
+        role = "planner_revision"
+        max_attempts = 1 + Integer(@cfg.dig("plan_review", "attempts", "max_transient"))
+        route = latest_route(record, role)
+        if route && TRANSIENT_OUTCOMES.include?(route["outcome"])
+          if attempts_in_current_run(record, role) >= max_attempts
+            exhausted = PlannerRevision::Result.new(
+              outcome: route.fetch("outcome"), candidate_bytes: nil,
+              candidate_digest: nil, route_receipt: route.fetch("actual", {}),
+              diagnostic: "planner revision retry bound exhausted"
+            ).freeze
+            return [ record, exhausted, false ]
+          end
+          return [ record, nil, true ] if retry_in_future?(route["retry_at"])
+        end
+
+        attempt_id = Identity.attempt(record.review_id)
+        revision = @planner_revision.call(
+          review_id: record.review_id, plan_bytes:, findings:,
+          planner_identity: planner_identity(record),
+          timeout_sec: @cfg.dig("plan_review", "attempts", "timeout_sec")
+        )
+        retry_at = if TRANSIENT_OUTCOMES.include?(revision.outcome)
+          default_retry_at(record, role, attempt_id)
+        end
+        route = planner_revision_route(
+          revision, record, attempt_id:, retry_at:
+        )
+        refs = @store.write_attempt!(
+          review_id: record.review_id, attempt_id:, plan_bytes:,
+          result: revision.to_h, coverage: [], route_receipt: route
+        )
+        artifacts = record["artifacts"].merge(
+          "planner_revision_input" => refs.fetch("input_plan"),
+          "planner_revision_result" => refs.fetch("result"),
+          "planner_revision_coverage" => refs.fetch("coverage"),
+          "planner_revision_route" => refs.fetch("route_receipt")
+        )
+        attempts = attempts_in_current_run(record, role) + 1
+        pending = TRANSIENT_OUTCOMES.include?(revision.outcome) && attempts < max_attempts
+        state = pending ? "retry_scheduled" : "revising"
+        record = publish(
+          record,
+          "state" => state, "outcome" => nil,
+          "attempt_ids" => record["attempt_ids"] + [ attempt_id ],
+          "current_attempt_id" => attempt_id,
+          "routes" => record["routes"] + [ route ], "artifacts" => artifacts,
+          "blockers" => [],
+          "required_action" => pending ? "retry planner revision after #{retry_at}" : nil,
+          "retry_at" => pending ? retry_at : nil, "execution_allowed" => false
+        )
+        [ record, revision, pending ]
+      end
+
       def terminal(record, state:, outcome:, findings: record["findings"], blockers: [],
                    required_action: nil, degradation_reason: nil)
         next_version = record.version + 1
@@ -384,7 +450,7 @@ module Hive
           "blockers" => blockers, "required_action" => required_action,
           "degradation_reason" => degradation_reason,
           "execution_allowed" => %w[skipped cleared degraded_cleared].include?(state),
-          "resolved_at" => timestamp
+          "resolved_at" => record["updated_at"]
         }
         reference = @store.write_review_artifact!(
           review_id: record.review_id, basename: "resolution-v#{next_version}.json",
@@ -621,14 +687,15 @@ module Hive
         adapter = stringify(adapter)
         {
           "role" => role,
-          "requested" => adapter["requested"] || base["requested"] || {},
+          "requested" => base["requested"] || adapter["requested"] || {},
           "actual" => adapter["actual"] || base["actual"] || {},
           "capability_result" => adapter["capability_result"] || base["capability_result"],
           "independence_verified" => adapter.fetch(
             "independence_verified", base.fetch("independence_verified", false)
           ),
           "independence_reason" => adapter["independence_reason"] || base["independence_reason"],
-          "attempt_id" => attempt_id, "outcome" => outcome, "retry_at" => retry_at
+          "attempt_id" => attempt_id, "outcome" => outcome, "retry_at" => retry_at,
+          "attempts" => base["attempts"] || adapter["attempts"]
         }.compact
       end
 
@@ -653,14 +720,15 @@ module Hive
         }
       end
 
-      def planner_revision_route(revision, record)
+      def planner_revision_route(revision, record, attempt_id: nil, retry_at: nil)
         actual = revision.route_receipt.empty? ? planner_identity(record) : revision.route_receipt
         {
           "role" => "planner_revision", "requested" => planner_identity(record),
           "actual" => actual, "capability_result" => "present",
           "independence_verified" => false, "independence_reason" => "same_plan_authority",
-          "outcome" => revision.outcome
-        }
+          "outcome" => revision.outcome, "attempt_id" => attempt_id,
+          "retry_at" => retry_at
+        }.compact
       end
 
       def planner_identity(record)
@@ -681,6 +749,14 @@ module Hive
         mode = File.stat(path).mode & 0o777
         Hive::AtomicFile.write(path, candidate_bytes, mode:)
         File.chmod(mode, path)
+      end
+
+      def with_task_mutation_lock(&block)
+        return block.call if Hive::Lock.task_lock_held?(@task.folder)
+
+        Hive::Lock.with_task_lock(
+          @task.folder, slug: @task.slug, op: "plan-review-promote", &block
+        )
       end
 
       def persisted_run_level

@@ -50,6 +50,30 @@ class PlanReviewResultParserTest < Minitest::Test
     assert_includes error.message, "duplicate"
   end
 
+  def test_finding_anchor_must_match_the_immutable_snapshot
+    snapshot = "one\ntwo\nthree\n"
+    evidence = valid_result.fetch("findings").first.fetch("evidence").merge(
+      "start_line" => 2, "end_line" => 3,
+      "anchor_digest" => Digest::SHA256.hexdigest("two\nthree")
+    )
+    result = valid_result.merge(
+      "findings" => [ valid_result.fetch("findings").first.merge("evidence" => evidence) ]
+    )
+    parsed = Hive::PlanReview::ResultParser.parse(
+      JSON.generate(result), snapshot_bytes: snapshot
+    )
+    assert_equal 2, parsed.findings.first["evidence"].fetch("start_line")
+
+    forged = result.merge(
+      "findings" => [ result.fetch("findings").first.merge(
+        "evidence" => evidence.merge("anchor_digest" => "0" * 64)
+      ) ]
+    )
+    assert_raises(Hive::PlanReview::InvalidRecord) do
+      Hive::PlanReview::ResultParser.parse(JSON.generate(forged), snapshot_bytes: snapshot)
+    end
+  end
+
   def test_malformed_top_level_and_coverage_retry_timestamps_are_rejected
     [
       valid_result.merge("retry_at" => "later"),

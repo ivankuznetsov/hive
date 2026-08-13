@@ -57,19 +57,12 @@ module Hive
           "source" => data.fetch("source").to_s.strip,
           "classification" => data.fetch("classification").to_s,
           "risk" => data.fetch("risk").to_s,
-          "title" => normalize_text(data.fetch("title")),
-          "description" => normalize_text(data.fetch("description")),
           "evidence" => data.fetch("evidence").slice(
             "path", "start_line", "end_line", "anchor_digest"
           )
         }
         "prf-#{Digest::SHA256.hexdigest(JSON.generate(Identity.normalize(semantic)))}"
       end
-
-      def self.normalize_text(value)
-        value.to_s.strip.gsub(/\s+/, " ")
-      end
-      private_class_method :normalize_text
 
       private
 

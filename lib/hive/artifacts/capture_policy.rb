@@ -16,8 +16,8 @@ require "hive/worktree"
 module Hive
   module Artifacts
     # Deterministic, generation-bound applicability decision written before the
-    # artifacts agent starts. Agents may consume this receipt but cannot demote
-    # it; required -> not_applicable is an explicit confirmed operator action.
+    # artifacts agent starts. Agents consume this receipt but cannot alter its
+    # applicability decision.
     class CapturePolicy
       SCHEMA = "hive-capture-requirement".freeze
       SCHEMA_VERSION = 1
@@ -35,7 +35,6 @@ module Hive
       }ix
       VISUAL_REQUEST = /\b(?:screenshot|screen[- ]?record|browser|visual proof|demo capture|video|gif)\b/i
 
-      class AuthorizationError < Hive::Error; end
       class ClassificationError < Hive::Error; end
 
       def self.for_task(task, project:, clock: -> { Time.now.utc })
@@ -132,35 +131,6 @@ module Hive
         end
 
         write!(desired)
-      end
-
-      def promote!(actor:, rationale:)
-        current = ensure!
-        return current if current["result"] == "required"
-
-        write!(current.merge(
-          "result" => "required",
-          "rationale" => rationale.to_s,
-          "override" => override("promotion", actor, rationale)
-        ))
-      end
-
-      def demote!(actor:, rationale:, confirmed:)
-        current = ensure!
-        actor = actor.to_s
-        unless confirmed == true && actor.match?(/\Aoperator(?::|$)/) && !rationale.to_s.strip.empty?
-          raise AuthorizationError,
-                "required capture can be demoted only by a confirmed operator with a rationale"
-        end
-        unless current["task_generation"] == @task_generation
-          raise AuthorizationError, "capture applicability changed generation; reclassify before confirming"
-        end
-
-        write!(current.merge(
-          "result" => "not_applicable",
-          "rationale" => rationale.to_s.strip,
-          "override" => override("confirmed_demotion", actor, rationale)
-        ))
       end
 
       def capture_satisfied?
@@ -334,16 +304,6 @@ module Hive
           "task", "project", "task_generation", "implementation_base",
           "implementation_head", "changed_paths_digest", "classifier_version"
         )
-      end
-
-      def override(kind, actor, rationale)
-        {
-          "kind" => kind,
-          "actor" => actor.to_s,
-          "rationale" => rationale.to_s.strip,
-          "confirmed_at" => iso_time(@clock.call),
-          "task_generation" => @task_generation
-        }
       end
 
       def write!(document)

@@ -1996,10 +1996,6 @@ module Hive
         true
       end
 
-      def collect_answered_escalation_findings(ctx)
-        collect_answered_escalation_findings_with_count(ctx).text
-      end
-
       def collect_answered_escalation_findings_with_count(ctx)
         path = Hive::Stages::Review::Triage.escalations_path(ctx)
         questions = parse_escalation_questions(path)

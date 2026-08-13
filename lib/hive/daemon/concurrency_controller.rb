@@ -343,10 +343,6 @@ module Hive
         @running.size + @external_running_global
       end
 
-      def project_dropped?(project)
-        @dropped_projects.include?(project)
-      end
-
       def dropped_projects
         @dropped_projects.to_a
       end

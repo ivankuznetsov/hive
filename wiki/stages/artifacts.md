@@ -100,9 +100,8 @@ for existing tasks:
 ```
 
 For new work, applicability is not agent-authored: `not_applicable` is the
-classifier result, while required capture failure is a stage error. Promotion
-is unrestricted; demotion requires a confirmed generation-bound operator and
-rationale. See [[commands/web]].
+classifier result, while required capture failure is a stage error. See
+[[commands/web]].
 
 ## Marker -> next action
 

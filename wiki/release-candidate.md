@@ -123,6 +123,12 @@ v0.4.1, and v0.4.2 have separate directories so their common
 gem and all three authentication sidecars plus each row's exact producer lock,
 the historical row's separate exact observer lock, offline-cache manifest, and
 complete manifest-bound `gems/` directory.
+
+Hosted staging downloads each baseline's tagged `Gemfile.lock` as immutable
+bytes and verifies its reviewed SHA-256 before using it. It does not fetch or
+archive tags through the Actions checkout, because mutating a shallow checkout
+can race Git's shallow-file maintenance. Package assets and dependency gems
+remain network-staged only before the no-network upgrade sandbox begins.
 Missing release files remain `baseline_assets_missing` and expose only the
 needed exact `gh release download <tag> --repo ivankuznetsov/hive --pattern
 <filename> --dir <tag-cache>` argv. Planning never executes those argv.

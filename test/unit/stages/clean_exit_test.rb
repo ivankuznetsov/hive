@@ -347,6 +347,24 @@ class HiveStagesCleanExitTest < Minitest::Test
     assert_includes captured_argv, "ls-files"
   end
 
+  def test_safety_gate_rejects_malformed_head_tree_records
+    captured_argv = nil
+    capture = lambda do |argv, **_kwargs|
+      captured_argv = argv
+      { success: true, stdout: "100644 blob not-an-object\twiki/bad.md\0" }
+    end
+
+    with_replaced_singleton_method(Hive::Stages::AutoCommit, :capture_git_with_timeout, capture) do
+      result = Hive::Stages::AutoCommit.send(
+        :head_blob_object_ids, "/worktree", [ "wiki/bad.md" ]
+      )
+
+      refute result.fetch(:success)
+      assert_equal "git ls-tree HEAD returned malformed tree data", result.fetch(:message)
+    end
+    assert_includes captured_argv, "ls-tree"
+  end
+
   def test_oversized_allowed_path_returns_safety_violation_without_reading_blob
     with_tmp_dir do |worktree|
       init_git(worktree)

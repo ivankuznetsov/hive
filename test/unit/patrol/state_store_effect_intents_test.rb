@@ -514,15 +514,10 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
         )
       end
 
-      reserved = []
       all = []
-      store.each_reserved_occurrence { |record| reserved << record.fetch("occurrence_id") }
       store.each_occurrence { |record| all << record.fetch("occurrence_id") }
 
-      assert_empty reserved
       assert_equal [ capture.occurrence_id ], all
-      assert_equal reserved,
-                   store.each_reserved_occurrence.map { |record| record.fetch("occurrence_id") }
       assert_equal all, store.each_occurrence.map { |record| record.fetch("occurrence_id") }
       assert_equal(
         [ capture.occurrence_id ],

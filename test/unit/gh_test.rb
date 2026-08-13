@@ -32,8 +32,6 @@ class GhUnitTest < Minitest::Test
       ].each { |k| ENV.delete(k) }
   end
 
-  # --- with_network_timeout --------------------------------------------
-
   def test_remote_branch_validation_matches_worktree_contract
     %w[feature//nested feature/.hidden feature/locked.lock feature@{upstream}].each do |branch|
       error = assert_raises(Hive::GhError) do
@@ -42,15 +40,6 @@ class GhUnitTest < Minitest::Test
       assert_match(/branch name is invalid/, error.message)
     end
     assert_equal "feature/nested", Hive::Gh.send(:validated_branch_name, " feature/nested ")
-  end
-
-  def test_with_network_timeout_raises_typed_error_on_timeout
-    err = assert_raises(Hive::GhError) do
-      Hive::Gh.with_network_timeout do
-        Timeout.timeout(0.01) { sleep 0.5 }
-      end
-    end
-    assert_match(/network operation exceeded/, err.message)
   end
 
   def test_capture3_enforces_stdout_limit_while_streaming

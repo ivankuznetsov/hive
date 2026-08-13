@@ -1,5 +1,4 @@
 require "json"
-require "timeout"
 require "uri"
 require "yaml"
 require "hive/agent_git_gate"
@@ -961,12 +960,6 @@ module Hive
 
     def monotonic_now
       Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    end
-
-    def with_network_timeout(timeout_sec: NETWORK_TIMEOUT_SEC, &block)
-      yield
-    rescue Timeout::Error
-      raise Hive::GhError, "network operation exceeded #{timeout_sec}s"
     end
   end
 end

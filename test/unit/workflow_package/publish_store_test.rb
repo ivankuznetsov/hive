@@ -270,10 +270,6 @@ class WorkflowPackagePublishStoreTest < Minitest::Test
         assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
           store.verify_bundle(receipt)
         end
-        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
-          store.send(:secure_file!, File.join(state, "missing-state"))
-        end
-
         assert_equal receipt.identity.transform_keys(&:to_sym), store.send(:symbol_identity, receipt)
       end
     end

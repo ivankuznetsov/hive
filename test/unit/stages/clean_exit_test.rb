@@ -253,6 +253,44 @@ class HiveStagesCleanExitTest < Minitest::Test
     end
   end
 
+  def test_safety_gate_rejects_malformed_index_records
+    captured_argv = nil
+    capture = lambda do |argv, **_kwargs|
+      captured_argv = argv
+      { success: true, stdout: "100644 not-an-object 0\twiki/bad.md\0" }
+    end
+
+    with_replaced_singleton_method(Hive::Stages::AutoCommit, :capture_git_with_timeout, capture) do
+      result = Hive::Stages::AutoCommit.staged_index_entries("/worktree", [ "wiki/bad.md" ])
+
+      refute result.fetch(:success)
+      assert_equal "git ls-files --stage returned malformed index data", result.fetch(:message)
+    end
+    assert_includes captured_argv, "ls-files"
+  end
+
+  def test_oversized_allowed_path_returns_safety_violation_without_reading_blob
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      File.binwrite(
+        File.join(worktree, "wiki", "large.bin"),
+        "x" * (Hive::Stages::AutoCommit::AUTO_COMMIT_BLOB_SCAN_MAX_BYTES + 1)
+      )
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result.fetch(:status)
+      assert_equal [ "wiki/large.bin" ], result.fetch(:paths)
+      assert_match(/exceeds the .* safety scan limit/, result.fetch(:message))
+      assert_empty `git -C #{worktree} diff --cached --name-only`
+      assert File.exist?(File.join(worktree, "wiki", "large.bin"))
+    end
+  end
+
   # Regression for the nested-Rails-app (`web/`) scope gap: a fix touching
   # `web/app/**` / `web/test/**` must auto-commit (those mirror the top-level
   # source/test allowlist), while sensitive nested dirs like `web/config/**`

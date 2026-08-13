@@ -119,6 +119,39 @@ class CleanExitCoverageGapsTest < Minitest::Test
     end
   end
 
+  def test_clean_exit_run_returns_git_failed_when_safety_inspection_fails
+    fake_add = { success: true, stdout: "", stderr: "", timed_out: false, message: nil }
+    fake_reset = { success: true, message: nil, timed_out: false }
+    fake_staged = { success: true, paths: [ "wiki/foo.md" ], message: nil }
+    fake_safety = { success: false, message: "git cat-file failed: missing object" }
+    capture = ->(argv, **_kw) { argv.include?("add") ? fake_add : fake_reset }
+
+    with_replaced_singleton_method(Hive::Stages::CleanExit, :porcelain_status,
+                                   ->(_path) { { status: :ok, porcelain: "M wiki/foo.md\n" } }) do
+      with_replaced_singleton_method(Hive::Stages::AutoCommit, :capture_git_with_timeout, capture) do
+        with_replaced_singleton_method(Hive::Stages::AutoCommit, :staged_auto_commit_paths,
+                                       ->(_path) { fake_staged }) do
+          with_replaced_singleton_method(Hive::Stages::AutoCommit, :auto_commit_scope_check_enabled?,
+                                         ->(_cfg) { false }) do
+            with_replaced_singleton_method(Hive::Stages::AutoCommit, :auto_commit_sign_policy_for,
+                                           ->(_cfg) { :inherit }) do
+              with_replaced_singleton_method(Hive::Stages::AutoCommit, :auto_commit_sign_policy_failure,
+                                             ->(_path, _policy) { nil }) do
+                with_replaced_singleton_method(Hive::Stages::AutoCommit, :auto_commit_safety_violations,
+                                               ->(_path, _paths) { fake_safety }) do
+                  out = run_clean_exit
+
+                  assert_equal :git_failed, out.fetch(:status)
+                  assert_match(/git cat-file failed/, out.fetch(:message))
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
   # --- clean_exit.rb:76 — auto_commit_git_commit failure path ---
 
   def test_clean_exit_run_returns_git_failed_when_git_commit_fails

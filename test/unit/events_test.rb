@@ -83,6 +83,14 @@ class EventsTest < Minitest::Test
     end
   end
 
+  def test_clean_exit_summary_treats_event_log_read_failures_as_no_summary
+    with_replaced_singleton_method(
+      Hive::Events, :read_recent_events, ->(*) { raise Errno::EACCES, "events unavailable" }
+    ) do
+      assert_nil Hive::Events.clean_exit_summary("/unreadable/task")
+    end
+  end
+
   def test_clean_exit_data_bounds_and_sanitizes_display_paths
     long_path = "wiki/a\n#{'b' * 200}.md"
 

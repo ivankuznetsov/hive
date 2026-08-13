@@ -52,6 +52,74 @@ class HiveCommandsWorktreeTest < Minitest::Test
     assert_equal "hive status --json", payload.dig("next_action", "command")
   end
 
+  def test_status_renders_human_readable_recovery_details
+    out, = capture_io do
+      with_resolved_task do
+        Hive::Commands::Worktree.new(
+          "status", @task.slug,
+          pointer_resolver: ->(_task, _cfg) { @worktree }
+        ).call
+      end
+    end
+
+    assert_includes out, "demo-260813-abcd: status"
+    assert_includes out, "worktree: #{@worktree}"
+    assert_includes out, "branch: main"
+    assert_match(/head: [0-9a-f]+/, out)
+    assert_includes out, "residue: (clean)"
+    assert_includes out, "next: hive status --json"
+  end
+
+  def test_status_resolves_the_strict_owned_pointer_by_default
+    canonical_input = nil
+    pointer_args = nil
+    worktree = @worktree
+    canonical_root = "/canonical/worktrees"
+
+    with_replaced_singleton_method(Hive::Worktree, :canonical_root, lambda { |path|
+      canonical_input = path
+      canonical_root
+    }) do
+      with_replaced_singleton_method(Hive::Worktree, :read_owned_pointer, lambda { |folder, **kwargs|
+        pointer_args = [ folder, kwargs ]
+        { "path" => worktree }
+      }) do
+        out, = capture_io do
+          with_resolved_task do
+            Hive::Commands::Worktree.new("status", @task.slug, json: true).call
+          end
+        end
+
+        assert_equal @worktree, JSON.parse(out).fetch("worktree_path")
+      end
+    end
+
+    assert_equal Hive::Worktree.default_worktree_root(@task.project_name), canonical_input
+    assert_equal(
+      [
+        @task.folder,
+        {
+          project_root: @task.project_root, slug: @task.slug,
+          expected_root: canonical_root
+        }
+      ],
+      pointer_args
+    )
+  end
+
+  def test_error_envelope_kinds_preserve_resolution_and_lock_failures
+    errors = {
+      Hive::AmbiguousSlug.new("ambiguous", slug: @task.slug, candidates: []) => "ambiguous_slug",
+      Hive::InvalidTaskPath.new("invalid") => "invalid_task_path",
+      Hive::ConcurrentRunError.new("locked") => "task_locked",
+      StandardError.new("unexpected") => "error"
+    }
+
+    errors.each do |error, expected|
+      assert_equal expected, command("status").envelope_error_kind(error), error.class.name
+    end
+  end
+
   def test_commit_residue_uses_clean_exit_guards_and_keeps_marker_for_coordinator
     FileUtils.mkdir_p(File.join(@worktree, "wiki"))
     File.write(File.join(@worktree, "wiki", "residue.md"), "residue\n")
@@ -137,6 +205,46 @@ class HiveCommandsWorktreeTest < Minitest::Test
     refute File.exist?(File.join(@worktree, "wiki", "a,b.md"))
   end
 
+  def test_discard_residue_restores_a_tracked_path_from_head
+    File.write(File.join(@worktree, "seed.txt"), "changed\n")
+
+    payload = run_command("discard-residue", paths: [ "seed.txt" ])
+
+    assert_equal [ "seed.txt" ], payload.fetch("discarded_paths")
+    assert_equal "seed\n", File.read(File.join(@worktree, "seed.txt"))
+    assert payload.fetch("clean")
+  end
+
+  def test_discard_residue_rejects_paths_that_are_not_currently_dirty
+    out, error = run_command_error("discard-residue", paths: [ "not-dirty.txt" ])
+
+    assert_instance_of Hive::UsageError, error
+    assert_equal "invalid_arguments", JSON.parse(out).fetch("error_kind")
+    assert_match(/not currently reported as residue/, error.message)
+  end
+
+  def test_discard_residue_rejects_non_normalized_paths
+    out, error = run_command_error("discard-residue", paths: [ "../outside" ])
+
+    assert_instance_of Hive::UsageError, error
+    assert_equal "invalid_arguments", JSON.parse(out).fetch("error_kind")
+    assert_match(/normalized repository-relative paths/, error.message)
+  end
+
+  def test_discard_residue_rejects_invalid_encoded_marker_paths
+    Hive::Markers.set(
+      @task.state_file, :error,
+      reason: "ensure_clean_on_exit_failed",
+      residue_paths_b64: "not-base64"
+    )
+
+    out, error = run_command_error("discard-residue")
+
+    assert_instance_of Hive::WorktreeError, error
+    assert_equal "worktree_error", JSON.parse(out).fetch("error_kind")
+    assert_match(/invalid encoded paths/, error.message)
+  end
+
   def test_mutation_requires_durable_residue_marker
     Hive::Markers.set(@task.state_file, :review_complete)
     FileUtils.mkdir_p(File.join(@worktree, "wiki"))
@@ -156,11 +264,46 @@ class HiveCommandsWorktreeTest < Minitest::Test
     assert_equal "invalid_arguments", JSON.parse(out).fetch("error_kind")
   end
 
+  def test_argument_validation_rejects_cross_action_options
+    cases = [
+      [ "future", {}, /unknown worktree subcommand/ ],
+      [ "status", { paths: [ "wiki/a.md" ] }, /status does not accept/ ],
+      [ "commit-residue", { strategy: "commit" }, /strategy applies only/ ],
+      [ "commit-residue", { paths: [ "wiki/a.md" ] }, /paths applies only/ ],
+      [ "discard-residue", { message: "commit this" }, /message applies only/ ]
+    ]
+
+    cases.each do |subcommand, options, expected_message|
+      out, error = run_command_error(subcommand, **options)
+
+      assert_instance_of Hive::UsageError, error
+      assert_equal "invalid_arguments", JSON.parse(out).fetch("error_kind")
+      assert_match expected_message, error.message
+    end
+  end
+
   def test_commit_message_rejects_control_characters
     out, error = run_command_error("commit-residue", message: "fix residue\rfor me")
 
     assert_instance_of Hive::UsageError, error
     assert_equal "invalid_arguments", JSON.parse(out).fetch("error_kind")
+  end
+
+  def test_status_rejects_malformed_porcelain_records
+    captured_argv = nil
+    capture = lambda do |argv, **_kwargs|
+      captured_argv = argv
+      { success: true, stdout: "M malformed\0" }
+    end
+
+    with_replaced_singleton_method(Hive::Stages::AutoCommit, :capture_git_with_timeout, capture) do
+      error = assert_raises(Hive::WorktreeError) do
+        command("status").send(:worktree_status, @worktree)
+      end
+
+      assert_match(/malformed porcelain data/, error.message)
+    end
+    assert_includes captured_argv, "status"
   end
 
   private

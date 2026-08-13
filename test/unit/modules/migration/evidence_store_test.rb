@@ -59,9 +59,12 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
     end
   end
 
-  def test_collection_read_rejects_no_follow_reads
+  def test_retained_readers_reject_untrusted_identity_and_no_follow_reads
     with_tmp_dir do |root|
       store = Hive::Modules::Migration::EvidenceStore.new(root: root)
+      assert_raises(Hive::ConfigError) do
+        store.receipts_for_occurrence("../../config")
+      end
 
       capture = capture_for(recorded_at: NOW)
       outside = File.join(root, "outside.json")

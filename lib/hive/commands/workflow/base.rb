@@ -7,6 +7,8 @@ require "hive/git_ops"
 require "hive/lock"
 require "hive/module_package/workflow_compatibility"
 require "hive/workflow_package/managed_store"
+require "hive/workflow_package/mutation_lock"
+require "hive/workflow_package/task_migrator"
 
 module Hive
   module Commands
@@ -119,6 +121,92 @@ module Hive
               pathspecs: [ relative ]
             )
           end
+        end
+
+        def migrate_managed_tasks!(name)
+          prepared = prepare_managed_tasks!(name)
+          result = nil
+          Hive::WorkflowPackage::MutationLock.with_lock(store.workflows_dir) do
+            result = commit_prepared_task_migration!(prepared, name, action: "migrated", commit_empty: false)
+          end
+          prepared.cleanup(result)
+        rescue StandardError => error
+          raise error if error.is_a?(Hive::UnsupportedProjectConfigError)
+
+          raise Hive::Error,
+                "managed workflow #{name.inspect} retained task migration failed " \
+                "(#{error.class}: #{error.message}); finish any live task, then run hive migrate"
+        ensure
+          prepared&.close
+        end
+
+        def activate_with_task_migration!(candidate:, configuration:, expected_current:, action:)
+          name = candidate.resolution.name
+          workflow_compatibility.stage!(candidate: candidate, configuration: configuration)
+          prepared = begin
+            prepare_managed_tasks!(
+              name,
+              target_selection: {
+                "source_commit" => candidate.resolution.source_commit,
+                "manifest_digest" => candidate.resolution.manifest_digest,
+                "configuration_digest" => configuration.digest
+              }
+            )
+          rescue StandardError => error
+            cleanup_after_failed_activation(name, error)
+          end
+
+          migration = nil
+          workflow_compatibility.activate!(
+            candidate: candidate,
+            configuration: configuration,
+            expected_current: expected_current,
+            commit: lambda do
+              migration = commit_prepared_task_migration!(
+                prepared, name, action: action, commit_empty: true
+              )
+            end,
+            admit: false
+          )
+          migration
+        ensure
+          prepared&.close
+        end
+
+        def prepare_managed_tasks!(name, target_selection: nil)
+          Hive::WorkflowPackage::TaskMigrator.new(
+            hive_state_path,
+            store: store,
+            cfg: project_config,
+            workflow: name,
+            target_selection: target_selection
+          ).prepare
+        end
+
+        def commit_prepared_task_migration!(prepared, name, action:, commit_empty:)
+          result = nil
+          Hive::Lock.with_commit_lock(hive_state_path) do
+            result = prepared.apply do |preview|
+              next if preview.task_count.zero? && !commit_empty
+
+              pathspecs = preview.pathspecs + [ File.join("workflows", name) ]
+              if @committer
+                @committer.call(action, name, pathspecs)
+              else
+                detail = if preview.task_count.positive?
+                  "#{action} and migrated #{preview.task_count} task#{preview.task_count == 1 ? '' : 's'}"
+                else
+                  action
+                end
+                Hive::GitOps.new(@project_root).hive_commit(
+                  stage_name: "workflows", slug: name,
+                  action: detail,
+                  pathspecs: pathspecs
+                )
+              end
+            end
+          end
+          result
         end
 
         def cleanup_after_failed_activation(name, original_error)

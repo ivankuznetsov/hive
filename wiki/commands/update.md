@@ -1,9 +1,9 @@
 ---
 title: hive update
 type: command
-source: lib/hive/commands/update.rb, lib/hive/commands/migrate_all.rb, lib/hive/install_channel.rb
+source: lib/hive/commands/update.rb, lib/hive/commands/migrate_all.rb, lib/hive/install_channel.rb, install.sh
 created: 2026-05-21
-updated: 2026-08-03
+updated: 2026-08-13
 tags: [command, install, update, migration]
 ---
 
@@ -55,6 +55,13 @@ after installation. When it succeeds, Hive resolves the updated executable
 again and invokes `<updated-hive> migrate --all`; migrations therefore execute
 with the newly installed code, not the old in-memory implementation.
 
+The standalone `install.sh` path also invokes the exact newly installed
+wrapper's `migrate --all` before installing or restarting daemon autostart.
+This covers a direct installer upgrade as well as `hive update`; the bash
+channel's second post-updater invocation is intentionally harmless because all
+migrations are idempotent. Migration failure stops the install command before
+daemon setup and prints the exact installed-wrapper recovery command.
+
 `hive migrate --all` checks global recovery state and then every registered
 project. Output includes a global-state check, `[N/total]` progress for each
 project, per-project success, and a final migrated/failed count. Project
@@ -68,7 +75,8 @@ If the channel updater fails, migration is not started. If the updated binary
 cannot be resolved or the fleet migration exits non-zero, `hive update` reports
 that distinction and prints the exact `hive migrate --all` command to retry.
 Project migrations defer daemon restart requests so a changed fleet triggers
-at most one restart, after every registered project has been attempted.
+at most one restart, and only after every registered project succeeds. A
+partial fleet failure prints that restart is deferred until the repair run.
 
 ## Nudge command (shared with the update flow)
 
@@ -88,6 +96,8 @@ command itself still selects brew, `yay`/`paru`, or the bash installer.
   migration, continue-after-failure behavior, readable errors, and recovery
   commands.
 - `test/unit/install_channel_test.rb` covers marker reads/writes, XDG paths, Homebrew marker probing, prefix marker precedence, and fail-closed invalid markers.
+- `test/unit/install_script_test.rb` proves direct installs migrate all
+  registered projects before daemon setup and fail closed on migration error.
 
 ## Backlinks
 

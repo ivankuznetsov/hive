@@ -53,23 +53,30 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
         applied = update(project, client, yes: true)
         assert_equal "updated", applied.fetch("status")
         assert_equal candidate.fetch(:source_commit), current.selected("demo").fetch("source_commit")
-        assert_equal old.fetch(:source_commit), Hive::Task.new(task).workflow_commit
+        assert_equal candidate.fetch(:source_commit), Hive::Task.new(task).workflow_commit
         assert_equal :demo, Hive::Task.new(task).workflow.id
 
         rows = Hive::Commands::Workflow::List.new(
           project_root: project, json: true, stdout: StringIO.new
         ).call!.fetch("workflows").select { |row| row["name"] == "demo" }
-        assert_equal %w[retained selected], rows.map { |row| row.fetch("selection") }.sort
+        assert_equal %w[selected], rows.map { |row| row.fetch("selection") }.sort
 
+        error = assert_raises(Hive::Commands::Workflow::OwnershipError) do
+          Hive::Commands::Workflow::Remove.new(
+            "demo", project_root: project, json: true, yes: true,
+            stdout: StringIO.new, committer: ->(*) { }
+          ).call!
+        end
+        assert_match(/finish\/archive or reset those tasks/, error.message)
+        FileUtils.rm_rf(task)
         removed = Hive::Commands::Workflow::Remove.new(
           "demo", project_root: project, json: true, yes: true,
           stdout: StringIO.new, committer: ->(*) { }
         ).call!
         assert_equal "removed", removed.fetch("status")
         assert_nil current.selected("demo")
-        assert File.directory?(current.generation_path("demo", old.fetch(:source_commit)))
+        refute File.exist?(current.generation_path("demo", old.fetch(:source_commit)))
         refute File.exist?(current.generation_path("demo", candidate.fetch(:source_commit)))
-        assert_equal :demo, Hive::Task.new(task).workflow.id
       end
     end
   end

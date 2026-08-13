@@ -49,12 +49,17 @@ module Hive
           end
         end
 
-        restart_daemon_if_required!
-
         migrated = projects.size - failures.size
         if failures.empty?
+          restart_daemon_if_required!
           @output.puts "hive: migration: complete (#{project_count(migrated)} migrated, 0 failed)"
           return 0
+        end
+
+        if @daemon_restart_required
+          @error_output.puts(
+            "hive: migration: daemon restart deferred until every registered project migrates successfully"
+          )
         end
 
         @error_output.puts(

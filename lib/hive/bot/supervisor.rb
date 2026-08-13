@@ -1179,7 +1179,13 @@ module Hive
       # request_id so the continuation sidecar can point at the first request
       # before that request is visible to the daemon.
       def enqueue_dispatch_request(result, update, request_id: nil)
-        writer_method = request_id.nil? && @dispatch_request_writer.respond_to?(:dispatch!) ? :dispatch! : :write!
+        writer_method = if request_id.nil? && @dispatch_request_writer.respond_to?(:dispatch!)
+          :dispatch!
+        elsif @dispatch_request_writer.respond_to?(:write_current!)
+          :write_current!
+        else
+          :write!
+        end
         writer_arguments = {
           project: result.project,
           slug: result.slug,

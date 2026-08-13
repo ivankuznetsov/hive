@@ -328,12 +328,11 @@ module Hive
     #   * `envelope_error_kind(error)` — map an exception to a
     #     closed-enum `error_kind` value
     #
-    # Used by default-stdout command producers whose error schemas share
-    # ErrorEnvelope's common shape. Commands with injected output streams,
-    # variant schema routing, or schema-specific payloads keep specialised
-    # emitters. Metrics, for example, deliberately retains its narrower v1
-    # payload, which omits `error_class`; forcing it through this mixin would
-    # change a published contract rather than remove duplication.
+    # Used by default-stdout command producers. Commands with injected output
+    # streams or variant schema routing keep specialised emitters. Consumers
+    # with a narrower published schema may override `envelope_payload_for`;
+    # Metrics does this to retain its v1 payload without `error_class` while
+    # still sharing the rescue, single-document guard, and write handling.
     #
     # Consumers may also override `envelope_extras` to merge per-command
     # fields (e.g. `{"verb" => "review"}`) into the envelope; the default is

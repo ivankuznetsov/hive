@@ -11,3 +11,5 @@
   capped its managed projection at 25 rows and 256 KiB.
 - Added the Patrol health route to canonical Hive skill `0.1.5` and regenerated
   the complete OpenClaw projection; this metadata bump does not publish it.
+- Kept the added Patrol navigation visible on mobile by replacing the
+  overflowing single row with a bounded four-column grid.

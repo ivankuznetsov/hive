@@ -175,10 +175,9 @@ sharing the URL.
 A locally authenticated operator sees the
 complete primary navigation under the `hive` product identity and is labelled
 `Local`; GitHub-dependent repository browsing stays behind an explicit
-**Connect GitHub** action. At the 390px mobile breakpoint, all six primary
-capabilities fit beside the account action without starting inside a horizontal
-scroll overflow; spacing uses fixed small insets so Linux and local Chromium
-font metrics preserve the same visible set. Navigation state is grouped by the first segment of
+**Connect GitHub** action. At the 390px mobile breakpoint, all seven primary
+capabilities remain visible in a bounded four-column grid below the account
+action, without starting inside a horizontal scroll overflow. Navigation state is grouped by the first segment of
 Rails `controller_path`, so namespaced task, workflow, and Telegram resource
 controllers retain their parent section's active link when they render a
 complete page. Completing the optional GitHub connection from verified
@@ -547,7 +546,7 @@ Honeycomb projections.
   through the adapter for the full preview/apply lifecycle.
   The known legacy-vs-v2 `workflow publish` gap is stated in the page instead
   of exposing a button that opens an unusable registry PR. At mobile widths the
-  primary header wraps to a second full-width row, keeping all five sections
+  primary header wraps to a second full-width row, keeping every section
   visible without document overflow while preserving the local GitHub-connect
   action.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:

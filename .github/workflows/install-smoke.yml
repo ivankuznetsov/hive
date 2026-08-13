@@ -298,29 +298,57 @@ jobs:
           cat > "$fakebin/npm" <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
-          prefix=""
-          while [[ $# -gt 0 ]]; do
-            case "$1" in
-              --prefix) prefix="$2"; shift 2 ;;
-              *) shift ;;
-            esac
-          done
-          [[ -n "$prefix" ]] || { echo "missing --prefix" >&2; exit 1; }
-          mkdir -p "$prefix/bin"
-          cat > "$prefix/bin/qmd" <<'QMD'
+          case "${1:-}" in
+            pack)
+              destination=""
+              while [[ $# -gt 0 ]]; do
+                if [[ "$1" == "--pack-destination" ]]; then
+                  shift
+                  destination="$1"
+                fi
+                shift
+              done
+              filename="tobilu-qmd-fixture.tgz"
+              printf 'fixture qmd tarball\n' > "$destination/$filename"
+              printf '[{"filename":"%s"}]\n' "$filename"
+              ;;
+            install)
+              prefix=""
+              while [[ $# -gt 0 ]]; do
+                if [[ "$1" == "--prefix" ]]; then
+                  shift
+                  prefix="$1"
+                fi
+                shift
+              done
+              [[ -n "$prefix" ]] || { echo "missing --prefix" >&2; exit 1; }
+              mkdir -p "$prefix/bin" "$prefix/lib/node_modules/@tobilu/qmd"
+              printf '{"name":"@tobilu/qmd"}\n' > "$prefix/lib/node_modules/@tobilu/qmd/package.json"
+              cat > "$prefix/bin/qmd" <<'QMD'
           #!/usr/bin/env bash
           echo "qmd fixture"
           QMD
-          chmod +x "$prefix/bin/qmd"
+              chmod +x "$prefix/bin/qmd"
+              ;;
+            rebuild)
+              exit 0
+              ;;
+            *)
+              echo "unexpected npm command: ${1:-}" >&2
+              exit 1
+              ;;
+          esac
           SH
           chmod +x "$fakebin/npm"
+          printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/node"
+          chmod +x "$fakebin/node"
           apache_bin="$fixtures/apache-bin"
           xdg_bin="$fixtures/xdg-bin"
           xdg_data="$fixtures/xdg-data"
           mkdir -p "$apache_bin" "$xdg_bin" "$xdg_data"
           printf '#!/usr/bin/env bash\necho "Apache Hive 3.1.0"\n' > "$apache_bin/hive"
           chmod +x "$apache_bin/hive"
-          FIXTURES="$fixtures" HIVE_DAEMON_ENV_CAPTURE="$fixtures/invoked-bin" XDG_BIN_HOME="$xdg_bin" XDG_DATA_HOME="$xdg_data" PATH="$fakebin:$apache_bin:$xdg_bin:$PATH" bash install.sh --version=v0.1.0 >"$fixtures/install.out" 2>"$fixtures/install.err"
+          FIXTURES="$fixtures" HIVE_DAEMON_ENV_CAPTURE="$fixtures/invoked-bin" HIVE_QMD_NPM_INTEGRITY="sha512-FuCVEbmVUamL/u3RGidreIgEAntoYnykur2a9tOPQm0QJmd+TIwGqoiAibuzXTJ/i1WKqy+BXh4498MOBL+DHA==" XDG_BIN_HOME="$xdg_bin" XDG_DATA_HOME="$xdg_data" PATH="$fakebin:$apache_bin:$xdg_bin:$PATH" bash install.sh --version=v0.1.0 >"$fixtures/install.out" 2>"$fixtures/install.err"
           grep -q "daemon autostart enabled via hive daemon install (written)" "$fixtures/install.out"
           grep -qx "$xdg_bin/hive" "$fixtures/invoked-bin"
           test -L "$xdg_bin/hv"

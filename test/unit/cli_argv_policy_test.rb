@@ -50,6 +50,14 @@ class HiveCliArgvPolicyTest < Minitest::Test
     )
   end
 
+  def test_new_text_boundary_skips_every_supported_option_shape_and_unknown_flags
+    argv = %w[
+      new --json --workflow content --depends-on=alpha --future-option demo explain this
+    ]
+
+    assert_equal 7, Hive::CliArgvPolicy.new_text_start_index(argv, value_options: VALUE_OPTIONS)
+  end
+
   def test_lifts_new_options_and_preserves_literal_tail
     argv = %w[new demo write it --workflow content --json]
     assert_equal %w[new --workflow content --json demo -- write it],

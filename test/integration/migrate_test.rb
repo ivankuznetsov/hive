@@ -176,9 +176,10 @@ class MigrateTest < Minitest::Test
           "configuration_digest" => current_pin.fetch(:workflow_configuration_digest)
         }
       end
-      store.define_singleton_method(:workflow) do |name, source, digest, configuration_digest:, cfg:|
+      store.define_singleton_method(:workflow) do |name, source, digest, configuration_digest:, cfg:,
+                                                     verify_profiles: true|
         pin = [ source, digest, configuration_digest ]
-        calls << [ :workflow, name, *pin, cfg ]
+        calls << [ :workflow, name, *pin, cfg, verify_profiles ]
         pin == old_pin.values ? old_workflow : current_workflow
       end
       store.define_singleton_method(:cleanup_unreferenced) do |name|
@@ -807,6 +808,8 @@ class MigrateTest < Minitest::Test
             "configuration_digest" => "e" * 64
           }
         end
+        research_workflow = migration_workflow("inbox", "brainstorm", "plan", "execute")
+        store.define_singleton_method(:workflow) { |*_args, **_kwargs| research_workflow }
         capture_io do
           migrate_command(
             dir,
@@ -1049,6 +1052,65 @@ class MigrateTest < Minitest::Test
     end
 
     assert_equal [ "workflows/architecture", "workflows/writing" ], calls.first.fetch(:pathspecs)
+  end
+
+  def test_managed_recovery_marker_path_does_not_reenter_the_workflow_mutation_lock
+    with_tmp_dir do |project|
+      stages = File.join(project, ".hive-state", "stages")
+      folder = write_task_folder(stages, "1-inbox", "managed-writing-260813-abcd")
+      pin = {
+        workflow_commit: "a" * 40,
+        workflow_manifest_digest: "b" * 64,
+        workflow_configuration_digest: "c" * 64
+      }
+      Hive::TaskMeta.write(
+        folder, id: 42, slug: File.basename(folder), display_name: "Managed writing",
+        workflow: "writing", **pin
+      )
+      workflow = migration_workflow("inbox", "review")
+      calls = []
+      store = Object.new
+      store.define_singleton_method(:workflow) do |name, commit, digest, configuration_digest:, cfg:,
+                                                     verify_profiles:|
+        calls << [ name, commit, digest, configuration_digest, cfg, verify_profiles ]
+        workflow
+      end
+      command = migrate_command(project)
+
+      with_replaced_singleton_method(Hive::Task, :new, lambda { |_folder|
+        raise "runtime task loading would re-enter the managed mutation lock"
+      }) do
+        assert_equal File.join(folder, "inbox.md"), command.send(
+          :recovery_state_file, folder,
+          managed_store: store,
+          cfg: { "project_name" => "writing" }
+        )
+      end
+
+      assert_equal false, calls.first.last
+      assert_equal pin.values, calls.first.values_at(1, 2, 3)
+    end
+  end
+
+  def test_unpinned_recovery_marker_path_uses_the_generation_captured_before_the_mutation_lock
+    with_tmp_dir do |project|
+      stages = File.join(project, ".hive-state", "stages")
+      folder = write_task_folder(stages, "1-inbox", "legacy-coding-260813-abcd")
+      generation = Object.new
+      task = Struct.new(:state_file).new(File.join(folder, "idea.md"))
+      calls = []
+
+      with_replaced_singleton_method(Hive::Task, :new, lambda { |candidate, workflow_generation:|
+        calls << [ candidate, workflow_generation ]
+        task
+      }) do
+        assert_equal task.state_file, migrate_command(project).send(
+          :recovery_state_file, folder, workflow_generation: generation
+        )
+      end
+
+      assert_equal [ [ folder, generation ] ], calls
+    end
   end
 
   def test_managed_workflow_cleanup_warns_when_its_state_commit_fails

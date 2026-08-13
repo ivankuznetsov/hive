@@ -2163,10 +2163,6 @@ module Hive
         atomic_write(path, evidence)
       end
 
-      def jobs_dir
-        File.join(root, "jobs")
-      end
-
       def job_path(job_id)
         @job_files.job_path(validate_id!(job_id))
       end

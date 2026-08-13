@@ -809,6 +809,21 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal "Approve", notification.keyboard.first.first.fetch(:text)
   end
 
+  def test_auto_residue_redacts_secret_shaped_paths
+    secret = "AKIAABCDEFGHIJKLMNOP"
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(
+        action: "archived", marker: "complete", stage: "9-done",
+        auto_residue: {
+          "commits" => 1, "path_count" => 1, "paths" => [ "wiki/#{secret}.md" ]
+        }
+      )
+    )
+
+    assert_includes notification.text, "[REDACTED:aws_access_key]"
+    refute_includes notification.text, secret
+  end
+
   def test_bug_9281_agent_running_error_fixture_is_suppressed_and_logged_once
     logger = StubLogger.new
     slug = "bug-agentlimit-false-positives-on-260623-a4df"

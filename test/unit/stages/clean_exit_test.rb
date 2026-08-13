@@ -139,6 +139,24 @@ class HiveStagesCleanExitTest < Minitest::Test
     end
   end
 
+  def test_out_of_scope_secret_shaped_path_is_redacted
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      secret = "AKIAABCDEFGHIJKLMNOP"
+      FileUtils.mkdir_p(File.join(worktree, "unrelated"))
+      File.write(File.join(worktree, "unrelated", "#{secret}.txt"), "ordinary content\n")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :scope_violation, result[:status]
+      refute_includes result[:message], secret
+      refute_includes result.fetch(:paths).join, secret
+    end
+  end
+
   def test_allowed_path_symlink_returns_safety_violation_and_unstages
     with_tmp_dir do |worktree|
       init_git(worktree)
@@ -193,6 +211,66 @@ class HiveStagesCleanExitTest < Minitest::Test
       refute_includes result[:message], secret
       assert_empty `git -C #{worktree} diff --cached --name-only`
       assert File.exist?(File.join(worktree, "wiki", "migration-notes.md"))
+    end
+  end
+
+  def test_unrelated_edit_preserves_committed_secret_fixture
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      path = File.join(worktree, "wiki", "detector-fixture.md")
+      File.write(path, "fake detector fixture: AKIAABCDEFGHIJKLMNOP\n")
+      run!("git", "-C", worktree, "add", "wiki/detector-fixture.md")
+      run!("git", "-C", worktree, "commit", "-m", "add detector fixture", "--quiet")
+      File.write(path, "ordinary documentation update\n", mode: "a")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :auto_committed, result[:status]
+      assert_empty `git -C #{worktree} status --porcelain`
+    end
+  end
+
+  def test_changed_secret_in_tracked_file_returns_safety_violation
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      path = File.join(worktree, "wiki", "detector-fixture.md")
+      File.write(path, "fake detector fixture: AKIAABCDEFGHIJKLMNOP\n")
+      run!("git", "-C", worktree, "add", "wiki/detector-fixture.md")
+      run!("git", "-C", worktree, "commit", "-m", "add detector fixture", "--quiet")
+      File.write(path, "replacement: AKIAQRSTUVWXYZABCDEF\n")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_match(/secret detectors/, result[:message])
+      refute_includes result[:message], "AKIAQRSTUVWXYZABCDEF"
+    end
+  end
+
+  def test_new_secret_shaped_path_is_rejected_and_redacted
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      secret = "AKIAABCDEFGHIJKLMNOP"
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      File.write(File.join(worktree, "wiki", "#{secret}.md"), "ordinary content\n")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_match(/staged path matches secret detectors/, result[:message])
+      refute_includes result[:message], secret
+      refute_includes result.fetch(:paths).join, secret
     end
   end
 

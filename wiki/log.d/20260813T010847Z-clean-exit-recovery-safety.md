@@ -6,7 +6,9 @@ date: 2026-08-13
 
 **Action:** Hardened every CleanExit auto-commit with staged-symlink rejection
 and a bounded exact-staged-blob secret scan, while retaining `git add -A` plus the documented
-strict-`.gitignore` contract. Added `hive worktree status`,
+strict-`.gitignore` contract. Tracked-file scans subtract identical secret matches
+already present at `HEAD`, so unrelated edits to detector fixtures remain recoverable
+while new or changed matches are still rejected. Added `hive worktree status`,
 `commit-residue`, `discard-residue`, and `repair --strategy` as task-locked,
 owned-worktree recovery verbs. They never clear the durable marker; agents
 must refresh status and use the current generation-guarded retry.
@@ -23,4 +25,5 @@ event tests cover safety rejection, exact-path discard, marker preservation,
 consumer mapping, notification suppression exceptions, and legacy-event
 compatibility. Independent review additionally pinned Git pathspec-magic
 filenames, binary secret blobs, literal-path discard, lossless marker path
-encoding, JSON usage errors, and the canonical recovery-skill route.
+encoding, secret-shaped filename rejection and notification redaction, JSON
+usage errors, and the canonical recovery-skill route.

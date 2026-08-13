@@ -104,6 +104,17 @@ class EventsTest < Minitest::Test
     refute_includes data.fetch(:paths).first, "\n"
   end
 
+  def test_clean_exit_data_redacts_secret_shaped_paths
+    secret = "AKIAABCDEFGHIJKLMNOP"
+
+    data = Hive::Events.clean_exit_data(
+      head: "abc", reason: "stage_exit", paths: [ "wiki/#{secret}.md" ]
+    )
+
+    assert_equal [ "wiki/[REDACTED:aws_access_key].md" ], data.fetch(:paths)
+    refute_includes data.fetch(:paths).join, secret
+  end
+
   def test_unknown_event_type_raises
     with_tmp_dir do |dir|
       assert_raises(ArgumentError) do

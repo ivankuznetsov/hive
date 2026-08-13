@@ -420,7 +420,7 @@ module Hive
       # produced by the finalize backstop (vs. a per-stage `stage_exit`
       # hook). Best-effort — log-write failure must not abort finalize.
       def log_finalize_residue_committed(task, result)
-        paths = Array(result[:paths]).map(&:to_s)
+        paths = Hive::Events.clean_exit_paths(result[:paths])
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,

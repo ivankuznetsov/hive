@@ -3,6 +3,7 @@ require "json"
 require "securerandom"
 require "time"
 require "hive/task_journal/envelope"
+require "hive/secret_patterns"
 
 module Hive
   module Events
@@ -97,11 +98,16 @@ module Hive
       paths = Array(paths).map(&:to_s)
       {
         head: head, reason: reason,
-        paths: paths.first(MAX_EVENT_PATHS).map do |path|
-          path.byteslice(0, MAX_EVENT_PATH_BYTES).to_s.scrub("").gsub(/[\u0000-\u001f\u007f]/, "?")
-        end,
+        paths: clean_exit_paths(paths),
         path_count: paths.length
       }
+    end
+
+    def clean_exit_paths(paths)
+      Array(paths).first(MAX_EVENT_PATHS).map do |path|
+        bounded = path.to_s.byteslice(0, MAX_EVENT_PATH_BYTES).to_s.scrub("").gsub(/[\u0000-\u001f\u007f]/, "?")
+        Hive::SecretPatterns.redact(bounded)
+      end
     end
 
     def render_status!(task_folder, last_record)

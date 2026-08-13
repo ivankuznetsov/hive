@@ -589,7 +589,7 @@ module Hive
       def log_clean_exit_event(task, stage, result)
         return unless result[:status] == :auto_committed
 
-        paths = Array(result[:paths]).map(&:to_s)
+        paths = Hive::Events.clean_exit_paths(result[:paths])
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,

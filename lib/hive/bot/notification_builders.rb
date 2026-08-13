@@ -8,6 +8,7 @@ require "hive/bot/row_actions"
 require "hive/bot/title_formatter"
 require "hive/markers"
 require "hive/recovery"
+require "hive/secret_patterns"
 require "hive/task_action"
 require "hive/workflows"
 
@@ -144,6 +145,7 @@ module Hive
         visible_paths = paths.first(5)
         remainder = summary.fetch("path_count", paths.length).to_i - visible_paths.length
         path_text = visible_paths.empty? ? "#{summary.fetch('path_count', 0)} path(s)" : visible_paths.join(", ")
+        path_text = Hive::SecretPatterns.redact(path_text)
         path_text = "#{path_text} (+#{remainder} more)" if remainder.positive?
         text = "Hive auto-committed residue: #{summary.fetch('commits')} commit(s) — #{path_text}"
         html ? Hive::Bot::Format.html_escape(text) : text

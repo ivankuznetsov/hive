@@ -2516,7 +2516,7 @@ module Hive
       end
 
       def emit_pre_fix_clean_exit_event(task, result)
-        paths = Array(result[:paths]).map(&:to_s)
+        paths = Hive::Events.clean_exit_paths(result[:paths])
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,

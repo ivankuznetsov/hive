@@ -148,11 +148,6 @@ module Hive
         raise PublishRecoveryError, "publication bundle could not be marked GC-eligible"
       end
 
-      def bundle_gc_eligible?(package_digest)
-        path = File.join(gc_eligible_root, "#{package_digest}.json")
-        File.file?(path) && !File.symlink?(path)
-      end
-
       private
 
       def ensure_layout!

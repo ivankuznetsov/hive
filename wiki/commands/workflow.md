@@ -52,8 +52,15 @@ versions fail closed with their advisory IDs.
 `--input-binding NAME=ENV_NAME` flags. Human preview names every executable
 slot and optional input, reports absent model/effort pins as `unpinned`, and
 redacts all environment values. `--dry-run --json` validates and reports the
-candidate, mapping/input changes, permission diff, and retained/deletable
-generations without writing project state.
+candidate, mapping/input changes, permission diff, retained-task migrations,
+and deletable generations without writing project state.
+
+Install and update immediately migrate retained tasks to the selected
+generation by stable semantic stage name, atomically with pointer activation.
+A removed occupied stage or live task lock leaves the previous selection
+executable; `remove` refuses while retained tasks still name the workflow.
+Stale nonterminal dispatch requests are removed, and identity fencing rejects
+deliveries that raced the cutover.
 
 JSON and non-TTY mutations require `--yes`. A package or update that needs the
 separate high-risk consent also requires `--allow-escalation`; the preview
@@ -64,12 +71,14 @@ USAGE error with `error_kind: consent_required`.
 `list --json` reports orthogonal `origin`, `selection`, `integrity`, and
 `catalog_visibility` fields. Managed rows add the selected configuration
 digest, stable-slot mapping identities and fingerprints, and optional-input
-bindings/availability without values. Task-retained rows expose pinned
-configuration identity without presenting it as the active selection; offline
-catalog visibility is `unknown_offline`.
+bindings/availability without values. Diagnostic retained rows expose pinned
+configuration identity without presenting it as the active selection; runtime
+does not dispatch them until `hive migrate` converges the task. Offline catalog
+visibility is `unknown_offline`.
 
-Committed activation remains successful when later cleanup or cache refresh
-fails; the result carries `warnings`, which Hive Web renders after redirect.
+Activation or migration commit failures roll back the selected pointer and
+retained-task filesystem changes. Once the commit succeeds, later cleanup or
+cache refresh failures become `warnings`, which Hive Web renders after redirect.
 A changed concurrent selection is a retryable `ConcurrentRunError`, while an
 exact selected generation and configuration returns `already_installed`.
 

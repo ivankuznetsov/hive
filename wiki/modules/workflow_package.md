@@ -18,7 +18,8 @@ hook-free `Hive::ModulePackage` with the same immutable identity, mappings,
 inputs, and disclosure. That compatibility relationship does not make this
 page the owner of native-module hooks, grants, or activation; those belong to
 the dedicated [`docs/modules.md`](../../docs/modules.md) module guide. No
-package republish or state migration is required.
+package republish is required. Install and update automatically migrate retained
+tasks to the selected generation before runtime dispatch resumes.
 
 `Hive::WorkflowPackage` defines a second, stricter trust boundary without
 weakening owner-authored descriptor compatibility:
@@ -72,9 +73,9 @@ weakening owner-authored descriptor compatibility:
   configuration digest; workflow, source commit, and manifest digest remain a
   required tuple. `workflow list --json` schema v2 reads the selected
   digest-addressed snapshot back through this store to expose per-slot identity
-  and redacted optional-input binding/availability. Retained task rows expose
-  only a pinned configuration digest, when available, so historical identity
-  is not confused with the active selection.
+  and redacted optional-input binding/availability. Diagnostic retained rows
+  expose only a pinned configuration digest, when available, so historical
+  identity is not confused with the active selection.
   Activation distinguishes "no baseline check" from an explicit "still
   unselected" baseline; selected baselines compare source commit, manifest
   digest, and configuration digest under the mutation lock. The mutation lock
@@ -86,15 +87,18 @@ weakening owner-authored descriptor compatibility:
   lifecycle commands, so JSON surfaces cannot drift from snapshot semantics.
 - `Loader` registers selected managed workflows beside built-ins and authored
   descriptors while rejecting id collisions and reloading when its managed
-  fingerprint changes. Task-pinned generations bypass the single-id overlay and
-  validate/load directly from `ManagedStore` by id, source commit, manifest
-  digest, and configuration digest. Profile fingerprint drift fails closed at
-  runtime. `hive migrate` is the explicit one-way mapping cutover: when a task
-  and the selected workflow still share the same package source commit and
-  manifest digest, it preflights the selected configuration, rebinds the task
-  to that configuration digest, and cleans snapshots no task references.
-  Tasks on another package generation remain pinned for a workflow-specific
-  migration rather than silently changing instructions.
+  fingerprint changes. Runtime accepts only the selected source commit,
+  manifest digest, and configuration digest. A stale task fails closed with an
+  exact `hive migrate` recovery command. `hive migrate` is the only boundary
+  that loads the task's old descriptor: it maps the old directory through the
+  stable semantic stage name, preflights every destination and task lock,
+  renames the stage artifact when its filename changed, and repins the task to
+  the selected generation. Install and update coordinate pointer activation
+  and retained-task changes in one state commit; failure rolls back both.
+  They also remove stale nonterminal delivery requests, while consume-time task
+  identity checks fence requests that raced the migration. Unreferenced
+  generations and configurations are removed only after the cutover commits,
+  and `workflow remove` refuses while retained tasks name the workflow.
   For a legacy lock-schema-v1 selection, task creation derives the compatibility
   snapshot with the effective project agent profiles and writes that
   digest-addressed snapshot before `meta.yml` can pin it. The snapshot therefore

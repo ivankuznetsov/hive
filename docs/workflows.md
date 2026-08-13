@@ -172,9 +172,10 @@ hive new <project> --workflow my-flow "<your idea>"
 
 Managed Honeycomb workflows are a separate, reviewed package origin and a
 one-workflow compatibility projection of Hive's generalized module lifecycle.
+Existing catalog entries and installed locks require no republish. Updates
+automatically migrate retained tasks to the selected generation.
 Use `hive module` for packages that add hooks, schedules, events, typed
-settings, or grants. Existing catalog entries and installed locks require no
-republish or manual migration.
+settings, or grants.
 
 Typical operator commands are:
 

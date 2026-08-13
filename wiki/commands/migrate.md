@@ -187,6 +187,12 @@ the selection-activation transaction, so the pointer and retained tasks land in
 one state commit; `hive workflow remove` refuses while any retained task still
 names the workflow.
 
+Recovery-marker backfill resolves a pinned managed task's state file directly
+from its descriptor while the workflow mutation lock is held. Unpinned tasks
+use an immutable workflow generation captured before that lock. Neither path
+performs live workflow loading inside the transaction, because that would
+reacquire the same non-reentrant lock and deadlock an update.
+
 The cutover is idempotent. Updating one or more pins restarts a running daemon
 so its managed-workflow cache observes the new selection immediately.
 

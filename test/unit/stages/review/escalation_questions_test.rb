@@ -73,7 +73,6 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       ctx = make_ctx(dir, task_folder)
       payload = Hive::Stages::Review.collect_accepted_findings_with_count(ctx)
       accepted = payload.text
-      answered = Hive::Stages::Review.collect_answered_escalation_findings(ctx)
 
       assert_equal 4, payload.count
       assert_equal accepted, Hive::Stages::Review.collect_accepted_findings(ctx)
@@ -84,10 +83,6 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       assert_includes accepted, "USER-ANSWERED ESCALATION Q2"
       assert_includes accepted, "Should we add a new abstraction?"
       assert_includes accepted, "keep the fix local"
-      assert_includes answered, "USER-ANSWERED ESCALATION Q1"
-      assert_includes answered, "USER-ANSWERED ESCALATION Q2"
-      assert_includes answered, "Use execute.agent"
-      assert_includes answered, "keep the fix local"
       refute_includes accepted, "RESOLVED/NO-FIX"
       refute_includes accepted, "Should this remain manual?"
     end

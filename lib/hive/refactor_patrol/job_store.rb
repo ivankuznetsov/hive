@@ -1425,14 +1425,6 @@ module Hive
         rebuild_indexes!.fetch("fingerprints")
       end
 
-      def action_index
-        read_derived_index(
-          action_index_path,
-          schema: JobIndexes::ACTION_SCHEMA,
-          collection: "actions"
-        ) { rebuild_indexes!.fetch("actions") }
-      end
-
       def fingerprint_index_path
         File.join(root, "indexes", "fingerprints.json")
       end
@@ -2224,19 +2216,6 @@ module Hive
 
       def timestamp!(value, label, path)
         @record_validator.timestamp!(value, label, path)
-      end
-
-      def read_derived_index(path, schema:, collection:)
-        relative = @job_files.relative_path(path)
-        data = @job_files.read_json(relative, missing: true)
-        return yield unless data
-        unless data.is_a?(Hash) && data["schema"] == schema && data["schema_version"] == SCHEMA_VERSION &&
-               data[collection].is_a?(Hash) && (data.keys - %w[schema schema_version] - [ collection ]).empty?
-          return yield
-        end
-        data
-      rescue JSON::ParserError, SystemCallError, IOError
-        yield
       end
 
       def atomic_write(path, data)

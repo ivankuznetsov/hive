@@ -406,7 +406,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
-  def test_eligible_jobs_filters_backoff_per_job_without_starving_later_work
+  def test_claimable_jobs_filters_backoff_per_job_without_starving_later_work
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       first_manifest = manifest(
@@ -433,9 +433,9 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       )
 
       assert_equal [ second.fetch("job_id") ],
-                   store.eligible_jobs(now: T0 + 180).map { |entry| entry.fetch("job_id") }
+                   store.claimable_jobs(now: T0 + 180).map { |entry| entry.fetch("job_id") }
       assert_equal %w[pr-7-stable pr-8-stable],
-                   store.eligible_jobs(now: T0 + 7200).map { |entry| entry.fetch("job_id") }
+                   store.claimable_jobs(now: T0 + 7200).map { |entry| entry.fetch("job_id") }
     end
   end
 
@@ -732,8 +732,8 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_equal "blocked", released.fetch("state")
       assert_equal (T0 + 61).iso8601, released.fetch("attempts").last.fetch("next_eligible_at")
       assert_empty released.dig("dispositions", "accepted")
-      assert_empty store.eligible_jobs(now: T0 + 60)
-      assert_equal [ "pr-7-stable" ], store.eligible_jobs(now: T0 + 61).map { |item| item.fetch("job_id") }
+      assert_empty store.claimable_jobs(now: T0 + 60)
+      assert_equal [ "pr-7-stable" ], store.claimable_jobs(now: T0 + 61).map { |item| item.fetch("job_id") }
     end
   end
 
@@ -1725,7 +1725,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       )
       store.define_singleton_method(:jobs) { [ queued ] }
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
-        store.eligible_jobs(now: T0)
+        store.claimable_jobs(now: T0)
       end
 
       active = initialized_store(File.join(dir, "actions"))

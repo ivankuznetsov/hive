@@ -126,12 +126,6 @@ module Hive
         end
       end
 
-      def pending_count
-        each_candidate.count do |candidate|
-          !%w[archived superseded].include?(candidate.dig("archive", "status"))
-        end
-      end
-
       def watching?(project:, slug:)
         candidates_for(project).any? do |candidate|
           candidate.dig("task", "slug") == slug.to_s &&

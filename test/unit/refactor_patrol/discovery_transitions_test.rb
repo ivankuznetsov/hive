@@ -847,6 +847,34 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
     assert_empty store.calls
   end
 
+  def test_source_retirement_race_returns_locked_status_without_applying_transition
+    store = Store.new
+    store.capture = Capture.new(owner_epoch: 7)
+    store.aggregate = aggregate_with
+    statuses = [ :retireable ]
+    store.define_singleton_method(:obsolete_source_retirement_status) do |*, **|
+      statuses.shift || :claim_active
+    end
+    store.define_singleton_method(:retire_obsolete_source!) do |*, **|
+      :claim_active
+    end
+    transition_value = :not_called
+    gateway = Gateway.new do |_options, transition|
+      transition_value = transition.call(intent)
+    end
+    coordinator, = blocks(store, gateway)
+
+    result = coordinator.retire(
+      entry: entry, store: store, aggregate: store.aggregate,
+      merge_sha: "b" * 40, trunk_sha: "c" * 40, now: now,
+      claim_resolver: ->(_claim) { :unresolved }
+    )
+
+    assert_equal :claim_active, result
+    assert_nil transition_value,
+               "a locked no-op must not be reported to the gateway as applied"
+  end
+
   private
 
   def claims(store, gateway,

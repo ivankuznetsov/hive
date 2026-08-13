@@ -167,6 +167,20 @@ class RefactorPatrolJobQueryIndexTest < Minitest::Test
     end
   end
 
+  def test_recent_page_is_bounded_and_newest_first
+    with_index do |index, root|
+      30.times { |number| register(index, root, "job-#{number}") }
+
+      page = index.recent_page(limit: 25)
+
+      assert_equal 30, page.fetch("total")
+      assert_equal true, page.fetch("has_more")
+      assert_equal "job-29", page.fetch("job_ids").first
+      assert_equal "job-5", page.fetch("job_ids").last
+      assert_equal 25, page.fetch("job_ids").size
+    end
+  end
+
   def test_registration_requires_its_authoritative_job
     with_index do |index, _root|
       assert_raises(InconsistentRecord) do

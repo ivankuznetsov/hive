@@ -46,6 +46,20 @@ class HiveRefactorPatrolJobQueryTest < Minitest::Test
       }
     end
 
+    def recent_job_query_page(limit:)
+      selected = @records.last(limit).reverse
+      {
+        "generation" => @generation,
+        "after_sequence" => 0,
+        "through_sequence" => @records.size,
+        "next_after_sequence" => 0,
+        "total" => @records.size,
+        "has_more" => @records.size > limit,
+        "job_ids" => selected.map { |record| record.fetch("job_id") },
+        "jobs" => selected
+      }
+    end
+
     def add(record)
       @records << record
     end
@@ -102,6 +116,20 @@ class HiveRefactorPatrolJobQueryTest < Minitest::Test
     ).list_envelope(project: "demo", project_root: "/repo")
 
     assert_equal %w[first rollback], payload.fetch("jobs").map { |job| job.fetch("job_id") }
+  end
+
+  def test_recent_list_returns_newest_durable_memberships
+    records = 30.times.map { |index| aggregate(job_id: "job-#{index}") }
+
+    payload = Hive::RefactorPatrol::JobQuery.new(
+      FakeStore.new(records)
+    ).recent_envelope(project: "demo", project_root: "/repo", limit: 25)
+
+    assert_equal "recent", payload.fetch("action")
+    assert_equal 30, payload.fetch("count")
+    assert_equal "job-29", payload.dig("jobs", 0, "job_id")
+    assert_equal "job-5", payload.dig("jobs", -1, "job_id")
+    assert_equal true, payload.dig("page", "has_more")
   end
 
   def test_list_is_bounded_and_resumes_from_an_opaque_cursor

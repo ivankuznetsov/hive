@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-08-11
+updated: 2026-08-13
 tags: [command, web, rails, turbo, hivebox-container, archive, retention]
 ---
 
@@ -200,13 +200,26 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
 
 The project-filtered **Modules** surface presents installed and historical
 module rows using the same redacted `Hive::Modules::Status` object as CLI
-list/status/inspect. Rails does not parse generation locks or patrol stores.
+list/status/inspect; that surface does not parse generation locks or patrol
+stores.
 Install, update, enable, disable, settings changes, and uninstall use the same
 preview-bound lifecycle service as CLI: signed receipts bind candidate/current
 identity, settings, hooks, bindings, cursors, and individual grants, and any
 drift returns a no-write preview-again response. `/workflows` remains the
 workflow authoring/selection surface and preserves its existing managed
 Honeycomb projections.
+
+- **Patrol (`/patrol`)** — A read-only project-filtered view combines ordinary
+  Patrol finding health with Architecture Patrol job health. Ordinary findings
+  come from Patrol's writer-maintained 25-row projection and are active-first
+  and newest-first; Architecture jobs use the newest page of the native durable
+  query index and show accepted finding summaries from a bounded detail sample.
+  Each section isolates read failures instead of failing the page. The response
+  renders at most 25 rows per patrol kind and enriches at most five Architecture
+  jobs; operators use `hive patrol PROJECT --list --json` and the paginated
+  `hive refactor-patrol` inspection commands for CLI evidence. The page has no
+  retry, archive, or mutation controls. Internal exceptions are redacted in
+  server logs and exposed to the browser only as a stable unavailable message.
 
 - **Status board and grid (`/board`, `/grid`, `/`)** — Board is the first-visit
   default. The view-switch forms store a signed browser preference that `/`

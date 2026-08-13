@@ -3,7 +3,7 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-08-09
+updated: 2026-08-13
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
@@ -108,6 +108,16 @@ an invocation-unique analysis-worktree key and therefore cannot reuse or
 remove a same-job daemon worker's tree. If an interrupted removal leaves only
 stale Git worktree administration, the next materialization prunes that orphan
 record and retries without operator repair.
+
+Before either discovery or action reservation, the daemon fetches the current
+default branch and proves that the immutable source merge is still reachable.
+If that ancestry check conclusively fails, the source is obsolete rather than
+retryable: Hive completes the job once, terminalizes every unpublished action
+with `source_no_longer_on_trunk`, and records the retirement through the normal
+qualified transition gateway. A durable remote continuation intent or receipt
+keeps the action resumable so reconciliation can finish an effect that may
+already exist. Fetch, checkout, and object-resolution failures remain transient
+checkout-guard errors and keep their bounded retry behavior.
 
 Discovery inherits the resolved execute provider, concrete model, and effort by
 default. `refactor_patrol.agent`, `.model`, and `.effort` may independently
@@ -379,6 +389,9 @@ reservation. A schema-valid child result that leaves that digest unchanged is
 dispatching the same inert child on every scheduler tick. Fix-agent resource
 exhaustion retains its structured reason; daily token or launch ceilings wait
 until the next UTC day, while other transient failures keep the hourly retry.
+Jobs retired because their source merge left current trunk are excluded from
+later candidate selection, so their diagnostic receipt is written once rather
+than producing another discovery or action retry loop.
 When an occurrence reaches its reserved effect-capacity boundary, the daemon
 rolls the job into the exact next occurrence generation. It first requires all
 predecessor transitions to be terminal, publishes that segment's capture and

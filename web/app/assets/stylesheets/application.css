@@ -743,6 +743,27 @@ pre {
 .skill-repair { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 14px; }
 .skill-repair p { margin: 0; }
 
+/* ---- Patrol evidence ---- */
+
+.patrol-project-form select { min-width: 220px; }
+.patrol-grid { display: grid; gap: 18px; margin-top: 20px; }
+.patrol-section h2 { margin: 0; }
+.patrol-section .muted { margin: 5px 0 0; }
+.patrol-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.patrol-summary { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 18px 0 12px; color: var(--ink-muted); font-size: 0.88rem; }
+.patrol-summary strong { color: var(--ink); }
+.patrol-list { display: grid; gap: 10px; }
+.patrol-row { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 13px 16px; }
+.patrol-row p { margin: 6px 0 0; }
+.patrol-row-title { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+.patrol-row-title strong { overflow-wrap: anywhere; }
+.patrol-meta { color: var(--ink-muted); font-family: var(--font-mono); font-size: 0.8rem; }
+.patrol-findings { margin: 9px 0 0; padding-left: 20px; }
+.patrol-findings li + li { margin-top: 6px; }
+.tag-health-attention { border-color: color-mix(in srgb, var(--warn) 50%, transparent); color: var(--warn); }
+.tag-health-running { border-color: color-mix(in srgb, var(--ok) 50%, transparent); color: var(--ok); }
+.tag-health-disabled, .tag-health-idle { color: var(--ink-faint); }
+
 /* ---- Workflows ---- */
 
 .workflow-project-form select { min-width: 220px; }

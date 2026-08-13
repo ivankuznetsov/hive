@@ -34,6 +34,38 @@ class RefactorPatrolCheckoutGuardTest < Minitest::Test
     end
   end
 
+  def test_existing_pin_still_checks_fresh_remote_trunk_after_rewrite
+    Dir.mktmpdir do |tmp|
+      origin = File.join(tmp, "origin.git")
+      run!("git", "init", "--bare", "--quiet", origin)
+      with_tmp_git_repo do |repo|
+        base = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+        File.write(File.join(repo, "source.txt"), "source\n")
+        run!("git", "-C", repo, "add", "source.txt")
+        run!("git", "-C", repo, "commit", "-m", "source", "--quiet")
+        merge_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+        run!("git", "-C", repo, "remote", "add", "origin", origin)
+        run!("git", "-C", repo, "push", "--quiet", "origin", "master")
+        run!(
+          "git", "-C", repo, "push", "--quiet", "--force",
+          "origin", "#{base}:master"
+        )
+
+        error = assert_raises(Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk) do
+          Hive::RefactorPatrol::CheckoutGuard.new(
+            repo, default_branch: "master"
+          ).validate_and_snapshot!(
+            merge_sha: merge_sha,
+            analysis_sha: merge_sha
+          )
+        end
+
+        assert_equal merge_sha, error.merge_sha
+        assert_equal base, error.trunk_sha
+      end
+    end
+  end
+
   def test_pins_fresh_remote_default_without_moving_local_default_branch
     Dir.mktmpdir do |tmp|
       origin = File.join(tmp, "origin.git")
@@ -73,12 +105,14 @@ class RefactorPatrolCheckoutGuardTest < Minitest::Test
       run!("git", "-C", repo, "switch", "master", "--quiet")
       assert_equal base, run!("git", "-C", repo, "rev-parse", "HEAD").strip
 
-      error = assert_raises(Hive::GitError) do
+      error = assert_raises(Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk) do
         Hive::RefactorPatrol::CheckoutGuard.new(repo, default_branch: "master")
                                           .validate_and_snapshot!(merge_sha: merge_sha)
       end
 
       assert_includes error.message, "does not contain merge commit"
+      assert_equal merge_sha, error.merge_sha
+      assert_equal base, error.trunk_sha
     end
   end
 
@@ -109,6 +143,7 @@ class RefactorPatrolCheckoutGuardTest < Minitest::Test
       end
 
       assert_includes error.message, "cannot fetch origin/master"
+      refute_kind_of Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk, error
     end
   end
 

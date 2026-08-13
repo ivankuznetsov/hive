@@ -176,4 +176,31 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
       assert_match(/\A[0-9a-f]{64}\z/, request.task_generation)
     end
   end
+
+  def test_resolution_race_keeps_a_stage_bound_delivery_without_foreground_admission
+    with_tmp_dir do |state_home|
+      entrypoint = Object.new
+      entrypoint.define_singleton_method(:dispatch) { |**| flunk "unresolved task must stay queued" }
+
+      with_replaced_singleton_method(
+        Hive::Bot::DispatchRequestWriter,
+        :resolve_task,
+        ->(**) { raise Hive::InvalidTaskPath, "task is moving" }
+      ) do
+        reference = Hive::Bot::DispatchRequestWriter.dispatch!(
+          project: "demo", slug: "demo-task",
+          argv: %w[hive run demo-task --stage 4-execute],
+          request_id: "request-moving", state_home: state_home,
+          entrypoint: entrypoint
+        )
+
+        assert reference.queued?
+      end
+
+      request = Hive::Daemon::DispatchRequestQueue.pending(state_home: state_home).fetch(0)
+      assert_equal "4-execute", request.expected_stage
+      assert_nil request.task_id
+      assert_nil request.task_generation
+    end
+  end
 end

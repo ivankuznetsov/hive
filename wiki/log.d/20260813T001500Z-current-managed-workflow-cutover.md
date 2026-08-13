@@ -15,6 +15,9 @@ any apply or commit failure restores both the old pins/folders and the prior
 selection. State-file renames preserve the existing stage artifact, and bound
 dispatch requests that race the cutover are rejected at consume time. Fleet
 migration restarts the daemon only after every registered project succeeds.
+A producer that resolves during the task-folder move still writes a durable,
+stage-bound request without claiming a task id; the daemon rejects that
+incomplete binding instead of silently dropping the requested action.
 
 Managed runtime dispatch now accepts only the selected generation. A stale pin
 fails with an explicit `hive migrate` instruction, workflow removal is blocked

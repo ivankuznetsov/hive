@@ -51,10 +51,10 @@ module Hive
       # rejects the delivery if the task advances or a workflow migration
       # changes its stage/generation before the queue is consumed.
       def write_current!(project:, slug:, argv:, **attributes)
-        task = resolve_task(project: project, slug: slug, argv: argv)
+        _task, identity = resolve_task_identity(project: project, slug: slug, argv: argv)
         write!(
           project: project, slug: slug, argv: argv,
-          **attributes, **identity_for(task, project: project, argv: argv)
+          **attributes, **identity
         )
       end
 
@@ -66,13 +66,19 @@ module Hive
                     trigger: nil, request_id: generate_request_id,
                     state_home: Hive::Paths.state_home, now: Time.now,
                     entrypoint: nil)
-        task = resolve_task(project: project, slug: slug, argv: argv)
+        task, identity = resolve_task_identity(project: project, slug: slug, argv: argv)
         write!(
           project: project, slug: slug, argv: argv,
           chat_id: chat_id, update_id: update_id, trigger: trigger,
           request_id: request_id, state_home: state_home, now: now,
-          **identity_for(task, project: project, argv: argv)
+          **identity
         )
+        unless task
+          return DispatchReference.new(
+            request_id: request_id.to_s, attempt_id: nil, state: "queued",
+            status: :queued, argv: argv
+          )
+        end
 
         intended_stage = intended_stage_for(argv, task)
         result = (entrypoint || Hive::Attempts::API.new).dispatch(
@@ -108,8 +114,7 @@ module Hive
           status: result.status,
           argv: argv
         )
-      rescue Hive::ConcurrentRunError, Hive::Attempts::UnsupportedDetachment,
-             Hive::InvalidTaskPath, Hive::ConfigError
+      rescue Hive::ConcurrentRunError, Hive::Attempts::UnsupportedDetachment
         DispatchReference.new(
           request_id: request_id.to_s, attempt_id: nil, state: "queued",
           status: :queued, argv: argv
@@ -157,6 +162,17 @@ module Hive
           project_filter: project,
           stage_filter: stage_filter_for(argv)
         ).resolve
+      end
+
+      # A task can be momentarily unresolvable while migration owns and moves
+      # its folder. Keep the delivery durable, but bind it to the producer's
+      # observed stage without a task id; the daemon then rejects it as stale
+      # instead of running an unauthenticated generation.
+      def resolve_task_identity(project:, slug:, argv:)
+        task = resolve_task(project: project, slug: slug, argv: argv)
+        [ task, identity_for(task, project: project, argv: argv) ]
+      rescue Hive::InvalidTaskPath, Hive::ConfigError
+        [ nil, { expected_stage: stage_filter_for(argv) } ]
       end
 
       def stage_filter_for(argv)

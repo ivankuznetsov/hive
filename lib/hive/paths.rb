@@ -56,10 +56,6 @@ module Hive
       File.join(attempts_root, "proof")
     end
 
-    def attempt_decision_indexes_root
-      File.join(attempts_root, "decision-indexes")
-    end
-
     def attempt_pending_finalization_root
       File.join(attempts_root, "pending-finalization")
     end

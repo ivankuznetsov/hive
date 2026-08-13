@@ -38,7 +38,6 @@ class PathsTest < Minitest::Test
         assert_equal File.join(attempts, "logs"), Hive::Paths.attempt_logs_root
         assert_equal File.join(attempts, "outputs"), Hive::Paths.attempt_outputs_root
         assert_equal File.join(attempts, "proof"), Hive::Paths.attempt_proof_root
-        assert_equal File.join(attempts, "decision-indexes"), Hive::Paths.attempt_decision_indexes_root
         assert_equal File.join(attempts, "pending-finalization"), Hive::Paths.attempt_pending_finalization_root
         assert_equal File.join(dir, "state", "hive", "provider-health", "v1"),
                      Hive::Paths.provider_health_root

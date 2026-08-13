@@ -61,34 +61,6 @@ module Hive
       unsafe!
     end
 
-    # Descriptor-stable directory metadata probe. A missing directory is
-    # distinct from an unsafe symlink or non-directory binding.
-    def directory_metadata(relative = ".", missing: false)
-      components = relative_components(relative)
-      with_session(create_root: false) do |session|
-        session.with_directory(components, missing: missing) do |handle|
-          stat = IO.for_fd(
-            handle.directory.fileno, autoclose: false
-          ).stat
-          validate_directory!(stat)
-          {
-            mode: stat.mode & 0o777,
-            mtime: stat.mtime.utc
-          }.freeze
-        end
-      end
-    rescue MissingEntry
-      return nil if missing
-
-      unsafe!
-    rescue Errno::ENOENT
-      unsafe!
-    rescue Hive::ConfigError
-      raise
-    rescue SystemCallError, IOError, ArgumentError, TypeError
-      unsafe!
-    end
-
     # Returns :directory or :regular without following a symbolic link. This
     # is intentionally narrower than lstat: managed stores accept no other
     # entry kinds, and regular files must have exactly one link.

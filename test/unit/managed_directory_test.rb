@@ -75,63 +75,6 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
-  def test_directory_metadata_is_missing_aware_and_translates_failures
-    with_tmp_dir do |anchor|
-      root = File.join(anchor, "state")
-      nested = File.join(root, "nested")
-      directory = Hive::ManagedDirectory.new(
-        root: root, anchor: anchor, label: "test state"
-      )
-      directory.ensure_directory("nested")
-      File.chmod(0o750, nested)
-
-      metadata = directory.directory_metadata("nested")
-      assert_equal 0o750, metadata.fetch(:mode)
-      assert_equal File.stat(nested).mtime.utc, metadata.fetch(:mtime)
-      assert_nil directory.directory_metadata("missing", missing: true)
-      assert_raises(Hive::ConfigError) do
-        directory.directory_metadata("missing")
-      end
-      assert_raises(Hive::ConfigError) do
-        directory.directory_metadata("../outside")
-      end
-
-      native = directory.instance_variable_get(:@native)
-      original_open = native.method(:open_directory)
-      with_replaced_singleton_method(
-        native,
-        :open_directory,
-        lambda do |parent, name|
-          raise Errno::EIO, name if name == "broken"
-
-          original_open.call(parent, name)
-        end
-      ) do
-        assert_raises(Hive::ConfigError) do
-          directory.directory_metadata("broken")
-        end
-      end
-
-      nested_opens = 0
-      with_replaced_singleton_method(
-        native,
-        :open_directory,
-        lambda do |parent, name|
-          if name == "nested"
-            nested_opens += 1
-            raise Errno::ENOENT, name if nested_opens == 2
-          end
-
-          original_open.call(parent, name)
-        end
-      ) do
-        assert_raises(Hive::ConfigError) do
-          directory.directory_metadata("nested")
-        end
-      end
-    end
-  end
-
   def test_entry_type_translates_each_missing_and_unsafe_failure
     with_tmp_dir do |root|
       directory = Hive::ManagedDirectory.new(root: root, label: "test state")

@@ -1934,6 +1934,42 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_state_file_marker_zero_exit_with_agent_working_sets_recoverable_error
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      Hive::Markers.set(task.state_file, :agent_working, pid: 123)
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = { timed_out: false, exit_code: 0 }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, result[:status]
+      assert_equal :error, marker.name
+      assert_equal "agent_exited_without_terminal_marker", marker.attrs["reason"]
+      assert_equal "agent_working", marker.attrs["observed_marker"]
+      assert_equal "claude", marker.attrs["provider"]
+    end
+  end
+
+  def test_state_file_marker_nil_exit_with_agent_working_sets_recoverable_error
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      Hive::Markers.set(task.state_file, :agent_working, pid: 123)
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = { timed_out: false, exit_code: nil }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, result[:status]
+      assert_equal :error, marker.name
+      assert_equal "agent_exited_without_terminal_marker", marker.attrs["reason"]
+      assert_equal "agent_working", marker.attrs["observed_marker"]
+      assert_equal "claude", marker.attrs["provider"]
+    end
+  end
+
   def test_state_file_marker_classifies_provider_limits_before_exit_code
     with_tmp_dir do |dir|
       task = make_task(dir)

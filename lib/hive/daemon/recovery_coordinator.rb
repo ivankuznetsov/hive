@@ -1101,12 +1101,8 @@ module Hive
       end
 
       def resolve_task(project:, slug:, folder:, stage:)
-        # Status already resolved the canonical folder, including immutable
-        # managed-workflow provenance. Reuse that path instead of searching
-        # only the currently installed stage catalogue: historical package
-        # generations can legitimately own stage names that no current
-        # workflow advertises. TaskResolver still enforces the project and
-        # stage identity against the task loaded from that folder.
+        # Status already resolved the canonical current-generation folder.
+        # Reuse it while TaskResolver enforces project and stage identity.
         target = folder.to_s.empty? ? slug : folder
         Hive::TaskResolver.new(target, project_filter: project, stage_filter: stage).resolve
       end

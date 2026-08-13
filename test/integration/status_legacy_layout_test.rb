@@ -143,11 +143,11 @@ class StatusLegacyLayoutTest < Minitest::Test
     end
   end
 
-  def test_managed_task_pinned_to_historical_stage_is_not_reported_as_legacy
+  def test_current_managed_task_outside_core_layout_is_not_reported_as_legacy
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
-        folder = seed_managed_task(dir, "4-review", "historical-architecture-260810-aaaa")
+        folder = seed_managed_task(dir, "4-review", "managed-architecture-260810-aaaa")
         generation = Struct.new(:stage_dirs).new([ "1-inbox", "2-repo-research" ])
         loaded = []
 

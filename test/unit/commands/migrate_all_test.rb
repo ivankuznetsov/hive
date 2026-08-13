@@ -159,6 +159,35 @@ class MigrateAllCommandTest < Minitest::Test
     assert_equal 1, restart_calls
   end
 
+  def test_partial_fleet_failure_does_not_restart_the_daemon
+    projects = [
+      { "name" => "alpha", "path" => "/tmp/alpha" },
+      { "name" => "broken", "path" => "/tmp/broken" }
+    ]
+    restart_calls = 0
+    error_output = StringIO.new
+
+    replacement = lambda { |path, global_migration:, daemon_restarter:|
+      Command.new(lambda {
+        global_migration.call
+        daemon_restarter.call if path.end_with?("alpha")
+        raise Hive::ConfigError, "blocked migration" if path.end_with?("broken")
+      })
+    }
+    with_replaced_singleton_method(Hive::Commands::Migrate, :new, replacement) do
+      assert_raises(Hive::Error) do
+        Hive::Commands::MigrateAll.new(
+          projects: projects, output: StringIO.new, error_output: error_output,
+          binary: "hive", global_migration: -> { },
+          daemon_restarter: -> { restart_calls += 1 }
+        ).call
+      end
+    end
+
+    assert_equal 0, restart_calls
+    assert_includes error_output.string, "daemon restart deferred"
+  end
+
   def test_default_daemon_restarter_delegates_to_migrate
     restart_calls = 0
     migrate = Object.new

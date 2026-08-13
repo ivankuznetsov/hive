@@ -84,11 +84,15 @@ module Hive
       return nil unless managed_workflow?
 
       store = Hive::WorkflowPackage::ManagedStore.new(@hive_state_path)
-      root = store.generation_path(workflow.id.to_s, workflow_commit)
-      manifest = store.manifest(workflow.id.to_s, workflow_commit, workflow_manifest_digest)
+      cfg = @workflow_generation&.config || Hive::Config.load(@project_root)
+      selected = current_managed_selection!(store, cfg)
+      name = meta.fetch(:workflow)
+      root = store.generation_path(name, selected.fetch("source_commit"))
+      manifest = store.manifest(
+        name, selected.fetch("source_commit"), selected.fetch("manifest_digest")
+      )
       metadata = manifest.data.fetch("x-hive", {})
-      configuration = workflow_configuration_digest &&
-                      store.configuration(workflow.id.to_s, workflow_configuration_digest)
+      configuration = store.configuration(name, selected.fetch("configuration_digest"), cfg: cfg)
       tools = Array(metadata["tools"]).map { |entry| File.join(root, entry.fetch("path")) }
       prompt_assets = Array(metadata["prompt_assets"]).map { |entry| File.join(root, entry.fetch("path")) }
       environment = configuration ? configuration.input_environment_for(slot_id, runtime_metadata: metadata) : {}
@@ -242,10 +246,11 @@ module Hive
         end
         store = Hive::WorkflowPackage::ManagedStore.new(@hive_state_path)
         begin
+          cfg = @workflow_generation&.config || Hive::Config.load(@project_root)
+          selected = current_managed_selection!(store, cfg)
           return store.workflow(
-            meta[:workflow], meta[:workflow_commit], meta[:workflow_manifest_digest],
-            configuration_digest: meta[:workflow_configuration_digest],
-            cfg: @workflow_generation&.config || Hive::Config.load(@project_root)
+            meta[:workflow], selected.fetch("source_commit"), selected.fetch("manifest_digest"),
+            configuration_digest: selected.fetch("configuration_digest"), cfg: cfg
           )
         rescue Hive::UnsupportedProjectConfigError
           raise
@@ -278,6 +283,26 @@ module Hive
       end
     rescue Hive::Workflows::UnknownWorkflow => e
       raise InvalidTaskPath, e.message
+    end
+
+    def current_managed_selection!(store, cfg)
+      selected = store.selected(meta[:workflow], cfg: cfg)
+      unless selected
+        raise Hive::ConfigError,
+              "managed workflow #{meta[:workflow].inspect} is not selected; " \
+              "install it and run hive migrate before executing task #{slug}"
+      end
+      current = [
+        selected.fetch("source_commit"),
+        selected.fetch("manifest_digest"),
+        selected.fetch("configuration_digest")
+      ]
+      pinned = [ workflow_commit, workflow_manifest_digest, workflow_configuration_digest ]
+      return selected if pinned == current
+
+      raise Hive::ConfigError,
+            "managed workflow task #{slug} requires migration to the selected " \
+            "#{meta[:workflow].inspect} generation; run hive migrate"
     end
 
     def project_default_workflow

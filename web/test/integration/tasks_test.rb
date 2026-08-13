@@ -491,6 +491,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     get task_evidence_path(@project, @slug, "attempt-01-web", representation.fetch("sha256"))
     assert_response :success
     assert_equal "text/plain", response.media_type
+    assert_equal representation.fetch("bytes").to_s, response.headers.fetch("Content-Length")
     assert_includes response.body, "Checkout outcome"
   end
 

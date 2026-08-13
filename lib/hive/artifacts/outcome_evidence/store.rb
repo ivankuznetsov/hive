@@ -21,7 +21,7 @@ module Hive
         ROOT = "outcome-evidence".freeze
         MAX_DOCUMENT_BYTES = 256 * 1024
         SAFE_ID = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
-        DIGEST = /\A[0-9a-f]{64}\z/
+        DIGEST = Proof::DIGEST
         BLOCK_REASONS = %w[capability_blocked review_blocked recaptures_exhausted].freeze
         SCHEMAS = {
           requirement: "hive-outcome-evidence-requirement",
@@ -177,7 +177,9 @@ module Hive
             id = item.fetch("attempt_id")
             {
               "attempt_id" => id,
-              "attempt_sha256" => Digest::SHA256.file(attempt_path(generation, id)).hexdigest
+              "attempt_sha256" => secure_file_digest!(
+                attempt_path(generation, id), "outcome-evidence attempt"
+              )
             }
           end
           unless history.last&.fetch("attempt_id") == attempt_id
@@ -193,8 +195,12 @@ module Hive
             "generation" => generation,
             "recovery_epoch" => requirement.fetch("recovery_epoch"),
             "attempt_id" => attempt_id,
-            "requirement_sha256" => Digest::SHA256.file(requirement_file).hexdigest,
-            "attempt_sha256" => Digest::SHA256.file(attempt_file).hexdigest,
+            "requirement_sha256" => secure_file_digest!(
+              requirement_file, "outcome-evidence requirement"
+            ),
+            "attempt_sha256" => secure_file_digest!(
+              attempt_file, "outcome-evidence attempt"
+            ),
             "attempts" => history,
             "attempt_count" => history.length,
             "reason" => nil,
@@ -234,7 +240,9 @@ module Hive
             end
             {
               "attempt_id" => attempt_id,
-              "attempt_sha256" => Digest::SHA256.file(path).hexdigest
+              "attempt_sha256" => secure_file_digest!(
+                path, "outcome-evidence attempt"
+              )
             }
           end
           if reason != "capability_blocked" && attempts.empty?
@@ -267,7 +275,9 @@ module Hive
             "generation" => generation,
             "recovery_epoch" => requirement.fetch("recovery_epoch"),
             "attempt_id" => last&.fetch("attempt_id"),
-            "requirement_sha256" => Digest::SHA256.file(requirement_file).hexdigest,
+            "requirement_sha256" => secure_file_digest!(
+              requirement_file, "outcome-evidence requirement"
+            ),
             "attempt_sha256" => last&.fetch("attempt_sha256"),
             "attempts" => attempts,
             "attempt_count" => attempts.length,
@@ -405,7 +415,23 @@ module Hive
           end
           case pointer.fetch("status")
           when "accepted"
-            raise StoreError, "accepted package failed publication validation" unless accepted?(generation: generation)
+            published_attempt = pointer.fetch("attempts").find do |item|
+              item.fetch("attempt_id") == pointer.fetch("attempt_id")
+            end
+            unless published_attempt &&
+                   published_attempt.fetch("attempt_sha256") == pointer.fetch("attempt_sha256")
+              raise StoreError, "accepted package attempt digest is inconsistent"
+            end
+            active_attempt = attempt_documents.find do |attempt|
+              attempt.fetch("attempt_id") == pointer.fetch("attempt_id")
+            end
+            unless active_attempt
+              raise StoreError, "accepted package omits its published attempt"
+            end
+            validate_publication!(
+              requirement_document, active_attempt, generation,
+              pointer.fetch("attempt_id")
+            )
           when "blocked"
             expected = recovery_digest(
               generation: generation, reason: pointer.fetch("reason"),
@@ -724,6 +750,10 @@ module Hive
           end
         rescue Errno::ENOENT, Errno::ELOOP
           nil
+        end
+
+        def secure_file_digest!(path, label)
+          secure_file_digest(path) || raise(StoreError, "#{label} is unavailable")
         end
 
         def reject_symlink!(path, label)

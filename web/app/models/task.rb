@@ -8,14 +8,40 @@ require "hive/artifacts/outcome_evidence/store"
 class Task
   include TaskMutations
 
+  class VerifiedEvidenceBody
+    include Enumerable
+
+    CHUNK_BYTES = 64 * 1024
+
+    def initialize(io)
+      @io = io
+    end
+
+    def each
+      return enum_for(__method__) unless block_given?
+
+      begin
+        while (chunk = @io.read(CHUNK_BYTES))
+          yield chunk
+        end
+      ensure
+        close
+      end
+    end
+
+    def close
+      @io.close unless @io.closed?
+    end
+  end
+
   BoundBrainstormQuestion = Struct.new(
     :round, :n, :text, :binding, :ordinal, keyword_init: true
   )
 
   ARTIFACT_ORDER = %w[idea.md brainstorm.md plan.md task.md pr.md summary.md artifact.md].freeze
   MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif|webp|webm|mp4)\z/i
-  EVIDENCE_ATTEMPT_RE = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
-  EVIDENCE_DIGEST_RE = /\A[0-9a-f]{64}\z/
+  EVIDENCE_ATTEMPT_RE = Hive::Artifacts::OutcomeEvidence::Store::SAFE_ID
+  EVIDENCE_DIGEST_RE = Hive::Artifacts::OutcomeEvidence::Store::DIGEST
   EVIDENCE_MEDIA_TYPES = {
     "image/png" => [ "image/png", "inline" ],
     "image/jpeg" => [ "image/jpeg", "inline" ],
@@ -197,20 +223,31 @@ class Task
     return nil unless media
 
     path = File.join(folder, representation.fetch("path"))
-    bytes = File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
-      return nil unless file.stat.file? && file.stat.size == representation.fetch("bytes")
-      file.read(representation.fetch("bytes") + 1)
+    io = File.open(path, File::RDONLY | File::NOFOLLOW)
+    expected_bytes = representation.fetch("bytes")
+    unless io.stat.file? && io.stat.size == expected_bytes
+      io.close
+      return nil
     end
-    return nil unless bytes.bytesize == representation.fetch("bytes")
-    return nil unless Digest::SHA256.hexdigest(bytes) == digest
+    actual_digest = Digest::SHA256.new
+    while (chunk = io.read(VerifiedEvidenceBody::CHUNK_BYTES))
+      actual_digest << chunk
+    end
+    unless actual_digest.hexdigest == digest
+      io.close
+      return nil
+    end
+    io.rewind
 
     {
-      "bytes" => bytes,
+      "body" => VerifiedEvidenceBody.new(io),
+      "bytes" => expected_bytes,
       "filename" => File.basename(representation.fetch("path")),
       "content_type" => media.first,
       "disposition" => media.last
     }
   rescue Hive::Artifacts::OutcomeEvidence::Error, SystemCallError
+    io&.close unless io&.closed?
     nil
   end
 

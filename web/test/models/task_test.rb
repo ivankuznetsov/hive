@@ -160,7 +160,7 @@ class TaskTest < ActiveSupport::TestCase
     representation = result.fetch(:evidence).fetch("representations").last
     file = task.outcome_evidence_file("attempt-01-web", representation.fetch("sha256"))
     assert_equal "text/plain; charset=utf-8", file.fetch("content_type")
-    assert_includes file.fetch("bytes"), "Checkout outcome"
+    assert_includes file.fetch("body").to_a.join, "Checkout outcome"
 
     pointer = folder.join("outcome-evidence", "current.json")
     document = JSON.parse(pointer.read)

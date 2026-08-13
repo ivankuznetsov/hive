@@ -10,9 +10,12 @@ class Tasks::EvidenceController < Tasks::BaseController
     end
 
     expires_in 60.seconds, public: false
-    send_data file.fetch("bytes"),
-              filename: file.fetch("filename"),
-              type: file.fetch("content_type"),
-              disposition: file.fetch("disposition")
+    send_file_headers!(
+      filename: file.fetch("filename"),
+      type: file.fetch("content_type"),
+      disposition: file.fetch("disposition")
+    )
+    response.headers["Content-Length"] = file.fetch("bytes").to_s
+    self.response_body = file.fetch("body")
   end
 end

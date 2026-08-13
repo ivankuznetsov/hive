@@ -1,8 +1,8 @@
 require "digest"
-require "open3"
 require "pathname"
 require "hive/draft_pr_receipt"
 require "hive/artifacts/outcome_evidence/document"
+require "hive/managed_git"
 require "hive/worktree"
 
 module Hive
@@ -47,7 +47,6 @@ module Hive
                   "controller implementation range is empty; a same-head value cannot establish evidence"
           end
           paths.each { |path| self.class.validate_changed_path!(path) }
-          reject_symlinks!(worktree, head, paths)
 
           repository = controller_value(pointer, handoff, "repository")
           branch = controller_value(pointer, handoff, "branch", "task_branch") || pointer.fetch("branch")
@@ -145,20 +144,31 @@ module Hive
 
         def changed_paths(worktree, base, head)
           source = git(
-            worktree, "diff", "--name-only", "--no-ext-diff", "--diff-filter=ACDMRTUXB",
+            worktree, "diff", "--raw", "--diff-filter=ACDMRTUXB",
             "-z", "#{base}..#{head}", "--"
           )
-          source.split("\0", -1).reject(&:empty?).uniq.sort
-        end
+          fields = source.split("\0", -1)
+          fields.pop while fields.last == ""
+          paths = []
+          until fields.empty?
+            header = fields.shift
+            match = header.match(
+              /\A:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ ([A-Z])\d*\z/
+            )
+            raise ResolutionError, "outcome-evidence Git returned malformed raw diff" unless match
 
-        def reject_symlinks!(worktree, head, paths)
-          paths.each do |path|
-            entry = git(worktree, "ls-tree", "-z", head, "--", path)
-            mode = entry.split(/\s+/, 2).first
-            if mode == "120000"
-              raise ResolutionError, "implementation path #{path.inspect} is a symlink"
+            count = %w[C R].include?(match[3]) ? 2 : 1
+            entry_paths = fields.shift(count)
+            if entry_paths.length != count || entry_paths.any?(&:nil?)
+              raise ResolutionError, "outcome-evidence Git returned truncated raw diff"
             end
+            if match[2] == "120000"
+              raise ResolutionError,
+                    "implementation path #{entry_paths.last.inspect} is a symlink"
+            end
+            paths << entry_paths.last
           end
+          paths.uniq.sort
         end
 
         def oid!(value, label)
@@ -169,11 +179,7 @@ module Hive
         end
 
         def git(worktree, *args)
-          out, err, status = Open3.capture3(
-            { "GIT_CONFIG_NOSYSTEM" => "1", "GIT_TERMINAL_PROMPT" => "0" },
-            "git", "-c", "core.hooksPath=/dev/null", "-c", "diff.external=",
-            "-C", worktree, *args
-          )
+          out, err, status = Hive::ManagedGit.capture3(worktree, *args)
           return out if status.success?
 
           diagnostic = err.to_s.strip

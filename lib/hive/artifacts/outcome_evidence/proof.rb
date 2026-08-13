@@ -25,7 +25,7 @@ module Hive
         SAFE_NAME = /\A[a-z][a-z0-9_-]{0,63}\z/
         SAFE_CLAIM = /\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z/
         DIGEST = /\A[0-9a-f]{64}\z/
-        OID = /\A[0-9a-f]{40,64}\z/
+        OID = Identity::OID
         MEDIA_TYPES = {
           "screenshot" => {
             "original" => %w[image/png image/jpeg image/webp],

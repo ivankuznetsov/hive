@@ -95,6 +95,18 @@ class OutcomeEvidenceRangeResolverTest < Minitest::Test
     end
   end
 
+  def test_resolves_rename_to_the_current_path_from_one_raw_diff
+    with_repository do |task, worktree, base, root|
+      run!("git", "-C", worktree, "mv", "README.md", "GUIDE.md")
+      run!("git", "-C", worktree, "commit", "-m", "rename guide", "--quiet")
+      write_pointer(task, worktree, base_oid: base)
+
+      identity = resolver(task, root).resolve
+
+      assert_equal [ "GUIDE.md" ], identity.fetch("changed_paths")
+    end
+  end
+
   private
 
   def with_repository

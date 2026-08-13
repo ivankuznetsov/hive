@@ -77,19 +77,6 @@ module Hive
         :unverifiable
       end
 
-      def safe_group?(wrapper:, worker: nil)
-        return false unless status(wrapper) == :matching
-
-        wrapper_session = wrapper["session_id"] || wrapper[:session_id]
-        wrapper_group = wrapper["process_group_id"] || wrapper[:process_group_id]
-        return false unless wrapper_session && wrapper_group && wrapper_session == wrapper_group
-        return true unless worker
-        return false unless status(worker) == :matching
-
-        worker_session = worker["session_id"] || worker[:session_id]
-        worker_session == wrapper_session
-      end
-
       # Cleanup for the one supported orphan case: the authoritative wrapper
       # is gone but its recorded worker group is still alive in that wrapper's
       # session. Identity is rechecked before TERM and again before KILL.

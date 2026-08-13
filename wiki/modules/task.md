@@ -60,7 +60,6 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
 | `#id` | Numeric id from `meta.yml`, or nil when absent/malformed/unallocated |
 | `#display_name` | `display_name` from `meta.yml`, or nil |
 | `#depends_on` | Single same-project id/slug or explicit `project:slug` prerequisite from `meta.yml`, or nil |
-| `#display_label` | `display_name || slug` |
 | `#lock_file` | `File.join(folder, ".lock")` |
 | `#log_dir` | `File.join(@hive_state_path, "logs", @slug)` |
 | `#commit_lock_file` | `File.join(@hive_state_path, ".commit-lock")` |

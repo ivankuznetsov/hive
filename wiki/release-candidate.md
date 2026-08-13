@@ -42,8 +42,8 @@ attempt results rather than copying or rewriting terminal evidence.
 
 Local evidence keeps `trust_scope`, `scope_status`, and `qa_status` separate. A
 passing requested local scope exits successfully but remains `qa_blocked` on
-`remote_validation_required`. The v0.7.1 development candidate is newer than
-the reviewed v0.7.0 baseline, so `candidate_not_newer` no longer applies; the
+`remote_validation_required`. The v0.7.2 development candidate is newer than
+the reviewed v0.7.1 baseline, so `candidate_not_newer` no longer applies; the
 command does not choose a version or print/perform a release action. `dispatch`
 is the sole explicit GitHub-writing verb and
 `collect` is read-only. Both bind a request ID, candidate/workflow SHA,
@@ -95,7 +95,7 @@ public component contract is implied.
 ## Reviewed release baselines
 
 `packaging/release_candidate/baselines.yml` is the reviewed, non-floating
-baseline catalog. Its `latest-stable` alias is pinned to v0.7.0. The initial
+baseline catalog. Its `latest-stable` alias is pinned to v0.7.1. The initial
 historical `legacy-bench-v041` row binds the real v0.4.1 producer and v0.4.2
 collision observer. Every package and checksum/signature/certificate asset has
 one canonical HTTPS release URL, exact filename, byte size, and SHA-256. Rows
@@ -117,12 +117,18 @@ to the tracked alias and report `baseline_catalog_stale`, but it never floats or
 rewrites the run input.
 
 `plan` inspects the candidate-bound catalog and tag-scoped cache roots under
-`tmp/release-candidates/baseline-cache/` without creating them. v0.7.0,
+`tmp/release-candidates/baseline-cache/` without creating them. v0.7.1,
 v0.4.1, and v0.4.2 have separate directories so their common
 `SHA256SUMS{,.sig,.pem}` filenames cannot collide. Availability requires the
 gem and all three authentication sidecars plus each row's exact producer lock,
 the historical row's separate exact observer lock, offline-cache manifest, and
 complete manifest-bound `gems/` directory.
+
+Hosted staging downloads each baseline's tagged `Gemfile.lock` as immutable
+bytes and verifies its reviewed SHA-256 before using it. It does not fetch or
+archive tags through the Actions checkout, because mutating a shallow checkout
+can race Git's shallow-file maintenance. Package assets and dependency gems
+remain network-staged only before the no-network upgrade sandbox begins.
 Missing release files remain `baseline_assets_missing` and expose only the
 needed exact `gh release download <tag> --repo ivankuznetsov/hive --pattern
 <filename> --dir <tag-cache>` argv. Planning never executes those argv.
@@ -433,8 +439,8 @@ explicit decision to create and push `vX.Y.Z` may start `release.yml`. The
 candidate CLI and trusted aggregate never choose a version, create a tag,
 publish, deploy, or release.
 
-The checked-in source metadata is prepared as 0.7.1 while the reviewed
-latest-stable alias remains v0.7.0, clearing only the candidate-version
+The checked-in source metadata is prepared as 0.7.2 while the reviewed
+latest-stable alias remains v0.7.1, clearing only the candidate-version
 comparison. Previous hosted evidence belongs to its exact older candidate SHA
 and cannot qualify these bytes; a fresh trusted remote campaign is still
 required. No release action was authorized or performed.

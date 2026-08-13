@@ -1151,7 +1151,7 @@ class SpawnAgentTest < Minitest::Test
 
   # A7 golden, brainstorm stage: brainstorm has a DISTINCT dual-path impl
   # (run_headless! → spawn_agent vs run_claude! → spawn_claude_with_tmux_marker!,
-  # plus the legacy brainstorm_tmux.rb) that threads
+  # plus the shared Claude launcher) that threads
   # stage_permission_scope("brainstorm", ...) independently of plan/execute. The
   # plan/execute goldens don't exercise it, so pin the absent-permissions (yolo)
   # argv in BOTH modes here — a brainstorm path that dropped the builtin

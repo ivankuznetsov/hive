@@ -252,10 +252,6 @@ module Hive
         attempt.is_a?(Hash) && !attempt.key?("superseded")
       end
 
-      def pre_create?(attempt)
-        attempt.is_a?(Hash) && !attempt.key?("pr_create_intent")
-      end
-
       def remote_push_evidence?(attempt)
         attempt.is_a?(Hash) && attempt["push_complete"].is_a?(Hash)
       end

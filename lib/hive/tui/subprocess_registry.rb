@@ -3,10 +3,8 @@ require "monitor"
 module Hive
   module Tui
     # Process-local registry for the single in-flight workflow-verb child the
-    # TUI may spawn at a time. Holds either nil, a `:placeholder` sentinel
-    # (between `Process.spawn` start and `getpgid` return), or an Integer
-    # pgid. Read by the SIGHUP cleanup hook in U9; written by Subprocess
-    # before/after the spawn.
+    # TUI may spawn at a time. Holds either nil or an Integer pgid. Read by the
+    # SIGHUP cleanup hook in U9.
     #
     # A `Monitor` (re-entrant) — not a plain Mutex — guards the slot so a
     # signal trap firing while #register is mid-flight on the same thread
@@ -21,10 +19,6 @@ module Hive
       @slot = nil
 
       module_function
-
-      def register_placeholder
-        MONITOR.synchronize { @slot = :placeholder }
-      end
 
       def register(pgid)
         MONITOR.synchronize { @slot = pgid }

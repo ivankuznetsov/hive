@@ -352,7 +352,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       scopes << scope
       Hive::UsageDb.zero_aggregate
     }) do
-      @model.send(:usage_footer_line, 120)
+      @model.send(:default_footer, 120)
     end
 
     assert_equal [ { project_slug: "demo", task_slug: "task-one" } ], scopes
@@ -375,7 +375,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       scopes << scope
       Hive::UsageDb.zero_aggregate
     }) do
-      @model.send(:usage_footer_line, 120)
+      @model.send(:default_footer, 120)
     end
 
     assert_equal [ { project_slug: "demo" } ], scopes
@@ -407,7 +407,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       scopes << scope
       Hive::UsageDb.zero_aggregate
     }) do
-      @model.send(:usage_footer_line, 120)
+      @model.send(:default_footer, 120)
     end
 
     assert_equal [ {} ], scopes

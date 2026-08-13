@@ -148,11 +148,6 @@ module Hive
         raise PublishRecoveryError, "publication bundle could not be marked GC-eligible"
       end
 
-      def bundle_gc_eligible?(package_digest)
-        path = File.join(gc_eligible_root, "#{package_digest}.json")
-        File.file?(path) && !File.symlink?(path)
-      end
-
       private
 
       def ensure_layout!
@@ -266,13 +261,6 @@ module Hive
         stat
       rescue Errno::ENOENT, Errno::EACCES, IOError
         raise PublishRecoveryError, "publication bundle is missing or unreadable"
-      end
-
-      def secure_file!(path)
-        read_secure_file(
-          path, max_bytes: Manifest::MAX_FILE_BYTES,
-          message: "publication state file is linked, special, or not owned by the current user"
-        ).last
       end
 
       def read_secure_file(path, max_bytes:, message:, mode: nil)

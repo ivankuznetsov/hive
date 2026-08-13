@@ -47,8 +47,6 @@ module Hive
 
         def self.canonical(value) = Hive::WorkflowPackage::CanonicalJSON.generate(value)
 
-        def self.valid_payload?(payload) = valid_legacy_payload?(payload)
-
         def self.valid_legacy_payload?(payload)
           return false unless payload.is_a?(Hash) &&
                               payload["schema"] == "hive-module-migration-report" &&

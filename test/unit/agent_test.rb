@@ -2086,25 +2086,6 @@ class AgentTest < Minitest::Test
     end
   end
 
-  def test_extract_final_message_handles_agent_and_assistant_shapes
-    with_tmp_dir do |dir|
-      agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)
-
-      assert_equal "agent says hi", agent.send(:extract_final_message, JSON.generate(
-        "type" => "agent_message",
-        "text" => " agent says hi "
-      ))
-      assert_nil agent.send(:extract_final_message, JSON.generate(
-        "type" => "assistant",
-        "message" => "not-a-hash"
-      ))
-      assert_equal "assistant content", agent.send(:extract_final_message, JSON.generate(
-        "type" => "assistant",
-        "message" => { "content" => [ { "type" => "text", "text" => "assistant content" } ] }
-      ))
-    end
-  end
-
   def test_claude_write_tool_event_recognizes_completed_assistant_tool_use
     with_tmp_dir do |dir|
       agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)

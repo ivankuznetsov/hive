@@ -927,7 +927,7 @@ class AgentProfileTest < Minitest::Test
     assert overridden.frozen?
   end
 
-  def test_runtime_override_probes_binary_paths_path_entries_and_capabilities
+  def test_runtime_override_inherits_binary_probe_and_checks_capabilities
     with_tmp_dir do |dir|
       binary = capability_binary(dir, help: "--safe-mode")
       profile = make_profile(

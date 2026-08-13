@@ -15,9 +15,7 @@ module Hive
     module DispatchRequestWriter
       module_function
 
-      DispatchReference = Data.define(:request_id, :attempt_id, :state, :status, :argv) do
-        def queued? = status == :queued
-      end
+      DispatchReference = Data.define(:request_id, :attempt_id, :state, :status, :argv)
 
       def generate_request_id
         Hive::Daemon::DispatchRequestQueue.generate_request_id

@@ -108,12 +108,13 @@ class ModulesEventRoutingTest < Minitest::Test
     )
 
     publisher.patrol_reserved(entry, ordinary, schedule: "*/10 * * * *")
-    publisher.architecture_patrol_finalized(
+    architecture_event = publisher.prepare_architecture_patrol_finalized(
       entry,
       architecture,
       schedule: "*/10 * * * *",
       target_hook: "scheduled-discovery"
     )
+    publisher.publish_prepared(entry, architecture_event)
 
     patrol = ledger.records.fetch(0)
     assert_equal ordinary.to_h,

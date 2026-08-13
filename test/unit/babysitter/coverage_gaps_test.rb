@@ -434,11 +434,9 @@ class BabysitterCoverageGapsTest < Minitest::Test
     }) do
       assert Hive::Babysitter::GhOps.add_label("/tmp/wt", 42, "label", cfg: {}, dry_run: false).success?
       assert Hive::Babysitter::GhOps.post_pr_comment("/tmp/wt", 42, "body", cfg: {}, dry_run: false).success?
-      assert Hive::Babysitter::GhOps.rerun_ci("/tmp/wt", 99, cfg: {}, dry_run: false).success?
     end
     assert calls.any? { |cmd| cmd.include?("edit") }
     assert calls.any? { |cmd| cmd.include?("comment") }
-    assert calls.any? { |cmd| cmd.include?("rerun") }
 
     now = Time.utc(2026, 6, 3, 1, 0, 0)
     recent = Hive::Babysitter::GhOps.give_up_marker(now: now)

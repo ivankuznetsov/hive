@@ -58,8 +58,8 @@ class ModulesDispatcherTest < Minitest::Test
         module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
       )
 
-      assert first.launched?
-      refute second.launched?
+      assert_equal "launch", first.decision.fetch("outcome")
+      refute_equal "launch", second.decision.fetch("outcome")
       assert_equal "duplicate", second.decision.fetch("reason")
       assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
       attempt = runtime.fetch(:attempt_store).scan.records.first
@@ -95,7 +95,7 @@ class ModulesDispatcherTest < Minitest::Test
         module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
       )
 
-      assert recovered.launched?
+      assert_equal "launch", recovered.decision.fetch("outcome")
       assert_equal admitted.attempt.attempt_id, recovered.decision.fetch("attempt_id")
       assert_equal "recovered_launch", recovered.attempt_result.reason
       assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
@@ -143,7 +143,7 @@ class ModulesDispatcherTest < Minitest::Test
         runtime.fetch(:store).runtime_path("demo"), "runs", "#{hook_attempt.run_id}.json"
       )))
 
-      assert recovered.launched?
+      assert_equal "launch", recovered.decision.fetch("outcome")
       assert_equal :terminal_replay, recovered.attempt_result.status
       assert_equal "running", run.fetch("status")
       assert_equal admitted.attempt.attempt_id, run.fetch("attempt_id")
@@ -186,7 +186,7 @@ class ModulesDispatcherTest < Minitest::Test
         module_name: "demo", hook_id: "task", event: runtime.fetch(:event), dry_run: true
       )
 
-      assert result.launched?
+      assert_equal "launch", result.decision.fetch("outcome")
       assert_nil result.decision.fetch("decision_id")
       assert_empty runtime.fetch(:journal).all
       assert_empty runtime.fetch(:attempt_store).scan.records
@@ -266,7 +266,7 @@ class ModulesDispatcherTest < Minitest::Test
           module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
         )
 
-        assert result.launched?
+        assert_equal "launch", result.decision.fetch("outcome")
         refute_includes JSON.generate(result.decision), "available"
         refute_includes JSON.generate(result.decision), "MODULE_TEST_TOKEN"
       end

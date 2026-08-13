@@ -120,10 +120,6 @@ module Hive
           ::Digest::SHA256.hexdigest("#{severity_key}\x01#{files}\x01#{title}")[0, 16]
         end
 
-        def read_active_keys(ctx)
-          read_active_entries(ctx).keys.to_set
-        end
-
         def read_active_entries(ctx)
           read_entries(suppressed_path(ctx)).select(&:active).to_h { |entry| [ entry.key, entry ] }
         rescue SuppressedDocReadError => e

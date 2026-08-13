@@ -16,9 +16,7 @@ module HiveBench
   # in the "judged" subset (scored by tiers 2–3 only). The gated:judged split is
   # what the leaderboard publishes so the "objective floor" isn't overstated.
   class Gate
-    Result = Data.define(:status, :subset, :reason, :details) do
-      def gated? = subset == "gated"
-    end
+    Result = Data.define(:status, :subset, :reason, :details)
 
     # exec: ->(cmd:, work_dir:) => { output: String, ok: Boolean }
     #   In production this runs the command inside the `--network none` runner

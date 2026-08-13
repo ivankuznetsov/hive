@@ -15,7 +15,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       assert_equal [ first.occurrence_id ],
                    journal.each_reserved.map { |record| record.fetch("occurrence_id") }
       assert_equal 1, journal.each_record.count
-      refute journal.projection_pending?
+      assert_empty journal.each_projection_pending.to_a
       journal.reserve!(patrol_capture, now: NOW)
 
       journal.mark_dispatch_uncertain!(first, now: NOW + 12)

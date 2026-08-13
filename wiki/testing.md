@@ -605,7 +605,9 @@ cleanup fails, while a cleanup failure still fails an otherwise-green test.
 `babysitter/dry_run_env_test.rb` also pins the private-permission boundary for
 both dry-run stubs: pre-existing `0644` and `0666` audit logs are left unchanged,
 the blocked invocation is not appended, and stderr reports both the permission
-refusal and normal skip marker.
+refusal and normal skip marker. `babysitter/passthrough_policy_test.rb` pins the
+side-effect-free `GitPolicy` / `GhPolicy` classification tables and the shared
+runner's skip, absolute-binary, environment-hook, handoff, and failure mapping.
 
 Implementation ownership has focused unit coverage in `implementation_identity/{resolver,store,reconstructor}_test.rb`, `task_journal_test.rb`, `task_projection_test.rb`, `attempts/generation_test.rb`, `protected_files_test.rb`, agent/profile argv tests, the three implementation-owning stage launch tests, status/schema correspondence, and the TUI detail view. These tests pin the shared identity event builder across capture and legacy reconstruction, durable-before-spawn ordering, journal/projection tamper detection, fail-closed downstream generation reads, project/task/generation-bound legacy reconstruction, persisted-provider failure attribution, generation idempotency/conflicts, raw partial overrides, legacy precedence, exact Claude/Codex argv, provider-default pi/grok behavior, and honest unsupported effort.
 

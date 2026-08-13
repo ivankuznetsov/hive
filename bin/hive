@@ -47,6 +47,7 @@ if ENV["HIVE_ATTEMPT_INTERNAL"] == "1"
 end
 
 require "hive/cli"
+require "hive/cli_argv_policy"
 require "hive/cli_json_options"
 require "hive/refactor_patrol/reporter"
 require "json"
@@ -139,161 +140,8 @@ JSON_USAGE_ERROR_CONTRACTS = {
   end
 ).freeze
 
-def wrapper_option_argv(argv)
-  Hive::CliJsonOptions.option_argv(argv)
-end
-
-# Thor treats a class option before the subcommand as input to its help path.
-# Keep `hive --json status` equivalent to `hive status --json`.
-def normalize_leading_json_options!(argv)
-  leading = []
-  leading << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
-  return if leading.empty?
-
-  cmd_idx = wrapper_option_argv(argv).index { |a| !a.start_with?("-") }
-  return argv.unshift(*leading) unless cmd_idx
-
-  argv.insert(cmd_idx + 1, *leading)
-end
-
-# True for an allow-listed value option in `--name=VALUE` form (e.g.
-# `--workflow=content`). Single-sources the predicate shared by
-# new_text_start_index and lift_new_options!.
-def new_value_assignment?(arg)
-  NEW_VALUE_OPTIONS.any? { |name| arg.start_with?("#{name}=") }
-end
-
-def new_text_start_index(argv)
-  option_argv = wrapper_option_argv(argv)
-  cmd_idx = option_argv.index { |a| !a.start_with?("-") }
-  return nil unless cmd_idx && argv[cmd_idx] == "new"
-
-  idx = cmd_idx + 1
-  project_idx = nil
-  while idx < option_argv.length
-    arg = option_argv[idx]
-    if JSON_BOOLEAN_OPTIONS.include?(arg)
-      idx += 1
-      next
-    end
-    if NEW_VALUE_OPTIONS.include?(arg)
-      # Boundary scan only: advance past the value unconditionally. This
-      # intentionally diverges from lift_new_options!, which keeps a
-      # trailing/option-like value option as literal text (the
-      # `!value.start_with?("-")` guard). The two only differ for the
-      # out-of-scope "value option before PROJECT with a missing/option-like
-      # value" case, and the sole consumer of this index
-      # (reject_unsupported_json_assignments!) runs first and inspects only
-      # `--json=` tokens, so the divergence is harmless. Keep both guards in
-      # sync if a future edit changes the allow-list or that consumer.
-      idx += 2
-      next
-    end
-    if new_value_assignment?(arg)
-      idx += 1
-      next
-    end
-    unless arg.start_with?("-")
-      project_idx = idx
-      break
-    end
-
-    idx += 1
-  end
-  return nil unless project_idx
-
-  project_idx + 1
-end
-
-# Thor only honours `--help` *before* the subcommand name (`hive help approve`);
-# `hive approve --help` would be consumed as the TARGET positional. Intercept
-# the help flag before Thor dispatch so the convention agents try first works.
-def rewrite_help_flag!(argv)
-  return if argv.empty?
-
-  option_argv = wrapper_option_argv(argv)
-  cmd_idx = option_argv.index { |a| !a.start_with?("-") }
-  return unless cmd_idx
-
-  text_start_idx = new_text_start_index(argv)
-  scan_limit = [ option_argv.length, text_start_idx ].compact.min
-  help_idx = (cmd_idx + 1...scan_limit).find do |idx|
-    next false if idx <= cmd_idx
-
-    argv[idx] == "--help" || argv[idx] == "-h"
-  end
-  return unless help_idx
-
-  cmd = argv[cmd_idx]
-  argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
-end
-
-# Thor stops parsing options at the first positional (PROJECT), so allow-listed
-# options must be lifted ahead of it before dispatch wherever they appear after
-# `new` — before the project, between the project and the task text, or after the
-# text.
-def lift_new_options!(argv)
-  cmd_idx = wrapper_option_argv(argv).index { |a| !a.start_with?("-") }
-  return unless cmd_idx && argv[cmd_idx] == "new"
-
-  lifted = []
-  rest = []
-  protected_tail = false
-  idx = cmd_idx + 1
-  while idx < argv.length
-    arg = argv[idx]
-    if protected_tail
-      rest << arg
-    elsif arg == "--"
-      protected_tail = true
-    elsif JSON_BOOLEAN_OPTIONS.include?(arg)
-      lifted << arg
-    elsif NEW_VALUE_OPTIONS.include?(arg)
-      # Only consume the next token as the value when it exists and does not
-      # begin with `-`; otherwise the bare option stays literal text so a trailing
-      # or value-less `--workflow`/`--depends-on` cannot eat PROJECT on rebuild.
-      # (new_text_start_index's boundary scan intentionally advances past the
-      # value unconditionally — see the note there for why the divergence is
-      # harmless.)
-      value = argv[idx + 1]
-      if value && !value.start_with?("-")
-        lifted << arg << value
-        idx += 1
-      else
-        rest << arg
-      end
-    elsif new_value_assignment?(arg)
-      lifted << arg
-    else
-      rest << arg
-    end
-    idx += 1
-  end
-
-  project = rest.shift
-  return unless project
-
-  tail = rest.empty? ? [] : [ "--", *rest ]
-  argv.replace(argv[0...cmd_idx] + [ "new" ] + lifted + [ project ] + tail)
-end
-
 def json_requested?(argv)
-  Hive::CliJsonOptions.requested?(argv)
-end
-
-def reject_invalid_argv_encoding!(argv)
-  idx = argv.index { |arg| !arg.dup.force_encoding(Encoding::UTF_8).valid_encoding? }
-  return unless idx
-
-  raise Thor::MalformattedArgumentError, "invalid byte sequence in argument #{idx + 1}"
-end
-
-def reject_unsupported_json_assignments!(argv)
-  text_start_idx = new_text_start_index(argv)
-  arg = Hive::CliJsonOptions.unsupported_assignment(argv, before_index: text_start_idx)
-  return unless arg
-
-  raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
+  Hive::CliArgvPolicy.json_requested?(argv)
 end
 
 def json_usage_option_region(argv, command_index)
@@ -603,11 +451,13 @@ end
 original_argv = ARGV.dup
 
 begin
-  reject_invalid_argv_encoding!(ARGV)
-  reject_unsupported_json_assignments!(ARGV)
-  normalize_leading_json_options!(ARGV)
-  rewrite_help_flag!(ARGV)
-  lift_new_options!(ARGV)
+  ARGV.replace(Hive::CliArgvPolicy.validate_encoding(ARGV))
+  text_start = Hive::CliArgvPolicy.new_text_start_index(ARGV, value_options: NEW_VALUE_OPTIONS)
+  ARGV.replace(Hive::CliArgvPolicy.reject_unsupported_json_assignments(ARGV, before_index: text_start))
+  ARGV.replace(Hive::CliArgvPolicy.normalize_leading_json_options(ARGV))
+  text_start = Hive::CliArgvPolicy.new_text_start_index(ARGV, value_options: NEW_VALUE_OPTIONS)
+  ARGV.replace(Hive::CliArgvPolicy.rewrite_help(ARGV, text_start_index: text_start))
+  ARGV.replace(Hive::CliArgvPolicy.lift_new_options(ARGV, value_options: NEW_VALUE_OPTIONS))
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
   error = thor_usage_error(original_argv, e)

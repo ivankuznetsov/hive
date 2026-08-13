@@ -1,9 +1,9 @@
 ---
 title: CLI Surface
 type: api
-source: bin/hive, bin/hv, lib/hive/cli.rb, lib/hive/commands/answer.rb, schemas/hive-answer.v1.json
+source: bin/hive, bin/hive-e2e, bin/hv, lib/hive/cli.rb, lib/hive/cli_argv_policy.rb, lib/hive/commands/answer.rb, schemas/hive-answer.v1.json
 created: 2026-04-25
-updated: 2026-08-10
+updated: 2026-08-13
 tags: [cli, api, skills, agents, operational, provisioning, brainstorm]
 ---
 
@@ -22,7 +22,12 @@ recommends an answer nor advances a stage.
 
 `bin/hive` is a thin runner that loads `lib/hive` and calls `Hive::CLI.start(ARGV)`, catching `Hive::Error` to render `hive: <message>` to stderr with the error's `exit_code` (default `ExitCodes::GENERIC = 1`).
 
-Before Thor dispatch, `bin/hive` handles two wrapper-level cases itself:
+Before Thor dispatch, `bin/hive` delegates shared wrapper grammar to the pure
+`Hive::CliArgvPolicy`, while retaining command-specific JSON error contracts
+and dispatch. `bin/hive-e2e` uses the same policy for encoding validation,
+Thor-exact JSON booleans, leading-option placement, and command-local help, so
+the two executables no longer duplicate those transformations. The wrapper
+handles two user-visible cases before dispatch:
 top-level `--version` / `-v` prints `Hive::VERSION`, and command-local
 `--help` / `-h` is rewritten to `help <cmd>`. The help rewrite preserves any
 leading dash-prefixed arguments that appear before the subcommand, then drops

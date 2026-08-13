@@ -88,12 +88,6 @@ module Hive
       true
     end
 
-    def restore_safely(root, captured, names)
-      [ restore(root, captured, names), nil ]
-    rescue StandardError => e
-      [ false, "#{e.class}: #{e.message}" ]
-    end
-
     def restore_paths_safely(paths, captured, labels)
       [ restore_paths(paths, captured, labels), nil ]
     rescue StandardError => e

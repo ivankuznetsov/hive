@@ -34,14 +34,6 @@ module Hive
       end
     end
 
-    # Snapshot a small labeled set of absolute controller paths. Managed
-    # worktree agents can legitimately mutate refs and indexes through Git,
-    # but the .git pointer and repository configuration remain controller
-    # trust anchors and must not change across the spawn.
-    def snapshot_paths(paths)
-      paths.to_h { |label, path| [ label, fingerprint(path) ] }
-    end
-
     # Structured no-follow identities used by the Artifact Firewall. The
     # legacy #snapshot shape remains content-digest compatible, while this
     # richer observation also detects mode and file-type substitutions.

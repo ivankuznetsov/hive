@@ -77,7 +77,7 @@ depends_on: api:base-task-260716-abcd
 completed_at: 2026-07-24T12:00:00Z
 ```
 
-`Hive::Task#id`, `#display_name`, `#display_label`, `#depends_on`,
+`Hive::Task#id`, `#display_name`, `#depends_on`,
 `#completed_at`, and the optional workflow selector are derived from this
 sidecar. `completed_at` is optional for active and legacy tasks. Once present it
 is an exact UTC ISO 8601 timestamp and `TaskMeta.write_completed_at_once`

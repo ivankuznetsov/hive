@@ -172,11 +172,11 @@ hive new <project> --workflow my-flow "<your idea>"
 
 Managed Honeycomb workflows now use the generalized project-local module
 lifecycle described in [modules.md](modules.md). Existing `hive workflow
-install|list|update|remove` flags, output schemas, locks, and task-pinned
-generations remain compatibility projections of one-workflow, hook-free
-modules; existing catalog entries and installed locks require no republish or
-manual migration. Use `hive module` for packages that also expose hooks,
-schedules, events, typed settings, and grants.
+install|list|update|remove` flags, output schemas, and locks remain
+compatibility projections of one-workflow, hook-free modules. Existing catalog
+entries and installed locks require no republish. Hive update automatically
+migrates retained tasks to the selected generation. Use `hive module` for
+packages that also expose hooks, schedules, events, typed settings, and grants.
 
 Honeycomb packages are a separate, untrusted-by-default workflow origin. Hive
 consumes the official flat `honeycomb-catalog/v2` snapshot and accepts only
@@ -225,10 +225,13 @@ choice fails runtime admission before project state changes.
 .hive-state/workflows/<name>/versions/<catalog-commit>/
 ```
 
-New tasks pin the catalog commit and release digest in `meta.yml`. Updating or
-removing the project selection therefore affects only new tasks; generations
-still referenced by existing tasks remain verifiable and runnable. Tampering
-is an integrity error, never an implicit local override.
+New tasks pin the catalog commit, release digest, and configuration digest in
+`meta.yml`. Runtime accepts only the selected tuple. During update, Hive maps
+each retained task from its old descriptor to the selected descriptor by stable
+semantic stage name, moves its folder and state artifact when needed, and
+repins it in the same durable state commit as pointer activation. A removed
+occupied semantic stage or live task lock blocks the update before the pointer
+changes. Tampering is an integrity error, never an implicit local override.
 
 Lifecycle mutations recheck the selected source commit and manifest digest
 inside the workflow mutation lock. A first install likewise verifies that no
@@ -251,7 +254,8 @@ never read into the document. A task-retained row carries its configuration
 digest when the task metadata has one, but does not present that historical
 snapshot as the active mapping. Owner-authored and built-in rows retain their
 generation-free shape. `workflow remove` operates only on Hive-managed locks
-and never deletes task-pinned generations or owner-authored/built-in workflows.
+and refuses while the workflow owns retained tasks. It never deletes
+owner-authored/built-in workflows.
 List and remove work offline; catalog visibility is reported as
 `unknown_offline` until a trusted refresh is available.
 

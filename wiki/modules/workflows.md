@@ -132,7 +132,8 @@ the same identity, source commit, manifest digest, mappings, inputs, and
 permission disclosure. `hive workflow install|list|update|remove` remains the
 0.x compatibility projection; the generalized project-local lifecycle is
 available through `hive module` and uses the same reviewed-catalog trust
-boundary. No package republish or state migration is required.
+boundary. No package republish is required. Hive updates automatically migrate
+retained tasks onto the selected generation before runtime dispatch resumes.
 
 Native `hive-module/v1` descriptors can add registered entrypoint hooks,
 schedules, the three named module events, typed settings, grants, templates,
@@ -221,15 +222,17 @@ weakening owner-authored descriptor compatibility:
   lifecycle commands, so JSON surfaces cannot drift from snapshot semantics.
 - `Loader` registers selected managed workflows beside built-ins and authored
   descriptors while rejecting id collisions and reloading when its managed
-  fingerprint changes. Task-pinned generations bypass the single-id overlay and
-  validate/load directly from `ManagedStore` by id, source commit, manifest
-  digest, and configuration digest. Profile fingerprint drift fails closed at
-  runtime. `hive migrate` is the explicit one-way mapping cutover: when a task
-  and the selected workflow still share the same package source commit and
-  manifest digest, it preflights the selected configuration, rebinds the task
-  to that configuration digest, and cleans snapshots no task references.
-  Tasks on another package generation remain pinned for a workflow-specific
-  migration rather than silently changing instructions.
+  fingerprint changes. Runtime accepts only the selected source commit,
+  manifest digest, and configuration digest. A stale task fails closed with an
+  exact `hive migrate` recovery command. `hive migrate` is the only boundary
+  that loads the task's old descriptor: it maps the old directory through the
+  stable semantic stage name, preflights every destination and task lock,
+  renames the stage artifact when its filename changed, and repins the task to
+  the selected generation. Workflow updates coordinate pointer activation and
+  retained-task changes in one state commit. Install and update paths remove
+  stale nonterminal delivery requests; consume-time task identity checks fence
+  requests that raced the migration. Unreferenced generations and
+  configurations are removed only after that cutover commits.
   For a legacy lock-schema-v1 selection, task creation derives the compatibility
   snapshot with the effective project agent profiles and writes that
   digest-addressed snapshot before `meta.yml` can pin it. The snapshot therefore

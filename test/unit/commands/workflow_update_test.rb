@@ -44,7 +44,7 @@ class WorkflowUpdateCommandTest < Minitest::Test
     end
   end
 
-  def test_content_only_update_needs_ordinary_consent_and_preserves_old_task_pin
+  def test_content_only_update_needs_ordinary_consent_and_migrates_retained_tasks
     with_update_fixture do |project, store, old, candidate_root, candidate|
       task = File.join(store.hive_state_path, "stages", "1-inbox", "old-task-260715-aaaa")
       Hive::TaskMeta.write(task, id: 1, slug: File.basename(task), display_name: nil, workflow: "demo",
@@ -53,12 +53,38 @@ class WorkflowUpdateCommandTest < Minitest::Test
 
       assert_equal "updated", payload.fetch("status")
       assert_equal candidate.source_commit, store.selected("demo").fetch("source_commit")
-      assert File.directory?(store.generation_path("demo", old.source_commit))
-      assert_equal :demo, Hive::Task.new(task).workflow.id
+      refute File.exist?(store.generation_path("demo", old.source_commit))
+      resolved = Hive::Task.new(task)
+      assert_equal candidate.source_commit, resolved.workflow_commit
+      assert_equal :demo, resolved.workflow.id
     end
   end
 
-  def test_v1_task_materializes_project_profile_snapshot_and_survives_v2_update_cleanup
+  def test_task_migration_preflight_failure_preserves_the_previous_selection
+    with_update_fixture do |project, store, old, candidate_root, candidate|
+      task = File.join(store.hive_state_path, "stages", "1-inbox", "locked-task-260715-aaaa")
+      selected = store.selected("demo")
+      Hive::TaskMeta.write(
+        task, id: 1, slug: File.basename(task), display_name: nil, workflow: "demo",
+        workflow_commit: old.source_commit,
+        workflow_manifest_digest: old.manifest_digest,
+        workflow_configuration_digest: selected.fetch("configuration_digest")
+      )
+      lock = Hive::Lock.acquire_task_lock(task, operation: "test", create: false)
+
+      assert_raises(Hive::ConcurrentRunError) do
+        command(project, candidate_root, candidate, yes: true).call!
+      end
+
+      assert_equal old.source_commit, store.selected("demo").fetch("source_commit")
+      assert_equal old.source_commit, Hive::Task.new(task).workflow_commit
+      refute File.exist?(store.generation_path("demo", candidate.source_commit))
+    ensure
+      Hive::Lock.release_task_lock(task, lock_id: lock.fetch("lock_id")) if lock
+    end
+  end
+
+  def test_v1_task_materializes_project_profile_snapshot_then_migrates_to_current_configuration
     with_update_fixture do |project, store, old, candidate_root, candidate|
       config_path = File.join(project, ".hive-state", "config.yml")
       project_cfg = YAML.safe_load_file(config_path)
@@ -102,17 +128,13 @@ class WorkflowUpdateCommandTest < Minitest::Test
 
       assert_equal "updated", payload.fetch("status")
       assert_equal 2, selected.fetch("schema_version")
-      assert_equal pinned_digest, Hive::Task.new(task).workflow_configuration_digest
-      assert_equal store.generation_path("demo", old.source_commit),
+      assert_equal active_digest, Hive::Task.new(task).workflow_configuration_digest
+      assert_equal store.generation_path("demo", candidate.source_commit),
                    Hive::Task.new(task).managed_runtime_context("stages.work").fetch(:package_root)
-
-      store.remove_selection("demo")
-      assert_equal [ old.source_commit ], store.cleanup_unreferenced("demo")
-      assert File.directory?(store.generation_path("demo", old.source_commit))
-      refute File.exist?(store.generation_path("demo", candidate.source_commit))
-      assert File.file?(store.configuration_path("demo", pinned_digest))
-      refute File.exist?(store.configuration_path("demo", active_digest))
-      assert_equal :demo, Hive::Task.new(task).workflow.id
+      refute File.exist?(store.generation_path("demo", old.source_commit))
+      assert File.directory?(store.generation_path("demo", candidate.source_commit))
+      refute File.exist?(store.configuration_path("demo", pinned_digest))
+      assert File.file?(store.configuration_path("demo", active_digest))
     end
   end
 
@@ -179,6 +201,32 @@ class WorkflowUpdateCommandTest < Minitest::Test
         command(project, candidate_root, candidate, yes: true, committer: failing).call!
       end
       assert_equal old.source_commit, store.selected("demo").fetch("source_commit")
+      refute File.exist?(store.generation_path("demo", candidate.source_commit))
+    end
+  end
+
+  def test_combined_selection_and_task_commit_failure_rolls_back_both
+    with_update_fixture do |project, store, old, candidate_root, candidate|
+      selected = store.selected("demo")
+      task = File.join(store.hive_state_path, "stages", "1-inbox", "rollback-task-260715-aaaa")
+      Hive::TaskMeta.write(
+        task, id: 1, slug: File.basename(task), display_name: nil, workflow: "demo",
+        workflow_commit: old.source_commit,
+        workflow_manifest_digest: old.manifest_digest,
+        workflow_configuration_digest: selected.fetch("configuration_digest")
+      )
+
+      assert_raises(Hive::GitError) do
+        command(
+          project, candidate_root, candidate, yes: true,
+          committer: ->(*) { raise Hive::GitError, "combined commit failed" }
+        ).call!
+      end
+
+      assert_equal old.source_commit, store.selected("demo").fetch("source_commit")
+      assert File.directory?(task)
+      assert_equal old.source_commit, Hive::TaskMeta.read(task).fetch(:workflow_commit)
+      assert_equal :demo, Hive::Task.new(task).workflow.id
       refute File.exist?(store.generation_path("demo", candidate.source_commit))
     end
   end
@@ -275,6 +323,16 @@ class WorkflowUpdateCommandTest < Minitest::Test
       end
       assert_equal old.source_commit, store.selected("demo").fetch("source_commit")
     end
+  end
+
+  def test_update_disclosure_pluralizes_moved_stages
+    updater = Hive::Commands::Workflow::Update.new(
+      "demo", project_root: Dir.pwd, json: false, stdout: StringIO.new
+    )
+    migration = Struct.new(:task_count, :moved_count).new(3, 2)
+
+    assert_equal "migrated retained tasks: 3 (2 stages moved)",
+                 updater.send(:migration_line, migration)
   end
 
   private

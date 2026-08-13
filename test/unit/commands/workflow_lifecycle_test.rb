@@ -277,7 +277,7 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
-  def test_remove_retains_task_pinned_generation
+  def test_remove_rejects_a_workflow_that_still_owns_retained_tasks
     with_project_and_package do |project, package, resolution|
       client = stub_client(package, resolution)
       Hive::Commands::Workflow::Install.new(
@@ -290,12 +290,15 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
                           workflow_commit: resolution.source_commit,
                           workflow_manifest_digest: resolution.manifest_digest)
 
-      payload = Hive::Commands::Workflow::Remove.new(
-        "demo", project_root: project, json: true, yes: true,
-        stdout: StringIO.new, committer: ->(*) { }
-      ).call!
-      assert_equal [ resolution.source_commit ], payload.fetch("retained_commits")
-      assert File.directory?(Hive::WorkflowPackage::ManagedStore.new(hive_state).generation_path("demo", resolution.source_commit))
+      error = assert_raises(Hive::Commands::Workflow::OwnershipError) do
+        Hive::Commands::Workflow::Remove.new(
+          "demo", project_root: project, json: true, yes: true,
+          stdout: StringIO.new, committer: ->(*) { }
+        ).call!
+      end
+      assert_match(/still owns 1 retained task/, error.message)
+      assert_match(/historical workflow dispatch is not supported/, error.message)
+      assert Hive::WorkflowPackage::ManagedStore.new(hive_state).selected("demo")
     end
   end
 
@@ -341,7 +344,7 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
-  def test_list_distinguishes_selected_and_task_retained_configurations_for_the_same_generation
+  def test_mapping_update_migrates_tasks_and_leaves_only_the_selected_configuration
     with_project_and_package do |project, package, resolution|
       client = stub_client(package, resolution)
       installed = Hive::Commands::Workflow::Install.new(
@@ -366,11 +369,12 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
       ).call!.fetch("workflows").select { |entry| entry["name"] == "demo" }
 
       selected = rows.find { |entry| entry["selection"] == "selected" }
-      retained = rows.find { |entry| entry["selection"] == "retained" }
       assert_equal configured.fetch("configuration_digest"), selected.fetch("configuration_digest")
-      assert_equal installed.fetch("configuration_digest"), retained.fetch("configuration_digest")
-      refute retained.key?("mappings")
-      refute retained.key?("optional_inputs")
+      assert_equal [ "selected" ], rows.map { |entry| entry.fetch("selection") }
+      assert_equal configured.fetch("configuration_digest"),
+                   Hive::TaskMeta.read(task).fetch(:workflow_configuration_digest)
+      refute_equal installed.fetch("configuration_digest"),
+                   Hive::TaskMeta.read(task).fetch(:workflow_configuration_digest)
     end
   end
 
@@ -586,6 +590,16 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
       assert_match(/cleanup state commit failed.*already succeeded/, payload.fetch("warnings").first)
       assert_nil Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state")).selected("demo")
     end
+  end
+
+  def test_install_disclosure_pluralizes_moved_stages
+    command = Hive::Commands::Workflow::Install.new(
+      "demo", project_root: Dir.pwd, json: false, stdout: StringIO.new
+    )
+    migration = Struct.new(:task_count, :moved_count).new(3, 2)
+
+    assert_equal "migrated retained tasks: 3 (2 stages moved)",
+                 command.send(:migration_line, migration)
   end
 
   private

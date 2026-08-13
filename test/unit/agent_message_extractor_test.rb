@@ -23,6 +23,18 @@ class AgentMessageExtractorTest < Minitest::Test
     assert_equal "Line title", Hive::Agent::MessageExtractor.extract(line)
   end
 
+  def test_extracts_claude_assistant_content_and_rejects_malformed_messages
+    assert_nil Hive::Agent::MessageExtractor.extract({
+      "type" => "assistant", "message" => "not-a-hash"
+    })
+    assert_equal "assistant content", Hive::Agent::MessageExtractor.extract({
+      "type" => "assistant",
+      "message" => {
+        "content" => [ { "type" => "text", "text" => "assistant content" } ]
+      }
+    })
+  end
+
   def test_extracts_grok_text_chunk_without_stripping_significant_space
     event = { "type" => "text", "data" => " a summary" }
 

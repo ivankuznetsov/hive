@@ -16,9 +16,7 @@ module Hive
     # Invalid records are deliberately retained by scans and count as a
     # reservation. A downgraded or partially written store must never create
     # capacity for a duplicate owner by ignoring evidence it cannot parse.
-    InvalidStoredRecord = Data.define(:path, :error) do
-      def capacity_reservation? = true
-    end
+    InvalidStoredRecord = Data.define(:path, :error)
     Scan = Data.define(:records, :invalid_records)
 
     class Store

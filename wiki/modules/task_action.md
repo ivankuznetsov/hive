@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb, lib/hive/task_action/diagnostic.rb, lib/hive/terminal_outcome.rb
 created: 2026-04-26
-updated: 2026-08-02
+updated: 2026-08-13
 tags: [module, status, action, classifier, human-stage, diagnostic, blocked, terminal-outcomes]
 ---
 
@@ -20,6 +20,11 @@ action.next_action # structured row-local recovery action, or nil
 action.diagnostic  # bounded diagnostic payload for recover_review / recover_execute / error rows, nil otherwise
 action.payload     # { "key", "label", "command", "next_action" } for JSON emission
 ```
+
+Status dispatch adapters share the classifier's derived
+`TaskAction::READY_COMMANDS` lookup. The bot exposes every ready command,
+including in-process `approve`; the web exposes only commands accepted by the
+daemon dispatch-request queue.
 
 ## Red-status diagnostic (`#diagnostic`)
 

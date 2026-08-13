@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-07-27
+updated: 2026-08-13
 tags: [command, workflow, authoring, validation, human-stage, honeycomb, registry, archive, retention]
 ---
 
@@ -34,196 +34,67 @@ hive workflow publish my-flow --version 1.0.0 \
 
 ## Honeycomb Lifecycle
 
-The lifecycle implementation now normalizes a managed Honeycomb into a
-one-workflow installable module. The existing workflow command flags, human
-messages, exit codes, lock behavior, and JSON schemas remain the 0.x
-compatibility contract. Operators who need hooks, schedules, typed settings,
-or lifecycle status use `hive module`; current Honeycombs do not need
-republishing or manual migration.
+`install`, `list`, `update`, and `remove` are the 0.x command-compatible
+projection of Hive's managed-module lifecycle. [[modules/workflow_package]] is
+the authoritative source for package trust, immutable storage, configuration
+resolution, task provenance, disclosure versus exact runtime enforcement, and
+publication recovery. This command page owns only the operator-visible CLI
+contract.
 
-The official-source grammar is closed: `honeycomb/NAME`, a catalog semantic
-version, or its catalog-listed full upstream source SHA. Mutable refs,
-abbreviated/unlisted commits, arbitrary namespaces, and arbitrary repositories
-fail resolution. Bare discovery/latest considers only listed/discoverable
-entries; exact soft-hidden and yanked versions remain resolvable, while revoked
-versions fail closed with advisory IDs. Install materializes the immutable
-package directory from the pinned catalog commit itself and validates canonical
-`manifest.yml`, `release_sha256`, complete payload inventory/hashes, catalog
-binding, static diagnostics, and every descriptor-selected runner before
-mutation. The review head is audit identity and `source_sha` is upstream
-provenance, not install-tree Git identity.
+The accepted source forms are `honeycomb/NAME`, a catalog semantic version, or
+a catalog-listed full upstream source SHA. Mutable refs, abbreviated or
+unlisted commits, arbitrary namespaces, and arbitrary repositories fail
+resolution. Exact soft-hidden or yanked versions remain addressable; revoked
+versions fail closed with their advisory IDs.
 
-Managed storage is
-`workflows/NAME/versions/CATALOG_COMMIT/` plus
-`workflows/NAME/configurations/CONFIGURATION_DIGEST.json` plus
-`workflows/NAME/honeycomb.lock.json`. Install enumerates each active stage,
-reviewer, and reviser, shows one complete suggested mapping summary, and lets an
-interactive operator accept the defaults or edit each slot's agent, model, and
-effort. Changing an agent recomputes its model/effort suggestions before those
-prompts, and entering `unpinned` clears a pin. Mapping output names absent
-model/effort pins as `unpinned`. New tasks copy the
-catalog commit, release digest, and configuration digest into `meta.yml`;
-update/remove retain every identity referenced by an in-flight task. When the
-selected pointer is a legacy schema-v1 lock, Hive derives its compatibility
-configuration from the project's effective agent profiles and durably stores
-the snapshot before writing task metadata, so a later schema-v2 update cannot
-strand the task's configuration pin.
+`install` and `update` accept repeatable
+`--mapping SLOT=AGENT[,model=MODEL][,effort=EFFORT]` and
+`--input-binding NAME=ENV_NAME` flags. Human preview names every executable
+slot and optional input, reports absent model/effort pins as `unpinned`, and
+redacts all environment values. `--dry-run --json` validates and reports the
+candidate, mapping/input changes, permission diff, and retained/deletable
+generations without writing project state.
 
-Install binds activation to the still-absent selection observed after package
-validation. An already-selected exact generation and configuration returns
-`already_installed` before activation, but any selection that appears
-concurrently after that check raises `ConcurrentRunError`; there is no
-concurrent-install no-op arm. Web update receipts bind the selected source,
-manifest, and configuration digests plus the candidate package and configuration
-digests. The command checks that identity before remote or destructive work and
-the store rechecks the selected identity inside the mutation lock. A changed
-baseline raises retryable `ConcurrentRunError` instead of applying an action to
-an unreviewed selection.
+JSON and non-TTY mutations require `--yes`. A package or update that needs the
+separate high-risk consent also requires `--allow-escalation`; the preview
+states that requirement without duplicating the policy classification here.
+Interactive refusal is a successful `cancelled` no-op. Missing consent is a
+USAGE error with `error_kind: consent_required`.
 
-Activation/commit failures remain failures and trigger best-effort candidate
-cleanup; if cleanup also fails, it is logged without replacing the original
-exception. Once update/remove commits the selection change, later cleanup,
-cleanup-commit, or cache-refresh failures return the successful status with a
-`warnings` array. Hive Web renders those warnings after redirect so retry cannot
-produce a misleading "not installed" result.
+`list --json` reports orthogonal `origin`, `selection`, `integrity`, and
+`catalog_visibility` fields. Managed rows add the selected configuration
+digest, stable-slot mapping identities and fingerprints, and optional-input
+bindings/availability without values. Task-retained rows expose pinned
+configuration identity without presenting it as the active selection; offline
+catalog visibility is `unknown_offline`.
 
-Package descriptors cannot select agent/model/effort; immutable installation
-configuration overlays those choices in memory. Planning/development defaults
-follow the project's init choices and reviewer roles cycle configured review
-agents. A registry package may provide a sorted, identity-free
-`x-hive.mapping_recommendations` list for known executable slots. Its optional
-portable `effort` value (`low`, `medium`, or `high`) is only an install
-suggestion: explicit `--mapping` fields win, a compatible installed mapping wins
-on update, and the project default is used only when neither applies. A
-recommended effort stays unpinned when the selected agent cannot express it;
-an explicit unsupported pin still fails closed. If a suggested agent cannot enforce a slot's non-`yolo` tool scope,
-the suggestion falls back to Claude; explicit choices remain exact and an
-incompatible explicit mapping fails runtime admission before mutation. Updates
-preserve only slots whose stable ID, role, and
-`mapping_contract` match. Profile drift or contract changes require explicit
-remapping. A non-null model or effort pin is accepted only when the selected
-profile can translate it into native launch arguments; unsupported suggested
-defaults remain unset, while an explicit unsupported pin fails before managed
-state is mutated. JSON schema v2 discloses the mapping, configuration digest,
-actor policy fingerprints, and optional-input availability without values.
-Human previews likewise name each optional input, its authorized stable slots,
-and its environment-variable binding while replacing every available value
-with `[redacted]`. A compatible binding from the installed configuration wins
-over a new same-name environment suggestion during update; an explicit
-`--input-binding` wins over both. Rebinding is disclosed as a configuration
-change before ordinary update consent, while an authorization-scope gain is an
-actor-policy change and therefore uses the separate escalation consent.
-Re-running install or update against the selected catalog commit resolves these
-options against the selected snapshot: it is a no-op only when the resulting
-configuration digest also matches. Otherwise Hive admits and activates a new
-immutable configuration snapshot against the same generation using the full
-source, manifest, and configuration baseline as its concurrency check.
+Committed activation remains successful when later cleanup or cache refresh
+fails; the result carries `warnings`, which Hive Web renders after redirect.
+A changed concurrent selection is a retryable `ConcurrentRunError`, while an
+exact selected generation and configuration returns `already_installed`.
 
-The catalog permission union remains coarse disclosure. Runtime admission and
-spawn use exact actor permissions. Unbounded installs require both ordinary
-consent and `--allow-escalation`; this includes explicit `yolo`, scoped shell,
-and unqualified scoped file-write actors. Registry manifests must conservatively
-disclose those actors as high risk with the corresponding wildcard capability
-surface. Actor-level policy redistribution also escalates when the package
-union is unchanged. `--input-binding NAME=ENV_NAME`
-stores only an environment reference, and absent optional inputs do not block
-prompt-only execution. `publish` projects every executable actor into the
-conservative registry permission union and retains exact actor semantics in
-`workflow.yml`.
+## Publish command
 
-Consent is deliberately non-composable. JSON and non-TTY install/remove/update
-require `--yes` for mutation. `--dry-run --json` on all three commands returns
-the exact permission, diff, or retained/deletable-generation consequences
-without requiring consent and without changing project state. An update that adds tools/directories/commands/domains,
-credentials, dependencies, removes deny rules, or changes an incomparable
-dependency additionally requires `--allow-escalation`. Dry-run validates and
-reports content, dependency, security, and file categories without a project
-write. Interactive refusal is a successful `cancelled` no-op; missing
-non-interactive consent is `consent_required`/USAGE.
+`publish ID --version VERSION` requires the CLI id to match the authored
+descriptor and `VERSION` to be strict SemVer. Adjacent `honeycomb.yml` supplies
+the author, license, minimum Hive version, immutable source identity, and closed
+asset list; `README.md` must replace every required section placeholder.
+`x-hive` authoring metadata may declare tools, prompt assets, and optional
+inputs for stable actor slots.
 
-`list` emits orthogonal `origin`, `selection`, `integrity`, and
-`catalog_visibility` fields, including tampered/malformed and retained entries.
-JSON schema v2 adds the selected configuration digest, its stable-slot
-agent/model/effort mappings and fingerprints, and each declared optional
-input's authorized slots, environment-variable binding, and availability.
-Environment values are never emitted. Task-retained rows expose their pinned
-configuration digest when present but omit active mapping/input details;
-built-in and authored rows keep their generation-free shape. Its offline
-visibility is `unknown_offline`.
-
-## Publish authoring and recovery contract
-
-The CLI id must equal the descriptor `id`, and strict SemVer `--version` is
-required. Adjacent authored `honeycomb.yml` owns description, author name/URL,
-SPDX license, minimum Hive version, immutable source URL and 40/64-hex revision,
-and a sorted unique asset list. `README.md` must contain authored
-non-placeholder `Behavior`, `Prerequisites`, `Inputs`, `Outputs`, `Permissions
-and Risks`, and `Recovery` sections. Only referenced local instructions and
-declared regular assets are snapshotted; named `skill:` dependencies become
-`x-hive.external_skills` and are never copied.
-
-Optional top-level descriptor `x-hive` authoring metadata owns `tools`,
-`prompt_assets`, and `optional_inputs`. Tool and prompt-asset paths must also
-appear in `honeycomb.yml`'s closed asset list; only explicitly declared tools
-retain executable mode. Optional inputs carry sorted portable names and sorted
-authorized executable-slot IDs. Hive removes this authoring block from the
-packaged `workflow.yml` and projects its validated values into generated
-manifest `x-hive` metadata. Authoring-only `honeycomb.yml` and generated
-`manifest.yml`/`workflow.yml` paths cannot enter the package as assets.
-
-The canonical builder emits only `packages/NAME/VERSION/` with generated
-`manifest.yml`, packaged `workflow.yml`, authored `README.md`, referenced
-instructions, and declared assets. The manifest owns normalized permissions,
-the complete registry-relative hash map, and `release_sha256`; the final
-manifest byte hash is `package_digest`. The current consumer validator and
-pinned Honeycomb lint contract run before remote access. The installed gem
-ships the pinned Markdown corpus and upstream SafeYAML parity cases as runtime
-contract data, so packaged Hive does not depend on the source checkout's test
-tree. Bounded safe-file reads treat a zero-byte regular file as empty bytes;
-an empty YAML behavior asset is therefore reported as malformed YAML instead
-of escaping into the generic scanner-error boundary. The lint receipt
-identity binds the upstream policy, fixture corpus, expected output, and local
-contract checksums. Dry-run returns
-`state: validated`, both digests, and `freshness: not_checked` without durable
-publication state.
-
-The real invocation must pass the confirmed full digest through
-`--expected-release-digest`. Destination repository/base come only from trusted
-`honeycomb.repository`/`honeycomb.base_branch` configuration. Owner-private
-receipts and digest bundles under `Hive::Paths.state_home/workflow-publish/v1`
-journal fork, push, and PR intent before effects. Retry identity is registry,
-name, version, and full release digest; a different digest is an immutable
-conflict. The same digest verifies exact fork parent/owner, head
-repository/branch, commit parent/OID, package bytes, and non-draft PR head/base
-before reuse. An open PR still requires its live branch to resolve to the
-immutable recorded head. A merged or closed PR remains observable when GitHub
-has deleted that branch, because its immutable PR head and commit/package
-evidence remain independently verified; if a terminal PR's branch still
-exists, it must not have moved. A branch name is only a locator, so a matching
-external PR can be adopted after those authority checks. PR-body metadata is
-likewise only a locator: discovery paginates the complete PR set and derives
-same-version identity from exact remote package bytes and Git modes. Receipt
-steps and observations are monotonic under one per-version lock spanning
-discovery through PR verification. Expected-absent pushes use an atomic
-absent-ref lease; they never replace an existing branch. No merge,
-approval, close, branch/fork deletion, or catalogue edit path exists.
-
-Retained publication Git objects live only under an owner-private, non-symlink
-root. Reused and newly cloned checkouts must be real current-user directories
-with a real current-user `.git` directory, and checkout mode is narrowed to
-`0700` before Git reads. Once a PR has been verified, its disposable retained
-checkout is removed best-effort; cleanup failure becomes a warning without
-changing the lifecycle result. Exact `listed` observation marks the digest
-bundle GC-eligible while retaining the compact receipt indefinitely.
+`--dry-run --json` builds and validates the complete local package and returns
+`state: validated`, the package/release digests, and
+`freshness: not_checked` without Git, GitHub, receipt, or catalog effects. A
+real submission must pass the confirmed full digest with
+`--expected-release-digest`; a different digest for the same registry/name/version
+is an immutable conflict.
 
 Schema v2 reports `pending_review`, `merged_pending_listing`, `listed`, or
-`closed_unmerged`, separately from `freshness: current|cached`. Only a current
-exact catalogue name/version/release-digest entry yields `listed`; offline
-reconciliation may return a prior state as cached with its original
-`observed_at`. A newer blocking lint policy is reported during retained
-read-only reconciliation and stops only a still-required remote mutation.
-Publication ends at registry review. Hivebox has no publish or
-status route, and no legacy conversion/migration command is provided.
+`closed_unmerged`, independently of `freshness: current|cached`. Publication
+ends at registry review: this command never merges, approves, closes,
+force-pushes, deletes remote state, or edits the catalog. The immutable builder,
+receipt, PR-identity, checkout-custody, and retry reconciliation rules are owned
+by [[modules/workflow_package]].
 
 For a fresh project that should default to the custom workflow immediately,
 prefer `hive init --new-workflow my-flow [PROJECT_PATH]`; it performs init,
@@ -318,21 +189,6 @@ Honeycomb packages. Passing either retired name returns its exact
 `hive workflow install honeycomb/<name>` command instead of scaffolding a
 reduced owner-authored copy.
 
-## Flagship release proof
-
-The retirement gate completed on 2026-07-19 using the public Hive v0.6.1 gem
-(`sha256:454fbd018dd62d2880747e74020edd429d994ba902f323d77ed4fba053821234`)
-and catalog commit `382e43efddbd5642f8b6cc6470b27535565383cd`.
-Zero-override installs selected runnable Claude defaults for every slot:
-
-- Architecture manifest `1d84025fe5d2fa23e63126ddb8bb06906cedc38be7463c7431e068117dd19bd9`, configuration `cbd826c56e0b0092678f686b7ba95c9eecd61ebcadfdb119343b1c76790aa97e`, terminal `architecture.md` (35,687 bytes).
-- Writing manifest `2daf087f0712b44a53d5dd8fab94033a2735cf5035ea1262192e1d780f352127`, configuration `d5383300a50ddbae3b88dfa929491a8c734a3fc6d6c098ee72681937a69a6ca2`, terminal `article.md` (20,643 bytes) after a two-round editorial council.
-- SEO Content manifest `30226a0694e62f54177dc514c55bb8965098a0adae83439efa8045345ca7ce76`, configuration `006af00c8a1d77636795063de35ca701c04b39875c041be0b0370b01ce5af9ad`, terminal `article.md` (23,843 bytes). All optional provider inputs were absent and redacted; the provider stage completed in prompt-only mode without treating absence as zero data.
-
-All three status rows were `complete` / `archived`. Release workflow
-`29686390960` also passed signed assets, Bash, Homebrew, AUR, native amd64/arm64
-image smokes, and final GHCR promotion.
-
 Every scaffold also renders `README.md` and `honeycomb.yml` with explicit
 publish placeholders. Those assets do not alter local execution and the
 existing `hive-workflow-new` JSON response remains unchanged.
@@ -408,4 +264,5 @@ pathspecs under the commit lock before removing the generated files.
 - [[cli]]
 - [[commands/init]]
 - [[modules/workflows]]
+- [[modules/workflow_package]]
 - [[commands/new]]

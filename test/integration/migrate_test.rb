@@ -1113,6 +1113,40 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_managed_recovery_marker_path_skips_a_stage_missing_from_its_pinned_descriptor
+    with_tmp_dir do |project|
+      stages = File.join(project, ".hive-state", "stages")
+      folder = write_task_folder(stages, "1-inbox", "removed-stage-260813-abcd")
+      Hive::TaskMeta.write(
+        folder, id: 42, slug: File.basename(folder), display_name: "Removed stage",
+        workflow: "writing", workflow_commit: "a" * 40,
+        workflow_manifest_digest: "b" * 64, workflow_configuration_digest: "c" * 64
+      )
+      workflow = migration_workflow("review")
+      store = Object.new
+      store.define_singleton_method(:workflow) do |*_args, **_kwargs|
+        workflow
+      end
+
+      assert_nil migrate_command(project).send(
+        :recovery_state_file, folder, managed_store: store, cfg: {}
+      )
+    end
+  end
+
+  def test_recovery_marker_path_skips_an_invalid_unpinned_task
+    with_tmp_dir do |project|
+      folder = File.join(
+        project, ".hive-state", "stages", "1-inbox", "invalid-task-260813-abcd"
+      )
+      error = Hive::InvalidTaskPath.new("unknown workflow")
+
+      with_replaced_singleton_method(Hive::Task, :new, ->(*) { raise error }) do
+        assert_nil migrate_command(project).send(:recovery_state_file, folder)
+      end
+    end
+  end
+
   def test_managed_workflow_cleanup_warns_when_its_state_commit_fails
     ops = Object.new
     ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit blocked" }

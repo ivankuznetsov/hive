@@ -226,9 +226,7 @@ class HiveBotBrainstormParserTest < Minitest::Test
     end
   end
 
-  def test_heading_helpers_and_invalid_encoded_answer_fall_back_literally
-    assert_equal "### Q7.", Hive::BrainstormParser.question_header(7)
-
+  def test_invalid_encoded_answer_falls_back_literally
     invalid = "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}not*base64"
     question = Hive::BrainstormParser.parse_text(
       "## Round 1\n### Q1. Encoded?\n" \

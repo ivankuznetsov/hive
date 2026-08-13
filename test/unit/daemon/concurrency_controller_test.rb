@@ -426,8 +426,8 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
 
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0 + 1)
     assert_equal 1, c.in_flight_count
-    refute_includes c.running_pids, 100
-    assert_includes c.running_pids, 101
+    refute c.running_task?(project: "p1", slug: "s1")
+    assert c.running_task?(project: "p1", slug: "s2")
   end
 
   def test_running_task_detects_tracked_project_slug

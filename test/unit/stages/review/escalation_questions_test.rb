@@ -144,9 +144,10 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       assert_equal 1, payload.count
       assert_includes accepted, "Accepted legacy escalations from escalations-01.md"
       assert_includes accepted, "apply the requested legacy escalation fix"
-      assert_equal accepted, Hive::Stages::Review.collect_legacy_checked_escalations(
+      legacy = Hive::Stages::Review.collect_legacy_checked_escalations_with_count(
         Hive::Stages::Review::Triage.escalations_path(ctx)
       )
+      assert_equal accepted, legacy.text
       assert_equal 1, Hive::Stages::Review.count_escalations(ctx)
     end
   end
@@ -171,7 +172,10 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       File.write(path, "- [x] accepted legacy finding\n")
 
       with_readlines_failure(path) do
-        assert_equal "", Hive::Stages::Review.collect_legacy_checked_escalations(path)
+        legacy = Hive::Stages::Review.collect_legacy_checked_escalations_with_count(path)
+
+        assert_equal "", legacy.text
+        assert_equal 0, legacy.count
       end
     end
   end

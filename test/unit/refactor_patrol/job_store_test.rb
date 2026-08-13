@@ -72,6 +72,43 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_obsolete_source_retirement_rejects_a_different_merge_commit
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      before = store.read_job("pr-7-stable")
+
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.retire_obsolete_source!(
+          "pr-7-stable",
+          merge_sha: "d" * 40,
+          trunk_sha: "c" * 40,
+          now: T0 + 1
+        )
+      end
+
+      assert_match(/does not match the job merge commit/, error.message)
+      assert_equal before, store.read_job("pr-7-stable")
+    end
+  end
+
+  def test_obsolete_source_retirement_fails_closed_when_claim_resolution_errors
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      store.claim_discovery!(
+        "pr-7-stable", owner: "runner", analysis_sha: "c" * 40, now: T0
+      )
+
+      status = store.obsolete_source_retirement_status(
+        "pr-7-stable",
+        claim_resolver: ->(_claim) { raise "resolver unavailable" }
+      )
+
+      assert_equal :claim_active, status
+    end
+  end
+
   def test_obsolete_source_terminalizes_all_unpublished_actions_together
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
@@ -252,6 +289,12 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_equal 2, second.fetch("total")
       refute second.fetch("has_more")
       assert_equal 3, store.job_query_page(limit: 100).fetch("total")
+
+      recent = store.recent_job_query_page(limit: 2)
+      assert_equal %w[job-3 job-2], recent.fetch("job_ids")
+      assert_equal recent.fetch("job_ids"),
+                   recent.fetch("jobs").map { |job| job.fetch("job_id") }
+      assert recent.fetch("has_more")
     end
   end
 

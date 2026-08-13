@@ -33,6 +33,46 @@ class PatrolFindingQueryTest < Minitest::Test
     end
   end
 
+  def test_text_renders_summary_and_each_finding
+    payload = {
+      "project" => "demo",
+      "count" => 2,
+      "counts" => { "active" => 1 },
+      "findings" => [
+        {
+          "id" => "finding-1", "lifecycle_state" => "active",
+          "severity" => "high", "title" => "Broken boundary"
+        },
+        {
+          "id" => "finding-2", "severity" => "low", "category" => "bug"
+        }
+      ]
+    }
+
+    text = Hive::Patrol::FindingQuery.new(Object.new).text(payload)
+
+    assert_equal <<~OUTPUT.chomp, text
+      hive patrol findings: demo count=2 active=1 returned=2
+      finding-1 state=active severity=high Broken boundary
+      finding-2 state=active severity=low bug
+    OUTPUT
+  end
+
+  def test_projection_treats_an_invalid_lifecycle_timestamp_as_oldest
+    with_tmp_dir do |dir|
+      store = Hive::Patrol::StateStore.new(dir)
+      store.with_cycle_lock { nil }
+      invalid = finding(1, state: "active")
+      invalid.lifecycle_updated_at = "not-a-timestamp"
+      store.write_finding(invalid)
+      store.write_finding(finding(2, state: "active"))
+
+      projection = store.rebuild_finding_query_projection!
+
+      assert_equal %w[finding-2 finding-1],
+                   projection.fetch("items").map { |item| item.fetch("id") }
+    end
+  end
 
   def test_projection_caps_summary_strings_and_omits_full_finding_evidence
     with_tmp_dir do |dir|

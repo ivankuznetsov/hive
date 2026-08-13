@@ -34,6 +34,34 @@ class RefactorPatrolCheckoutGuardTest < Minitest::Test
     end
   end
 
+  def test_rejects_a_pinned_analysis_commit_that_does_not_contain_the_merge
+    with_tmp_git_repo do |repo|
+      run!("git", "-C", repo, "switch", "-c", "analysis", "--quiet")
+      File.write(File.join(repo, "analysis.txt"), "analysis\n")
+      run!("git", "-C", repo, "add", "analysis.txt")
+      run!("git", "-C", repo, "commit", "-m", "analysis", "--quiet")
+      analysis_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+
+      run!("git", "-C", repo, "switch", "master", "--quiet")
+      File.write(File.join(repo, "merged.txt"), "merged\n")
+      run!("git", "-C", repo, "add", "merged.txt")
+      run!("git", "-C", repo, "commit", "-m", "merged", "--quiet")
+      merge_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+
+      error = assert_raises(Hive::GitError) do
+        Hive::RefactorPatrol::CheckoutGuard.new(
+          repo, default_branch: "master"
+        ).validate_and_snapshot!(
+          merge_sha: merge_sha,
+          analysis_sha: analysis_sha
+        )
+      end
+
+      assert_includes error.message,
+                      "analysis commit #{analysis_sha} does not contain merge commit #{merge_sha}"
+    end
+  end
+
   def test_existing_pin_still_checks_fresh_remote_trunk_after_rewrite
     Dir.mktmpdir do |tmp|
       origin = File.join(tmp, "origin.git")

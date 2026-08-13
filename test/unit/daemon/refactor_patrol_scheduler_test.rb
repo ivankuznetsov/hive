@@ -1506,6 +1506,37 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_dry_run_reports_obsolete_source_without_retiring_the_job
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      before = store.read_job("job-7")
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
+        job_store_factory: ->(_path) { store },
+        repository_resolver: ->(_entry, _cfg) { repository_identity },
+        checkout_guard_factory: ->(*) {
+          Object.new.tap do |guard|
+            guard.define_singleton_method(:validate_and_snapshot!) do |merge_sha:, **|
+              raise Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk.new(
+                merge_sha: merge_sha,
+                trunk_sha: "head"
+              )
+            end
+          end
+        },
+        owner: "daemon-a", dry_run: true
+      )
+
+      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
+      end
+
+      assert_equal "source_no_longer_on_trunk", error.reason
+      assert_equal "retired", error.evidence.fetch("retirement")
+      assert_equal before, store.read_job("job-7")
+    end
+  end
+
   def test_source_missing_from_trunk_terminalizes_unpublished_action_plan_together
     with_project do |dir, entry, store|
       write_action_job(dir, store)

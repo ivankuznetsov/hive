@@ -875,7 +875,82 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
                "a locked no-op must not be reported to the gateway as applied"
   end
 
+  def test_source_retirement_without_gateway_preserves_store_outcomes
+    retired = legacy_retirement_store(
+      statuses: %i[retireable already_terminal], result: :retired
+    )
+    raced = legacy_retirement_store(
+      statuses: [ :retireable ], result: :claim_active
+    )
+    unavailable = legacy_retirement_store(
+      statuses: [ :retireable ], result: nil
+    )
+
+    assert_equal :retired,
+                 retire_source(blocks(retired, Object.new).first, retired)
+    assert_equal :claim_active,
+                 retire_source(blocks(raced, Object.new).first, raced)
+    assert_nil retire_source(
+      blocks(unavailable, Object.new).first, unavailable
+    )
+  end
+
+  def test_source_retirement_gateway_reconciles_and_replays_the_durable_job
+    store = Store.new
+    store.capture = Capture.new(owner_epoch: 7)
+    store.aggregate = aggregate_with
+    store.define_singleton_method(:obsolete_source_retirement_status) do |*, **|
+      aggregate.fetch("complete") ? :already_terminal : :retireable
+    end
+    completed = aggregate_with(complete: true).merge("state" => "complete")
+    store.define_singleton_method(:retire_obsolete_source!) do |*, episode:, transition:, **|
+      self.aggregate = completed.merge(
+        "attempts" => [
+          {
+            "kind" => Hive::RefactorPatrol::JobStore::SOURCE_RETIREMENT_ATTEMPT_KIND,
+            "generation" => episode,
+            "transitions" => [ transition ]
+          }
+        ]
+      ).merge("state" => "complete")
+      :retired
+    end
+    reconciled = nil
+    replayed = nil
+    gateway = Gateway.new do |options, transition|
+      transition.call(intent)
+      reconciled = options.fetch(:reconcile).call(intent)
+      replayed = options.fetch(:replay).call(nil)
+    end
+
+    result = retire_source(blocks(store, gateway).first, store)
+
+    assert_equal :retired, result
+    assert_equal "matched", reconciled.fetch("status")
+    assert_same store.aggregate, replayed
+  end
+
   private
+
+  def retire_source(coordinator, store)
+    coordinator.retire(
+      entry: entry, store: store, aggregate: aggregate_with,
+      merge_sha: "b" * 40, trunk_sha: "c" * 40, now: now,
+      claim_resolver: ->(_claim) { :unresolved }
+    )
+  end
+
+  def legacy_retirement_store(statuses:, result:)
+    values = statuses.dup
+    Object.new.tap do |store|
+      store.define_singleton_method(:obsolete_source_retirement_status) do |*, **|
+        values.length > 1 ? values.shift : values.first
+      end
+      store.define_singleton_method(:retire_obsolete_source!) do |*, **|
+        result
+      end
+    end
+  end
 
   def claims(store, gateway,
              claim_resolver: ->(_claim) { :unresolved })

@@ -122,10 +122,6 @@ module Hive
       parsed.select { |question| question.answer.nil? }
     end
 
-    def question_for(parsed, question_n)
-      parsed.find { |question| question.n == question_n }
-    end
-
     # Normalize layout-only differences before binding a presented question to
     # a durable fingerprint. NFC closes canonically-equivalent Unicode forms
     # without compatibility-folding distinct glyphs such as ①/1 or x²/x2;

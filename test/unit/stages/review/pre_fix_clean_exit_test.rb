@@ -46,6 +46,23 @@ class HiveStagesReviewPreFixCleanExitTest < Minitest::Test
     end
   end
 
+  def test_prepare_worktree_for_fix_surfaces_safety_failure_detail
+    @task = fake_task
+    cleanup = {
+      status: :safety_violation,
+      message: "auto-commit safety check failed: wiki/link: staged symlinks are not eligible"
+    }
+
+    with_replaced_singleton_method(Hive::Stages::Review, :worktree_status, ->(_path) { :dirty }) do
+      with_replaced_singleton_method(Hive::Stages::CleanExit, :run!, ->(**_kwargs) { cleanup }) do
+        result = Hive::Stages::Review.send(:prepare_worktree_for_fix, @task, {}, "/worktree")
+
+        assert_equal :status_failed, result.first
+        assert_includes result.last, "staged symlinks"
+      end
+    end
+  end
+
   def test_prepare_worktree_for_fix_maps_cleanup_config_error_to_status_failure
     @task = fake_task
 

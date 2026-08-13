@@ -726,6 +726,42 @@ module Hive
     end
     map "rebase-status" => :rebase_status
 
+    desc "worktree SUBCOMMAND TARGET", "Inspect or repair task-owned worktree residue"
+    long_desc <<~DESC
+      Subcommands:
+        status TARGET             Inspect exact porcelain residue without writes.
+        commit-residue TARGET     Scope-check, safety-check, and commit residue.
+        discard-residue TARGET    Discard only --paths or marker-recorded residue.
+        repair TARGET             Run commit/discard via --strategy.
+
+      Mutation is admitted only for `ensure_clean_on_exit_failed` or
+      `dirty_worktree` recovery markers and is serialized by the task lock.
+      It never clears the marker directly: refresh `hive status --json`, then
+      invoke the emitted generation-guarded workflow.retry action.
+    DESC
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :stage, type: :string,
+                   desc: "scope slug lookup to one stage, full or short form (#{STAGE_VOCABULARY})"
+    option :paths, type: :array,
+                   desc: "repository-relative residue paths to discard (space-separated)"
+    option :message, type: :string,
+                     desc: "one-line commit subject for commit-residue"
+    option :strategy, type: :string, enum: %w[commit discard],
+                      desc: "for repair: commit or discard"
+    def worktree(subcommand = nil, target = nil)
+      require "hive/commands/worktree"
+      Hive::Commands::Worktree.new(
+        subcommand,
+        target,
+        project: options[:project],
+        stage: options[:stage],
+        json: options[:json],
+        paths: options[:paths],
+        message: options[:message],
+        strategy: options[:strategy]
+      ).call
+    end
+
     desc "brainstorm TARGET", "Move an inbox task into brainstorm, or run an existing brainstorm task"
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"

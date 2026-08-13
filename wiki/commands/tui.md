@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb, lib/hive/tui/**
 created: 2026-04-27
-updated: 2026-07-25
+updated: 2026-08-13
 tags: [command, tui, observability, interactive, diagnostics, task-id, archive, retention, pr]
 ---
 
@@ -222,6 +222,11 @@ remain view-specific.
 Pressing `s` from grid mode is the manual-steering escape hatch. `KeyMap` emits `Messages::OpenInAgent`, and `BubbleModel` resolves the task's project config, looks up `execute.agent`, verifies the feature worktree exists, then writes `MANUAL_STEERING` to the row's state file before handing the terminal to the configured development agent in that worktree. Existing stage folders for the slug are passed in `Hive::Stages::DIRS` order with the agent profile's add-dir flag, so the agent can read the idea, brainstorm, plan, task, logs, reviews, and later-stage artifacts without the operator copying paths by hand. `MANUAL_STEERING` classifies as `manual_steering` with no suggested command, so `hive run`, the daemon policy, and workflow verb keys skip it. When the interactive agent exits, `Messages::AgentSteerExited` moves the active stage folder to `.hive-state/stages/archived-manual/<slug>/` (or a numeric suffix on collision), which makes the slug disappear from `hive status` and the TUI without treating it as an `9-done` pipeline archive.
 
 Execute-stage waiting rows read `row.next_action` from `hive status --json`: `kind=edit` opens the reason-specific target (`worktree`, `plan.md`, or `task.md`), while `kind=run` dispatches the suggested `hive develop ... --from 4-execute` command directly for recovery states like `missing_research_output` where editing a file cannot clear the gate.
+
+When the status producer reports a non-null `auto_residue` summary, the task
+status column appends `auto-residue:<commits>` before dependency and ownership
+suffixes. This is an FYI only: it does not change Enter behavior or synthesize
+a recovery action.
 
 Three stages get an auto-continue convenience after the editor exits cleanly:
 

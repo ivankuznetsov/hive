@@ -61,6 +61,21 @@
           "enum": ["missing_project_path", "not_initialised", "project_load_failed"]
         },
         "tasks": { "type": "array", "items": { "$ref": "#/$defs/Task" } },
+        "config_summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stages"],
+          "properties": {
+            "stages": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["ensure_clean_on_exit"],
+              "properties": {
+                "ensure_clean_on_exit": { "type": "boolean" }
+              }
+            }
+          }
+        },
         "legacy_stage_dirs": {
           "type": "array",
           "items": {
@@ -119,7 +134,7 @@
         "condition_task_generation",
          "commit_generation", "current_attempt", "conditions", "condition_history",
          "evidence", "closure", "condition_overrides", "condition_gate", "condition_migration", "condition_provenance",
-         "shadow_audit", "condition_warning", "unanswered_questions", "action",
+         "shadow_audit", "condition_warning", "auto_residue", "unanswered_questions", "action",
          "action_label", "suggested_command", "outcomes",
         "next_action", "diagnostic"
       ],
@@ -253,6 +268,13 @@
             { "type": "null" }
           ]
         },
+        "auto_residue": {
+          "description": "CleanExit commits made during the current stage invocation, or null.",
+          "oneOf": [
+            { "$ref": "#/$defs/AutoResidue" },
+            { "type": "null" }
+          ]
+        },
         "unanswered_questions": { "type": "integer", "minimum": 0 },
         "action": {
           "type": "string",
@@ -287,6 +309,23 @@
             { "type": "null" }
           ]
         }
+      }
+    },
+    "AutoResidue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commits", "path_count", "paths", "latest_head", "latest_reason", "latest_at"],
+      "properties": {
+        "commits": { "type": "integer", "minimum": 1 },
+        "path_count": { "type": "integer", "minimum": 0 },
+        "paths": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "type": "string" }
+        },
+        "latest_head": { "type": ["string", "null"] },
+        "latest_reason": { "type": "string" },
+        "latest_at": { "type": ["string", "null"], "format": "date-time" }
       }
     },
     "HumanOutcome": {

@@ -10,8 +10,8 @@ module Hive
 
       module_function
 
-      def observational(slug:, stage:, event_type:, agent:, message:, at: Time.now.utc)
-        {
+      def observational(slug:, stage:, event_type:, agent:, message:, data: nil, at: Time.now.utc)
+        record = {
           "ts" => at.utc.iso8601,
           "slug" => slug.to_s,
           "stage" => stage.to_s,
@@ -19,6 +19,8 @@ module Hive
           "event_type" => event_type.to_s,
           "message" => message
         }
+        record["data"] = Hive::StringifyKeys.call(data) unless data.nil?
+        record
       end
 
       def authoritative(attributes, id_generator: -> { SecureRandom.uuid }, clock: -> { Time.now.utc })

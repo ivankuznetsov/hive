@@ -17,6 +17,7 @@ require "hive/commands/rebase_status"
 require "hive/commands/stage_action"
 require "hive/commands/adhoc_review"
 require "hive/commands/status"
+require "hive/commands/worktree"
 require "hive/commands/circuits"
 require "hive/commands/watch"
 require "hive/commands/act"
@@ -438,6 +439,27 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "rebase-status", "slug", "--project", "proj", "--stage", "execute", "--json" ])
       assert_equal [ "slug" ], calls.first.fetch(:args)
       assert_equal({ project: "proj", stage: "execute", json: true }, calls.first.fetch(:kwargs))
+    end
+  end
+
+  def test_worktree_passes_recovery_options
+    with_command_new_stub(Hive::Commands::Worktree) do |calls|
+      Hive::CLI.start([
+        "worktree", "repair", "slug", "--project", "proj", "--stage", "review",
+        "--paths", "wiki/a.md", "wiki/b.md", "--message", "preserve residue",
+        "--strategy", "commit", "--json"
+      ])
+
+      assert_equal [ "repair", "slug" ], calls.first.fetch(:args)
+      assert_equal(
+        {
+          project: "proj", stage: "review", json: true,
+          paths: [ "wiki/a.md", "wiki/b.md" ],
+          message: "preserve residue", strategy: "commit"
+        },
+        calls.first.fetch(:kwargs)
+      )
+      assert_equal :call, calls.last
     end
   end
 

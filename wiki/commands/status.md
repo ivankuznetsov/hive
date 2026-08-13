@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-10
+updated: 2026-08-13
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, terminal-outcomes, dependencies, scheduler]
 ---
 
@@ -207,6 +207,14 @@ attempt loss/failure uses `kind=run`; worktree/evidence repairs identify an
 editable target. `condition_overrides` contains the latest 20 forced gate
 waivers with source command and waived diagnostics; the journal retains full
 history. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row, and `0` otherwise.
+
+Each healthy project also carries
+`config_summary.stages.ensure_clean_on_exit`, the resolved boolean after
+defaults and project overrides. Each task carries `auto_residue`: `null` when
+the current stage invocation made no CleanExit commit, otherwise a bounded
+summary with `commits`, `path_count`, up to 20 paths, and the latest
+head/reason/time. Bot and TUI consume this producer field rather than reading
+`events.jsonl` independently.
 
 Every task row has `depends_on`, `blocked_by`, `dependency_stage`, `blocked`, and required nullable `admission_error`. The correlations are closed:
 

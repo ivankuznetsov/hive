@@ -177,6 +177,45 @@ module Hive
       )
     end
 
+    # Operation receipts survive attempt retries and stage-directory moves.
+    # Reconciliation must validate a historical receipt against the durable
+    # attempt binding it captured, while keeping the current task/workflow and
+    # task-local writer boundary fixed.
+    def activity_for_operation_receipt(receipt)
+      row = receipt.to_h.transform_keys(&:to_s)
+      unless self.class.canonical_equal?(row["task"], @task) &&
+             self.class.canonical_equal?(row["workflow"], @workflow)
+        raise InvalidActivity, "operation receipt task binding is invalid"
+      end
+      attempt_store = @writer.respond_to?(:attempt_store) ? @writer.attempt_store : nil
+      unless attempt_store
+        raise InvalidActivity, "operation receipt attempt binding is unavailable"
+      end
+      Hive::TaskJournal::Validator.new(
+        attempt_store: attempt_store, require_attempt_store: true
+      ).validate_binding!(
+        task: row["task"], stage: row["stage"], attempt_id: row["attempt_id"],
+        task_generation: row["task_generation"],
+        ownership_generation: row["ownership_generation"]
+      )
+
+      self.class.new(
+        task_folder: task_folder, task: row["task"], workflow: row["workflow"],
+        stage: row["stage"], attempt_id: row["attempt_id"],
+        task_generation: row["task_generation"],
+        ownership_generation: row["ownership_generation"],
+        commit_generation: row["commit_generation"],
+        attempt_store: attempt_store,
+        clock: @clock
+      )
+    rescue Hive::TaskJournal::Error => e
+      raise InvalidActivity, Hive::SecretPatterns.redact(e.message.to_s)
+    end
+
+    def self.canonical_equal?(left, right)
+      Hive::TaskWorkspace.canonical_json(left) == Hive::TaskWorkspace.canonical_json(right)
+    end
+
     def operation_time = @clock.call
 
     # Reconcile bounded, task-local operation receipts. The resolver may
@@ -406,28 +445,46 @@ module Hive
           operation = new(activity: activity, receipt: receipt)
           if File.exist?(operation.path)
             existing = open!(activity: activity, filename: File.basename(operation.path))
-            unless existing.same_intent?(operation.receipt)
-              raise Conflict, "conflicting operation receipt #{operation.operation_id}"
+            if existing.receipt["state"] == "aborted"
+              unless existing.same_domain_intent?(operation.receipt)
+                raise Conflict, "conflicting operation receipt #{operation.operation_id}"
+              end
+              return begin_retry!(activity: activity, receipt: receipt)
+            else
+              unless existing.same_intent?(operation.receipt)
+                raise Conflict, "conflicting operation receipt #{operation.operation_id}"
+              end
+              return existing
             end
-            return existing unless existing.receipt["state"] == "aborted"
-
-            receipt = receipt.merge(
-              "operation_id" => retry_operation_id(activity, receipt.fetch("operation_id"))
-            )
-            operation = new(activity: activity, receipt: receipt)
           end
           operation.persist_new!
           operation
         end
 
-        def retry_operation_id(activity, base)
+        def begin_retry!(activity:, receipt:)
+          base = receipt.fetch("operation_id")
           1.upto(100) do |number|
             candidate = "#{base}:retry:#{number}"
             path = File.join(
               activity.task_folder, OPERATION_DIRECTORY,
               "#{Digest::SHA256.hexdigest(candidate)}.json"
             )
-            return candidate unless File.exist?(path)
+            candidate_receipt = receipt.merge("operation_id" => candidate)
+            unless File.exist?(path)
+              operation = new(activity: activity, receipt: candidate_receipt)
+              operation.persist_new!
+              return operation
+            end
+
+            existing = open!(activity: activity, filename: File.basename(path))
+            if existing.same_intent?(candidate_receipt)
+              return existing unless existing.receipt["state"] == "aborted"
+              next
+            end
+            unless existing.receipt["state"] == "aborted" &&
+                   existing.same_domain_intent?(candidate_receipt)
+              raise Conflict, "conflicting operation receipt #{candidate}"
+            end
           end
           raise Conflict, "operation receipt retry limit exhausted"
         end
@@ -454,7 +511,8 @@ module Hive
             body.bytesize > MAX_OPERATION_RECEIPT_BYTES
 
           receipt = JSON.parse(body)
-          operation = new(activity: activity, receipt: receipt)
+          bound_activity = activity.activity_for_operation_receipt(receipt)
+          operation = new(activity: bound_activity, receipt: receipt)
           unless File.basename(operation.path) == filename
             raise InvalidActivity, "operation receipt identity does not match filename"
           end
@@ -481,6 +539,17 @@ module Hive
           schema schema_version activity_kind source reason task workflow stage
           attempt_id task_generation ownership_generation commit_generation
           precondition_fingerprint expected_postcondition_fingerprint
+        ]
+        keys.all? do |key|
+          Hive::TaskWorkspace.canonical_json(receipt[key]) ==
+            Hive::TaskWorkspace.canonical_json(other[key])
+        end
+      end
+
+      def same_domain_intent?(other)
+        keys = %w[
+          schema schema_version operation_id activity_kind source reason task
+          workflow stage precondition_fingerprint expected_postcondition_fingerprint
         ]
         keys.all? do |key|
           Hive::TaskWorkspace.canonical_json(receipt[key]) ==

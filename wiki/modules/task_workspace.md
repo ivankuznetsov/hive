@@ -102,6 +102,14 @@ attempt. Start/finish observations retain role, requested provider/model/effort,
 provider-reported actual model when available, health, outcome, timestamps,
 timeout, guards, and usage. Missing runtime facts remain unavailable.
 
+The session start is durable before provider execution. For stages with
+artifact custody, `ArtifactFirewall::AgentCustody` then encloses only the
+untrusted provider call and managed-output materialization. Validation and
+restoration finish before context promotion and the terminal session receipt.
+If restoration cannot establish a safe task path, context promotion and the
+terminal session write are suppressed. The journal stays protected from
+agent-authored bytes; controller telemetry is not mistaken for tampering.
+
 Resource records keep different meanings separate:
 
 - monetary API caps;
@@ -132,6 +140,13 @@ paths may persist a precondition/expected-result operation receipt before the
 domain change, then complete it with a result fingerprint. Bounded
 reconciliation appends the missing event once when commitment is provable;
 ambiguous outcomes become explicit `activity_gap` records.
+
+Operation receipts survive retries, but reconciliation first verifies their
+historical task, stage, numeric input epoch, ownership generation, and attempt
+ID against the durable attempt store. A proven-uncommitted historical receipt
+is aborted immutably; the successor attempt receives a distinct `:retry:N`
+operation ID. Activity receipts describe work inside an already-selected input
+generation and therefore never advance that generation by themselves.
 
 `TaskWorkspace::Timeline` merges authoritative task-journal records with
 bounded fail-soft `events.jsonl` observations. Journal/controller occurrence

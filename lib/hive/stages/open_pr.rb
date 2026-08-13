@@ -145,18 +145,18 @@ module Hive
           protected_anchors: Hive::ArtifactFirewall::ORCHESTRATOR_OWNED,
           permitted_writable_roots: [ task.folder, worktree_path ]
         )
-        custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
-        begin
-          spawn_open_pr_agent(
-            task, cfg, prompt, profile, worktree_path,
-            identity: identity, launch_arguments: launch_arguments
-          )
-        ensure
-          custody_report = Hive::ArtifactFirewall.validate_and_restore(
-            custody_manifest, custody_snapshot
-          )
+        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
+        spawn_result = spawn_open_pr_agent(
+          task, cfg, prompt, profile, worktree_path,
+          identity: identity, launch_arguments: launch_arguments,
+          agent_custody: agent_custody
+        )
+        custody_report = agent_custody.report
+        if !custody_report && spawn_result.is_a?(Hash) && spawn_result[:status] == :ok
+          Hive::Markers.set(task.state_file, :error, reason: "open_pr_custody_missing")
+          return { commit: "open_pr_custody_missing", status: :error }
         end
-        if custody_report.tampered?
+        if custody_report&.tampered?
           Hive::Markers.set(task.state_file, :error,
                             reason: "open_pr_tampered",
                             files: custody_report.tampered_labels.join(","),
@@ -215,7 +215,8 @@ module Hive
       end
 
       def spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path,
-                              identity: nil, launch_arguments: nil)
+                              identity: nil, launch_arguments: nil,
+                              agent_custody: nil)
         launch_arguments ||=
           Hive::Stages::Base.implementation_launch_arguments(identity, profile)
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
@@ -230,6 +231,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "open_pr") || 1800,
           log_label: "open-pr",
           profile: profile,
+          agent_custody: agent_custody,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker,
           **launch_arguments

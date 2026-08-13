@@ -209,7 +209,7 @@ module Hive
 
       def fit_observation(observation)
         maximum = @limits.fetch(:publication_cache_entry_bytes) / 2
-        copy = Marshal.load(Marshal.dump(observation))
+        copy = observation.merge("checks" => observation.fetch("checks").dup)
         while JSON.generate(copy).bytesize > maximum && copy["checks"].any?
           copy["checks"].pop
           copy["checks_truncated"] = true

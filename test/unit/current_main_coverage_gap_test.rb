@@ -98,10 +98,14 @@ class CurrentMainCoverageGapTest < Minitest::Test
   def with_spawn_agent_capture(calls, result = { status: :ok })
     with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |task, **kwargs|
       calls << [ task, kwargs ]
-      FileUtils.mkdir_p(File.dirname(kwargs[:expected_output])) if kwargs[:expected_output]
-      File.write(kwargs[:expected_output], JSON.generate(status: "passed", summary: "ok", details: "", duration_sec: 1)) if kwargs[:expected_output]&.end_with?(".json")
-      File.write(kwargs[:expected_output], "# Escalations\n") if kwargs[:expected_output]&.end_with?(".md")
-      result
+      invoke = lambda do
+        FileUtils.mkdir_p(File.dirname(kwargs[:expected_output])) if kwargs[:expected_output]
+        File.write(kwargs[:expected_output], JSON.generate(status: "passed", summary: "ok", details: "", duration_sec: 1)) if kwargs[:expected_output]&.end_with?(".json")
+        File.write(kwargs[:expected_output], "# Escalations\n") if kwargs[:expected_output]&.end_with?(".md")
+        result
+      end
+      custody = kwargs[:agent_custody]
+      custody ? custody.call(&invoke) : invoke.call
     }) do
       yield
     end
@@ -387,7 +391,10 @@ class CurrentMainCoverageGapTest < Minitest::Test
             with_replaced_singleton_method(Hive::Stages::Review, :reviewer_compare_ref, ->(_cfg, _ops) { "main" }) do
               with_replaced_singleton_method(Hive::Stages::Review, :git_head, ->(_path) { "head-before-fix" }) do
                 with_replaced_singleton_method(Hive::Stages::Review, :worktree_status, ->(_path) { status_checks.shift }) do
-                  with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(_task, _cfg, _ctx, accepted:, identity: nil) { { status: :ok } }) do
+                  replacement = lambda do |_task, _cfg, _ctx, accepted:, identity: nil, agent_custody: nil|
+                    agent_custody.call { { status: :ok } }
+                  end
+                  with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, replacement) do
                     with_replaced_singleton_method(Hive::Stages::Review, :auto_commit_fix_worktree, ->(_task, _cfg, _ctx, _accepted) {
                       { success: false, message: "git add -A failed: permission denied" }
                     }) do
@@ -433,7 +440,10 @@ class CurrentMainCoverageGapTest < Minitest::Test
             with_replaced_singleton_method(Hive::Stages::Review, :reviewer_compare_ref, ->(_cfg, _ops) { "main" }) do
               with_replaced_singleton_method(Hive::Stages::Review, :git_head, ->(_path) { "head-before-fix" }) do
                 with_replaced_singleton_method(Hive::Stages::Review, :worktree_status, ->(_path) { status_checks.shift }) do
-                  with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(_task, _cfg, _ctx, accepted:, identity: nil) { { status: :ok } }) do
+                  replacement = lambda do |_task, _cfg, _ctx, accepted:, identity: nil, agent_custody: nil|
+                    agent_custody.call { { status: :ok } }
+                  end
+                  with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, replacement) do
                     result = Hive::Stages::Review.run!(task, { "review" => {} })
 
                     assert_equal :review_error, result[:status]

@@ -282,9 +282,11 @@ class HiveStagesExecuteTest < Minitest::Test
       with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
         with_replaced_singleton_method(
           Hive::Stages::Execute, :spawn_implementation,
-          lambda { |_task, _cfg, _path, **_kwargs|
-            File.write(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME), "tampered\n")
-            { status: :ok }
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            agent_custody.call do
+              File.write(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME), "tampered\n")
+              { status: :ok }
+            end
           }
         ) do
           result = Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
@@ -294,6 +296,38 @@ class HiveStagesExecuteTest < Minitest::Test
 
       assert_includes Hive::Markers.current(task.state_file).attrs["files"],
                       Hive::TaskJournal::JOURNAL_BASENAME
+    end
+  end
+
+  def test_run_pass_keeps_controller_journal_writes_outside_implementer_custody
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug,
+                    "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      journal = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            File.write(journal, "controller session start\n")
+            begin
+              agent_custody.call { raise IOError, "provider failed" }
+            ensure
+              File.open(journal, "ab") { |file| file.write("controller session finish\n") }
+            end
+          }
+        ) do
+          error = assert_raises(IOError) do
+            Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
+          end
+          assert_equal "provider failed", error.message
+        end
+      end
+
+      assert_equal "controller session start\ncontroller session finish\n", File.binread(journal)
     end
   end
 
@@ -315,9 +349,11 @@ class HiveStagesExecuteTest < Minitest::Test
       with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
         with_replaced_singleton_method(
           Hive::Stages::Execute, :spawn_implementation,
-          lambda { |_task, _cfg, _path, **_kwargs|
-            File.write(File.join(task.folder, "plan.md"), "forged\n")
-            raise IOError, "provider stream failed"
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            agent_custody.call do
+              File.write(File.join(task.folder, "plan.md"), "forged\n")
+              raise IOError, "provider stream failed"
+            end
           }
         ) do
           error = assert_raises(IOError) do
@@ -415,9 +451,11 @@ class HiveStagesExecuteTest < Minitest::Test
       with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
         with_replaced_singleton_method(
           Hive::Stages::Execute, :spawn_implementation,
-          lambda { |_task, _cfg, _path, **_kwargs|
-            File.write(File.join(task.folder, "plan.md"), "forged\n")
-            raise Hive::ProviderRouteFailed, "admitted provider route failed"
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            agent_custody.call do
+              File.write(File.join(task.folder, "plan.md"), "forged\n")
+              raise Hive::ProviderRouteFailed, "admitted provider route failed"
+            end
           }
         ) do
           assert_raises(Hive::ProviderRouteFailed) do

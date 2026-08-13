@@ -233,6 +233,60 @@ class TaskActivityTest < Minitest::Test
     end
   end
 
+  def test_new_attempt_reconciles_and_retries_a_prior_pending_operation
+    with_activity do |first_activity, dir, writer|
+      attributes = {
+        kind: "approval_recorded",
+        operation_id: "approve:3-plan:4-execute:forward",
+        source: "command_service",
+        reason: "task stage approval recorded",
+        precondition: { "stage" => "3-plan", "marker" => "complete" },
+        expected_postcondition: { "stage" => "4-execute" }
+      }
+      first_activity.begin_operation(**attributes)
+      create_retry_attempt(writer)
+      retry_activity = build_activity(
+        writer: writer, task_folder: dir, task_generation: 3,
+        attempt_id: "attempt-2", ownership_generation: "ownership-2"
+      )
+
+      summary = retry_activity.reconcile_operations! { :not_committed }
+      retried = retry_activity.begin_operation(**attributes)
+      duplicate = retry_activity.begin_operation(**attributes)
+
+      assert_empty summary.fetch("diagnostics")
+      assert_equal "approve:3-plan:4-execute:forward:retry:1", retried.operation_id
+      assert_equal retried.operation_id, duplicate.operation_id,
+                   "the same successor attempt must reopen its retry receipt idempotently"
+      assert_equal "attempt-2", retried.receipt.fetch("attempt_id")
+      assert_equal "aborted", first_activity_receipt(dir).fetch("state")
+    end
+  end
+
+  def test_reconciliation_rejects_a_receipt_with_no_durable_attempt_binding
+    with_activity do |activity, dir|
+      operation = activity.begin_operation(
+        kind: "operator_action", operation_id: "action:forged-attempt",
+        source: "operator", reason: "operator action",
+        precondition: "waiting", expected_postcondition: "advanced"
+      )
+      path = File.join(
+        dir, Hive::TaskActivity::OPERATION_DIRECTORY,
+        "#{Digest::SHA256.hexdigest(operation.operation_id)}.json"
+      )
+      receipt = JSON.parse(File.read(path)).merge("attempt_id" => "missing-attempt")
+      File.write(path, JSON.generate(receipt) + "\n")
+
+      summary = activity.reconcile_operations! do
+        flunk "an unbound operation receipt must not reach domain reconciliation"
+      end
+
+      assert_equal [ "operation_receipt_invalid" ],
+                   summary.fetch("diagnostics").map { |row| row.fetch("reason") }
+      assert_includes summary.dig("diagnostics", 0, "detail"), "unknown durable attempt"
+    end
+  end
+
   private
 
   def with_activity(task_generation: 3)
@@ -260,17 +314,37 @@ class TaskActivityTest < Minitest::Test
       )
       yield build_activity(
         writer: writer, task_folder: dir, task_generation: task_generation
-      ), dir
+      ), dir, writer
     end
   end
 
-  def build_activity(writer:, task_folder: "/tmp/task", task_generation: 3)
+  def build_activity(writer:, task_folder: "/tmp/task", task_generation: 3,
+                     attempt_id: "attempt-1", ownership_generation: "ownership-1")
     Hive::TaskActivity.new(
       task_folder: task_folder,
       task: { "id" => "42", "slug" => "durable-task" },
-      workflow: "coding", stage: "4-execute", attempt_id: "attempt-1",
-      task_generation: task_generation, ownership_generation: "ownership-1",
+      workflow: "coding", stage: "4-execute", attempt_id: attempt_id,
+      task_generation: task_generation, ownership_generation: ownership_generation,
       commit_generation: 0, writer: writer, clock: -> { NOW }
+    )
+  end
+
+  def first_activity_receipt(dir)
+    paths = Dir[File.join(dir, Hive::TaskActivity::OPERATION_DIRECTORY, "*.json")]
+    receipts = paths.map { |path| JSON.parse(File.read(path)) }
+    receipts.find { |receipt| receipt.fetch("operation_id") == "approve:3-plan:4-execute:forward" }
+  end
+
+  def create_retry_attempt(writer)
+    writer.attempt_store.create_launching(
+      attempt_id: "attempt-2", request_id: "request-2",
+      predecessor_attempt_id: "attempt-1", task_id: "42", project: "demo",
+      task_slug: "durable-task", intended_stage: "4-execute",
+      task_generation: "ownership-2", ownership_generation: "ownership-2",
+      task_input_epoch: 3, progress_token: "progress-2", provider: "codex",
+      starting_revision: nil, worker_argv: [ "hive", "run", "durable-task" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest("d" * 64),
+      retry_charge: 1, inherited_outputs: [], launch_timeout_sec: 30, now: NOW
     )
   end
 end

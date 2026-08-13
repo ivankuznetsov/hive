@@ -286,11 +286,13 @@ class StagesAgentTest < Minitest::Test
       report_source = valid_fix_report
       spawn = lambda do |_task, prompt:, **kwargs|
         captured << { prompt: prompt, kwargs: kwargs }
-        File.write(File.join(kwargs.fetch(:cwd), "fix.rb"), "fixed\n")
-        run_command.call("git", "-C", kwargs.fetch(:cwd), "add", "fix.rb")
-        run_command.call("git", "-C", kwargs.fetch(:cwd), "commit", "-m", "fix nil response", "--quiet")
-        File.write(File.join(task.folder, "fix-report.md"), report_source)
-        { status: :ok, exit_code: 0 }
+        kwargs.fetch(:agent_custody).call do
+          File.write(File.join(kwargs.fetch(:cwd), "fix.rb"), "fixed\n")
+          run_command.call("git", "-C", kwargs.fetch(:cwd), "add", "fix.rb")
+          run_command.call("git", "-C", kwargs.fetch(:cwd), "commit", "-m", "fix nil response", "--quiet")
+          File.write(File.join(task.folder, "fix-report.md"), report_source)
+          { status: :ok, exit_code: 0 }
+        end
       end
 
       with_fake_github_controller do
@@ -328,13 +330,15 @@ class StagesAgentTest < Minitest::Test
     with_draft_pr_task do |task, _worktree_root|
       calls = 0
       report_source = valid_fix_report
-      spawn = lambda do |_task, **_kwargs|
+      spawn = lambda do |_task, **kwargs|
         calls += 1
-        File.write(
-          File.join(task.folder, "fix-report.md"),
-          report_source.sub("Decision: ready", "Decision: no-fix")
-        )
-        { status: :ok, exit_code: 0 }
+        kwargs.fetch(:agent_custody).call do
+          File.write(
+            File.join(task.folder, "fix-report.md"),
+            report_source.sub("Decision: ready", "Decision: no-fix")
+          )
+          { status: :ok, exit_code: 0 }
+        end
       end
       with_fake_github_controller do
         with_deferred_draft_handoff do
@@ -396,9 +400,11 @@ class StagesAgentTest < Minitest::Test
     with_draft_pr_task do |task, _worktree_root|
       with_tmp_dir do |agent_home|
         report_source = valid_fix_report.sub("Decision: ready", "Decision: no-fix")
-        spawn = lambda do |_task, **_kwargs|
-          File.write(File.join(task.folder, "fix-report.md"), report_source)
-          { status: :ok, exit_code: 0 }
+        spawn = lambda do |_task, **kwargs|
+          kwargs.fetch(:agent_custody).call do
+            File.write(File.join(task.folder, "fix-report.md"), report_source)
+            { status: :ok, exit_code: 0 }
+          end
         end
         aliases = {
           "HOME" => agent_home,
@@ -429,12 +435,14 @@ class StagesAgentTest < Minitest::Test
         protected_path = File.join(task.folder, protected_name)
         original = File.binread(protected_path) if File.file?(protected_path)
         spawn = lambda do |_task, **kwargs|
-          File.write(protected_path, "agent-owned\n")
-          File.write(File.join(kwargs.fetch(:cwd), "fix.rb"), "fixed\n")
-          run_command.call("git", "-C", kwargs.fetch(:cwd), "add", "fix.rb")
-          run_command.call("git", "-C", kwargs.fetch(:cwd), "commit", "-m", "fix", "--quiet")
-          File.write(File.join(task.folder, "fix-report.md"), report_source)
-          { status: :ok, exit_code: 0 }
+          kwargs.fetch(:agent_custody).call do
+            File.write(protected_path, "agent-owned\n")
+            File.write(File.join(kwargs.fetch(:cwd), "fix.rb"), "fixed\n")
+            run_command.call("git", "-C", kwargs.fetch(:cwd), "add", "fix.rb")
+            run_command.call("git", "-C", kwargs.fetch(:cwd), "commit", "-m", "fix", "--quiet")
+            File.write(File.join(task.folder, "fix-report.md"), report_source)
+            { status: :ok, exit_code: 0 }
+          end
         end
 
         with_fake_github_controller do
@@ -461,10 +469,12 @@ class StagesAgentTest < Minitest::Test
     with_draft_pr_task do |task, _worktree_root|
       run_command = method(:run!)
       spawn = lambda do |_task, **kwargs|
-        run_command.call(
-          "git", "-C", kwargs.fetch(:cwd), "config", "core.hooksPath", "/tmp/agent-hooks"
-        )
-        { status: :ok, exit_code: 0 }
+        kwargs.fetch(:agent_custody).call do
+          run_command.call(
+            "git", "-C", kwargs.fetch(:cwd), "config", "core.hooksPath", "/tmp/agent-hooks"
+          )
+          { status: :ok, exit_code: 0 }
+        end
       end
 
       with_fake_github_controller do
@@ -490,9 +500,11 @@ class StagesAgentTest < Minitest::Test
 
   def test_worktree_stage_contains_protected_task_restore_failure
     with_draft_pr_task do |task, _worktree_root|
-      spawn = lambda do |_task, **_kwargs|
-        File.write(File.join(task.folder, "task.md"), "agent-owned\n")
-        { status: :ok, exit_code: 0 }
+      spawn = lambda do |_task, **kwargs|
+        kwargs.fetch(:agent_custody).call do
+          File.write(File.join(task.folder, "task.md"), "agent-owned\n")
+          { status: :ok, exit_code: 0 }
+        end
       end
 
       with_fake_github_controller do
@@ -516,11 +528,13 @@ class StagesAgentTest < Minitest::Test
     with_draft_pr_task do |task, _worktree_root|
       run_command = method(:run!)
       spawn = lambda do |_task, **kwargs|
-        run_command.call(
-          "git", "-C", kwargs.fetch(:cwd),
-          "config", "core.hooksPath", "/tmp/agent-hooks"
-        )
-        { status: :ok, exit_code: 0 }
+        kwargs.fetch(:agent_custody).call do
+          run_command.call(
+            "git", "-C", kwargs.fetch(:cwd),
+            "config", "core.hooksPath", "/tmp/agent-hooks"
+          )
+          { status: :ok, exit_code: 0 }
+        end
       end
 
       with_fake_github_controller do
@@ -544,9 +558,11 @@ class StagesAgentTest < Minitest::Test
     with_draft_pr_task do |task, _worktree_root|
       with_tmp_dir do |agent_home|
         run_command = method(:run!)
-        spawn = lambda do |_task, **_kwargs|
-          run_command.call("git", "config", "--global", "credential.helper", "attacker")
-          { status: :ok, exit_code: 0 }
+        spawn = lambda do |_task, **kwargs|
+          kwargs.fetch(:agent_custody).call do
+            run_command.call("git", "config", "--global", "credential.helper", "attacker")
+            { status: :ok, exit_code: 0 }
+          end
         end
 
         with_env("HOME" => agent_home) do
@@ -579,11 +595,13 @@ class StagesAgentTest < Minitest::Test
   def test_worktree_stage_rejects_symlinked_report
     with_draft_pr_task do |task, _worktree_root|
       report_source = valid_fix_report
-      spawn = lambda do |_task, **_kwargs|
-        target = File.join(task.folder, "outside-report.md")
-        File.write(target, report_source)
-        File.symlink(target, File.join(task.folder, "fix-report.md"))
-        { status: :ok, exit_code: 0 }
+      spawn = lambda do |_task, **kwargs|
+        kwargs.fetch(:agent_custody).call do
+          target = File.join(task.folder, "outside-report.md")
+          File.write(target, report_source)
+          File.symlink(target, File.join(task.folder, "fix-report.md"))
+          { status: :ok, exit_code: 0 }
+        end
       end
 
       with_fake_github_controller do
@@ -599,9 +617,11 @@ class StagesAgentTest < Minitest::Test
 
   def test_worktree_stage_checks_protected_files_when_spawn_raises
     with_draft_pr_task do |task, _worktree_root|
-      spawn = lambda do |_task, **_kwargs|
-        File.write(File.join(task.folder, "pr.md"), "forged\n")
-        raise IOError, "stream failed"
+      spawn = lambda do |_task, **kwargs|
+        kwargs.fetch(:agent_custody).call do
+          File.write(File.join(task.folder, "pr.md"), "forged\n")
+          raise IOError, "stream failed"
+        end
       end
 
       with_fake_github_controller do

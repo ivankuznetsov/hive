@@ -601,21 +601,23 @@ module Hive
             protected_anchors: protected_set,
             permitted_writable_roots: [ task.folder, worktree_path ]
           )
-          custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
+          agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
           before_fix_head = git_head(worktree_path)
 
-          begin
-            fix_result = spawn_fix_agent(
-              task, cfg, ctx_pass, accepted: accepted, identity: fix_identity
-            )
-          ensure
-            custody_report = Hive::ArtifactFirewall.validate_and_restore(
-              custody_manifest, custody_snapshot
-            )
+          fix_result = spawn_fix_agent(
+            task, cfg, ctx_pass, accepted: accepted, identity: fix_identity,
+            agent_custody: agent_custody
+          )
+          custody_report = agent_custody.report
+          if !custody_report && !agent_failed?(fix_result)
+            Hive::Markers.set(task.state_file, :review_error,
+                              phase: :fix, reason: "fix_custody_missing", pass: pass)
+            return { commit: "fix_custody_missing_pass_#{format('%02d', pass)}",
+                     status: :review_error }
           end
           after_fix_head = git_head(worktree_path)
 
-          if custody_report.tampered?
+          if custody_report&.tampered?
             Hive::Markers.set(task.state_file, :review_error,
                               phase: :fix, reason: "fix_tampered",
                               files: custody_report.tampered_labels.join(","), pass: pass,
@@ -2107,7 +2109,8 @@ module Hive
         File.write(path, body)
       end
 
-      def spawn_fix_agent(task, cfg, ctx, accepted:, identity: nil)
+      def spawn_fix_agent(task, cfg, ctx, accepted:, identity: nil,
+                          agent_custody: nil)
         identity ||= Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
         profile_name = identity&.provider || cfg.dig("review", "fix", "agent") || "claude"
         profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
@@ -2145,6 +2148,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "review_fix") || 2700,
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
+          agent_custody: agent_custody,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only,
           **Hive::Stages::Base.implementation_launch_arguments(identity, profile)

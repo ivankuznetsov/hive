@@ -101,7 +101,11 @@ class HiveStagesOpenPrTest < Minitest::Test
         with_replaced_singleton_method(
           Hive::Stages::Base,
           :spawn_agent,
-          ->(*_args, **_kwargs) { File.write(pointer_path, "path: /tmp/foreign\n") }
+          lambda { |*_args, **kwargs|
+            kwargs.fetch(:agent_custody).call do
+              File.write(pointer_path, "path: /tmp/foreign\n")
+            end
+          }
         ) do
           # capture_io swallows the expected `local_head_oid` warn —
           # this test uses a plain dir, not a git repo, so the new
@@ -155,7 +159,10 @@ class HiveStagesOpenPrTest < Minitest::Test
             Hive::AgentProfiles, :lookup,
             ->(provider, cfg:) { looked_up << [ provider, cfg ]; :persisted_profile }
           ) do
-            with_replaced_singleton_method(Hive::Stages::OpenPr, :spawn_open_pr_agent, ->(*_args, **_kwargs) { }) do
+            with_replaced_singleton_method(
+              Hive::Stages::OpenPr, :spawn_open_pr_agent,
+              ->(*_args, **kwargs) { kwargs.fetch(:agent_custody).call { { status: :ok } } }
+            ) do
               capture_io { Hive::Stages::OpenPr.run!(task, cfg) }
             end
           end
@@ -174,8 +181,10 @@ class HiveStagesOpenPrTest < Minitest::Test
       write_pointer(task, worktree)
 
       with_basic_open_pr_run_stubs do
-        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
-          Hive::Markers.set(task.state_file, :review_waiting, reason: "human")
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **kwargs|
+          kwargs.fetch(:agent_custody).call do
+            Hive::Markers.set(task.state_file, :review_waiting, reason: "human")
+          end
         }) do
           result = nil
           capture_io { result = Hive::Stages::OpenPr.run!(task, cfg) }
@@ -428,9 +437,11 @@ class HiveStagesOpenPrTest < Minitest::Test
               with_replaced_singleton_method(Hive::Gh, :scan_pr_for_secrets, ->(state_file:, pr_url:, cfg:) { scan }) do
                 with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(_cfg, _stage) { :profile }) do
                   with_replaced_singleton_method(Hive::Stages::Base, :render, ->(_template, _bindings) { "prompt" }) do
-                    with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |spawned_task, **_kwargs|
-                      Hive::Markers.set(spawned_task.state_file, :complete,
-                                        pr_url: new_pr.fetch("url"), is_draft: "true")
+                    with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |spawned_task, **kwargs|
+                      kwargs.fetch(:agent_custody).call do
+                        Hive::Markers.set(spawned_task.state_file, :complete,
+                                          pr_url: new_pr.fetch("url"), is_draft: "true")
+                      end
                     }) do
                       result = Hive::Stages::OpenPr.run!(task, cfg)
 
@@ -495,9 +506,11 @@ class HiveStagesOpenPrTest < Minitest::Test
                 with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(_cfg, _stage) { :profile }) do
                   with_replaced_singleton_method(Hive::Stages::Base, :render, ->(_template, _bindings) { "prompt" }) do
                     with_replaced_singleton_method(Hive::Gh, :lookup_existing_pr, lambda { |_worktree, _branch, cfg:| new_pr }) do
-                      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |spawned_task, **_kwargs|
-                        Hive::Markers.set(spawned_task.state_file, :complete,
-                                          pr_url: new_pr.fetch("url"), is_draft: "true")
+                      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |spawned_task, **kwargs|
+                        kwargs.fetch(:agent_custody).call do
+                          Hive::Markers.set(spawned_task.state_file, :complete,
+                                            pr_url: new_pr.fetch("url"), is_draft: "true")
+                        end
                       }) do
                         result = Hive::Stages::OpenPr.run!(task, cfg)
 

@@ -95,7 +95,7 @@ module Hive
             permitted_writable_roots: [ ctx.task_folder, ctx.worktree_path ],
             required_outputs: { File.basename(escalations) => escalations }
           )
-          custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
+          agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
           task = synthetic_task(ctx)
           scope = Hive::Stages::Base.stage_permission_scope(
             cfg, "review.triage", task, profile,
@@ -117,27 +117,30 @@ module Hive
               )
             ),
             **Hive::Stages::Base.tool_scope_kwargs(scope),
-            status_mode: :output_file_exists
+            status_mode: :output_file_exists,
+            agent_custody: agent_custody
           }
-          begin
-            spawn_result =
-              if profile.name == :claude
-                Hive::Stages::Base.spawn_claude!(
-                  task,
-                  cfg,
-                  **kwargs,
-                  session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-triage-pass#{ctx.pass}", task)
-                )
-              else
-                Hive::Stages::Base.spawn_agent(task, **kwargs)
-              end
-          ensure
-            custody_report = Hive::ArtifactFirewall.validate_and_restore(
-              custody_manifest, custody_snapshot
+          spawn_result =
+            if profile.name == :claude
+              Hive::Stages::Base.spawn_claude!(
+                task,
+                cfg,
+                **kwargs,
+                session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-triage-pass#{ctx.pass}", task)
+              )
+            else
+              Hive::Stages::Base.spawn_agent(task, **kwargs)
+            end
+          custody_report = agent_custody.report
+          if !custody_report && spawn_result[:status] == :ok
+            return Result.new(
+              status: :error, escalations_path: escalations,
+              error_message: "triage agent custody was not invoked",
+              tampered_files: [], limit_text: nil
             )
           end
 
-          if custody_report.tampered?
+          if custody_report&.tampered?
             unless custody_report.restored?
               return Result.new(
                 status: :error,

@@ -99,15 +99,17 @@ module Hive
           protected_anchors: Hive::ArtifactFirewall::ORCHESTRATOR_OWNED,
           permitted_writable_roots: [ task.folder, worktree_path ]
         )
-        custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
-        begin
-          spawn_finalize_agent(task, cfg, prompt, profile, worktree_path)
-        ensure
-          custody_report = Hive::ArtifactFirewall.validate_and_restore(
-            custody_manifest, custody_snapshot
-          )
+        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
+        spawn_result = spawn_finalize_agent(
+          task, cfg, prompt, profile, worktree_path,
+          agent_custody: agent_custody
+        )
+        custody_report = agent_custody.report
+        if !custody_report && spawn_result.is_a?(Hash) && spawn_result[:status] == :ok
+          Hive::Markers.set(task.state_file, :error, reason: "finalize_custody_missing")
+          return { commit: "finalize_custody_missing", status: :error }
         end
-        if custody_report.tampered?
+        if custody_report&.tampered?
           Hive::Markers.set(task.state_file, :error,
                             reason: "finalize_tampered",
                             files: custody_report.tampered_labels.join(","),
@@ -166,7 +168,8 @@ module Hive
         { commit: "pr_finalized", status: :complete }
       end
 
-      def spawn_finalize_agent(task, cfg, prompt, profile, worktree_path)
+      def spawn_finalize_agent(task, cfg, prompt, profile, worktree_path,
+                               agent_custody: nil)
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "finalize", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
@@ -179,6 +182,7 @@ module Hive
           timeout_sec: finalize_timeout(cfg),
           log_label: "finalize",
           profile: profile,
+          agent_custody: agent_custody,
           routing_arguments: Hive::Stages::Base.model_routing_arguments(
             cfg, "finalize", profile,
             current: Hive::Stages::Base.model_routing_current(cfg["finalize"])

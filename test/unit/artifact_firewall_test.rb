@@ -742,6 +742,29 @@ class ArtifactFirewallTest < Minitest::Test
     end
   end
 
+  def test_agent_custody_encloses_only_its_single_untrusted_call
+    with_tmp_dir do |dir|
+      protected_path = File.join(dir, "task-journal.jsonl")
+      File.write(protected_path, "controller start\n")
+      custody = Hive::ArtifactFirewall::AgentCustody.new(
+        build_manifest(dir, protected: { "journal" => protected_path })
+      )
+
+      result = custody.call do
+        File.write(protected_path, "agent forged\n")
+        :provider_result
+      end
+      File.open(protected_path, "ab") { |file| file.write("controller finish\n") }
+
+      assert_equal :provider_result, result
+      assert custody.called?
+      assert custody.report.tampered?
+      assert custody.report.restored?
+      assert_equal "controller start\ncontroller finish\n", File.binread(protected_path)
+      assert_raises(Hive::ArtifactFirewall::Error) { custody.call { :again } }
+    end
+  end
+
   private
 
   def build_manifest(dir, protected: {}, outputs: {}, roots: [], redactor: Hive::SecretPatterns.method(:redact))

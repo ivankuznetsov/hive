@@ -104,6 +104,20 @@ module Hive
         true
       end
 
+      def validate_binding!(task:, stage:, attempt_id:, task_generation:,
+                            ownership_generation: nil)
+        validate_attempt!(
+          "task" => Hive::StringifyKeys.call(task),
+          "stage" => stage.to_s,
+          "attempt_id" => attempt_id.to_s,
+          "task_generation" => Integer(task_generation),
+          "ownership_generation" => ownership_generation
+        )
+        true
+      rescue ArgumentError, TypeError => e
+        raise AttemptMismatch, e.message
+      end
+
       def attempt_for(attempt_id)
         @attempt_cache[attempt_id]
       end

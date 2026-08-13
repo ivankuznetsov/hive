@@ -46,5 +46,4 @@ class Tasks::PublicationsController < Tasks::BaseController
       format.json { render json: @publication }
     end
   end
-
 end

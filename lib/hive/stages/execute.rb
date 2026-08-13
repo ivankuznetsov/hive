@@ -145,24 +145,18 @@ module Hive
           protected_anchors: PROTECTED_FILES,
           permitted_writable_roots: [ task.folder, worktree_path ]
         )
-        custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
-        custody_report = nil
+        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
         begin
-          begin
-            impl_result = spawn_implementation(
-              task, cfg, worktree_path, identity: identity
-            )
-          ensure
-            custody_report = Hive::ArtifactFirewall.validate_and_restore(
-              custody_manifest, custody_snapshot
-            )
-          end
+          impl_result = spawn_implementation(
+            task, cfg, worktree_path, identity: identity,
+            agent_custody: agent_custody
+          )
         rescue Hive::ProviderRouteFailed
-          if custody_report&.tampered?
+          if agent_custody.report&.tampered?
             record_tamper(
-              task, custody_report.tampered_labels, who: "implementer",
-              restored: custody_report.restored?,
-              restore_error: custody_report.restore_diagnostic
+              task, agent_custody.report.tampered_labels, who: "implementer",
+              restored: agent_custody.report.restored?,
+              restore_error: agent_custody.report.restore_diagnostic
             )
           else
             mark_provider_route_failure(task)
@@ -171,7 +165,8 @@ module Hive
         end
         append_implementation_output(task, impl_result)
 
-        if custody_report.tampered?
+        custody_report = agent_custody.report
+        if custody_report&.tampered?
           return record_tamper(
             task, custody_report.tampered_labels, who: "implementer",
             restored: custody_report.restored?,
@@ -361,7 +356,8 @@ module Hive
         Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).capture_execute!
       end
 
-      def spawn_implementation(task, cfg, worktree_path, identity: nil)
+      def spawn_implementation(task, cfg, worktree_path, identity: nil,
+                               agent_custody: nil)
         plan_text = File.read(File.join(task.folder, "plan.md"))
         prompt = Hive::Stages::Base.render(
           "execute_prompt.md.erb",
@@ -406,6 +402,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
           log_label: "execute-impl",
           profile: profile,
+          agent_custody: agent_custody,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only,
           **Hive::Stages::Base.implementation_launch_arguments(identity, profile)

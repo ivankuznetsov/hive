@@ -1133,11 +1133,13 @@ class RunFinalizeTest < Minitest::Test
                     with_stubbed_singleton_method(
                       Hive::Stages::Finalize,
                       :spawn_finalize_agent,
-                      lambda do |spawned_task, *_args|
-                        File.write(
-                          spawned_task.state_file,
-                          ENV.fetch("HIVE_FAKE_CLAUDE_WRITE_CONTENT")
-                        )
+                      lambda do |spawned_task, *_args, **kwargs|
+                        kwargs.fetch(:agent_custody).call do
+                          File.write(
+                            spawned_task.state_file,
+                            ENV.fetch("HIVE_FAKE_CLAUDE_WRITE_CONTENT")
+                          )
+                        end
                       end
                     ) do
                       result = Hive::Stages::Finalize.run!(task, {})

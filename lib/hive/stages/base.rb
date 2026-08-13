@@ -806,7 +806,7 @@ module Hive
                       disallowed_tools: nil, cli_flags: nil,
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
                       routing_resolution: nil, routing_arguments: nil,
-                      resource_guards: nil)
+                      resource_guards: nil, agent_custody: nil)
         context = Hive::Attempts::Context.current
         launch_binding = nil
         provider_route = nil
@@ -909,44 +909,49 @@ module Hive
         result = nil
         observation.start!
         begin
-          result = Hive::Agent.new(
-            task: task,
-            prompt: prompt,
-            max_budget_usd: max_budget_usd,
-            timeout_sec: timeout_sec,
-            add_dirs: add_dirs,
-            cwd: cwd,
-            log_label: log_label,
-            profile: profile,
-            expected_output: expected_output,
-            status_mode: effective_status_mode,
-            permission_mode: permission_mode,
-            allowed_tools: allowed_tools,
-            disallowed_tools: disallowed_tools,
-            cli_flags: cli_flags,
-            identity_arguments: identity_arguments || [],
-            launch_arguments: launch_arguments,
-            runtime_policy: runtime_policy,
-            routing_arguments: routing_arguments,
-            launch_environment: launch_binding&.environment || {},
-            provider_route: provider_route
-          ).run!
-          if result[:status] == :ok && runtime_policy&.host_outputs?
-            begin
-              runtime_policy.materialize_outputs!(result)
-            rescue Hive::ConfigError => e
-              result[:status] = :error
-              result[:error_reason] = "managed_output_invalid"
-              result[:error_message] = e.message
+          result = run_with_agent_custody(agent_custody) do
+            agent_result = Hive::Agent.new(
+              task: task,
+              prompt: prompt,
+              max_budget_usd: max_budget_usd,
+              timeout_sec: timeout_sec,
+              add_dirs: add_dirs,
+              cwd: cwd,
+              log_label: log_label,
+              profile: profile,
+              expected_output: expected_output,
+              status_mode: effective_status_mode,
+              permission_mode: permission_mode,
+              allowed_tools: allowed_tools,
+              disallowed_tools: disallowed_tools,
+              cli_flags: cli_flags,
+              identity_arguments: identity_arguments || [],
+              launch_arguments: launch_arguments,
+              runtime_policy: runtime_policy,
+              routing_arguments: routing_arguments,
+              launch_environment: launch_binding&.environment || {},
+              provider_route: provider_route
+            ).run!
+            if agent_result[:status] == :ok && runtime_policy&.host_outputs?
+              begin
+                runtime_policy.materialize_outputs!(agent_result)
+              rescue Hive::ConfigError => e
+                agent_result[:status] = :error
+                agent_result[:error_reason] = "managed_output_invalid"
+                agent_result[:error_message] = e.message
+              end
             end
+            agent_result
           end
           record_usage(
             task, profile, result, started_at,
             context: context, session_id: observation.session_id
           )
-          Hive::ContextProvenance.promote_agent_receipt(
-            task: task, context: context
-          ) if context
+          if context && agent_custody_safe_after?(agent_custody)
+            Hive::ContextProvenance.promote_agent_receipt(
+              task: task, context: context
+            )
+          end
           if result[:provider_signal]
             unless context.publish_provider_signal(result.fetch(:provider_signal))
               raise Hive::ProviderRouteFailed, "admitted provider route failed without durable evidence delivery"
@@ -955,7 +960,9 @@ module Hive
           end
           result
         ensure
-          observation.finish!(result || {}, exception: $!)
+          if agent_custody_safe_after?(agent_custody)
+            observation.finish!(result || {}, exception: $!)
+          end
         end
       ensure
         runtime_policy&.cleanup!
@@ -1009,7 +1016,7 @@ module Hive
                          disallowed_tools: nil, mcp_config_path: nil,
                          strict_mcp_config: false, identity_arguments: nil,
                          routing_arguments: nil, runtime_policy: nil,
-                         resource_guards: nil)
+                         resource_guards: nil, agent_custody: nil)
         require "hive/claude_launcher"
 
         context = Hive::Attempts::Context.current
@@ -1032,7 +1039,8 @@ module Hive
             identity_arguments: identity_arguments,
             routing_arguments: routing_arguments,
             runtime_policy: runtime_policy,
-            resource_guards: resource_guards
+            resource_guards: resource_guards,
+            agent_custody: agent_custody
           )
         end
 
@@ -1056,7 +1064,7 @@ module Hive
             strict_mcp_config: strict_mcp_config,
             identity_arguments: identity_arguments,
             routing_arguments: routing_arguments, runtime_policy: runtime_policy,
-            resource_guards: resource_guards
+            resource_guards: resource_guards, agent_custody: agent_custody
           )
         end
 
@@ -1078,28 +1086,34 @@ module Hive
         started_at = Time.now.utc.iso8601
         observation.start!
         begin
-          result = Hive::ClaudeLauncher.launch!(
-            task: task, cfg: cfg, prompt: prompt, add_dirs: add_dirs,
-            cwd: cwd || task.folder, max_budget_usd: max_budget_usd,
-            timeout_sec: timeout_sec, log_label: log_label,
-            session_name: session_name, status_mode: status_mode,
-            expected_output: expected_output, profile: profile,
-            permission_mode: permission_mode, allowed_tools: allowed_tools,
-            disallowed_tools: disallowed_tools, mcp_config_path: mcp_config_path,
-            strict_mcp_config: strict_mcp_config,
-            identity_arguments: identity_arguments,
-            routing_arguments: routing_arguments, runtime_policy: runtime_policy
-          )
+          result = run_with_agent_custody(agent_custody) do
+            Hive::ClaudeLauncher.launch!(
+              task: task, cfg: cfg, prompt: prompt, add_dirs: add_dirs,
+              cwd: cwd || task.folder, max_budget_usd: max_budget_usd,
+              timeout_sec: timeout_sec, log_label: log_label,
+              session_name: session_name, status_mode: status_mode,
+              expected_output: expected_output, profile: profile,
+              permission_mode: permission_mode, allowed_tools: allowed_tools,
+              disallowed_tools: disallowed_tools, mcp_config_path: mcp_config_path,
+              strict_mcp_config: strict_mcp_config,
+              identity_arguments: identity_arguments,
+              routing_arguments: routing_arguments, runtime_policy: runtime_policy
+            )
+          end
           record_usage(
             task, profile, result, started_at,
             context: context, session_id: observation.session_id
           )
-          Hive::ContextProvenance.promote_agent_receipt(
-            task: task, context: context
-          ) if context
+          if context && agent_custody_safe_after?(agent_custody)
+            Hive::ContextProvenance.promote_agent_receipt(
+              task: task, context: context
+            )
+          end
           result
         ensure
-          observation.finish!(result || {}, exception: $!)
+          if agent_custody_safe_after?(agent_custody)
+            observation.finish!(result || {}, exception: $!)
+          end
         end
       end
 
@@ -1149,6 +1163,21 @@ module Hive
                           exception_class: e.class.name,
                           message: e.message)
         { status: :error, error_message: e.message }
+      end
+
+      # Artifact custody belongs around the untrusted provider execution, not
+      # around controller-authored session, usage, or context receipts. The
+      # caller supplies a callable that captures and validates its stage-local
+      # protected-file manifest while this block runs.
+      def run_with_agent_custody(agent_custody)
+        return yield unless agent_custody
+        raise ArgumentError, "agent_custody must respond to call" unless agent_custody.respond_to?(:call)
+
+        agent_custody.call { yield }
+      end
+
+      def agent_custody_safe_after?(agent_custody)
+        !agent_custody.respond_to?(:safe_after?) || agent_custody.safe_after?
       end
 
       class TemplateBindings

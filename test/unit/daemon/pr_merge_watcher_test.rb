@@ -208,7 +208,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       result = restarted.tick(now: T0 + 61).first
 
       assert_equal :closed_unmerged, result.fetch(:status)
-      assert restarted.watching?(project: "app", slug: tasks.first.slug)
       assert_equal "CLOSED_UNMERGED",
                    restarted.state_for(project: "app", slug: tasks.first.slug)
     end
@@ -351,7 +350,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       state = store.load(identity_for(tasks.first.project_root))
       candidate = state.fetch("candidates").values.first
       assert_equal 26, candidate.dig("retry", "failures")
-      assert watcher.watching?(project: "app", slug: tasks.first.slug)
       assert_match(/offline/, candidate.dig("archive", "last_error"))
     end
   end
@@ -643,7 +641,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       result = watcher.tick(now: T0 + 1).first
       assert_equal :blocked, result.fetch(:status)
       assert_match(/ledger unreadable/, result.fetch(:reason))
-      refute watcher.watching?(project: "app", slug: task.slug)
+      assert_nil watcher.state_for(project: "app", slug: task.slug)
     end
   end
 

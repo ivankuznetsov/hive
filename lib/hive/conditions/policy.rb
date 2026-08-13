@@ -83,8 +83,6 @@ module Hive
         end
       end
 
-      def each_rule(&block) = @rules.values.each(&block)
-
       def build_rule(transition:, required:, inhibitors:, options:, authoritative_capable:)
         transition = transition.to_s
         raise InvalidPolicy, "gate transition must be non-empty" if transition.empty?

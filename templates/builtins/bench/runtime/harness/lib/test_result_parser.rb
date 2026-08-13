@@ -13,9 +13,7 @@ module HiveBench
   module TestResultParser
     module_function
 
-    Result = Data.define(:ran, :passed, :failed, :errored, :by_name) do
-      def suite_green? = ran && failed.zero? && errored.zero?
-    end
+    Result = Data.define(:ran, :passed, :failed, :errored, :by_name)
 
     # Minitest summary line, e.g. "12 runs, 34 assertions, 1 failures, 0 errors, 0 skips".
     SUMMARY = /(\d+)\s+runs?,\s+\d+\s+assertions?,\s+(\d+)\s+failures?,\s+(\d+)\s+errors?/

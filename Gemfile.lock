@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    hive-cli (0.7.1)
+    hive-cli (0.7.2)
       agent-cli-runtime (~> 0.1.1)
       base64 (>= 0.2)
       bubbletea (= 0.1.4)

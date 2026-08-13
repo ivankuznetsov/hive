@@ -674,16 +674,16 @@ class TaskClosureTest < Minitest::Test
     end
 
     with_closure_project do |task, project|
-      service = service_for
       input = input_for("acme/app#42")
       assert_raises(Hive::TaskClosure::StalePreview) do
-        service.confirm!(
+        Hive::TaskClosure.confirm!(
           task: task, project: project, input: input,
           preview_digest: "short", operator: "tester", channel: "cli",
-          authorized: true
+          authorized: true, gh: FakeGh.new
         )
       end
 
+      service = service_for
       invalid = service.preview(
         task: task, project: project, input: input_for("not-evidence")
       )

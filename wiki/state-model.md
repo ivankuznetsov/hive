@@ -167,6 +167,23 @@ closed-unmerged, held, unsafe, superseded-generation, and retrying candidates
 therefore remain explainable across restart; none is discarded after a fixed
 failure count.
 
+An observed-head change within one task generation remains an immutable archive
+hold, but it is eligible for bounded remote-state polling. An `OPEN` or
+closed-unmerged result releases ordinary error recovery so a fresh generation
+can review the changed head. A `MERGED` result remains blocked before
+architecture intake or closure, so polling cannot silently accept drift as
+delivery evidence. Other hold reasons remain ineligible until their owning
+status evidence changes. A current dependency, admission, repository, or
+PR-identity hold outranks the historical drift reason; after it clears, the
+same-generation predecessor re-establishes the drift hold. The poll gate also
+rechecks the ledger's host and repository identity before external I/O.
+
+For a held drift candidate, `merged`, `delivered_elsewhere`, and `ambiguous`
+remote facts become quiescent only after the blocked archive diagnostic is
+durable. This preserves crash recovery between the remote-fact checkpoint and
+the block write without turning a terminal mismatch into a permanent polling
+loop.
+
 An adjacent mode-0600 lock serializes readers and writers. State writes use
 owner-private atomic replacement plus directory fsync. Malformed,
 unsupported, or identity-drifted authoritative bytes are not rewritten:

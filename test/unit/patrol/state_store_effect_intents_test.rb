@@ -514,14 +514,6 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
         )
       end
 
-      projection_pending = []
-      store.each_projection_pending_occurrence do |record|
-        projection_pending << record.fetch("occurrence_id")
-      end
-
-      assert_equal [ capture.occurrence_id ], projection_pending
-      assert_equal projection_pending,
-                   store.each_projection_pending_occurrence.map { |record| record.fetch("occurrence_id") }
       assert_equal(
         [ capture.occurrence_id ],
         store.rebuild_recovery_index!.fetch("occurrence_ids")

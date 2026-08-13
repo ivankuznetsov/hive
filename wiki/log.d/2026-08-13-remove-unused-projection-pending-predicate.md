@@ -2,5 +2,6 @@
 
 - Removed `OccurrenceJournal#projection_pending?`, which had no production
   caller.
-- Kept empty and pending-state coverage on `each_projection_pending`, the
-  bounded enumerator used by patrol recovery.
+- Its lower-level enumerator was subsequently removed after the Patrol
+  forwarding surface retired; recovery continues through the bounded
+  `each_recovery_active` view.

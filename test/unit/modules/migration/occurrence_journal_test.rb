@@ -12,10 +12,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       alternate = effect_intent(capability: "github_pull_requests:alternate")
       journal.prepare_effect!(first, now: NOW)
       journal.prepare_effect!(alternate, now: NOW)
-      assert_equal [ first.occurrence_id ],
-                   journal.each_reserved.map { |record| record.fetch("occurrence_id") }
       assert_equal 1, journal.each_record.count
-      assert_empty journal.each_projection_pending.to_a
       journal.reserve!(patrol_capture, now: NOW)
 
       journal.mark_dispatch_uncertain!(first, now: NOW + 12)
@@ -1321,8 +1318,6 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         journal.finalize!(drifted_time, now: NOW + 1)
       end
-      assert_equal [ provisional.occurrence_id ],
-                   journal.each_reserved.map { |record| record.fetch("occurrence_id") }
       journal.mark_dispatch_uncertain!(intent, now: NOW)
       outcome = { "pr_url" => "https://example.test/effect/1" }
       committed = journal.settle_effect!(
@@ -1364,10 +1359,6 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         journal.mark_dispatch_uncertain!(intent, now: NOW + 2)
       end
-      pending_ids = journal.each_projection_pending.map do |record|
-        record.fetch("occurrence_id")
-      end
-      assert_equal [ final.occurrence_id ], pending_ids
       assert_equal %w[capture event receipt],
                    replay.fetch("outbox").map { |entry| entry.fetch("kind") }
                          .sort

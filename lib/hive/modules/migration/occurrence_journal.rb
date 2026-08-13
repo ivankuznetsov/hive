@@ -162,15 +162,6 @@ module Hive
           @store.fetch(occurrence_id)
         end
 
-        def each_reserved
-          return enum_for(__method__) unless block_given?
-
-          each_recovery_active do |record|
-            yield record if record.fetch("phase") == "reserved"
-          end
-          nil
-        end
-
         # Normal recovery reads only the bounded durable active-ID projection.
         # Occurrence records remain authoritative, so a missing, stale, dirty,
         # or malformed projection receives one descriptor-safe history repair.
@@ -189,15 +180,6 @@ module Hive
             yield record
           end
           repair_recovery_index! if stale
-          nil
-        end
-
-        def each_projection_pending
-          return enum_for(__method__) unless block_given?
-
-          each_recovery_active do |record|
-            yield record if projection_pending_record?(record)
-          end
           nil
         end
 

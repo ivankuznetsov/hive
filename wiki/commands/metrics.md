@@ -44,6 +44,9 @@ Text output prints one section per project with total fix commits, reverted coun
 - `by_phase`
 
 Usage failures emit a JSON error envelope with a closed `error_kind` such as `invalid_days`, `unknown_project`, `unknown_subcommand`, or `no_projects_registered`.
+The command uses the shared `Hive::Schemas::EnvelopeEmitter` rescue and
+single-document guard, but overrides its payload builder to preserve the
+published metrics v1 allowlist, which intentionally omits `error_class`.
 
 ## Tests
 

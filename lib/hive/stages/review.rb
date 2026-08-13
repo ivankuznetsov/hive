@@ -2017,10 +2017,6 @@ module Hive
         AcceptedFindings.new(text: out, count: answered.size)
       end
 
-      def collect_legacy_checked_escalations(path)
-        collect_legacy_checked_escalations_with_count(path).text
-      end
-
       def collect_legacy_checked_escalations_with_count(path)
         return AcceptedFindings.new(text: "", count: 0) unless File.exist?(path)
 

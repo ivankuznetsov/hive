@@ -1,8 +1,11 @@
 require "test_helper"
+require "base64"
+require "digest"
 require "open3"
 
 class InstallScriptTest < Minitest::Test
   INSTALL_SCRIPT = File.expand_path("../../install.sh", __dir__)
+  INSTALL_DOC = File.expand_path("../../install.md", __dir__)
   OLD_WRAPPER = <<~SH.freeze
     #!/bin/sh
     # hive-managed: install-wrapper/v1
@@ -10,6 +13,8 @@ class InstallScriptTest < Minitest::Test
   SH
   OLD_HV = "#!/bin/sh\nprintf 'old hv\\n'\n".freeze
   OLD_SHIM = "#!/bin/sh\nprintf 'old shim\\n'\n".freeze
+  QMD_TARBALL = "fixture qmd tarball\n".freeze
+  QMD_TARBALL_INTEGRITY = "sha512-#{Base64.strict_encode64(Digest::SHA512.digest(QMD_TARBALL))}".freeze
 
   def test_hv_wrapper_delegates_to_hive_wrapper_instead_of_rubygems_shim
     wrapper = File.read(INSTALL_SCRIPT).match(
@@ -167,7 +172,299 @@ class InstallScriptTest < Minitest::Test
     end
   end
 
+  def test_installer_normalizes_relative_prefix_before_writing_sidecars
+    Dir.mktmpdir("hive-installer-relative-prefix") do |dir|
+      _out, err, status = run_installer(
+        dir, "none", hive_prefix: "relative-prefix", chdir: dir
+      )
+
+      assert status.success?, err
+      expected = File.join(dir, "relative-prefix")
+      assert_equal "#{expected}\n",
+                   File.binread(File.join(expected, "hive", "install-prefix"))
+      assert_equal "#{expected}\n",
+                   File.binread(File.join(dir, "home", ".local", "share", "hive", "install-prefix"))
+    end
+  end
+
+  def test_installer_expands_home_prefix_before_writing_sidecars
+    Dir.mktmpdir("hive-installer-home-prefix") do |dir|
+      _out, err, status = run_installer(
+        dir, "none", hive_prefix: "~/custom-prefix", chdir: dir
+      )
+
+      assert status.success?, err
+      expected = File.join(dir, "home", "custom-prefix")
+      assert_equal "#{expected}\n",
+                   File.binread(File.join(expected, "hive", "install-prefix"))
+      assert_equal "#{expected}\n",
+                   File.binread(File.join(dir, "home", ".local", "share", "hive", "install-prefix"))
+    end
+  end
+
+  def test_qmd_install_uses_exact_package_and_integrity_pin
+    Dir.mktmpdir("hive-installer-qmd-pin") do |dir|
+      npm_args = File.join(dir, "npm-args")
+
+      _out, err, status = run_installer(
+        dir, "none", install_qmd: true, npm_args: npm_args
+      )
+
+      assert status.success?, err
+      calls = File.readlines(npm_args, chomp: true)
+      assert_includes File.read(INSTALL_SCRIPT), 'DEFAULT_QMD_NPM_PACKAGE="@tobilu/qmd@2.5.3"'
+      assert calls.any? { |line| line.start_with?("pack @tobilu/qmd@2.5.3 ") }, calls.inspect
+      assert calls.any? { |line| line.include?("install --global") && line.end_with?(".tgz") },
+             calls.inspect
+      refute calls.any? { |line| line.start_with?("install ") && line.include?("@tobilu/qmd@") }, calls.inspect
+      assert_empty Dir.glob(File.join(dir, "prefix", "hive", ".qmd-{stage,backup}.*"))
+    end
+  end
+
+  def test_documented_qmd_repair_fails_closed_before_installing_mismatched_bytes
+    block = File.read(INSTALL_DOC).match(
+      %r{## Install / Repair QMD.*?```bash\n(?<body>.*?)\n```}m
+    )
+    refute_nil block
+
+    Dir.mktmpdir("hive-installer-qmd-doc") do |dir|
+      fake_bin = create_installer_fakes(dir)
+      npm_args = File.join(dir, "npm-args")
+      env = {
+        "PATH" => "#{fake_bin}:/usr/bin:/bin",
+        "HOME" => File.join(dir, "home"),
+        "XDG_DATA_HOME" => File.join(dir, "data"),
+        "XDG_BIN_HOME" => File.join(dir, "bin"),
+        "HIVE_INSTALL_TEST_NPM_ARGS" => npm_args
+      }
+
+      _out, _err, status = Open3.capture3(env, "/bin/bash", "-c", block[:body])
+
+      refute status.success?
+      calls = File.readlines(npm_args, chomp: true)
+      assert calls.any? { |line| line.start_with?("pack @tobilu/qmd@2.5.3 ") }
+      refute calls.any? { |line| line.start_with?("install ") }
+      refute_path_exists File.join(dir, "bin", "qmd")
+    end
+  end
+
+  def test_qmd_install_rejects_non_exact_or_foreign_package_specs_before_npm
+    Dir.mktmpdir("hive-installer-qmd-package") do |dir|
+      npm_args = File.join(dir, "npm-args")
+
+      _out, err, status = run_installer(
+        dir, "none", install_qmd: true,
+        qmd_package: "https://example.invalid/qmd.tgz", npm_args: npm_args
+      )
+
+      refute status.success?
+      assert_includes err, "invalid HIVE_QMD_NPM_PACKAGE"
+      refute_path_exists npm_args
+    end
+  end
+
+  def test_disabled_qmd_ignores_an_unused_package_override
+    Dir.mktmpdir("hive-installer-qmd-disabled") do |dir|
+      _out, err, status = run_installer(
+        dir, "none", qmd_package: "https://example.invalid/qmd.tgz"
+      )
+
+      assert status.success?, err
+    end
+  end
+
+  def test_qmd_rebuild_failure_is_visible_and_skips_publication
+    Dir.mktmpdir("hive-installer-qmd-rebuild") do |dir|
+      _out, err, status = run_installer(
+        dir, "none", install_qmd: true, qmd_rebuild_failure: true
+      )
+
+      assert status.success?, err
+      assert_includes err, "qmd native rebuild failed"
+      refute_path_exists File.join(dir, "bin", "qmd")
+    end
+  end
+
+  def test_failed_qmd_upgrade_preserves_previous_tree_and_managed_link
+    Dir.mktmpdir("hive-installer-qmd-upgrade") do |dir|
+      qmd_home = File.join(dir, "prefix", "hive", "qmd")
+      qmd_bin = File.join(qmd_home, "bin", "qmd")
+      qmd_link = File.join(dir, "bin", "qmd")
+      FileUtils.mkdir_p(File.dirname(qmd_bin))
+      FileUtils.mkdir_p(File.dirname(qmd_link))
+      write_executable(qmd_bin, "#!/bin/sh\nprintf 'old qmd\\n'\n")
+      File.symlink(qmd_bin, qmd_link)
+
+      _out, err, status = run_installer(
+        dir, "none", install_qmd: true, qmd_rebuild_failure: true
+      )
+
+      assert status.success?, err
+      assert_includes err, "qmd native rebuild"
+      assert_equal "#!/bin/sh\nprintf 'old qmd\\n'\n", File.binread(qmd_bin)
+      assert_equal qmd_bin, File.realpath(qmd_link)
+      assert_empty Dir.glob(File.join(File.dirname(qmd_home), ".qmd-stage.*"))
+    end
+  end
+
+  def test_qmd_integrity_mismatch_is_visible_and_skips_install
+    Dir.mktmpdir("hive-installer-qmd-integrity") do |dir|
+      npm_args = File.join(dir, "npm-args")
+
+      _out, err, status = run_installer(
+        dir, "none", install_qmd: true, npm_args: npm_args,
+        qmd_integrity: "sha512-wrong"
+      )
+
+      assert status.success?, err
+      assert_includes err, "qmd package integrity mismatch"
+      refute File.readlines(npm_args, chomp: true).any? { |line| line.start_with?("install ") }
+      refute_path_exists File.join(dir, "bin", "qmd")
+    end
+  end
+
+  def test_qmd_download_failure_is_visible_and_skips_publication
+    assert_optional_qmd_failure(
+      qmd_pack_failure: true,
+      expected_warning: "qmd package download failed"
+    )
+  end
+
+  def test_qmd_install_failure_is_visible_and_skips_publication
+    assert_optional_qmd_failure(
+      qmd_install_failure: true,
+      expected_warning: "qmd install failed"
+    )
+  end
+
+  def test_qmd_missing_executable_is_visible_and_skips_publication
+    assert_optional_qmd_failure(
+      qmd_missing_bin: true,
+      expected_warning: "no executable was found in staging"
+    )
+  end
+
+  def test_qmd_startup_failure_is_visible_and_skips_publication
+    assert_optional_qmd_failure(
+      qmd_version_failure: true,
+      expected_warning: "qmd startup check failed"
+    )
+  end
+
+  def test_qmd_download_timeout_is_visible_and_skips_publication
+    assert_optional_qmd_failure(
+      qmd_hang: "pack", qmd_timeout_seconds: 1,
+      expected_warning: "qmd package download timed out after 1s"
+    )
+  end
+
+  def test_custom_qmd_version_requires_integrity
+    Dir.mktmpdir("hive-installer-qmd-custom-no-integrity") do |dir|
+      npm_args = File.join(dir, "npm-args")
+      _out, err, status = run_installer(
+        dir, "none", install_qmd: true,
+        qmd_package: "@tobilu/qmd@2.5.2", qmd_integrity: nil,
+        npm_args: npm_args
+      )
+
+      refute status.success?
+      assert_includes err, "HIVE_QMD_NPM_INTEGRITY is required"
+      refute_path_exists npm_args
+    end
+  end
+
+  def test_custom_qmd_version_rejects_malformed_integrity
+    Dir.mktmpdir("hive-installer-qmd-custom-bad-integrity") do |dir|
+      npm_args = File.join(dir, "npm-args")
+      _out, err, status = run_installer(
+        dir, "none", install_qmd: true,
+        qmd_package: "@tobilu/qmd@2.5.2", qmd_integrity: "sha256-nope",
+        npm_args: npm_args
+      )
+
+      refute status.success?
+      assert_includes err, "invalid HIVE_QMD_NPM_INTEGRITY"
+      refute_path_exists npm_args
+    end
+  end
+
+  def test_custom_qmd_version_accepts_matching_tarball_integrity
+    Dir.mktmpdir("hive-installer-qmd-custom-integrity") do |dir|
+      npm_args = File.join(dir, "npm-args")
+      _out, err, status = run_installer(
+        dir, "none", install_qmd: true,
+        qmd_package: "@tobilu/qmd@2.5.2", qmd_integrity: QMD_TARBALL_INTEGRITY,
+        npm_args: npm_args
+      )
+
+      assert status.success?, err
+      assert File.readlines(npm_args, chomp: true).any? { |line| line.start_with?("pack @tobilu/qmd@2.5.2 ") }
+      assert File.symlink?(File.join(dir, "bin", "qmd"))
+    end
+  end
+
+  def test_qmd_native_health_probe_loads_better_sqlite3_before_publication
+    Dir.mktmpdir("hive-installer-qmd-native") do |dir|
+      node_args = File.join(dir, "node-args")
+
+      _out, err, status = run_installer(
+        dir, "none", install_qmd: true,
+        qmd_native_failure: true, node_args: node_args
+      )
+
+      assert status.success?, err
+      assert_includes err, "qmd native SQLite health check failed"
+      assert_includes File.binread(node_args), "better-sqlite3"
+      refute_path_exists File.join(dir, "bin", "qmd")
+    end
+  end
+
+  def test_qmd_managed_link_refresh_does_not_depend_on_readlink_dash_f
+    Dir.mktmpdir("hive-installer-qmd-readlink") do |dir|
+      qmd_bin = File.join(dir, "prefix", "hive", "qmd", "bin", "qmd")
+      qmd_link = File.join(dir, "bin", "qmd")
+      FileUtils.mkdir_p(File.dirname(qmd_bin))
+      FileUtils.mkdir_p(File.dirname(qmd_link))
+      File.symlink(qmd_bin, qmd_link)
+
+      _out, err, status = run_installer(
+        dir, "none", install_qmd: true, readlink_f_failure: true
+      )
+
+      assert status.success?, err
+      refute_includes err, "existing qmd"
+      assert_equal qmd_bin, File.realpath(qmd_link)
+    end
+  end
+
+  def test_qmd_install_preserves_an_unowned_user_launcher
+    Dir.mktmpdir("hive-installer-unowned-qmd") do |dir|
+      qmd_link = File.join(dir, "bin", "qmd")
+      FileUtils.mkdir_p(File.dirname(qmd_link))
+      unowned = "#!/bin/sh\nprintf 'operator qmd\\n'\n"
+      write_executable(qmd_link, unowned)
+
+      _out, err, status = run_installer(dir, "none", install_qmd: true)
+
+      assert status.success?, err
+      assert_equal unowned, File.binread(qmd_link)
+      refute File.symlink?(qmd_link)
+      assert_includes err, "existing qmd"
+    end
+  end
+
   private
+
+  def assert_optional_qmd_failure(expected_warning:, **options)
+    Dir.mktmpdir("hive-installer-qmd-optional-failure") do |dir|
+      _out, err, status = run_installer(dir, "none", install_qmd: true, **options)
+
+      assert status.success?, err
+      assert_includes err, expected_warning
+      refute_path_exists File.join(dir, "bin", "qmd")
+      assert_empty Dir.glob(File.join(dir, "prefix", "hive", ".qmd-stage.*"))
+    end
+  end
 
   def assert_launcher_rollback(failure, expected_error)
     Dir.mktmpdir("hive-installer-rollback") do |dir|
@@ -187,21 +484,43 @@ class InstallScriptTest < Minitest::Test
     end
   end
 
-  def run_installer(dir, failure, hive_version: "v0.0.0", cosign_args: nil)
+  def run_installer(dir, failure, hive_version: "v0.0.0", cosign_args: nil,
+                    hive_prefix: nil, chdir: nil, install_qmd: false,
+                    qmd_package: nil, qmd_rebuild_failure: false,
+                    qmd_native_failure: false, npm_args: nil, node_args: nil,
+                    readlink_f_failure: false, qmd_integrity: :fixture,
+                    qmd_pack_failure: false, qmd_install_failure: false,
+                    qmd_missing_bin: false, qmd_version_failure: false,
+                    qmd_hang: nil, qmd_timeout_seconds: nil)
     fake_bin = create_installer_fakes(dir)
     env = {
       "PATH" => "#{fake_bin}:/usr/bin:/bin",
       "HOME" => File.join(dir, "home"),
-      "HIVE_PREFIX" => File.join(dir, "prefix"),
+      "HIVE_PREFIX" => hive_prefix || File.join(dir, "prefix"),
       "XDG_BIN_HOME" => File.join(dir, "bin"),
       "HIVE_VERSION" => hive_version,
-      "HIVE_INSTALL_QMD" => "0",
+      "HIVE_INSTALL_QMD" => install_qmd ? "1" : "0",
+      "HIVE_QMD_NPM_PACKAGE" => qmd_package,
+      "HIVE_QMD_NPM_INTEGRITY" => qmd_integrity == :fixture ?
+        (install_qmd ? QMD_TARBALL_INTEGRITY : nil) : qmd_integrity,
+      "HIVE_QMD_TIMEOUT_SECONDS" => qmd_timeout_seconds&.to_s,
       "HIVE_INSTALL_TEST_FAILURE" => failure,
-      "HIVE_INSTALL_TEST_COSIGN_ARGS" => cosign_args
+      "HIVE_INSTALL_TEST_COSIGN_ARGS" => cosign_args,
+      "HIVE_INSTALL_TEST_QMD_REBUILD_FAILURE" => qmd_rebuild_failure ? "1" : nil,
+      "HIVE_INSTALL_TEST_QMD_NATIVE_FAILURE" => qmd_native_failure ? "1" : nil,
+      "HIVE_INSTALL_TEST_NPM_ARGS" => npm_args,
+      "HIVE_INSTALL_TEST_NODE_ARGS" => node_args,
+      "HIVE_INSTALL_TEST_READLINK_F_FAILURE" => readlink_f_failure ? "1" : nil,
+      "HIVE_INSTALL_TEST_QMD_PACK_FAILURE" => qmd_pack_failure ? "1" : nil,
+      "HIVE_INSTALL_TEST_QMD_INSTALL_FAILURE" => qmd_install_failure ? "1" : nil,
+      "HIVE_INSTALL_TEST_QMD_MISSING_BIN" => qmd_missing_bin ? "1" : nil,
+      "HIVE_INSTALL_TEST_QMD_VERSION_FAILURE" => qmd_version_failure ? "1" : nil,
+      "HIVE_INSTALL_TEST_QMD_HANG" => qmd_hang
     }.compact
     Open3.capture3(
       env,
-      "/bin/bash", INSTALL_SCRIPT
+      "/bin/bash", INSTALL_SCRIPT,
+      **({ chdir: chdir }.compact)
     )
   end
 
@@ -256,8 +575,8 @@ class InstallScriptTest < Minitest::Test
       #!/bin/sh
       case "$*" in
         *'print RUBY_VERSION'*) printf '3.4.7' ;;
+        *) exec /usr/bin/ruby "$@" ;;
       esac
-      exit 0
     SH
     write_executable(File.join(fake_bin, "gem"), <<~'SH')
       #!/bin/bash
@@ -309,6 +628,72 @@ class InstallScriptTest < Minitest::Test
         exit 76
       fi
       exec /usr/bin/ln "$@"
+    SH
+    write_executable(File.join(fake_bin, "npm"), <<~'SH')
+      #!/bin/bash
+      if [[ -n "${HIVE_INSTALL_TEST_NPM_ARGS:-}" ]]; then
+        printf '%s\n' "$*" >> "$HIVE_INSTALL_TEST_NPM_ARGS"
+      fi
+      case "${1:-}" in
+        pack)
+          [[ "${HIVE_INSTALL_TEST_QMD_HANG:-}" == "pack" ]] && /usr/bin/sleep 5
+          [[ "${HIVE_INSTALL_TEST_QMD_PACK_FAILURE:-}" == "1" ]] && exit 41
+          destination=""
+          while [[ $# -gt 0 ]]; do
+            if [[ "$1" == "--pack-destination" ]]; then
+              shift
+              destination="$1"
+            fi
+            shift
+          done
+          filename="tobilu-qmd-fixture.tgz"
+          printf 'fixture qmd tarball\n' > "$destination/$filename"
+          printf '[{"filename":"%s"}]\n' "$filename"
+          ;;
+        install)
+          [[ "${HIVE_INSTALL_TEST_QMD_HANG:-}" == "install" ]] && /usr/bin/sleep 5
+          [[ "${HIVE_INSTALL_TEST_QMD_INSTALL_FAILURE:-}" == "1" ]] && exit 42
+          prefix=""
+          while [[ $# -gt 0 ]]; do
+            if [[ "$1" == "--prefix" ]]; then
+              shift
+              prefix="$1"
+            fi
+            shift
+          done
+          mkdir -p "$prefix/lib/node_modules/@tobilu/qmd/node_modules/better-sqlite3"
+          printf '{"name":"@tobilu/qmd"}\n' > "$prefix/lib/node_modules/@tobilu/qmd/package.json"
+          [[ "${HIVE_INSTALL_TEST_QMD_MISSING_BIN:-}" == "1" ]] && exit 0
+          mkdir -p "$prefix/bin"
+          cat > "$prefix/bin/qmd" <<'QMD'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  [ "${HIVE_INSTALL_TEST_QMD_VERSION_FAILURE:-}" = "1" ] && exit 44
+  printf 'qmd 2.5.3\n'
+fi
+QMD
+          chmod 755 "$prefix/bin/qmd"
+          ;;
+        rebuild)
+          [[ "${HIVE_INSTALL_TEST_QMD_REBUILD_FAILURE:-}" == "1" ]] && exit 42
+          exit 0
+          ;;
+      esac
+    SH
+    write_executable(File.join(fake_bin, "node"), <<~'SH')
+      #!/bin/bash
+      if [[ -n "${HIVE_INSTALL_TEST_NODE_ARGS:-}" ]]; then
+        printf '%s\n' "$*" > "$HIVE_INSTALL_TEST_NODE_ARGS"
+      fi
+      [[ "${HIVE_INSTALL_TEST_QMD_NATIVE_FAILURE:-}" == "1" ]] && exit 43
+      exit 0
+    SH
+    write_executable(File.join(fake_bin, "readlink"), <<~'SH')
+      #!/bin/bash
+      if [[ "${HIVE_INSTALL_TEST_READLINK_F_FAILURE:-}" == "1" && "${1:-}" == "-f" ]]; then
+        exit 1
+      fi
+      exec /usr/bin/readlink "$@"
     SH
     fake_bin
   end

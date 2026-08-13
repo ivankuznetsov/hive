@@ -91,19 +91,74 @@ The bash installer installs QMD automatically when npm is available. For Homebre
 
 ```bash
 if command -v npm >/dev/null 2>&1; then
-  qmd_prefix="${XDG_DATA_HOME:-$HOME/.local/share}/hive/qmd"
-  qmd_bin_home="${XDG_BIN_HOME:-$HOME/.local/bin}"
-  mkdir -p "$qmd_bin_home"
-  npm install --global --prefix "$qmd_prefix" --no-audit --no-fund "${HIVE_QMD_NPM_PACKAGE:-@tobilu/qmd}"
-  npm rebuild --global --prefix "$qmd_prefix" better-sqlite3 >/dev/null 2>&1 || true
-  ln -sfn "$qmd_prefix/bin/qmd" "$qmd_bin_home/qmd"
-  "$qmd_prefix/bin/qmd" --version
+  (
+    set -euo pipefail
+    qmd_parent="${XDG_DATA_HOME:-$HOME/.local/share}/hive"
+    qmd_prefix="$qmd_parent/qmd"
+    qmd_bin_home="${XDG_BIN_HOME:-$HOME/.local/bin}"
+    qmd_package="@tobilu/qmd@2.5.3"
+    qmd_integrity="sha512-wUKc4pSPDbgs7mV7JYE8/Qj1pNXXatJFV8byTT/T3yLaoAXheFtWu0BgSWwoWGhRkMmxl5Qyitt66NHgbMyeBA=="
+    mkdir -p "$qmd_parent" "$qmd_bin_home"
+    qmd_stage="$(mktemp -d "$qmd_parent/.qmd-stage.XXXXXX")"
+    qmd_download="$(mktemp -d)"
+    qmd_backup=""
+    cleanup_qmd_repair() {
+      rm -rf "$qmd_download" "$qmd_stage"
+      if [[ -n "$qmd_backup" && -e "$qmd_backup" && ! -e "$qmd_prefix" ]]; then
+        mv "$qmd_backup" "$qmd_prefix"
+      fi
+    }
+    trap cleanup_qmd_repair EXIT
+
+    pack_json="$(npm pack "$qmd_package" --json --pack-destination "$qmd_download")"
+    qmd_tarball="$(printf '%s' "$pack_json" | ruby -rjson -e '
+      filename = JSON.parse(STDIN.read).fetch(0).fetch("filename")
+      abort "unsafe npm pack filename" unless File.basename(filename) == filename && filename.end_with?(".tgz")
+      print File.join(ARGV.fetch(0), filename)
+    ' "$qmd_download")"
+    actual_integrity="$(ruby -rdigest -rbase64 -e '
+      digest = Digest::SHA512.file(ARGV.fetch(0)).digest
+      print "sha512-", Base64.strict_encode64(digest)
+    ' "$qmd_tarball")"
+    [[ "$actual_integrity" == "$qmd_integrity" ]]
+
+    npm install --global --prefix "$qmd_stage" --no-audit --no-fund "$qmd_tarball"
+    npm rebuild --global --prefix "$qmd_stage" better-sqlite3
+    "$qmd_stage/bin/qmd" --version
+    node -e '
+      const { createRequire } = require("node:module");
+      const qmdRequire = createRequire(process.argv[1]);
+      const Database = qmdRequire("better-sqlite3");
+      const db = new Database(":memory:");
+      db.prepare("SELECT 1").get();
+      db.close();
+    ' "$qmd_stage/lib/node_modules/@tobilu/qmd/package.json"
+
+    qmd_backup="$(mktemp -d "$qmd_parent/.qmd-backup.XXXXXX")"
+    rmdir "$qmd_backup"
+    [[ ! -e "$qmd_prefix" ]] || mv "$qmd_prefix" "$qmd_backup"
+    mv "$qmd_stage" "$qmd_prefix"
+    qmd_stage=""
+    rm -rf "$qmd_backup"
+    qmd_backup=""
+    qmd_link="$qmd_bin_home/qmd"
+    managed_qmd="$(ruby -e 'print File.realpath(ARGV.fetch(0))' "$qmd_prefix/bin/qmd")"
+    if [[ ! -e "$qmd_link" && ! -L "$qmd_link" ]]; then
+      ln -s "$qmd_prefix/bin/qmd" "$qmd_link"
+    elif [[ -L "$qmd_link" ]] && \
+      [[ "$(ruby -e 'begin; print File.realpath(ARGV.fetch(0)); rescue SystemCallError; end' "$qmd_link")" == "$managed_qmd" ]]; then
+      ln -sfn "$qmd_prefix/bin/qmd" "$qmd_link"
+    else
+      printf 'existing qmd at %s; leaving it unchanged\n' "$qmd_link" >&2
+    fi
+    "$qmd_prefix/bin/qmd" --version
+  )
 else
   echo "qmd install skipped: npm is missing; install Node.js/npm and rerun this section" >&2
 fi
 ```
 
-Two env knobs tune this step: `HIVE_QMD_BIN` is a runtime override pointing at an executable `qmd` (read by the generated wiki scripts and `hive doctor` when PATH or the managed install path is not enough), and `HIVE_QMD_NPM_PACKAGE` overrides the npm package spec used for the install (defaults to `@tobilu/qmd`).
+`HIVE_QMD_BIN` is a runtime override pointing at an executable `qmd` (read by the generated wiki scripts and `hive doctor` when PATH or the managed install path is not enough). The bash installer pins QMD to `@tobilu/qmd@2.5.3`, downloads that exact tarball once, and verifies its sha512 integrity locally before install. `HIVE_QMD_NPM_PACKAGE` may select only another exact `@tobilu/qmd@X.Y.Z` version and then requires the matching `HIVE_QMD_NPM_INTEGRITY`; arbitrary package names, URLs, tags, and ranges are rejected before npm runs. Optional npm and Node operations time out after `HIVE_QMD_TIMEOUT_SECONDS` (default 600 seconds).
 
 Do not install Node.js/npm automatically. If npm is missing, report that Hive core is installed but QMD-backed wiki search needs Node.js/npm.
 

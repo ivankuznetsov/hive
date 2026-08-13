@@ -1,9 +1,9 @@
 ---
 title: hive update
 type: command
-source: lib/hive/commands/update.rb, lib/hive/commands/migrate_all.rb, lib/hive/install_channel.rb
+source: lib/hive/commands/update.rb, lib/hive/commands/migrate_all.rb, lib/hive/install_channel.rb, install.sh
 created: 2026-05-21
-updated: 2026-08-03
+updated: 2026-08-13
 tags: [command, install, update, migration]
 ---
 
@@ -31,7 +31,7 @@ migration command without executing either one.
 
 A missing marker means `dev`, the git-checkout fallback. Malformed markers fail closed with `Hive::ConfigError` instead of falling through to a lower-priority marker.
 
-`install.sh --prefix=<dir>` writes both `install-channel` and `install-prefix` sidecars so the bash-channel updater can re-use the original prefix without requiring `HIVE_PREFIX` to be exported again.
+`install.sh --prefix=<dir>` normalizes `<dir>` to an absolute path before it writes both `install-channel` and `install-prefix` sidecars, so the bash-channel updater can re-use relative or `~/...` caller input from any later working directory without requiring `HIVE_PREFIX` to be exported again.
 
 ## Channel actions
 

@@ -250,8 +250,9 @@ class InstallScriptTest < Minitest::Test
       calls = File.readlines(npm_args, chomp: true)
       assert_includes File.read(INSTALL_SCRIPT), 'DEFAULT_QMD_NPM_PACKAGE="@tobilu/qmd@2.5.3"'
       assert calls.any? { |line| line.start_with?("pack @tobilu/qmd@2.5.3 ") }, calls.inspect
-      assert calls.any? { |line| line.start_with?("ci --prefix ") }, calls.inspect
+      assert calls.any? { |line| line.start_with?("ci --prefix ") && line.include?("--ignore-scripts") }, calls.inspect
       refute calls.any? { |line| line.start_with?("install ") && line.include?("@tobilu/qmd@") }, calls.inspect
+      refute calls.any? { |line| line.start_with?("rebuild ") }, calls.inspect
       assert File.exist?(File.join(dir, "prefix", "hive", "qmd", "lib", "package-lock.json"))
       assert_empty Dir.glob(File.join(dir, "prefix", "hive", ".qmd-{stage,backup}.*"))
     end
@@ -300,6 +301,8 @@ class InstallScriptTest < Minitest::Test
     refute_empty registry_packages
     assert registry_packages.all? { |metadata| metadata.fetch("version").match?(/\A\d+\.\d+\.\d+/) }
     assert registry_packages.all? { |metadata| metadata.fetch("integrity").start_with?("sha512-") }
+    assert_equal "11.5.0", lock.fetch("packages").fetch("").fetch("dependencies").fetch("node-gyp")
+    assert_equal "11.5.0", packages.fetch("node_modules/node-gyp").fetch("version")
   end
 
   def test_disabled_qmd_ignores_an_unused_package_override
@@ -352,7 +355,7 @@ class InstallScriptTest < Minitest::Test
 
       _out, err, status = run_installer(
         dir, "none", install_qmd: true, npm_args: npm_args,
-        qmd_integrity: "sha512-wrong"
+        qmd_pack_tampered: true
       )
 
       assert status.success?, err
@@ -419,7 +422,7 @@ class InstallScriptTest < Minitest::Test
     end
   end
 
-  def test_default_qmd_version_rejects_malformed_integrity
+  def test_default_qmd_version_rejects_non_release_integrity
     Dir.mktmpdir("hive-installer-qmd-custom-bad-integrity") do |dir|
       npm_args = File.join(dir, "npm-args")
       _out, err, status = run_installer(
@@ -429,8 +432,44 @@ class InstallScriptTest < Minitest::Test
       )
 
       refute status.success?
-      assert_includes err, "invalid HIVE_QMD_NPM_INTEGRITY"
+      assert_includes err, "unsupported HIVE_QMD_NPM_INTEGRITY"
       refute_path_exists npm_args
+    end
+  end
+
+  def test_default_qmd_version_rejects_well_formed_non_release_integrity
+    Dir.mktmpdir("hive-installer-qmd-unlocked-integrity") do |dir|
+      npm_args = File.join(dir, "npm-args")
+      alternate = "sha512-#{Base64.strict_encode64(Digest::SHA512.digest("not the release tarball"))}"
+
+      _out, err, status = run_installer(
+        dir, "none", install_qmd: true,
+        qmd_integrity: alternate, npm_args: npm_args
+      )
+
+      refute status.success?
+      assert_includes err, "release dependency lock requires the published @tobilu/qmd@2.5.3 integrity"
+      refute_path_exists npm_args
+    end
+  end
+
+  def test_qmd_native_build_uses_locked_node_gyp_local_headers_and_offline_mode
+    Dir.mktmpdir("hive-installer-qmd-locked-native-build") do |dir|
+      npm_args = File.join(dir, "npm-args")
+      node_args = File.join(dir, "node-args")
+
+      _out, err, status = run_installer(
+        dir, "none", install_qmd: true,
+        npm_args: npm_args, node_args: node_args
+      )
+
+      assert status.success?, err
+      calls = File.readlines(node_args, chomp: true)
+      build = calls.find { |line| line.include?("node_modules/node-gyp/bin/node-gyp.js") }
+      refute_nil build, calls.inspect
+      assert_includes build, "--directory="
+      assert_includes build, "--nodedir="
+      refute File.readlines(npm_args, chomp: true).any? { |line| line.start_with?("rebuild ") }
     end
   end
 
@@ -536,9 +575,22 @@ class InstallScriptTest < Minitest::Test
                     qmd_native_failure: false, npm_args: nil, node_args: nil,
                     readlink_f_failure: false, qmd_integrity: :fixture,
                     qmd_pack_failure: false, qmd_install_failure: false,
+                    qmd_pack_tampered: false,
                     qmd_missing_bin: false, qmd_version_failure: false,
                     qmd_hang: nil, qmd_timeout_seconds: nil)
     fake_bin = create_installer_fakes(dir)
+    install_script = INSTALL_SCRIPT
+    if install_qmd
+      install_script = File.join(dir, "install.sh")
+      script = File.binread(INSTALL_SCRIPT).sub(
+        /DEFAULT_QMD_NPM_INTEGRITY="sha512-[A-Za-z0-9+\/=]+"/,
+        "DEFAULT_QMD_NPM_INTEGRITY=\"#{QMD_TARBALL_INTEGRITY}\""
+      )
+      File.binwrite(install_script, script)
+    end
+    node_header_root = File.join(dir, "node-prefix")
+    FileUtils.mkdir_p(File.join(node_header_root, "include", "node"))
+    File.binwrite(File.join(node_header_root, "include", "node", "node.h"), "/* fixture */\n")
     env = {
       "PATH" => "#{fake_bin}:/usr/bin:/bin",
       "HOME" => File.join(dir, "home"),
@@ -547,8 +599,7 @@ class InstallScriptTest < Minitest::Test
       "HIVE_VERSION" => hive_version,
       "HIVE_INSTALL_QMD" => install_qmd ? "1" : "0",
       "HIVE_QMD_NPM_PACKAGE" => qmd_package,
-      "HIVE_QMD_NPM_INTEGRITY" => qmd_integrity == :fixture ?
-        (install_qmd ? QMD_TARBALL_INTEGRITY : nil) : qmd_integrity,
+      "HIVE_QMD_NPM_INTEGRITY" => qmd_integrity.is_a?(String) ? qmd_integrity : nil,
       "HIVE_QMD_TIMEOUT_SECONDS" => qmd_timeout_seconds&.to_s,
       "HIVE_INSTALL_TEST_FAILURE" => failure,
       "HIVE_INSTALL_TEST_COSIGN_ARGS" => cosign_args,
@@ -556,8 +607,10 @@ class InstallScriptTest < Minitest::Test
       "HIVE_INSTALL_TEST_QMD_NATIVE_FAILURE" => qmd_native_failure ? "1" : nil,
       "HIVE_INSTALL_TEST_NPM_ARGS" => npm_args,
       "HIVE_INSTALL_TEST_NODE_ARGS" => node_args,
+      "HIVE_INSTALL_TEST_NODE_HEADER_ROOT" => node_header_root,
       "HIVE_INSTALL_TEST_READLINK_F_FAILURE" => readlink_f_failure ? "1" : nil,
       "HIVE_INSTALL_TEST_QMD_PACK_FAILURE" => qmd_pack_failure ? "1" : nil,
+      "HIVE_INSTALL_TEST_QMD_PACK_TAMPERED" => qmd_pack_tampered ? "1" : nil,
       "HIVE_INSTALL_TEST_QMD_INSTALL_FAILURE" => qmd_install_failure ? "1" : nil,
       "HIVE_INSTALL_TEST_QMD_MISSING_BIN" => qmd_missing_bin ? "1" : nil,
       "HIVE_INSTALL_TEST_QMD_VERSION_FAILURE" => qmd_version_failure ? "1" : nil,
@@ -567,7 +620,7 @@ class InstallScriptTest < Minitest::Test
     }.compact
     Open3.capture3(
       env,
-      "/bin/bash", INSTALL_SCRIPT,
+      "/bin/bash", install_script,
       **({ chdir: chdir }.compact)
     )
   end
@@ -727,7 +780,11 @@ class InstallScriptTest < Minitest::Test
             shift
           done
           filename="tobilu-qmd-fixture.tgz"
-          printf 'fixture qmd tarball\n' > "$destination/$filename"
+          if [ "${HIVE_INSTALL_TEST_QMD_PACK_TAMPERED:-}" = "1" ]; then
+            printf 'tampered qmd tarball\n' > "$destination/$filename"
+          else
+            printf 'fixture qmd tarball\n' > "$destination/$filename"
+          fi
           printf '[{"filename":"%s"}]\n' "$filename"
           ;;
         ci)
@@ -742,7 +799,10 @@ class InstallScriptTest < Minitest::Test
             shift
           done
           mkdir -p "$prefix/node_modules/@tobilu/qmd/node_modules/better-sqlite3"
+          mkdir -p "$prefix/node_modules/better-sqlite3" "$prefix/node_modules/node-gyp/bin"
           printf '{"name":"@tobilu/qmd"}\n' > "$prefix/node_modules/@tobilu/qmd/package.json"
+          printf '{}\n' > "$prefix/node_modules/better-sqlite3/binding.gyp"
+          printf '// fixture\n' > "$prefix/node_modules/node-gyp/bin/node-gyp.js"
           [ "${HIVE_INSTALL_TEST_QMD_MISSING_BIN:-}" = "1" ] && exit 0
           mkdir -p "$prefix/node_modules/.bin"
           cat > "$prefix/node_modules/.bin/qmd" <<'QMD'
@@ -755,16 +815,20 @@ fi
 QMD
           chmod 755 "$prefix/node_modules/.bin/qmd"
           ;;
-        rebuild)
-          [ "${HIVE_INSTALL_TEST_QMD_REBUILD_FAILURE:-}" = "1" ] && exit 42
-          exit 0
-          ;;
       esac
     SH
     write_executable(File.join(fake_bin, "node"), <<~'SH')
       #!/bin/sh
       if [ -n "${HIVE_INSTALL_TEST_NODE_ARGS:-}" ]; then
-        printf '%s\n' "$*" > "$HIVE_INSTALL_TEST_NODE_ARGS"
+        printf '%s\n' "$*" >> "$HIVE_INSTALL_TEST_NODE_ARGS"
+      fi
+      if [ "${1:-}" = "-e" ] && printf '%s' "${2:-}" | /usr/bin/grep -q 'include.*node.*node.h'; then
+        printf '%s' "$HIVE_INSTALL_TEST_NODE_HEADER_ROOT"
+        exit 0
+      fi
+      if printf '%s' "$*" | /usr/bin/grep -q 'node_modules/node-gyp/bin/node-gyp.js'; then
+        [ "${HIVE_INSTALL_TEST_QMD_REBUILD_FAILURE:-}" = "1" ] && exit 42
+        exit 0
       fi
       [ "${HIVE_INSTALL_TEST_QMD_NATIVE_FAILURE:-}" = "1" ] && exit 43
       exit 0

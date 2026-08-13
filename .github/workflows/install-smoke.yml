@@ -297,22 +297,14 @@ jobs:
           chmod +x "$fakebin/curl"
           printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/cosign"
           chmod +x "$fakebin/cosign"
+          real_npm="$(command -v npm)"
+          real_node="$(command -v node)"
           cat > "$fakebin/npm" <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
           case "${1:-}" in
             pack)
-              destination=""
-              while [[ $# -gt 0 ]]; do
-                if [[ "$1" == "--pack-destination" ]]; then
-                  shift
-                  destination="$1"
-                fi
-                shift
-              done
-              filename="tobilu-qmd-fixture.tgz"
-              printf 'fixture qmd tarball\n' > "$destination/$filename"
-              printf '[{"filename":"%s"}]\n' "$filename"
+              exec "$HIVE_INSTALL_TEST_REAL_NODE" "$HIVE_INSTALL_TEST_REAL_NPM" "$@"
               ;;
             ci)
               prefix=""
@@ -325,15 +317,15 @@ jobs:
               done
               [[ -n "$prefix" ]] || { echo "missing --prefix" >&2; exit 1; }
               mkdir -p "$prefix/node_modules/.bin" "$prefix/node_modules/@tobilu/qmd"
+              mkdir -p "$prefix/node_modules/better-sqlite3" "$prefix/node_modules/node-gyp/bin"
               printf '{"name":"@tobilu/qmd"}\n' > "$prefix/node_modules/@tobilu/qmd/package.json"
+              printf '{}\n' > "$prefix/node_modules/better-sqlite3/binding.gyp"
+              printf '// fixture\n' > "$prefix/node_modules/node-gyp/bin/node-gyp.js"
               cat > "$prefix/node_modules/.bin/qmd" <<'QMD'
           #!/usr/bin/env bash
           echo "qmd fixture"
           QMD
               chmod +x "$prefix/node_modules/.bin/qmd"
-              ;;
-            rebuild)
-              exit 0
               ;;
             *)
               echo "unexpected npm command: ${1:-}" >&2
@@ -342,15 +334,23 @@ jobs:
           esac
           SH
           chmod +x "$fakebin/npm"
-          printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/node"
+          cat > "$fakebin/node" <<'SH'
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "-e" && "${2:-}" == *'include", "node", "node.h'* ]]; then
+            printf '%s' "$HIVE_INSTALL_TEST_NODE_HEADER_ROOT"
+          fi
+          exit 0
+          SH
           chmod +x "$fakebin/node"
           apache_bin="$fixtures/apache-bin"
           xdg_bin="$fixtures/xdg-bin"
           xdg_data="$fixtures/xdg-data"
-          mkdir -p "$apache_bin" "$xdg_bin" "$xdg_data"
+          node_prefix="$fixtures/node-prefix"
+          mkdir -p "$apache_bin" "$xdg_bin" "$xdg_data" "$node_prefix/include/node"
+          printf '/* fixture */\n' > "$node_prefix/include/node/node.h"
           printf '#!/usr/bin/env bash\necho "Apache Hive 3.1.0"\n' > "$apache_bin/hive"
           chmod +x "$apache_bin/hive"
-          FIXTURES="$fixtures" HIVE_DAEMON_ENV_CAPTURE="$fixtures/invoked-bin" HIVE_QMD_NPM_INTEGRITY="sha512-FuCVEbmVUamL/u3RGidreIgEAntoYnykur2a9tOPQm0QJmd+TIwGqoiAibuzXTJ/i1WKqy+BXh4498MOBL+DHA==" XDG_BIN_HOME="$xdg_bin" XDG_DATA_HOME="$xdg_data" PATH="$fakebin:$apache_bin:$xdg_bin:$PATH" bash install.sh --version=v0.1.0 >"$fixtures/install.out" 2>"$fixtures/install.err"
+          FIXTURES="$fixtures" HIVE_DAEMON_ENV_CAPTURE="$fixtures/invoked-bin" HIVE_INSTALL_TEST_REAL_NPM="$real_npm" HIVE_INSTALL_TEST_REAL_NODE="$real_node" HIVE_INSTALL_TEST_NODE_HEADER_ROOT="$node_prefix" XDG_BIN_HOME="$xdg_bin" XDG_DATA_HOME="$xdg_data" PATH="$fakebin:$apache_bin:$xdg_bin:$PATH" bash install.sh --version=v0.1.0 >"$fixtures/install.out" 2>"$fixtures/install.err"
           grep -q "daemon autostart enabled via hive daemon install (written)" "$fixtures/install.out"
           grep -qx "$xdg_bin/hive" "$fixtures/invoked-bin"
           test -L "$xdg_bin/hv"

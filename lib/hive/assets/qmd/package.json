@@ -2,6 +2,7 @@
   "name": "hive-managed-qmd",
   "private": true,
   "dependencies": {
-    "@tobilu/qmd": "file:qmd.tgz"
+    "@tobilu/qmd": "file:qmd.tgz",
+    "node-gyp": "11.5.0"
   }
 }

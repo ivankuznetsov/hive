@@ -10,7 +10,7 @@ INSTALL_QMD="${HIVE_INSTALL_QMD:-1}"
 DEFAULT_QMD_NPM_PACKAGE="@tobilu/qmd@2.5.3"
 DEFAULT_QMD_NPM_INTEGRITY="sha512-wUKc4pSPDbgs7mV7JYE8/Qj1pNXXatJFV8byTT/T3yLaoAXheFtWu0BgSWwoWGhRkMmxl5Qyitt66NHgbMyeBA=="
 QMD_NPM_PACKAGE="${HIVE_QMD_NPM_PACKAGE:-${DEFAULT_QMD_NPM_PACKAGE}}"
-QMD_NPM_INTEGRITY="${HIVE_QMD_NPM_INTEGRITY:-${DEFAULT_QMD_NPM_INTEGRITY}}"
+QMD_NPM_INTEGRITY="${DEFAULT_QMD_NPM_INTEGRITY}"
 QMD_TIMEOUT_SECONDS="${HIVE_QMD_TIMEOUT_SECONDS:-600}"
 
 usage() {
@@ -38,8 +38,8 @@ QMD env knobs:
   HIVE_QMD_NPM_PACKAGE  QMD package spec. Must match the release-owned
                         dependency lock: \`${DEFAULT_QMD_NPM_PACKAGE}\`.
   HIVE_QMD_NPM_INTEGRITY
-                        QMD tarball integrity. Must match the release-owned
-                        dependency lock.
+                        Deprecated compatibility input. When set, it must
+                        equal the release-owned integrity exactly.
   HIVE_QMD_TIMEOUT_SECONDS
                         Timeout for each optional npm/QMD/Node subprocess;
                         defaults to ${QMD_TIMEOUT_SECONDS} seconds.
@@ -81,8 +81,9 @@ validate_inputs() {
   if [[ "$QMD_NPM_PACKAGE" != "$DEFAULT_QMD_NPM_PACKAGE" ]]; then
     die "unsupported HIVE_QMD_NPM_PACKAGE '${QMD_NPM_PACKAGE}'; release dependency lock requires ${DEFAULT_QMD_NPM_PACKAGE}"
   fi
-  if ! [[ "$QMD_NPM_INTEGRITY" =~ ^sha512-[A-Za-z0-9+/]+={0,2}$ ]]; then
-    die "invalid HIVE_QMD_NPM_INTEGRITY; expected sha512-base64"
+  if [[ -n "${HIVE_QMD_NPM_INTEGRITY:-}" &&
+        "$HIVE_QMD_NPM_INTEGRITY" != "$DEFAULT_QMD_NPM_INTEGRITY" ]]; then
+    die "unsupported HIVE_QMD_NPM_INTEGRITY; release dependency lock requires the published ${DEFAULT_QMD_NPM_PACKAGE} integrity"
   fi
   if ! [[ "$QMD_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
     die "invalid HIVE_QMD_TIMEOUT_SECONDS '${QMD_TIMEOUT_SECONDS}'; expected positive integer seconds"
@@ -404,7 +405,7 @@ qmd_command_failed() {
 install_qmd() {
   local qmd_home qmd_bin qmd_link qmd_stage qmd_stage_bin qmd_package_json
   local qmd_download_dir qmd_pack_json qmd_tarball qmd_tarball_integrity qmd_backup
-  local qmd_lock_root qmd_install_root
+  local qmd_lock_root qmd_install_root qmd_node_header_root qmd_node_gyp qmd_better_sqlite
   local existing_qmd_link active_qmd active_qmd_canon managed_qmd_canon qmd_version rc
   local qmd_had_original=0
   qmd_home="${data_home}/qmd"
@@ -472,7 +473,7 @@ install_qmd() {
   cp "$qmd_tarball" "${qmd_install_root}/qmd.tgz"
   log "qmd: installing verified package and locked dependency closure into staging"
   if run_with_timeout "$QMD_TIMEOUT_SECONDS" \
-    npm ci --prefix "$qmd_install_root" --no-audit --no-fund; then
+    npm ci --prefix "$qmd_install_root" --ignore-scripts --no-audit --no-fund; then
     :
   else
     rc=$?
@@ -483,11 +484,38 @@ install_qmd() {
   rm -f "${qmd_install_root}/qmd.tgz"
   ln -s "../lib/node_modules/.bin/qmd" "$qmd_stage_bin"
 
-  # A prior managed tree may carry a native better-sqlite3 build for an older
-  # Node ABI. Rebuild explicitly so `hive update` repairs the
-  # NODE_MODULE_VERSION mismatch class of failures.
+  # Lifecycle scripts are disabled above so dependency packages cannot fetch
+  # mutable prebuilds outside package-lock integrity. Build better-sqlite3
+  # directly from its verified package source with the locked node-gyp and the
+  # local Node installation's headers. Supplying --nodedir and offline mode
+  # prevents node-gyp from downloading a second, unpinned input.
+  if qmd_node_header_root="$(run_with_timeout "$QMD_TIMEOUT_SECONDS" node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const prefix = path.dirname(path.dirname(process.execPath));
+    const candidates = [prefix, path.dirname(prefix), "/usr"];
+    const root = candidates.find(candidate => fs.existsSync(path.join(candidate, "include", "node", "node.h")));
+    if (!root) process.exit(1);
+    process.stdout.write(root);
+  ')"; then
+    :
+  else
+    rc=$?
+    qmd_command_failed "local Node header discovery" "$rc"
+    rm -rf "$qmd_stage"
+    return 0
+  fi
+  qmd_node_gyp="${qmd_install_root}/node_modules/node-gyp/bin/node-gyp.js"
+  qmd_better_sqlite="${qmd_install_root}/node_modules/better-sqlite3"
+  if [[ ! -f "$qmd_node_gyp" || ! -f "${qmd_better_sqlite}/binding.gyp" ]]; then
+    warn "qmd locked native-build inputs are unavailable; $(qmd_repair_hint)"
+    rm -rf "$qmd_stage"
+    return 0
+  fi
   if run_with_timeout "$QMD_TIMEOUT_SECONDS" \
-    npm rebuild --prefix "$qmd_install_root" better-sqlite3; then
+    env npm_config_offline=true npm_config_nodedir="$qmd_node_header_root" \
+    node "$qmd_node_gyp" rebuild --release --directory="$qmd_better_sqlite" \
+    --nodedir="$qmd_node_header_root"; then
     :
   else
     rc=$?
@@ -635,8 +663,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "dry run: would run ${gem_home}/bin/hive migrate --all before daemon startup"
   log "dry run: would run ${link_path} daemon install to enable daemon autostart"
   if qmd_install_enabled; then
-    log "dry run: would npm ci the release-owned QMD dependency lock under ${data_home}/qmd"
-    log "dry run: would npm rebuild --prefix ${data_home}/qmd/lib better-sqlite3"
+    log "dry run: would npm ci --ignore-scripts the release-owned QMD dependency lock under ${data_home}/qmd"
+    log "dry run: would build better-sqlite3 from locked source with local Node headers"
     log "dry run: would link ${bin_home}/qmd"
   else
     log "dry run: would skip qmd install (HIVE_INSTALL_QMD=${INSTALL_QMD})"

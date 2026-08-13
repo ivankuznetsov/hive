@@ -139,12 +139,6 @@ module Hive
         @occurrence_store.rebuild_recovery_index!
       end
 
-      def each_occurrence(&block)
-        return @occurrence_store.each_record unless block
-
-        @occurrence_store.each_record(&block)
-      end
-
       def finalize_occurrence!(capture:, event: nil, evidence_store:,
                                event_publisher: nil, project_entry: nil,
                                now: Time.now.utc)

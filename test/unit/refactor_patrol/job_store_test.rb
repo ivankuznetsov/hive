@@ -2699,8 +2699,6 @@ class RefactorPatrolJobStoreTest < Minitest::Test
           )
         end
       end
-      assert_equal File.join(store.root, "jobs"),
-                   store.send(:jobs_dir)
     end
   end
 

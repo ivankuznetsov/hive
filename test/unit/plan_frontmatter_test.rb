@@ -11,8 +11,8 @@ class PlanFrontmatterTest < Minitest::Test
 
       assert_equal :absent, missing.status
       assert_equal :absent, plain.status
-      refute missing.depends_on_present?
-      refute plain.depends_on_present?
+      assert_nil missing.depends_on
+      assert_nil plain.depends_on
     end
   end
 
@@ -21,14 +21,13 @@ class PlanFrontmatterTest < Minitest::Test
 
     assert_equal :ok, result.status
     assert_equal "research", result.data["execution_mode"]
-    refute result.depends_on_present?
+    assert_nil result.depends_on
   end
 
   def test_matching_scalar_dependency_is_normalized
     result = read_plan("---\ndepends_on: analytics:base-task\n---\n# Plan\n")
 
     assert_equal :ok, result.status
-    assert result.depends_on_present?
     assert_equal "analytics:base-task", result.depends_on.to_s
   end
 

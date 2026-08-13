@@ -191,13 +191,10 @@ module Hive
     # Managed workflow runners have a second enforcement boundary in
     # WorkflowPackage::RuntimePolicy. That compiler needs the same normalized
     # permission scope without prematurely applying the legacy Claude-only
-    # runner gate above. Keeping this as a separate entrypoint prevents an
-    # ordinary project stage from treating a non-Claude profile as scoped
-    # merely because the descriptor parsed.
-    def resolve_managed(spec, task_folder:, stage: nil)
-      resolve_managed_spec(spec, task_folder: task_folder, stage: stage).first
-    end
-
+    # runner gate above. Returning both the scope and parsed spec lets that
+    # boundary validate portable profile support without making an ordinary
+    # project stage treat a non-Claude profile as scoped merely because the
+    # descriptor parsed.
     def resolve_managed_spec(spec, task_folder:, stage: nil)
       parsed = parse_spec(spec, stage: stage)
       [ resolve_parsed(parsed, task_folder: task_folder, stage: stage), parsed.freeze ].freeze

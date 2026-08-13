@@ -35,7 +35,7 @@ class ReleaseContractTest < Minitest::Test
     releasing = read("docs/RELEASING.md")
     dependencies = read("wiki/dependencies.md")
     assert_includes releasing, "the source version is #{Hive::VERSION}"
-    assert_includes releasing, "latest-stable baseline remains v0.7.0"
+    assert_includes releasing, "latest-stable baseline remains v0.7.1"
     assert_includes releasing, "must not report\n`candidate_not_newer`"
     assert_includes dependencies,
                     "The v#{Hive::VERSION} release-prep checkout is `#{Hive::VERSION}`"

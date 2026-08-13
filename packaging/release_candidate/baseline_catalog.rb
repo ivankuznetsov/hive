@@ -89,12 +89,6 @@ module HiveReleaseCandidate
         raise(UsageError, "unknown release baseline #{id.inspect}")
     end
 
-    def all_artifacts
-      entries.flat_map do |entry|
-        entry.packages.values.map { |package| package.fetch("artifact") }
-      end
-    end
-
     def package_requirements
       entries.flat_map do |entry|
         entry.packages.map do |role, package|

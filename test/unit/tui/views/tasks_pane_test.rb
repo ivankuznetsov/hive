@@ -20,6 +20,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 depends_on: nil, blocked_by: nil, dependency_stage: nil,
                 blocked: false, admission_error: nil,
                 implementation_identity: nil,
+                auto_residue: nil,
                 suggested: "hive plan #{slug} --from 2-brainstorm")
     {
       "slug" => slug,
@@ -42,6 +43,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       "claude_pid" => nil,
       "claude_pid_alive" => nil,
       "implementation_identity" => implementation_identity,
+      "auto_residue" => auto_residue,
       "action" => action,
       "action_label" => action_label,
       "suggested_command" => suggested
@@ -309,6 +311,24 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_equal "Ready to plan ⏸ blocked by base-task (7-artifacts)",
                  Hive::Tui::Views::TasksPane.status_label(row),
                  "a blocked row must append the dependency block to its action-state label"
+  end
+
+  def test_status_label_surfaces_current_run_auto_residue_count
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "residue-task",
+          auto_residue: {
+            "commits" => 2, "path_count" => 3, "paths" => [ "a.rb", "b.rb", "c.rb" ],
+            "latest_head" => "abc", "latest_reason" => "stage_exit",
+            "latest_at" => "2026-08-13T00:00:00Z"
+          }
+        )
+      ] }
+    ])
+
+    assert_equal "Ready to plan auto-residue:2",
+                 Hive::Tui::Views::TasksPane.status_label(snap.projects.first.rows.first)
   end
 
   def test_admission_error_shows_reason_and_safe_correction_without_wait_label

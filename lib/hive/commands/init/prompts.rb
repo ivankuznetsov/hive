@@ -260,8 +260,7 @@ module Hive
           # A closed real IO answers respond_to?(:tty?) with true but raises
           # IOError on #tty?; degrade to the non-interactive defaults path
           # (hive init under a closed stdin: daemon / CI) instead of
-          # escaping #collect with an IOError. Shared guard with
-          # Setup::BackendPrompt#interactive?.
+          # escaping #collect with an IOError.
           false
         end
 

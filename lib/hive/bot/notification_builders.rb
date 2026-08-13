@@ -8,6 +8,7 @@ require "hive/bot/row_actions"
 require "hive/bot/title_formatter"
 require "hive/markers"
 require "hive/recovery"
+require "hive/secret_patterns"
 require "hive/task_action"
 require "hive/workflows"
 
@@ -70,18 +71,18 @@ module Hive
                           project: row.project, slug: row.slug, stage: row.stage,
                           marker: row.marker, action: row.action)
           end
-          return nil
+          return auto_residue_notification(row)
         end
 
-        if READY_ACTIONS.include?(row.action)
-          stage_approval(row)
-        elsif row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
-          needs_input(row)
-        elsif recovery?(row)
-          recovery(row, logger: logger)
-        else
-          nil
-        end
+        notification =
+          if READY_ACTIONS.include?(row.action)
+            stage_approval(row)
+          elsif row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+            needs_input(row)
+          elsif recovery?(row)
+            recovery(row, logger: logger)
+          end
+        append_auto_residue(notification, row)
       end
 
       def legacy_stage_dirs?(row)
@@ -113,7 +114,41 @@ module Hive
       def fingerprint(row)
         return legacy_stage_dirs_fingerprint(row) if legacy_stage_dirs?(row)
 
-        ::Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.stage, row.marker, sorted_attr_pairs(row) ]))
+        ::Digest::SHA256.hexdigest(
+          JSON.generate([ row.project, row.slug, row.stage, row.marker, sorted_attr_pairs(row), row.auto_residue ])
+        )
+      end
+
+      def append_auto_residue(notification, row)
+        residue = auto_residue_notification(row)
+        return notification unless residue
+        return residue unless notification
+
+        separator = notification.text.empty? ? "" : "\n"
+        text = "#{notification.text}#{separator}#{auto_residue_text(row, html: notification.parse_mode == :html)}"
+        Notification.new(text: text, keyboard: notification.keyboard, parse_mode: notification.parse_mode)
+      end
+
+      def auto_residue_notification(row)
+        return nil unless auto_residue?(row)
+
+        Notification.new(text: "#{header(row)}\n#{auto_residue_text(row)}", keyboard: nil)
+      end
+
+      def auto_residue?(row)
+        row.auto_residue.is_a?(Hash) && row.auto_residue.fetch("commits", 0).to_i.positive?
+      end
+
+      def auto_residue_text(row, html: false)
+        summary = row.auto_residue
+        paths = Array(summary["paths"])
+        visible_paths = paths.first(5)
+        remainder = summary.fetch("path_count", paths.length).to_i - visible_paths.length
+        path_text = visible_paths.empty? ? "#{summary.fetch('path_count', 0)} path(s)" : visible_paths.join(", ")
+        path_text = Hive::SecretPatterns.redact(path_text)
+        path_text = "#{path_text} (+#{remainder} more)" if remainder.positive?
+        text = "Hive auto-committed residue: #{summary.fetch('commits')} commit(s) — #{path_text}"
+        html ? Hive::Bot::Format.html_escape(text) : text
       end
 
       # Sorted [key, value] pairs of a row's attrs with stringified keys — the

@@ -139,6 +139,254 @@ class HiveStagesCleanExitTest < Minitest::Test
     end
   end
 
+  def test_out_of_scope_secret_shaped_path_is_redacted
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      secret = "AKIAABCDEFGHIJKLMNOP"
+      FileUtils.mkdir_p(File.join(worktree, "unrelated"))
+      File.write(File.join(worktree, "unrelated", "#{secret}.txt"), "ordinary content\n")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :scope_violation, result[:status]
+      refute_includes result[:message], secret
+      refute_includes result.fetch(:paths).join, secret
+    end
+  end
+
+  def test_allowed_path_symlink_returns_safety_violation_and_unstages
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      File.symlink("/tmp/operator-secret", File.join(worktree, "wiki", "reference.md"))
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_equal [ "wiki/reference.md" ], result[:paths]
+      assert_match(/staged symlinks/, result[:message])
+      assert_empty `git -C #{worktree} diff --cached --name-only`
+      assert File.symlink?(File.join(worktree, "wiki", "reference.md"))
+    end
+  end
+
+  def test_pathspec_magic_filename_cannot_hide_staged_symlink
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      File.symlink("/tmp/operator-secret", File.join(worktree, ":(literal)evil.gemspec"))
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_equal [ ":(literal)evil.gemspec" ], result[:paths]
+      assert_match(/staged symlinks/, result[:message])
+      assert_empty `git -C #{worktree} diff --cached --name-only`
+    end
+  end
+
+  def test_allowed_path_secret_content_returns_redacted_safety_violation
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      secret = "AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP"
+      File.write(File.join(worktree, "wiki", "migration-notes.md"), "#{secret}\n")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_equal [ "wiki/migration-notes.md" ], result[:paths]
+      assert_match(/secret detectors/, result[:message])
+      refute_includes result[:message], secret
+      assert_empty `git -C #{worktree} diff --cached --name-only`
+      assert File.exist?(File.join(worktree, "wiki", "migration-notes.md"))
+    end
+  end
+
+  def test_unrelated_edit_preserves_committed_secret_fixture
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      path = File.join(worktree, "wiki", "detector-fixture.md")
+      File.write(path, "fake detector fixture: AKIAABCDEFGHIJKLMNOP\n")
+      run!("git", "-C", worktree, "add", "wiki/detector-fixture.md")
+      run!("git", "-C", worktree, "commit", "-m", "add detector fixture", "--quiet")
+      File.write(path, "ordinary documentation update\n", mode: "a")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :auto_committed, result[:status]
+      assert_empty `git -C #{worktree} status --porcelain`
+    end
+  end
+
+  def test_changed_secret_in_tracked_file_returns_safety_violation
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      path = File.join(worktree, "wiki", "detector-fixture.md")
+      File.write(path, "fake detector fixture: AKIAABCDEFGHIJKLMNOP\n")
+      run!("git", "-C", worktree, "add", "wiki/detector-fixture.md")
+      run!("git", "-C", worktree, "commit", "-m", "add detector fixture", "--quiet")
+      File.write(path, "replacement: AKIAQRSTUVWXYZABCDEF\n")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_match(/secret detectors/, result[:message])
+      refute_includes result[:message], "AKIAQRSTUVWXYZABCDEF"
+    end
+  end
+
+  def test_new_secret_shaped_path_is_rejected_and_redacted
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      secret = "AKIAABCDEFGHIJKLMNOP"
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      File.write(File.join(worktree, "wiki", "#{secret}.md"), "ordinary content\n")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_match(/staged path matches secret detectors/, result[:message])
+      refute_includes result[:message], secret
+      refute_includes result.fetch(:paths).join, secret
+    end
+  end
+
+  def test_binary_allowed_path_secret_content_returns_redacted_safety_violation
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      secret = "AKIAABCDEFGHIJKLMNOP"
+      File.binwrite(File.join(worktree, "wiki", "migration-key.bin"), "\x00#{secret}\x00".b)
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_equal [ "wiki/migration-key.bin" ], result[:paths]
+      assert_match(/secret detectors/, result[:message])
+      refute_includes result[:message], secret
+      assert_empty `git -C #{worktree} diff --cached --name-only`
+    end
+  end
+
+  def test_safety_gate_still_applies_when_filename_scope_check_is_disabled
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      File.symlink("/tmp/operator-secret", File.join(worktree, "unrelated-link"))
+      cfg = deep_dup_default_cfg
+      cfg["review"]["fix"]["auto_commit"]["scope_check"]["enabled"] = false
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_equal [ "unrelated-link" ], result[:paths]
+    end
+  end
+
+  def test_safety_gate_rejects_gitlink_index_entries
+    object_id = "a" * 40
+    capture = lambda do |argv, **_kwargs|
+      if argv.include?("ls-files")
+        { success: true, stdout: "160000 #{object_id} 0\twiki/plugin\0" }
+      else
+        { success: true, stdout: "" }
+      end
+    end
+
+    with_replaced_singleton_method(Hive::Stages::AutoCommit, :capture_git_with_timeout, capture) do
+      result = Hive::Stages::AutoCommit.auto_commit_safety_violations(
+        "/worktree", [ "wiki/plugin" ]
+      )
+
+      assert_equal 1, result.fetch(:violations).length
+      assert_includes result.dig(:violations, 0).reason, "mode 160000"
+    end
+  end
+
+  def test_safety_gate_rejects_malformed_index_records
+    captured_argv = nil
+    capture = lambda do |argv, **_kwargs|
+      captured_argv = argv
+      { success: true, stdout: "100644 not-an-object 0\twiki/bad.md\0" }
+    end
+
+    with_replaced_singleton_method(Hive::Stages::AutoCommit, :capture_git_with_timeout, capture) do
+      result = Hive::Stages::AutoCommit.staged_index_entries("/worktree", [ "wiki/bad.md" ])
+
+      refute result.fetch(:success)
+      assert_equal "git ls-files --stage returned malformed index data", result.fetch(:message)
+    end
+    assert_includes captured_argv, "ls-files"
+  end
+
+  def test_safety_gate_rejects_malformed_head_tree_records
+    captured_argv = nil
+    capture = lambda do |argv, **_kwargs|
+      captured_argv = argv
+      { success: true, stdout: "100644 blob not-an-object\twiki/bad.md\0" }
+    end
+
+    with_replaced_singleton_method(Hive::Stages::AutoCommit, :capture_git_with_timeout, capture) do
+      result = Hive::Stages::AutoCommit.send(
+        :head_blob_object_ids, "/worktree", [ "wiki/bad.md" ]
+      )
+
+      refute result.fetch(:success)
+      assert_equal "git ls-tree HEAD returned malformed tree data", result.fetch(:message)
+    end
+    assert_includes captured_argv, "ls-tree"
+  end
+
+  def test_oversized_allowed_path_returns_safety_violation_without_reading_blob
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      File.binwrite(
+        File.join(worktree, "wiki", "large.bin"),
+        "x" * (Hive::Stages::AutoCommit::AUTO_COMMIT_BLOB_SCAN_MAX_BYTES + 1)
+      )
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result.fetch(:status)
+      assert_equal [ "wiki/large.bin" ], result.fetch(:paths)
+      assert_match(/exceeds the .* safety scan limit/, result.fetch(:message))
+      assert_empty `git -C #{worktree} diff --cached --name-only`
+      assert File.exist?(File.join(worktree, "wiki", "large.bin"))
+    end
+  end
+
   # Regression for the nested-Rails-app (`web/`) scope gap: a fix touching
   # `web/app/**` / `web/test/**` must auto-commit (those mirror the top-level
   # source/test allowlist), while sensitive nested dirs like `web/config/**`

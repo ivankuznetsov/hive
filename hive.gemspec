@@ -40,6 +40,7 @@ Gem::Specification.new do |spec|
     "skills/**/*",
     "lib/**/*.rb",
     "lib/hive/scripts/**/*.sh",
+    "lib/hive/assets/qmd/*",
     "templates/**/*",
     "templates/builtins/bench/runtime/.dockerignore",
     "schemas/**/*.json",

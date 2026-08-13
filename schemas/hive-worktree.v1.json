@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-worktree.v1.json",
+  "title": "hive worktree output (v1)",
+  "description": "Agent-callable inspection and bounded recovery for task-owned worktree residue.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "PorcelainEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "path"],
+      "properties": {
+        "status": { "type": "string", "minLength": 2, "maxLength": 2 },
+        "path": { "type": "string" }
+      }
+    },
+    "NextAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "command", "instructions"],
+      "properties": {
+        "kind": { "const": "refresh_status" },
+        "command": { "const": "hive status --json" },
+        "instructions": { "type": "string" }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "action", "slug", "stage",
+        "task_folder", "worktree_path", "branch", "head", "clean",
+        "untracked_count", "residue_paths", "porcelain", "next_action"
+      ],
+      "properties": {
+        "schema": { "const": "hive-worktree" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "action": { "enum": ["status", "commit-residue", "discard-residue"] },
+        "slug": { "type": "string" },
+        "stage": { "type": "string", "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$" },
+        "task_folder": { "type": "string" },
+        "worktree_path": { "type": "string" },
+        "branch": { "type": "string" },
+        "head": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "clean": { "type": "boolean" },
+        "untracked_count": { "type": "integer", "minimum": 0 },
+        "residue_paths": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "porcelain": { "type": "array", "items": { "$ref": "#/$defs/PorcelainEntry" } },
+        "next_action": { "$ref": "#/$defs/NextAction" },
+        "commit": { "type": ["string", "null"] },
+        "committed_paths": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "commit_subject": { "type": ["string", "null"] },
+        "discarded_paths": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind",
+        "exit_code", "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-worktree" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "enum": [
+            "ambiguous_slug", "invalid_task_path", "task_locked",
+            "worktree_error", "invalid_arguments", "error"
+          ]
+        },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" },
+        "candidates": { "type": "array" },
+        "holder": { "type": ["object", "null"] },
+        "lock_path": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

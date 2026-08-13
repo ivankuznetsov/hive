@@ -77,7 +77,7 @@ as of this refresh.
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
 | `json_schemer` | `~> 2.5` (locked 2.5.0) | Runtime JSON Schema validation for architecture-patrol manifests in daemon and hivebox supervisor processes; also reused by the e2e schema validator. |
 | `rexml` | `~> 3.2` | Launchd plist parsing for daemon install/status drift checks; explicit because Ruby 3.4 no longer guarantees it as a default gem. |
-| `sqlite3` | `~> 2.0` | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. |
+| `sqlite3` | `~> 2.0` (locked 2.9.6) | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. The root and packaged-web lockfiles stay at 2.9.6 or newer to avoid GHSA-mwm8-39rw-8826. |
 | `tzinfo` | `~> 2.0` (locked 2.0.6) | IANA timezone rules for the digest-only Europe/London calendar window, including spring-forward and fall-back days without changing the process timezone. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 

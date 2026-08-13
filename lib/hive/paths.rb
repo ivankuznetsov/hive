@@ -44,10 +44,6 @@ module Hive
       File.join(attempts_root, "records")
     end
 
-    def attempt_outputs_root
-      File.join(attempts_root, "outputs")
-    end
-
     def attempt_proof_root
       File.join(attempts_root, "proof")
     end

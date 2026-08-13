@@ -1168,22 +1168,10 @@ module Hive
       registered_project_entries(preserve_invalid: false)
     end
 
-    # Observation-only registry reader for status surfaces. When only the
-    # legacy registry exists, read it in place rather than invoking the normal
-    # one-off move into XDG config storage.
-    def registered_projects_read_only
-      registered_project_entries(
-        preserve_invalid: false,
-        migrate_legacy: false
-      )
-    end
-
-    def registered_project_entries(preserve_invalid:, migrate_legacy: true)
-      Hive::Paths.ensure_migrated! if migrate_legacy
+    def registered_project_entries(preserve_invalid:)
+      Hive::Paths.ensure_migrated!
       validate_hive_home!
-      path = registry_path_for_read(
-        migrate_legacy: migrate_legacy
-      )
+      path = global_config_path
       return [] unless File.exist?(path)
 
       data = load_global_config(path)
@@ -1216,14 +1204,6 @@ module Hive
         project["hive_state_path"] = project_hive_state_path(project)
         out << project
       end
-    end
-
-    def registry_path_for_read(migrate_legacy:)
-      current = global_config_path
-      return current if migrate_legacy || File.exist?(current)
-      return current if Hive::Paths.hive_home_override
-
-      Hive::Paths.legacy_registry_path || current
     end
 
     # One-time, locked registry migration. It deliberately emits no module
@@ -1259,37 +1239,6 @@ module Hive
         write_global_config_atomic!(data) if changed
       end
       changed
-    end
-
-    # The operator's persisted backend selection from the global config,
-    # or `default_global_agents` when nothing is stored yet. Three "unset"
-    # shapes all fall through to the defaults: an absent `agents:` block, an
-    # absent `agents.selected` key, and a present-but-null `selected:` (a
-    # bare `selected:` with no value). A present-but-malformed block
-    # (non-Hash `agents:`, non-Array `selected`) is a hand-edit error and
-    # raises ConfigError. Note the deliberate asymmetry against an empty
-    # `selected: []`: a null `selected:` is treated as "unset" and yields
-    # the defaults, whereas an explicit empty list raises via
-    # `normalize_global_agents` — an empty array is a hand-edit mistake the
-    # prompt can never produce, a null value is just "nothing stored yet".
-    def load_global_agents
-      Hive::Paths.ensure_migrated!
-      validate_hive_home!
-      path = global_config_path
-      data = File.exist?(path) ? load_global_config(path) : {}
-      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
-
-      agents = data["agents"]
-      return default_global_agents if agents.nil?
-
-      unless agents.is_a?(Hash)
-        raise ConfigError, "agents in #{describe_source(path)} must be a Hash; got #{agents.class}"
-      end
-
-      selected = agents["selected"]
-      return default_global_agents if selected.nil?
-
-      normalize_global_agents(selected, source: describe_source(path))
     end
 
     # Provider accounts are global because their external credential/config
@@ -1331,15 +1280,14 @@ module Hive
       end
     end
 
-    # Validate and canonicalize a raw selection (from disk or a caller)
-    # into the persisted contract: a frozen array of frozen backend names
+    # Validate and canonicalize a caller-provided selection into the
+    # persisted contract: a frozen array of frozen backend names
     # in `GLOBAL_AGENT_BACKENDS` order, deduped, with at least one entry.
     # Enforcing "≥1 backend" here mirrors the prompt boundary
-    # (BackendPrompt) so neither a hand-edited `selected: []` nor a
-    # `write_global_agents!([])` can persist a zero-backend state the
-    # prompt can never produce. Each name must be a non-empty String that
-    # resolves to a registered backend; anything else is a hand-edit error
-    # and raises ConfigError.
+    # (BackendPrompt) so `write_global_agents!([])` cannot persist a
+    # zero-backend state the prompt can never produce. Each name must be a
+    # non-empty String that resolves to a registered backend; anything else
+    # raises ConfigError.
     def normalize_global_agents(agents, source:)
       unless agents.is_a?(Array)
         raise ConfigError,
@@ -1362,10 +1310,7 @@ module Hive
                 "agents.selected in #{source} must contain non-empty strings"
         end
 
-        # Downcase before the allowed-list check so a hand-edited
-        # `selected: [Claude]` — the exact capitalization the setup prompt
-        # displays — loads, matching the prompt's case-insensitive name
-        # resolution (BackendPrompt#resolve_token).
+        # Match BackendPrompt's case-insensitive name resolution.
         name = agent.strip.downcase
         unless allowed.include?(name)
           if GLOBAL_AGENT_BACKENDS.include?(name)
@@ -2569,13 +2514,6 @@ module Hive
       end
 
       auto_commit
-    end
-
-    def validate_review_fix_auto_commit_scope!(cfg, source_path)
-      auto_commit = review_fix_auto_commit_config(cfg, source_path)
-      return if auto_commit.nil?
-
-      validate_review_fix_auto_commit_scope_config!(auto_commit["scope_check"], source_path)
     end
 
     def validate_review_fix_auto_commit_scope_config!(scope, source_path)

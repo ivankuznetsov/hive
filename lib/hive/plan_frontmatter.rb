@@ -7,10 +7,6 @@ module Hive
     MAX_FRONTMATTER_BYTES = 65_536
 
     Result = Data.define(:status, :data, :depends_on, :error) do
-      def depends_on_present?
-        !depends_on.nil?
-      end
-
       def valid?
         %i[ok absent].include?(status)
       end

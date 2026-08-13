@@ -73,7 +73,6 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       ctx = make_ctx(dir, task_folder)
       payload = Hive::Stages::Review.collect_accepted_findings_with_count(ctx)
       accepted = payload.text
-      answered = Hive::Stages::Review.collect_answered_escalation_findings(ctx)
 
       assert_equal 4, payload.count
       assert_equal accepted, Hive::Stages::Review.collect_accepted_findings(ctx)
@@ -84,10 +83,6 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       assert_includes accepted, "USER-ANSWERED ESCALATION Q2"
       assert_includes accepted, "Should we add a new abstraction?"
       assert_includes accepted, "keep the fix local"
-      assert_includes answered, "USER-ANSWERED ESCALATION Q1"
-      assert_includes answered, "USER-ANSWERED ESCALATION Q2"
-      assert_includes answered, "Use execute.agent"
-      assert_includes answered, "keep the fix local"
       refute_includes accepted, "RESOLVED/NO-FIX"
       refute_includes accepted, "Should this remain manual?"
     end
@@ -149,9 +144,10 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       assert_equal 1, payload.count
       assert_includes accepted, "Accepted legacy escalations from escalations-01.md"
       assert_includes accepted, "apply the requested legacy escalation fix"
-      assert_equal accepted, Hive::Stages::Review.collect_legacy_checked_escalations(
+      legacy = Hive::Stages::Review.collect_legacy_checked_escalations_with_count(
         Hive::Stages::Review::Triage.escalations_path(ctx)
       )
+      assert_equal accepted, legacy.text
       assert_equal 1, Hive::Stages::Review.count_escalations(ctx)
     end
   end
@@ -176,7 +172,10 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       File.write(path, "- [x] accepted legacy finding\n")
 
       with_readlines_failure(path) do
-        assert_equal "", Hive::Stages::Review.collect_legacy_checked_escalations(path)
+        legacy = Hive::Stages::Review.collect_legacy_checked_escalations_with_count(path)
+
+        assert_equal "", legacy.text
+        assert_equal 0, legacy.count
       end
     end
   end

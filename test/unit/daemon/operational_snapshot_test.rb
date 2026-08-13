@@ -164,65 +164,28 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
-  def test_runtime_readiness_is_generation_bound_retained_and_read_only
+  def test_runtime_ready_is_published_and_retained_on_later_records
     with_tmp_dir do |dir|
-      path = File.join(
-        dir, "private", "operational-snapshot.json"
-      )
-      _store, assembler, reader = build(path)
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, _reader = build(path)
+
       assembler.runtime_ready(now: T0)
-      ready_bytes = File.binread(path)
+      ready = JSON.parse(File.binread(path))
+      assert_equal true, ready.fetch("runtime_ready")
+      assert_equal "complete", ready.fetch("phase")
 
-      readiness = reader.runtime_readiness(
-        expected_daemon: IDENTITY, now: T0 + 1
-      )
-
-      assert_equal ready_bytes, File.binread(path)
-      assert_equal true, readiness.fetch("runtime_ready")
-      assert_equal "complete", readiness.fetch("phase")
-      assert_nil reader.runtime_readiness(
-        expected_daemon:
-          IDENTITY.merge("generation" => "other"),
-        now: T0 + 1
-      )
-
-      assembler.begin_tick(now: T0 + 2)
-      assert_equal "started", reader.runtime_readiness(
-        expected_daemon: IDENTITY, now: T0 + 3
-      ).fetch("phase")
-      assert_nil reader.runtime_readiness(
-        expected_daemon: IDENTITY, now: T0 + 100
-      )
+      assembler.begin_tick(now: T0 + 1)
+      started = JSON.parse(File.binread(path))
+      assert_equal true, started.fetch("runtime_ready")
+      assert_equal "started", started.fetch("phase")
 
       assembler.shutdown(
         admission_closed: true, drained: true,
-        child_inventory: [], now: T0 + 4
+        child_inventory: [], now: T0 + 2
       )
-      assert_nil reader.runtime_readiness(
-        expected_daemon: IDENTITY, now: T0 + 5
-      )
-    end
-  end
-
-  def test_runtime_readiness_auto_identity_degrades_missing_storage_to_nil
-    with_tmp_dir do |dir|
-      private_dir = File.join(dir, "private")
-      FileUtils.mkdir_p(private_dir, mode: 0o700)
-      pid_path = File.join(dir, ".daemon.pid")
-      process_start_time = Hive::Lock.process_start_time(Process.pid)
-      File.write(
-        pid_path,
-        {
-          "pid" => Process.pid,
-          "process_start_time" => process_start_time
-        }.to_yaml
-      )
-      reader = Hive::Daemon::OperationalSnapshot::Reader.new(
-        path: File.join(private_dir, "missing.json"),
-        pid_path: pid_path
-      )
-
-      assert_nil reader.runtime_readiness(now: T0)
+      shutdown = JSON.parse(File.binread(path))
+      assert_equal true, shutdown.fetch("runtime_ready")
+      assert shutdown.key?("shutdown")
     end
   end
 

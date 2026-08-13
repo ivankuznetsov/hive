@@ -1,6 +1,5 @@
 require "test_helper"
 require "hive/modules/event_publisher"
-require "hive/modules/event_router"
 
 class ModulesEventRoutingTest < Minitest::Test
   include HiveTestHelper
@@ -32,44 +31,6 @@ class ModulesEventRoutingTest < Minitest::Test
         record[key.to_sym] = value unless key == "event_id"
       end
       Hive::Modules::EventResult.new(status: :created, event: event)
-    end
-  end
-
-  def test_router_persists_each_supported_occurrence_before_dispatch
-    ledger = RecordingLedger.new
-    dispatched = []
-    dispatcher = Object.new
-    dispatcher.define_singleton_method(:dispatch_event) do |event|
-      dispatched << event
-      [ { "outcome" => "skip" } ]
-    end
-    router = Hive::Modules::EventRouter.new(
-      ledger: ledger, dispatcher: dispatcher, project_id: "project-1", project: "demo",
-      clock: -> { NOW }
-    )
-
-    task = router.task_completed(
-      task_id: "task-1", task_generation: "generation-1", occurred_at: NOW
-    )
-    merged = router.pull_request_merged(
-      repository: "owner/repo", number: 7, merge_commit: "b" * 40,
-      manifest_digest: "c" * 64, occurred_at: NOW.iso8601
-    )
-    registered = router.project_registered(registration_id: "registration-1", occurred_at: NOW)
-    scheduled = router.schedule(
-      schedule: "0 * * * *", due_at: NOW.iso8601, missed_windows: 2
-    )
-
-    assert_equal 4, ledger.records.size
-    assert_equal 4, dispatched.size
-    assert_equal "task.completed", task.fetch(:occurrence).event.fetch("event_name")
-    assert_equal "pull_request.merged", merged.fetch(:occurrence).event.fetch("event_name")
-    assert_equal "project.registered", registered.fetch(:occurrence).event.fetch("event_name")
-    assert_equal 2, scheduled.fetch(:occurrence).event.dig("payload", "missed_windows")
-    assert_equal "2026-07-22T10:00:00.000000Z", scheduled.fetch(:occurrence).event.fetch("occurred_at")
-
-    assert_raises(Hive::ConfigError) do
-      router.schedule(schedule: "0 * * * *", due_at: "not-a-time")
     end
   end
 

@@ -1334,12 +1334,10 @@ module Hive
     # Validate and canonicalize a raw selection (from disk or a caller)
     # into the persisted contract: a frozen array of frozen backend names
     # in `GLOBAL_AGENT_BACKENDS` order, deduped, with at least one entry.
-    # Enforcing "≥1 backend" here mirrors the prompt boundary
-    # (BackendPrompt) so neither a hand-edited `selected: []` nor a
-    # `write_global_agents!([])` can persist a zero-backend state the
-    # prompt can never produce. Each name must be a non-empty String that
-    # resolves to a registered backend; anything else is a hand-edit error
-    # and raises ConfigError.
+    # Enforcing "≥1 backend" here prevents a hand-edited `selected: []` or
+    # `write_global_agents!([])` from creating a zero-backend state. Each
+    # name must be a non-empty String that resolves to a registered backend;
+    # anything else is a hand-edit error and raises ConfigError.
     def normalize_global_agents(agents, source:)
       unless agents.is_a?(Array)
         raise ConfigError,
@@ -1363,9 +1361,7 @@ module Hive
         end
 
         # Downcase before the allowed-list check so a hand-edited
-        # `selected: [Claude]` — the exact capitalization the setup prompt
-        # displays — loads, matching the prompt's case-insensitive name
-        # resolution (BackendPrompt#resolve_token).
+        # `selected: [Claude]` loads case-insensitively.
         name = agent.strip.downcase
         unless allowed.include?(name)
           if GLOBAL_AGENT_BACKENDS.include?(name)

@@ -146,8 +146,7 @@ class ConfigGlobalAgentsTest < Minitest::Test
   end
 
   def test_registered_agent_names_projects_registry_symbols_to_strings
-    # Locks the symbol→string projection that BackendPrompt and
-    # normalize_global_agents both depend on.
+    # Locks the symbol→string projection that normalize_global_agents uses.
     names = Hive::Config.registered_agent_names
 
     assert_equal %w[claude codex grok pi], names.sort
@@ -189,8 +188,7 @@ class ConfigGlobalAgentsTest < Minitest::Test
   end
 
   def test_load_global_agents_accepts_capitalized_names_case_insensitively
-    # The capitalization the setup prompt itself displays ([claude]) must
-    # load: normalize downcases before the allowed-list check.
+    # Normalize downcases names before the allowed-list check.
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), {
         "registered_projects" => [],

@@ -194,19 +194,6 @@ class ModulesDispatcherTest < Minitest::Test
     end
   end
 
-  def test_dispatch_event_projects_and_dispatches_every_active_hook
-    with_runtime do |runtime|
-      projected = runtime.fetch(:dispatcher).dispatch_event(runtime.fetch(:event), dry_run: true)
-      assert_equal [ "admitted" ], projected.map { |result| result.decision.fetch("reason") }
-      assert_empty runtime.fetch(:journal).all
-
-      dispatched = runtime.fetch(:dispatcher).dispatch_event(runtime.fetch(:event))
-      assert_equal 1, dispatched.size
-      assert_equal "launch", dispatched.first.decision.fetch("outcome")
-      assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
-    end
-  end
-
   def test_missing_module_or_hook_uses_a_closed_null_configuration
     with_runtime do |runtime|
       missing_module = runtime.fetch(:dispatcher).dispatch(
@@ -402,7 +389,9 @@ class ModulesDispatcherTest < Minitest::Test
     with_runtime do |runtime|
       foreign = runtime.fetch(:event).merge("project_id" => "another-project")
       assert_raises(Hive::ConfigError) do
-        runtime.fetch(:dispatcher).dispatch_event(foreign)
+        runtime.fetch(:dispatcher).dispatch(
+          module_name: "demo", hook_id: "task", event: foreign
+        )
       end
 
       original_open = File.method(:open)

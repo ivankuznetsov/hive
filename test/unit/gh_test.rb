@@ -1171,8 +1171,16 @@ def gh_test_pid_alive?(pid)
 
   Process.kill(0, pid)
   true
-rescue Errno::ESRCH
+rescue Errno::ENOENT, Errno::ESRCH
   false
+end
+
+def test_gh_test_pid_alive_treats_proc_disappearance_as_dead
+  with_replaced_singleton_method(File, :file?, ->(*) { true }) do
+    with_replaced_singleton_method(File, :read, ->(*) { raise Errno::ENOENT }) do
+      refute gh_test_pid_alive?(1234)
+    end
+  end
 end
 
 def test_process_group_liveness_is_fail_closed_on_permissions_and_false_when_missing

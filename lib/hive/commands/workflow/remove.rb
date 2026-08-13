@@ -26,7 +26,14 @@ module Hive
             raise OwnershipError, "managed workflow #{@name.inspect} is the project default; choose another default before removal"
           end
 
-          retained = store.task_references(@name).map { |reference| reference.fetch(:commit) }.uniq.sort
+          references = store.task_references(@name)
+          unless references.empty?
+            raise OwnershipError,
+                  "managed workflow #{@name.inspect} still owns #{references.length} retained " \
+                  "task#{references.length == 1 ? '' : 's'}; finish/archive or reset those tasks " \
+                  "before removal (historical workflow dispatch is not supported)"
+          end
+          retained = []
           versions = Dir.glob(File.join(store.workflows_dir, @name, "versions", "*")).map { |path| File.basename(path) }
           deletable = versions - retained
           if @dry_run
@@ -55,7 +62,7 @@ module Hive
           report = payload("removed", lock, retained, deletable)
           report["warnings"] = warnings unless warnings.empty?
           emit(report, human_lines: [
-            "hive: removed honeycomb/#{@name}; retained #{retained.length} task-pinned generation(s)",
+            "hive: removed honeycomb/#{@name}; no retained tasks remain",
             *warning_lines(warnings)
           ])
         end

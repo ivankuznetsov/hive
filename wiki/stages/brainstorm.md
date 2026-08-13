@@ -1,7 +1,7 @@
 ---
 title: 2-brainstorm stage
 type: stage
-source: lib/hive/stages/brainstorm.rb, lib/hive/stages/brainstorm_tmux.rb, lib/hive/attempts/dispatcher.rb, lib/hive/tmux_runner.rb, templates/brainstorm_prompt.md.erb
+source: lib/hive/stages/brainstorm.rb, lib/hive/claude_launcher.rb, lib/hive/attempts/dispatcher.rb, lib/hive/tmux_runner.rb, templates/brainstorm_prompt.md.erb
 created: 2026-04-25
 updated: 2026-07-25
 tags: [stage, brainstorm, qa, tmux]
@@ -70,7 +70,10 @@ The runner returns `{commit: action, status: marker.name}` so `Commands::Run` wr
 - `test/integration/run_brainstorm_tmux_test.rb` exercises the tmux launcher path.
 - `test/unit/stages/brainstorm_runtime_test.rb` pins headless/tmux failure reconciliation, structural artifact validation, changed-artifact precedence, and stale-artifact rejection.
 - `test/unit/attempts/dispatcher_test.rb` pins one repair admission for a successful Brainstorm receipt whose required artifact is absent.
-- `test/unit/stages/brainstorm_tmux_sentinel_test.rb` pins the tmux readiness/sentinel helpers and the orphan-sweep invariant that matched Claude PIDs are terminated individually while the tmux server is skipped and logged.
+- `test/unit/stages/brainstorm_tmux_sentinel_test.rb` exercises the live
+  `ClaudeLauncher` readiness/sentinel helpers and pins the orphan-sweep
+  invariant that matched Claude PIDs are terminated individually while the
+  tmux server is skipped and logged.
 - `test/unit/tmux_runner_test.rb` pins prompt-buffer cleanup, tmux command timeouts, and paste-settle behavior before the final Enter submit.
 
 ## Backlinks

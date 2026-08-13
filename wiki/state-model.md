@@ -1147,8 +1147,9 @@ Since 2026-05-22, `Hive::Stages::DIRS` has all nine slots filled in order; `Stag
 Its stable identity is the task/project, task generation, implementation
 base/head, changed-path digest, and classifier version. Hive classifies
 user-visible paths or an explicit visual-proof request as `required`; other
-work is `not_applicable`. Agents cannot demote the result. A demotion records a
-confirmed operator, rationale, timestamp, and the same task generation.
+work is `not_applicable`. The result is deterministic and has no runtime
+promotion or demotion API; the nullable `override` field remains empty for v1
+receipt compatibility.
 
 When required, new `media/capture-manifest.json` receipts use the
 provider-neutral `hive-artifact-capture` v2 contract and must identify the same

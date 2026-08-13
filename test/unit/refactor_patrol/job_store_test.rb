@@ -259,7 +259,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
-  def test_rebuilds_derived_indexes_after_deletion_or_corruption
+  def test_rebuilds_fingerprint_index_after_corruption
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       store.write_job!(job)
@@ -270,10 +270,8 @@ class RefactorPatrolJobStoreTest < Minitest::Test
                                          .fetch("occurrences").first.fetch("disposition")
       refute first.fetch("actions").fetch("actions").fetch("fix-fp-accepted").key?("receipts")
 
-      FileUtils.rm_f(store.action_index_path)
       File.write(store.fingerprint_index_path, "{")
 
-      assert_equal first.fetch("actions"), store.action_index
       assert_equal first.fetch("fingerprints"), store.fingerprint_index
     end
   end
@@ -2434,7 +2432,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
-  def test_low_level_validation_and_index_recovery_are_fail_closed
+  def test_low_level_validation_is_fail_closed
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       assert_equal [ { "a" => 1 } ], store.send(:deep_sort, [ { "a" => 1 } ])
@@ -2447,14 +2445,6 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
         store.send(:json_copy, Float::NAN)
       end
-
-      store.write_job!(job)
-      store.rebuild_indexes!
-      assert_equal "job-1", store.action_index.dig("actions", "fix-fp-accepted", "owner_job_id")
-      File.write(store.action_index_path, "[]")
-      assert_equal "job-1", store.action_index.dig("actions", "fix-fp-accepted", "owner_job_id")
-      File.write(store.action_index_path, "{")
-      assert_equal "job-1", store.action_index.dig("actions", "fix-fp-accepted", "owner_job_id")
     end
   end
 

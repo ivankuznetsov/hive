@@ -101,6 +101,17 @@ class InstallScriptTest < Minitest::Test
     end
   end
 
+  def test_installer_skips_fleet_migration_when_installing_a_release_that_predates_it
+    Dir.mktmpdir("hive-installer-legacy-migration") do |dir|
+      out, err, status = run_installer(dir, "legacy_migration")
+
+      assert status.success?, err
+      assert_includes out, "predates fleet migration"
+      calls = File.readlines(File.join(dir, "hive-args"), chomp: true)
+      assert_equal [ "daemon install --json" ], calls
+    end
+  end
+
   def test_installer_preserves_an_unowned_user_hive_launcher_and_uses_hv_fallback
     Dir.mktmpdir("hive-installer-unowned-launcher") do |dir|
       bin = File.join(dir, "bin")
@@ -298,6 +309,14 @@ class InstallScriptTest < Minitest::Test
       /usr/bin/mkdir -p "$bindir"
       cat > "$bindir/hive" <<'HIVE'
       #!/bin/sh
+      if [ "$1" = "help" ] && [ "$2" = "migrate" ]; then
+        if [ "$HIVE_INSTALL_TEST_FAILURE" = "legacy_migration" ]; then
+          printf 'Usage: hive migrate [PROJECT_PATH]\n'
+        else
+          printf 'Options:\n  --all  migrate every registered project\n'
+        fi
+        exit 0
+      fi
       printf '%s\n' "$*" >> "$HIVE_INSTALL_TEST_HIVE_ARGS"
       if [ "$1" = "migrate" ] && [ "$HIVE_INSTALL_TEST_FAILURE" = "migration" ]; then
         exit 79

@@ -21,6 +21,10 @@ fails with an explicit `hive migrate` instruction, workflow removal is blocked
 while retained tasks exist, and direct `install.sh` upgrades run fleet
 migration before daemon setup. This deliberately replaces historical workflow
 dispatch with one idempotent forward migration boundary.
+When the current installer is deliberately used to install a release that
+predates fleet migration, it detects the missing `migrate --all` capability
+and skips this new phase; releases containing the capability fail closed if
+any registered project cannot migrate.
 
 Focused coverage exercises semantic stage and artifact moves, same-position
 repins, removed-stage and live-lock refusal, mid-batch rollback, queue cleanup

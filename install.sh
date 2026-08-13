@@ -301,6 +301,13 @@ daemon_autostart_setup() {
 # Run it before daemon setup so no newly started daemon can dispatch a retained
 # task against a stale managed-workflow generation.
 migrate_registered_projects() {
+  local migrate_help
+  if ! migrate_help="$("${gem_home}/bin/hive" help migrate 2>/dev/null)" ||
+     [[ "$migrate_help" != *"--all"* ]]; then
+    log "installed Hive ${version} predates fleet migration; no automatic project migration is available"
+    return 0
+  fi
+
   log "migrating registered projects with installed Hive"
   if ! "${gem_home}/bin/hive" migrate --all; then
     die "automatic project migration failed; resolve the reported project error and run '${gem_home}/bin/hive migrate --all'"

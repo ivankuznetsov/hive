@@ -1168,12 +1168,10 @@ module Hive
       registered_project_entries(preserve_invalid: false)
     end
 
-    def registered_project_entries(preserve_invalid:, migrate_legacy: true)
-      Hive::Paths.ensure_migrated! if migrate_legacy
+    def registered_project_entries(preserve_invalid:)
+      Hive::Paths.ensure_migrated!
       validate_hive_home!
-      path = registry_path_for_read(
-        migrate_legacy: migrate_legacy
-      )
+      path = global_config_path
       return [] unless File.exist?(path)
 
       data = load_global_config(path)
@@ -1206,14 +1204,6 @@ module Hive
         project["hive_state_path"] = project_hive_state_path(project)
         out << project
       end
-    end
-
-    def registry_path_for_read(migrate_legacy:)
-      current = global_config_path
-      return current if migrate_legacy || File.exist?(current)
-      return current if Hive::Paths.hive_home_override
-
-      Hive::Paths.legacy_registry_path || current
     end
 
     # One-time, locked registry migration. It deliberately emits no module

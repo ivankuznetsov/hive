@@ -2,7 +2,6 @@
 
 require "digest"
 require "json"
-require "pathname"
 require_relative "paths"
 
 module HiveReleaseCandidate
@@ -14,7 +13,6 @@ module HiveReleaseCandidate
       doctor_json tasks
     ].freeze
     HISTORICAL_SECTIONS = %w[builtin_runtime legacy_descriptor legacy_instructions].freeze
-    MAX_CAPTURE_BYTES = 1_048_576
     SEMANTIC_JSON_SECTIONS = %w[doctor_json status_json].freeze
     VOLATILE_JSON_KEYS = %w[
       age_seconds binary binary_path elapsed_ms executable finished_at generated_at
@@ -63,19 +61,6 @@ module HiveReleaseCandidate
           "allowed" => permitted,
           "unexpected" => unexpected
         }
-      end
-
-      def capture_tree(root:, sections:)
-        root = safe_root!(root)
-        unless sections.is_a?(Hash) && !sections.empty?
-          raise UsageError, "capture sections must be a non-empty hash"
-        end
-        captured = sections.to_h do |name, relative|
-          name = name.to_s
-          path = confined_path!(root, relative)
-          [ name, capture_path(path, root) ]
-        end
-        captured
       end
 
       private
@@ -200,48 +185,6 @@ module HiveReleaseCandidate
       def status_task_path?(path)
         path.length == 5 && path[0, 2] == %w[status_json projects] &&
           path[2].is_a?(Integer) && path[3] == "tasks" && path[4].is_a?(Integer)
-      end
-
-      def safe_root!(value)
-        root = File.expand_path(value)
-        stat = File.lstat(root)
-        unless stat.directory? && !stat.symlink? && stat.uid == Process.uid
-          raise Error, "invariant capture root must be an owned directory"
-        end
-        root
-      rescue Errno::ENOENT, Errno::EACCES
-        raise Error, "invariant capture root must be an owned directory"
-      end
-
-      def confined_path!(root, value)
-        relative = Pathname.new(value.to_s)
-        clean = relative.cleanpath.to_s
-        if relative.absolute? || clean == ".." || clean.start_with?("../") || value.to_s.include?("\\")
-          raise Error, "invariant capture path escapes its root"
-        end
-        File.join(root, clean)
-      end
-
-      def capture_path(path, root)
-        stat = File.lstat(path)
-        raise Error, "invariant capture refuses symlink: #{path}" if stat.symlink?
-        if stat.file?
-          raise Error, "invariant capture file exceeds #{MAX_CAPTURE_BYTES} bytes" if stat.size > MAX_CAPTURE_BYTES
-          return {
-            "kind" => "file", "size" => stat.size,
-            "sha256" => Digest::SHA256.file(path).hexdigest
-          }
-        end
-        raise Error, "invariant capture path is not a regular file or directory" unless stat.directory?
-
-        entries = Dir.children(path).sort.to_h do |name|
-          child = File.join(path, name)
-          relative = Pathname.new(child).relative_path_from(Pathname.new(root)).to_s
-          [ name, capture_path(confined_path!(root, relative), root) ]
-        end
-        { "kind" => "directory", "entries" => entries }
-      rescue Errno::ENOENT, Errno::EACCES => e
-        raise Error, "cannot capture invariant path #{path}: #{e.message}"
       end
     end
   end

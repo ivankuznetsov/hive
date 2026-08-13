@@ -676,18 +676,13 @@ module Hive
     # review.ci.command (Hive::Reviewers.dispatch).
     REVIEWER_KINDS = %w[agent codex_review linter].freeze
     # Agent backends offered by setup, in canonical listing/default order.
-    # The names are frozen so results derived from this constant cannot mutate
-    # the shared values in place.
+    # The names are frozen so prompt selections cannot mutate shared values.
     GLOBAL_AGENT_BACKENDS = %w[claude codex pi grok].map(&:freeze).freeze
-    # Recommended default selection when the operator accepts the prompt
-    # default or runs non-interactively — Claude + Codex; Pi is opt-in.
+    # Recommended setup defaults when the operator accepts the prompt default
+    # or runs non-interactively.
     DEFAULT_GLOBAL_AGENTS = %w[claude codex].map(&:freeze).freeze
-    # Boot-time parity guard, the analogue of Init::Prompts' CHOICES/MODES
-    # check (init/prompts.rb): a recommended default that isn't also a
-    # known backend would let `default_global_agents` emit a value that the
-    # setup prompt cannot represent. Enforce the subset here rather than
-    # letting the two setup sources drift. Single-line modifier (like the sibling guard) so the
-    # never-taken raise stays on the evaluated line for the coverage gate.
+    # BackendPrompt consumes both constants directly, so keep its defaults
+    # representable by the canonical setup list.
     raise "DEFAULT_GLOBAL_AGENTS must be a subset of GLOBAL_AGENT_BACKENDS: #{(DEFAULT_GLOBAL_AGENTS - GLOBAL_AGENT_BACKENDS).inspect} not in #{GLOBAL_AGENT_BACKENDS.inspect}" unless (DEFAULT_GLOBAL_AGENTS - GLOBAL_AGENT_BACKENDS).empty?
     # The last two stages of `Hive::Stages::DIRS` (lib/hive/stages.rb).
     # Kept as an explicit policy literal rather than derived via
@@ -725,35 +720,10 @@ module Hive
     end
 
     # Single source of the registry's string representation. The agent
-    # registry keys on symbols, but every backend-selection path (the
-    # defaults and the setup prompt) compares against backend-name
-    # *strings*, so the symbol→string projection lives here — the
-    # registry-representation coupling is then a one-line edit rather than
-    # several drifting copies.
+    # registry keys on symbols, but setup prompts compare against backend-name
+    # strings.
     def registered_agent_names
       AgentProfiles.registered_names.map(&:to_s)
-    end
-
-    # The default selection filtered down to the backends actually
-    # registered on this machine, in canonical order. Returns a frozen
-    # array of frozen strings with at least one entry, so a consumer never
-    # sees a mutable or empty default selection. Raises ConfigError
-    # when no default backend is registered — unreachable while claude/codex
-    # auto-register on `require "hive/config"`, but the guarantee is enforced
-    # here rather than merely asserted in this comment.
-    def default_global_agents
-      registered = registered_agent_names
-      # Derive order from the canonical GLOBAL_AGENT_BACKENDS rather than
-      # iterating the DEFAULT_* literal, so reordering the default literal
-      # cannot change the setup prompt's canonical order. The result remains
-      # a subset of GLOBAL_AGENT_BACKENDS. Left-ordered `&` also deduplicates.
-      selected = GLOBAL_AGENT_BACKENDS & DEFAULT_GLOBAL_AGENTS & registered
-      if selected.empty?
-        raise ConfigError,
-              "no default agent backend is registered (expected one of #{DEFAULT_GLOBAL_AGENTS.inspect})"
-      end
-
-      selected.freeze
     end
 
     def hive_state_dir(project_root, hive_state_name = ".hive-state")

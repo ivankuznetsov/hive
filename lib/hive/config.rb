@@ -1168,16 +1168,6 @@ module Hive
       registered_project_entries(preserve_invalid: false)
     end
 
-    # Observation-only registry reader for status surfaces. When only the
-    # legacy registry exists, read it in place rather than invoking the normal
-    # one-off move into XDG config storage.
-    def registered_projects_read_only
-      registered_project_entries(
-        preserve_invalid: false,
-        migrate_legacy: false
-      )
-    end
-
     def registered_project_entries(preserve_invalid:, migrate_legacy: true)
       Hive::Paths.ensure_migrated! if migrate_legacy
       validate_hive_home!

@@ -1283,9 +1283,8 @@ module Hive
     # Validate and canonicalize a caller-provided selection into the
     # persisted contract: a frozen array of frozen backend names
     # in `GLOBAL_AGENT_BACKENDS` order, deduped, with at least one entry.
-    # Enforcing "≥1 backend" here mirrors the prompt boundary
-    # (BackendPrompt) so `write_global_agents!([])` cannot persist a
-    # zero-backend state the prompt can never produce. Each name must be a
+    # Enforcing "≥1 backend" here means `write_global_agents!([])` cannot
+    # persist a zero-backend state. Each name must be a
     # non-empty String that resolves to a registered backend; anything else
     # raises ConfigError.
     def normalize_global_agents(agents, source:)
@@ -1310,7 +1309,7 @@ module Hive
                 "agents.selected in #{source} must contain non-empty strings"
         end
 
-        # Match BackendPrompt's case-insensitive name resolution.
+        # Resolve backend names case-insensitively.
         name = agent.strip.downcase
         unless allowed.include?(name)
           if GLOBAL_AGENT_BACKENDS.include?(name)

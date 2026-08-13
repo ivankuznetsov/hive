@@ -114,8 +114,7 @@ class ConfigGlobalAgentsTest < Minitest::Test
   end
 
   def test_registered_agent_names_projects_registry_symbols_to_strings
-    # Locks the symbol→string projection that BackendPrompt and
-    # normalize_global_agents both depend on.
+    # Locks the symbol→string projection that normalize_global_agents uses.
     names = Hive::Config.registered_agent_names
 
     assert_equal %w[claude codex grok pi], names.sort

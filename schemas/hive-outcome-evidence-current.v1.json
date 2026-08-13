@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-outcome-evidence-current.v1.json",
+  "title": "Hive Outcome Evidence Current Pointer v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "task", "project", "generation", "attempt_id",
+    "requirement_sha256", "attempt_sha256", "published_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-outcome-evidence-current" },
+    "schema_version": { "const": 1 },
+    "task": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "generation": { "$ref": "#/$defs/Digest" },
+    "attempt_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "requirement_sha256": { "$ref": "#/$defs/Digest" },
+    "attempt_sha256": { "$ref": "#/$defs/Digest" },
+    "published_at": { "type": "string", "format": "date-time", "maxLength": 64 }
+  },
+  "$defs": {
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

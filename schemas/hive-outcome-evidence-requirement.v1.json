@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-outcome-evidence-requirement.v1.json",
+  "title": "Hive Outcome Evidence Requirement v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "task", "project", "task_generation",
+    "recovery_epoch", "generation", "requirement", "implementation", "created_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-outcome-evidence-requirement" },
+    "schema_version": { "const": 1 },
+    "task": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "task_generation": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "recovery_epoch": { "type": "integer", "minimum": 0 },
+    "generation": { "$ref": "#/$defs/Digest" },
+    "requirement": { "const": "outcome_evidence_required" },
+    "implementation": { "$ref": "#/$defs/Implementation" },
+    "created_at": { "type": "string", "format": "date-time", "maxLength": 64 }
+  },
+  "$defs": {
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "Oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "SafePath": {
+      "type": "string", "minLength": 1, "maxLength": 4096,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\u0000]+$"
+    },
+    "Implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository", "branch", "implementation_base", "merge_base",
+        "implementation_head", "changed_paths", "changed_paths_digest"
+      ],
+      "properties": {
+        "repository": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", "maxLength": 512 }
+          ]
+        },
+        "branch": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "implementation_base": { "$ref": "#/$defs/Oid" },
+        "merge_base": { "$ref": "#/$defs/Oid" },
+        "implementation_head": { "$ref": "#/$defs/Oid" },
+        "changed_paths": {
+          "type": "array", "minItems": 1, "maxItems": 10000,
+          "uniqueItems": true, "items": { "$ref": "#/$defs/SafePath" }
+        },
+        "changed_paths_digest": { "$ref": "#/$defs/Digest" }
+      }
+    }
+  }
+}

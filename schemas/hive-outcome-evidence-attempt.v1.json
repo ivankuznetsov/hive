@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-outcome-evidence-attempt.v1.json",
+  "title": "Hive Outcome Evidence Attempt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "task", "project", "generation",
+    "attempt_id", "status", "evidence", "diagnostic", "recorded_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-outcome-evidence-attempt" },
+    "schema_version": { "const": 1 },
+    "task": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "generation": { "$ref": "#/$defs/Digest" },
+    "attempt_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "status": { "enum": ["accepted", "rejected"] },
+    "evidence": {
+      "type": "array", "maxItems": 1024,
+      "items": { "$ref": "#/$defs/Evidence" }
+    },
+    "diagnostic": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "minLength": 1, "maxLength": 16384 }
+      ]
+    },
+    "recorded_at": { "type": "string", "format": "date-time", "maxLength": 64 }
+  },
+  "$defs": {
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "SafePath": {
+      "type": "string", "minLength": 1, "maxLength": 4096,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\u0000]+$"
+    },
+    "Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "summary"],
+      "properties": {
+        "kind": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "path": { "$ref": "#/$defs/SafePath" },
+        "sha256": { "$ref": "#/$defs/Digest" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 1073741824 }
+      },
+      "dependentRequired": {
+        "sha256": ["path", "bytes"],
+        "bytes": ["path", "sha256"]
+      }
+    }
+  }
+}

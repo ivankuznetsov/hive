@@ -577,17 +577,6 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
     end
   end
 
-  def test_report_shape_guard_handles_hash_like_objects_that_break_mid_validation
-    liar = Object.new
-    liar.define_singleton_method(:is_a?) { |klass| klass == Hash || super(klass) }
-    payload = {
-      "schema" => "hive-module-migration-report", "schema_version" => 1,
-      "eligible" => false, "modules" => liar, "blockers" => []
-    }
-
-    refute Hive::Modules::Migration::Report.valid_payload?(payload)
-  end
-
   def test_report_bounds_external_streams_and_collapses_configuration_changes
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)

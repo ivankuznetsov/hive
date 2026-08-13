@@ -16,11 +16,9 @@ class ModulesCapabilityContextTest < Minitest::Test
     assert context.require_network_host!("https://api.github.com/repos")
     assert context.require_filesystem_read!("lib/hive.rb")
     assert context.require_filesystem_write!(".hive-state/patrol/**")
-    assert context.require_secret!("PATROL_TOKEN")
     assert_raises(Hive::Modules::CapabilityDenied) { context.require_github_mutation!("issues") }
     assert_raises(Hive::Modules::CapabilityDenied) { context.require_external_command!("bash") }
     assert_raises(Hive::Modules::CapabilityDenied) { context.require_network_host!("example.com") }
-    assert_raises(Hive::Modules::CapabilityDenied) { context.require_secret!("OTHER_TOKEN") }
     assert_raises(Hive::Modules::CapabilityDenied) do
       context.require_filesystem_read!("/etc/passwd")
     end

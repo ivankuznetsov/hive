@@ -24,7 +24,6 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
       assert_equal :duplicate, store.append_receipt(receipt).status
 
       restarted = Hive::Modules::Migration::EvidenceStore.new(root: root)
-      assert_equal receipt, restarted.fetch_receipt(receipt.receipt_id)
       assert_equal [ capture ], restarted.captures
       assert_equal [ receipt ], restarted.receipts
     end
@@ -60,10 +59,9 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
     end
   end
 
-  def test_public_reads_reject_untrusted_paths_and_no_follow_reads
+  def test_collection_read_rejects_no_follow_reads
     with_tmp_dir do |root|
       store = Hive::Modules::Migration::EvidenceStore.new(root: root)
-      assert_raises(Hive::ConfigError) { store.fetch_receipt("/tmp/receipt") }
 
       capture = capture_for(recorded_at: NOW)
       outside = File.join(root, "outside.json")

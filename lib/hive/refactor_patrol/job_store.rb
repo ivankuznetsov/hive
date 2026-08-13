@@ -353,14 +353,6 @@ module Hive
         raise CorruptRecord, "refactor patrol manifest is missing #{e.key.inspect}"
       end
 
-      # Expose independently due intake jobs so one old backoff-bound
-      # occurrence cannot hide later work.
-      def eligible_jobs(now: Time.now)
-        eligible_from(jobs, now: now).sort_by { |aggregate| scheduling_key(aggregate) }
-      rescue ArgumentError => e
-        raise InconsistentRecord, "refactor patrol job has invalid scheduling timestamp (#{e.message})"
-      end
-
       def eligible_from(records, now:)
         records.select do |aggregate|
           next false if aggregate.fetch("complete")

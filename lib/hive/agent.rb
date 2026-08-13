@@ -938,13 +938,6 @@ module Hive
       end
     end
 
-    def extract_final_message(data)
-      Hive::Agent::MessageExtractor.extract(
-        data,
-        structured_output_protocol: @profile.structured_output_protocol
-      )
-    end
-
     def parse_json_line(line)
       Hive::Agent::MessageExtractor.parse_json_line(line)
     end

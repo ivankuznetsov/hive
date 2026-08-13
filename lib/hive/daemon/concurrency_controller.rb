@@ -329,10 +329,6 @@ module Hive
         @dropped_projects.add(project)
       end
 
-      def running_pids
-        @running.keys
-      end
-
       def running_task?(project:, slug:)
         @running.any? do |_pid, entry|
           entry[:project] == project && entry[:slug] == slug

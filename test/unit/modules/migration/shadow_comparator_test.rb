@@ -625,7 +625,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
     end
   end
 
-  def test_history_pages_are_lexicographic_and_restart_portable
+  def test_history_iteration_is_lexicographic_and_restart_portable
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
       3.times do |index|
@@ -641,26 +641,22 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
         )
       end
 
-      first = comparator.records_page(module_name: "patrol", limit: 1)
-      assert_equal 1, first.records.size
-      refute_nil first.next_cursor
+      first = comparator.each_record("patrol", page_size: 1).to_a
+      assert_equal 3, first.size
       restarted = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      second = restarted.records_page(
-        module_name: "patrol", limit: 2, cursor: first.next_cursor
-      )
-      assert_equal 2, second.records.size
-      assert_nil second.next_cursor
-      ids = (first.records + second.records).map { |record| record.fetch("decision_id") }
+      second = restarted.each_record("patrol", page_size: 2).to_a
+      assert_equal first, second
+      ids = second.map { |record| record.fetch("decision_id") }
       assert_equal ids.sort, ids
       refute_respond_to comparator, :records
       assert_raises(Hive::ConfigError) do
-        comparator.records_page(module_name: "unknown", limit: 1)
+        comparator.each_record("unknown", page_size: 1).to_a
       end
       assert_raises(Hive::ConfigError) do
-        comparator.records_page(module_name: "patrol", limit: 0)
+        comparator.each_record("patrol", page_size: 0).to_a
       end
       assert_raises(Hive::ConfigError) do
-        comparator.records_page(module_name: "patrol", limit: "many")
+        comparator.each_record("patrol", page_size: "many").to_a
       end
     end
   end

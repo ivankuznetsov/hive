@@ -14,7 +14,6 @@ module Hive
       class ShadowComparator
         class IdentityConflict < Hive::ConfigError; end
 
-        ShadowPage = Data.define(:records, :next_cursor)
         MODULES = PatrolEvidence::MODULES
         MAX_RECORD_BYTES = 512 * 1024
         MAX_RECORDS = 4_096
@@ -106,23 +105,6 @@ module Hive
             }
             record["semantic_digest"] = semantic_digest(record)
             persist(record)
-          end
-        end
-
-        def records_page(module_name:, limit: MAX_PAGE_SIZE, cursor: nil)
-          module_name = validated_module_name(module_name)
-          limit = validated_page_size(limit)
-          @admission_lock.call(shared: true) do
-            page = inventory_for(module_name).page(
-              limit: limit,
-              cursor: cursor
-            )
-            ShadowPage.new(
-              records: page.names.map do |name|
-                read(File.join(root, module_name, name))
-              end.freeze,
-              next_cursor: page.next_cursor
-            ).freeze
           end
         end
 

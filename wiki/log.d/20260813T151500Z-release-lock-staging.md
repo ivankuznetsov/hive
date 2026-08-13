@@ -11,3 +11,5 @@ tags: [release, packaging, github-actions, git]
   parallel candidate campaigns.
 - Added focused coverage for producer/observer lock selection and fail-closed
   digest drift.
+- Updated the root and packaged-web sqlite3 locks to 2.9.6 after the release
+  security gate identified GHSA-mwm8-39rw-8826 in 2.9.5.

@@ -40,10 +40,6 @@ module Hive
       File.join(state_home, "attempts", "v4")
     end
 
-    def attempt_proof_root
-      File.join(attempts_root, "proof")
-    end
-
     # Owner-private, host-global provider-account and exact-model health.
     # Explicit routing alone consults this state; legacy attempts bypass it.
     def provider_health_root

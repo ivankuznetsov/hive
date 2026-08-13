@@ -34,7 +34,6 @@ class PathsTest < Minitest::Test
         assert_equal File.join(dir, "bin"), Hive::Paths.bin_home
         attempts = File.join(dir, "state", "hive", "attempts", "v4")
         assert_equal attempts, Hive::Paths.attempts_root
-        assert_equal File.join(attempts, "proof"), Hive::Paths.attempt_proof_root
         assert_equal File.join(dir, "state", "hive", "provider-health", "v1"),
                      Hive::Paths.provider_health_root
         publish = File.join(dir, "state", "hive", "workflow-publish", "v1")

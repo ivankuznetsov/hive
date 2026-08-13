@@ -56,10 +56,6 @@ module HiveBench
       ]
     end
 
-    def pipeline_by_id(id)
-      pipelines.find { |p| p.id == id }
-    end
-
     # The recorded incumbent: scored from claude-opus-4.7's RAW execute output
     # (reused — see lib/reuse.rb), never run fresh (we don't ship the 4.7 CLI).
     # headless_argv is unused for a reused cell but kept for shape/preflight.

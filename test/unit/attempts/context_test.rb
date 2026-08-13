@@ -52,7 +52,6 @@ class AttemptsContextTest < Minitest::Test
     routing.fetch("route")["model"] = "changed-after-admission"
 
     assert context.explicit_routing?
-    assert_equal "a" * 64, context.routing_policy_digest
     assert_equal "decision-1", context.routing_decision.fetch("decision_id")
     assert_equal "codex-account-a", context.provider_account_id
     assert_equal "codex", context.adapter

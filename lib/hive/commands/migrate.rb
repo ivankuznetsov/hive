@@ -351,16 +351,6 @@ module Hive
         nil
       end
 
-      def migrate_managed_workflow_tasks(hive_state)
-        store = @managed_store_factory.call(hive_state)
-        migrator = Hive::WorkflowPackage::TaskMigrator.new(
-          hive_state, store: store, cfg: @config_loader.call(@project_path)
-        )
-        result = nil
-        with_store_mutation_lock(store) { result = migrator.call }
-        result
-      end
-
       def with_store_mutation_lock(store, &block)
         return yield unless store.respond_to?(:workflows_dir)
 

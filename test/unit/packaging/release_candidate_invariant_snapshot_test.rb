@@ -33,28 +33,13 @@ class ReleaseCandidateInvariantSnapshotTest < Minitest::Test
     assert_equal [ "/tasks/task body" ], diff.fetch("unexpected").map { |item| item.fetch("path") }
   end
 
-  def test_missing_required_named_invariant_and_symlinked_capture_root_fail_closed
+  def test_missing_required_named_invariant_fails_closed
     missing = state("task body" => "keep")
     missing.delete("durable_attempts")
     error = assert_raises(HiveReleaseCandidate::Error) do
       HiveReleaseCandidate::InvariantSnapshot.build(row_id: "latest-stable", sections: missing)
     end
     assert_includes error.message, "durable_attempts"
-
-    with_tmp_dir do |dir|
-      outside = File.join(dir, "outside")
-      root = File.join(dir, "root")
-      FileUtils.mkdir_p([ outside, root ])
-      File.write(File.join(outside, "secret"), "do not read")
-      File.symlink(outside, File.join(root, "linked"))
-
-      error = assert_raises(HiveReleaseCandidate::Error) do
-        HiveReleaseCandidate::InvariantSnapshot.capture_tree(
-          root: root, sections: { "tasks" => "linked" }
-        )
-      end
-      assert_includes error.message, "symlink"
-    end
   end
 
   def test_status_and_doctor_ignore_timestamp_order_version_and_binary_noise

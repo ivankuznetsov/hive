@@ -176,17 +176,6 @@ module Hive
         result(status.success?, out, err)
       end
 
-      def rerun_ci(worktree, run_id, cfg:, dry_run:)
-        return result(true, "[dry-run] gh run rerun skipped", "") if dry_run
-
-        out, err, status = Hive::Gh.capture3(
-          "gh", "run", "rerun", run_id.to_s,
-          chdir: worktree,
-          cfg: cfg
-        )
-        result(status.success?, out, err)
-      end
-
       def pr_has_label?(worktree, pr_number, label, cfg:)
         out, _err, status = Hive::Gh.capture3(
           "gh", "pr", "view", pr_number.to_s, "--json", "labels",

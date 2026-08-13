@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "time"
-
 module HiveBench
   # Detects when a candidate run hit a provider usage/credit/rate limit rather
   # than genuinely failing. A limit is not a clean exit code — it surfaces as a
@@ -57,8 +55,6 @@ module HiveBench
       /resource[_\s-]*exhausted/i
     ].freeze
 
-    UTC_RESET_HINT = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s+\(UTC\)/i
-
     # True if any non-benign line matches a limit pattern.
     def limit_hit?(text)
       normalize(text).each_line.any? do |line|
@@ -72,28 +68,6 @@ module HiveBench
 
     def normalize(text)
       text.to_s.scrub.gsub(%r{\e\[[0-9;?]*[ -/]*[@-~]}, "")
-    end
-
-    # Prefer a provider's explicit UTC reset boundary over the generic cooldown.
-    # Claude currently emits messages such as "resets 12am (UTC)". A small
-    # grace period keeps the retry off the exact boundary; absent/malformed or
-    # non-UTC hints retain the conservative one-hour fallback.
-    def retry_after(text, now: Time.now.utc, fallback_seconds: 3600, grace_seconds: 60)
-      now = now.utc
-      fallback = (now + fallback_seconds).iso8601
-      match = normalize(text).scan(UTC_RESET_HINT).last
-      return fallback unless match
-
-      hour, minute, meridiem = match
-      hour = Integer(hour)
-      minute = Integer(minute || 0)
-      return fallback unless (1..12).cover?(hour) && (0..59).cover?(minute)
-
-      hour %= 12
-      hour += 12 if meridiem.downcase == "pm"
-      reset = Time.utc(now.year, now.month, now.day, hour, minute) + grace_seconds
-      reset += 86_400 if reset <= now
-      reset.iso8601
     end
   end
 end

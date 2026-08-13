@@ -136,6 +136,10 @@ module Hive
             !%w[archived superseded].include?(item.dig("archive", "status"))
         end
         return false unless candidate
+        if candidate.dig("observation", "held") == true
+          hold_reason = candidate.dig("observation", "hold_reason")
+          return true unless @store.remote_poll_hold_reason?(hold_reason)
+        end
 
         !%w[open closed_unmerged].include?(candidate.dig("remote", "state"))
       end
@@ -174,7 +178,7 @@ module Hive
             end
             if same_generation && binding_drift?(same_generation, candidate)
               candidate["observation"]["held"] = true
-              candidate["observation"]["hold_reason"] =
+              candidate["observation"]["hold_reason"] ||=
                 binding_drift_reason(same_generation, candidate)
             end
             task_candidates.each do |existing|
@@ -347,6 +351,19 @@ module Hive
           return remote_result unless remote_result.fetch(:status) == :merged
 
           remote = remote_result.fetch(:remote)
+        end
+
+        if candidate.dig("observation", "held") == true
+          hold_reason = candidate.dig("observation", "hold_reason").to_s.tr("_", " ")
+          return {
+            status: :blocked,
+            remote: remote,
+            archive: {
+              "status" => "blocked",
+              "last_error" => "automatic archive blocked because the #{hold_reason}"
+            },
+            next_poll_at: now + @poll_interval_sec
+          }
         end
 
         architecture = ensure_architecture_intake(
@@ -676,6 +693,7 @@ module Hive
         )
           merged["observation"]["held"] = true
           merged["observation"]["hold_reason"] =
+            observed.dig("observation", "hold_reason") ||
             existing.dig("observation", "hold_reason")
           return merged
         end

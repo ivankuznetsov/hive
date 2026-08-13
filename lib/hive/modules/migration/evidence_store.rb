@@ -87,13 +87,6 @@ module Hive
           )
         end
 
-        def receipts_for_intent(intent_id, limit: MAX_PAGE_SIZE, cursor: nil)
-          indexed_receipts(
-            :intent, validated_id(intent_id, :intent),
-            limit: limit, cursor: cursor
-          )
-        end
-
         # Existing stores can acquire the bounded indices without one
         # history-wide allocation. Callers persist +next_cursor+ and continue
         # in later repair ticks; an incomplete page is never presented as a

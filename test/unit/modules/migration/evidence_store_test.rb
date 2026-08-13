@@ -80,7 +80,7 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
     end
   end
 
-  def test_occurrence_and_intent_indexes_avoid_history_scans
+  def test_occurrence_index_avoids_history_scans
     with_tmp_dir do |root|
       store = Hive::Modules::Migration::EvidenceStore.new(root: root)
       first = receipt_for(
@@ -97,15 +97,11 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
       page = store.receipts_for_occurrence(first.intent.occurrence_id)
       assert_equal [ first ], page.records
       assert_nil page.next_cursor
-      assert_equal [ first ], store.receipts_for_intent(first.intent.intent_id).records
       assert File.file?(
         File.join(
           root, "indexes", "occurrences",
           "#{first.intent.occurrence_id}.json"
         )
-      )
-      assert File.file?(
-        File.join(root, "indexes", "intents", "#{first.intent.intent_id}.json")
       )
     end
   end

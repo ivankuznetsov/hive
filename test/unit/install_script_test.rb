@@ -571,14 +571,10 @@ class InstallScriptTest < Minitest::Test
       fi
       exit 0
     SH
-    write_executable(File.join(fake_bin, "ruby"), <<~'SH')
-      #!/bin/sh
-      case "$*" in
-        *'RUBY_VERSION.to_f >= 3.4'*) exit 0 ;;
-        *'print RUBY_VERSION'*) printf '3.4.7' ;;
-        *) exec /usr/bin/ruby "$@" ;;
-      esac
-    SH
+    write_executable(File.join(fake_bin, "ruby"), <<~RUBY)
+      #!#{RbConfig.ruby}
+      exec(#{RbConfig.ruby.dump}, *ARGV)
+    RUBY
     write_executable(File.join(fake_bin, "gem"), <<~'SH')
       #!/bin/bash
       [[ "$HIVE_INSTALL_TEST_FAILURE" == "gem_failure" ]] && exit 42

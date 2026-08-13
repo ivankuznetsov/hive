@@ -52,10 +52,6 @@ module Hive
       File.join(attempts_root, "outputs")
     end
 
-    def attempt_generation_locks_root
-      File.join(attempts_root, "generation-locks")
-    end
-
     def attempt_proof_root
       File.join(attempts_root, "proof")
     end

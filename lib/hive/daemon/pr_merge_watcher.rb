@@ -741,10 +741,6 @@ module Hive
         []
       end
 
-      def each_candidate
-        @contexts.keys.flat_map { |project| candidates_for(project) }
-      end
-
       def parse_pr_url(value)
         Hive::Gh.parse_pull_request_url(value)
       end

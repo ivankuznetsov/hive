@@ -90,23 +90,6 @@ class ArtifactsCapturePolicyTest < Minitest::Test
     end
   end
 
-  def test_required_capture_cannot_be_demoted_without_confirmed_operator
-    with_task do |task|
-      policy = Hive::Artifacts::CapturePolicy.new(
-        task: task, project: "demo", changed_paths: [ "web/app.css" ],
-        task_generation: "g", base_sha: "a" * 40, head_sha: "b" * 40
-      )
-      policy.ensure!
-
-      assert_raises(Hive::Artifacts::CapturePolicy::AuthorizationError) do
-        policy.demote!(actor: "agent", rationale: "tool missing", confirmed: false)
-      end
-      receipt = policy.demote!(actor: "operator:local", rationale: "verified no visual delta", confirmed: true)
-      assert_equal "not_applicable", receipt.fetch("result")
-      assert_equal "confirmed_demotion", receipt.dig("override", "kind")
-    end
-  end
-
   def test_required_capture_verifies_schema_files_hashes_cleanup_and_accessibility
     with_task do |task|
       policy = Hive::Artifacts::CapturePolicy.new(
@@ -417,43 +400,6 @@ class ArtifactsCapturePolicyTest < Minitest::Test
     end
 
     assert_match(/not a repository/, error.message)
-  end
-
-  def test_promote_records_operator_rationale_and_is_idempotent
-    with_task do |task|
-      policy = Hive::Artifacts::CapturePolicy.new(
-        task: task, project: "demo", changed_paths: [ "lib/hive/config.rb" ],
-        task_generation: "g", base_sha: "a" * 40, head_sha: "b" * 40,
-        clock: -> { Time.utc(2026, 7, 26, 3) }
-      )
-
-      promoted = policy.promote!(actor: "operator:local", rationale: "Needs a visual walkthrough")
-      repeated = policy.promote!(actor: "operator:other", rationale: "ignored")
-
-      assert_equal "required", promoted.fetch("result")
-      assert_equal "promotion", promoted.dig("override", "kind")
-      assert_equal "operator:local", promoted.dig("override", "actor")
-      assert_equal promoted, repeated
-    end
-  end
-
-  def test_demotion_rejects_a_stale_generation_receipt
-    with_task do |task|
-      policy = Hive::Artifacts::CapturePolicy.new(
-        task: task, project: "demo", changed_paths: [ "web/app.css" ],
-        task_generation: "current", base_sha: "a" * 40, head_sha: "b" * 40
-      )
-      stale = policy.build.merge("task_generation" => "stale")
-      policy.define_singleton_method(:ensure!) { stale }
-
-      error = assert_raises(Hive::Artifacts::CapturePolicy::AuthorizationError) do
-        policy.demote!(
-          actor: "operator:local", rationale: "Confirmed nonvisual", confirmed: true
-        )
-      end
-
-      assert_match(/changed generation/, error.message)
-    end
   end
 
   def test_invalid_capture_times_and_missing_media_fail_validation

@@ -675,8 +675,8 @@ module Hive
     # config-load time but rejected at dispatch with a pointer to
     # review.ci.command (Hive::Reviewers.dispatch).
     REVIEWER_KINDS = %w[agent codex_review linter].freeze
-    # The agent backends `hive setup` can persist globally, in canonical
-    # listing/storage order. Every method that filters or reorders a
+    # Agent backends accepted by the global selection reader, in canonical
+    # listing order. Every method that filters or reorders a
     # selection iterates this list so the on-disk order is stable
     # regardless of the order the operator typed. The names are frozen so
     # callers that receive them back from `normalize_global_agents` cannot
@@ -688,7 +688,7 @@ module Hive
     # Boot-time parity guard, the analogue of Init::Prompts' CHOICES/MODES
     # check (init/prompts.rb): a recommended default that isn't also a
     # known backend would let `default_global_agents` emit a value that
-    # `normalize_global_agents`/`write_global_agents!` then reject. Enforce
+    # `normalize_global_agents` then rejects. Enforce
     # the subset here rather than letting it surface only as a runtime
     # ConfigError. Single-line modifier (like the sibling guard) so the
     # never-taken raise stays on the evaluated line for the coverage gate.
@@ -1312,32 +1312,12 @@ module Hive
       )
     end
 
-    # Persist a backend selection, writing the normalized (validated,
-    # canonical-order) list to `agents.selected` and returning it. Merging
-    # into `(existing || {})` preserves any operator-owned sibling keys
-    # under `agents:` (e.g. per-agent override blocks, freeform notes) —
-    # only `selected` is rewritten. A pre-existing non-Hash `agents:` value
-    # is a hand-edit error and raises rather than being clobbered.
-    def write_global_agents!(agents)
-      normalized = normalize_global_agents(agents, source: "the write_global_agents! argument")
-      update_global_config! do |data|
-        existing = data["agents"]
-        unless existing.nil? || existing.is_a?(Hash)
-          raise ConfigError, "agents in #{describe_source(global_config_path)} must be a Hash; got #{existing.class}"
-        end
-
-        data["agents"] = (existing || {}).merge("selected" => normalized)
-        normalized
-      end
-    end
-
-    # Validate and canonicalize a raw selection (from disk or a caller)
+    # Validate and canonicalize a raw selection from disk
     # into the persisted contract: a frozen array of frozen backend names
     # in `GLOBAL_AGENT_BACKENDS` order, deduped, with at least one entry.
     # Enforcing "≥1 backend" here mirrors the prompt boundary
-    # (BackendPrompt) so neither a hand-edited `selected: []` nor a
-    # `write_global_agents!([])` can persist a zero-backend state the
-    # prompt can never produce. Each name must be a non-empty String that
+    # (BackendPrompt) so a hand-edited `selected: []` cannot create a
+    # zero-backend state the prompt can never produce. Each name must be a non-empty String that
     # resolves to a registered backend; anything else is a hand-edit error
     # and raises ConfigError.
     def normalize_global_agents(agents, source:)

@@ -7,6 +7,8 @@ require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/config"
 require "hive/events"
+require "base64"
+require "json"
 require "hive/markers"
 require "hive/model_routing"
 require "hive/permission_scope"
@@ -474,7 +476,7 @@ module Hive
       # CleanExit checks the worktree at `stage_exit`. On residue:
       #   - `:auto_committed` → log and fall through (the residue is
       #     committed; the stage marker the runner wrote stands).
-      #   - `:scope_violation` / `:git_failed` → write
+      #   - `:scope_violation` / `:safety_violation` / `:git_failed` → write
       #     `:error reason=ensure_clean_on_exit_failed`, BUT never
       #     downgrade an already-terminal `:error` (the wrapped runner's
       #     own error wins for diagnostic clarity).
@@ -482,7 +484,7 @@ module Hive
       # Returns a sentinel hash describing the outcome so the caller
       # (`with_stage_events`) can decide whether the stage's
       # `result[:commit]` is now stale:
-      #   { status: :clean | :auto_committed | :scope_violation |
+      #   { status: :clean | :auto_committed | :scope_violation | :safety_violation |
       #             :git_failed | :skipped,
       #     overwrote_marker: true | false }
       # `:skipped` covers PAUSE_MARKERS and missing-worktree no-ops; any
@@ -512,7 +514,7 @@ module Hive
         when :clean, :auto_committed
           log_clean_exit_event(task, stage, result)
           { status: result[:status], overwrote_marker: false }
-        when :scope_violation, :git_failed
+        when :scope_violation, :safety_violation, :git_failed
           overwrote = mark_clean_exit_failure(task, result, existing_marker)
           { status: result[:status], overwrote_marker: overwrote }
         else
@@ -587,12 +589,16 @@ module Hive
       def log_clean_exit_event(task, stage, result)
         return unless result[:status] == :auto_committed
 
+        paths = Hive::Events.clean_exit_paths(result[:paths])
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
           stage: stage,
           event_type: :clean_exit_auto_committed,
-          message: "head=#{result[:head]} paths=#{Array(result[:paths]).join(',')[0, 200]}"
+          message: "head=#{result[:head]} paths=#{paths.join(',')[0, 200]}",
+          data: Hive::Events.clean_exit_data(
+            head: result[:head], reason: "stage_exit", paths: paths
+          )
         )
       rescue StandardError
         nil
@@ -606,7 +612,11 @@ module Hive
           reason: "ensure_clean_on_exit_failed",
           detail: result[:message].to_s[0, 200]
         }
-        attrs[:residue_paths] = Array(result[:paths]).join(",")[0, 200] if result[:paths]
+        if result[:paths]
+          paths = Array(result[:paths]).first(Hive::Events::MAX_EVENT_PATHS).map(&:to_s)
+          attrs[:residue_paths] = paths.join(",")[0, 200]
+          attrs[:residue_paths_b64] = Base64.strict_encode64(JSON.generate(paths))
+        end
         Hive::Markers.set(task.state_file, :error, **attrs)
         true
       end

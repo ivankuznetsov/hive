@@ -33,6 +33,14 @@ Preserve the task folder, worktree, attempt records, queue entries, locks, marke
   evidence (for example operator answers, dirty/foreign worktree state,
   unrestored controller files, or a credential still present locally); do not
   bypass it with a blind marker clear.
+- For `ensure_clean_on_exit_failed` or `dirty_worktree`, keep recovery inside
+  Hive's owned-worktree boundary: inspect with
+  `hive worktree status SLUG --json`, then use either
+  `hive worktree commit-residue SLUG --json` or
+  `hive worktree discard-residue SLUG --paths PATH [PATH ...] --json`.
+  These commands are marker-gated, task-locked, and preserve the marker. After
+  the repair, refresh `hive status --json` and invoke only the fresh
+  generation-guarded `workflow.retry` action it emits.
 - If the daemon is not running and background automation is expected,
   `hive daemon start --detach` is the normal start form.
 - `recovery_migration_required` means the current failure predates marker IDs.

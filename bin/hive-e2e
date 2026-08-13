@@ -7,6 +7,7 @@ require "json"
 require "open3"
 require "thor"
 require "hive"
+require "hive/cli_argv_policy"
 require "hive/cli_json_options"
 require "coverage_catalog"
 require "runner"
@@ -94,15 +95,15 @@ module Hive
         selection = semantic_selection(catalog, pattern)
         scenarios = if selection
                       catalog.scenarios_for(selection)
-                    else
+        else
                       filter_scenarios(catalog.scenarios, pattern: pattern, tag: options[:filter])
-                    end
+        end
         if scenarios.empty?
           target = if options[:coverage]
                      "no runnable scenario for coverage #{options[:coverage]}"
-                   else
+          else
                      "no scenarios match #{pattern || options[:filter] || options[:profile] || 'all'}"
-                   end
+          end
           exit_with_error(target,
                           error_kind: "no_scenarios", exit_code: BinaryExit::USAGE)
         end
@@ -279,7 +280,7 @@ module Hive
           )
         end
         return catalog.select_profile(options[:profile]) if options[:profile]
-        return catalog.select_coverage(options[:coverage]) if options[:coverage]
+        catalog.select_coverage(options[:coverage]) if options[:coverage]
       end
 
       def filter_scenarios(scenarios, pattern:, tag:)
@@ -376,26 +377,6 @@ module Hive
   end
 end
 
-def wrapper_option_argv(argv)
-  Hive::CliJsonOptions.option_argv(argv)
-end
-
-def rewrite_help_flag!(argv)
-  return if argv.empty?
-
-  option_argv = wrapper_option_argv(argv)
-  cmd_idx = option_argv.index { |arg| !arg.start_with?("-") }
-  return unless cmd_idx
-
-  help_idx = option_argv[(cmd_idx + 1)..]&.index { |arg| arg == "--help" || arg == "-h" }
-  return unless help_idx
-
-  command = argv[cmd_idx]
-  known_commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
-  help_target = known_commands.include?(command) ? command : "run"
-  argv.replace(argv[0...cmd_idx] + [ "help", help_target ])
-end
-
 JSON_BOOLEAN_OPTIONS = Hive::CliJsonOptions::BOOLEAN_OPTIONS
 TOP_LEVEL_FLAGS = %w[--help -h --version -v].freeze
 
@@ -407,21 +388,7 @@ TOP_LEVEL_FLAGS = %w[--help -h --version -v].freeze
 # `--json=<value>` assignments are rejected before Thor can use the value as a
 # command or pattern.
 def json_requested?(argv)
-  Hive::CliJsonOptions.requested?(argv)
-end
-
-def reject_invalid_argv_encoding!(argv)
-  idx = argv.index { |arg| !arg.dup.force_encoding(Encoding::UTF_8).valid_encoding? }
-  return unless idx
-
-  raise Thor::MalformattedArgumentError, "invalid byte sequence in argument #{idx + 1}"
-end
-
-def reject_unsupported_json_assignments!(argv)
-  arg = Hive::CliJsonOptions.unsupported_assignment(argv)
-  return unless arg
-
-  raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
+  Hive::CliArgvPolicy.json_requested?(argv)
 end
 
 RETENTION_VALUE_OPTIONS = %w[--retain-days --retain-failed-days].freeze
@@ -429,7 +396,7 @@ RETENTION_VALUE_OPTIONS = %w[--retain-days --retain-failed-days].freeze
 def reject_missing_retention_values!(argv)
   return unless argv.first == "clean"
 
-  wrapper_option_argv(argv).each_index do |idx|
+  Hive::CliArgvPolicy.option_argv(argv).each_index do |idx|
     arg = argv[idx]
     next unless RETENTION_VALUE_OPTIONS.include?(arg)
 
@@ -442,44 +409,6 @@ end
 
 HELP_FLAGS = %w[--help -h].freeze
 
-def normalize_leading_global_options!(argv)
-  leading = []
-  leading << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
-  return if leading.empty?
-
-  commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
-
-  # A *bare* top-level flag (`--json --version`, `--json -h`) is handled as
-  # human-only version/help output, so the leading --json is irrelevant and
-  # stays dropped. But when tokens trail the flag (`--json --version --filter
-  # tui`) it is no longer a standalone top-level invocation: Thor consumes it
-  # as a pattern and dispatches into `run_scenarios`, whose body reads
-  # `options[:json]`. Restore --json there so the command honors the caller's
-  # JSON request instead of emitting prose (the outer rescue's json_mode
-  # snapshot only guards Thor-level errors, not the command body).
-  if TOP_LEVEL_FLAGS.include?(argv.first)
-    return if argv.length == 1
-
-    # `--json --help <command>` / `--json -h <command>` requests that command's
-    # help. Thor renders command help natively when a help flag leads and a
-    # recognized command follows (exactly as `--help run` does) — but only while
-    # the leading --json stays dropped. Restoring --json ahead of --help makes
-    # Thor stop treating --help as the help switch and instead dispatch into
-    # run_scenarios with [--help, <command>], exiting 64. Help output is human
-    # prose, so the now-irrelevant --json can stay dropped. Non-command trailers
-    # (`--json --help missing`, `--json --help --filter tui`) fall through to the
-    # restore path so their usage errors still honor the JSON-envelope contract.
-    return if HELP_FLAGS.include?(argv.first) && commands.include?(argv[1])
-
-    return argv.unshift(*leading)
-  end
-
-  cmd_idx = argv.index { |arg| commands.include?(arg) }
-  return argv.unshift(*leading) unless cmd_idx
-
-  argv.insert(cmd_idx + 1, *leading)
-end
-
 # Snapshot the caller's JSON request from the pristine ARGV. Normalization can
 # shift a leading `--json` out of ARGV and then return early without restoring
 # it (e.g. `--json --help missing`, `--json --version extra`, where a top-level
@@ -489,14 +418,19 @@ end
 json_mode = json_requested?(ARGV)
 
 begin
-  reject_invalid_argv_encoding!(ARGV)
-  reject_unsupported_json_assignments!(ARGV)
-  normalize_leading_global_options!(ARGV)
+  ARGV.replace(Hive::CliArgvPolicy.validate_encoding(ARGV))
+  ARGV.replace(Hive::CliArgvPolicy.reject_unsupported_json_assignments(ARGV))
+  commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
+  ARGV.replace(
+    Hive::CliArgvPolicy.normalize_leading_json_options(
+      ARGV, commands: commands, top_level_flags: TOP_LEVEL_FLAGS, help_flags: HELP_FLAGS
+    )
+  )
   if ARGV == [ "--version" ] || ARGV == [ "-v" ]
     puts Hive::VERSION
     exit 0
   end
-  rewrite_help_flag!(ARGV)
+  ARGV.replace(Hive::CliArgvPolicy.rewrite_help(ARGV, known_commands: commands, fallback_command: "run"))
   reject_missing_retention_values!(ARGV)
   # Thor::Base#start rescues Thor::Error internally and exits 1 when
   # exit_on_failure? is true. Passing `debug: true` makes Thor re-raise

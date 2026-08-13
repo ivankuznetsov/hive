@@ -115,12 +115,6 @@ module Hive
         )
       end
 
-      def each_projection_pending_occurrence(&block)
-        return @occurrence_store.each_projection_pending unless block
-
-        @occurrence_store.each_projection_pending(&block)
-      end
-
       def each_recovery_active_occurrence(&block)
         return @occurrence_store.each_recovery_active unless block
 
@@ -131,12 +125,6 @@ module Hive
 
       def rebuild_recovery_index!
         @occurrence_store.rebuild_recovery_index!
-      end
-
-      def each_occurrence(&block)
-        return @occurrence_store.each_record unless block
-
-        @occurrence_store.each_record(&block)
       end
 
       def finalize_occurrence!(capture:, event: nil, evidence_store:,

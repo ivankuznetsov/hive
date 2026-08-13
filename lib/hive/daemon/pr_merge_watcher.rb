@@ -126,13 +126,6 @@ module Hive
         end
       end
 
-      def watching?(project:, slug:)
-        candidates_for(project).any? do |candidate|
-          candidate.dig("task", "slug") == slug.to_s &&
-            !%w[archived superseded].include?(candidate.dig("archive", "status"))
-        end
-      end
-
       # Error recovery must wait until the durable watcher has classified the
       # task-bound PR. Unknown/merged/ambiguous candidates stay fenced; a
       # confirmed open or closed-unmerged PR may continue through ordinary

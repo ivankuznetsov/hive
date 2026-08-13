@@ -8,6 +8,8 @@ module Hive
     #
     # See lib/hive/metrics.rb for the trailer + revert-detection rules.
     class Metrics
+      include Hive::Schemas::EnvelopeEmitter
+
       # Typed usage error for hive metrics. Exits with the canonical
       # sysexits(3) USAGE code (64) — distinct from
       # ExitCodes::ALREADY_INITIALIZED (2), which the metrics command
@@ -50,16 +52,18 @@ module Hive
       end
 
       def call
-        @stdout_written = false
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json && !@stdout_written
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json && !@stdout_written
-        raise wrapped
+        call_with_envelope { do_call }
       end
+
+      def envelope_schema
+        "hive-metrics-rollback-rate"
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
+      end
+
+      def envelope_serialization_failure_policy = :suppress
 
       def do_call
         case @subcommand
@@ -99,47 +103,21 @@ module Hive
         end
       end
 
-      # Emit a JSON error envelope on stdout with EnvelopeEmitter's
-      # single-document guard and typed re-raise pattern, while deliberately
-      # retaining this schema's narrower payload (no `error_class`).
       def fail_usage!(message, kind:)
         error = UsageError.new(message, error_kind: kind)
         if @json
-          puts JSON.generate(
-            "schema" => "hive-metrics-rollback-rate",
-            "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-metrics-rollback-rate"),
-            "ok" => false,
-            "error_kind" => kind,
-            "exit_code" => Hive::ExitCodes::USAGE,
-            "message" => message
-          )
-          @stdout_written = true
+          emit_envelope(error)
         else
           warn message
         end
         raise error
       end
 
-      # Top-level error envelope for Hive::Error subclasses that surface
-      # outside fail_usage! (e.g., Hive::ConfigError from
-      # Hive::Config#validate_hive_home! / registered_projects). Mirrors
-      # Run/Status's @stdout_written-guarded emit so the rescue can never
-      # write a second JSON document on top of fail_usage!'s envelope.
-      def emit_error_envelope(error)
-        payload = {
-          "schema" => "hive-metrics-rollback-rate",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-metrics-rollback-rate"),
-          "ok" => false,
-          "error_kind" => error_kind_for(error),
-          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
-          "message" => error.message
-        }
-        puts JSON.generate(payload)
-        @stdout_written = true
-      rescue Errno::EPIPE, JSON::GeneratorError
-        # See Run/Status: swallow emit-time failures so the original
-        # Hive::Error still propagates with its documented exit_code.
-        @stdout_written = true
+      # The published metrics v1 error arm intentionally omits `error_class`.
+      # Keep that allowlist while sharing EnvelopeEmitter's rescue and write
+      # mechanics with the other JSON-producing commands.
+      def envelope_payload_for(error)
+        super.slice("schema", "schema_version", "ok", "error_kind", "exit_code", "message")
       end
 
       def error_kind_for(error)

@@ -29,64 +29,19 @@ agent. For real isolation, run Hive under a sandboxed user or choose the
 
 ## Managed Honeycomb Policy
 
-The module lifecycle adds a separate runtime grant contract around package
-hooks and first-party Patrol adapters. These grants are not workflow-stage
-`permissions:` presets. A preview discloses and records each of:
+Reviewed Honeycomb packages use a separate managed-runtime contract rather than
+inheriting the owner-authored stage default above. Hive validates each exact
+actor scope during install or update and again immediately before spawn; a
+profile that cannot enforce the declared bound fails closed. Preview and status
+show permission/input metadata and secret-binding availability, never secret
+values. These tool controls are still not an OS sandbox, so use Hivebox or
+another container boundary when inherited settings, plugins, MCP servers, or
+the shared OS user must also be isolated.
 
-- repository write authority;
-- GitHub mutation kinds;
-- external command names;
-- network hosts;
-- filesystem read and write patterns;
-- secret binding names.
-
-Permission growth, a new network host, or a new hook requires renewed explicit
-consent. The immutable grant snapshot is checked again at hook execution; no
-first-party module receives a consent bypass. The Patrol adapters currently
-preflight that snapshot before invoking their legacy engines, but complete
-gateway-bound enforcement remains a cutover blocker as documented in
-[modules.md](modules.md). Status exposes only grant digests and secret binding
-names/availability, never values.
-
-Reviewed Honeycomb packages do not inherit the owner-authored default above.
-The current `honeycomb-manifest/v1` declares a generated coarse disclosure:
-risk, capabilities, network hosts, filesystem read/write sets, and secrets.
-Hive validates that disclosure against the catalog and package fingerprint,
-but does not reinterpret it as the older exact tool/deny/command policy.
-
-Only `risk: low`, `capabilities: [filesystem-read]`, task-only read access, and
-empty network/write/secret sets have a lossless mapping today. That maps to
-Hive's read-only tool set. Every broader disclosure fails admission before
-project state changes. The current Bench and Docs Sync seeds therefore verify
-as registry content but are not installable until Hive can enforce v2 precisely
-or the registry adds an exact runtime policy contract.
-
-V2 managed actors compile their descriptor's exact `permissions:` preset in
-memory. Headless and tmux launches receive the resulting permission mode,
-allowed/denied tool lists, task/package directories, and a sanitized child
-environment/PATH. This actor path does not write `.managed-policies`, generate
-settings or MCP files, or install a pre-tool hook; it therefore does not claim
-to disable inherited Claude settings, hooks, plugins, or MCP configuration.
-Use hivebox or another OS/container boundary when those sources must be
-isolated as well as the actor's Hive-supplied tool scope.
-
-The publisher traverses every executable actor, rejects missing or understated
-policy disclosure, and projects the exact policies into Honeycomb's conservative
-coarse permission union. High-risk but reviewable packages remain visible to
-registry reviewers; publication does not manufacture approval evidence.
-
-Admission runs before installation/update, then the policy is compiled again
-from the task-pinned manifest immediately before spawn. `workflow publish`
-runs authoring validation, conservative exact-actor disclosure projection,
-consumer validation, and the pinned local Honeycomb lint before any remote
-interaction. It deliberately does not apply the current runtime admission
-limit to author submission, so a correctly disclosed high-risk package remains
-reviewable even when this Hive version cannot yet install it.
-Codex, Pi, Grok,
-custom profiles without the full `policy_capabilities` set, and explicit
-managed actors selecting them fail closed. These controls reduce agent/tool
-capability but do not change the process's OS user or claim universal network
-isolation beyond controls the runner can enforce.
+The authoritative package-policy specification—including disclosure versus
+runtime enforcement, high-risk consent classification, provider admission, and
+publication projection—lives in the managed wiki's
+[`Hive::WorkflowPackage` module page](../wiki/modules/workflow_package.md).
 
 ## Presets
 

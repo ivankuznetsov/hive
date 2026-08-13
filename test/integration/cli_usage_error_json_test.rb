@@ -152,6 +152,22 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_worktree_pre_dispatch_usage_errors_preserve_the_json_contract
+    with_tmp_global_config do |home|
+      [
+        %w[worktree status demo extra --json],
+        %w[worktree repair demo --strategy unknown --json]
+      ].each do |argv|
+        assert_pre_dispatch_error(
+          home,
+          argv,
+          schema: "hive-worktree",
+          error_kind: "invalid_arguments"
+        )
+      end
+    end
+  end
+
   def test_watch_rejects_single_document_json_with_stream_guidance
     with_tmp_global_config do |home|
       out, err, status = run_hive(home, "watch", "demo:task", "--json")

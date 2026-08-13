@@ -43,11 +43,7 @@ module Hive
     # distinguishable from a clean scan. A blanket rescue that
     # returned `[]` on any error would reduce a security-critical
     # gate to a no-op on any transient gh hiccup.
-    ScanResult = Struct.new(:hits, :fetch_failed, :fetch_error, keyword_init: true) do
-      def clean?
-        hits.empty? && !fetch_failed
-      end
-    end
+    ScanResult = Struct.new(:hits, :fetch_failed, :fetch_error, keyword_init: true)
 
     module_function
 

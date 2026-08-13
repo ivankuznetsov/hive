@@ -140,7 +140,7 @@ class GhUnitTest < Minitest::Test
       state = File.join(dir, "pr.md")
       File.write(state, "no secrets here\n")
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "")
-      assert result.clean?
+      assert_empty result.hits
       refute result.fetch_failed
     end
   end
@@ -151,7 +151,7 @@ class GhUnitTest < Minitest::Test
         state_file: File.join(dir, "pr.md"), pr_url: ""
       )
 
-      assert result.clean?
+      assert_empty result.hits
       refute result.fetch_failed
     end
   end
@@ -161,7 +161,6 @@ class GhUnitTest < Minitest::Test
       state = File.join(dir, "pr.md")
       File.write(state, "key: sk-ant-#{'a' * 30}\n")
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "")
-      refute result.clean?
       assert_includes result.hits.map { |h| h[:name].to_s }, "anthropic_api_key"
     end
   end
@@ -177,7 +176,6 @@ class GhUnitTest < Minitest::Test
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "https://example.com/pr/42")
       assert result.fetch_failed, "gh pr view non-zero must set fetch_failed=true"
       refute_empty result.fetch_error.to_s, "fetch_error must preserve the gh failure detail"
-      refute result.clean?, "fetch_failed must NOT be reported as clean"
     end
   end
 

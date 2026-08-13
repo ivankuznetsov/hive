@@ -239,7 +239,9 @@ jobs:
           # install.sh's `gem install` step has a real, well-formed
           # artifact to consume.
           gemroot="$fixtures/gemroot"
-          mkdir -p "$gemroot/bin"
+          mkdir -p "$gemroot/bin" "$gemroot/lib/hive/assets/qmd"
+          cp lib/hive/assets/qmd/package.json "$gemroot/lib/hive/assets/qmd/package.json"
+          cp lib/hive/assets/qmd/package-lock.json "$gemroot/lib/hive/assets/qmd/package-lock.json"
           cat > "$gemroot/bin/hive" <<'SH'
           #!/usr/bin/env ruby
           if ARGV == ["daemon", "install", "--json"]
@@ -262,7 +264,7 @@ jobs:
             s.author = "fixture"
             s.bindir = "bin"
             s.executables = ["hive", "hv"]
-            s.files = Dir["bin/*"]
+            s.files = Dir["bin/*", "lib/hive/assets/qmd/*"]
           end
           RUBY
           ( cd "$gemroot" && gem build hive-cli.gemspec )
@@ -312,7 +314,7 @@ jobs:
               printf 'fixture qmd tarball\n' > "$destination/$filename"
               printf '[{"filename":"%s"}]\n' "$filename"
               ;;
-            install)
+            ci)
               prefix=""
               while [[ $# -gt 0 ]]; do
                 if [[ "$1" == "--prefix" ]]; then
@@ -322,13 +324,13 @@ jobs:
                 shift
               done
               [[ -n "$prefix" ]] || { echo "missing --prefix" >&2; exit 1; }
-              mkdir -p "$prefix/bin" "$prefix/lib/node_modules/@tobilu/qmd"
-              printf '{"name":"@tobilu/qmd"}\n' > "$prefix/lib/node_modules/@tobilu/qmd/package.json"
-              cat > "$prefix/bin/qmd" <<'QMD'
+              mkdir -p "$prefix/node_modules/.bin" "$prefix/node_modules/@tobilu/qmd"
+              printf '{"name":"@tobilu/qmd"}\n' > "$prefix/node_modules/@tobilu/qmd/package.json"
+              cat > "$prefix/node_modules/.bin/qmd" <<'QMD'
           #!/usr/bin/env bash
           echo "qmd fixture"
           QMD
-              chmod +x "$prefix/bin/qmd"
+              chmod +x "$prefix/node_modules/.bin/qmd"
               ;;
             rebuild)
               exit 0

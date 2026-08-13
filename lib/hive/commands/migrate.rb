@@ -90,10 +90,17 @@ module Hive
           plan = build_migration_plan(stages)
           preflight_collisions!(plan)
           store = @managed_store_factory.call(hive_state)
+          project_config = @config_loader.call(@project_path)
           migrator = Hive::WorkflowPackage::TaskMigrator.new(
-            hive_state, store: store, cfg: @config_loader.call(@project_path)
+            hive_state, store: store, cfg: project_config
           )
           prepared = migrator.prepare
+          Hive::Workflows::Project.load!(
+            @project_path, config: project_config, hive_state_path: hive_state
+          )
+          workflow_generation = Hive::Task.capture_workflow_generation(
+            @project_path, config: project_config
+          )
           workflow_migration = nil
           with_store_mutation_lock(store) do
             Hive::Lock.with_commit_lock(hive_state) do
@@ -110,7 +117,10 @@ module Hive
 
                 ensure_current_stage_dirs(stages)
                 backfilled_count = backfill_task_ids(stages)
-                recovery_marker_count = backfill_recovery_marker_ids(stages)
+                recovery_marker_count = backfill_recovery_marker_ids(
+                  stages, managed_store: store, cfg: project_config,
+                  workflow_generation: workflow_generation
+                )
 
                 if config_changed || moved.any? || backfilled_count.positive? ||
                    recovery_marker_count.positive? || workflow_task_count.positive?
@@ -295,9 +305,14 @@ module Hive
       # markers written before marker_id existed. Migrate them once, under the
       # project commit lock, so runtime recovery can reject id-less markers
       # instead of carrying a permanent compatibility identity algorithm.
-      def backfill_recovery_marker_ids(stages)
+      def backfill_recovery_marker_ids(
+        stages, managed_store: nil, cfg: {}, workflow_generation: nil
+      )
         task_folders(stages).count do |folder|
-          state_file = recovery_state_file(folder)
+          state_file = recovery_state_file(
+            folder, managed_store: managed_store, cfg: cfg,
+            workflow_generation: workflow_generation
+          )
           next false unless state_file
 
           marker = Hive::Markers.current(state_file)
@@ -308,8 +323,27 @@ module Hive
         end
       end
 
-      def recovery_state_file(folder)
-        Hive::Task.new(folder).state_file
+      def recovery_state_file(folder, managed_store: nil, cfg: {}, workflow_generation: nil)
+        read = Hive::TaskMeta.read_for_admission(folder)
+        if managed_store && read.status == :ok && read.data[:workflow_commit]
+          meta = read.data
+          workflow = managed_store.workflow(
+            meta.fetch(:workflow),
+            meta.fetch(:workflow_commit),
+            meta.fetch(:workflow_manifest_digest),
+            configuration_digest: meta[:workflow_configuration_digest],
+            cfg: cfg,
+            verify_profiles: false
+          )
+          stage = workflow.stage_for_dir(File.basename(File.dirname(folder)))
+          return File.join(folder, stage.state_file) if stage
+
+          return nil
+        end
+
+        # Runtime task loading without an immutable generation reads managed
+        # selections and would re-enter the mutation lock held by migrate.
+        Hive::Task.new(folder, workflow_generation: workflow_generation).state_file
       rescue Hive::InvalidTaskPath, Hive::ConfigError
         # An unknown or incomplete workflow cannot identify its authoritative
         # state file safely. Preserve it unchanged; recovery remains blocked

@@ -20,8 +20,6 @@ module Hive
           )
           freeze
         end
-
-        def default? = id == "default"
       end
 
       module_function

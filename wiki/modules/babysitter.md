@@ -3,7 +3,7 @@ title: Hive::Babysitter
 type: module
 source: lib/hive/babysitter/, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh.rb, bin/hive-babysitter-skip-log.rb
 created: 2026-05-26
-updated: 2026-08-07
+updated: 2026-08-13
 tags: [babysitter, module, daemon, github, agents]
 ---
 
@@ -20,7 +20,7 @@ tags: [babysitter, module, daemon, github, agents]
 | `Hive::Babysitter::PrFixer` | `lib/hive/babysitter/pr_fixer.rb` | Per-PR precheck, green-but-`BEHIND` auto-rebase, worktree setup, context gathering, prompt render, agent spawn, give-up handling. |
 | `Hive::Babysitter::ContextBuilder` | `lib/hive/babysitter/context_builder.rb` | Builds prompt-ready status rollup, failing-job logs, and diff stat. |
 | `Hive::Babysitter::Worktree` | `lib/hive/babysitter/worktree.rb` | Recreates `.hive-state/babysitter/worktrees/<pr>/` from a force-refreshed internal PR-head ref. Before add, it force-removes the old checkout, moves any undeletable residue to `.hive-state/babysitter/quarantine/worktrees/`, and immediately prunes stale Git metadata so rebased, force-pushed, interrupted, or container-contaminated worktrees do not wedge the babysitter cache. |
-| `Hive::Babysitter::GhOps` | `lib/hive/babysitter/gh_ops.rb` | Hive-driven GitHub/git side effects: `force_push_with_lease(worktree, branch, cfg:, dry_run:, expected_oid: nil)` (explicit `--force-with-lease=<branch>:<oid>` when `expected_oid` is given — robust without a local remote-tracking ref — else the bare `--force-with-lease`), `rebase_onto_base` (fetch base over the remote's **push URL** + rebase onto `FETCH_HEAD`, abort-on-conflict, returns a `RebaseResult` of `:success`/`:conflict`/`:failure`), idempotent provisioning and application of the Hive-owned `babysitter/needs-human` label, comment, rerun. Honors dry-run. |
+| `Hive::Babysitter::GhOps` | `lib/hive/babysitter/gh_ops.rb` | Hive-driven GitHub/git side effects: `force_push_with_lease(worktree, branch, cfg:, dry_run:, expected_oid: nil)` (explicit `--force-with-lease=<branch>:<oid>` when `expected_oid` is given — robust without a local remote-tracking ref — else the bare `--force-with-lease`), `rebase_onto_base` (fetch base over the remote's **push URL** + rebase onto `FETCH_HEAD`, abort-on-conflict, returns a `RebaseResult` of `:success`/`:conflict`/`:failure`), idempotent provisioning and application of the Hive-owned `babysitter/needs-human` label, and comments. Honors dry-run. |
 | `Hive::Babysitter::DryRunEnv` / `StubEnvironment` | `lib/hive/babysitter/{dry_run_env,stub_environment}.rb` | PATH overlay and launcher setup for agent-side dry-run `git` / `gh` wrappers. One Ruby-owned startup/dynamic-loader environment definition is shared by the parent overlay and both stubs; the generated `gh` launcher invokes the Ruby stub directly. Before writing launchers it `lstat`s and removes any pre-existing overlay path, creates a fresh owned `0700` directory, and pins the parent-resolved real binary and worktree-root skip-log path. |
 | `Hive::Babysitter::GitPolicy` | `lib/hive/babysitter/git_policy.rb` | Pure, default-deny classification and argv hardening for dry-run Git reads. |
 | `Hive::Babysitter::GhPolicy` | `lib/hive/babysitter/gh_policy.rb` | Pure, default-deny classification for dry-run GitHub CLI reads, including host and browser/credential boundaries. |

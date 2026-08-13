@@ -89,7 +89,9 @@ module Hive
         attempts = runtime.fetch(:attempt_store).scan.records
         decisions = runtime.fetch(:journal).all
 
-        raise "first occurrence was not admitted" unless first.launched?
+        unless first.decision.fetch("outcome") == "launch"
+          raise "first occurrence was not admitted"
+        end
         raise "replay was not an explainable duplicate" unless replay.decision.fetch("reason") == "duplicate"
         raise "replay created duplicate attempts" unless attempts.one? && attempts.first.module_hook?
         raise "expected launch and skip receipts" unless decisions.map { |row| row.fetch("reason") } ==

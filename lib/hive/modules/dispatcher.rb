@@ -14,9 +14,7 @@ require "hive/workflow_package/canonical_json"
 
 module Hive
   module Modules
-    ModuleDispatchResult = Data.define(:decision, :attempt_result, :event) do
-      def launched? = decision && decision["outcome"] == "launch"
-    end
+    ModuleDispatchResult = Data.define(:decision, :attempt_result, :event)
 
     # Project-local hook admission coordinator. One hook lock covers enabled
     # state, binding cursor, dedupe/concurrency evidence, attempt admission,

@@ -541,29 +541,6 @@ module Hive
           nil
         end
 
-        # Unlike #read, readiness accepts a currently-running tick's `started`
-        # phase. `runtime_ready=true` can only be published after construction
-        # and is retained on every later record for the same daemon identity.
-        def runtime_readiness(expected_daemon: AUTO_DAEMON,
-                              now: Time.now.utc)
-          expected = expected_daemon.equal?(AUTO_DAEMON) ?
-            self.expected_daemon : expected_daemon
-          return nil if expected == :unavailable
-
-          validate_path!
-          record = JSON.parse(File.read(@path))
-          validate_record!(record)
-          return nil unless daemon_matches?(record, expected)
-          return nil unless record["runtime_ready"] == true
-          return nil if record.key?("shutdown")
-          return nil if Time.parse(record.fetch("valid_until")) < now
-
-          record
-        rescue Errno::ENOENT, SecurityError, JSON::ParserError,
-               ArgumentError, TypeError, KeyError, SystemCallError, IOError
-          nil
-        end
-
         private
 
         def expected_daemon

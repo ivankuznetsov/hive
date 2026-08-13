@@ -78,10 +78,6 @@ module HiveReleaseCandidate
       File.join(attempt_dir(attempt_id), "evidence.json")
     end
 
-    def summary_path(attempt_id)
-      File.join(attempt_dir(attempt_id), "summary.md")
-    end
-
     def current_path
       File.join(candidate_root, "current.json")
     end

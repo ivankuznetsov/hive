@@ -19,12 +19,6 @@ module HiveBench
       # reasons defaults empty so pre-existing constructions (tests, merge paths)
       # stay valid — older records simply carry no rationale.
       def initialize(reasons: [], **rest) = super
-
-      # Two cells are a tie when their judge intervals overlap — the leaderboard
-      # must not order within noise.
-      def ties_with?(other)
-        interval.first <= other.interval.last && other.interval.first <= interval.last
-      end
     end
 
     PROMPT_PATH = File.expand_path("judge-prompt.md", __dir__)

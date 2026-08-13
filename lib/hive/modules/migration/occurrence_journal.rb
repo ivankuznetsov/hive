@@ -202,7 +202,6 @@ module Hive
         end
 
         def recovery_active? = each_recovery_active.any?
-        def projection_pending? = each_projection_pending.any?
 
         # Exact bounded proof that a missing occurrence was finalized,
         # fully acknowledged, and retired. Callers must supply the immutable

@@ -258,16 +258,6 @@ module Hive
         value && self.class.parse_time(value, label: "active deadline", error_class: InvalidRecord)
       end
 
-      def transition_allowed?(target)
-        return false if final?
-
-        case state
-        when "launching" then %w[launching running lost].include?(target)
-        when "running" then %w[running terminal lost].include?(target)
-        else false
-        end
-      end
-
       def [](key) = @data[key]
 
       def validate!

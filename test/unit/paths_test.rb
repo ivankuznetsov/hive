@@ -46,7 +46,6 @@ class PathsTest < Minitest::Test
         publish = File.join(dir, "state", "hive", "workflow-publish", "v1")
         assert_equal publish, Hive::Paths.workflow_publish_root
         assert_equal File.join(publish, "receipts"), Hive::Paths.workflow_publish_receipts_root
-        assert_equal File.join(publish, "bundles"), Hive::Paths.workflow_publish_bundles_root
         assert_equal File.join(publish, "objects"), Hive::Paths.workflow_publish_objects_root
       end
     end

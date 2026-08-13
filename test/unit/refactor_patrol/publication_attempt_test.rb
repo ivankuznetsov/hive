@@ -361,7 +361,6 @@ class RefactorPatrolPublicationAttemptTest < Minitest::Test
       Publication.state_for(state, attempt_id)
     )
     assert Publication.phase_evidence?(state)
-    assert Publication.pre_create?(attempt)
     assert Publication.remote_push_evidence?(attempt)
 
     empty = publication_state
@@ -372,9 +371,6 @@ class RefactorPatrolPublicationAttemptTest < Minitest::Test
     terminal = copy(state)
     terminal.dig(Publication::ATTEMPTS_KEY, attempt_id)["superseded"] = {}
     assert_nil Publication.state_for(terminal, attempt_id)
-    terminal.dig(Publication::ATTEMPTS_KEY, attempt_id)["pr_create_intent"] = phase_payload
-    refute Publication.pre_create?(terminal.dig(Publication::ATTEMPTS_KEY, attempt_id))
-    refute Publication.pre_create?(nil)
   end
 
   def test_legacy_phases_copy_only_matching_operations_and_commits

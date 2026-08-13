@@ -1168,22 +1168,10 @@ module Hive
       registered_project_entries(preserve_invalid: false)
     end
 
-    # Observation-only registry reader for status surfaces. When only the
-    # legacy registry exists, read it in place rather than invoking the normal
-    # one-off move into XDG config storage.
-    def registered_projects_read_only
-      registered_project_entries(
-        preserve_invalid: false,
-        migrate_legacy: false
-      )
-    end
-
-    def registered_project_entries(preserve_invalid:, migrate_legacy: true)
-      Hive::Paths.ensure_migrated! if migrate_legacy
+    def registered_project_entries(preserve_invalid:)
+      Hive::Paths.ensure_migrated!
       validate_hive_home!
-      path = registry_path_for_read(
-        migrate_legacy: migrate_legacy
-      )
+      path = global_config_path
       return [] unless File.exist?(path)
 
       data = load_global_config(path)
@@ -1216,14 +1204,6 @@ module Hive
         project["hive_state_path"] = project_hive_state_path(project)
         out << project
       end
-    end
-
-    def registry_path_for_read(migrate_legacy:)
-      current = global_config_path
-      return current if migrate_legacy || File.exist?(current)
-      return current if Hive::Paths.hive_home_override
-
-      Hive::Paths.legacy_registry_path || current
     end
 
     # One-time, locked registry migration. It deliberately emits no module
@@ -2569,13 +2549,6 @@ module Hive
       end
 
       auto_commit
-    end
-
-    def validate_review_fix_auto_commit_scope!(cfg, source_path)
-      auto_commit = review_fix_auto_commit_config(cfg, source_path)
-      return if auto_commit.nil?
-
-      validate_review_fix_auto_commit_scope_config!(auto_commit["scope_check"], source_path)
     end
 
     def validate_review_fix_auto_commit_scope_config!(scope, source_path)

@@ -113,18 +113,6 @@ class ProtectedFilesTest < Minitest::Test
     end
   end
 
-  def test_snapshot_paths_detects_labeled_absolute_control_file_changes
-    with_tmp_dir do |dir|
-      config = File.join(dir, "config")
-      File.write(config, "safe\n")
-      before = Hive::ProtectedFiles.snapshot_paths("repository config" => config)
-      File.write(config, "unsafe\n")
-      after = Hive::ProtectedFiles.snapshot_paths("repository config" => config)
-
-      assert_equal [ "repository config" ], Hive::ProtectedFiles.diff(before, after)
-    end
-  end
-
   def test_capture_restores_changed_deleted_and_new_files
     with_tmp_dir do |dir|
       File.write(File.join(dir, "plan.md"), "trusted plan\n")
@@ -137,12 +125,11 @@ class ProtectedFilesTest < Minitest::Test
       FileUtils.rm_f(File.join(dir, "task.md"))
       File.write(File.join(dir, "worktree.yml"), "path: /attacker\n")
 
-      restored, error = Hive::ProtectedFiles.restore_safely(
+      restored = Hive::ProtectedFiles.restore(
         dir, captured, %w[plan.md task.md worktree.yml]
       )
 
       assert_equal true, restored
-      assert_nil error
       assert_equal "trusted plan\n", File.read(File.join(dir, "plan.md"))
       assert_equal "trusted task\n", File.read(File.join(dir, "task.md"))
       refute File.exist?(File.join(dir, "worktree.yml"))
@@ -154,12 +141,11 @@ class ProtectedFilesTest < Minitest::Test
       captured = Hive::ProtectedFiles.capture(dir, [ "plan.md" ])
       FileUtils.mkdir_p(File.join(dir, "plan.md", "nested"))
 
-      restored, error = Hive::ProtectedFiles.restore_safely(
-        dir, captured, [ "plan.md" ]
-      )
+      error = assert_raises(Hive::ProtectedFiles::RestoreError) do
+        Hive::ProtectedFiles.restore(dir, captured, [ "plan.md" ])
+      end
 
-      assert_equal false, restored
-      assert_includes error, "refusing to replace protected path directory"
+      assert_includes error.message, "refusing to replace protected path directory"
       assert File.directory?(File.join(dir, "plan.md"))
     end
   end
@@ -187,20 +173,18 @@ class ProtectedFilesTest < Minitest::Test
       File.symlink(target, File.join(dir, "plan.md"))
       captured = Hive::ProtectedFiles.capture(dir, [ "plan.md" ])
 
-      restored, error = Hive::ProtectedFiles.restore_safely(
-        dir, captured, [ "plan.md" ]
-      )
-      assert_equal false, restored
-      assert_includes error, "non-file path cannot be reconstructed"
+      error = assert_raises(Hive::ProtectedFiles::RestoreError) do
+        Hive::ProtectedFiles.restore(dir, captured, [ "plan.md" ])
+      end
+      assert_includes error.message, "non-file path cannot be reconstructed"
 
       unknown = {
         "task.md" => { kind: :future_capture_type, fingerprint: nil }
       }
-      restored, error = Hive::ProtectedFiles.restore_safely(
-        dir, unknown, [ "task.md" ]
-      )
-      assert_equal false, restored
-      assert_includes error, "unknown protected capture type"
+      error = assert_raises(Hive::ProtectedFiles::RestoreError) do
+        Hive::ProtectedFiles.restore(dir, unknown, [ "task.md" ])
+      end
+      assert_includes error.message, "unknown protected capture type"
     end
   end
 

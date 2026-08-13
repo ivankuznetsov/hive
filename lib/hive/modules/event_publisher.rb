@@ -110,13 +110,6 @@ module Hive
         )
       end
 
-      def architecture_patrol_finalized(entry, capture, schedule:, target_hook:)
-        event = prepare_architecture_patrol_finalized(
-          entry, capture, schedule: schedule, target_hook: target_hook
-        )
-        publish_prepared(entry, event)
-      end
-
       def publish_prepared(entry, event)
         ledger(entry).append(event)
       end

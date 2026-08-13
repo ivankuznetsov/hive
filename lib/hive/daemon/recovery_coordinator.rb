@@ -805,11 +805,6 @@ module Hive
         )
       end
 
-      def receipt_for_id(request_id)
-        request = @request_queue.fetch(request_id, state_home: @state_home)
-        request && receipt_for_request(request)
-      end
-
       def observation_token_for(row)
         self.class.observation_token(row)
       end

@@ -642,20 +642,6 @@ module Hive
         key ? env.fetch(key) : @bin_default_override
       end
 
-      def binary_installed?(env: ENV)
-        executable = bin(env:)
-        if executable.include?(File::SEPARATOR)
-          return File.file?(executable) && File.executable?(executable)
-        end
-
-        env.fetch("PATH", "").split(File::PATH_SEPARATOR).any? do |directory|
-          candidate = File.join(directory, executable)
-          File.file?(candidate) && File.executable?(candidate)
-        end
-      rescue ArgumentError
-        false
-      end
-
       def check_version!(env: ENV)
         profile = AgentCliRuntime::Profile.new(
           name: name, bin_default: @bin_default_override,

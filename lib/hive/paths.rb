@@ -44,26 +44,6 @@ module Hive
       File.join(attempts_root, "records")
     end
 
-    def attempt_logs_root
-      File.join(attempts_root, "logs")
-    end
-
-    def attempt_outputs_root
-      File.join(attempts_root, "outputs")
-    end
-
-    def attempt_generation_locks_root
-      File.join(attempts_root, "generation-locks")
-    end
-
-    def attempt_decision_indexes_root
-      File.join(attempts_root, "decision-indexes")
-    end
-
-    def attempt_pending_finalization_root
-      File.join(attempts_root, "pending-finalization")
-    end
-
     # Owner-private, host-global provider-account and exact-model health.
     # Explicit routing alone consults this state; legacy attempts bypass it.
     def provider_health_root

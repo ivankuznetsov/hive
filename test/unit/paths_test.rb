@@ -35,11 +35,6 @@ class PathsTest < Minitest::Test
         attempts = File.join(dir, "state", "hive", "attempts", "v4")
         assert_equal attempts, Hive::Paths.attempts_root
         assert_equal File.join(attempts, "records"), Hive::Paths.attempt_records_root
-        assert_equal File.join(attempts, "logs"), Hive::Paths.attempt_logs_root
-        assert_equal File.join(attempts, "outputs"), Hive::Paths.attempt_outputs_root
-        assert_equal File.join(attempts, "generation-locks"), Hive::Paths.attempt_generation_locks_root
-        assert_equal File.join(attempts, "decision-indexes"), Hive::Paths.attempt_decision_indexes_root
-        assert_equal File.join(attempts, "pending-finalization"), Hive::Paths.attempt_pending_finalization_root
         assert_equal File.join(dir, "state", "hive", "provider-health", "v1"),
                      Hive::Paths.provider_health_root
         publish = File.join(dir, "state", "hive", "workflow-publish", "v1")

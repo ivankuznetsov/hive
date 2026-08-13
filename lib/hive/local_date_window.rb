@@ -9,10 +9,6 @@ module Hive
       now.getlocal.to_date
     end
 
-    def previous_local_day(now: Time.now)
-      local_today(now: now) - 1
-    end
-
     def on_local_date?(instant, date)
       parse_time(instant).getlocal.to_date == parse_date(date)
     end

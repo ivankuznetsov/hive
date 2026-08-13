@@ -1636,24 +1636,28 @@ def test_merged_prs_page_fails_closed_above_graphql_search_traversal_cap
   end
 end
 
-def test_pr_failing_job_logs_tail_clips_each_job
+def test_retained_pr_status_and_failing_job_log_paths
   calls = []
   status = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  rollup = {
+  expected_rollup = {
     "statusCheckRollup" => [
       { "name" => "unit", "databaseId" => 11, "conclusion" => "FAILURE" },
       { "name" => "lint", "databaseId" => 12, "conclusion" => "SUCCESS" }
     ]
   }
+
   with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
     calls << cmd
     if cmd.include?("pr")
-      [ JSON.generate(rollup), "", status ]
+      [ JSON.generate(expected_rollup), "", status ]
     else
       [ "x" * 100, "", status ]
     end
   }) do
-    logs = Hive::Gh.pr_failing_job_logs("/tmp/repo", 42, byte_cap: 20)
+    rollup = Hive::Gh.pr_status_rollup("/tmp/repo", 42)
+    logs = Hive::Gh.failing_jobs_with_logs("/tmp/repo", rollup, byte_cap: 20)
+
+    assert_equal expected_rollup, rollup
     assert_equal 1, logs.size
     assert_equal "unit", logs.first.fetch("name")
     assert_operator logs.first.fetch("log").bytesize, :>, 20

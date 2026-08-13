@@ -616,11 +616,6 @@ module Hive
       raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
     end
 
-    def pr_failing_job_logs(worktree_path, number, cfg: nil, byte_cap: 50 * 1024)
-      rollup = pr_status_rollup(worktree_path, number, cfg: cfg)
-      failing_jobs_with_logs(worktree_path, rollup, cfg: cfg, byte_cap: byte_cap)
-    end
-
     def failing_jobs_with_logs(worktree_path, rollup, cfg: nil, byte_cap: 50 * 1024)
       jobs = failing_jobs_from_rollup(rollup)
       return [] if jobs.empty?

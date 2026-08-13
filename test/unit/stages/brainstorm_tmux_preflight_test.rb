@@ -1,5 +1,5 @@
 require "test_helper"
-require "hive/stages/brainstorm_tmux"
+require "hive/claude_launcher"
 
 class BrainstormTmuxPreflightTest < Minitest::Test
   include HiveTestHelper
@@ -8,13 +8,13 @@ class BrainstormTmuxPreflightTest < Minitest::Test
     with_tmp_dir do |dir|
       tmux = fake_tmux(dir, "tmux 3.0")
 
-      assert_equal "3.0", Hive::Stages::BrainstormTmux.preflight_tmux!(tmux_bin: tmux)
+      assert_equal "3.0", Hive::ClaudeLauncher.preflight_tmux!(tmux_bin: tmux)
     end
   end
 
   def test_preflight_tmux_rejects_missing_binary
     err = assert_raises(Hive::AgentError) do
-      Hive::Stages::BrainstormTmux.preflight_tmux!(tmux_bin: "missing-tmux-for-hive")
+      Hive::ClaudeLauncher.preflight_tmux!(tmux_bin: "missing-tmux-for-hive")
     end
 
     assert_match(/tmux binary not runnable/, err.message)
@@ -25,7 +25,7 @@ class BrainstormTmuxPreflightTest < Minitest::Test
       tmux = fake_tmux(dir, "tmux 2.9")
 
       err = assert_raises(Hive::AgentError) do
-        Hive::Stages::BrainstormTmux.preflight_tmux!(tmux_bin: tmux)
+        Hive::ClaudeLauncher.preflight_tmux!(tmux_bin: tmux)
       end
 
       assert_match(/below minimum/, err.message)
@@ -38,7 +38,7 @@ class BrainstormTmuxPreflightTest < Minitest::Test
       tmux = fake_tmux(dir, "tmux 3.6", exit_status: 42, err: "boom")
 
       err = assert_raises(Hive::AgentError) do
-        Hive::Stages::BrainstormTmux.preflight_tmux!(tmux_bin: tmux)
+        Hive::ClaudeLauncher.preflight_tmux!(tmux_bin: tmux)
       end
 
       assert_match(/tmux not runnable/, err.message)
@@ -51,7 +51,7 @@ class BrainstormTmuxPreflightTest < Minitest::Test
       tmux = fake_tmux(dir, "definitely not tmux")
 
       err = assert_raises(Hive::AgentError) do
-        Hive::Stages::BrainstormTmux.preflight_tmux!(tmux_bin: tmux)
+        Hive::ClaudeLauncher.preflight_tmux!(tmux_bin: tmux)
       end
 
       assert_match(/could not parse/, err.message)
@@ -62,8 +62,8 @@ class BrainstormTmuxPreflightTest < Minitest::Test
     with_tmp_dir do |dir|
       old_tmux = fake_tmux(dir, "tmux 2.9")
 
-      old_status, old_message = Hive::Stages::BrainstormTmux.tmux_status(tmux_bin: old_tmux)
-      missing_status, missing_message = Hive::Stages::BrainstormTmux.tmux_status(
+      old_status, old_message = Hive::ClaudeLauncher.tmux_status(tmux_bin: old_tmux)
+      missing_status, missing_message = Hive::ClaudeLauncher.tmux_status(
         tmux_bin: "missing-tmux-for-hive"
       )
 

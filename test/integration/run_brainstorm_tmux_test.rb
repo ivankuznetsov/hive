@@ -3,7 +3,7 @@ require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/run"
 require "hive/claude_launcher"
-require "hive/stages/brainstorm_tmux"
+require "hive/stages/brainstorm"
 
 class RunBrainstormTmuxTest < Minitest::Test
   include HiveTestHelper
@@ -152,7 +152,7 @@ class RunBrainstormTmuxTest < Minitest::Test
         ENV["HIVE_FAKE_INTERACTIVE_SCENARIO"] = "waiting"
         folder = make_task_at_brainstorm(dir, timeout: 3)
         task = Hive::Task.new(folder)
-        name = Hive::Stages::BrainstormTmux.session_name_for(task)
+        name = Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task)
         system("tmux", "-L", @socket, "new-session", "-d", "-s", name, "sleep 10")
 
         _out, err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
@@ -227,7 +227,7 @@ class RunBrainstormTmuxTest < Minitest::Test
           raise "forced midrun failure"
         end
 
-        assert_raises(RuntimeError) { Hive::Stages::BrainstormTmux.run!(task, cfg) }
+        assert_raises(RuntimeError) { Hive::Stages::Brainstorm.run_claude!(task, cfg) }
         assert_empty tmux_sessions
       ensure
         if original

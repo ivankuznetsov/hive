@@ -140,11 +140,14 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
 
   def test_rolls_back_every_task_when_a_later_metadata_rewrite_fails
     with_tmp_dir do |dir|
-      old = workflow("review" => 4)
-      current = workflow("review" => 6)
+      old = workflow("review" => 4, state_files: { "review" => "review-v1.md" })
+      current = workflow("review" => 6, state_files: { "review" => "review-v2.md" })
       store = store_for(old:, current:)
       first = task_folder(dir, "4-review", old_pin, slug: "first-task-260812-aaaa")
       second = task_folder(dir, "4-review", old_pin, slug: "second-task-260812-bbbb")
+      [ first, second ].each do |folder|
+        FileUtils.mv(File.join(folder, "review.md"), File.join(folder, "review-v1.md"))
+      end
       pruned = []
       original = Hive::TaskMeta.method(:rewrite)
       calls = 0
@@ -163,6 +166,8 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
       assert_match(/second-task/, error.message)
       [ first, second ].each do |folder|
         assert File.directory?(folder)
+        assert_equal "evidence\n", File.read(File.join(folder, "review-v1.md"))
+        refute File.exist?(File.join(folder, "review-v2.md"))
         assert_equal old_pin, Hive::TaskMeta.read(folder).slice(
           :workflow_commit, :workflow_manifest_digest, :workflow_configuration_digest
         )
@@ -210,6 +215,139 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
       destination = File.join(dir, "stages", "6-review", File.basename(source))
       assert_equal "evidence\n", File.read(File.join(destination, "review-v2.md"))
       refute File.exist?(File.join(destination, "review-v1.md"))
+    end
+  end
+
+  def test_rejects_invalid_target_selection_and_unreadable_or_unselected_tasks
+    with_tmp_dir do |dir|
+      assert_raises(ArgumentError) do
+        Hive::WorkflowPackage::TaskMigrator.new(
+          dir, store: Object.new, cfg: {}, target_selection: {}
+        )
+      end
+
+      current = workflow("review" => 6)
+      store = store_for(old: current, current: current)
+      folder = task_folder(dir, "6-review", old_pin)
+      unreadable = Struct.new(:status, :error).new(:invalid, "bad metadata")
+      original = Hive::TaskMeta.method(:read_for_admission)
+      with_replaced_singleton_method(Hive::TaskMeta, :read_for_admission, lambda { |path|
+        path == folder ? unreadable : original.call(path)
+      }) do
+        error = assert_raises(Hive::ConfigError) { migrator(dir, store).call }
+        assert_includes error.message, "cannot safely read"
+      end
+
+      store.selection = nil
+      error = assert_raises(Hive::ConfigError) { migrator(dir, store).call }
+      assert_includes error.message, "is not selected"
+    end
+  end
+
+  def test_rejects_a_task_folder_missing_from_its_pinned_workflow
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old:, current:)
+      task_folder(dir, "5-review", old_pin)
+
+      error = assert_raises(Hive::ConfigError) { migrator(dir, store).call }
+
+      assert_includes error.message, "not present in its pinned workflow"
+    end
+  end
+
+  def test_preflight_rejects_duplicate_destinations_and_existing_artifacts
+    with_tmp_dir do |dir|
+      command = migrator(dir, store_for(old: workflow("review" => 4), current: workflow("review" => 6)))
+      source = File.join(dir, "stages", "4-review", "task")
+      destination = File.join(dir, "stages", "6-review", "task")
+      operation = operation_for(source:, destination:)
+
+      assert_raises(Hive::DestinationCollision) do
+        command.send(:preflight_destinations!, [ operation, operation ])
+      end
+
+      FileUtils.mkdir_p(destination)
+      assert_raises(Hive::DestinationCollision) do
+        command.send(:preflight_destinations!, [ operation ])
+      end
+      FileUtils.rm_rf(destination)
+
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "review-v1.md"), "old\n")
+      File.write(File.join(source, "review-v2.md"), "new\n")
+      assert_raises(Hive::DestinationCollision) do
+        command.send(
+          :preflight_destinations!,
+          [ operation.with(from_state_file: "review-v1.md", to_state_file: "review-v2.md") ]
+        )
+      end
+    end
+  end
+
+  def test_revalidation_rejects_changed_task_and_selection
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old:, current:)
+      folder = task_folder(dir, "4-review", old_pin)
+      operation = operation_for(
+        source: folder,
+        destination: File.join(dir, "stages", "6-review", File.basename(folder))
+      )
+      command = migrator(dir, store)
+
+      Hive::TaskMeta.rewrite(folder, current_pin)
+      assert_raises(Hive::ConcurrentRunError) do
+        command.send(:revalidate_tasks!, [ operation ])
+      end
+
+      store.selection = {
+        "source_commit" => old_pin.fetch(:workflow_commit),
+        "manifest_digest" => old_pin.fetch(:workflow_manifest_digest),
+        "configuration_digest" => old_pin.fetch(:workflow_configuration_digest)
+      }
+      assert_raises(Hive::ConcurrentRunError) do
+        command.send(:revalidate_selections!, [ operation ])
+      end
+    end
+  end
+
+  def test_defensive_failures_are_reported_as_migration_warnings
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old:, current:)
+      task_folder(dir, "4-review", old_pin)
+      store.define_singleton_method(:cleanup_unreferenced) { |_name| raise Errno::EIO, "cleanup" }
+
+      result = nil
+      _out, err = capture_io do
+        result = migrator(dir, store, pruner: ->(*) { raise Errno::ENOSPC, "queue" }).call
+      end
+
+      assert_equal 2, result.warnings.length
+      assert_includes err, "recovery cleanup"
+      assert_includes err, "unreferenced demo cleanup"
+    end
+  end
+
+  def test_rollback_warning_preserves_the_original_failure
+    with_tmp_dir do |dir|
+      operation = operation_for(
+        source: File.join(dir, "stages", "4-review", "task"),
+        destination: File.join(dir, "stages", "4-review", "task")
+      )
+      command = migrator(dir, store_for(old: workflow("review" => 4), current: workflow("review" => 6)))
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::TaskMeta, :restore, ->(*) { raise Errno::EIO, "restore" }) do
+          command.send(:rollback!, [ { operation: operation, snapshot: {}, artifact_moved: false } ])
+        end
+      end
+
+      assert_includes err, "rollback failed for task"
     end
   end
 
@@ -288,5 +426,18 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
       workflow_manifest_digest: "e" * 64,
       workflow_configuration_digest: "f" * 64
     }
+  end
+
+  def operation_for(source:, destination:)
+    Hive::WorkflowPackage::TaskMigrator::Operation.new(
+      source: source,
+      destination: destination,
+      slug: "task",
+      workflow: "demo",
+      from_pin: old_pin,
+      to_pin: current_pin,
+      from_state_file: "review.md",
+      to_state_file: "review.md"
+    )
   end
 end

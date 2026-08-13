@@ -6271,6 +6271,59 @@ end
     end
   end
 
+  def test_dispatcher_removes_a_durable_request_with_stale_task_identity
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      Q.write_request!(
+        project: "p1", slug: "s1", argv: %w[hive run s1 --json],
+        requestor: "bot", request_id: "STALE", task_id: 42,
+        expected_stage: "4-execute", task_generation: "old-generation",
+        state_home: state_home, now: T0
+      )
+      dispatcher.define_singleton_method(:bound_task_request_current?) { |_request| false }
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      rejected = logger.events.find do |name, attrs|
+        name == :dispatch_request_rejected && attrs[:request_id] == "STALE"
+      end
+      refute_nil rejected
+      assert_equal "stale_task_identity", rejected.last.fetch(:reason)
+      assert_empty sup.spawned
+      assert_nil Q.fetch("STALE", state_home: state_home)
+    end
+  end
+
+  def test_bound_identity_fails_closed_when_task_resolution_errors
+    dispatcher, = make_dispatcher(rows: [])
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { raise Hive::ConfigError, "migration owns task" }
+    request = Q::Request.new(
+      project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+      task_id: 42, expected_stage: "4-execute", task_generation: "generation"
+    )
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      refute dispatcher.send(:bound_task_request_current?, request)
+    end
+  end
+
+  def test_request_intended_stage_uses_current_workflow_mapping_and_safe_fallback
+    dispatcher, = make_dispatcher(rows: [])
+    task = Struct.new(:stage_index, :stage_name).new(4, "execute")
+
+    assert_equal "6-review",
+                 dispatcher.send(:request_intended_stage, %w[hive review task], task)
+    assert_equal "4-execute",
+                 dispatcher.send(:request_intended_stage, %w[hive unknown task], task)
+  end
+
   def test_dispatch_request_rejected_when_argv_not_allowlisted
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(

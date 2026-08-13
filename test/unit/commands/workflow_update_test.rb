@@ -325,6 +325,16 @@ class WorkflowUpdateCommandTest < Minitest::Test
     end
   end
 
+  def test_update_disclosure_pluralizes_moved_stages
+    updater = Hive::Commands::Workflow::Update.new(
+      "demo", project_root: Dir.pwd, json: false, stdout: StringIO.new
+    )
+    migration = Struct.new(:task_count, :moved_count).new(3, 2)
+
+    assert_equal "migrated retained tasks: 3 (2 stages moved)",
+                 updater.send(:migration_line, migration)
+  end
+
   private
 
   def command(project, package, resolution, yes: false, allow_escalation: false, dry_run: false,

@@ -1032,6 +1032,74 @@ class MigrateTest < Minitest::Test
     refute migrate.send(:systemctl_available?)
   end
 
+  def test_managed_workflow_cleanup_commits_each_unique_workflow_path
+    calls = []
+    ops = Object.new
+    ops.define_singleton_method(:hive_commit) { |**kwargs| calls << kwargs }
+    operations = [ "writing", "architecture", "writing" ].map do |name|
+      Struct.new(:workflow).new(name)
+    end
+
+    with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { ops }) do
+      with_replaced_singleton_method(Hive::Lock, :with_commit_lock, ->(_path, &block) { block.call }) do
+        migrate_command("/tmp/project").send(
+          :commit_managed_workflow_cleanup, "/tmp/project/.hive-state", operations
+        )
+      end
+    end
+
+    assert_equal [ "workflows/architecture", "workflows/writing" ], calls.first.fetch(:pathspecs)
+  end
+
+  def test_managed_workflow_cleanup_warns_when_its_state_commit_fails
+    ops = Object.new
+    ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit blocked" }
+    operation = Struct.new(:workflow).new("writing")
+
+    _out, err = capture_io do
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { ops }) do
+        with_replaced_singleton_method(Hive::Lock, :with_commit_lock, ->(_path, &block) { block.call }) do
+          migrate_command("/tmp/project").send(
+            :commit_managed_workflow_cleanup, "/tmp/project/.hive-state", [ operation ]
+          )
+        end
+      end
+    end
+
+    assert_includes err, "managed workflow cleanup could not be committed"
+  end
+
+  def test_managed_workflow_messages_cover_singular_tasks_without_stage_moves
+    command = migrate_command("/tmp/project")
+
+    assert_equal(
+      "hive: migrate complete (0 tasks moved, 1 managed workflow task migrated)",
+      command.send(
+        :migration_complete_message, [], backfilled_count: 0,
+        recovery_marker_count: 0, workflow_task_count: 1, workflow_moved_count: 0
+      )
+    )
+    assert_equal(
+      "hive: migrate migrated 1 managed workflow task",
+      command.send(
+        :migration_no_move_message, config_changed: false, backfilled_count: 0,
+        workflow_task_count: 1, workflow_moved_count: 0
+      )
+    )
+  end
+
+  def test_legacy_reviewer_rewrite_reports_invalid_yaml_as_config_error
+    error = assert_raises(Hive::ConfigError) do
+      migrate_command("/tmp/project").send(
+        :rewrite_legacy_root_reviewers,
+        "reviewers: [unterminated\n",
+        "/tmp/project/.hive-state/config.yml"
+      )
+    end
+
+    assert_includes error.message, "is not valid YAML"
+  end
+
   def migrate_command(project_path, display_name_generator: NoopDisplayNameGenerator,
                       **options)
     Hive::Commands::Migrate.new(

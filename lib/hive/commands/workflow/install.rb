@@ -134,8 +134,7 @@ module Hive
         def migration_line(migration)
           return unless migration&.task_count&.positive?
 
-          "migrated retained tasks: #{migration.task_count} " \
-            "(#{migration.moved_count} stage#{migration.moved_count == 1 ? '' : 's'} moved)"
+          "migrated retained tasks: #{migration.task_count} (#{migration.moved_count} stage#{migration.moved_count == 1 ? '' : 's'} moved)"
         end
 
         def human_disclosure(resolution, resolver, verb: "installed")

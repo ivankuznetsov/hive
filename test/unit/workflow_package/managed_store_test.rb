@@ -537,6 +537,45 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
     end
   end
 
+  def test_workflow_recovers_a_legacy_configuration_digest_without_a_snapshot_file
+    with_tmp_dir do |dir|
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      package = File.join(dir, "package")
+      resolution = write_package(package, "a" * 40)
+      store.place_generation(package, resolution)
+      raw = store.workflow("demo", resolution.source_commit, resolution.manifest_digest)
+      generation = {
+        "name" => "demo", "source_commit" => resolution.source_commit,
+        "manifest_digest" => resolution.manifest_digest
+      }
+      legacy = Hive::WorkflowPackage::Configuration.build(
+        raw,
+        generation: generation,
+        overrides: Hive::WorkflowPackage::Configuration.legacy_overrides(raw)
+      )
+
+      resolved = store.workflow(
+        "demo", resolution.source_commit, resolution.manifest_digest,
+        configuration_digest: legacy.digest,
+        cfg: { "agents" => { "claude" => { "bin" => "/missing/claude" } } },
+        verify_profiles: false
+      )
+
+      assert_equal :demo, resolved.id
+      refute File.exist?(store.configuration_path("demo", legacy.digest))
+    end
+  end
+
+  def test_legacy_configuration_probe_treats_an_unreadable_lock_as_absent
+    with_tmp_dir do |dir|
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      FileUtils.mkdir_p(File.dirname(store.lock_path("demo")))
+      File.write(store.lock_path("demo"), "{not-json")
+
+      assert_nil store.send(:legacy_configuration_from_selected_lock, "demo")
+    end
+  end
+
   def test_generation_cleanup_tolerates_an_entry_disappearing_during_mode_repair
     with_tmp_dir do |dir|
       root = File.join(dir, "generation")

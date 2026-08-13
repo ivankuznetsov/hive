@@ -696,6 +696,12 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_remove_nonterminal_for_task_treats_a_disappearing_queue_as_empty
+    with_replaced_singleton_method(Q, :request_files, ->(*) { raise Errno::ENOENT }) do
+      assert_equal 0, Q.remove_nonterminal_for_task(project: "hive", slug: "retry-task")
+    end
+  end
+
   def test_terminal_recovery_retention_is_bounded_and_new_generation_supersedes_old
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       old_at = Time.utc(2026, 7, 1, 12)

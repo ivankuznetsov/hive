@@ -592,6 +592,16 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
+  def test_install_disclosure_pluralizes_moved_stages
+    command = Hive::Commands::Workflow::Install.new(
+      "demo", project_root: Dir.pwd, json: false, stdout: StringIO.new
+    )
+    migration = Struct.new(:task_count, :moved_count).new(3, 2)
+
+    assert_equal "migrated retained tasks: 3 (2 stages moved)",
+                 command.send(:migration_line, migration)
+  end
+
   private
 
   def with_project_and_package(permission_spec: "read-only")

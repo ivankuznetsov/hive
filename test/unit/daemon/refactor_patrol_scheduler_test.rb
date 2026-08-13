@@ -544,7 +544,9 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
           "migration",
           "patrol-evidence"
         )
-      ).receipts_for_intent(failed_intent.intent_id).records
+      ).receipts.select do |receipt|
+        receipt.intent.intent_id == failed_intent.intent_id
+      end
       assert_equal [ "reconciled" ],
                    receipts.map(&:status).uniq
       assert_nil restarted_store.occurrence_for_job("job-7"),

@@ -1,7 +1,8 @@
 require "test_helper"
 require "yaml"
 require "hive/lock"
-require "hive/stages/brainstorm_tmux"
+require "hive/claude_launcher"
+require "hive/stages/brainstorm"
 require "hive/markers"
 require "hive/task"
 
@@ -79,23 +80,23 @@ class BrainstormTmuxSentinelTest < Minitest::Test
   end
 
   def test_wait_until_session_exists_times_out
-    original = Hive::Stages::BrainstormTmux.singleton_class.instance_method(:session_ready_wait_timeout)
-    Hive::Stages::BrainstormTmux.define_singleton_method(:session_ready_wait_timeout) { 0.01 }
+    original = Hive::ClaudeLauncher.singleton_class.instance_method(:session_ready_wait_timeout)
+    Hive::ClaudeLauncher.define_singleton_method(:session_ready_wait_timeout) { 0.01 }
 
     err = assert_raises(Hive::AgentError) do
-      Hive::Stages::BrainstormTmux.wait_until_session_exists!(FakeNeverReadyRunner.new("missing"))
+      Hive::ClaudeLauncher.wait_until_session_exists!(FakeNeverReadyRunner.new("missing"))
     end
 
     assert_match(/did not start/, err.message)
   ensure
     if original
-      Hive::Stages::BrainstormTmux.singleton_class.send(:define_method, :session_ready_wait_timeout, original)
+      Hive::ClaudeLauncher.singleton_class.send(:define_method, :session_ready_wait_timeout, original)
     end
   end
 
   def test_prepare_claude_session_wraps_tmux_errors
     err = assert_raises(Hive::AgentError) do
-      Hive::Stages::BrainstormTmux.prepare_claude_session!(FakeTmuxErrorRunner.new("broken"))
+      Hive::ClaudeLauncher.prepare_claude_session!(FakeTmuxErrorRunner.new("broken"))
     end
 
     assert_match(/could not inspect claude tmux session broken/, err.message)
@@ -106,7 +107,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     with_tmp_task_folder do |task|
       File.write(task.state_file, "## Round\n<!-- WAITING -->\n")
 
-      marker = Hive::Stages::BrainstormTmux.marker_from_sentinel_tail(
+      marker = Hive::ClaudeLauncher.marker_from_sentinel_tail(
         task, FakeTmuxErrorRunner.new("broken")
       )
 
@@ -116,13 +117,13 @@ class BrainstormTmuxSentinelTest < Minitest::Test
 
   def test_reset_signal_files_removes_done_and_result
     with_tmp_task_folder do |task|
-      File.write(Hive::Stages::BrainstormTmux.done_path(task), "done")
-      File.write(Hive::Stages::BrainstormTmux.result_path(task), "{}")
+      File.write(Hive::ClaudeLauncher.done_path(task), "done")
+      File.write(Hive::ClaudeLauncher.result_path(task), "{}")
 
-      Hive::Stages::BrainstormTmux.reset_signal_files(task)
+      Hive::ClaudeLauncher.reset_signal_files(task)
 
-      refute_path_exists Hive::Stages::BrainstormTmux.done_path(task)
-      refute_path_exists Hive::Stages::BrainstormTmux.result_path(task)
+      refute_path_exists Hive::ClaudeLauncher.done_path(task)
+      refute_path_exists Hive::ClaudeLauncher.result_path(task)
     end
   end
 
@@ -262,7 +263,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       File.write(scratch, "{}")
 
       with_replaced_singleton_method(File, :delete, ->(_path) { raise Errno::EACCES, "blocked" }) do
-        assert_nil Hive::Stages::BrainstormTmux.cleanup_scratch(scratch)
+        assert_nil Hive::ClaudeLauncher.cleanup_scratch(scratch)
       end
     end
   end
@@ -273,7 +274,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       FileUtils.mkdir_p(File.dirname(scratch))
       File.write(scratch, "{}")
 
-      Hive::Stages::BrainstormTmux.cleanup_scratch(scratch)
+      Hive::ClaudeLauncher.cleanup_scratch(scratch)
 
       refute_path_exists scratch
       refute_path_exists File.dirname(scratch)
@@ -347,7 +348,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     old = ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"]
     ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"] = "0.25"
 
-    assert_in_delta 0.25, Hive::Stages::BrainstormTmux.ready_wait_timeout, 0.001
+    assert_in_delta 0.25, Hive::ClaudeLauncher.ready_wait_timeout, 0.001
   ensure
     old.nil? ? ENV.delete("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC") : ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"] = old
   end
@@ -538,111 +539,6 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       folder = File.join(root, ".hive-state", "stages", "2-brainstorm", "slug-260514-aaaa")
       FileUtils.mkdir_p(folder)
       yield Hive::Task.new(folder)
-    end
-  end
-
-  public
-
-  def test_brainstorm_tmux_run_uses_claude_launcher_and_returns_marker_action
-    with_tmp_task_folder do |task|
-      cfg = {
-        "budget_usd" => { "brainstorm" => 12 },
-        "timeout_sec" => { "brainstorm" => 34 }
-      }
-      profile = Struct.new(:name).new(:claude)
-      captured = nil
-      lookup_call = nil
-      render_call = nil
-
-      with_claude_launcher_stubs(
-        launch!: ->(**kwargs) {
-          captured = kwargs
-          Hive::Markers.set(task.state_file, :complete)
-          { status: :complete }
-        }
-      ) do
-        with_replaced_singleton_method(Hive::AgentProfiles, :lookup, ->(name, cfg:) {
-          lookup_call = [ name, cfg ]
-          profile
-        }) do
-          with_replaced_singleton_method(Hive::Stages::Brainstorm, :render_prompt, ->(render_task, render_cfg, profile:) {
-            render_call = [ render_task, render_cfg, profile ]
-            "brainstorm prompt"
-          }) do
-            result = Hive::Stages::BrainstormTmux.run!(task, cfg)
-
-            assert_equal({ commit: "complete", status: :complete }, result)
-          end
-        end
-      end
-
-      assert_equal [ :claude, cfg ], lookup_call
-      assert_equal [ task, cfg, profile ], render_call
-      assert_equal task, captured.fetch(:task)
-      assert_equal "brainstorm prompt", captured.fetch(:prompt)
-      assert_equal [ task.folder ], captured.fetch(:add_dirs)
-      assert_equal task.folder, captured.fetch(:cwd)
-      assert_equal 12, captured.fetch(:max_budget_usd)
-      assert_equal 34, captured.fetch(:timeout_sec)
-      assert_equal "brainstorm", captured.fetch(:log_label)
-      assert_equal :state_file_marker, captured.fetch(:status_mode)
-      assert_equal Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS, captured.fetch(:allowed_tools)
-    end
-  end
-
-  def test_brainstorm_tmux_delegates_remaining_helpers_to_claude_launcher
-    task = Struct.new(:folder, :slug).new("/tmp/task", "task-slug")
-    runner = Object.new
-    marker = Object.new
-    calls = []
-
-    with_claude_launcher_stubs(
-      parse_tmux_version: ->(output) { calls << [ :parse, output ]; "3.6" },
-      version_tuple: ->(version) { calls << [ :tuple, version ]; [ 3, 6 ] },
-      tmux_bin: -> { calls << [ :tmux_bin ]; "tmux-custom" },
-      claude_trust_prompt?: ->(pane) { calls << [ :trust, pane ]; true },
-      claude_ready_prompt?: ->(pane) { calls << [ :ready, pane ]; false },
-      wait_for_terminal_marker: ->(t, r, timeout) { calls << [ :wait_marker, t, r, timeout ]; marker },
-      record_claude_pid: ->(t, r) { calls << [ :pid, t, r ]; nil },
-      sweep_orphan_processes: ->(t) { calls << [ :sweep, t ]; nil },
-      orphan_sweep_pattern: ->(t) { calls << [ :pattern, t ]; "pattern" },
-      poll_interval: -> { calls << [ :poll ]; 0.1 },
-      sentinel_poll_interval: -> { calls << [ :sentinel ]; 0.2 },
-      claude_ready_wait_timeout: -> { calls << [ :ready_timeout ]; 3 },
-      session_ready_wait_timeout: -> { calls << [ :session_timeout ]; 4 },
-      pid_ready_wait_timeout: -> { calls << [ :pid_timeout ]; 5 },
-      cleanup_done: ->(t) { calls << [ :cleanup_done, t ]; nil }
-    ) do
-      assert_equal "3.6", Hive::Stages::BrainstormTmux.parse_tmux_version("tmux 3.6")
-      assert_equal [ 3, 6 ], Hive::Stages::BrainstormTmux.version_tuple("3.6")
-      assert_equal "tmux-custom", Hive::Stages::BrainstormTmux.tmux_bin
-      assert Hive::Stages::BrainstormTmux.claude_trust_prompt?("pane")
-      refute Hive::Stages::BrainstormTmux.claude_ready_prompt?("pane")
-      assert_same marker, Hive::Stages::BrainstormTmux.wait_for_terminal_marker(task, runner, 9)
-      assert_nil Hive::Stages::BrainstormTmux.record_claude_pid(task, runner)
-      assert_nil Hive::Stages::BrainstormTmux.sweep_orphan_processes(task)
-      assert_equal "pattern", Hive::Stages::BrainstormTmux.orphan_sweep_pattern(task)
-      assert_equal 0.1, Hive::Stages::BrainstormTmux.poll_interval
-      assert_equal 0.2, Hive::Stages::BrainstormTmux.sentinel_poll_interval
-      assert_equal 3, Hive::Stages::BrainstormTmux.claude_ready_wait_timeout
-      assert_equal 4, Hive::Stages::BrainstormTmux.session_ready_wait_timeout
-      assert_equal 5, Hive::Stages::BrainstormTmux.pid_ready_wait_timeout
-      assert_nil Hive::Stages::BrainstormTmux.cleanup_done(task)
-    end
-
-    assert_includes calls, [ :parse, "tmux 3.6" ]
-    assert_includes calls, [ :wait_marker, task, runner, 9 ]
-  end
-
-  def with_claude_launcher_stubs(replacements)
-    originals = replacements.keys.to_h { |name| [ name, Hive::ClaudeLauncher.method(name) ] }
-    replacements.each do |name, replacement|
-      Hive::ClaudeLauncher.define_singleton_method(name, &replacement)
-    end
-    yield
-  ensure
-    originals&.each do |name, original|
-      Hive::ClaudeLauncher.define_singleton_method(name, original)
     end
   end
 end

@@ -37,10 +37,9 @@ module Hive
       # the SubprocessRegistry. `Open3.capture3` manages the child
       # internally, and the per-keystroke triage subprocesses are short-
       # lived enough that the user can simply press `r` again on Ctrl-C.
-      # The historical install/restore_traps pairing was dead code: it
-      # registered `:placeholder` and never called `register_real_pgid`,
-      # so the trap blocks always short-circuited and INT forwarding
-      # silently no-op'd anyway. Removing it also closes the concurrent-
+      # The historical install/restore_traps pairing was dead code: it never
+      # registered a real pgid, so the trap blocks always short-circuited and
+      # INT forwarding silently no-op'd anyway. Removing it also closes the concurrent-
       # `run_quiet!` trap-chain race the audit flagged (F5/F9).
       # `dispatch_background` likewise does NOT install signal
       # forwarding — the child is detached into its own pgroup, and the

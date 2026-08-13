@@ -86,6 +86,66 @@ class ReleaseCandidateHostedStageTest < Minitest::Test
     end
   end
 
+  def test_tagged_locks_are_fetched_as_digest_bound_bytes_without_mutating_git
+    with_tmp_dir do |dir|
+      producer = "producer lock\n"
+      observer = "observer lock\n"
+      fetched = []
+      stage = HiveReleaseCandidate::HostedStage.new(
+        repo_root: ROOT, cache_root: File.join(dir, "cache"),
+        run_root: File.join(dir, "run"),
+        tagged_lock_fetcher: lambda do |tag|
+          fetched << tag
+          { "v1.0.0" => producer, "v1.0.1" => observer }.fetch(tag)
+        end
+      )
+      row = Struct.new(:id, :packages, :dependency_closure).new(
+        "legacy",
+        {
+          "producer" => { "tag" => "v1.0.0" },
+          "observer" => { "tag" => "v1.0.1" }
+        },
+        {
+          "lock" => {
+            "source_tag" => "v1.0.0", "sha256" => Digest::SHA256.hexdigest(producer)
+          },
+          "observer_lock" => {
+            "source_tag" => "v1.0.1", "sha256" => Digest::SHA256.hexdigest(observer)
+          }
+        }
+      )
+
+      locks = stage.send(:tagged_lock_contents, row)
+
+      assert_equal %w[v1.0.0 v1.0.1], fetched
+      assert_equal({ "producer" => producer, "observer" => observer }, locks)
+    end
+  end
+
+  def test_tagged_lock_fetch_rejects_bytes_that_do_not_match_the_reviewed_digest
+    with_tmp_dir do |dir|
+      stage = HiveReleaseCandidate::HostedStage.new(
+        repo_root: ROOT, cache_root: File.join(dir, "cache"),
+        run_root: File.join(dir, "run"), tagged_lock_fetcher: ->(_tag) { "drifted\n" }
+      )
+      row = Struct.new(:id, :packages, :dependency_closure).new(
+        "baseline",
+        { "producer" => { "tag" => "v1.0.0" } },
+        {
+          "lock" => {
+            "source_tag" => "v1.0.0", "sha256" => Digest::SHA256.hexdigest("expected\n")
+          }
+        }
+      )
+
+      error = assert_raises(HiveReleaseCandidate::Error) do
+        stage.send(:tagged_lock_contents, row)
+      end
+
+      assert_includes error.message, "baseline producer dependency lock digest mismatch"
+    end
+  end
+
   def test_install_rebinds_legacy_closure_roots_to_the_consumer_cache_namespace
     with_tmp_dir do |dir|
       run_root = File.join(dir, "run")

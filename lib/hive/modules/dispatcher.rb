@@ -6,7 +6,6 @@ require "hive/atomic_file"
 require "hive/attempts/dispatcher"
 require "hive/module_package/managed_store"
 require "hive/modules/decision_journal"
-require "hive/modules/event_scope"
 require "hive/modules/hook_attempt"
 require "hive/modules/migration/patrols"
 require "hive/modules/trigger_evaluator"
@@ -140,25 +139,6 @@ module Hive
             end
             ModuleDispatchResult.new(
               decision: decision, attempt_result: attempt_result, event: event
-            )
-          end
-        end
-      end
-
-      def dispatch_event(event, dry_run: false)
-        assert_project!(event)
-        selections = dry_run ? @store.inspect_selections : @store.selections
-        selections.flat_map do |selection|
-          active = selection.fetch("active")
-          configuration = @store.configuration(
-            selection.fetch("name"), active.fetch("configuration_digest")
-          )
-          configuration.contract.fetch("hooks").filter_map do |hook|
-            next unless EventScope.matches?(event: event, selection: selection, hook: hook)
-
-            dispatch(
-              module_name: selection.fetch("name"), hook_id: hook.fetch("id"),
-              event: event, dry_run: dry_run
             )
           end
         end

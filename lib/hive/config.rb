@@ -2571,13 +2571,6 @@ module Hive
       auto_commit
     end
 
-    def validate_review_fix_auto_commit_scope!(cfg, source_path)
-      auto_commit = review_fix_auto_commit_config(cfg, source_path)
-      return if auto_commit.nil?
-
-      validate_review_fix_auto_commit_scope_config!(auto_commit["scope_check"], source_path)
-    end
-
     def validate_review_fix_auto_commit_scope_config!(scope, source_path)
       return if scope.nil?
 

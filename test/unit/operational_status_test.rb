@@ -1029,7 +1029,54 @@ class OperationalStatusTest < Minitest::Test
     assert_includes error.message, "not-an-integer"
   end
 
+  def test_plan_review_wait_actions_defer_to_the_scheduler_only_when_the_daemon_is_enabled
+    row = task(action: "plan_reviewing", slug: "reviewing", stage: "3-plan",
+               plan_review: { "blocker_owner" => "provider" })
+
+    assert_equal [ "waiting_on_provider_or_scheduler", "provider" ],
+                 classify_row(row)
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ],
+                 classify_row(row, daemon_enabled: true)
+  end
+
+  def test_plan_review_repair_actions_report_the_review_blocker_owner
+    Hive::OperationalStatus::PLAN_REVIEW_REPAIR_ACTIONS.each do |action|
+      row = task(action:, slug: "repair", stage: "3-plan",
+                 plan_review: { "blocker_owner" => "operator" })
+
+      assert_equal [ "needs_repair", "operator" ], classify_row(row), action
+    end
+  end
+
+  def test_review_blocker_owner_collapses_agent_roles_and_rejects_unknown_owners
+    subject = Hive::OperationalStatus.new(
+      status_payload: status_payload, project_context: {}, scheduler_snapshot: nil,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    )
+    owner_for = lambda do |owner|
+      subject.send(:operational_review_owner, { "plan_review" => { "blocker_owner" => owner } })
+    end
+
+    %w[operator provider scheduler hive none unknown].each do |owner|
+      assert_equal owner, owner_for.call(owner)
+    end
+    # Reviewer-side roles are internal detail; operators only need "an agent".
+    %w[agent reviewer planner].each do |owner|
+      assert_equal "agent", owner_for.call(owner)
+    end
+    assert_equal "unknown", owner_for.call("bogus-role")
+    assert_equal "unknown", owner_for.call(nil)
+  end
+
   private
+
+  def classify_row(row, daemon_enabled: false)
+    context = daemon_enabled ? { "demo" => { "daemon_enabled" => true } } : {}
+    Hive::OperationalStatus.new(
+      status_payload: status_payload, project_context: context, scheduler_snapshot: nil,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    ).send(:classify, { "name" => "demo" }, row)
+  end
 
   def project(payload, project_context: {}, scheduler_snapshot: nil)
     Hive::OperationalStatus.new(

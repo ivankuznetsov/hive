@@ -791,6 +791,11 @@ class HiveCommandsApproveTest < Minitest::Test
   def test_error_envelope_and_classifier_cover_remaining_error_kinds
     cmd = command
 
+    # TransitionBlocked subclasses WrongStage, so the branch order in
+    # error_kind_for is what keeps it from collapsing into "wrong_stage".
+    assert_equal "plan_review_blocked",
+                 cmd.send(:error_kind_for, Hive::PlanReview::TransitionBlocked.new("blocked"))
+    assert_equal "wrong_stage", cmd.send(:error_kind_for, Hive::WrongStage.new("wrong"))
     assert_equal "rollback_failed", cmd.send(:error_kind_for, Hive::RollbackFailed.new("rollback"))
     assert_equal "invalid_task_path", cmd.send(:error_kind_for, Hive::InvalidTaskPath.new("bad"))
     assert_equal "error", cmd.send(:error_kind_for, Hive::Error.new("generic"))

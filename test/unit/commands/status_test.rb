@@ -2288,6 +2288,19 @@ class CommandsStatusTest < Minitest::Test
     assert_equal Hive::Schemas::StatusErrorKind::ERROR,
                  cmd.send(:error_kind_for, Hive::Error.new("generic"))
 
+    assert_equal "", cmd.send(:operational_plan_review_token, nil)
+    assert_equal " · review deep/awaiting_decision coverage=2/3 open=3",
+                 cmd.send(:operational_plan_review_token, {
+                   "effective_level" => "deep", "state" => "awaiting_decision",
+                   "coverage_counts" => { "completed" => 2, "pending" => 1 },
+                   "finding_counts" => { "open_gated" => 1, "open_manual" => 2 }
+                 })
+    # No effective level yet: fall back to the computed one, then to "pending".
+    assert_equal " · review standard/unknown coverage=0/0 open=0",
+                 cmd.send(:operational_plan_review_token, { "computed_level" => "standard" })
+    assert_equal " · review pending/unknown coverage=0/0 open=0",
+                 cmd.send(:operational_plan_review_token, {})
+
     with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::EPERM }) do
       assert_equal true, cmd.send(:pid_alive?, 12_345)
     end

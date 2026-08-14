@@ -15,4 +15,8 @@ passed 87,235/87,235 lines. Shard-zero-only preload captured 1,627 results and
 inventory to 1,374 results and 79,103/87,238 lines even though every collector
 test passed. The inverse relationship between inherited catalog size, durable
 child results, and coverage isolates collector preload as the loss mechanism.
-Exact-head lazy-collector proof is pending.
+A first exact-head lazy-collector run exposed a test-only environment leak: the
+new prepare-task contract test restored its input metadata but not the six
+coverage variables mutated by the Rake task, so a later subprocess inherited
+the nonempty-test guard and failed. The fixture now restores the complete
+environment mutation surface. Exact-head lazy-collector proof is pending.

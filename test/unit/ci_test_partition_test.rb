@@ -383,7 +383,13 @@ class CiTestPartitionTest < Minitest::Test
     env = {
       "HIVE_COVERAGE_SHARD_INDEX" => "1",
       "HIVE_COVERAGE_SHARD_COUNT" => "6",
-      "HIVE_COVERAGE_RUN_ID" => "preload-contract"
+      "HIVE_COVERAGE_RUN_ID" => "preload-contract",
+      "HIVE_COVERAGE" => nil,
+      "HIVE_COVERAGE_ROOT" => nil,
+      "HIVE_COVERAGE_COLLECT_ONLY" => nil,
+      "HIVE_COVERAGE_LOAD_ALL" => nil,
+      "HIVE_REQUIRE_TEST_RUNS" => nil,
+      "RUBYOPT" => nil
     }
 
     with_env(env) do

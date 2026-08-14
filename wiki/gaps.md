@@ -39,9 +39,13 @@ closes the missing hosted-proof gap, while confirming that source bytes are
 only an approximate runtime weight: the 146-second fastest-to-slowest spread
 identified the third partition as the long pole. A second hosted run measured
 that same collector at 440 seconds while the others took 244--294 seconds. CI
-therefore splits only that measured hot partition into two source-byte-balanced
-halves. The five-way exact-head timing remains pending; do not assume the two
-halves are runtime-balanced until the hosted result is recorded.
+therefore split that measured hot partition into two source-byte-balanced
+halves. Five-way exact-head run `31821818842` passed at 469 seconds overall;
+the two halves took 219 and 280 collector seconds. The unchanged fourth
+original partition then became the 370-second long pole, consistent with its
+368- and 294-second samples in the prior runs. CI now splits that partition too.
+The final six-way exact-head timing remains pending; do not assume its halves
+are runtime-balanced until the hosted result is recorded.
 
 ## Provider-routing trusted captures (updated 2026-08-11)
 

@@ -319,9 +319,6 @@ module Hive
           unless roles.count("original") == 1 && roles.count("review") == 1
             raise StoreError, "outcome evidence requires exactly one original and one review representation"
           end
-          paths = canonical.map { |item| item.fetch("path") }
-          raise StoreError, "outcome evidence representation paths must be unique" unless paths.uniq == paths
-
           canonical.sort_by { |item| [ role_order(item.fetch("role")), item.fetch("path") ] }
         end
         private_class_method :canonical_representations

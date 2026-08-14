@@ -76,7 +76,11 @@ Terminal and document originals need safe text review representations. Capture
 the real implemented interface, transition, or terminal behavior. Generated
 slides, labels, diagrams, narrated claim summaries, and pictures of test output
 do not establish screenshot or video behavior. A document proof may explain an
-invisible refactor only when it is concretely grounded in the frozen diff.
+invisible refactor only when it is concretely grounded in the frozen diff. For
+a public CLI or TUI claim, the recorded command must invoke the shipped public
+entrypoint itself; a custom evidence script, simulated output, or test runner is
+not a substitute. Focused tests are suitable only for genuinely internal claims
+whose statement is limited to the behavior those tests exercise.
 
 Return only `{ "evidence": [...] }`. Every task-produced entry has this exact
 minimal shape: `{ "kind": "screenshot|video|terminal|document", "summary":
@@ -99,4 +103,7 @@ with the required prefix above. On a recapture, return replacements only for
 claim IDs in the revision guidance. A bounded attempt may improve any nonempty
 subset; the controller preserves the last evidence for unaddressed claims and
 reassembles the full package. Do not wrap JSON in Markdown and do not write a
-Hive terminal marker.
+Hive terminal marker. When the managed browser publishes one PNG or WebM that
+is both the immutable original and the reviewer-visible representation, use
+that same controller-issued path for both roles; Hive creates distinct retained
+copies during custody transfer.

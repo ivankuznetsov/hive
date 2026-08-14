@@ -402,6 +402,28 @@ class OutcomeEvidenceProofTest < Minitest::Test
     end
   end
 
+  def test_materializes_one_managed_visual_capture_for_both_representation_roles
+    with_tmp_dir do |root|
+      valid_files(root)
+      FileUtils.mkdir_p(File.join(root, "retained", "attempt-visual"))
+      value = proof(
+        "screenshot", {},
+        original: [ "shot-original.png", "image/png" ],
+        review: [ "shot-original.png", "image/png" ]
+      )
+
+      retained = Proof.materialize_producer!(
+        value, task_folder: root, expected_head: HEAD,
+        destination_root: "retained/attempt-visual/entry-01"
+      )
+
+      representations = retained.fetch("representations")
+      assert_equal %w[original review], representations.map { |item| item.fetch("role") }
+      assert_equal 2, representations.map { |item| item.fetch("path") }.uniq.length
+      assert_equal 1, representations.map { |item| item.fetch("sha256") }.uniq.length
+    end
+  end
+
   def test_controller_adds_task_source_hashes_and_sizes_to_minimal_producer_output
     with_tmp_dir do |root|
       valid_files(root)

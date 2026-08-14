@@ -1162,3 +1162,16 @@ package listing now validates immutable metadata without rerunning OCR/ffmpeg
 for every retained file; selected downloads still recheck exact size/digest.
 Focused tests pin these boundaries, but a fully accepted live provider package
 through the new mailbox/network configuration remains part of this open gap.
+
+A frozen four-task retrospective over 350 exact changed paths sharpened this
+gap. Legacy marked all four tasks complete even though manual policy review
+found zero complete evidence packages; the new controller blocked all four,
+preventing every false completion. It accepted 2 of 9 final claims and all 9
+supporting exclusions, but accepted zero complete packages. Managed Web,
+terminal, and document capture all operated; the runs instead exposed omitted
+promised outcomes, claims too broad for one artifact, unreachable historical
+Web fixtures, and a producer substituting a custom script for the shipped CLI.
+One visual-custody contract defect was fixed, and a post-fix CLI inference rerun
+restored the omitted compatibility outcome and split one broad claim into three.
+Keep the gap open until at least one exact-range Web package and one CLI/TUI
+package are fully accepted without weakening the 4/4 false-completion result.

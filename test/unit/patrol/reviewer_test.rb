@@ -559,7 +559,9 @@ class HivePatrolReviewerTest < Minitest::Test
                    reviewer.send(:run_agent, prompt: "p",
                                              output_path: File.join(dir, "out.json"),
                                              run_dir: dir))
-      assert_equal 50_000, captured.fetch(:max_tokens)
+      assert_equal Hive::Patrol::TokenBudget::DEFAULT_MAX_TOKENS_PER_AGENT,
+                   captured.fetch(:max_tokens)
+      assert_nil captured.fetch(:max_budget_usd)
     ensure
       profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_lookup
       agent_singleton.define_method(:new, agent_new) if agent_new
@@ -598,15 +600,13 @@ class HivePatrolReviewerTest < Minitest::Test
     end
   end
 
-  def test_run_agent_wrapper_refuses_an_exhausted_patrol_budget
+  def test_run_agent_wrapper_refuses_initial_context_above_the_runaway_ceiling
     with_tmp_dir do |dir|
       budget = Object.new
-      budget.define_singleton_method(:acquire) do |stage:, minimum_tokens:|
-        minimum_tokens >= 0 && stage != "patrol-review"
-      end
-      budget.define_singleton_method(:exhaustion_message) { "cycle exhausted" }
+      budget.define_singleton_method(:acquire) { |minimum_tokens:| minimum_tokens.negative? }
+      budget.define_singleton_method(:exhaustion_message) { "runaway ceiling too small" }
       budget.define_singleton_method(:resource_exhaustion) do
-        { reason: "cycle_agent_spawn_limit", limit: 3, observed: 3 }
+        { reason: "insufficient_launch_headroom", limit: 10, observed: 20_001 }
       end
       reviewer = Hive::Patrol::Reviewer.new(dir, cfg: cfg, token_budget: budget)
       profile = Struct.new(:name, :initial_context_tokens) do
@@ -624,9 +624,9 @@ class HivePatrolReviewerTest < Minitest::Test
       end
 
       assert_equal :error, result.fetch(:status)
-      assert_equal "cycle exhausted", result.fetch(:error_message)
+      assert_equal "runaway ceiling too small", result.fetch(:error_message)
       assert_equal(
-        { reason: "cycle_agent_spawn_limit", limit: 3, observed: 3 },
+        { reason: "insufficient_launch_headroom", limit: 10, observed: 20_001 },
         result.fetch(:resource_exhaustion)
       )
     end

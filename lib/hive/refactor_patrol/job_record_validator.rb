@@ -336,7 +336,7 @@ module Hive
         strict_hash!(
           caps,
           required: constant(:POLICY_CAP_KEYS),
-          allowed: constant(:POLICY_CAP_KEYS) + constant(:LEGACY_POLICY_CAP_KEYS),
+          allowed: constant(:POLICY_CAP_KEYS),
           label: "policy action caps",
           path: path
         )
@@ -345,24 +345,12 @@ module Hive
             inconsistent!("policy action cap #{key} must be boolean", path)
           end
         end
-        constant(:LEGACY_POLICY_CAP_KEYS).each do |key|
-          next unless caps.key?(key)
-
-          value = caps[key]
-          unless value.is_a?(Integer) && value.positive?
-            inconsistent!("legacy policy action cap #{key} must be positive", path)
-          end
-        end
-        score = action.fetch("issue_min_leverage_score")
-        unless score.is_a?(Numeric) && score.between?(0, 1)
-          inconsistent!("policy action issue_min_leverage_score must be between 0 and 1", path)
-        end
       end
 
       def validate_disposition!(item, name, path)
         strict_hash!(
           item,
-          required: %w[id feature_id fingerprint score admissible reasons],
+          required: %w[id feature_id fingerprint route admissible reasons],
           allowed: constant(:DISPOSITION_KEYS),
           label: "#{name} disposition",
           path: path
@@ -370,16 +358,21 @@ module Hive
         %w[id feature_id fingerprint].each do |key|
           nonempty_string!(item.fetch(key), "disposition #{key}", path)
         end
-        inconsistent!("disposition score must be numeric", path) unless item.fetch("score").is_a?(Numeric)
+        unless item.fetch("route") == name
+          inconsistent!("disposition route must match its #{name} bucket", path)
+        end
         unless [ true, false ].include?(item.fetch("admissible"))
           inconsistent!("disposition admissible must be boolean", path)
         end
         reasons = string_array!(item.fetch("reasons"), "disposition reasons", path)
-        if name == "accepted"
-          inconsistent!("accepted disposition cannot have reasons", path) unless reasons.empty?
-          inconsistent!("accepted disposition must be admissible", path) unless item.fetch("admissible")
+        if name == "fix"
+          inconsistent!("fix disposition cannot have reasons", path) unless reasons.empty?
+          inconsistent!("fix disposition must be admissible", path) unless item.fetch("admissible")
         else
           inconsistent!("#{name} disposition requires reasons", path) if reasons.empty?
+          if name == "discuss" && item.fetch("admissible") != true
+            inconsistent!("discuss disposition must be admissible", path)
+          end
         end
         nonempty_string!(item["reference"], "disposition reference", path) if item.key?("reference")
         nonempty_string!(item["family_id"], "disposition family_id", path) if item.key?("family_id")

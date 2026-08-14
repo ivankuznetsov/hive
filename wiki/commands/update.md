@@ -74,9 +74,10 @@ options instead of suggesting a project migration that cannot run.
 If the channel updater fails, migration is not started. If the updated binary
 cannot be resolved or the fleet migration exits non-zero, `hive update` reports
 that distinction and prints the exact `hive migrate --all` command to retry.
-Project migrations defer daemon restart requests so a changed fleet triggers
-at most one restart, and only after every registered project succeeds. A
-partial fleet failure prints that restart is deferred until the repair run.
+Project migrations defer daemon restart requests so the fleet restarts once,
+and only after every registered project succeeds. A successful retry restarts
+even when the earlier partial pass already committed the only config changes;
+a partial fleet failure prints that restart is deferred until that repair run.
 
 ## Nudge command (shared with the update flow)
 

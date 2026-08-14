@@ -71,15 +71,16 @@ class PatrolOverviewTest < ActiveSupport::TestCase
       {
         "job" => {
           "dispositions" => {
-            "accepted" => [
+            "fix" => [
               {
-                "id" => "thesis-1", "score" => 0.8,
+                "id" => "thesis-1",
                 "thesis" => {
                   "problem" => "Architecture ownership is split",
                   "proposed_refactor" => "Move the policy behind one boundary"
                 }
               }
-            ]
+            ],
+            "discuss" => []
           }
         }
       }
@@ -94,6 +95,7 @@ class PatrolOverviewTest < ActiveSupport::TestCase
                  section.items.map { |job| job.fetch("job_id") }
     assert_equal "Architecture ownership is split",
                  section.items.first.fetch("findings").first.fetch("problem")
+    assert_equal "fix", section.items.first.fetch("findings").first.fetch("route")
     assert section.truncated
   end
 
@@ -129,7 +131,7 @@ class PatrolOverviewTest < ActiveSupport::TestCase
       { "count" => 40, "page" => { "has_more" => true }, "jobs" => jobs }
     end
     query.define_singleton_method(:show_envelope) do |**|
-      { "job" => { "dispositions" => { "accepted" => [] } } }
+      { "job" => { "dispositions" => { "fix" => [], "discuss" => [] } } }
     end
 
     section = overview(architecture_query: query).architecture
@@ -149,7 +151,7 @@ class PatrolOverviewTest < ActiveSupport::TestCase
     end
     query.define_singleton_method(:show_envelope) do |job_id:, **|
       calls << job_id
-      { "job" => { "dispositions" => { "accepted" => [] } } }
+      { "job" => { "dispositions" => { "fix" => [], "discuss" => [] } } }
     end
 
     overview(architecture_query: query).architecture
@@ -223,7 +225,10 @@ class PatrolOverviewTest < ActiveSupport::TestCase
       "job_id" => "job-#{state}", "state" => state,
       "complete" => state == "complete",
       "source" => { "number" => 7, "url" => "https://github.com/acme/demo/pull/7" },
-      "counts" => { "accepted" => 1, "pending_actions" => state == "complete" ? 0 : 1 },
+      "counts" => {
+        "fix" => 1, "discuss" => 0,
+        "pending_actions" => state == "complete" ? 0 : 1
+      },
       "blockers" => blocker ? [ { "scope" => "discovery", "reason" => blocker } ] : [],
       "updated_at" => "2026-08-13T12:00:00Z"
     }

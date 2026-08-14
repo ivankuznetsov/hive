@@ -78,10 +78,11 @@ single-project migration would. A failed project is named with its error and
 rolled back.
 
 Each single-project migration still requests a daemon restart when it changes
-stage layout or managed workflow tasks. Fleet mode coalesces those requests and
-restarts once only when every registered project succeeds. A partial fleet
-failure leaves the current daemon stopped from adopting the new state until the
-operator repairs the failed project and reruns `hive migrate --all`.
+stage layout or managed workflow tasks. Fleet mode restarts once after every
+successful all-project pass, including an otherwise no-op retry after a partial
+failure. That makes the successful pass the update cutover without maintaining
+another durable restart marker. A partial fleet failure defers the restart
+until the operator repairs the failed project and reruns `hive migrate --all`.
 
 `Stages::Finalize` likewise reads legacy `budget_usd.pr` /
 `timeout_sec.pr` as fallbacks. `hive migrate` rewrites those keys to

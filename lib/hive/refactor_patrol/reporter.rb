@@ -1,29 +1,26 @@
 require "json"
+require "hive/refactor_patrol/thesis"
 
 module Hive
   module RefactorPatrol
     class Reporter
-      V1_SCHEMA_VERSION = 1
-      V2_SCHEMA_VERSION = 2
-      V3_SCHEMA_VERSION = 3
-      CONFIDENCE_ORDER = { "low" => 0, "medium" => 1, "high" => 2 }.freeze
-      ZERO_REASONS = %w[no_mapped_slice no_theses all_suppressed].freeze
+      V4_SCHEMA_VERSION = 4
+      ZERO_REASONS = %w[no_mapped_slice no_theses all_dismissed].freeze
 
       def initialize(cfg)
         @cfg = cfg
       end
 
       def envelope(project:, project_root:, dry_run:, features:, theses:, suppressed:, last_scanned_sha:,
-                   version: V1_SCHEMA_VERSION, complete: true, review_errors: [], feature_results: nil)
-        raise ArgumentError, "unsupported refactor patrol report version #{version}" unless version == V1_SCHEMA_VERSION
+                   version: V4_SCHEMA_VERSION, complete: true, review_errors: [], feature_results: nil)
+        raise ArgumentError, "unsupported refactor patrol report version #{version}" unless version == V4_SCHEMA_VERSION
 
-        suppressed_ids = suppression_index(suppressed)
-        ranked = ranked_items(theses, suppressed_ids)
+        dispositions = classify(theses, suppressed)
         errors = json_copy(Array(review_errors))
         progress = feature_results || inferred_feature_results(features, theses, errors)
         {
           "schema" => "hive-refactor-patrol",
-          "schema_version" => V1_SCHEMA_VERSION,
+          "schema_version" => V4_SCHEMA_VERSION,
           "ok" => true,
           "project" => project,
           "project_root" => project_root,
@@ -32,10 +29,9 @@ module Hive
           "review_errors" => errors,
           "feature_results" => json_copy(Array(progress)),
           "features_mapped" => features.size,
-          "theses" => accepted_count(theses),
-          "ranked" => ranked.first(max_theses_per_run),
-          "flagged_theses" => flagged_items(theses, suppressed_ids),
-          "suppressed" => suppressed,
+          "fix" => dispositions.fetch("fix"),
+          "discuss" => dispositions.fetch("discuss"),
+          "dismiss" => dispositions.fetch("dismiss"),
           "last_scanned_sha" => last_scanned_sha.to_s
         }
       end
@@ -44,7 +40,7 @@ module Hive
       # disposition is computed once here and action outcomes are copied into a
       # sibling collection; a later fixer/issue result cannot reclassify a
       # thesis.
-      def v3_envelope(job_id:, project:, project_root:, dry_run:, source_pr:, analysis_sha:,
+      def v4_envelope(job_id:, project:, project_root:, dry_run:, source_pr:, analysis_sha:,
                       features:, theses:, suppressed:, complete:, review_errors:, actions:,
                       attempts:, zero_reason: nil, feature_results: nil)
         dispositions = classify(theses, suppressed)
@@ -55,7 +51,7 @@ module Hive
 
         {
           "schema" => "hive-refactor-patrol",
-          "schema_version" => V3_SCHEMA_VERSION,
+          "schema_version" => V4_SCHEMA_VERSION,
           "ok" => true,
           "job_id" => job_id.to_s,
           "project" => project.to_s,
@@ -65,9 +61,9 @@ module Hive
           "analysis_sha" => analysis_sha.to_s,
           "complete" => actually_complete,
           "features_mapped" => Array(features).size,
-          "accepted" => dispositions.fetch("accepted"),
-          "flagged" => dispositions.fetch("flagged"),
-          "suppressed" => dispositions.fetch("suppressed"),
+          "fix" => dispositions.fetch("fix"),
+          "discuss" => dispositions.fetch("discuss"),
+          "dismiss" => dispositions.fetch("dismiss"),
           "review_errors" => errors,
           "feature_results" => json_copy(Array(progress)),
           "zero_reason" => reason,
@@ -77,7 +73,7 @@ module Hive
       end
 
       def self.error_envelope(error, version:, error_kind:, job_id: nil, source_pr: nil)
-        unless [ V1_SCHEMA_VERSION, V2_SCHEMA_VERSION, V3_SCHEMA_VERSION ].include?(version)
+        unless version == V4_SCHEMA_VERSION
           raise ArgumentError, "unsupported refactor patrol report version #{version}"
         end
 
@@ -89,7 +85,7 @@ module Hive
           "schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"
         )
         base["schema_version"] = version
-        return base if version == V1_SCHEMA_VERSION
+        return base if job_id.nil?
 
         base.merge(
           "job_id" => job_id.to_s,
@@ -99,24 +95,24 @@ module Hive
       end
 
       def text(payload, theses)
+        dispositions = FINDING_ROUTES.flat_map do |route|
+          payload.fetch(route).map { |item| [ route, item ] }
+        end
         lines = [
           "hive refactor-patrol: #{payload.fetch('project')} mapped=#{payload.fetch('features_mapped')} " \
-          "theses=#{payload.fetch('theses')} review=#{payload.fetch('review_complete') ? 'complete' : 'partial'}"
+          "findings=#{dispositions.size} review=#{payload.fetch('review_complete') ? 'complete' : 'partial'}"
         ]
-        payload.fetch("ranked").each_with_index do |item, idx|
+        dispositions.each_with_index do |(route, item), idx|
           thesis = theses.find { |candidate| candidate.id == item.fetch("id") }
           next unless thesis
 
-          line = "#{idx + 1}. #{thesis.feature} score=#{format('%.2f', item.fetch('score'))} flags=#{item.fetch('flagged').join(',')}"
-          advisories = item.fetch("advisories")
-          line += " advisories=#{advisories.join(',')}" unless advisories.empty?
-          lines << line
+          lines << "#{idx + 1}. #{thesis.feature} route=#{route} reasons=#{item.fetch('reasons').join(',')}"
           lines << "   problem: #{thesis.problem}"
           lines << "   refactor: #{thesis.proposed_refactor}"
           lines << "   validation: #{validation_summary(thesis)}"
           lines << "   boundary: #{Array(thesis.feature_boundary['owned_files']).join(', ')}"
         end
-        lines << "flagged=#{payload.fetch('flagged_theses').size} suppressed=#{payload.fetch('suppressed').size}"
+        lines << "fix=#{payload.fetch('fix').size} discuss=#{payload.fetch('discuss').size} dismiss=#{payload.fetch('dismiss').size}"
         lines << "review_errors=#{payload.fetch('review_errors').size}" unless payload.fetch("review_complete")
         lines.join("\n")
       end
@@ -139,61 +135,51 @@ module Hive
           raise ArgumentError, "duplicate suppressed thesis id"
         end
 
-        result = { "accepted" => [], "flagged" => [], "suppressed" => [] }
+        result = { "fix" => [], "discuss" => [], "dismiss" => [] }
         candidates.each do |thesis|
           if (suppression = suppressed_by_id[thesis.id.to_s])
-            result.fetch("suppressed") << disposition_item(
+            result.fetch("dismiss") << disposition_item(
               thesis,
-              reasons: [ suppression.fetch("reason").to_s ],
+              route: "dismiss", reasons: [ suppression.fetch("reason").to_s ],
               reference: suppression["reference"]
             )
             next
           end
 
-          reasons = Array(thesis.risk && thesis.risk["flags"]).map(&:to_s).reject(&:empty?)
-          unless thesis.admissible == true
-            reason = thesis.admissibility_reason.to_s
-            reasons << reason unless reason.empty?
-          end
-          reasons << "below_min_confidence" if below_min_confidence?(thesis)
-          reasons.uniq!
-          bucket = reasons.empty? && thesis.admissible == true ? "accepted" : "flagged"
-          result.fetch(bucket) << disposition_item(thesis, reasons: reasons)
+          route = thesis.effective_route(min_confidence: min_confidence)
+          reasons = thesis.route_reasons(min_confidence: min_confidence)
+          result.fetch(route) << disposition_item(thesis, route: route, reasons: reasons)
         end
         result
       end
 
-      def disposition_item(thesis, reasons:, reference: nil)
+      def disposition_item(thesis, route:, reasons:, reference: nil)
         {
           "id" => thesis.id.to_s,
           "feature_id" => thesis.feature_id.to_s,
           "fingerprint" => thesis.fingerprint.to_s,
-          "score" => score(thesis),
+          "route" => route,
           "admissible" => thesis.admissible == true,
           "reasons" => reasons,
           # The daemon checkpoints this immutable snapshot into the
           # authoritative job aggregate. Action workers must never have to
           # re-run discovery or reconstruct a proposal from mutable files.
-          "thesis" => json_copy(thesis.to_h)
+          "thesis" => json_copy(thesis.to_h.merge("route" => route))
         }.tap do |item|
           item["reference"] = reference.to_s unless reference.nil? || reference.to_s.empty?
         end
       end
 
-      def below_min_confidence?(thesis)
-        CONFIDENCE_ORDER.fetch(thesis.confidence.to_s, -1) < min_confidence
-      end
-
       def resolved_zero_reason(explicit, features, theses, dispositions)
-        no_actionable_dispositions = dispositions.fetch("accepted").empty? && dispositions.fetch("flagged").empty?
+        no_actionable_dispositions = dispositions.fetch("fix").empty? && dispositions.fetch("discuss").empty?
         return nil unless no_actionable_dispositions
 
         inferred = if Array(features).empty?
                      "no_mapped_slice"
         elsif Array(theses).empty?
                      "no_theses"
-        elsif dispositions.fetch("suppressed").size == Array(theses).size
-                     "all_suppressed"
+        elsif dispositions.fetch("dismiss").size == Array(theses).size
+                     "all_dismissed"
         end
         requested = explicit&.to_s
         if requested && !ZERO_REASONS.include?(requested)
@@ -223,55 +209,8 @@ module Hive
         JSON.parse(JSON.generate(value))
       end
 
-      def ranked_items(theses, suppressed_ids)
-        theses.reject { |thesis| suppressed_ids[thesis.id.to_s] }
-              .reject { |thesis| thesis.collision && thesis.collision["kind"].to_s.start_with?("collision_already", "collision_dismissed", "collision_similar") }
-              .sort_by { |thesis| [ -score(thesis), thesis.feature_id.to_s, thesis.id.to_s ] }
-              .map do |thesis|
-          {
-            "id" => thesis.id,
-            "feature_id" => thesis.feature_id,
-            "score" => score(thesis),
-            "breakdown" => thesis.expected_leverage.fetch("breakdown", {}),
-            "admissible" => thesis.admissible == true,
-            "flagged" => Array(thesis.risk["flags"]),
-            "advisories" => Array(thesis.risk["advisories"])
-          }
-        end
-      end
-
-      def flagged_items(theses, suppressed_ids)
-        theses.filter_map do |thesis|
-          next if suppressed_ids[thesis.id.to_s]
-
-          reasons = []
-          reasons.concat(Array(thesis.risk["flags"]))
-          reasons << thesis.admissibility_reason unless thesis.admissible
-          next if reasons.empty?
-
-          { "id" => thesis.id, "reason" => reasons.uniq.join(",") }
-        end
-      end
-
-      def suppression_index(suppressed)
-        Array(suppressed).to_h { |item| [ item.fetch("id").to_s, true ] }
-      end
-
-      def accepted_count(theses)
-        theses.count do |thesis|
-          thesis.admissible &&
-            Array(thesis.risk["flags"]).empty? &&
-            CONFIDENCE_ORDER.fetch(thesis.confidence.to_s, -1) >= min_confidence &&
-            thesis.collision.nil?
-        end
-      end
-
       def min_confidence
-        CONFIDENCE_ORDER.fetch(@cfg.dig("refactor_patrol", "min_confidence") || "medium")
-      end
-
-      def score(thesis)
-        thesis.expected_leverage.fetch("score", 0).to_f
+        @cfg.dig("refactor_patrol", "min_confidence") || "medium"
       end
 
       def validation_summary(thesis)
@@ -282,9 +221,6 @@ module Hive
         commands.join(", ")
       end
 
-      def max_theses_per_run
-        @cfg.dig("refactor_patrol", "max_theses_per_run") || 10
-      end
     end
   end
 end

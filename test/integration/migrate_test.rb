@@ -392,6 +392,144 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_migrate_removes_retired_patrol_policy_once_and_restarts_daemon
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        File.write(cfg_path, <<~YAML)
+          # Keep this project comment.
+          patrol:
+            mode: off
+            max_tokens_per_cycle: 100
+            max_tokens_per_day: 200
+            max_tokens_per_agent: 1000000000
+            max_agent_spawns_per_cycle: 3
+            max_agent_spawns_per_day: 4
+            max_architecture_review_spawns_per_day: 5
+            max_architecture_unmetered_spawns_per_day: 6
+            max_budget_usd_per_agent: 7
+            architecture_budget_multiplier: 8
+            fix_budget_multiplier: 9
+          refactor_patrol:
+            enabled: false
+            min_leverage_score: 0.10
+            issue_filing:
+              enabled: false
+              min_leverage_score: 0.25
+            leverage:
+              weights:
+                churn: 1.0
+        YAML
+        restarts = 0
+        command = migrate_command(dir, daemon_restarter: -> { restarts += 1 })
+
+        out, _err = capture_io { command.call }
+
+        migrated_bytes = File.read(cfg_path)
+        migrated = YAML.safe_load(migrated_bytes)
+        assert_includes migrated_bytes, "# Keep this project comment."
+        assert_equal 1_000_000_000, migrated.dig("patrol", "max_tokens_per_agent")
+        Hive::Commands::Migrate::RETIRED_PATROL_CONFIG_KEYS.each do |key|
+          refute migrated.fetch("patrol").key?(key), key
+        end
+        refute migrated.fetch("refactor_patrol").key?("min_leverage_score")
+        refute migrated.fetch("refactor_patrol").key?("leverage")
+        refute migrated.dig("refactor_patrol", "issue_filing").key?("min_leverage_score")
+        assert_includes out, "rewrote legacy config keys"
+        assert_equal 1, restarts
+
+        second_out, _err = capture_io { command.call }
+        assert_equal migrated_bytes, File.read(cfg_path)
+        assert_equal 1, restarts, "idempotent migration must not request another restart"
+        refute_includes second_out, "rewrote legacy config keys"
+      end
+    end
+  end
+
+  def test_migrate_semantically_rewrites_flow_style_retired_patrol_policy
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        File.write(
+          cfg_path,
+          "patrol: {mode: off, max_tokens_per_day: 2, max_tokens_per_agent: 1000000000}\n" \
+          "refactor_patrol: {enabled: false, min_leverage_score: 0.1, " \
+          "issue_filing: {enabled: false, min_leverage_score: 0.25}, " \
+          "leverage: {weights: {churn: 1.0}}}\n"
+        )
+
+        capture_io { migrate_command(dir, daemon_restarter: -> {}).call }
+
+        migrated = YAML.safe_load(File.read(cfg_path))
+        assert_equal 1_000_000_000, migrated.dig("patrol", "max_tokens_per_agent")
+        refute migrated.fetch("patrol").key?("max_tokens_per_day")
+        refute migrated.fetch("refactor_patrol").key?("min_leverage_score")
+        refute migrated.fetch("refactor_patrol").key?("leverage")
+        refute migrated.dig("refactor_patrol", "issue_filing").key?("min_leverage_score")
+      end
+    end
+  end
+
+  def test_migrate_removes_complete_multiline_retired_patrol_values
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        File.write(cfg_path, <<~YAML)
+          patrol:
+            mode: off
+            max_tokens_per_day: |
+              100
+              200
+            max_agent_spawns_per_day:
+              - 3
+              - 4
+            max_budget_usd_per_agent: >
+              7
+              dollars
+            max_tokens_per_agent: 1000000000
+          refactor_patrol:
+            enabled: false
+        YAML
+
+        capture_io { migrate_command(dir, daemon_restarter: -> {}).call }
+
+        migrated_bytes = File.read(cfg_path)
+        migrated = YAML.safe_load(migrated_bytes)
+        assert_equal false, migrated.dig("patrol", "mode")
+        assert_equal 1_000_000_000, migrated.dig("patrol", "max_tokens_per_agent")
+        Hive::Commands::Migrate::RETIRED_PATROL_CONFIG_KEYS.each do |key|
+          refute migrated.fetch("patrol").key?(key), key
+        end
+        refute_includes migrated_bytes, "100\n200"
+        refute_includes migrated_bytes, "dollars"
+      end
+    end
+  end
+
+  def test_config_rewrite_requests_coalesced_restart_before_later_migration_failure
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        File.write(cfg_path, "patrol:\n  max_tokens_per_day: 2\n")
+        restarts = 0
+        command = migrate_command(
+          dir,
+          config_loader: ->(*) { raise Hive::ConfigError, "later migration failed" },
+          daemon_restarter: -> { restarts += 1 }
+        )
+
+        assert_raises(Hive::ConfigError) { capture_io { command.call } }
+
+        assert_equal 1, restarts
+        refute YAML.safe_load(File.read(cfg_path)).fetch("patrol").key?("max_tokens_per_day")
+      end
+    end
+  end
+
   def test_migrate_moves_top_level_reviewers_under_review_without_losing_comments
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

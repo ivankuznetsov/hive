@@ -46,7 +46,7 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
         job.dig("policy", "action", "caps")["single_feature_only"] = "yes"
       end,
       mutate_job(accepted_job) do |job|
-        job.dig("dispositions", "accepted", 0)["admissible"] = "yes"
+        job.dig("dispositions", "fix", 0)["admissible"] = "yes"
       end,
       mutate_job(accepted_job) { |job| job.dig("actions", 0)["terminal"] = "yes" }
     ]
@@ -466,8 +466,8 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
       inconsistent_record: Hive::RefactorPatrol::JobStore::InconsistentRecord
     )
     records = [
-      terminal_job("job-b", owner_job_id: "job-a", disposition: "flagged"),
-      terminal_job("job-a", owner_job_id: "job-a", disposition: "accepted"),
+      terminal_job("job-b", owner_job_id: "job-a", disposition: "discuss"),
+      terminal_job("job-a", owner_job_id: "job-a", disposition: "fix"),
       valid_job("job_id" => "queued-job")
     ]
 
@@ -488,7 +488,7 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
     )
 
     error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
-      projector.project([ terminal_job("job-b", owner_job_id: "missing", disposition: "flagged") ])
+      projector.project([ terminal_job("job-b", owner_job_id: "missing", disposition: "discuss") ])
     end
     assert_match "links to missing owner job", error.message
   end
@@ -509,9 +509,9 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
 
   def accepted_job
     aggregate = valid_job("state" => "acting")
-    aggregate.dig("dispositions", "accepted") << {
+    aggregate.dig("dispositions", "fix") << {
       "id" => "thesis-1", "feature_id" => "feature-1", "fingerprint" => "fp-1",
-      "score" => 0.9, "admissible" => true, "reasons" => []
+      "route" => "fix", "admissible" => true, "reasons" => []
     }
     aggregate["actions"] << {
       "canonical_action_id" => "action-1", "thesis_id" => "thesis-1",
@@ -532,8 +532,7 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
         "caps" => {
           "single_feature_only" => true, "allow_dependency_bumps" => false,
           "allow_public_api_changes" => false, "allow_cross_feature" => false
-        },
-        "issue_min_leverage_score" => 0.5
+        }
       }
     )
   end
@@ -681,7 +680,7 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
       "policy" => { "discovery" => true, "auto_fix" => false, "issue_filing" => false },
       "state" => "queued",
       "complete" => false,
-      "dispositions" => { "accepted" => [], "flagged" => [], "suppressed" => [] },
+      "dispositions" => { "fix" => [], "discuss" => [], "dismiss" => [] },
       "feature_results" => [],
       "review_errors" => [],
       "zero_reason" => nil,
@@ -703,9 +702,9 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
       "id" => "thesis-#{job_id}",
       "feature_id" => "feature-1",
       "fingerprint" => "fp-1",
-      "score" => 0.9,
+      "route" => disposition,
       "admissible" => true,
-      "reasons" => disposition == "accepted" ? [] : [ "lower leverage" ]
+      "reasons" => disposition == "fix" ? [] : [ "reviewer_requested_discussion" ]
     }
     aggregate["actions"] << {
       "canonical_action_id" => "action-1",

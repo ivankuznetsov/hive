@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-08-13
+updated: 2026-08-14
 tags: [command, patrol, review, pr, json]
 ---
 
@@ -44,7 +44,7 @@ patrol:
   max_fixes_per_feature_per_cycle: 1
   max_fix_attempts_per_cycle: 6
   max_prs_per_cycle: 3
-  fix_budget_multiplier: 2 # per-agent fix headroom; cycle/day limits stay shared
+  max_tokens_per_agent: 100000000 # optional emergency fuse for any Patrol child
   draft_prs: false   # default: open ready PRs (the babysitter skips drafts). Set true to open draft PRs.
   review_prs: true    # default: enqueue each opened patrol PR into 6-review as "Patrol: ..."
   review:
@@ -65,7 +65,17 @@ patrol:
 - `new_commits` runs only when the default branch SHA differs from `last_scanned_sha`.
 - `timer` runs whenever `last_run_at` is older than `poll_interval_sec`.
 
-The higher-level `patrol.mode` also resolves bounded resource envelopes. Low, medium, high, and ultrapatrol allow respectively 1/3/6/10 agent launches and 100k/200k/400k/800k input-plus-output tokens per ordinary cycle, with separate 2/8/18/36 ordinary-launch and 200k/600k/1.2m/2.4m shared-token ceilings per UTC day. Cached tokens remain telemetry and are not charged into those ceilings. Their ordinary review per-launch streamed-token limits are 40k/50k/75k/100k. Ordinary fixes receive `fix_budget_multiplier` times that per-agent headroom (2x by default) for edit/test/proof turns without enlarging cycle or day totals. Architecture receives 2x the ordinary per-launch token limit and 2x the per-cycle launch/token envelope; its fix does not compound the ordinary fix multiplier. Metered architecture launches are counted separately and do not consume the ordinary daily launch quota. Architecture reviews use the independent `max_architecture_review_spawns_per_day` cap (default `8`), while architecture fixes retain capacity. Unmetered architecture launches use the independent `max_architecture_unmetered_spawns_per_day` safety cap (default `96`). The native `max_budget_usd_per_agent` guard and project/day token ceiling stay shared. One project-wide advisory lock is held for the complete lifetime of each ordinary or architecture agent, so concurrent patrol workers cannot both spend the same daily headroom; a competing launch fails closed as `agent_in_flight` and can be retried by its scheduler. Claude stream events enforce the cap during a run; providers without interim usage remain bounded by launch and wall-clock ceilings and are recorded as unmetered when no terminal count exists. The CLI field is named `max_budget_usd_per_agent`, but for subscription-backed agents it is a subscription runaway guard expressed in budget-equivalent units, not an additional payment.
+`patrol.mode` controls cadence only. One deliberately high
+`max_tokens_per_agent` value applies equally to ordinary review/fix and
+architecture review/fix as an emergency streamed-token fuse. There are no
+Patrol cycle/day token quotas, launch-count quotas, multipliers, or native USD
+allowance. UsageDb still records metered and unmetered launches as telemetry,
+but telemetry cannot refuse future work. One project-wide advisory lock is held
+for the complete lifetime of each Patrol agent so ordinary and architecture
+workers cannot mutate the same project concurrently; a competing launch returns
+`agent_in_flight`. Wall-clock timeouts, Claude's four-turn review boundary,
+feature/fix/PR output caps, and daemon concurrency remain the normal runaway
+guards.
 
 ## Steps
 
@@ -169,7 +179,7 @@ The always-on behavior comes from [[modules/daemon]]: `Hive::Daemon::PatrolSched
 
 `hive patrol` is the frozen 0.x argument/output serializer for the first-party
 `patrol` module adapter. The adapter continues to call the existing Patrol
-engine and preserve `.hive-state/patrol/`, budgets, artifacts, review handoff,
+engine and preserve `.hive-state/patrol/`, runaway guard, artifacts, review handoff,
 human output, exit codes, and JSON v1/v2. Schedules and `task.completed`
 occurrences can enter through the module dispatcher, but legacy scheduling
 remains the only mutator until the shadow gate advances the ownership epoch.

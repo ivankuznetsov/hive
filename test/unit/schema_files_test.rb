@@ -2616,19 +2616,17 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
-  def test_refactor_patrol_retains_v1_and_v2_while_v3_is_current
-    assert_equal 3, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
-
-    v1 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 1)))
-    v2 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
-    v3 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3)))
-    assert_equal 1, v1.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
-    assert_equal 2, v2.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
-    assert_equal 3, v3.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  def test_refactor_patrol_publishes_only_the_current_v4_wire_contracts
+    assert_equal 4, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
+    assert_equal 4, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol-thesis")
+    %w[hive-refactor-patrol hive-refactor-patrol-thesis].each do |name|
+      (1..3).each { |version| refute_path_exists Hive::Schemas.schema_path(name, version: version) }
+      assert_path_exists Hive::Schemas.schema_path(name, version: 4)
+    end
   end
 
-  def test_refactor_patrol_v3_requires_a_complete_immutable_thesis_snapshot
-    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3)))
+  def test_refactor_patrol_v4_requires_a_complete_scoreless_thesis_snapshot
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 4)))
     snapshot_schema = JSONSchemer.schema(
       { "$ref" => "#/$defs/ThesisSnapshot", "$defs" => document.fetch("$defs") }
     )
@@ -2640,9 +2638,12 @@ class SchemaFilesTest < Minitest::Test
 
     required = document.dig("$defs", "ThesisSnapshot", "required")
     assert_includes required, "problem"
-    assert_includes required, "expected_leverage"
+    assert_includes required, "architecture_effects"
+    assert_includes required, "route"
     assert_includes required, "required_validation"
     assert_includes required, "admissible"
+    refute_includes required, "feature_hotspot"
+    refute_includes required, "expected_leverage"
   end
 
   # The standalone thesis schema is the normalizer gate; the report envelope
@@ -2650,8 +2651,8 @@ class SchemaFilesTest < Minitest::Test
   # contracts must stay in lockstep or an agent thesis with an empty `problem`
   # would pass the normalizer and then poison the whole discovery envelope.
   def test_refactor_patrol_thesis_narrative_min_lengths_match_the_envelope_snapshot
-    thesis = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 3)))
-    envelope = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3)))
+    thesis = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 4)))
+    envelope = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 4)))
 
     %w[problem cost proposed_refactor].each do |field|
       assert_equal 1, thesis.dig("properties", field, "minLength"),
@@ -2662,8 +2663,8 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
-  def test_refactor_patrol_v3_pins_complete_source_and_action_identity
-    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3)))
+  def test_refactor_patrol_v4_pins_complete_source_and_action_identity
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 4)))
 
     source_required = document.dig("$defs", "SourcePr", "required")
     assert_includes source_required, "registration"
@@ -2676,21 +2677,95 @@ class SchemaFilesTest < Minitest::Test
     assert_includes action_required, "owner_job_id"
   end
 
-  def test_refactor_patrol_thesis_v1_and_v2_keep_published_size_estimates_while_v3_removes_them
-    assert_equal 3, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol-thesis")
+  def test_refactor_patrol_v4_dispositions_are_scoreless_and_route_bound
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 4)))
+    required = document.dig("$defs", "Disposition", "required")
+    properties = document.dig("$defs", "Disposition", "properties")
 
-    v1 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 1)))
-    v2 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 2)))
-    v3 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 3)))
-
-    [ v1, v2 ].each do |document|
-      required = document.dig("$defs", "Risk", "properties", "caps", "required")
-      assert_includes required, "est_files"
-      assert_includes required, "est_diff_lines"
+    assert_includes required, "route"
+    assert_equal %w[fix discuss dismiss], properties.dig("route", "enum")
+    refute_includes required, "score"
+    refute properties.key?("score")
+    assert_equal %w[fix discuss dismiss],
+                 document.dig("$defs", "SuccessPayload", "required") & %w[fix discuss dismiss]
+    %w[accepted flagged suppressed].each do |legacy|
+      refute document.dig("$defs", "SuccessPayload", "properties").key?(legacy)
     end
-    assert_equal [ "single_feature" ], v3.dig("$defs", "Risk", "properties", "caps", "required")
-    refute v3.dig("$defs", "Risk", "properties", "caps", "properties").key?("est_files")
-    refute v3.dig("$defs", "Risk", "properties", "caps", "properties").key?("est_diff_lines")
+  end
+
+  def test_refactor_patrol_v4_accepts_the_scoreless_local_success_projection
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 4)))
+    schemer = JSONSchemer.schema(document)
+    disposition = {
+      "id" => "thesis-1", "feature_id" => "checkout", "fingerprint" => "fp-1",
+      "route" => "fix", "admissible" => true, "reasons" => [],
+      "thesis" => complete_refactor_patrol_thesis
+    }
+    payload = {
+      "schema" => "hive-refactor-patrol", "schema_version" => 4, "ok" => true,
+      "project" => "demo", "project_root" => "/repo", "dry_run" => true,
+      "review_complete" => true, "review_errors" => [], "feature_results" => [],
+      "features_mapped" => 1, "fix" => [ disposition ], "discuss" => [], "dismiss" => [],
+      "last_scanned_sha" => "a" * 40
+    }
+
+    assert schemer.valid?(payload), schemer.validate(payload).to_a.inspect
+    payload.fetch("fix").first["score"] = 0.9
+    refute schemer.valid?(payload)
+  end
+
+  def test_refactor_patrol_thesis_v4_replaces_leverage_with_route_and_effects
+    assert_equal 4, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol-thesis")
+    v4 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 4)))
+
+    required = v4.fetch("required")
+    assert_includes required, "route"
+    assert_includes required, "architecture_effects"
+    refute_includes required, "feature_hotspot"
+    refute_includes required, "expected_leverage"
+    assert_equal %w[fix discuss dismiss], v4.dig("properties", "route", "enum")
+    assert_equal 1, v4.dig("properties", "architecture_effects", "minItems")
+  end
+
+  def test_refactor_patrol_jobs_v2_replaces_legacy_counts_and_removes_v1
+    assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol-jobs")
+    refute_path_exists Hive::Schemas.schema_path("hive-refactor-patrol-jobs", version: 1)
+
+    v2 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-jobs", version: 2)))
+    counts = v2.dig("$defs", "Counts")
+    assert_equal %w[features fix discuss dismiss review_errors actions pending_actions],
+                 counts.fetch("required")
+    %w[accepted flagged suppressed].each { |legacy| refute counts.fetch("properties").key?(legacy) }
+  end
+
+  def complete_refactor_patrol_thesis
+    {
+      "id" => "thesis-1", "feature_id" => "checkout", "feature" => "Checkout",
+      "problem" => "Checkout has mixed responsibilities", "cost" => "Changes fan out",
+      "evidence" => [
+        {
+          "file" => "lib/checkout.rb", "line" => 1, "snippet" => "class Checkout",
+          "claim" => "one class owns unrelated orchestration"
+        }
+      ],
+      "proposed_refactor" => "Extract orchestration behind one boundary",
+      "feature_boundary" => {
+        "owned_files" => [ "lib/checkout.rb" ], "entrypoints" => [ "lib/checkout.rb" ]
+      },
+      "architecture_effects" => [ "give orchestration one explicit owner" ],
+      "route" => "fix", "confidence" => "high",
+      "risk" => {
+        "caps" => { "single_feature" => true },
+        "public_api_impact" => false, "public_api_details" => [],
+        "cross_feature_impact" => false, "cross_feature_details" => [], "flags" => []
+      },
+      "required_validation" => {
+        "commands" => [ "bundle exec ruby -Itest test/unit/checkout_test.rb" ],
+        "characterization_first" => false, "notes" => "Run focused tests"
+      },
+      "admissible" => true, "admissibility_reason" => "verified",
+      "follow_up_approval_state" => "pending", "fingerprint" => "fp-1"
+    }
   end
 
   # ── hive-dispatch-request: claimed-file contract (#247) ─────────────────

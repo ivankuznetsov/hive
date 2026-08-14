@@ -46,6 +46,18 @@ module Hive
         %w[budget_usd pr] => %w[budget_usd finalize],
         %w[timeout_sec pr] => %w[timeout_sec finalize]
       }.freeze
+      RETIRED_PATROL_CONFIG_KEYS = %w[
+        max_tokens_per_cycle
+        max_tokens_per_day
+        max_agent_spawns_per_cycle
+        max_agent_spawns_per_day
+        max_architecture_review_spawns_per_day
+        max_architecture_unmetered_spawns_per_day
+        max_budget_usd_per_agent
+        architecture_budget_multiplier
+        fix_budget_multiplier
+      ].freeze
+      RETIRED_REFACTOR_PATROL_CONFIG_KEYS = %w[min_leverage_score].freeze
       ROOT_REVIEWERS_LINE = /\A(?:reviewers|["']reviewers["'])\s*:/.freeze
       REVIEW_BLOCK_LINE = /\A(?:review|["']review["'])\s*:\s*(?:#.*)?(?:\r?\n)?\z/.freeze
 
@@ -81,6 +93,8 @@ module Hive
 
         @global_migration.call
         moved = []
+        config_changed = false
+        restart_requested = false
         backfilled_count = 0
         recovery_marker_count = 0
         workflow_task_count = 0
@@ -89,6 +103,24 @@ module Hive
         begin
           plan = build_migration_plan(stages)
           preflight_collisions!(plan)
+          # Retired Patrol keys must be removed before Config.load: the current
+          # runtime deliberately has no read-through compatibility for them.
+          # Commit this independently valid forward migration before preparing
+          # managed tasks, so a later project-specific failure cannot leave a
+          # rewritten config uncommitted or require the old schema to recover.
+          Hive::Lock.with_commit_lock(hive_state) do
+            config_changed = rewrite_legacy_config_keys(hive_state)
+            commit_migration(
+              hive_state, [], config_only: true
+            ) if config_changed
+          end
+          # MigrateAll injects a coalescing restarter. Request it immediately
+          # after the independently committed config rewrite so a later
+          # project-specific failure is reported as a deferred daemon restart.
+          if config_changed && @daemon_restarter
+            @daemon_restarter.call
+            restart_requested = true
+          end
           store = @managed_store_factory.call(hive_state)
           project_config = @config_loader.call(@project_path)
           migrator = Hive::WorkflowPackage::TaskMigrator.new(
@@ -109,7 +141,6 @@ module Hive
                 # generations are validated before this first legacy write.
                 # A removed semantic stage or live managed task therefore
                 # cannot leave config or ordinary task folders half-migrated.
-                config_changed = rewrite_legacy_config_keys(hive_state)
                 plan.each { |op| FileUtils.mv(op[:src], op[:dst]) }
                 moved.concat(plan.map { |op| [ op[:old_stage], op[:new_stage], op[:entry] ] })
                 workflow_task_count = preview.task_count
@@ -122,10 +153,10 @@ module Hive
                   workflow_generation: workflow_generation
                 )
 
-                if config_changed || moved.any? || backfilled_count.positive? ||
+                if moved.any? || backfilled_count.positive? ||
                    recovery_marker_count.positive? || workflow_task_count.positive?
                   commit_migration(
-                    hive_state, moved, config_only: config_changed && moved.empty?,
+                    hive_state, moved, config_only: false,
                     backfilled_count: backfilled_count,
                     recovery_marker_count: recovery_marker_count,
                     workflow_task_count: workflow_task_count
@@ -180,7 +211,7 @@ module Hive
         if repository_identity
           puts "hive: migrate backfilled registered repository identity #{repository_identity}"
         end
-        if moved.any? || workflow_task_count.positive?
+        if !restart_requested && (config_changed || moved.any? || workflow_task_count.positive?)
           (@daemon_restarter || method(:restart_daemon_if_running!)).call
         end
         moved
@@ -560,6 +591,8 @@ module Hive
 
         content = File.read(path)
         changed = false
+        content, rewritten = rewrite_retired_patrol_policy(content, path)
+        changed ||= rewritten
         content, rewritten = rewrite_legacy_root_reviewers(content, path)
         changed ||= rewritten
         CONFIG_KEY_RENAMES.each do |from, to|
@@ -613,6 +646,160 @@ module Hive
         [ lines.join, true ]
       rescue Psych::Exception => e
         raise Hive::ConfigError, "config.yml at #{path} is not valid YAML: #{e.message}"
+      end
+
+      # Remove retired Patrol allowance/leverage policy without retaining a
+      # compatibility reader. Block-style YAML is edited in place to preserve
+      # unrelated comments and formatting. Rare flow-style/quoted layouts fall
+      # back to a semantic YAML rewrite after proving the exact target value.
+      def rewrite_retired_patrol_policy(content, path)
+        parsed = YAML.safe_load(content) || {}
+        unless parsed.is_a?(Hash)
+          raise Hive::ConfigError, "config.yml at #{path} must be a hash"
+        end
+
+        target = Marshal.load(Marshal.dump(parsed))
+        changed = delete_retired_patrol_values!(target)
+        return [ content, false ] unless changed
+
+        rewritten = content
+        RETIRED_PATROL_CONFIG_KEYS.each do |key|
+          rewritten = remove_block_mapping_key(rewritten, [ "patrol" ], key)
+        end
+        RETIRED_REFACTOR_PATROL_CONFIG_KEYS.each do |key|
+          rewritten = remove_block_mapping_key(rewritten, [ "refactor_patrol" ], key)
+        end
+        rewritten = remove_block_mapping_key(
+          rewritten, [ "refactor_patrol", "issue_filing" ], "min_leverage_score"
+        )
+        rewritten = remove_block_mapping(rewritten, [ "refactor_patrol", "leverage" ])
+
+        reparsed = YAML.safe_load(rewritten) || {}
+        rewritten = target.to_yaml unless reparsed == target
+        [ rewritten, true ]
+      rescue Psych::Exception => e
+        raise Hive::ConfigError, "config.yml at #{path} is not valid YAML: #{e.message}"
+      end
+
+      def delete_retired_patrol_values!(config)
+        changed = false
+        patrol = config["patrol"]
+        if patrol.is_a?(Hash)
+          RETIRED_PATROL_CONFIG_KEYS.each do |key|
+            next unless patrol.key?(key)
+
+            patrol.delete(key)
+            changed = true
+          end
+        end
+
+        refactor = config["refactor_patrol"]
+        return changed unless refactor.is_a?(Hash)
+
+        RETIRED_REFACTOR_PATROL_CONFIG_KEYS.each do |key|
+          next unless refactor.key?(key)
+
+          refactor.delete(key)
+          changed = true
+        end
+        issue_filing = refactor["issue_filing"]
+        if issue_filing.is_a?(Hash) && issue_filing.key?("min_leverage_score")
+          issue_filing.delete("min_leverage_score")
+          changed = true
+        end
+        if refactor.key?("leverage")
+          refactor.delete("leverage")
+          changed = true
+        end
+        changed
+      end
+
+      def remove_block_mapping_key(content, mapping_path, key)
+        lines = content.lines
+        range = block_mapping_range(lines, mapping_path)
+        return content unless range
+
+        start_idx, end_idx, parent_indent = range
+        child_indent = direct_child_indent(lines, start_idx, end_idx, parent_indent)
+        return content unless child_indent
+
+        pattern = mapping_key_pattern(key, child_indent, value_required: true)
+        index = (start_idx...end_idx).find { |idx| pattern.match?(lines[idx]) }
+        return content unless index
+
+        entry_end = index + 1
+        while entry_end < end_idx
+          line = lines[entry_end]
+          if line.strip.empty? || line.lstrip.start_with?("#")
+            entry_end += 1
+            next
+          end
+
+          indent = line[/\A */].size
+          break if indent < child_indent
+          break if indent == child_indent && !line.lstrip.start_with?("-")
+
+          entry_end += 1
+        end
+        lines.slice!(index...entry_end)
+        lines.join
+      end
+
+      def remove_block_mapping(content, mapping_path)
+        lines = content.lines
+        range = block_mapping_range(lines, mapping_path)
+        return content unless range
+
+        start_idx, end_idx, = range
+        lines.slice!(start_idx...end_idx)
+        lines.join
+      end
+
+      def block_mapping_range(lines, mapping_path)
+        start_idx = 0
+        end_idx = lines.length
+        parent_indent = -1
+
+        mapping_path.each do |key|
+          child_indent = direct_child_indent(lines, start_idx, end_idx, parent_indent)
+          return nil unless child_indent
+
+          pattern = mapping_key_pattern(key, child_indent, value_required: false)
+          index = (start_idx...end_idx).find { |idx| pattern.match?(lines[idx]) }
+          return nil unless index
+
+          parent_indent = child_indent
+          start_idx = index
+          end_idx = mapping_end_index(lines, index, parent_indent, end_idx)
+        end
+        [ start_idx, end_idx, parent_indent ]
+      end
+
+      def direct_child_indent(lines, start_idx, end_idx, parent_indent)
+        first = start_idx
+        first += 1 if parent_indent >= 0
+        indents = (first...end_idx).filter_map do |idx|
+          line = lines[idx]
+          next if line.strip.empty? || line.lstrip.start_with?("#")
+
+          indent = line[/\A */].length
+          indent if indent > parent_indent
+        end
+        indents.min
+      end
+
+      def mapping_end_index(lines, index, indent, outer_end)
+        ((index + 1)...outer_end).find do |idx|
+          line = lines[idx]
+          next false if line.strip.empty? || line.lstrip.start_with?("#")
+
+          line[/\A */].length <= indent
+        end || outer_end
+      end
+
+      def mapping_key_pattern(key, indent, value_required:)
+        value = value_required ? "[^\\r\\n]*(?:\\r?\\n)?" : "(?:#.*)?(?:\\r?\\n)?"
+        /\A {#{indent}}(?:#{Regexp.escape(key)}|["']#{Regexp.escape(key)}["']):\s*#{value}\z/
       end
 
       def rewrite_section_key(content, section, legacy_key, canonical_key)

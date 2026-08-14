@@ -1,5 +1,4 @@
 require "test_helper"
-require "digest"
 require "hive/patrol/token_budget"
 
 class PatrolTokenBudgetTest < Minitest::Test
@@ -15,21 +14,8 @@ class PatrolTokenBudgetTest < Minitest::Test
     Hive::UsageDb.path = @old_path
   end
 
-  def config(**overrides)
-    {
-      "patrol" => {
-        "max_tokens_per_cycle" => 100,
-        "max_tokens_per_day" => 200,
-        "max_tokens_per_agent" => 60,
-        "max_agent_spawns_per_cycle" => 2,
-        "max_agent_spawns_per_day" => 3,
-        "max_architecture_review_spawns_per_day" => 8,
-        "max_architecture_unmetered_spawns_per_day" => 96,
-        "max_budget_usd_per_agent" => 10,
-        "architecture_budget_multiplier" => 2,
-        "fix_budget_multiplier" => 2
-      }.merge(overrides.transform_keys(&:to_s))
-    }
+  def config(max_tokens_per_agent: 100)
+    { "patrol" => { "max_tokens_per_agent" => max_tokens_per_agent } }
   end
 
   def with_budget(cfg = config)
@@ -41,133 +27,51 @@ class PatrolTokenBudgetTest < Minitest::Test
     end
   end
 
-  def record(budget, now, usage, stage: "patrol-review")
+  def record(budget, now, usage, stage: "patrol-review", profile: Profile.new(:codex))
     budget.record!(
-      result: { status: :ok, usage: usage }, profile: Profile.new(:codex),
+      result: { status: :ok, usage: usage }, profile: profile,
       stage: stage, started_at: now - 1
     )
   end
 
-  def test_resource_exhaustion_backoff_paces_daily_limits_to_next_utc_day
-    now = Time.utc(2026, 7, 16, 12, 30)
-
-    assert_equal 41_400, Hive::Patrol::TokenBudget.resource_exhaustion_backoff_sec(
-      [ "daily_token_limit", "daily_agent_spawn_limit" ],
-      now: now, fallback: 60
-    )
-    assert_equal 60, Hive::Patrol::TokenBudget.resource_exhaustion_backoff_sec(
-      [ "cycle_token_limit" ], now: now, fallback: 60
-    )
-    assert_equal 60, Hive::Patrol::TokenBudget.resource_exhaustion_backoff_sec(
-      [], now: now, fallback: 60
-    )
+  def test_default_is_a_high_per_agent_emergency_ceiling
+    with_budget({ "patrol" => {} }) do |budget|
+      assert_equal 100_000_000, budget.max_tokens
+    end
   end
 
-  def test_cycle_token_limit_stops_the_next_spawn
-    with_budget do |budget, _dir, now|
-      assert budget.acquire
-      record(budget, now, { input: 70, output: 20, cached: 10 })
-      snapshot = budget.snapshot
-      assert_equal 90, snapshot.dig("cycle", "tokens")
-      assert_equal 90, snapshot.dig("today", "tokens")
-      assert_equal 2, snapshot.dig("limits", "architecture_budget_multiplier")
-      assert_equal 2, snapshot.dig("limits", "fix_budget_multiplier")
+  def test_one_ceiling_applies_to_every_patrol_stage
+    with_budget(config(max_tokens_per_agent: 123_456)) do |budget|
+      assert_equal 123_456, budget.max_tokens
 
-      assert budget.acquire
-      record(budget, now, { input: 10, output: 0, cached: 1 })
-      refute budget.acquire
-      assert_equal "cycle_token_limit", budget.last_exhaustion.fetch(:reason)
+      %w[patrol-review patrol-fix refactor-patrol-review refactor-patrol-fix].each do |stage|
+        assert budget.acquire(minimum_tokens: 123_456), stage
+        record(budget, Time.utc(2026, 7, 16, 12), { input: 1, output: 0, cached: 0 }, stage: stage)
+      end
+    end
+  end
+
+  def test_launch_is_refused_only_when_its_initial_context_exceeds_the_ceiling
+    with_budget(config(max_tokens_per_agent: 100)) do |budget|
+      refute budget.acquire(minimum_tokens: 101)
+      assert_equal "insufficient_launch_headroom", budget.last_exhaustion.fetch(:reason)
       assert_equal(
-        { reason: "cycle_token_limit", limit: 100, observed: 100 },
+        { reason: "insufficient_launch_headroom", limit: 100, observed: 101 },
         budget.resource_exhaustion
       )
-      assert_match(/cycle=100\/100 tokens/, budget.exhaustion_message)
+      assert_match(/required=101 tokens, available=100/, budget.exhaustion_message)
+
+      assert budget.acquire(minimum_tokens: 100),
+             "a rejected launch must release the project lock"
     end
   end
 
-  def test_unmetered_launches_are_recorded_and_bounded_by_spawn_limit
-    with_budget(config(max_agent_spawns_per_cycle: 1)) do |budget, dir, now|
-      assert budget.acquire
-      record(budget, now, { input: 0, output: 0, cached: 0 })
-
-      refute budget.acquire
-      assert_equal "cycle_agent_spawn_limit", budget.last_exhaustion.fetch(:reason)
-      assert_equal(
-        { reason: "cycle_agent_spawn_limit", limit: 1, observed: 1 },
-        budget.resource_exhaustion
-      )
-      activity = Hive::UsageDb.patrol_activity(
-        scope: { project_slug: File.basename(dir) }, now: now
-      )
-      assert_equal 1, activity.fetch(:unmetered_spawns)
-    end
-  end
-
-  def test_daily_spawn_limit_is_shared_across_budget_instances
-    with_budget(config(max_agent_spawns_per_day: 1)) do |budget, dir, now|
-      assert budget.acquire
-      record(budget, now, { input: 1, output: 0, cached: 0 })
-
-      next_cycle = Hive::Patrol::TokenBudget.new(
-        dir, cfg: config(max_agent_spawns_per_day: 1), clock: -> { now }
-      )
-      refute next_cycle.acquire
-      assert_equal "daily_agent_spawn_limit", next_cycle.last_exhaustion.fetch(:reason)
-      assert_equal(
-        { reason: "daily_agent_spawn_limit", limit: 1, observed: 1 },
-        next_cycle.resource_exhaustion
-      )
-    end
-  end
-
-  def test_resource_exhaustion_reports_insufficient_token_headroom
-    with_budget do |budget|
-      refute budget.acquire(stage: "patrol-review", minimum_tokens: 61)
-      assert_equal(
-        { reason: "insufficient_launch_headroom", limit: 60, observed: 61 },
-        budget.resource_exhaustion
-      )
-    end
-  end
-
-  def test_resource_exhaustion_identifies_daily_token_headroom
-    limits = config(
-      max_tokens_per_cycle: 300, max_tokens_per_day: 200,
-      max_tokens_per_agent: 100
-    )
-    with_budget(limits) do |budget, dir, now|
-      assert budget.acquire(stage: "patrol-review")
-      record(budget, now, { input: 170, output: 0, cached: 0 })
-
-      next_cycle = Hive::Patrol::TokenBudget.new(dir, cfg: limits, clock: -> { now })
-      refute next_cycle.acquire(stage: "patrol-review", minimum_tokens: 40)
-      assert_equal "daily_token_headroom", next_cycle.last_exhaustion.fetch(:reason)
-      assert_equal(
-        { reason: "daily_token_headroom", limit: 30, observed: 40 },
-        next_cycle.resource_exhaustion
-      )
-    end
-  end
-
-  def test_remaining_launches_uses_the_tighter_cycle_or_daily_headroom
-    with_budget(config(max_agent_spawns_per_cycle: 3, max_agent_spawns_per_day: 2)) do |budget, _dir, now|
-      assert_equal 2, budget.remaining_launches
-
-      assert budget.acquire(stage: "patrol-review")
-      record(budget, now, { input: 1, output: 0, cached: 0 })
-
-      assert_equal 1, budget.remaining_launches
-    end
-  end
-
-  def test_only_one_patrol_agent_can_hold_project_budget_headroom_in_flight
+  def test_only_one_patrol_agent_can_hold_the_project_lock
     with_budget do |budget, dir, now|
-      concurrent = Hive::Patrol::TokenBudget.new(
-        dir, cfg: config, clock: -> { now }
-      )
+      concurrent = Hive::Patrol::TokenBudget.new(dir, cfg: config, clock: -> { now })
 
-      assert budget.acquire(stage: "patrol-review")
-      refute concurrent.acquire(stage: "refactor-patrol-review")
+      assert budget.acquire
+      refute concurrent.acquire
       assert_equal "agent_in_flight", concurrent.last_exhaustion.fetch(:reason)
       assert_equal(
         { reason: "agent_in_flight", limit: 1, observed: 1 },
@@ -175,209 +79,50 @@ class PatrolTokenBudgetTest < Minitest::Test
       )
 
       record(budget, now, { input: 40, output: 0, cached: 0 })
-      assert concurrent.acquire(stage: "refactor-patrol-review")
-      record(
-        concurrent, now, { input: 10, output: 0, cached: 0 },
-        stage: "refactor-patrol-review"
-      )
+      assert concurrent.acquire
+      record(concurrent, now, { input: 10, output: 0, cached: 0 }, stage: "refactor-patrol-review")
     end
   end
 
-  def test_per_agent_budget_equivalent_cap_takes_the_lower_value
-    with_budget do |budget|
-      assert_equal 10.0, budget.max_budget_usd(100)
-      assert_equal 5.0, budget.max_budget_usd(5)
-    end
-  end
-
-  def test_per_agent_token_limit_gives_ordinary_fixes_and_architecture_more_headroom
-    with_budget(config(max_tokens_per_cycle: 200)) do |budget|
-      assert_equal 60, budget.max_tokens(stage: "patrol-review")
-      assert_equal 120, budget.max_tokens(stage: "patrol-fix")
-      assert_equal 120, budget.max_tokens(stage: "refactor-patrol-review")
-      assert_equal 120, budget.max_tokens(stage: "refactor-patrol-fix")
-    end
-  end
-
-  def test_per_agent_token_limit_is_clamped_to_remaining_cycle_and_daily_budgets
-    with_budget(config(max_tokens_per_cycle: 100, max_tokens_per_day: 150)) do |budget, _dir, now|
-      assert budget.acquire(stage: "patrol-review")
-      record(budget, now, { input: 55, output: 0, cached: 0 })
-
-      assert_equal 45, budget.max_tokens(stage: "patrol-fix")
-      assert_equal 95, budget.max_tokens(stage: "refactor-patrol-review")
-    end
-
-    with_budget(config(max_tokens_per_cycle: 200, max_tokens_per_day: 100)) do |budget, _dir, now|
-      assert budget.acquire(stage: "patrol-review")
-      record(budget, now, { input: 70, output: 0, cached: 0 })
-
-      assert_equal 30, budget.max_tokens(stage: "patrol-fix")
-      assert_equal 30, budget.max_tokens(stage: "refactor-patrol-review")
-    end
-  end
-
-  def test_launch_is_refused_when_remaining_tokens_cannot_cover_initial_context
-    with_budget(config(max_tokens_per_cycle: 100, max_tokens_per_day: 100)) do |budget, _dir, now|
-      assert budget.acquire(stage: "patrol-review")
-      record(budget, now, { input: 70, output: 0, cached: 0 })
-
-      refute budget.acquire(stage: "patrol-review", minimum_tokens: 40)
-      assert_equal "daily_token_headroom", budget.last_exhaustion.fetch(:reason)
-      assert_equal 40, budget.last_exhaustion.fetch(:required_tokens)
-      assert_equal 30, budget.last_exhaustion.fetch(:available_tokens)
-      assert_match(/required=40 tokens, available=30/, budget.exhaustion_message)
-    end
-  end
-
-  def test_architecture_gets_doubled_cycle_and_spawn_limits_but_not_a_looser_native_budget_guard
-    with_budget(config(max_tokens_per_day: 300, max_agent_spawns_per_cycle: 4)) do |budget, _dir, now|
-      assert budget.acquire(stage: "patrol-review")
-      record(budget, now, { input: 80, output: 20, cached: 10 })
-      refute budget.acquire(stage: "patrol-fix")
-
-      assert budget.acquire(stage: "refactor-patrol-review")
-      record(
-        budget, now, { input: 80, output: 20, cached: 10 },
-        stage: "refactor-patrol-review"
-      )
-      refute budget.acquire(stage: "refactor-patrol-fix")
-      assert_equal "cycle_token_limit", budget.last_exhaustion.fetch(:reason)
-      assert_match(/cycle=200\/200 tokens/, budget.exhaustion_message)
-      assert_equal 10.0, budget.max_budget_usd(100, stage: "refactor-patrol-review")
-      assert_equal 10.0, budget.max_budget_usd(15, stage: "refactor-patrol-review")
-      assert_equal 10, budget.max_budget_usd("invalid", stage: "refactor-patrol-review")
-    end
-  end
-
-  def test_architecture_still_shares_daily_token_limit
-    with_budget(config(max_tokens_per_day: 150, max_agent_spawns_per_cycle: 4)) do |budget, _dir, now|
-      assert budget.acquire(stage: "patrol-review")
-      record(budget, now, { input: 100, output: 0, cached: 0 })
-      assert budget.acquire(stage: "refactor-patrol-review")
-      record(
-        budget, now, { input: 50, output: 0, cached: 0 },
-        stage: "refactor-patrol-review"
-      )
-
-      refute budget.acquire(stage: "refactor-patrol-review")
-      assert_equal "daily_token_limit", budget.last_exhaustion.fetch(:reason)
-      assert_equal(
-        { reason: "daily_token_limit", limit: 150, observed: 150 },
-        budget.resource_exhaustion
-      )
-    end
-  end
-
-  def test_architecture_is_not_blocked_by_ordinary_daily_spawn_limit
-    cfg = config(max_agent_spawns_per_cycle: 1, max_agent_spawns_per_day: 1)
-    with_budget(cfg) do |budget, dir, now|
-      assert budget.acquire(stage: "patrol-review")
-      record(budget, now, { input: 1, output: 0, cached: 0 })
-      refute budget.acquire(stage: "patrol-fix")
-
-      architecture = Hive::Patrol::TokenBudget.new(dir, cfg: cfg, clock: -> { now })
-      assert_equal 2, architecture.remaining_launches(stage: "refactor-patrol-review")
-      assert architecture.acquire(stage: "refactor-patrol-review")
-      record(
-        architecture, now, { input: 1, output: 0, cached: 0 },
-        stage: "refactor-patrol-review"
-      )
-      assert architecture.acquire(stage: "refactor-patrol-fix")
-      record(
-        architecture, now, { input: 1, output: 0, cached: 0 },
-        stage: "refactor-patrol-fix"
-      )
-
-      refute architecture.acquire(stage: "refactor-patrol-fix")
-      assert_equal "cycle_agent_spawn_limit", architecture.last_exhaustion.fetch(:reason)
-      assert_nil architecture.last_exhaustion.fetch(:max_agent_spawns_per_day)
-      assert_match(%r{2/unbounded today}, architecture.exhaustion_message)
-
-      next_ordinary = Hive::Patrol::TokenBudget.new(dir, cfg: cfg, clock: -> { now })
-      refute next_ordinary.acquire(stage: "patrol-review")
-      assert_equal "daily_agent_spawn_limit", next_ordinary.last_exhaustion.fetch(:reason)
-    end
-  end
-
-  def test_nine_architecture_launches_across_fresh_cycles_do_not_consume_ordinary_eight_per_day_quota
-    cfg = config(
-      max_agent_spawns_per_cycle: 10, max_agent_spawns_per_day: 8,
-      max_tokens_per_cycle: 1_000, max_tokens_per_day: 1_000,
-      max_architecture_review_spawns_per_day: 8
-    )
-    with_budget(cfg) do |_initial, dir, now|
-      8.times do
-        architecture = Hive::Patrol::TokenBudget.new(dir, cfg: cfg, clock: -> { now })
-        assert architecture.acquire(stage: "refactor-patrol-review")
-        record(
-          architecture, now, { input: 1, output: 0, cached: 0 },
-          stage: "refactor-patrol-review"
-        )
+  def test_projects_with_the_same_basename_do_not_share_a_lock
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = File.join(dir, "usage.db")
+      first = File.join(dir, "one", "project")
+      second = File.join(dir, "two", "project")
+      budgets = [ first, second ].map do |root|
+        Hive::Patrol::TokenBudget.new(root, cfg: config)
       end
 
-      blocked = Hive::Patrol::TokenBudget.new(dir, cfg: cfg, clock: -> { now })
-      refute blocked.acquire(stage: "refactor-patrol-review")
-      assert_equal "daily_architecture_review_spawn_limit", blocked.last_exhaustion.fetch(:reason)
-      assert_equal(
-        { reason: "daily_architecture_review_spawn_limit", limit: 8, observed: 8 },
-        blocked.resource_exhaustion
+      assert budgets.all?(&:acquire)
+    ensure
+      budgets&.each do |budget|
+        budget.record!(
+          result: {}, profile: Profile.new(:codex), stage: "patrol-review",
+          started_at: Time.now.utc
+        )
+      end
+    end
+  end
+
+  def test_metered_and_unmetered_launches_remain_usage_telemetry
+    with_budget do |budget, dir, now|
+      assert budget.acquire
+      record(budget, now, { input: 4, output: 3, cached: 2 })
+
+      assert budget.acquire
+      record(
+        budget, now, { input: 0, output: 0, cached: 0 },
+        stage: "refactor-patrol-review"
       )
-      assert blocked.acquire(stage: "refactor-patrol-fix"),
-             "the review cap must preserve auto-fix capacity"
-      record(blocked, now, { input: 1, output: 0, cached: 0 }, stage: "refactor-patrol-fix")
-
-      ordinary = Hive::Patrol::TokenBudget.new(dir, cfg: cfg, clock: -> { now })
-      assert_equal 8, ordinary.remaining_launches(stage: "patrol-review")
-      assert ordinary.acquire(stage: "patrol-review")
-      record(ordinary, now, { input: 1, output: 0, cached: 0 })
-
-      next_ordinary = Hive::Patrol::TokenBudget.new(dir, cfg: cfg, clock: -> { now })
-      assert_equal 7, next_ordinary.remaining_launches(stage: "patrol-review")
-      assert next_ordinary.acquire(stage: "patrol-review")
-      record(next_ordinary, now, { input: 1, output: 0, cached: 0 })
 
       activity = Hive::UsageDb.patrol_activity(
         scope: { project_slug: File.basename(dir) }, now: now
       )
-      assert_equal 9, activity.fetch(:architecture_agent_spawns)
-      assert_equal 8, activity.fetch(:architecture_review_spawns)
-      assert_equal 2, activity.fetch(:ordinary_agent_spawns)
-    end
-  end
-
-  def test_unmetered_architecture_launches_hit_separate_durable_daily_backstop
-    cfg = config(
-      max_agent_spawns_per_cycle: 2, max_agent_spawns_per_day: 1,
-      max_architecture_unmetered_spawns_per_day: 3
-    )
-    with_budget(cfg) do |first_cycle, dir, now|
-      2.times do
-        assert first_cycle.acquire(stage: "refactor-patrol-review")
-        record(
-          first_cycle, now, { input: 0, output: 0, cached: 0 },
-          stage: "refactor-patrol-review"
-        )
-      end
-
-      second_cycle = Hive::Patrol::TokenBudget.new(dir, cfg: cfg, clock: -> { now })
-      assert_equal 1, second_cycle.remaining_launches(stage: "refactor-patrol-review")
-      assert second_cycle.acquire(stage: "refactor-patrol-review")
-      record(
-        second_cycle, now, { input: 0, output: 0, cached: 0 },
-        stage: "refactor-patrol-review"
-      )
-
-      third_cycle = Hive::Patrol::TokenBudget.new(dir, cfg: cfg, clock: -> { now })
-      assert_equal 0, third_cycle.remaining_launches(stage: "refactor-patrol-review")
-      refute third_cycle.acquire(stage: "refactor-patrol-review")
-      assert_equal "daily_architecture_unmetered_spawn_limit",
-                   third_cycle.last_exhaustion.fetch(:reason)
-      assert_equal(
-        { reason: "daily_architecture_unmetered_spawn_limit", limit: 3, observed: 3 },
-        third_cycle.resource_exhaustion
-      )
-      assert_match(/unmetered_architecture=3\/3 today/, third_cycle.exhaustion_message)
+      assert_equal 7, activity.fetch(:tokens)
+      assert_equal 2, activity.fetch(:agent_spawns)
+      assert_equal 1, activity.fetch(:unmetered_spawns)
+      assert_equal 1, activity.fetch(:ordinary_agent_spawns)
+      assert_equal 1, activity.fetch(:architecture_agent_spawns)
     end
   end
 
@@ -386,10 +131,10 @@ class PatrolTokenBudgetTest < Minitest::Test
       "refactor_patrol" => { "auto_fix" => { "agent" => "pi" } }
     )
     with_budget(cfg) do |budget, dir, now|
-      assert budget.acquire(stage: "refactor-patrol-fix")
-      budget.record!(
-        result: { status: :ok, usage: { input: 1, output: 2, cached: 3 } },
-        profile: Object.new, stage: "refactor-patrol-fix", started_at: now - 1
+      assert budget.acquire
+      record(
+        budget, now, { input: 1, output: 2, cached: 3 },
+        stage: "refactor-patrol-fix", profile: Object.new
       )
 
       require "sqlite3"
@@ -401,24 +146,28 @@ class PatrolTokenBudgetTest < Minitest::Test
     end
   end
 
-  def test_unavailable_usage_store_fails_closed_before_spawn
+  def test_usage_store_failure_does_not_become_an_admission_gate
     with_tmp_dir do |dir|
       Hive::UsageDb.path = dir
       budget = Hive::Patrol::TokenBudget.new(dir, cfg: config)
 
-      _out, _err = capture_io { refute budget.acquire }
+      assert budget.acquire
+      _out, _err = capture_io do
+        refute record(budget, Time.now.utc, { input: 1, output: 0, cached: 0 })
+      end
 
-      assert_equal "usage_store_unavailable", budget.last_exhaustion.fetch(:reason)
+      assert budget.acquire,
+             "best-effort telemetry failure must still release the project lock"
     end
   end
 
   def test_launch_lock_open_failure_fails_closed_before_spawn
     with_budget do |budget|
       with_replaced_singleton_method(File, :open, ->(*) { raise Errno::EACCES }) do
-        _out, _err = capture_io { refute budget.acquire }
+        refute budget.acquire
       end
 
-      assert_equal "budget_lock_unavailable", budget.last_exhaustion.fetch(:reason)
+      assert_equal "launch_lock_unavailable", budget.last_exhaustion.fetch(:reason)
     end
   end
 

@@ -24,16 +24,6 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
-  class FakeLeverage
-    def initialize(scores)
-      @scores = scores
-    end
-
-    def score(feature, **)
-      @scores.fetch(feature.id)
-    end
-  end
-
   class FakeReviewer
     attr_reader :review_errors, :seen_feature_ids, :feature_results
 
@@ -44,7 +34,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       @feature_results = []
     end
 
-    def call(features, leverage_by_feature:)
+    def call(features)
       @seen_feature_ids = features.map(&:id)
       theses = features.flat_map { |feature| Array(@theses_by_feature[feature.id]) }
       @feature_results = features.map do |feature|
@@ -70,7 +60,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       @feature_results = []
     end
 
-    def call(features, leverage_by_feature:)
+    def call(features)
       feature = features.first
       @seen_feature_ids << feature.id
       result = {
@@ -95,7 +85,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       @feature_results = []
     end
 
-    def call(features, leverage_by_feature:)
+    def call(features)
       feature = features.fetch(0)
       @seen_feature_ids << feature.id
       result = {
@@ -121,7 +111,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       @feature_results = []
     end
 
-    def call(features, leverage_by_feature:)
+    def call(features)
       @seen_feature_ids = features.map(&:id)
       @feature_results = features.map do |feature|
         {
@@ -149,71 +139,58 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_json_run_ranks_flags_persists_and_rerun_suppresses_seen_theses
+  def test_json_run_routes_persists_and_rerun_dismisses_seen_theses
     with_refactor_patrol_project do |repo|
       features = [ feature("checkout"), feature("search") ]
-      clean = thesis("clean", feature_id: "checkout", score: 0.9, fingerprint: "fp-clean")
-      broad = thesis("broad", feature_id: "checkout", score: 0.8, fingerprint: "fp-broad")
+      clean = thesis("clean", feature_id: "checkout", fingerprint: "fp-clean")
+      broad = thesis("broad", feature_id: "checkout", fingerprint: "fp-broad")
       inadmissible = thesis(
         "inadmissible",
         feature_id: "search",
-        score: 0.7,
         fingerprint: "fp-bad",
         admissible: false,
         admissibility_reason: "missing measurable signal",
         flags: [ "inadmissible" ]
       )
-      below_floor = thesis(
-        "below-floor", feature_id: "search", score: 0.1,
-        fingerprint: "fp-below-floor", flags: [ "below_min_leverage" ]
-      )
-
       out, _err, status = with_captured_exit do
         command_for(
           features: features,
-          theses_by_feature: { "checkout" => [ clean, broad ], "search" => [ inadmissible, below_floor ] },
-          leverage_scores: leverage_scores("checkout" => 0.9, "search" => 0.7)
+          theses_by_feature: { "checkout" => [ clean, broad ], "search" => [ inadmissible ] },
         ).call
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, status
       payload = JSON.parse(out)
       assert refactor_schemer.valid?(payload), refactor_schemer.validate(payload).map { |e| e["error"] }.inspect
-      assert_equal [ "clean", "broad", "inadmissible" ], payload.fetch("ranked").map { |item| item.fetch("id") }
-      assert_equal 2, payload.fetch("theses"), "meaningful broad theses remain accepted"
-      refute_includes payload.fetch("flagged_theses").map { |item| item.fetch("id") }, "broad"
-      assert_includes payload.fetch("flagged_theses").map { |item| item.fetch("id") }, "inadmissible"
-      refute_includes payload.fetch("ranked").map { |item| item.fetch("id") }, "below-floor"
-      refute_includes payload.fetch("flagged_theses").map { |item| item.fetch("id") }, "below-floor"
-      assert_includes payload.fetch("suppressed"), { "id" => "below-floor", "reason" => "below_min_leverage" }
-      payload.fetch("ranked").each do |item|
-        refute_empty item.fetch("breakdown")
-      end
-      [ clean, broad, inadmissible, below_floor ].each do |item|
+      assert_equal [ "clean", "broad" ], payload.fetch("fix").map { |item| item.fetch("id") }
+      assert_equal [ "inadmissible" ], payload.fetch("dismiss").map { |item| item.fetch("id") }
+      assert_empty payload.fetch("discuss")
+      [ clean, broad, inadmissible ].each do |item|
         assert thesis_schemer.valid?(item.to_h), thesis_schemer.validate(item.to_h).map { |e| e["error"] }.inspect
       end
 
       refute Dir.exist?(File.join(repo, ".hive-state", "stages", "6-review")),
-             "refactor-patrol v1 must not enqueue review tasks"
+             "on-demand refactor-patrol must not enqueue review tasks"
 
       out, _err, status = with_captured_exit do
         command_for(
           features: features,
           theses_by_feature: { "checkout" => [ clean ], "search" => [] },
-          leverage_scores: leverage_scores("checkout" => 0.9, "search" => 0.7)
         ).call
       end
       assert_equal Hive::ExitCodes::SUCCESS, status
       rerun = JSON.parse(out)
-      assert_equal [ { "id" => "clean", "reason" => "collision_already_seen", "reference" => "fp-clean" } ],
-                   rerun.fetch("suppressed")
+      dismissed = rerun.fetch("dismiss").fetch(0)
+      assert_equal "clean", dismissed.fetch("id")
+      assert_equal [ "collision_already_seen" ], dismissed.fetch("reasons")
+      assert_equal "fp-clean", dismissed.fetch("reference")
     end
   end
 
   # Behavior-preserving work inside public-surface files (bin/, cli.rb) is an
-  # advisory, not an API change: the thesis still counts as accepted and the
-  # advisory is visible on its ranked entry.
-  def test_public_surface_thesis_is_accepted_with_advisory
+  # advisory, not an API change: the thesis remains fix-routed and the
+  # advisory is visible in its immutable snapshot.
+  def test_public_surface_thesis_is_fix_routed_with_advisory
     with_refactor_patrol_project do
       surface = thesis("surface", feature_id: "checkout", fingerprint: "fp-surface", boundary_files: [ "bin/checkout" ])
 
@@ -221,16 +198,15 @@ class RefactorPatrolCommandTest < Minitest::Test
         command_for(
           features: [ feature("checkout", files: [ "bin/checkout" ]) ],
           theses_by_feature: { "checkout" => [ surface ] },
-          leverage_scores: leverage_scores("checkout" => 0.9)
         ).call
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, status
       payload = JSON.parse(out)
-      assert_equal 1, payload.fetch("theses"), "surface-touching thesis must count as accepted"
-      ranked = payload.fetch("ranked").first
-      assert_empty ranked.fetch("flagged")
-      assert_equal [ "touches_public_api_surface" ], ranked.fetch("advisories")
+      routed = payload.fetch("fix").first
+      assert_equal "surface", routed.fetch("id")
+      assert_empty routed.fetch("reasons")
+      assert_equal [ "touches_public_api_surface" ], routed.dig("thesis", "risk", "advisories")
       assert_equal false, surface.risk.fetch("public_api_impact")
       assert thesis_schemer.valid?(surface.to_h), thesis_schemer.validate(surface.to_h).map { |e| e["error"] }.inspect
     end
@@ -243,7 +219,6 @@ class RefactorPatrolCommandTest < Minitest::Test
           dry_run: true,
           features: [ feature("checkout") ],
           theses_by_feature: { "checkout" => [ thesis("clean", fingerprint: "fp-clean") ] },
-          leverage_scores: leverage_scores("checkout" => 0.9)
         ).call
       end
 
@@ -263,7 +238,6 @@ class RefactorPatrolCommandTest < Minitest::Test
           path_hint: "lib/search",
           features: [ feature("checkout", files: [ "lib/checkout.rb" ]), feature("search", files: [ "lib/search/index.rb" ]) ],
           reviewer: reviewer,
-          leverage_scores: leverage_scores("checkout" => 0.9, "search" => 0.1)
         ).call
       end
 
@@ -284,7 +258,6 @@ class RefactorPatrolCommandTest < Minitest::Test
             feature("search", files: [ "lib/search.rb" ], entrypoints: [ "bin/search" ])
           ],
           reviewer: reviewer,
-          leverage_scores: leverage_scores("checkout" => 0.1, "search" => 0.9)
         ).call
       end
 
@@ -317,7 +290,6 @@ class RefactorPatrolCommandTest < Minitest::Test
             feature("search", files: [ "lib/search/index.rb" ])
           ],
           reviewer: reviewer,
-          leverage_scores: leverage_scores("checkout" => 0.9, "search" => 0.1)
         ).call
       end
 
@@ -336,7 +308,6 @@ class RefactorPatrolCommandTest < Minitest::Test
           changed_since: "missing-ref",
           features: [ feature("checkout", files: [ "lib/checkout.rb" ]) ],
           reviewer: reviewer,
-          leverage_scores: leverage_scores("checkout" => 0.9)
         ).call
       end
 
@@ -346,14 +317,13 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_text_output_includes_ranked_thesis_details
+  def test_text_output_includes_routed_thesis_details
     with_refactor_patrol_project do
       out, _err, status = with_captured_exit do
         command_for(
           json: false,
           features: [ feature("checkout") ],
           theses_by_feature: { "checkout" => [ thesis("clean", fingerprint: "fp-clean") ] },
-          leverage_scores: leverage_scores("checkout" => 0.9)
         ).call
       end
 
@@ -362,7 +332,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_includes out, "1. Checkout"
       assert_includes out, "problem:"
       assert_includes out, "validation:"
-      assert_includes out, "flagged=0 suppressed=0"
+      assert_includes out, "fix=1 discuss=0 dismiss=0"
     end
   end
 
@@ -379,7 +349,7 @@ class RefactorPatrolCommandTest < Minitest::Test
 
       payload = JSON.parse(out)
       assert_equal Hive::ExitCodes::SOFTWARE, status
-      assert_equal 1, payload.fetch("schema_version")
+      assert_equal 4, payload.fetch("schema_version")
       assert refactor_schemer.valid?(payload), refactor_schemer.validate(payload).map { |e| e["error"] }.inspect
       assert_equal false, payload.fetch("ok")
       assert_equal "InternalError", payload.fetch("error_class")
@@ -400,7 +370,7 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_pr_mode_uses_manifest_scope_and_emits_complete_v3
+  def test_pr_mode_uses_manifest_scope_and_emits_complete_v4
     with_refactor_patrol_project do |repo|
       expected_head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
       manifest = pr_manifest(merge_sha: expected_head)
@@ -418,23 +388,22 @@ class RefactorPatrolCommandTest < Minitest::Test
             feature("search", files: [ "lib/search.rb" ])
           ],
           reviewer: reviewer,
-          leverage_scores: leverage_scores("checkout" => 0.9)
         ).call
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
       payload = JSON.parse(out)
-      assert v3_refactor_schemer.valid?(payload), v3_refactor_schemer.validate(payload).map { |e| e["error"] }.inspect
-      assert_equal 3, payload.fetch("schema_version")
+      assert v4_refactor_schemer.valid?(payload), v4_refactor_schemer.validate(payload).map { |e| e["error"] }.inspect
+      assert_equal 4, payload.fetch("schema_version")
       assert_equal manifest.fetch("job_id"), payload.fetch("job_id")
       assert_equal [ "checkout" ], reviewer.seen_feature_ids
-      assert_equal [ "checkout" ], payload.fetch("accepted").map { |item| item.fetch("id") }
+      assert_equal [ "checkout" ], payload.fetch("fix").map { |item| item.fetch("id") }
       assert payload.fetch("complete")
       assert_equal expected_head, payload.fetch("analysis_sha")
       assert_equal "https://github.com/acme/demo/pull/7", resolver.seen
       refute File.exist?(File.join(repo, ".hive-state", "refactor_patrol", "state.json"))
       aggregate = Hive::RefactorPatrol::JobStore.new(repo).read_job(manifest.fetch("job_id"))
-      assert aggregate.fetch("complete"), "manual PR replay must checkpoint the authoritative v3 job"
+      assert aggregate.fetch("complete"), "manual PR replay must checkpoint the authoritative v4 job"
       assert_equal [ "checkout" ], aggregate.fetch("feature_results").map { |item| item.fetch("feature_id") }
       assert_equal true, aggregate.dig("policy", "discovery")
       claim = aggregate.fetch("attempts").first
@@ -464,20 +433,19 @@ class RefactorPatrolCommandTest < Minitest::Test
           pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
           features: [ feature("checkout", files: [ "lib/checkout.rb" ]) ],
           reviewer: reviewer,
-          leverage_scores: leverage_scores("checkout" => 0.9),
           root_observer: root_observer
         ).call
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
       payload = JSON.parse(out)
-      assert v3_refactor_schemer.valid?(payload),
-             v3_refactor_schemer.validate(payload).map { |error| error["error"] }.inspect
+      assert v4_refactor_schemer.valid?(payload),
+             v4_refactor_schemer.validate(payload).map { |error| error["error"] }.inspect
       assert payload.fetch("complete")
       assert_equal head, payload.fetch("analysis_sha")
-      assert_equal [ "checkout" ], payload.fetch("accepted").map { |entry| entry.fetch("id") }
+      assert_equal [ "checkout" ], payload.fetch("fix").map { |entry| entry.fetch("id") }
       assert_equal "reviewer mutated tracked source\n", File.read(File.join(repo, "README.md"))
-      assert_equal 3, analysis_paths.size
+      assert_equal 2, analysis_paths.size
       assert_equal 1, analysis_paths.uniq.size
       refute File.exist?(analysis_paths.first), "analysis worktree must be removed after discovery"
 
@@ -507,7 +475,6 @@ class RefactorPatrolCommandTest < Minitest::Test
           pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
           features: [ feature("checkout", files: [ "lib/checkout.rb" ]) ],
           reviewer: FakeReviewer.new({}),
-          leverage_scores: leverage_scores("checkout" => 0.9),
           root_observer: root_observer
         ).call
       end
@@ -591,7 +558,6 @@ class RefactorPatrolCommandTest < Minitest::Test
         command_for(
           pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
           features: features, reviewer: first_reviewer,
-          leverage_scores: leverage_scores("checkout" => 0.9, "search" => 0.8)
         ).call
       end
       assert_equal Hive::ExitCodes::SUCCESS, first_status, "#{first_out}\n#{first_err}"
@@ -605,7 +571,6 @@ class RefactorPatrolCommandTest < Minitest::Test
         command_for(
           pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
           features: features, reviewer: retry_reviewer,
-          leverage_scores: leverage_scores("checkout" => 0.9, "search" => 0.8)
         ).call
       end
 
@@ -613,7 +578,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_equal [ "search" ], retry_reviewer.seen_feature_ids
       payload = JSON.parse(second_out)
       assert payload.fetch("complete")
-      assert_equal %w[checkout search], payload.fetch("accepted").map { |item| item.fetch("id") }.sort
+      assert_equal %w[checkout search], payload.fetch("fix").map { |item| item.fetch("id") }.sort
       assert_equal %w[checkout search], Hive::RefactorPatrol::JobStore.new(repo)
                                                    .read_job(manifest.fetch("job_id"))
                                                    .fetch("feature_results")
@@ -643,12 +608,11 @@ class RefactorPatrolCommandTest < Minitest::Test
         command_for(
           pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
           features: features, reviewer: first,
-          leverage_scores: leverage_scores("checkout" => 0.9, "search" => 0.8)
         ).call
       end
       assert_equal Hive::ExitCodes::SUCCESS, first_status, "#{first_out}\n#{first_err}"
       store = Hive::RefactorPatrol::JobStore.new(repo)
-      before = JSON.generate(store.read_job(manifest.fetch("job_id")).dig("dispositions", "accepted", 0))
+      before = JSON.generate(store.read_job(manifest.fetch("job_id")).dig("dispositions", "fix", 0))
 
       config_path = File.join(repo, ".hive-state", "config.yml")
       current = YAML.safe_load(File.read(config_path))
@@ -661,18 +625,17 @@ class RefactorPatrolCommandTest < Minitest::Test
         command_for(
           pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
           features: features, reviewer: retry_reviewer,
-          leverage_scores: leverage_scores("checkout" => 0.9, "search" => 0.8)
         ).call
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, second_status, "#{second_out}\n#{second_err}"
       payload = JSON.parse(second_out)
       assert payload.fetch("complete")
-      assert_equal [ "checkout" ], payload.fetch("accepted").map { |item| item.fetch("id") }
-      assert_equal [ "search" ], payload.fetch("flagged").map { |item| item.fetch("id") }
-      assert_equal [ "below_min_confidence" ], payload.fetch("flagged").first.fetch("reasons")
+      assert_equal [ "checkout" ], payload.fetch("fix").map { |item| item.fetch("id") }
+      assert_equal [ "search" ], payload.fetch("dismiss").map { |item| item.fetch("id") }
+      assert_equal [ "below_min_confidence" ], payload.fetch("dismiss").first.fetch("reasons")
       aggregate = store.read_job(manifest.fetch("job_id"))
-      assert_equal before, JSON.generate(aggregate.dig("dispositions", "accepted", 0))
+      assert_equal before, JSON.generate(aggregate.dig("dispositions", "fix", 0))
       assert aggregate.fetch("complete")
     end
   end
@@ -695,14 +658,13 @@ class RefactorPatrolCommandTest < Minitest::Test
         command_for(
           pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
           features: features, reviewer: crashing,
-          leverage_scores: leverage_scores("checkout" => 0.9, "search" => 0.8)
         ).call
       end
 
       assert_equal Hive::ExitCodes::SOFTWARE, first_status, "#{first_out}\n#{first_err}"
       aggregate = Hive::RefactorPatrol::JobStore.new(repo).read_job(manifest.fetch("job_id"))
       assert_equal [ "checkout" ], aggregate.fetch("feature_results").map { |item| item.fetch("feature_id") }
-      assert_equal [ "checkout" ], aggregate.dig("dispositions", "accepted").map { |item| item.fetch("id") }
+      assert_equal [ "checkout" ], aggregate.dig("dispositions", "fix").map { |item| item.fetch("id") }
       assert_equal "blocked", aggregate.fetch("state")
 
       search = thesis("search", feature_id: "search", fingerprint: "fp-search")
@@ -711,7 +673,6 @@ class RefactorPatrolCommandTest < Minitest::Test
         command_for(
           pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
           features: features, reviewer: retry_reviewer,
-          leverage_scores: leverage_scores("checkout" => 0.9, "search" => 0.8)
         ).call
       end
 
@@ -719,7 +680,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_equal [ "search" ], retry_reviewer.seen_feature_ids
       payload = JSON.parse(second_out)
       assert payload.fetch("complete")
-      assert_equal %w[checkout search], payload.fetch("accepted").map { |item| item.fetch("id") }.sort
+      assert_equal %w[checkout search], payload.fetch("fix").map { |item| item.fetch("id") }.sort
     end
   end
 
@@ -732,7 +693,6 @@ class RefactorPatrolCommandTest < Minitest::Test
         command_for(
           pr: "7", manifest_resolver: FakeManifestResolver.new(first_manifest),
           features: [ feature("checkout") ], theses_by_feature: { "checkout" => [ original ] },
-          leverage_scores: leverage_scores("checkout" => 0.9)
         ).call
       end
       assert_equal Hive::ExitCodes::SUCCESS, first_status, "#{first_out}\n#{first_err}"
@@ -748,15 +708,14 @@ class RefactorPatrolCommandTest < Minitest::Test
         command_for(
           pr: "8", manifest_resolver: FakeManifestResolver.new(recursive_manifest),
           features: [ feature("checkout") ], theses_by_feature: { "checkout" => [ duplicate ] },
-          leverage_scores: leverage_scores("checkout" => 0.9)
         ).call
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, second_status, "#{second_out}\n#{second_err}"
       payload = JSON.parse(second_out)
-      assert_empty payload.fetch("accepted")
-      assert_equal [ "recursive" ], payload.fetch("suppressed").map { |item| item.fetch("id") }
-      assert_equal [ "collision_already_seen" ], payload.fetch("suppressed").flat_map { |item| item.fetch("reasons") }
+      assert_empty payload.fetch("fix")
+      assert_equal [ "recursive" ], payload.fetch("dismiss").map { |item| item.fetch("id") }
+      assert_equal [ "collision_already_seen" ], payload.fetch("dismiss").flat_map { |item| item.fetch("reasons") }
     end
   end
 
@@ -769,7 +728,6 @@ class RefactorPatrolCommandTest < Minitest::Test
         command_for(
           pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
           features: [ feature("checkout") ], theses_by_feature: { "checkout" => [ item ] },
-          leverage_scores: leverage_scores("checkout" => 0.9)
         ).call
       end
       assert_equal Hive::ExitCodes::SUCCESS, first_status, "#{first_out}\n#{first_err}"
@@ -791,7 +749,6 @@ class RefactorPatrolCommandTest < Minitest::Test
         command_for(
           pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
           features: [ feature("checkout") ], theses_by_feature: { "checkout" => [ item ] },
-          leverage_scores: leverage_scores("checkout" => 0.9)
         ).call
       end
 
@@ -800,10 +757,10 @@ class RefactorPatrolCommandTest < Minitest::Test
       refute_nil replay
       assert_equal true, replay.dig("policy", "auto_fix")
       assert_equal "classified", replay.fetch("state")
-      assert_equal [ "replayable" ], replay.dig("dispositions", "accepted").map { |entry| entry.fetch("id") }
+      assert_equal [ "replayable" ], replay.dig("dispositions", "fix").map { |entry| entry.fetch("id") }
       assert_equal replay_head, replay.fetch("analysis_sha")
       assert_equal head, original.fetch("analysis_sha")
-      assert_empty JSON.parse(second_out).fetch("suppressed")
+      assert_empty JSON.parse(second_out).fetch("dismiss")
       assert_equal original_bytes, File.binread(original_path)
     end
   end
@@ -820,7 +777,6 @@ class RefactorPatrolCommandTest < Minitest::Test
             dry_run: true, pr: "7",
             manifest_resolver: FakeManifestResolver.new(manifest),
             features: [ feature("checkout") ],
-            leverage_scores: leverage_scores("checkout" => 0.9),
             root_observer: lambda do |kind, root|
               analysis_paths << root if kind == :mapper
             end
@@ -837,7 +793,7 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_job_manifest_mode_emits_the_same_complete_v3_without_github_resolution
+  def test_job_manifest_mode_emits_the_same_complete_v4_without_github_resolution
     with_refactor_patrol_project do |repo|
       head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
       manifest = with_manifest_checksum(pr_manifest(merge_sha: head))
@@ -849,7 +805,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       pr_out, pr_err, pr_status = with_captured_exit do
         command_for(
           pr: "7", manifest_resolver: pr_resolver, features: features,
-          theses_by_feature: theses, leverage_scores: leverage_scores("checkout" => 0.9)
+          theses_by_feature: theses
         ).call
       end
 
@@ -862,7 +818,7 @@ class RefactorPatrolCommandTest < Minitest::Test
         command_for(
           job_manifest: path, result_file: result_file,
           manifest_resolver: forbidden_resolver, features: features,
-          theses_by_feature: theses, leverage_scores: leverage_scores("checkout" => 0.9)
+          theses_by_feature: theses
         ).call
       end
 
@@ -870,7 +826,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_equal Hive::ExitCodes::SUCCESS, scheduled_status, "#{scheduled_out}\n#{scheduled_err}"
       assert_equal JSON.parse(pr_out), JSON.parse(scheduled_out)
       assert_nil forbidden_resolver.seen, "persisted-manifest mode must not resolve mutable GitHub PR metadata"
-      assert v3_refactor_schemer.valid?(JSON.parse(scheduled_out))
+      assert v4_refactor_schemer.valid?(JSON.parse(scheduled_out))
       assert_equal JSON.parse(scheduled_out), JSON.parse(File.read(result_file))
     end
   end
@@ -931,7 +887,6 @@ class RefactorPatrolCommandTest < Minitest::Test
             feature("checkout", files: [ "lib/checkout.rb" ])
           ],
           reviewer: reviewer,
-          leverage_scores: leverage_scores("checkout" => 0.9)
         ).call
       end
 
@@ -946,13 +901,13 @@ class RefactorPatrolCommandTest < Minitest::Test
         end
       )
       assert_equal [ "checkpointed" ],
-                   aggregate.dig("dispositions", "accepted")
+                   aggregate.dig("dispositions", "fix")
                             .map { |entry| entry.fetch("id") }
       assert JSON.parse(out).fetch("complete")
     end
   end
 
-  def test_action_mode_resumes_the_authoritative_job_and_emits_a_strict_v3_projection
+  def test_action_mode_resumes_the_authoritative_job_and_emits_a_strict_v4_projection
     with_refactor_patrol_project do |repo|
       head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
       manifest = with_manifest_checksum(pr_manifest(merge_sha: head))
@@ -965,7 +920,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       accepted = {
         "id" => item.id, "feature_id" => item.feature_id,
         "fingerprint" => item.fingerprint,
-        "score" => item.expected_leverage.fetch("score"),
+        "route" => "fix",
         "admissible" => true, "reasons" => [], "thesis" => item.to_h
       }
       store, enrolled = enroll_manifest!(
@@ -976,7 +931,7 @@ class RefactorPatrolCommandTest < Minitest::Test
         enrolled.merge(
           "analysis_sha" => head, "policy" => policy,
           "state" => "classified", "complete" => false,
-          "dispositions" => { "accepted" => [ accepted ], "flagged" => [], "suppressed" => [] },
+          "dispositions" => { "fix" => [ accepted ], "discuss" => [], "dismiss" => [] },
           "feature_results" => [], "review_errors" => [], "zero_reason" => nil,
           "attempts" => [ { "number" => 1, "outcome" => "classified" } ],
           "actions" => [], "created_at" => "2026-07-10T00:00:00Z",
@@ -994,8 +949,8 @@ class RefactorPatrolCommandTest < Minitest::Test
 
       assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
       payload = JSON.parse(out)
-      assert v3_refactor_schemer.valid?(payload),
-             v3_refactor_schemer.validate(payload).map { |error| error["error"] }.inspect
+      assert v4_refactor_schemer.valid?(payload),
+             v4_refactor_schemer.validate(payload).map { |error| error["error"] }.inspect
       assert payload.fetch("complete")
       assert_equal "complete", payload.dig("action_status", "state")
       assert_empty payload.fetch("actions")
@@ -1020,7 +975,7 @@ class RefactorPatrolCommandTest < Minitest::Test
         enrolled.merge(
           "analysis_sha" => head, "policy" => policy,
           "state" => "complete", "complete" => true,
-          "dispositions" => { "accepted" => [], "flagged" => [], "suppressed" => [] },
+          "dispositions" => { "fix" => [], "discuss" => [], "dismiss" => [] },
           "feature_results" => [
             { "feature_id" => "checkout", "complete" => true, "thesis_ids" => [], "errors" => [] }
           ],
@@ -1039,8 +994,8 @@ class RefactorPatrolCommandTest < Minitest::Test
       payload = JSON.parse(out)
       assert payload.fetch("complete")
       assert_equal 1, payload.fetch("features_mapped")
-      assert_empty payload.fetch("accepted")
-      assert_empty payload.fetch("flagged")
+      assert_empty payload.fetch("fix")
+      assert_empty payload.fetch("discuss")
     end
   end
 
@@ -1055,7 +1010,6 @@ class RefactorPatrolCommandTest < Minitest::Test
           manifest_resolver: FakeManifestResolver.new(pr_manifest(merge_sha: head)),
           features: [ feature("checkout") ],
           reviewer: reviewer,
-          leverage_scores: leverage_scores("checkout" => 0.9)
         ).call
       end
 
@@ -1067,13 +1021,11 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_pr_mode_bounds_each_review_batch_to_available_architecture_launches
+  def test_pr_mode_reviews_the_whole_feature_batch_without_quota_gating
     with_refactor_patrol_project do |repo|
       head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
       features = 8.times.map { |index| feature("slice-#{index}") }
       reviewer = FakeReviewer.new({})
-      scores = features.to_h { |item| [ item.id, { "score" => 0.9 } ] }
-
       out, err, status = with_captured_exit do
         command_for(
           dry_run: true,
@@ -1083,22 +1035,16 @@ class RefactorPatrolCommandTest < Minitest::Test
           ),
           features: features,
           reviewer: reviewer,
-          leverage_scores: scores
         ).call
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
       payload = JSON.parse(out)
-      assert_equal features.first(6).map(&:id), reviewer.seen_feature_ids
-      refute payload.fetch("complete")
-      assert_equal 6, payload.fetch("features_mapped")
-      assert_equal features.first(6).map(&:id), payload.fetch("feature_results").map { |item| item.fetch("feature_id") }
+      assert_equal features.map(&:id), reviewer.seen_feature_ids
+      assert payload.fetch("complete")
+      assert_equal 8, payload.fetch("features_mapped")
+      assert_equal features.map(&:id), payload.fetch("feature_results").map { |item| item.fetch("feature_id") }
       assert_empty payload.fetch("review_errors")
-
-      zero_capacity = Object.new
-      zero_capacity.define_singleton_method(:remaining_launches) { |stage:| 0 }
-      bounded = Hive::Commands::RefactorPatrol.new("demo", pr: "7")
-      assert_equal [ features.first ], bounded.send(:bounded_review_features, features, zero_capacity)
     end
   end
 
@@ -1135,7 +1081,7 @@ class RefactorPatrolCommandTest < Minitest::Test
     assert_equal true, captured.fetch(1).last.fetch(:read_only)
   end
 
-  def test_pr_mode_rejects_legacy_scope_flags_and_emits_v3_error
+  def test_pr_mode_rejects_legacy_scope_flags_and_emits_v4_error
     with_refactor_patrol_project do
       out, _err, status = with_captured_exit do
         command_for(
@@ -1148,8 +1094,8 @@ class RefactorPatrolCommandTest < Minitest::Test
 
       payload = JSON.parse(out)
       assert_equal Hive::ExitCodes::CONFIG, status
-      assert_equal 3, payload.fetch("schema_version")
-      assert_equal false, payload.fetch("complete")
+      assert_equal 4, payload.fetch("schema_version")
+      assert v4_refactor_schemer.valid?(payload)
     end
   end
 
@@ -1176,7 +1122,6 @@ class RefactorPatrolCommandTest < Minitest::Test
           ),
           use_default_mapper: true,
           reviewer: reviewer,
-          leverage_scores: leverage_scores("documentation-docs-root" => 0.5)
         ).call
       end
       assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
@@ -1226,7 +1171,6 @@ class RefactorPatrolCommandTest < Minitest::Test
             ),
             use_default_mapper: true,
             reviewer: reviewer,
-            leverage_scores: leverage_scores(expected_feature_id => 0.5)
           ).call
         end
 
@@ -1249,7 +1193,7 @@ class RefactorPatrolCommandTest < Minitest::Test
 
         assert_equal Hive::ExitCodes::CONFIG, status
         assert_match(/refactor_patrol.enabled/, err)
-        assert_equal 1, payload.fetch("schema_version")
+        assert_equal 4, payload.fetch("schema_version")
         assert refactor_schemer.valid?(payload), refactor_schemer.validate(payload).map { |e| e["error"] }.inspect
         assert_equal false, payload.fetch("ok")
         assert_equal "config", payload.fetch("error_kind")
@@ -1283,7 +1227,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       reviewer = FakeReviewer.new({}, review_errors: [ { "feature_id" => "checkout", "error" => "agent_failed" } ])
 
       out, _err, status = with_captured_exit do
-        command_for(features: [ feature("checkout") ], reviewer: reviewer, leverage_scores: leverage_scores("checkout" => 0.9)).call
+        command_for(features: [ feature("checkout") ], reviewer: reviewer).call
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, status
@@ -1305,7 +1249,6 @@ class RefactorPatrolCommandTest < Minitest::Test
         changed_since: "HEAD",
         features: [ feature("checkout", files: [ "lib/checkout.rb" ]) ],
         reviewer: reviewer,
-        leverage_scores: leverage_scores("checkout" => 0.9)
       )
       original_capture3 = Open3.method(:capture3)
       begin
@@ -1408,9 +1351,9 @@ class RefactorPatrolCommandTest < Minitest::Test
         {
           "job_id" => "job-7", "complete" => true,
           "dispositions" => {
-            "accepted" => [ { "fingerprint" => "fp-accepted" } ],
-            "flagged" => [ { "fingerprint" => "fp-flagged" } ],
-            "suppressed" => []
+            "fix" => [ { "fingerprint" => "fp-accepted" } ],
+            "discuss" => [ { "fingerprint" => "fp-flagged" } ],
+            "dismiss" => []
           }
         }
       ]
@@ -1597,11 +1540,11 @@ class RefactorPatrolCommandTest < Minitest::Test
           { "feature_id" => "checkout", "complete" => true, "thesis_ids" => [ item.id ], "errors" => [] }
         ],
         "dispositions" => {
-          "accepted" => [], "flagged" => [],
-          "suppressed" => [
+          "fix" => [], "discuss" => [],
+          "dismiss" => [
             {
               "id" => item.id, "feature_id" => "checkout", "fingerprint" => item.fingerprint,
-              "score" => 0.9, "admissible" => true, "reasons" => [ "collision" ],
+              "route" => "dismiss", "admissible" => true, "reasons" => [ "collision" ],
               "reference" => "issue-7", "thesis" => item.to_h
             }
           ]
@@ -1631,7 +1574,7 @@ class RefactorPatrolCommandTest < Minitest::Test
     assert_empty results
   end
 
-  def test_v3_payload_error_fallbacks_and_nonterminal_zero_reason
+  def test_v4_payload_error_fallbacks_and_nonterminal_zero_reason
     command = Hive::Commands::RefactorPatrol.new("demo", json: true, dry_run: true, pr: "7")
     manifest = pr_manifest
     command.instance_variable_set(:@manifest, manifest)
@@ -1643,18 +1586,18 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
 
     payload = command.send(
-      :build_v3_payload, { "name" => "demo" }, "/repo", [ feature("checkout") ], [], [], reviewer
+      :build_v4_payload, { "name" => "demo" }, "/repo", [ feature("checkout") ], [], [], reviewer
     )
     assert_equal "agent_failed", payload.fetch("review_errors").fetch(0).fetch("error")
 
     payload = command.send(
-      :build_v3_payload, { "name" => "demo" }, "/repo", [ feature("checkout") ], [], [], Object.new
+      :build_v4_payload, { "name" => "demo" }, "/repo", [ feature("checkout") ], [], [], Object.new
     )
     assert_empty payload.fetch("review_errors")
     assert_nil command.send(
       :final_zero_reason,
       [ feature("checkout") ], [ thesis("one") ],
-      { "accepted" => [], "flagged" => [], "suppressed" => [] }
+      { "fix" => [], "discuss" => [], "dismiss" => [] }
     )
   end
 
@@ -1792,16 +1735,16 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_job_list_ignores_v2_jobs_without_creating_v3_state
+  def test_job_list_ignores_v3_jobs_without_creating_v4_state
     with_refactor_patrol_project do |repo|
       released = File.join(
-        repo, ".hive-state", "refactor_patrol", "v2", "jobs"
+        repo, ".hive-state", "refactor_patrol", "v3", "jobs"
       )
       FileUtils.mkdir_p(released)
       path = File.join(released, "opaque-job.bytes")
-      File.binwrite(path, "\x00released-v2-is-not-read\xff".b)
+      File.binwrite(path, "\x00released-v3-is-not-read\xff".b)
       before = durable_tree_snapshot(released)
-      current = File.join(repo, ".hive-state", "refactor_patrol", "v3")
+      current = File.join(repo, ".hive-state", "refactor_patrol", "v4")
 
       out, = capture_io do
         Hive::Commands::RefactorPatrol.new(
@@ -1811,9 +1754,9 @@ class RefactorPatrolCommandTest < Minitest::Test
       payload = JSON.parse(out)
       assert_empty job_query_schemer.validate(payload).to_a
       assert_empty payload.fetch("jobs")
-      refute Dir.exist?(current), "read-only list must not create v3 state"
+      refute Dir.exist?(current), "read-only list must not create v4 state"
       assert_equal before, durable_tree_snapshot(released),
-                   "read-only list must not inspect or rewrite v2 bytes"
+                   "read-only list must not inspect or rewrite v3 bytes"
     end
   end
 
@@ -1930,7 +1873,7 @@ class RefactorPatrolCommandTest < Minitest::Test
   end
 
   def command_for(project: "demo", json: true, dry_run: false, feature_hint: nil, entrypoint_hint: nil, path_hint: nil, changed_since: nil,
-                  pr: nil, job_manifest: nil, actions: false, result_file: nil, manifest_resolver: nil, features: [], theses_by_feature: {}, reviewer: nil, leverage_scores: {},
+                  pr: nil, job_manifest: nil, actions: false, result_file: nil, manifest_resolver: nil, features: [], theses_by_feature: {}, reviewer: nil,
                   use_default_mapper: false, repository_ownership: nil, root_observer: nil)
     reviewer ||= FakeReviewer.new(theses_by_feature)
     repository_ownership ||= lambda do |**_arguments|
@@ -1958,10 +1901,6 @@ class RefactorPatrolCommandTest < Minitest::Test
         root_observer&.call(:reviewer, root)
         reviewer
       end,
-      leverage_factory: lambda do |root, _cfg|
-        root_observer&.call(:leverage, root)
-        FakeLeverage.new(leverage_scores)
-      end,
       manifest_resolver_factory: manifest_resolver && ->(*) { manifest_resolver },
       repository_ownership: repository_ownership
     )
@@ -1978,22 +1917,7 @@ class RefactorPatrolCommandTest < Minitest::Test
     )
   end
 
-  def leverage_scores(scores)
-    scores.to_h do |feature_id, score|
-      [
-        feature_id,
-        {
-          "scope" => "feature",
-          "score" => score,
-          "breakdown" => { "churn" => score },
-          "signals" => { "churn" => 10 },
-          "normalized" => { "churn" => 1.0 }
-        }
-      ]
-    end
-  end
-
-  def thesis(id, feature_id: "checkout", score: 0.9, fingerprint: "fp",
+  def thesis(id, feature_id: "checkout", fingerprint: "fp",
              admissible: true, admissibility_reason: "evidence cites concrete paths and measurable signals",
              flags: [], boundary_files: nil)
     boundary_files ||= [ "lib/#{feature_id}.rb" ]
@@ -2013,18 +1937,8 @@ class RefactorPatrolCommandTest < Minitest::Test
       ],
       proposed_refactor: "Extract a #{feature_id} boundary service",
       feature_boundary: { "owned_files" => boundary_files, "entrypoints" => boundary_files },
-      feature_hotspot: {
-        "scope" => "feature",
-        "score" => 1.0,
-        "breakdown" => { "churn" => 1.0 },
-        "signals" => { "churn" => 10 },
-        "normalized" => { "churn" => 1.0 }
-      },
-      expected_leverage: {
-        "score" => score,
-        "breakdown" => { "churn" => score },
-        "drivers" => [ { "signal" => "churn", "relief" => score, "mechanism" => "isolate recurring edits" } ]
-      },
+      route: admissible ? (flags.empty? ? "fix" : "discuss") : "dismiss",
+      architecture_effects: [ "isolate recurring edits" ],
       confidence: "medium",
       risk: {
         "caps" => { "single_feature" => true },
@@ -2043,14 +1957,12 @@ class RefactorPatrolCommandTest < Minitest::Test
   end
 
   def refactor_schemer
-    @refactor_schemer ||= JSONSchemer.schema(
-      JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 1)))
-    )
+    v4_refactor_schemer
   end
 
-  def v3_refactor_schemer
-    @v3_refactor_schemer ||= JSONSchemer.schema(
-      JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3)))
+  def v4_refactor_schemer
+    @v4_refactor_schemer ||= JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 4)))
     )
   end
 
@@ -2094,7 +2006,7 @@ class RefactorPatrolCommandTest < Minitest::Test
         {
           "id" => item.id, "feature_id" => item.feature_id,
           "fingerprint" => item.fingerprint,
-          "score" => item.expected_leverage.fetch("score"),
+          "route" => "fix",
           "admissible" => true, "reasons" => [], "thesis" => item.to_h
         }
       ]
@@ -2104,7 +2016,7 @@ class RefactorPatrolCommandTest < Minitest::Test
     {
       "job_id" => manifest.fetch("job_id"), "source" => source_context(manifest),
       "analysis_sha" => "head", "state" => "complete", "complete" => true,
-      "dispositions" => { "accepted" => accepted, "flagged" => [], "suppressed" => [] },
+      "dispositions" => { "fix" => accepted, "discuss" => [], "dismiss" => [] },
       "feature_results" => [], "review_errors" => [], "zero_reason" => item ? nil : "no_theses",
       "attempts" => [], "actions" => actions
     }

@@ -7,17 +7,17 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
   ROOT = File.expand_path("../..", __dir__).freeze
   BIN = File.join(ROOT, "bin", "hive").freeze
 
-  def test_legacy_refactor_patrol_usage_error_is_schema_valid_v1
+  def test_refactor_patrol_usage_error_is_schema_valid_v4
     payload = run_usage_error("refactor-patrol", "demo", "extra", "--json")
 
-    assert_equal 1, payload.fetch("schema_version")
-    assert schema(1).valid?(payload), validation_errors(1, payload)
+    assert_equal 4, payload.fetch("schema_version")
+    assert schema.valid?(payload), validation_errors(payload)
     refute payload.key?("job_id")
     refute payload.key?("source_pr")
     refute payload.key?("complete")
   end
 
-  def test_pr_job_manifest_and_actions_usage_errors_are_schema_valid_v3
+  def test_pr_job_manifest_and_actions_usage_errors_are_schema_valid_v4
     selectors = [
       [ "--pr", "7" ],
       [ "--job-manifest", "/tmp/job.json" ],
@@ -29,15 +29,15 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
         "refactor-patrol", "demo", "extra", *selector, "--json"
       )
 
-      assert_equal 3, payload.fetch("schema_version"), selector.inspect
-      assert schema(3).valid?(payload), "#{selector.inspect}: #{validation_errors(3, payload)}"
-      assert_equal "", payload.fetch("job_id")
-      assert_nil payload.fetch("source_pr")
-      assert_equal false, payload.fetch("complete")
+      assert_equal 4, payload.fetch("schema_version"), selector.inspect
+      assert schema.valid?(payload), "#{selector.inspect}: #{validation_errors(payload)}"
+      refute payload.key?("job_id")
+      refute payload.key?("source_pr")
+      refute payload.key?("complete")
     end
   end
 
-  def test_last_negative_actions_form_keeps_legacy_usage_error_v1
+  def test_last_negative_actions_form_keeps_current_usage_error_v4
     selectors = [
       [ "--actions", "--no-actions" ],
       [ "--actions", "--skip-actions" ],
@@ -49,8 +49,8 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
         "refactor-patrol", "demo", "extra", *selector, "--json"
       )
 
-      assert_equal 1, payload.fetch("schema_version"), selector.inspect
-      assert schema(1).valid?(payload), "#{selector.inspect}: #{validation_errors(1, payload)}"
+      assert_equal 4, payload.fetch("schema_version"), selector.inspect
+      assert schema.valid?(payload), "#{selector.inspect}: #{validation_errors(payload)}"
     end
   end
 
@@ -70,14 +70,14 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
       )
 
       assert_equal "hive-refactor-patrol-jobs", payload.fetch("schema")
-      assert_equal 1, payload.fetch("schema_version")
+      assert_equal 2, payload.fetch("schema_version")
       assert_equal action, payload.fetch("action"), selector.inspect
       assert job_query_schema.valid?(payload),
              job_query_schema.validate(payload).map { |error| error.fetch("error") }.inspect
     end
   end
 
-  def test_last_negative_list_form_keeps_legacy_usage_error_v1
+  def test_last_negative_list_form_keeps_current_usage_error_v4
     [ [ "--list", "--no-list" ], [ "--list", "--skip-list" ],
       [ "--list=true", "--list=false" ] ].each do |selector|
       payload = run_usage_error(
@@ -85,8 +85,8 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
       )
 
       assert_equal "hive-refactor-patrol", payload.fetch("schema"), selector.inspect
-      assert_equal 1, payload.fetch("schema_version"), selector.inspect
-      assert schema(1).valid?(payload), "#{selector.inspect}: #{validation_errors(1, payload)}"
+      assert_equal 4, payload.fetch("schema_version"), selector.inspect
+      assert schema.valid?(payload), "#{selector.inspect}: #{validation_errors(payload)}"
     end
   end
 
@@ -132,17 +132,14 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
     end
   end
 
-  def schema(version)
-    @schemas ||= {}
-    @schemas[version] ||= JSONSchemer.schema(
-      JSON.parse(
-        File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: version))
-      )
+  def schema
+    @schema ||= JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol")))
     )
   end
 
-  def validation_errors(version, payload)
-    schema(version).validate(payload).map { |error| error.fetch("error") }.inspect
+  def validation_errors(payload)
+    schema.validate(payload).map { |error| error.fetch("error") }.inspect
   end
 
   def job_query_schema

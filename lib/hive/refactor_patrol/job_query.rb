@@ -9,7 +9,7 @@ module Hive
     # never enqueues, claims, replays, or resumes a job.
     class JobQuery
       SCHEMA = "hive-refactor-patrol-jobs".freeze
-      SCHEMA_VERSION = 1
+      SCHEMA_VERSION = 2
       DEFAULT_LIMIT = 100
       MAX_LIMIT = 100
       PUBLICATION_ATTEMPTS_KEY = "publication_attempts".freeze
@@ -318,9 +318,9 @@ module Hive
         actions = job.fetch("actions")
         {
           "features" => job.fetch("feature_results").size,
-          "accepted" => job.dig("dispositions", "accepted").size,
-          "flagged" => job.dig("dispositions", "flagged").size,
-          "suppressed" => job.dig("dispositions", "suppressed").size,
+          "fix" => job.dig("dispositions", "fix").size,
+          "discuss" => job.dig("dispositions", "discuss").size,
+          "dismiss" => job.dig("dispositions", "dismiss").size,
           "review_errors" => job.fetch("review_errors").size,
           "actions" => actions.size,
           "pending_actions" => actions.count { |action| action.fetch("terminal") == false }

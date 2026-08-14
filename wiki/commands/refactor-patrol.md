@@ -3,28 +3,27 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-08-13
+updated: 2026-08-14
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
 **TLDR**: `hive refactor-patrol` is Hive's language-neutral architecture
-patrol. The original on-demand v1 report remains available, while merged-PR
-mode emits the current v3 report over a durable v3 job lifecycle: immutable PR
-scope, read-only discovery,
-exhaustive dispositions, and separately authorized isolated fixes or
-deduplicated issues. It is not Ruby- or Hive-specific: discovery maps generic
-repositories and unfamiliar source languages. Automatic mutation is narrower
-by design; a language needs a certified public-contract guard or its thesis
-stays report/issue-only with `public_contract_safety_unavailable`.
+patrol. Every mode emits the current v4 route contract over a fresh durable v4
+job lifecycle: immutable PR scope, read-only discovery, explicit
+`fix`/`discuss`/`dismiss` decisions, and separately authorized isolated fixes
+or deduplicated issues. V3 JobStore data is left byte-identical and is not read
+by the v4 runtime. Automatic mutation remains narrower than discovery; a
+language needs a certified public-contract guard or its thesis routes to
+discussion with `public_contract_safety_unavailable`.
 
 ## Usage
 
 ```bash
-# Legacy on-demand report (v1)
+# On-demand report (v4)
 hive refactor-patrol my-project --json
 hive refactor-patrol my-project --feature route-home --changed-since origin/main
 
-# Explicit merged-PR replay (v3)
+# Explicit merged-PR replay (v4)
 hive refactor-patrol my-project --pr 123 --json
 hive refactor-patrol my-project --pr https://github.com/acme/app/pull/123 --json
 
@@ -58,16 +57,12 @@ even when stale configuration leaves `refactor_patrol.enabled: true`; read-only
 ```yaml
 refactor_patrol:
   enabled: true
-  # Proposal-specific leverage below this floor is retained as an audited
-  # suppression, not ranked or acted on.
-  min_leverage_score: 0.10
   max_theses_per_feature: 1
   auto_fix:
     enabled: true
     # agent/model/effort inherit the resolved refactor identity unless overridden.
   issue_filing:
     enabled: true
-    min_leverage_score: 0.25
   min_confidence: medium
   commands:
     docs: null
@@ -83,16 +78,16 @@ refactor_patrol:
 
 ## Discovery modes
 
-The legacy no-PR mode keeps the v1 reporting/state contract and accepts
-`--feature`, `--entrypoint`, `--path`, and `--changed-since`. It does not run
-the v2 action ledger.
+The no-PR mode accepts `--feature`, `--entrypoint`, `--path`, and
+`--changed-since` and emits the same v4 route vocabulary without creating a
+durable action job.
 
-`--pr` and `--job-manifest` are v2 modes. They require JSON, reject legacy
-scope hints, select mapped features only from the immutable changed-path/status
+`--pr` and `--job-manifest` require JSON, reject on-demand scope hints, and
+select mapped features only from the immutable changed-path/status
 manifest, and pin a freshly fetched committed default-branch `analysis_sha`
 that contains the merge. Discovery materializes that commit as a detached,
-clean, exact worktree under the configured worktree root. Mapper, leverage, and
-reviewer source reads all use that tree, while durable job state remains under
+clean, exact worktree under the configured worktree root. Mapper and reviewer
+source reads use that tree, while durable job state remains under
 the registered project's `.hive-state`. The operator's current branch and
 uncommitted edits are therefore outside the analysis boundary. The daemon
 consumes only the write-once manifest published by merge intake; it never
@@ -129,9 +124,9 @@ user config/rules suppressed. Other providers fail closed unless their profile
 can enforce read-only execution. Hive validates the analysis worktree
 before each feature checkpoint and again before completion. A reviewer that
 dirties the detached source tree makes the command fail, removes the ephemeral
-tree, and releases its discovery claim as `command_error`. Every thesis appears exactly once
-as accepted, flagged, or suppressed. Complete zero-result runs use
-`no_mapped_slice`, `no_theses`, or `all_suppressed`; malformed or partial
+tree, and releases its discovery claim as `command_error`. Every thesis appears
+exactly once as `fix`, `discuss`, or `dismiss`. Complete zero-result runs use
+`no_mapped_slice`, `no_theses`, or `all_dismissed`; malformed or partial
 reviewer results remain retryable and do not checkpoint completion.
 Completed feature slices and their exhaustive dispositions are checkpointed
 independently; a retry reviews only incomplete slices and cannot rewrite a
@@ -145,8 +140,8 @@ dedicated slice instead of expanding every source feature. Lightweight generic
 and ecosystem-specific import resolution builds a source-only dependency graph
 across slash-, dot-, backslash-, and namespace-style references. Tests, docs,
 assets, generated artifacts, fixture/test manifests, and mapper chunk boundaries
-do not inflate fan-in/coupling scores or consume reviewer slices.
-All outer semantic mapping, architecture mapping, and leverage content reads go
+do not consume reviewer slices.
+All outer semantic and architecture mapping reads go
 through one root-confined source reader before a path can enter a reviewer
 slice: tracked symlinks may resolve only to regular files beneath the real
 project root, device/FIFO-like targets are skipped, and each UTF-8-scrubbed read
@@ -160,48 +155,23 @@ it maps bounded root-document, `docs/`, wiki, ADR, and decision slices. Compiled
 wiki logs, raw notes, caches, generated content, and `.hive-state` do not become
 one broad documentation feature. Ordinary `hive patrol` mapping is unchanged.
 
-`max_theses_per_run` is a strict run-wide reviewer-output budget, not a
+`max_theses_per_run` is a strict run-wide reviewer-output cap, not a
 per-feature allowance. The per-feature default is one thesis, explicitly a
-ceiling rather than a quota. A slice whose complete measured hotspot cannot
-possibly reach `min_leverage_score`, even with 100% relief, completes without
-launching an agent. `max_review_seconds_per_run` (default 3600) is the
-matching absolute monotonic wall-clock budget: each feature spawn receives only
+ceiling rather than a quota. `max_review_seconds_per_run` (default 3600) is the
+matching absolute monotonic wall-clock cap: each feature spawn receives only
 the smaller of its configured patrol timeout and the whole-run time remaining.
-Once either budget is exhausted, later slices stay incomplete for a future
-resume instead of multiplying one agent timeout by every mapped feature.
-Before each architecture review or fix spawn, the shared project patrol budget
-also checks the selected `patrol.mode` token and cycle-launch ceilings.
-Architecture stages default to 2x the mode's per-cycle token/launch limits and
-per-agent streamed-token limit so broad boundary analysis is not constrained
-like a single ordinary slice. Post-merge architecture launch count does not use
-the ordinary `max_agent_spawns_per_day` ceiling: every merged occurrence stays
-eligible even after ordinary patrol reaches, for example, 8/8 launches, and
-architecture launches cannot consume that ordinary quota. The shared daily
-input-plus-output token pool, architecture per-cycle launch bound, per-agent token cap,
-one-agent-at-a-time lock, and native budget-equivalent guard remain in force.
-Cached token counts remain visible telemetry but do not consume those token
-ceilings. Architecture discovery is bounded separately by
-`max_architecture_review_spawns_per_day` (default `8`); fixes remain eligible
-after discovery reaches that cap.
-The ordinary `fix_budget_multiplier` does not compound architecture fix
-headroom. A separate `max_architecture_unmetered_spawns_per_day` backstop
-(default `96`) applies only after architecture providers omit usable token
-counts, retaining a durable anti-runaway limit without restoring 8/day.
-Usage is attributed to the TUI patrol row; absent provider counts are retained
-as unmetered launches and consume that separate quota. Budget exhaustion is an
-ordinary retryable incomplete result, so discovery checkpoints completed slices and
-actions retain their exact durable receipts rather than starting new work. PR
-discovery bounds each command to the tighter remaining architecture-cycle or
-unmetered daily safety headroom. It stops after the first failed feature and
-leaves later slices unattempted rather than manufacturing one failure per
-slice. A fully reviewed bounded batch returns clean partial progress: completed
-feature results are checkpointed, `complete` stays false, and the next command
-resumes the untouched suffix without exposing ordinary scheduling as a review
-error. When every reported error is a daily token or
-unmetered-architecture limit,
-including positive daily token headroom too small for the next initial context,
-the daemon backs the job off until the next UTC day instead of retrying it every
-minute.
+One non-configurable 12-slice safety bound also stops a run of empty reviews
+from launching an agent for every mapped feature. Once any bound is exhausted,
+later slices stay incomplete for a future resume instead of multiplying one
+agent timeout by every mapped feature.
+Before each ordinary or architecture review/fix spawn, one project-wide lock
+serializes the agent lifetime and one deliberately high
+`patrol.max_tokens_per_agent` fuse bounds the child process. There are no
+cycle, daily, launch-count, multiplier, or Patrol-specific USD allowances.
+UsageDb rows remain telemetry and never deny a launch. A token-limited child is
+a typed runaway result: discovery/action evidence is retained and Architecture
+Patrol retries after the fixed one-hour cooldown instead of waiting for a UTC
+quota reset.
 The read-only runner accepts either bare JSON or exactly one `json` code fence.
 Plain-text rationale may precede or follow that single fence, but another fence
 remains invalid so there is only one canonical structured result. The third
@@ -216,18 +186,14 @@ schema-invalid records remain review errors rather than successful zero-result
 scans. Evidence is also checked against the pinned checkout's real,
 root-confined, 256 KiB-bounded bytes: cited
 files must exist, line anchors must be in range within that inspection window,
-and snippets must occur exactly within it when present. One unverified citation
-makes the thesis inadmissible. Proposal
-leverage is derived from measured hotspot signals and model-explained relief.
-The reviewer requires evidence of a current consequence rather than hypothetical
-drift and rejects extra helpers/taxonomies that do not delete an ownership
-decision or dependency direction. The default `min_leverage_score: 0.10`
-classifies any residual low-value proposal as a persisted suppression: it stays
-auditable but is absent from ranked/flagged findings and cannot trigger action.
-If architecture mapping fails, leverage
-retains a bounded `measurement.status: incomplete` diagnostic instead of
-presenting its graceful zeroes as real measurements; affected theses remain
-visible but are inadmissible for automatic action.
+and snippets must occur exactly within it when present. The reviewer requires
+evidence of a current consequence and states the concrete ownership,
+dependency, interface, or decision cost removed in `architecture_effects`.
+Hive verifies the evidence and normalizes the requested route:
+missing/unverified evidence or insufficient confidence becomes `dismiss`;
+contract, dependency, cross-feature, validation, or other risk becomes
+`discuss`; only an admissible unblocked `fix` can reach mutation. Every
+override retains categorical reasons, with no numerical quality score.
 
 ## Durable post-merge lifecycle
 
@@ -269,7 +235,7 @@ fingerprint is stale and the next tick removes it. Earlier crashes resume the
 page/intake cursor; write-once manifest/job intake makes replay idempotent.
 Malformed or identity-drifted progress is quarantined and blocks.
 
-The v3 job lifecycle is `queued → analyzing → classified → acting → complete`.
+The v4 job lifecycle is `queued → analyzing → classified → acting → complete`.
 Discovery and actions use generation-fenced claims renewed by exact
 PID/process-start heartbeats; workers without verifiable process identity do
 not claim work. `JobStore` remains the sole aggregate lock/read/write facade,
@@ -328,7 +294,7 @@ an action or family identity.
 
 ## Read-only job inspection
 
-`--list` and `--show JOB_ID` query the authoritative v3 `JobStore` in the CLI
+`--list` and `--show JOB_ID` query the authoritative v4 `JobStore` in the CLI
 process. They do not enqueue, claim, replay, resume, or otherwise mutate a job,
 and they remain available for a registered project even when architecture
 discovery is currently disabled. `--list` returns jobs in their immutable
@@ -340,7 +306,7 @@ snapshot, so jobs arriving later, equal timestamps, and wall-clock rollback
 cannot skip or enter that pagination run. `count` and `page.total` report that
 snapshot's total while `page.returned` is the current page size.
 
-The sequence projection lives under `v3/indexes/job-query/` as immutable
+The sequence projection lives under `v4/indexes/job-query/` as immutable
 per-sequence sidecars plus an O(1) high-water record. Writer paths publish it
 only after the authoritative job exists. A list query reads the high-water
 once, opens at most `limit + 1` membership records, and parses only the selected
@@ -367,13 +333,13 @@ explicitly opt into the complete, potentially large history. `--full` and
 `--limit` are mutually exclusive.
 
 Text mode prints a compact operator summary. `--json` emits the versioned
-`hive-refactor-patrol-jobs.v1` success/error contract. An unknown job id is a
+`hive-refactor-patrol-jobs.v2` success/error contract. An unknown job id is a
 `not_found` error with usage exit 64. Query options are mutually exclusive and
 cannot be combined with `--pr`, `--job-manifest`, `--actions`, `--dry-run`,
 legacy scope hints, or the internal result-file option. `--cursor` belongs only
 to `--list`; `--full` belongs only to `--show`. Invalid job ids and query
 modifiers—including `--limit`, `--cursor`, or `--full` without a selector—use
-the jobs-v1 `usage` error arm with exit 64, while a valid but
+the jobs-v2 `usage` error arm with exit 64, while a valid but
 missing id uses `not_found`; corruption in an existing valid-id record remains
 a hard error and is never relabeled as missing.
 
@@ -387,8 +353,8 @@ Action dispatch also binds a digest of the job aggregate observed at
 reservation. A schema-valid child result that leaves that digest unchanged is
 `action_no_progress`: the daemon persists a one-hour action block instead of
 dispatching the same inert child on every scheduler tick. Fix-agent resource
-exhaustion retains its structured reason; daily token or launch ceilings wait
-until the next UTC day, while other transient failures keep the hourly retry.
+exhaustion retains its structured reason and uses the same fixed one-hour retry
+as other transient Architecture Patrol action failures.
 Jobs retired because their source merge left current trunk are excluded from
 later candidate selection, so their diagnostic receipt is written once rather
 than producing another discovery or action retry loop.
@@ -404,16 +370,12 @@ claim recovery runs first and rollover follows on the next scheduler pass.
 
 ## Fix and issue routing
 
-Current accepted, unflagged theses can reach `Fixer`. For upgrade recovery,
-an admissible persisted row whose complete reason set contains only the retired
-`exceeds_max_files` / `exceeds_max_diff_lines` flags receives the same current
-action authority while its stored historical disposition remains immutable.
+Only current `fix` theses can reach `Fixer`.
 The job's enqueue-time policy must have allowed auto-fix. New policy snapshots
 pin the resolved auto-fix provider, concrete model, effort, and launcher
-identity; legacy provider-only snapshots retain provider-only comparison. The
-current config may revoke or narrow that
+identity. The current config may revoke or narrow that
 snapshot; it cannot relax captured contract/dependency guards, lower
-confidence/leverage thresholds, add a validation command, switch identities, or
+confidence threshold, add a validation command, switch identities, or
 otherwise broaden an old job. A revoked action remains nonterminal so restored
 authority can resume it, but Hive probes that durable hold at most hourly
 instead of launching an action child every daemon minute. Other transient
@@ -531,13 +493,12 @@ immediately before enqueueing `6-review`. An OPEN or MERGED publication is
 successful only after that mandatory handoff; an externally CLOSED-unmerged PR
 terminates as `closed_without_merge`. Patrol never merges the PR itself.
 
-Issue filing is limited to admissible strategic/cap-blocked theses or accepted
-theses without a reviewable fix result, and also requires material
-proposal-specific leverage. When an accepted thesis has no fix because
-auto-fix is disabled, `auto_fix_disabled` routes it to an issue instead of
-terminating as JSON-only output. The issue records follow-up approval as
-pending and includes the source PR, thesis, evidence, proposed refactor,
-leverage, strategic reasons, and required validation. Semantic families
+`discuss` routes initialize issue actions directly. `fix` routes initialize a
+fix plus a dormant semantic-family issue fallback: a successful PR or no-diff
+result suppresses the issue, a deterministic non-fixable result activates it,
+and a transient failure keeps retrying the fix. The issue records follow-up
+approval as pending and includes the source PR, thesis, evidence, proposed
+refactor, architecture effects, route reasons, and required validation. Semantic families
 deduplicate reworded occurrences across jobs. A successful fix in any thesis
 of a family suppresses the family issue. Family JSON is a rebuildable
 projection from authoritative job aggregates, not independent completion
@@ -572,9 +533,9 @@ for only the incomplete slices. Hive never mixes snapshots or resets trunk.
 
 ## Module compatibility
 
-`hive refactor-patrol` remains the frozen 0.x serializer and recovery protocol
-for the first-party `architecture-patrol` module adapter. All public and
-daemon-internal modes use v3 jobs, immutable merge
+`hive refactor-patrol` is the serializer and recovery protocol for the
+first-party `architecture-patrol` module adapter. All public and
+daemon-internal modes use v4 jobs, immutable merge
 manifests, claims, progress, quarantine, result transport, publication
 attempts, and global terminal proofs. Module scheduling and
 `pull_request.merged` admission do not add a second GitHub poller; the current
@@ -600,17 +561,17 @@ and thesis schema. Scheduled JobStore state uses a split namespace:
     families/<family-id>.json    # rebuildable semantic-family projection
     results/<dispatch-id>.json   # daemon completion channel; removed on reap
     runs/ and logs/              # agent evidence
-  v3/
+  v4/
     jobs/<job-id>.json           # sole aggregate authority
     occurrences/records/occ-*.json # prepared/uncertain/terminal effects + outbox
     indexes/                     # rebuildable job/action/query projections
 ```
 
-JobStore authority is fixed at v3. Construction and `--list`/`--show` do not
-create state, while the first mutation lazily creates only v3. Runtime never
-probes, reads, hashes, moves, deletes, or interprets an obsolete `v2/jobs`
-entry; arbitrary v2 bytes are ignored and an existing v3 store always wins.
-Every non-JobStore v2 owner above remains live and unchanged.
+JobStore authority is fixed at v4. Construction and `--list`/`--show` do not
+create state, while the first mutation lazily creates only v4. Runtime never
+probes, reads, hashes, moves, deletes, or interprets an obsolete v3 JobStore;
+those bytes remain opaque. Reconciler manifests, families, result transport,
+and global terminal proofs retain their separate namespaces and authority.
 
 Terminal remote-effect proof is repository-global rather than registration
 local:
@@ -634,23 +595,15 @@ later catalog rebuild can recover terminal PR proof instead of mistaking stage
 movement for a missing handoff. Paths outside those exact stage roots, or nested
 below a task folder, still fail closed.
 
-Legacy no-PR JSON remains `hive-refactor-patrol.v1`; its success payload now
-includes `review_complete`, `review_errors`, and per-feature progress so a
-token-limited or failed review cannot look like a clean zero-thesis result.
-Structured cap evidence is retained under
-`review_errors[].details.resource_exhaustion`. PR discovery and action
-resume emit `hive-refactor-patrol.v3`, including source identity,
-`analysis_sha`, completeness, per-feature progress,
-accepted/flagged/suppressed dispositions, review errors, attempts, and public
-action receipts. V3 thesis snapshots carry
-the complete normalized thesis rather than only identity fields.
-Pre-dispatch `--json` usage errors follow the same mode: legacy argv receives a
-schema-valid v1 error, while `--pr`, `--job-manifest`, or enabled `--actions`
-argv receives a schema-valid v3 error with the required empty job/source and
-`complete: false` projection.
+Every report mode emits `hive-refactor-patrol.v4`, including source identity,
+`analysis_sha` where applicable, completeness, per-feature progress,
+`fix`/`discuss`/`dismiss` dispositions, review errors, attempts, and public
+action receipts. V4 thesis snapshots carry the complete normalized thesis,
+including categorical route reasons and architecture effects. Pre-dispatch
+`--json` usage errors use the same v4 error arm.
 
 Read-only `--list` and `--show` use a separate
-`hive-refactor-patrol-jobs.v1` schema. List responses contain validated job
+`hive-refactor-patrol-jobs.v2` schema. List responses contain validated job
 summaries plus bounded, sequence-snapshot continuation metadata; show responses contain one
 validated durable detail projection with bounded-history metadata or an
 explicit `full: true` projection.
@@ -658,7 +611,7 @@ Their query-specific error arm preserves the requested `action` (`list` or
 `show`, or null for a selector-less query modifier) without falling through to
 either discovery reporter.
 
-Daemon children write their v3 document atomically to the job-bound internal
+Daemon children write their v4 document atomically to the job-bound internal
 result file. Stdout remains operator logging, so a valid snapshot larger than
 the supervisor's ordinary 64 KiB log tail is not truncated into a false retry.
 

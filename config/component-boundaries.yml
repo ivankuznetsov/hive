@@ -286,7 +286,7 @@ components:
       - lib/hive/refactor_patrol/transition_gateway.rb
     state_contracts:
       - "StateStore and JobStore expose the only product recovery APIs over one OccurrenceJournal facade; OccurrenceRecordStore is the sole occurrence-cell lock/read/write owner"
-      - "JobStore v3 owns the immutable job-to-occurrence and intake-transition identities; discovery attempts, actions, and diagnostic episodes append exact transition identities"
+      - "JobStore v4 owns the immutable job-to-occurrence and intake-transition identities; discovery attempts, actions, and diagnostic episodes append exact transition identities"
       - "Canonical occurrence records atomically bind prepared or uncertain delivery, terminal outcomes, and ordered projection outbox bytes; persisted sender leases and PID authority do not exist"
       - "A committed or reconciled ordinary Patrol pull request atomically appends its exact terminal receipt bytes as a typed publication outbox entry; StateStore alone projects that entry to one immutable publication_binding before tuple acknowledgement"
       - "EvidenceStore is an append-only bounded observational projection under module-runtime/migration/patrol-evidence and is never consulted for retry"
@@ -294,13 +294,13 @@ components:
       - "PatrolEffectIndex is a bounded pure run-wide duplicate projection, and PatrolQualification counts unique trigger/repository/SHA/change-window decision identities and derives immutable completeness and diversity findings without executing scenarios or recovering effects"
       - "ReportProjection merges deterministic and installed-live qualifications without mutation authority, except that an exact superseding contradiction may invalidate its qualified lane; ReportMigration alone converts the complete released v1 report shape while validating and crash-repairing immutable source, archive, and receipt provenance"
       - "ActionRunner and RefactorPatrolScheduler decide product work; composed action/discovery transition coordinators own durable transition identities, claim fences, and replay"
-      - "JobStoreFiles is the sole descriptor-confined physical I/O port for live v3 jobs, query indexes, quarantine evidence, and action locks; JobQueryIndex owns only their bounded logical projection"
-      - "JobStore authority is fixed at refactor_patrol/v3; construction and read-only queries do not create state, while the first mutation lazily creates only v3 and never inspects v2/jobs"
+      - "JobStoreFiles is the sole descriptor-confined physical I/O port for live v4 jobs, query indexes, quarantine evidence, and action locks; JobQueryIndex owns only their bounded logical projection"
+      - "JobStore authority is fixed at refactor_patrol/v4; construction and read-only queries do not create state, while the first mutation lazily creates only v4 and never inspects opaque v3 jobs"
     schema_contracts:
       - "hive-patrol-capture v1 and hive-patrol-effect-receipt v1 are strict canonical observation records"
       - "hive-patrol-evidence-receipt v1 binds candidate, scenario, repository, artifact, capture, effect, fault-step, reviewer, and configuration identities"
       - "hive-module-migration-report v2 is the strict two-lane projection over unique comparable decision identities, decision-class, repository-SHA, and change-window diversity; an explicitly migrated empty projection records evidence_required rather than qualification"
-      - "hive-refactor-patrol-job v3 is the sole runtime JobStore schema; released v2 jobs have no compatibility reader or converter"
+      - "hive-refactor-patrol-job v4 is the sole runtime JobStore schema; released v3 jobs remain opaque and have no compatibility reader or converter"
       - "hive-patrol-occurrence-recovery-index v1 is a bounded rebuildable active-ID projection tied to the journal-state recovery generation; occurrence records remain authoritative"
     lock_contracts:
       - "Persist intent before shared migration admission; under live owner, epoch, config, module-generation, capability, and claim checks, one process-local keyed mutex plus one stable mode-0600 flock serializes each sender"

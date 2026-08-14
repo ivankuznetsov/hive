@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/modules/migration/occurrence_*.rb, lib/hive/modules/migration/patrol_*.rb, lib/hive/modules/migration/shadow_*.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-08-13
+updated: 2026-08-14
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
 ---
 
@@ -647,7 +647,7 @@ recovery authority: occurrence records retain authoritative effects and
 projection outbox bytes, while neither coordination file can authorize work.
 StateStore and JobStore remain the separate product-facing owners, and
 observational EvidenceStore records are never consulted to authorize a retry.
-JobStore establishes its admitted v3 namespace before any architecture
+JobStore establishes its admitted v4 namespace before any architecture
 recovery backoff or active-index repair can write coordination state. Semantic
 family dry-run resolution instead uses a read-only JobStore reader, so a
 preview cannot create that namespace or any other project state.
@@ -667,7 +667,7 @@ fresh inventory with no remaining live v1 record.
 
 ## Architecture-patrol split-generation state
 
-Only JobStore-owned authority uses v3. Manifests, semantic-family projections,
+Only JobStore-owned authority uses v4. Manifests, semantic-family projections,
 merge reconciliation, child results, runs, and logs retain their independent
 v2 owners:
 
@@ -681,17 +681,17 @@ v2 owners:
 │   ├── results/<dispatch-id>.json
 │   ├── runs/
 │   └── logs/
-└── v3/
+└── v4/
     ├── jobs/<job-id>.json                # sole current aggregate authority
     ├── occurrences/records/              # effects and exact receipts
     ├── occurrences/recovery-index.json   # bounded active-record locator
     └── indexes/job-query/                # rebuildable ordered query index
 ```
 
-A fresh project initializes the v3 namespace on its first authoritative
+A fresh project initializes the v4 namespace on its first authoritative
 mutation. Construction and read-only job queries do not create it. JobStore
-never probes, reads, hashes, moves, deletes, or interprets `v2/jobs`; arbitrary
-v2 bytes are ignored, including when a non-empty v3 store already exists. The
+never probes, reads, hashes, moves, deletes, or interprets `v3/jobs`; arbitrary
+v3 bytes are ignored, including when a non-empty v4 store already exists. The
 other live v2 owners and the separate global terminal-proof catalog remain
 independent and unchanged.
 
@@ -765,16 +765,18 @@ consumed set is impossible state and is quarantined before any GitHub call.
 
 The job aggregate remains the only completion authority. It stores the
 enqueue-time policy snapshot, one pinned `analysis_sha`,
-feature-level completion/errors, immutable accepted/flagged/suppressed thesis
+feature-level completion/errors, immutable `fix`/`discuss`/`dismiss` thesis
 snapshots, claims and fencing generations, action ownership, attempts,
 creation intents, validation/patch/PR/issue/handoff receipts, and parent
 completeness. Writes use a locked atomic tempfile/fsync/rename transition and
 the shared `Hive::AtomicFile.fsync_directory` policy to persist directory-entry
-changes where the platform supports directory fsync.
+changes where the platform supports directory fsync. Current JobStore authority
+is v4; v3 is left byte-identical and opaque, and the first current mutation
+starts a fresh v4 store.
 
-V2 discovery materializes `analysis_sha` at
+Architecture discovery materializes `analysis_sha` at
 `<worktree_root>/.refactor-patrol/analysis/<job-id>` as an ephemeral detached,
-clean worktree. Source mapping, leverage scoring, and review use only that
+clean worktree. Source mapping and review use only that
 tree; manifests, job aggregates, collision state, logs, and result receipts
 remain under the registered project's `.hive-state`. The tree is validated at
 feature checkpoints and removed before successful completion. An interrupted

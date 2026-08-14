@@ -17,7 +17,7 @@ metadata:
 platform: openclaw
 invocation: /hive
 skill-version: 0.1.5
-canonical-digest: cb86207d63d6e89a6473e4dc29cd6da25f417d02a823bf40ff0ad0a02be6dc9f
+canonical-digest: c7647f974ed3e60775b3f9898e7ebff42b50c5dac625134485f7be5c560244fd
 hive-version: 0.7.2
 -->
 
@@ -75,7 +75,7 @@ rollback without the operator's explicit direction.
 - Read [workflow-actions.md](references/workflow-actions.md) for task creation, direct workflow verbs, daemon ownership, closed actions, and completion checks.
 - Read [recovery.md](references/recovery.md) for diagnosis, coordinator ownership, provider holds, stale workers, migration, and guarded recovery.
 - Read [patrol-health.md](references/patrol-health.md) when inspecting ordinary
-  Patrol findings or Architecture Patrol jobs, blockers, and accepted theses.
+  Patrol findings or Architecture Patrol jobs, blockers, and routed theses.
 - Read [setup-and-platforms.md](references/setup-and-platforms.md) for installation, initialization, agent-skill setup, and platform invocation conventions.
 - Read [release-candidate-qa.md](references/release-candidate-qa.md) for semantic E2E discovery, local candidate evidence, bounded hosted collection, retry semantics, and the explicit hosted-dispatch boundary.
 - Read [safety.md](references/safety.md) before any admin, force, credential, external-publication, deployment, or release-sensitive operation.

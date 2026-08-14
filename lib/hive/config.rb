@@ -441,28 +441,11 @@ module Hive
         "max_fixes_per_feature_per_cycle" => 1,
         "max_fix_attempts_per_cycle" => 6,
         "max_prs_per_cycle" => 3,
-        # Patrol tiers bound both input-plus-output tokens and agent launches. The
-        # launch ceilings are the provider-independent fail-safe when a CLI
-        # omits usable token accounting. Cached tokens remain visible in usage
-        # telemetry but do not consume Hive's input-plus-output ceilings.
-        "max_tokens_per_cycle" => 200_000,
-        "max_tokens_per_day" => 600_000,
-        "max_tokens_per_agent" => 50_000,
-        "max_agent_spawns_per_cycle" => 3,
-        "max_agent_spawns_per_day" => 8,
-        "max_architecture_review_spawns_per_day" => 8,
-        # Metered architecture launches follow merge demand and do not consume
-        # the ordinary daily count. Keep a separate durable backstop for a
-        # provider that repeatedly returns no usable token totals.
-        "max_architecture_unmetered_spawns_per_day" => 96,
-        "max_budget_usd_per_agent" => 25,
-        # Architecture discovery/fixing may use a wider per-cycle and
-        # per-agent envelope, but still shares the mode's daily token ceiling.
-        "architecture_budget_multiplier" => 2,
-        # Ordinary fix agents need edit/test/proof turns after inspection;
-        # widen only their per-agent stream cap while preserving cycle/day
-        # token and launch ceilings.
-        "fix_budget_multiplier" => 2,
+        # One deliberately high per-agent fuse stops a genuinely runaway child
+        # without turning normal Patrol work into daily/cycle allowance math.
+        # Provider quotas and the existing wall-clock/process-custody bounds
+        # remain independent safety fences.
+        "max_tokens_per_agent" => 100_000_000,
         # Open ready (non-draft) PRs by default so the babysitter — which
         # skips draft PRs — picks them up. Set `draft_prs: true` per project
         # to revert to draft PRs that need a manual "ready" toggle first.
@@ -516,14 +499,9 @@ module Hive
           # advertises workspace-write enforcement.
         },
         "issue_filing" => {
-          "enabled" => false,
-          # Avoid turning every cap warning into tracker noise. Issue filing
-          # is reserved for proposals with material, proposal-specific
-          # leverage in addition to a strategic routing reason.
-          "min_leverage_score" => 0.25
+          "enabled" => false
         },
         "min_confidence" => "medium",
-        "min_leverage_score" => 0.10,
         "max_theses_per_feature" => 1,
         "max_theses_per_run" => 10,
         # One architecture-discovery child must never multiply the per-agent
@@ -552,16 +530,6 @@ module Hive
           "allow_dependency_bumps" => false,
           "allow_public_api_changes" => false,
           "allow_cross_feature" => true
-        },
-        "leverage" => {
-          "weights" => {
-            "churn" => 0.3,
-            "fan_in" => 0.25,
-            "complexity" => 0.25,
-            "coupling" => 0.2,
-            "bug_density" => 0.0,
-            "coverage_gap" => 0.0
-          }
         },
         "review" => {
           "max_context_files" => 6,
@@ -3132,44 +3100,20 @@ module Hive
       "ultrapatrol" => {
         "trigger" => "timer",
         "poll_interval_sec" => 1800,
-        "max_tokens_per_cycle" => 800_000,
-        "max_tokens_per_day" => 2_400_000,
-        "max_tokens_per_agent" => 100_000,
-        "max_agent_spawns_per_cycle" => 10,
-        "max_agent_spawns_per_day" => 36,
-        "max_budget_usd_per_agent" => 100,
         "enabled" => true
       },
       "high" => {
         "trigger" => "timer",
         "poll_interval_sec" => 7200,
-        "max_tokens_per_cycle" => 400_000,
-        "max_tokens_per_day" => 1_200_000,
-        "max_tokens_per_agent" => 75_000,
-        "max_agent_spawns_per_cycle" => 6,
-        "max_agent_spawns_per_day" => 18,
-        "max_budget_usd_per_agent" => 50,
         "enabled" => true
       },
       "medium" => {
         "trigger" => "timer",
         "poll_interval_sec" => 14_400,
-        "max_tokens_per_cycle" => 200_000,
-        "max_tokens_per_day" => 600_000,
-        "max_tokens_per_agent" => 50_000,
-        "max_agent_spawns_per_cycle" => 3,
-        "max_agent_spawns_per_day" => 8,
-        "max_budget_usd_per_agent" => 25,
         "enabled" => true
       },
       "low" => {
         "trigger" => "new_commits",
-        "max_tokens_per_cycle" => 100_000,
-        "max_tokens_per_day" => 200_000,
-        "max_tokens_per_agent" => 40_000,
-        "max_agent_spawns_per_cycle" => 1,
-        "max_agent_spawns_per_day" => 2,
-        "max_budget_usd_per_agent" => 10,
         "enabled" => true
       },
       "off" => {
@@ -3185,15 +3129,7 @@ module Hive
       [ "max_fixes_per_feature_per_cycle", 1 ],
       [ "max_fix_attempts_per_cycle", 1 ],
       [ "max_prs_per_cycle", 1 ],
-      [ "max_tokens_per_cycle", 1 ],
-      [ "max_tokens_per_day", 1 ],
       [ "max_tokens_per_agent", 1 ],
-      [ "max_agent_spawns_per_cycle", 1 ],
-      [ "max_agent_spawns_per_day", 1 ],
-      [ "max_architecture_review_spawns_per_day", 1 ],
-      [ "max_architecture_unmetered_spawns_per_day", 1 ],
-      [ "architecture_budget_multiplier", 1 ],
-      [ "fix_budget_multiplier", 1 ]
     ].freeze
 
     def validate_patrol!(cfg, source_path)
@@ -3257,13 +3193,6 @@ module Hive
         raise ConfigError,
               "patrol.min_alpha_to_fix in #{describe_source(source_path)} must be <= 100; " \
               "got #{patrol['min_alpha_to_fix'].inspect}"
-      end
-
-      per_agent_budget = patrol["max_budget_usd_per_agent"]
-      unless per_agent_budget.is_a?(Numeric) && per_agent_budget.positive?
-        raise ConfigError,
-              "patrol.max_budget_usd_per_agent in #{describe_source(source_path)} must be a positive number; " \
-              "got #{per_agent_budget.inspect} (#{per_agent_budget.class})"
       end
 
       validate_agent_name!(patrol["agent"], "patrol.agent", source_path)
@@ -3342,15 +3271,6 @@ module Hive
       "max_theses_per_run" => 1,
       "max_review_seconds_per_run" => 1
     }.freeze
-    REFACTOR_PATROL_WEIGHT_KEYS = %w[
-      churn
-      fan_in
-      complexity
-      coupling
-      bug_density
-      coverage_gap
-    ].freeze
-
     def validate_refactor_patrol!(cfg, source_path)
       refactor = cfg["refactor_patrol"]
       return if refactor.nil?
@@ -3368,13 +3288,6 @@ module Hive
               "#{REFACTOR_PATROL_CONFIDENCE_LEVELS.inspect}; got #{confidence.inspect} (#{confidence.class})"
       end
 
-      leverage_score = refactor["min_leverage_score"]
-      unless leverage_score.is_a?(Numeric) && leverage_score.between?(0, 1)
-        raise ConfigError,
-              "refactor_patrol.min_leverage_score in #{describe_source(source_path)} " \
-              "must be a number between 0 and 1; got #{leverage_score.inspect} (#{leverage_score.class})"
-      end
-
       REFACTOR_PATROL_NUMERIC_BOUNDS.each do |key, min|
         validate_integer_min!(refactor[key], "refactor_patrol.#{key}", min, source_path)
       end
@@ -3384,7 +3297,6 @@ module Hive
       validate_path_glob_list!(refactor["exclude"], "refactor_patrol.exclude", source_path)
       validate_refactor_patrol_commands!(refactor, source_path)
       validate_refactor_patrol_caps!(refactor, source_path)
-      validate_refactor_patrol_leverage!(refactor, source_path)
       validate_refactor_patrol_review!(refactor, source_path)
     end
 
@@ -3398,14 +3310,6 @@ module Hive
 
       validate_required_boolean!(gate["enabled"], "refactor_patrol.#{key}.enabled", source_path)
       validate_refactor_patrol_identity!(gate, "refactor_patrol.auto_fix", source_path) if key == "auto_fix"
-      if key == "issue_filing"
-        score = gate["min_leverage_score"]
-        unless score.is_a?(Numeric) && score.between?(0, 1)
-          raise ConfigError,
-                "refactor_patrol.issue_filing.min_leverage_score in #{describe_source(source_path)} " \
-                "must be a number between 0 and 1; got #{score.inspect} (#{score.class})"
-        end
-      end
     end
 
     def validate_refactor_patrol_identity!(block, label, source_path)
@@ -3457,39 +3361,6 @@ module Hive
 
       REFACTOR_PATROL_CAP_BOOLEAN_KEYS.each do |key|
         validate_boolean!(caps[key], "refactor_patrol.caps.#{key}", source_path)
-      end
-    end
-
-    def validate_refactor_patrol_leverage!(refactor, source_path)
-      leverage = refactor["leverage"]
-      unless leverage.is_a?(Hash)
-        raise ConfigError,
-              "refactor_patrol.leverage in #{describe_source(source_path)} must be a Hash; " \
-              "got #{leverage.inspect} (#{leverage.class})"
-      end
-
-      weights = leverage["weights"]
-      unless weights.is_a?(Hash)
-        raise ConfigError,
-              "refactor_patrol.leverage.weights in #{describe_source(source_path)} must be a Hash; " \
-              "got #{weights.inspect} (#{weights.class})"
-      end
-
-      REFACTOR_PATROL_WEIGHT_KEYS.each do |key|
-        value = weights[key]
-        next if value.is_a?(Numeric) && value >= 0
-
-        raise ConfigError,
-              "refactor_patrol.leverage.weights.#{key} in #{describe_source(source_path)} must be a number >= 0; " \
-              "got #{value.inspect} (#{value.class})"
-      end
-
-      # An all-zero weight set produces an empty leverage breakdown, which fails
-      # the thesis schema's expected_leverage.breakdown.minProperties and
-      # silently drops every thesis; require at least one positive weight.
-      unless REFACTOR_PATROL_WEIGHT_KEYS.any? { |key| weights[key].is_a?(Numeric) && weights[key].positive? }
-        raise ConfigError,
-              "refactor_patrol.leverage.weights in #{describe_source(source_path)} must have at least one positive weight"
       end
     end
 

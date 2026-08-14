@@ -364,20 +364,9 @@ patrol:
   # Bound expensive fix-agent work even when findings are stale or fail validation.
   max_fix_attempts_per_cycle: 6
   max_prs_per_cycle: 3
-  # Streamed usage stops ordinary review agents at the mode's per-agent token
-  # allowance. Fix agents get 2x per-agent headroom for edit/test/proof turns,
-  # while architecture gets 2x the ordinary allowance plus 2x the per-cycle
-  # token/launch envelope. Architecture launch count follows merged-PR demand;
-  # the shared UTC-day token and native budget guards still apply.
-  # max_tokens_per_agent: 50000
-  # fix_budget_multiplier: 2
-  # architecture_budget_multiplier: 2
-  # Metered architecture checks follow merge volume rather than the ordinary
-  # daily launch count. This higher, separate ceiling only stops repeated
-  # architecture launches whose provider omits all token accounting.
-  # max_architecture_unmetered_spawns_per_day: 96
-  # Bound architecture discovery fan-out independently from auto-fix work.
-  # max_architecture_review_spawns_per_day: 8
+  # One deliberately high per-agent fuse stops a genuinely runaway child.
+  # Normal work is not constrained by shared daily/cycle token allowances.
+  max_tokens_per_agent: 100000000
   # Open ready (non-draft) PRs by default so the babysitter — which skips
   # draft PRs — picks them up. Set true to open draft PRs instead.
   draft_prs: false
@@ -444,10 +433,9 @@ patrol:
 # disabled discovery policy.
 refactor_patrol:
   enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
-  # Admit small but repeated ownership costs; evidence and safety gates still apply.
-  min_leverage_score: 0.10
   # Absolute wall-clock budget shared by every feature review in one child.
-  # Unfinished features remain durable and resume in a later patrol run.
+  # Unfinished features remain durable and resume in a later patrol run. Hive
+  # also applies a fixed 12-slice runaway guard without another config knob.
   max_review_seconds_per_run: 3600
   auto_fix:
     enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
@@ -458,7 +446,6 @@ refactor_patrol:
     public_contract: null
   issue_filing:
     enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
-    min_leverage_score: 0.25
 
 # Auto-rebase pre-step for `hive run` (plan
 # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md).

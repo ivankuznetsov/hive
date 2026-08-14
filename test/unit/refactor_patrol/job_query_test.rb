@@ -615,7 +615,7 @@ class HiveRefactorPatrolJobQueryTest < Minitest::Test
       "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => false },
       "state" => "blocked",
       "complete" => false,
-      "dispositions" => { "accepted" => [], "flagged" => [], "suppressed" => [] },
+      "dispositions" => { "fix" => [], "discuss" => [], "dismiss" => [] },
       "feature_results" => [],
       "review_errors" => [],
       "zero_reason" => nil,

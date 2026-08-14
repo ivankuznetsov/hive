@@ -30,3 +30,7 @@ tags: [artifacts, evidence, review, web, recovery]
   JSON keys, scanning semantic text and visual OCR for secret-shaped content,
   validating the full package before recovery, and giving reviewers the frozen
   task, plan, and exact diff context.
+- Bound the standard `4-execute` worktree pointer to its controller-read base
+  before the implementer starts, then upgraded the real-CLI full-pipeline
+  scenario to run inference, scoped production, retained custody, independent
+  review, accepted publication, and archive instead of seeding a legacy marker.

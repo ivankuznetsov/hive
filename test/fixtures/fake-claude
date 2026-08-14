@@ -31,6 +31,65 @@ ARGV_LOG="${LOG_DIR}/fake-claude-argv.log"
   done
 } >> "$ARGV_LOG"
 
+# Real-CLI outcome-evidence fixture. One `hive artifacts` invocation launches
+# three independent roles, so a single static fake response cannot exercise
+# the controller contract. Route only the controller-owned role prompts and
+# produce a tiny, real two-file document package whose sizes and hashes are
+# checked by production code.
+# Role detection is prompt-based because production intentionally launches
+# these agents with an isolated environment that drops harness-only variables.
+prompt_blob=$(printf '%s\n' "$@")
+if [[ "${!#:-}" == "-" ]]; then
+  stdin_prompt=$(cat)
+  prompt_blob=$(printf '%s\n%s' "$prompt_blob" "$stdin_prompt")
+fi
+
+emit_final_message() {
+  ruby -rjson -e 'puts JSON.generate({ "type" => "result", "result" => ARGV.fetch(0) })' "$1"
+}
+
+if [[ "$prompt_blob" == *"outcome-evidence inference role"* ||
+      "$prompt_blob" == *"outcome-evidence producer"* ||
+      "$prompt_blob" == *"independent outcome-evidence reviewer"* ]]; then
+  if [[ "$prompt_blob" == *"outcome-evidence inference role"* ]]; then
+    emit_final_message '{"claims":[{"id":"implemented-demo-pipeline","statement":"The requested demo pipeline implementation is present in the frozen source range.","proof_kind":"document","changed_paths":["implementation.txt"]}],"exclusions":[]}'
+    exit 0
+  fi
+
+  if [[ "$prompt_blob" == *"outcome-evidence producer"* ]]; then
+    writable_root=$(printf '%s\n' "$prompt_blob" | sed -n 's/^Controller-owned evidence-write root: //p' | head -n 1)
+    relative_root=$(printf '%s\n' "$prompt_blob" | sed -n 's|^Required task-relative representation path prefix: \(.*\)/$|\1|p' | head -n 1)
+    source_worktree=$(printf '%s\n' "$prompt_blob" | sed -n 's/^Frozen source worktree (read only): //p' | head -n 1)
+    if [[ -z "$writable_root" || -z "$relative_root" || -z "$source_worktree" ]]; then
+      printf '%s\n' 'fake-claude: outcome-evidence producer prompt is missing controller paths' >&2
+      exit 64
+    fi
+
+    mkdir -p "$writable_root"
+    printf '%s\n' 'The frozen implementation adds implementation.txt with the requested demo behavior.' > "$writable_root/original.md"
+    printf '%s\n' 'Reviewed implementation.txt: it contains the committed demo implementation marker.' > "$writable_root/review.txt"
+    original_sha=$(sha256sum "$writable_root/original.md" | cut -d' ' -f1)
+    review_sha=$(sha256sum "$writable_root/review.txt" | cut -d' ' -f1)
+    original_bytes=$(wc -c < "$writable_root/original.md" | tr -d ' ')
+    review_bytes=$(wc -c < "$writable_root/review.txt" | tr -d ' ')
+    source_sha=$(git -C "$source_worktree" rev-parse HEAD)
+    printf -v final_message '{"evidence":[{"kind":"document","summary":"Committed document evidence for the demo pipeline implementation.","claims":["implemented-demo-pipeline"],"source":{"type":"task","name":"artifact-agent","source_sha":"%s"},"representations":[{"role":"original","media_type":"text/markdown","rendering":"original","path":"%s/original.md","sha256":"%s","bytes":%s},{"role":"review","media_type":"text/plain","rendering":"escaped_text","path":"%s/review.txt","sha256":"%s","bytes":%s}]}]}' \
+      "$source_sha" "$relative_root" "$original_sha" "$original_bytes" \
+      "$relative_root" "$review_sha" "$review_bytes"
+    emit_final_message "$final_message"
+    exit 0
+  fi
+
+  if [[ "$prompt_blob" == *"independent outcome-evidence reviewer"* ]]; then
+    original_sha=$(printf '%s\n' 'The frozen implementation adds implementation.txt with the requested demo behavior.' | sha256sum | cut -d' ' -f1)
+    review_sha=$(printf '%s\n' 'Reviewed implementation.txt: it contains the committed demo implementation marker.' | sha256sum | cut -d' ' -f1)
+    printf -v final_message '{"inspected_hashes":["%s","%s"],"verdicts":[{"target_id":"implemented-demo-pipeline","verdict":"accepted","reason":"Both retained representations match the frozen committed implementation and directly support the requested outcome."}]}' \
+      "$original_sha" "$review_sha"
+    emit_final_message "$final_message"
+    exit 0
+  fi
+fi
+
 if [[ -n "${HIVE_FAKE_CLAUDE_OUTPUT:-}" ]]; then
   printf '%s\n' "${HIVE_FAKE_CLAUDE_OUTPUT}"
 fi

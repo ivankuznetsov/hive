@@ -869,6 +869,8 @@ path: /home/asterio/Dev/<project>.worktrees/<slug>
 branch: <slug>
 created_at: <UTC-ISO>
 execute_base_head: <sha>
+base_branch: <branch>
+base_oid: <sha>
 ```
 
 Runtime coding stages read the pointer through
@@ -876,7 +878,10 @@ Runtime coding stages read the pointer through
 `<worktree_root>/<slug>` path and slug branch, current Git worktree
 registration, and the same repository common directory. The permissive
 `read_pointer` remains for compatibility cleanup/inspection only. See
-[[modules/worktree]].
+[[modules/worktree]]. On initial `4-execute`, `execute_base_head` and
+`base_oid` are the same controller-read commit before the implementation agent
+starts. The former remains the execution-loop baseline; the latter is the
+durable lower bound for the later outcome-evidence range.
 
 ### Managed draft-PR receipt
 

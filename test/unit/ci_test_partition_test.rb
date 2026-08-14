@@ -11,6 +11,8 @@ class CiTestPartitionTest < Minitest::Test
     HIVE_CI_GATE_TESTS
     HIVE_CI_GATE_TEST_OPTIONS
     HIVE_DEFAULT_TEST_FILES
+    HIVE_COVERAGE_SHARD_COUNT
+    HIVE_COVERAGE_SHARDS
     HIVE_HOSTILE_TEST_FILES
   ].freeze
 
@@ -40,6 +42,25 @@ class CiTestPartitionTest < Minitest::Test
       assert gate_tests.keys.all? { |name|
         Rake::Task[name].prerequisites == [ "test:require_nonempty_ci_gate" ]
       }
+    end
+  end
+
+  def test_coverage_shards_are_complete_disjoint_and_size_balanced
+    with_loaded_rakefile do
+      files = Object.const_get(:HIVE_DEFAULT_TEST_FILES)
+      shard_count = Object.const_get(:HIVE_COVERAGE_SHARD_COUNT)
+      shards = Object.const_get(:HIVE_COVERAGE_SHARDS)
+
+      assert_equal 4, shard_count
+      assert_equal shard_count, shards.length
+      assert_equal files.sort, shards.flatten.sort
+      assert_equal files.length, shards.flatten.uniq.length
+      assert shards.all?(&:frozen?)
+      assert shards.frozen?
+
+      byte_counts = shards.map { |shard| shard.sum { |path| File.size(File.join(ROOT, path)) } }
+      assert_operator byte_counts.max - byte_counts.min, :<, 10_000,
+                      "coverage shard source bytes should remain balanced: #{byte_counts.inspect}"
     end
   end
 
@@ -74,7 +95,41 @@ class CiTestPartitionTest < Minitest::Test
       assert_equal 'bundle exec rake "$HIVE_CI_GATE_TASK"', run_step.fetch("run")
       assert_equal "${{ matrix.task }}", run_step.fetch("env").fetch("HIVE_CI_GATE_TASK")
 
-      assert_equal "coverage (Ruby ${{ matrix.ruby }})", workflow.fetch("jobs").fetch("test").fetch("name")
+      coverage_shards = workflow.fetch("jobs").fetch("coverage-shards")
+      assert_equal "coverage shard ${{ matrix.label }}/4", coverage_shards.fetch("name")
+      assert_equal [
+        { "shard" => 0, "label" => 1 },
+        { "shard" => 1, "label" => 2 },
+        { "shard" => 2, "label" => 3 },
+        { "shard" => 3, "label" => 4 }
+      ], coverage_shards.dig("strategy", "matrix", "include")
+      collect = coverage_shards.fetch("steps").find { |step| step["name"] == "Collect coverage shard" }
+      assert_equal "bundle exec rake coverage:collect", collect.fetch("run")
+      assert_equal "${{ matrix.shard }}", collect.fetch("env").fetch("HIVE_COVERAGE_SHARD_INDEX")
+      assert_equal "4", collect.fetch("env").fetch("HIVE_COVERAGE_SHARD_COUNT")
+      assert_equal "shard-${{ matrix.shard }}", collect.fetch("env").fetch("HIVE_COVERAGE_RUN_ID")
+
+      upload = coverage_shards.fetch("steps").find { |step| step["name"] == "Retain raw coverage results" }
+      assert_equal UPLOAD_ARTIFACT_ACTION, upload.fetch("uses")
+      assert_equal "always()", upload.fetch("if")
+      assert_equal "coverage-shard-${{ matrix.shard }}", upload.dig("with", "name")
+      assert_equal "coverage/.resultset/shard-${{ matrix.shard }}", upload.dig("with", "path")
+      assert_equal true, upload.dig("with", "include-hidden-files")
+      assert_equal "error", upload.dig("with", "if-no-files-found")
+
+      coverage_gate = workflow.fetch("jobs").fetch("test")
+      assert_equal "coverage (Ruby 3.4)", coverage_gate.fetch("name")
+      assert_equal "coverage-shards", coverage_gate.fetch("needs")
+      download = coverage_gate.fetch("steps").find { |step| step["name"] == "Download coverage shards" }
+      assert_equal DOWNLOAD_ARTIFACT_ACTION, download.fetch("uses")
+      assert_equal "coverage-shard-*", download.dig("with", "pattern")
+      assert_equal "coverage/.resultset/merged", download.dig("with", "path")
+      assert_equal true, download.dig("with", "merge-multiple")
+      merge = coverage_gate.fetch("steps").find { |step| step["name"] == "Merge shards and enforce exact coverage" }
+      assert_equal "bundle exec rake coverage:report", merge.fetch("run")
+      assert_equal "100", merge.fetch("env").fetch("HIVE_COVERAGE_MIN_LINE")
+      assert_equal "merged", merge.fetch("env").fetch("HIVE_COVERAGE_RUN_ID")
+
       required_gate = workflow.fetch("jobs").fetch("required-test-gate")
       assert_equal "rake test (Ruby 3.4)", required_gate.fetch("name")
       assert_equal "${{ always() }}", required_gate.fetch("if")

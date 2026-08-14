@@ -140,6 +140,17 @@ class HiveTestCoverageTest < Minitest::Test
     assert HiveTestCoverage.coverage_ok?(report)
   end
 
+  def test_collect_only_mode_is_explicit_and_does_not_change_the_percentage_threshold
+    with_env("HIVE_COVERAGE_COLLECT_ONLY" => "1") do
+      assert HiveTestCoverage.collect_only?
+      assert_equal 100.0, HiveTestCoverage.minimum_line_percent
+    end
+
+    with_env("HIVE_COVERAGE_COLLECT_ONLY" => nil) do
+      refute HiveTestCoverage.collect_only?
+    end
+  end
+
   def test_coverage_gate_keeps_non_percentage_failures_at_full_line_coverage
     report = {
       "line_total" => 3,

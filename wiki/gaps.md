@@ -9,6 +9,21 @@ tags: [gap, todo, release-proof, agent-skills]
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
+## Sharded CI coverage needs exact-head hosted timing (2026-08-14)
+
+The four-way coverage collector and downstream exact merge are locally pinned
+at the harness level: all four disjoint file partitions ran, and their 1,546
+raw process results merged to 84,609/84,609 covered executable lines with no
+unloaded files or result errors. Three collectors were green. The fourth
+completed in 560 seconds but one 0.5-second subprocess-start assertion lost a
+race while another repository-wide test process saturated the host; that test
+passed immediately in an isolated coverage reproduction. The source-byte
+heuristic is intentionally only an initial partition, and local green shard
+wall times ranged from 187 to 486 seconds. Until a successful exact-head
+GitHub Actions run proves artifact
+download/merge behavior and exposes isolated hosted shard timings, do not quote
+a hosted before/after improvement or treat the current partition as balanced.
+
 ## Provider-routing trusted captures (updated 2026-08-11)
 
 The U1 provider-routing policy includes a sanitized provenance inventory for

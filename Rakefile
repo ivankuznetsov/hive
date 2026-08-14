@@ -20,6 +20,20 @@ HIVE_CI_GATE_TEST_OPTIONS = {
 HIVE_DEFAULT_TEST_FILES = FileList[
   "test/{unit,integration,babysitter}/**/*_test.rb"
 ].exclude(*HIVE_CI_GATE_TESTS.values).to_a.freeze
+HIVE_COVERAGE_SHARD_COUNT = 4
+HIVE_COVERAGE_SHARDS = begin
+  shards = Array.new(HIVE_COVERAGE_SHARD_COUNT) { [] }
+  shard_bytes = Array.new(HIVE_COVERAGE_SHARD_COUNT, 0)
+
+  HIVE_DEFAULT_TEST_FILES.sort_by { |path| [ -File.size(path), path ] }.each do |path|
+    shard = shard_bytes.each_index.min_by { |index| [ shard_bytes[index], index ] }
+    shards.fetch(shard) << path
+    shard_bytes[shard] += File.size(path)
+  end
+
+  shards.each(&:freeze)
+  shards.freeze
+end
 HIVE_HOSTILE_TEST_FILES = FileList[
   "test/unit/packaging/workflow_creator_values_test.rb",
   "test/unit/packaging/patrol_evidence_candidate_test.rb",
@@ -61,7 +75,7 @@ end
 desc "Run the default suite with merged stdlib Coverage reporting and a 100% line threshold"
 task :coverage do
   root = File.expand_path(__dir__)
-  run_id = "#{Process.pid}-#{SecureRandom.hex(4)}"
+  run_id = ENV.fetch("HIVE_COVERAGE_RUN_ID") { "#{Process.pid}-#{SecureRandom.hex(4)}" }
   report_path = File.join(root, "coverage", "coverage.json")
   env_keys = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID RUBYOPT]
   old_env = env_keys.to_h { |key| [ key, ENV[key] ] }
@@ -89,6 +103,66 @@ task :coverage do
     abort HiveTestCoverage.failure_message(report) unless HiveTestCoverage.coverage_ok?(report)
   ensure
     old_env.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
+end
+
+namespace :coverage do
+  coverage_shard_index = Integer(ENV["HIVE_COVERAGE_SHARD_INDEX"], exception: false)
+  coverage_shard_files = coverage_shard_index ? HIVE_COVERAGE_SHARDS.fetch(coverage_shard_index, []) : []
+
+  task :prepare_shard do
+    shard_index = Integer(ENV.fetch("HIVE_COVERAGE_SHARD_INDEX"))
+    shard_count = Integer(ENV.fetch("HIVE_COVERAGE_SHARD_COUNT"))
+    unless shard_count == HIVE_COVERAGE_SHARD_COUNT && shard_index.between?(0, shard_count - 1)
+      abort "coverage shard must be 0..#{HIVE_COVERAGE_SHARD_COUNT - 1} " \
+            "of #{HIVE_COVERAGE_SHARD_COUNT}"
+    end
+
+    root = File.expand_path(__dir__)
+    run_id = ENV.fetch("HIVE_COVERAGE_RUN_ID")
+    abort "HIVE_COVERAGE_RUN_ID must not be empty" if run_id.empty?
+
+    FileUtils.rm_rf(File.join(root, "coverage", ".resultset"))
+    FileUtils.rm_f(File.join(root, "coverage", "coverage.json"))
+    ENV["HIVE_COVERAGE"] = "1"
+    ENV["HIVE_COVERAGE_ROOT"] = root
+    ENV["HIVE_COVERAGE_COLLECT_ONLY"] = "1"
+    ENV["HIVE_COVERAGE_LOAD_ALL"] = shard_index.zero? ? "1" : "0"
+    ENV["HIVE_REQUIRE_TEST_RUNS"] = "1"
+    coverage_rubyopt = "-I#{File.join(root, 'test')} -rhive_coverage_boot"
+    ENV["RUBYOPT"] = [ coverage_rubyopt, ENV["RUBYOPT"] ].compact.join(" ")
+  rescue ArgumentError, KeyError
+    abort "coverage shard index, count, and run ID must be provided"
+  end
+
+  Rake::TestTask.new(run_shard: :prepare_shard) do |t|
+    t.libs << "test"
+    t.libs << "lib"
+    t.test_files = coverage_shard_files
+    t.warning = false
+  end
+  Rake::Task["coverage:run_shard"].enhance([ "test:agent_cli_runtime" ]) if coverage_shard_index == 0
+
+  desc "Collect one deterministic CI coverage shard without applying the final percentage gate"
+  task collect: :run_shard do
+    run_id = ENV.fetch("HIVE_COVERAGE_RUN_ID")
+    resultset_dir = File.join(__dir__, "coverage", ".resultset", run_id)
+    process_results = Dir.glob(File.join(resultset_dir, "*.marshal"))
+    dump_errors = Dir.glob(File.join(resultset_dir, "*.error.json"))
+    abort "coverage shard wrote no process results to #{resultset_dir}" if process_results.empty?
+    abort "coverage shard recorded dump errors in #{resultset_dir}" if dump_errors.any?
+
+    puts "Collected #{process_results.length} coverage process result(s) for #{run_id}"
+  end
+
+  desc "Merge previously collected CI coverage artifacts and apply the exact coverage gate"
+  task :report do
+    root = File.expand_path(__dir__)
+    report_path = File.join(root, "coverage", "coverage.json")
+    HiveTestCoverage.configure!(root: root)
+    HiveTestCoverage.report!
+    report = HiveTestCoverage.read_report(report_path)
+    abort HiveTestCoverage.failure_message(report) unless HiveTestCoverage.coverage_ok?(report)
   end
 end
 

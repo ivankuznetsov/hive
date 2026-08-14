@@ -48,9 +48,13 @@ module HiveTestCoverage
 
     Minitest.after_run do
       dump_process_result!
-      report!
+      report! unless collect_only?
     end
     @reporter_installed = true
+  end
+
+  def collect_only?
+    ENV["HIVE_COVERAGE_COLLECT_ONLY"] == "1"
   end
 
   def load_all_sources!

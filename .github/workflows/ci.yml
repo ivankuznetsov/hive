@@ -14,13 +14,21 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: coverage (Ruby ${{ matrix.ruby }})
+  coverage-shards:
+    name: coverage shard ${{ matrix.label }}/4
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        ruby: ["3.4"]
+        include:
+          - shard: 0
+            label: 1
+          - shard: 1
+            label: 2
+          - shard: 2
+            label: 3
+          - shard: 3
+            label: 4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -29,12 +37,46 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: ${{ matrix.ruby }}
+          ruby-version: "3.4"
           bundler-cache: true
-      - name: Run minitest suite with merged coverage report
+      - name: Collect coverage shard
+        env:
+          HIVE_COVERAGE_RUN_ID: shard-${{ matrix.shard }}
+          HIVE_COVERAGE_SHARD_INDEX: ${{ matrix.shard }}
+          HIVE_COVERAGE_SHARD_COUNT: "4"
+        run: bundle exec rake coverage:collect
+      - name: Retain raw coverage results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-shard-${{ matrix.shard }}
+          path: coverage/.resultset/shard-${{ matrix.shard }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    name: coverage (Ruby 3.4)
+    needs: coverage-shards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Download coverage shards
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-shard-*
+          path: coverage/.resultset/merged
+          merge-multiple: true
+      - name: Merge shards and enforce exact coverage
         env:
           HIVE_COVERAGE_MIN_LINE: "100"
-        run: bundle exec rake coverage
+          HIVE_COVERAGE_RUN_ID: merged
+        run: bundle exec rake coverage:report
 
   expensive-test-gates:
     name: ${{ matrix.name }}

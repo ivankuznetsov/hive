@@ -52,10 +52,6 @@ sha256_file() {
   ruby -rdigest -e 'puts Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$1"
 }
 
-sha256_line() {
-  ruby -rdigest -e 'puts Digest::SHA256.hexdigest(ARGV.fetch(0) + "\n")' "$1"
-}
-
 if [[ "$prompt_blob" == *"outcome-evidence inference role"* ||
       "$prompt_blob" == *"outcome-evidence producer"* ||
       "$prompt_blob" == *"independent outcome-evidence reviewer"* ]]; then

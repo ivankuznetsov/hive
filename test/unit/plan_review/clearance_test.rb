@@ -30,6 +30,64 @@ class PlanReviewClearanceTest < Minitest::Test
     assert_match(/new linked plan/, result.required_action)
   end
 
+  def test_gated_finding_asks_for_approval_rather_than_an_answer
+    result = Hive::PlanReview::Clearance.evaluate(
+      level: "standard", coverage: complete_coverage,
+      findings: [ build_finding("gated_auto") ],
+      adapter_outcomes: %w[success success], verification_outcome: nil,
+      revision_required: false, revision_complete: false,
+      verification_complete: false
+    )
+
+    assert_equal "awaiting_decision", result.state
+    assert_match(/approve gated plan finding/, result.required_action)
+  end
+
+  def test_required_revision_precedes_verification
+    result = Hive::PlanReview::Clearance.evaluate(
+      level: "standard", coverage: complete_coverage, findings: [],
+      adapter_outcomes: %w[success success], verification_outcome: nil,
+      revision_required: true, revision_complete: false,
+      verification_complete: false
+    )
+
+    assert_equal "revising", result.state
+    assert_nil result.outcome
+    assert_equal "revise plan with accepted findings", result.required_action
+    refute result.execution_allowed
+  end
+
+  def test_completed_revision_waits_on_disposition_verification
+    result = Hive::PlanReview::Clearance.evaluate(
+      level: "standard", coverage: complete_coverage, findings: [],
+      adapter_outcomes: %w[success success], verification_outcome: nil,
+      revision_required: true, revision_complete: true,
+      verification_complete: false
+    )
+
+    assert_equal "verifying", result.state
+    assert_equal "run disposition verification", result.required_action
+    refute result.execution_allowed
+  end
+
+  def test_blocked_coverage_stops_clearance_with_a_waiver_action
+    result = Hive::PlanReview::Clearance.evaluate(
+      level: "mandatory",
+      coverage: complete_coverage + [
+        { "name" => "security", "required" => false, "status" => "failed" }
+      ],
+      findings: [], adapter_outcomes: %w[success success],
+      verification_outcome: "success", revision_required: false,
+      revision_complete: true, verification_complete: true
+    )
+
+    assert_equal "blocked", result.state
+    assert_equal "blocked", result.outcome
+    assert_equal "security", result.blockers.first.fetch("coverage")
+    assert_match(/waive named coverage/, result.required_action)
+    refute result.execution_allowed
+  end
+
   private
 
   def build_finding(classification)

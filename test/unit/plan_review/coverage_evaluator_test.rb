@@ -50,6 +50,47 @@ class PlanReviewCoverageEvaluatorTest < Minitest::Test
     assert waived.complete?
   end
 
+  def test_failed_verification_blocks_mandatory_and_degrades_standard
+    mandatory = Hive::PlanReview::CoverageEvaluator.evaluate(
+      level: "mandatory",
+      coverage: [ row("whole_document", true, "completed"), row("adversarial", true, "completed") ],
+      adapter_outcomes: %w[success success], verification_outcome: "failed"
+    )
+    standard = Hive::PlanReview::CoverageEvaluator.evaluate(
+      level: "standard",
+      coverage: [ row("whole_document", true, "completed"), row("adversarial", true, "completed") ],
+      adapter_outcomes: %w[success success], verification_outcome: "failed"
+    )
+
+    assert mandatory.blocked?
+    assert_equal(
+      { "owner" => "reviewer", "reason" => "verification_failed" },
+      mandatory.blockers.fetch(0)
+    )
+    # Core coverage is intact, so a standard review degrades instead of blocking.
+    assert standard.degraded?
+    assert_equal "partial_coverage", standard.degradation_reason
+  end
+
+  def test_malformed_coverage_entries_are_rejected
+    error = assert_raises(Hive::PlanReview::InvalidRecord) do
+      Hive::PlanReview::CoverageEvaluator.evaluate(
+        level: "standard", coverage: [ row("Whole Document", true, "completed") ]
+      )
+    end
+
+    assert_match(/invalid plan review coverage entry/, error.message)
+  end
+
+  def test_merge_infers_a_failed_status_when_the_reviewer_reports_nothing
+    merged = Hive::PlanReview::CoverageEvaluator.merge(
+      requested: [ row("whole_document", true, "requested") ],
+      observed: [], outcome: "success"
+    )
+
+    assert_equal "failed", merged.fetch(0).fetch("status")
+  end
+
   private
 
   def row(name, required, status)

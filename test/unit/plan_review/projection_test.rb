@@ -58,6 +58,38 @@ class PlanReviewProjectionTest < Minitest::Test
     refute summary.fetch("execution_allowed")
   end
 
+  def test_empty_summary_rejects_states_outside_the_record_vocabulary
+    assert_raises(ArgumentError) do
+      Hive::PlanReview::Projection.empty_summary(
+        state: "not-a-state", freshness_status: "not_initialized"
+      )
+    end
+    assert_raises(ArgumentError) do
+      Hive::PlanReview::Projection.empty_summary(
+        state: "uninitialized", freshness_status: "not-a-freshness"
+      )
+    end
+  end
+
+  def test_blocker_owner_falls_back_to_the_state_when_no_blocker_names_one
+    {
+      "awaiting_decision" => "operator", "retry_scheduled" => "provider",
+      "reviewing" => "agent", "revising" => "agent", "verifying" => "agent",
+      "blocked" => "hive"
+    }.each do |state, expected_owner|
+      summary = Hive::PlanReview::Projection.new(
+        Hive::PlanReview::Record.new(
+          record.to_h.merge(
+            "state" => state, "outcome" => state == "blocked" ? "blocked" : nil,
+            "execution_allowed" => false, "blockers" => []
+          )
+        )
+      ).summary
+
+      assert_equal expected_owner, summary.fetch("blocker_owner"), state
+    end
+  end
+
   private
 
   def record

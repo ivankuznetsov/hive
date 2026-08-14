@@ -687,7 +687,7 @@ module Hive
           record = store.fetch(context.attempt_id)
           unless record && record["project"] == @project &&
                  record["task_slug"] == @task.slug.to_s &&
-                 record["intended_stage"] == "7-artifacts" &&
+                 record["intended_stage"] == "7-artifacts" && # coding-scoped: durable ownership for the coding artifacts stage
                  record.ownership_generation == context.ownership_generation
             raise StoreError, "durable attempt does not own this artifacts generation"
           end

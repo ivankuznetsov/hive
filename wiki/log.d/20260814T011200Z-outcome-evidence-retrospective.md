@@ -16,6 +16,12 @@ tags: [artifacts, evidence, retrospective, custody, agents]
   are explicitly non-evidence for behavior claims.
 - Fixed role receipts when a provider uses its default model route rather than
   an explicit routing receipt.
+- Routed clean frozen-range resolution through the closed Agent Git Gate,
+  including bounded raw changed-path metadata and explicit dirty-submodule
+  detection, and registered the attempt store access as a read-only ownership
+  check rather than an alternate admission path.
+- Updated workflow integration fixtures to model controller-published accepted
+  evidence instead of restoring the retired agent-authored completion marker.
 - Retrospectively evaluated the 159-path conditional-plan-critique task. The new
   system inferred four outcome-specific proof requirements and two justified
   exclusions, accepted the exclusions, rejected three rounds of synthetic or

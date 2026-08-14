@@ -1,8 +1,8 @@
 require "digest"
 require "pathname"
+require "hive/agent_git_gate"
 require "hive/draft_pr_receipt"
 require "hive/artifacts/outcome_evidence/document"
-require "hive/managed_git"
 require "hive/worktree"
 
 module Hive
@@ -13,6 +13,7 @@ module Hive
       class Identity
         OID = /\A[0-9a-f]{40,64}\z/i
         SAFE_PATH_BYTES = 4 * 1024
+        MAX_GIT_OUTPUT_BYTES = 16 * 1024 * 1024
 
         def initialize(task:, project:, worktree_root: nil)
           @task = task
@@ -31,15 +32,12 @@ module Hive
           worktree = pointer.fetch("path")
           ensure_clean!(worktree)
 
-          head = oid!(git(worktree, "rev-parse", "HEAD").strip, "implementation head")
+          head = oid!(git_read!(worktree, :head_oid).strip, "implementation head")
           base = controller_base(pointer, handoff)
           verify_controller_head!(head, handoff)
-          git(worktree, "rev-parse", "--verify", "#{base}^{commit}")
+          git_read!(worktree, :commit_oid, oid: base)
           ancestor!(worktree, base, head)
-          merge_base = oid!(git(worktree, "merge-base", base, head).strip, "merge base")
-          unless merge_base == base
-            raise ResolutionError, "controller base is not the implementation merge base"
-          end
+          merge_base = base
 
           paths = changed_paths(worktree, base, head)
           if paths.empty?
@@ -129,23 +127,25 @@ module Hive
         end
 
         def ensure_clean!(worktree)
-          status = git(
-            worktree, "status", "--porcelain=v1", "-z",
-            "--untracked-files=all", "--ignore-submodules=none"
-          )
+          status = git_read!(worktree, :status)
           raise ResolutionError, "implementation worktree must be clean" unless status.empty?
         end
 
         def ancestor!(worktree, base, head)
-          git(worktree, "merge-base", "--is-ancestor", base, head)
-        rescue ResolutionError
+          result = Hive::AgentGitGate.read(
+            worktree, :ancestor, base_oid: base, head_oid: head,
+            max_stdout_bytes: MAX_GIT_OUTPUT_BYTES
+          )
+          return if result.success?
+
           raise ResolutionError, "controller base is not an ancestor of implementation head"
+        rescue Hive::AgentGitGate::Error => e
+          raise ResolutionError, "outcome-evidence Git failed: #{e.message}"
         end
 
         def changed_paths(worktree, base, head)
-          source = git(
-            worktree, "diff", "--raw", "--diff-filter=ACDMRTUXB",
-            "-z", "#{base}..#{head}", "--"
+          source = git_read!(
+            worktree, :raw_changed_paths, base_oid: base, head_oid: head
           )
           fields = source.split("\0", -1)
           fields.pop while fields.last == ""
@@ -178,13 +178,20 @@ module Hive
           oid
         end
 
-        def git(worktree, *args)
-          out, err, status = Hive::ManagedGit.capture3(worktree, *args)
-          return out if status.success?
+        def git_read!(worktree, operation, **parameters)
+          result = Hive::AgentGitGate.read(
+            worktree, operation,
+            max_stdout_bytes: MAX_GIT_OUTPUT_BYTES,
+            **parameters
+          )
+          return result.stdout if result.success?
 
-          diagnostic = err.to_s.strip
-          diagnostic = out.to_s.strip if diagnostic.empty?
+          diagnostic = result.stderr.to_s.strip
+          diagnostic = result.stdout.to_s.strip if diagnostic.empty?
+          diagnostic = "bounded output exceeded" if result.overflow
           raise ResolutionError, "outcome-evidence Git failed: #{diagnostic}"
+        rescue Hive::AgentGitGate::Error => e
+          raise ResolutionError, "outcome-evidence Git failed: #{e.message}"
         end
       end
     end

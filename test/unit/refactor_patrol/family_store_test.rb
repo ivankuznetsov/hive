@@ -650,7 +650,7 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
       "job_id" => "job-1",
       "source" => source,
       "dispositions" => {
-        "flagged" => [ { "id" => thesis.id, "thesis" => thesis_snapshot } ]
+        "discuss" => [ { "id" => thesis.id, "thesis" => thesis_snapshot } ]
       },
       "actions" => [
         {
@@ -687,19 +687,19 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
         "state" => "classified",
         "complete" => false,
         "dispositions" => {
-          "accepted" => [],
-          "flagged" => [
+          "fix" => [],
+          "discuss" => [
             {
               "id" => item.id,
               "feature_id" => item.feature_id,
               "fingerprint" => item.fingerprint,
-              "score" => 0.8,
+              "route" => "discuss",
               "admissible" => true,
               "reasons" => [ "cross_feature_impact" ],
               "thesis" => item.to_h
             }
           ],
-          "suppressed" => []
+          "dismiss" => []
         },
         "feature_results" => [],
         "review_errors" => [],
@@ -746,12 +746,8 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
         "owned_files" => %w[services/checkout/authorize.ts services/checkout/route.ts],
         "entrypoints" => [ "services/checkout/route.ts" ]
       },
-      feature_hotspot: {},
-      expected_leverage: {
-        "drivers" => [
-          { "signal" => "coupling", "relief" => 0.5, "mechanism" => "Give checkout one validation policy" }
-        ]
-      },
+      route: "fix",
+      architecture_effects: [ "Give checkout one validation policy" ],
       confidence: "high",
       risk: {},
       required_validation: {},

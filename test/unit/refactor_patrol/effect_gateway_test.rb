@@ -309,9 +309,9 @@ class RefactorPatrolEffectGatewayTest < Minitest::Test
       "state" => "complete",
       "complete" => true,
       "dispositions" => {
-        "accepted" => [],
-        "flagged" => [],
-        "suppressed" => []
+        "fix" => [],
+        "discuss" => [],
+        "dismiss" => []
       },
       "feature_results" => [],
       "review_errors" => [],

@@ -316,7 +316,7 @@ module Hive
         )
         profile = Hive::AgentProfiles.lookup(@cfg.dig("patrol", "agent") || "claude", cfg: @cfg)
         launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :review)
-        unless @token_budget.acquire(stage: STAGE, minimum_tokens: launch.fetch(:minimum_tokens))
+        unless @token_budget.acquire(minimum_tokens: launch.fetch(:minimum_tokens))
           exhaustion = @token_budget.resource_exhaustion if @token_budget.respond_to?(:resource_exhaustion)
           return {
             status: :error,
@@ -332,10 +332,8 @@ module Hive
             prompt: prompt,
             add_dirs: [ @project_root ],
             cwd: @project_root,
-            max_budget_usd: @token_budget.max_budget_usd(
-              @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
-            ),
-            max_tokens: @token_budget.max_tokens(stage: STAGE),
+            max_budget_usd: nil,
+            max_tokens: @token_budget.max_tokens,
             max_turns: launch.fetch(:max_turns),
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
             log_label: STAGE,

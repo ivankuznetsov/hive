@@ -18,7 +18,7 @@ require "hive/worktree"
 
 module Hive
   module RefactorPatrol
-    # Applies one accepted thesis inside a deterministic isolated worktree and
+    # Applies one fix-routed thesis inside a deterministic isolated worktree and
     # returns publication evidence. It never pushes or mutates registered
     # trunk; PrOpener owns the external transition after these guards pass.
     class Fixer
@@ -45,7 +45,6 @@ module Hive
       end
 
       VALIDATION_NAMES = %w[docs format lint public_contract typecheck test].freeze
-      CONFIDENCE_ORDER = { "low" => 0, "medium" => 1, "high" => 2 }.freeze
 
       def initialize(project_root, cfg:, worktree_factory: nil, agent_runner: nil,
                      validator_factory: nil, public_contract_guard: Caps,
@@ -68,7 +67,7 @@ module Hive
       def attempt(thesis:, job_id:, analysis_sha:, canonical_action_id: nil,
                   reanalysis_depth: 0,
                   report_analysis_sha: analysis_sha)
-        return blocked("not_accepted", thesis: thesis) unless accepted?(thesis)
+        return blocked("not_fix_routed", thesis: thesis) unless fix_routed?(thesis)
 
         branch = branch_name(job_id, thesis.fingerprint, canonical_action_id)
         worktree = @worktree_factory.call(branch: branch)
@@ -177,11 +176,10 @@ module Hive
 
       private
 
-      def accepted?(thesis)
-        minimum = CONFIDENCE_ORDER.fetch(@cfg.dig("refactor_patrol", "min_confidence") || "medium", 1)
-        confidence = CONFIDENCE_ORDER.fetch(thesis.confidence.to_s, -1)
-        thesis.admissible == true && confidence >= minimum &&
-          Array(thesis.risk && thesis.risk["flags"]).empty?
+      def fix_routed?(thesis)
+        thesis.effective_route(
+          min_confidence: @cfg.dig("refactor_patrol", "min_confidence") || "medium"
+        ) == "fix"
       end
 
       def branch_name(job_id, fingerprint, canonical_action_id)
@@ -533,7 +531,7 @@ module Hive
         )
         profile = fix_profile
         launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :fix)
-        unless @token_budget.acquire(stage: STAGE, minimum_tokens: launch.fetch(:minimum_tokens))
+        unless @token_budget.acquire(minimum_tokens: launch.fetch(:minimum_tokens))
           exhaustion = @token_budget.resource_exhaustion if
             @token_budget.respond_to?(:resource_exhaustion)
           return {
@@ -547,10 +545,8 @@ module Hive
         begin
           result = Hive::Agent.new(
             task: task, prompt: prompt, add_dirs: [], cwd: worktree_path,
-            max_budget_usd: @token_budget.max_budget_usd(
-              @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
-            ),
-            max_tokens: @token_budget.max_tokens(stage: STAGE),
+            max_budget_usd: nil,
+            max_tokens: @token_budget.max_tokens,
             max_turns: launch.fetch(:max_turns),
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
             log_label: STAGE, profile: profile, status_mode: :exit_code_only,

@@ -144,7 +144,7 @@ module Hive
         features, feature_batch, reviewer, findings = with_scan_checkout(project_root, target_sha) do |scan_root|
           mapped = @mapper_factory.call(scan_root, cfg, state).call
           batch = Hive::Patrol::FeatureBatch.new(cfg: cfg, state: state).call(
-            mapped, target_sha: target_sha, limit: review_launch_limit(token_budget, cfg)
+            mapped, target_sha: target_sha
           )
           scan_reviewer = build_reviewer(scan_root, cfg, state, token_budget)
           reviewed = stamp_findings(
@@ -430,29 +430,10 @@ module Hive
         }
       end
 
-      # Reviewer calls consume the same cycle and daily launch envelope as
-      # fixers. Bound the selected feature batch to launches that can actually
-      # happen and, for a shipping cycle, reserve as much configured fix-attempt
-      # capacity as the current envelope permits. A zero- or one-launch
-      # remainder still selects one feature so review can progress or report
-      # the exact budget exhaustion instead of presenting an empty batch as
-      # complete.
-      def review_launch_limit(token_budget, cfg)
-        available = token_budget.remaining_launches
-        return [ available, 1 ].max if @dry_run
-
-        desired_fix_launches = cfg.dig("patrol", "max_fix_attempts_per_cycle").to_i
-        fix_launches = [ desired_fix_launches, [ available - 1, 0 ].max ].min
-        [ available - fix_launches, 1 ].max
-      end
-
       def terminal_patrol_exhaustion?(patch)
         exhaustion = patch.validation["resource_exhaustion"] || patch.validation[:resource_exhaustion]
         reason = exhaustion.is_a?(Hash) && (exhaustion["reason"] || exhaustion[:reason]).to_s
-        %w[
-          cycle_agent_spawn_limit daily_agent_spawn_limit
-          cycle_token_limit daily_token_limit usage_store_unavailable
-        ].include?(reason)
+        reason == "token_limit"
       end
 
       # A later feature failure must pin that feature, not replay already-clean

@@ -106,7 +106,7 @@ module Hive
       private_class_method :problem_kind
 
       def refactor_kind(thesis)
-        text = semantic_text(thesis, %w[proposed_refactor], mechanisms: true)
+        text = semantic_text(thesis, %w[proposed_refactor], architecture_effects: true)
         return "invert_dependency" if text.match?(/\b(?:invert|dependency inversion|reverse dependency)\b/)
         return "introduce_adapter" if text.match?(/\b(?:introduce|add|create|extract)\w*\b.*\badapter\b/)
         if text.match?(/\b(?:contract|interface|protocol|schema|api)\b/) &&
@@ -130,7 +130,7 @@ module Hive
           value(thesis, "feature"), value(thesis, "problem"), value(thesis, "cost"),
           value(thesis, "proposed_refactor"),
           *Array(value(thesis, "evidence")).map { |entry| hash_value(entry, "claim") },
-          *Array(hash_value(value(thesis, "expected_leverage"), "drivers")).map { |driver| hash_value(driver, "mechanism") }
+          *valid_architecture_effects(thesis)
         ].map { |item| tokens(item) }.reject(&:empty?)
         frequency = Hash.new(0)
         documents.each { |document| document.uniq.each { |token| frequency[token] += 1 } }
@@ -167,16 +167,18 @@ module Hive
       end
       private_class_method :split_camel
 
-      def semantic_text(thesis, fields, evidence: false, mechanisms: false)
+      def semantic_text(thesis, fields, evidence: false, architecture_effects: false)
         items = fields.map { |field| value(thesis, field) }
         items.concat(Array(value(thesis, "evidence")).map { |entry| hash_value(entry, "claim") }) if evidence
-        if mechanisms
-          drivers = hash_value(value(thesis, "expected_leverage"), "drivers")
-          items.concat(Array(drivers).map { |driver| hash_value(driver, "mechanism") })
-        end
+        items.concat(valid_architecture_effects(thesis)) if architecture_effects
         split_camel(items.join(" ")).downcase.gsub(/[^a-z0-9]+/, " ")
       end
       private_class_method :semantic_text
+
+      def valid_architecture_effects(thesis)
+        Array(value(thesis, "architecture_effects")).select { |effect| effect.is_a?(String) }
+      end
+      private_class_method :valid_architecture_effects
 
       def value(object, key)
         return hash_value(object, key) if object.is_a?(Hash)

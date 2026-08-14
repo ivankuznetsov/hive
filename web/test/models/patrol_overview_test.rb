@@ -54,13 +54,13 @@ class PatrolOverviewTest < ActiveSupport::TestCase
       architecture_job("complete")
     ]
     query = Object.new
-    query.define_singleton_method(:recent_envelope) do |project:, project_root:, limit:|
+    query.define_singleton_method(:recent_projection) do |project:, project_root:, limit:|
       raise "wrong identity" unless project == "demo" && project_root == "/repo"
       raise "unbounded query" unless limit == PatrolOverview::ITEM_LIMIT
 
       {
         "count" => 120,
-        "page" => { "has_more" => true },
+        "truncated" => true,
         "jobs" => jobs
       }
     end
@@ -71,15 +71,16 @@ class PatrolOverviewTest < ActiveSupport::TestCase
       {
         "job" => {
           "dispositions" => {
-            "accepted" => [
+            "fix" => [
               {
-                "id" => "thesis-1", "score" => 0.8,
+                "id" => "thesis-1",
                 "thesis" => {
                   "problem" => "Architecture ownership is split",
                   "proposed_refactor" => "Move the policy behind one boundary"
                 }
               }
-            ]
+            ],
+            "discuss" => []
           }
         }
       }
@@ -94,13 +95,14 @@ class PatrolOverviewTest < ActiveSupport::TestCase
                  section.items.map { |job| job.fetch("job_id") }
     assert_equal "Architecture ownership is split",
                  section.items.first.fetch("findings").first.fetch("problem")
+    assert_equal "fix", section.items.first.fetch("findings").first.fetch("route")
     assert section.truncated
   end
 
   test "disabled patrols do not read their stores" do
     unreadable = Object.new
     unreadable.define_singleton_method(:list_envelope) { |**| raise "must not read" }
-    unreadable.define_singleton_method(:recent_envelope) { |**| raise "must not read" }
+    unreadable.define_singleton_method(:recent_projection) { |**| raise "must not read" }
     project = FakeProject.new(
       name: "demo", path: "/repo", hive_state_path: "/state",
       config: {
@@ -123,13 +125,13 @@ class PatrolOverviewTest < ActiveSupport::TestCase
     jobs = 24.times.map { architecture_job("complete") }
     jobs.unshift(architecture_job("blocked", blocker: "new_blocker").merge("job_id" => "newest"))
     query = Object.new
-    query.define_singleton_method(:recent_envelope) do |limit:, **|
+    query.define_singleton_method(:recent_projection) do |limit:, **|
       raise "unbounded query" unless limit == PatrolOverview::ITEM_LIMIT
 
-      { "count" => 40, "page" => { "has_more" => true }, "jobs" => jobs }
+      { "count" => 40, "truncated" => true, "jobs" => jobs }
     end
     query.define_singleton_method(:show_envelope) do |**|
-      { "job" => { "dispositions" => { "accepted" => [] } } }
+      { "job" => { "dispositions" => { "fix" => [], "discuss" => [] } } }
     end
 
     section = overview(architecture_query: query).architecture
@@ -144,12 +146,12 @@ class PatrolOverviewTest < ActiveSupport::TestCase
     end
     calls = []
     query = Object.new
-    query.define_singleton_method(:recent_envelope) do |**|
-      { "count" => 6, "page" => { "has_more" => false }, "jobs" => jobs }
+    query.define_singleton_method(:recent_projection) do |**|
+      { "count" => 6, "truncated" => false, "jobs" => jobs }
     end
     query.define_singleton_method(:show_envelope) do |job_id:, **|
       calls << job_id
-      { "job" => { "dispositions" => { "accepted" => [] } } }
+      { "job" => { "dispositions" => { "fix" => [], "discuss" => [] } } }
     end
 
     overview(architecture_query: query).architecture
@@ -209,8 +211,8 @@ class PatrolOverviewTest < ActiveSupport::TestCase
 
   def empty_architecture_query
     Object.new.tap do |query|
-      query.define_singleton_method(:recent_envelope) do |**|
-        { "count" => 0, "page" => { "has_more" => false }, "jobs" => [] }
+      query.define_singleton_method(:recent_projection) do |**|
+        { "count" => 0, "truncated" => false, "jobs" => [] }
       end
       query.define_singleton_method(:show_envelope) do |**|
         raise "empty query must not request details"
@@ -223,7 +225,10 @@ class PatrolOverviewTest < ActiveSupport::TestCase
       "job_id" => "job-#{state}", "state" => state,
       "complete" => state == "complete",
       "source" => { "number" => 7, "url" => "https://github.com/acme/demo/pull/7" },
-      "counts" => { "accepted" => 1, "pending_actions" => state == "complete" ? 0 : 1 },
+      "counts" => {
+        "fix" => 1, "discuss" => 0,
+        "pending_actions" => state == "complete" ? 0 : 1
+      },
       "blockers" => blocker ? [ { "scope" => "discovery", "reason" => blocker } ] : [],
       "updated_at" => "2026-08-13T12:00:00Z"
     }

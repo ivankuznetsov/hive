@@ -1010,9 +1010,9 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
       "attempts" => attempts,
       "feature_results" => [],
       "dispositions" => {
-        "accepted" => [],
-        "flagged" => [],
-        "suppressed" => []
+        "fix" => [],
+        "discuss" => [],
+        "dismiss" => []
       }
     }
   end
@@ -1056,9 +1056,9 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
     {
       "complete" => complete,
       "feature_results" => [],
-      "accepted" => [],
-      "flagged" => [],
-      "suppressed" => []
+      "fix" => [],
+      "discuss" => [],
+      "dismiss" => []
     }
   end
 

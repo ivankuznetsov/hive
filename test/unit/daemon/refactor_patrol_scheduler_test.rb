@@ -182,29 +182,18 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_exhausted_review_budget_pauses_discovery_without_blocking_actions
+  def test_discovery_and_actions_remain_eligible_without_a_daily_allowance_gate
     with_project do |dir, entry, store|
       enqueue(store, job_id: "queued-review")
       write_action_job(dir, store)
-      stages = []
-      budget = Object.new
-      budget.define_singleton_method(:remaining_launches) do |stage:|
-        stages << stage
-        0
-      end
-      instance = scheduler(
-        entry, store,
-        token_budget_factory: ->(_project_root, _cfg) { budget }
-      )
+      instance = scheduler(entry, store)
 
       candidates = instance.candidates(now: T0)
 
-      assert_equal [ "action-job" ], candidates.map { |item| item.fetch(:job_id) }
-      assert_equal [ :action ], candidates.map { |item| item.fetch(:action_phase) }
-      assert_equal [ "refactor-patrol-review" ], stages
-      queued = store.read_job("queued-review")
-      assert_equal "queued", queued.fetch("state")
-      assert_empty queued.fetch("attempts")
+      assert_equal %w[action-job queued-review],
+                   candidates.map { |item| item.fetch(:job_id) }.sort
+      assert_equal %i[action discovery],
+                   candidates.map { |item| item.fetch(:action_phase) }.sort
     end
   end
 
@@ -256,7 +245,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     with_project do |dir, entry, store|
       write_action_job(dir, store)
       initialized = store.initialize_actions!(
-        "action-job", specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ],
+        "action-job", specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ],
         now: T0
       )
       action_id = initialized.fetch("actions").first.fetch("canonical_action_id")
@@ -419,7 +408,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       write_action_job(first_dir, first_store)
       initialized = first_store.initialize_actions!(
         "action-job",
-        specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ],
+        specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ],
         now: T0
       )
       action_id = initialized.fetch("actions").first.fetch("canonical_action_id")
@@ -482,7 +471,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         )
         assert_equal :retry, result.fetch(:status)
         refute store.read_job("job-7").fetch("complete")
-        assert_empty store.read_job("job-7").dig("dispositions", "accepted")
+        assert_empty store.read_job("job-7").dig("dispositions", "fix")
         now += 63
       end
 
@@ -774,21 +763,20 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_daily_patrol_quota_exhaustion_backs_off_until_next_utc_day
-    %w[
-      daily_agent_spawn_limit daily_architecture_unmetered_spawn_limit
-      daily_architecture_review_spawn_limit daily_token_headroom daily_token_limit
-    ].each do |reason|
+  def test_review_runaway_ceiling_uses_the_shared_one_hour_retry
+    %w[token_limit turn_limit].each do |reason|
       with_project do |_dir, entry, store|
         enqueue(store)
         scheduler = scheduler(entry, store)
         dispatch = scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
         scheduler.spawned(dispatch, pid: 1234, process_start_time: "boot", pgid: 1234, now: T0 + 1)
         error = {
-          "feature_id" => "checkout", "error" => "agent_failed", "message" => "daily quota exhausted",
+          "feature_id" => "checkout", "error" => "agent_failed",
+          "message" => "agent exceeded runaway ceiling",
           "details" => {
             "resource_exhaustion" => {
-              "reason" => reason, "limit" => 8, "observed" => 8
+              "reason" => reason, "limit" => 100_000_000,
+              "observed" => 100_000_001
             }
           }
         }
@@ -807,8 +795,10 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         )
 
         assert_equal :retry, result.fetch(:status), reason
-        assert_empty scheduler.candidates(now: Time.utc(2026, 7, 10, 23, 59, 59)), reason
-        assert_equal [ "job-7" ], scheduler.candidates(now: Time.utc(2026, 7, 11)).map { |item| item.fetch(:job_id) }, reason
+        assert_empty scheduler.candidates(now: T0 + 3601), reason
+        assert_equal [ "job-7" ],
+                     scheduler.candidates(now: T0 + 3602).map { |item| item.fetch(:job_id) },
+                     reason
       end
     end
   end
@@ -1569,7 +1559,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       store.initialize_actions!(
         "action-job",
         specifications: [
-          { "thesis_id" => "accepted", "kind" => "fix" }
+          { "thesis_id" => "fix", "kind" => "fix" }
         ],
         now: T0
       )
@@ -1612,7 +1602,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       write_action_job(dir, store)
       initialized = store.initialize_actions!(
         "action-job",
-        specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ],
+        specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ],
         now: T0
       )
       action_id = initialized.dig("actions", 0, "canonical_action_id")
@@ -1688,7 +1678,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       entry = entry(dir, "demo")
       aggregate = {
         "job_id" => "job-7", "source" => { "registration" => "demo" },
-        "dispositions" => { "accepted" => [], "flagged" => [], "suppressed" => [] },
+        "dispositions" => { "fix" => [], "discuss" => [], "dismiss" => [] },
         "actions" => []
       }
       failing_store = Object.new
@@ -1806,7 +1796,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
                  scheduler.send(:action_completion_failure_reason, 0, {})
     aggregate = {
       "source" => { "number" => 7, "url" => "url" },
-      "dispositions" => { "accepted" => [ {} ], "flagged" => [], "suppressed" => [] },
+      "dispositions" => { "fix" => [ {} ], "discuss" => [], "dismiss" => [] },
       "actions" => [
         { "canonical_action_id" => "done", "outcome" => "pr_opened", "terminal" => true },
         { "canonical_action_id" => "pending", "outcome" => "claimed", "terminal" => false }
@@ -1821,9 +1811,9 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     assert_equal "job-7", projection.fetch(:job_id)
     assert_equal 7, projection.fetch(:pr_number)
     assert_equal "url", projection.fetch(:pr_url)
-    assert_equal 1, projection.fetch(:accepted_count)
-    assert_equal 0, projection.fetch(:flagged_count)
-    assert_equal 0, projection.fetch(:suppressed_count)
+    assert_equal 1, projection.fetch(:fix_count)
+    assert_equal 0, projection.fetch(:discuss_count)
+    assert_equal 0, projection.fetch(:dismiss_count)
     assert_equal 2, projection.fetch(:action_count)
     assert_equal 1, projection.fetch(:terminal_action_count)
     assert_equal [ "pending" ], projection.fetch(:pending_action_ids)
@@ -1834,15 +1824,15 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       :classified,
       { job_id: "job-7" },
       {
-        "accepted" => [ {}, {} ],
-        "flagged" => [ {} ],
-        "suppressed" => []
+        "fix" => [ {}, {} ],
+        "discuss" => [ {} ],
+        "dismiss" => []
       },
       aggregate: aggregate
     )
     assert_equal :classified, classified.fetch(:status)
-    assert_equal 2, classified.fetch(:accepted_count)
-    assert_equal 1, classified.fetch(:flagged_count)
+    assert_equal 2, classified.fetch(:fix_count)
+    assert_equal 1, classified.fetch(:discuss_count)
     assert_equal({ "done" => "pr_opened", "pending" => "claimed" }, classified.fetch(:action_outcomes))
     assert_equal Time.at(0).utc, scheduler.send(:parse_time, "not-a-time")
   end
@@ -1905,7 +1895,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       )
       store.initialize_actions!(
         "action-job",
-        specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ],
+        specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ],
         now: T0 + 1
       )
       aggregate = store.read_job("action-job")
@@ -2332,11 +2322,11 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       hive_state_path: entry.fetch("hive_state_path")
     ).read_job("job-7")
     {
-      "schema" => "hive-refactor-patrol", "schema_version" => 3, "ok" => true,
+      "schema" => "hive-refactor-patrol", "schema_version" => 4, "ok" => true,
       "job_id" => "job-7", "project" => entry.fetch("name"), "project_root" => entry.fetch("path"),
       "dry_run" => false, "source_pr" => aggregate.fetch("source"), "analysis_sha" => "head",
       "complete" => true, "features_mapped" => 1,
-      "accepted" => [], "flagged" => [], "suppressed" => [], "review_errors" => [],
+      "fix" => [], "discuss" => [], "dismiss" => [], "review_errors" => [],
       "feature_results" => [
         { "feature_id" => "checkout", "complete" => true, "thesis_ids" => [], "errors" => [] }
       ],
@@ -2346,12 +2336,12 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
 
   def action_envelope(entry, aggregate)
     {
-      "schema" => "hive-refactor-patrol", "schema_version" => 3, "ok" => true,
+      "schema" => "hive-refactor-patrol", "schema_version" => 4, "ok" => true,
       "job_id" => aggregate.fetch("job_id"), "project" => entry.fetch("name"),
       "project_root" => entry.fetch("path"), "dry_run" => false,
       "source_pr" => aggregate.fetch("source"), "analysis_sha" => aggregate.fetch("analysis_sha"),
       "complete" => aggregate.fetch("complete"), "features_mapped" => 0,
-      "accepted" => [], "flagged" => [], "suppressed" => [], "review_errors" => [],
+      "fix" => [], "discuss" => [], "dismiss" => [], "review_errors" => [],
       "feature_results" => [], "zero_reason" => nil, "attempts" => [], "actions" => []
     }
   end
@@ -2370,12 +2360,12 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       now: T0
     )
     snapshot = {
-      "id" => "accepted", "feature_id" => "checkout", "feature" => "Checkout",
+      "id" => "fix", "feature_id" => "checkout", "feature" => "Checkout",
       "problem" => "Scattered policy", "cost" => "Repeated edits",
       "evidence" => [ { "file" => "lib/demo.rb", "claim" => "policy repeats" } ],
       "proposed_refactor" => "Consolidate policy",
       "feature_boundary" => { "owned_files" => [ "lib/demo.rb" ], "entrypoints" => [] },
-      "feature_hotspot" => {}, "expected_leverage" => { "score" => 0.8 },
+      "route" => "fix", "architecture_effects" => [ "one policy owner" ],
       "confidence" => "high", "risk" => { "flags" => [] },
       "required_validation" => { "commands" => [ "test" ] },
       "admissible" => true, "admissibility_reason" => "anchored",
@@ -2386,13 +2376,13 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         "analysis_sha" => "head",
         "state" => "classified", "complete" => false,
         "dispositions" => {
-          "accepted" => [
+          "fix" => [
             {
-              "id" => "accepted", "feature_id" => "checkout", "fingerprint" => "fp-accepted",
-              "score" => 0.8, "admissible" => true, "reasons" => [], "thesis" => snapshot
+              "id" => "fix", "feature_id" => "checkout", "fingerprint" => "fp-accepted",
+              "route" => "fix", "admissible" => true, "reasons" => [], "thesis" => snapshot
             }
           ],
-          "flagged" => [], "suppressed" => []
+          "discuss" => [], "dismiss" => []
         },
         "feature_results" => [], "review_errors" => [], "zero_reason" => nil,
         "attempts" => [], "actions" => [],

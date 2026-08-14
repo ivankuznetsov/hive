@@ -66,7 +66,7 @@ class PatrolOverview
   def architecture
     return disabled_section unless architecture_enabled?
 
-    payload = @architecture_query.recent_envelope(
+    payload = @architecture_query.recent_projection(
       project: project.name,
       project_root: project.path,
       limit: ITEM_LIMIT
@@ -91,7 +91,7 @@ class PatrolOverview
       counts: counts,
       items: jobs,
       last_run_at: jobs.map { |job| job["updated_at"] }.compact.max,
-      truncated: payload.dig("page", "has_more") == true,
+      truncated: payload.fetch("truncated") == true,
       error: nil
     )
   rescue StandardError => error
@@ -113,7 +113,7 @@ class PatrolOverview
     jobs.map do |job|
       projected = job.dup
       next projected unless remaining.positive? &&
-                            job.dig("counts", "accepted").to_i.positive?
+                            %w[fix discuss].sum { |route| job.dig("counts", route).to_i }.positive?
 
       remaining -= 1
       detail = @architecture_query.show_envelope(
@@ -122,17 +122,18 @@ class PatrolOverview
         job_id: job.fetch("job_id"),
         limit: 1
       )
-      projected["findings"] = Array(
-        detail.dig("job", "dispositions", "accepted")
-      ).first(ARCHITECTURE_FINDINGS_PER_JOB).map do |item|
-        thesis = item["thesis"].is_a?(Hash) ? item.fetch("thesis") : {}
-        {
-          "id" => item["id"],
-          "score" => item["score"],
-          "problem" => thesis["problem"],
-          "proposed_refactor" => thesis["proposed_refactor"]
-        }
-      end
+      dispositions = detail.dig("job", "dispositions") || {}
+      projected["findings"] = %w[fix discuss].flat_map do |route|
+        Array(dispositions[route]).map do |item|
+          thesis = item["thesis"].is_a?(Hash) ? item.fetch("thesis") : {}
+          {
+            "id" => item["id"],
+            "route" => route,
+            "problem" => thesis["problem"],
+            "proposed_refactor" => thesis["proposed_refactor"]
+          }
+        end
+      end.first(ARCHITECTURE_FINDINGS_PER_JOB)
       projected
     end
   end

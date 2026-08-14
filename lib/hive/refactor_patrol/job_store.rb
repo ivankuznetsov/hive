@@ -7,7 +7,6 @@ require "hive/config"
 require "hive/refactor_patrol/architecture_occurrence_store"
 require "hive/refactor_patrol/job_occurrence_lifecycle"
 require "hive/refactor_patrol/claim_transitions"
-require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/job_indexes"
 require "hive/refactor_patrol/job_query_index"
 require "hive/refactor_patrol/job_record_validator"
@@ -20,18 +19,18 @@ require "hive/refactor_patrol/thesis"
 
 module Hive
   module RefactorPatrol
-    # Authoritative v3 lifecycle storage. A job aggregate owns discovery and
+    # Authoritative v4 lifecycle storage. A job aggregate owns discovery and
     # action receipts; the indexes below are disposable projections rebuilt by
     # scanning terminal aggregates.
     class JobStore
       SCHEMA = "hive-refactor-patrol-job".freeze
-      SCHEMA_VERSION = 3
-      SUPPORTED_DISCOVERY_PAYLOAD_SCHEMA_VERSIONS = [ 3 ].freeze
+      SCHEMA_VERSION = 4
+      SUPPORTED_DISCOVERY_PAYLOAD_SCHEMA_VERSIONS = [ 4 ].freeze
       ID_PATTERN = /\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\z/
       STATES = %w[queued analyzing classified acting blocked complete].freeze
-      DISPOSITIONS = %w[accepted flagged suppressed].freeze
+      DISPOSITIONS = FINDING_ROUTES
       ZERO_REASONS = %w[
-        no_mapped_slice no_theses all_suppressed source_no_longer_on_trunk
+        no_mapped_slice no_theses all_dismissed source_no_longer_on_trunk
       ].freeze
       TOP_LEVEL_KEYS = %w[
         schema schema_version job_id occurrence_id intake_transition_id source
@@ -45,7 +44,6 @@ module Hive
       POLICY_KEYS = %w[discovery auto_fix issue_filing action epoch captured_at].freeze
       POLICY_ACTION_KEYS = %w[
         default_branch auto_fix_agent min_confidence commands caps
-        issue_min_leverage_score
       ].freeze
       POLICY_ACTION_OPTIONAL_KEYS = %w[
         auto_fix_model auto_fix_effort auto_fix_launcher_identity
@@ -56,8 +54,7 @@ module Hive
         single_feature_only allow_dependency_bumps allow_public_api_changes
         allow_cross_feature
       ].freeze
-      LEGACY_POLICY_CAP_KEYS = %w[max_files max_diff_lines].freeze
-      DISPOSITION_KEYS = %w[id feature_id fingerprint score admissible reasons reference thesis family_id].freeze
+      DISPOSITION_KEYS = %w[id feature_id fingerprint route admissible reasons reference thesis family_id].freeze
       FEATURE_RESULT_KEYS = %w[feature_id complete thesis_ids errors].freeze
       ACTION_REQUIRED_KEYS = %w[
         canonical_action_id thesis_id thesis_fingerprint kind owner_job_id
@@ -1535,26 +1532,6 @@ module Hive
         File.join(root, "indexes", "actions.json")
       end
 
-      # Historical size caps classified otherwise admissible theses as
-      # flagged. Keep that immutable classification on disk, but treat a row
-      # whose complete reason/flag set consists only of those retired cap
-      # codes as accepted when deciding current action authority.
-      def effective_disposition(disposition, item)
-        name = disposition.to_s
-        return name unless name == "flagged"
-        return name unless item.is_a?(Hash) && item["admissible"] == true
-
-        thesis = item["thesis"]
-        return name unless thesis.is_a?(Hash) && thesis["admissible"] == true
-
-        findings = Array(item["reasons"]).map(&:to_s) +
-                   Array(thesis.dig("risk", "flags")).map(&:to_s)
-        return name if findings.empty?
-        return name unless (findings - Caps::LEGACY_SIZE_FLAGS).empty?
-
-        "accepted"
-      end
-
       private
 
       def ordered_job_query_ids
@@ -1588,7 +1565,6 @@ module Hive
           raise InconsistentRecord.new("action thesis is not classified", path: path) unless entry
 
           disposition, thesis = entry
-          disposition = effective_disposition(disposition, thesis)
           validate_action_authority!(aggregate, kind, disposition, thesis, path)
           family_id = specification["family_id"].to_s unless specification["family_id"].nil?
           identity = action_identity(kind, family_id, thesis, path)
@@ -1619,11 +1595,11 @@ module Hive
         policy = aggregate.fetch("policy")
         case kind
         when "fix"
-          unless disposition == "accepted" && policy.fetch("auto_fix")
+          unless disposition == "fix" && policy.fetch("auto_fix")
             raise InconsistentRecord.new("fix action exceeds the immutable policy/disposition snapshot", path: path)
           end
         when "issue"
-          eligible = (disposition == "flagged" && thesis.fetch("admissible")) || disposition == "accepted"
+          eligible = (disposition == "discuss" && thesis.fetch("admissible")) || disposition == "fix"
           unless eligible && policy.fetch("issue_filing")
             raise InconsistentRecord.new("issue action exceeds the immutable policy/disposition snapshot", path: path)
           end
@@ -2223,10 +2199,10 @@ module Hive
 
       def action_authorized_for?(aggregate)
         policy = aggregate.fetch("policy")
-        (policy.fetch("auto_fix") && aggregate.dig("dispositions", "accepted").any?) ||
+        (policy.fetch("auto_fix") && aggregate.dig("dispositions", "fix").any?) ||
           (policy.fetch("issue_filing") && (
-            aggregate.dig("dispositions", "accepted").any? ||
-            aggregate.dig("dispositions", "flagged").any? { |item| item["admissible"] == true }
+            aggregate.dig("dispositions", "fix").any? ||
+            aggregate.dig("dispositions", "discuss").any? { |item| item["admissible"] == true }
           ))
       end
 

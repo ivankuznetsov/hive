@@ -926,6 +926,15 @@ module Hive
         if marker.name == :none && result[:exit_code].nil?
           Hive::Markers.set(@task.state_file, :error, reason: "no_marker_no_exit_code")
           result[:status] = :error
+        elsif marker.name == :agent_working
+          Hive::Markers.set(
+            @task.state_file,
+            :error,
+            reason: "agent_exited_without_terminal_marker",
+            observed_marker: marker.name,
+            provider: @profile.name
+          )
+          result[:status] = :error
         else
           result[:status] = marker.name
         end

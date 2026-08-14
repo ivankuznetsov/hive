@@ -328,6 +328,18 @@ class RunFinalizeTest < Minitest::Test
         # scope_check allowlist (`lib/**`).
         FileUtils.mkdir_p(File.join(worktree_path, "lib"))
         File.write(File.join(worktree_path, "lib", "foo.rb"), "module Foo; end\n")
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          pr_url: https://github.com/acme/app/pull/9
+          pr_number: 9
+          ---
+
+          ## Summary
+          final
+
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
+        MD
 
         capture_io { Hive::Commands::Run.new(task_dir).call }
 

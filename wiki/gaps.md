@@ -189,6 +189,11 @@ stable class and scope.
   `Hive::Markers.set`; an installed-daemon retry still needs to prove the fix
   live. A separate campaign-specific Hive project is no longer an intended
   validation target. Honeycomb is not a dependency of this named-workflow path.
+  The DeepSeek and Grok expansion then reproduced a second false-success path:
+  a provider process returned while Hive's pre-spawn `AGENT_WORKING` marker
+  remained current. Source tests now rewrite that state to a recoverable
+  `ERROR reason=agent_exited_without_terminal_marker`; a post-merge retry on the
+  shared current-main Hive deployment remains the required live proof.
 - The packaged mixed Sol/Terra/Grok and Opus/Fable profiles, provider-neutral
   model routes, explicit reviewer identities, and combined Sol-runner selection
   are locally test-pinned; the Opus/Fable profiles now have one paid end-to-end

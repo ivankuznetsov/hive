@@ -133,7 +133,9 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
         return {
           viewport: root.clientWidth,
           documentWidth: root.scrollWidth,
-          readingWidth: documentBody.getBoundingClientRect().width,
+          panelWidth: documentBody.getBoundingClientRect().width,
+          readingWidth: documentBody.querySelector("p").getBoundingClientRect().width,
+          evidenceWidth: documentBody.querySelector("table").getBoundingClientRect().width,
           fontSize: parseFloat(bodyStyle.fontSize),
           lineHeight: parseFloat(bodyStyle.lineHeight),
           h1Size: parseFloat(getComputedStyle(documentBody.querySelector("h1")).fontSize),
@@ -152,6 +154,10 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
                     "section headings must establish a clear document hierarchy"
     assert_operator desktop.fetch("readingWidth"), :<=, 900,
                     "long lines must be capped at a comfortable reading measure"
+    assert_operator desktop.fetch("panelWidth"), :>, desktop.fetch("readingWidth"),
+                    "the document panel should leave desktop room for wide evidence"
+    assert_operator desktop.fetch("evidenceWidth"), :>, desktop.fetch("readingWidth"),
+                    "tables should use available desktop width without widening prose"
     assert_operator desktop.fetch("documentWidth"), :<=, desktop.fetch("viewport") + 1
 
     page.current_window.resize_to(375, 812)

@@ -27,7 +27,7 @@ class AgentTest < Minitest::Test
        HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE HIVE_FAKE_CLAUDE_DELAY_AFTER_WRITE_OUTPUT
        HIVE_FAKE_CLAUDE_HANG HIVE_FAKE_CLAUDE_IGNORE_TERM HIVE_FAKE_CLAUDE_LOG_DIR
        HIVE_FAKE_CLAUDE_READY_FILE HIVE_FAKE_CLAUDE_RELEASE_FILE
-       HIVE_SCREENOTE_BASE_URL].each { |k| ENV.delete(k) }
+       HIVE_SCREENOTE_BASE_URL AWS_ACCESS_KEY_ID DATABASE_URL GITHUB_TOKEN DISPLAY].each { |k| ENV.delete(k) }
   end
 
   def make_task(dir, stage = "2-brainstorm", slug = "agent-test-260424-aaaa")
@@ -120,6 +120,33 @@ class AgentTest < Minitest::Test
         assert_nil agent.child_environment.fetch(key)
       end
       refute agent.child_environment.key?("GROK_AUTH_PATH")
+    end
+  end
+
+  def test_isolated_child_environment_excludes_ambient_secrets_and_keeps_desktop_context
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      log_dir = File.join(dir, "agent-log")
+      FileUtils.mkdir_p(log_dir)
+      with_env(
+        "AWS_ACCESS_KEY_ID" => "AKIAIOSFODNN7EXAMPLE",
+        "DATABASE_URL" => "postgres://secret@db/app",
+        "GITHUB_TOKEN" => "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        "DISPLAY" => ":77"
+      ) do
+        result = Hive::Agent.new(
+          task: task, prompt: "inspect", max_budget_usd: nil, timeout_sec: 5,
+          status_mode: :exit_code_only, isolate_environment: true,
+          launch_environment: { "HIVE_FAKE_CLAUDE_LOG_DIR" => log_dir }
+        ).run!
+        assert_equal :ok, result.fetch(:status)
+      end
+
+      log = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_includes log, "env_AWS_ACCESS_KEY_ID=__unset__"
+      assert_includes log, "env_DATABASE_URL=__unset__"
+      assert_includes log, "env_GITHUB_TOKEN=__unset__"
+      assert_includes log, "env_DISPLAY=:77"
     end
   end
 

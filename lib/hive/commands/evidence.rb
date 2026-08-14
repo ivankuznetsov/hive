@@ -81,12 +81,13 @@ module Hive
                 "task is not at the exact observed outcome-evidence blocker"
         end
         store = Hive::Artifacts::OutcomeEvidence::Store.new(task: task, project: project)
-        pointer = store.current
-        unless pointer && pointer["status"] == "blocked"
+        package = store.package
+        pointer = package.fetch("current")
+        unless pointer.fetch("status") == "blocked"
           raise Hive::Artifacts::OutcomeEvidence::StoreError,
                 "current outcome-evidence pointer is not blocked"
         end
-        requirement = store.requirement(generation: pointer.fetch("generation"))
+        requirement = package.fetch("requirement")
         task_generation = requirement.fetch("task_generation")
         record = Hive::Artifacts::OutcomeEvidence::Recovery.new(
           task: task, project: project

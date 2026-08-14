@@ -67,6 +67,41 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     end
   end
 
+  def test_retain_candidate_moves_producer_files_before_semantic_review
+    with_store do |store, task, _controller|
+      requirement = store.open_generation!(**requirement_input)
+      source = document_evidence(task)
+      retained = store.retain_candidate!(
+        generation: requirement.fetch("generation"), attempt_id: "attempt-custody",
+        evidence: [ source ]
+      )
+      entry = retained.fetch(0)
+      hashes = entry.fetch("representations").map { |item| item.fetch("sha256") }
+      entry.fetch("representations").each do |representation|
+        assert_match(%r{/retained/attempt-custody/}, "/#{representation.fetch('path')}")
+      end
+
+      File.write(
+        File.join(task.folder, source.dig("representations", 0, "path")),
+        "producer rewrote its source after returning\n"
+      )
+      attempt = store.append_attempt!(
+        generation: requirement.fetch("generation"), attempt_id: "attempt-custody",
+        status: "accepted", evidence: retained, producer: actor("producer-custody"),
+        review: {
+          "reviewer" => actor("reviewer-custody"), "inspected_hashes" => hashes,
+          "verdicts" => %w[claim-a claim-b].map do |id|
+            {
+              "target_id" => id, "verdict" => "accepted",
+              "reason" => "The controller-owned document verifies this bounded outcome directly."
+            }
+          end
+        }
+      )
+      assert_equal entry, attempt.fetch("evidence").fetch(0)
+    end
+  end
+
   def test_open_generation_is_idempotent_and_keeps_the_original_inference
     with_store do |store, _task, _controller|
       first = store.open_generation!(**requirement_input)
@@ -110,6 +145,19 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       refute store.accepted?
       assert store.blocked_for_identity?(identity)
       assert_equal "blocked", store.package.dig("current", "status")
+
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        store.publish_blocked!(
+          generation: generation, reason: "recaptures_exhausted",
+          failed_claims: [ "claim-a" ],
+          reviewer_reasons: [
+            "The review exposed api_key=abcdefghijklmnopqrstuvwxyz0123456789 in output."
+          ],
+          attempt_ids: [ attempt.fetch("attempt_id") ]
+        )
+      end
+      assert_match(/secret-shaped/, error.message)
+      refute_includes error.message, "abcdefghijklmnopqrstuvwxyz"
     end
   end
 

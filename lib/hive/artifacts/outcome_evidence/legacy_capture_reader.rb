@@ -17,7 +17,7 @@ module Hive
           return nil unless source
 
           preview = JSON.parse(
-            source, object_class: Document::StrictHash, allow_duplicate_key: true
+            source, object_class: Document::StrictHash, allow_duplicate_key: false
           )
           version = Integer(preview["schema_version"], exception: false)
           return nil unless [ 1, 2 ].include?(version)

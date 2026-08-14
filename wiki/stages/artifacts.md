@@ -75,12 +75,21 @@ configuration may reduce recaptures to zero or one, but cannot exceed two.
 - Use `terminal` for CLI/TUI behavior. The retained original is an asciinema
   cast and the reviewer representation is bounded plain text.
 - Use `document` for invisible/refactoring outcomes, using safe text, Markdown,
-  JSON, PDF, or static image material that explains the resulting contract,
-  schema, or architecture. Active HTML and SVG are not admitted.
+  JSON, or static image material that explains the resulting contract, schema,
+  or architecture. Active HTML, SVG, and PDF are not admitted. Static images
+  and video up to 30 seconds are OCR-scanned for secret-shaped content before
+  review.
 
 This semantic selection is intentionally agent-inferred from task intent and the
 exact diff. Controller code validates closed structure, integrity, custody, and
 traceability; it does not guess user meaning from filenames.
+
+Each evidence role starts with an isolated child environment containing only
+reviewed runtime, locale, provider-session, and desktop-session keys. Arbitrary
+project credentials are not inherited. Producer files cross a no-follow,
+hash-checked controller custody copy before the reviewer starts; the reviewer
+reads the original task, plan when present, and exact frozen diff as well as the
+validated requirement.
 
 ## Ledger and recovery
 

@@ -25,3 +25,8 @@ tags: [artifacts, evidence, review, web, recovery]
   provenance, capabilities, attempts, and recovery; legacy media is visibly
   labelled as a diagnostic. Tampered packages fail closed and evidence files are
   served only through admitted attempt/hash identities.
+- Hardened independent review by copying producer files into controller custody
+  before launch, isolating role subprocess environments, rejecting duplicate
+  JSON keys, scanning semantic text and visual OCR for secret-shaped content,
+  validating the full package before recovery, and giving reviewers the frozen
+  task, plan, and exact diff context.

@@ -461,6 +461,7 @@ class StagesArtifactsTest < Minitest::Test
       end
       store.define_singleton_method(:accepted?) { |generation:| false }
       store.define_singleton_method(:attempts) { |generation:| [] }
+      store.define_singleton_method(:retain_candidate!) { |evidence:, **| evidence }
       store.define_singleton_method(:append_attempt!) do |**input|
         calls << [ :append, input ]
         { "attempt_id" => input.fetch(:attempt_id) }
@@ -577,6 +578,7 @@ class StagesArtifactsTest < Minitest::Test
       end
       store.define_singleton_method(:accepted?) { |generation:| false }
       store.define_singleton_method(:attempts) { |generation:| attempts }
+      store.define_singleton_method(:retain_candidate!) { |evidence:, **| evidence }
       store.define_singleton_method(:append_attempt!) do |**input|
         document = input.transform_keys(&:to_s).merge("attempt_id" => input.fetch(:attempt_id))
         attempts << document
@@ -683,7 +685,9 @@ class StagesArtifactsTest < Minitest::Test
       identity = { "implementation_head" => "a" * 40 }
       changed = { "implementation_head" => "b" * 40 }
       resolver = Struct.new(:value) { def resolve = value }.new(changed)
-      spawn = lambda do |_task, **_kwargs|
+      isolated = nil
+      spawn = lambda do |_task, **kwargs|
+        isolated = kwargs[:isolate_environment]
         File.write(File.join(source, "app.rb"), "mutated\n")
         { status: :ok, final_message: '{"evidence":[]}' }
       end
@@ -700,8 +704,95 @@ class StagesArtifactsTest < Minitest::Test
             )
           end
           assert_match(/changed the frozen implementation source/, error.message)
+          assert_equal true, isolated
         end
       end
+    end
+  end
+
+  def test_symlinked_producer_evidence_is_rejected_before_reviewer_launch
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      paths = [ "app/checkout.rb" ]
+      identity = {
+        "repository" => nil, "branch" => "demo",
+        "implementation_base" => "a" * 40, "merge_base" => "a" * 40,
+        "implementation_head" => "b" * 40, "changed_paths" => paths,
+        "changed_paths_digest" => Digest::SHA256.hexdigest(paths.join("\0"))
+      }
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      store = Hive::Artifacts::OutcomeEvidence::Store.new(
+        task: task, project: File.basename(task.project_root),
+        controller_binding: -> { { "task_generation" => "1", "recovery_epoch" => 0 } }
+      )
+      reviewer_launched = false
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |role:, writable_root: nil, **|
+        case role
+        when "inference"
+          {
+            actor: { "context_id" => "inference-1", "agent" => "claude" },
+            output: {
+              "claims" => [
+                {
+                  "id" => "claim-flow",
+                  "statement" => "A buyer finishes checkout and sees confirmation.",
+                  "proof_kind" => "document", "changed_paths" => paths
+                }
+              ],
+              "exclusions" => []
+            }
+          }
+        when "producer"
+          FileUtils.mkdir_p(writable_root)
+          target = File.join(writable_root, "target.md")
+          link = File.join(writable_root, "original.md")
+          review = File.join(writable_root, "review.txt")
+          File.write(target, "# Checkout\n\nConfirmation is visible.\n")
+          File.symlink(target, link)
+          File.write(review, "Checkout confirmation is visible.\n")
+          relative = ->(path) { Pathname.new(path).relative_path_from(Pathname.new(task.folder)).to_s }
+          representation = lambda do |path, role_name, media_type|
+            {
+              "role" => role_name, "media_type" => media_type,
+              "path" => relative.call(path), "bytes" => File.size(path),
+              "sha256" => Digest::SHA256.file(path).hexdigest
+            }
+          end
+          {
+            actor: { "context_id" => "producer-1", "agent" => "claude" },
+            output: {
+              "evidence" => [
+                {
+                  "kind" => "document", "summary" => "Checkout confirmation proof",
+                  "claims" => [ "claim-flow" ],
+                  "source" => {
+                    "type" => "task", "name" => "artifact-agent",
+                    "source_sha" => identity.fetch("implementation_head")
+                  },
+                  "representations" => [
+                    representation.call(link, "original", "text/markdown"),
+                    representation.call(review, "review", "text/plain")
+                  ]
+                }
+              ]
+            }
+          }
+        when "reviewer"
+          reviewer_launched = true
+          flunk "reviewer must not receive unadmitted producer evidence"
+        end
+      end
+
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Hive::Stages::Artifacts.run_outcome_evidence!(
+          task, {}, identity_resolver: resolver, store: store
+        )
+      end
+      assert_match(/regular file/, error.message)
+      refute reviewer_launched
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
     end
   end
 

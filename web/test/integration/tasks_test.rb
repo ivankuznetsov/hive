@@ -495,6 +495,26 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_includes response.body, "Checkout outcome"
   end
 
+  test "task page explains blocked evidence and prints its exact recovery command" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    result = write_blocked_outcome_evidence(
+      folder, slug: @slug, project: @project,
+      project_root: folder.join("..", "..", "..", "..").cleanpath
+    )
+    refresh_status_feed!
+
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_response :success
+    assert_select ".evidence-status--blocked", text: "blocked", count: 1
+    assert_select ".evidence-verdict--revise", text: /final confirmation/, count: 1
+    assert_select ".evidence-blocker h3", text: "Operator recovery required", count: 1
+    command = css_select(".evidence-blocker code").first.text
+    assert_includes command, result.dig(:pointer, "generation")
+    assert_includes command, result.dig(:pointer, "recovery_digest")
+    assert_includes command, "hive evidence recover #{@project}:#{@slug}"
+  end
+
   test "task page renders capture failed banner without broken images" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
     write_media_manifest(folder, {

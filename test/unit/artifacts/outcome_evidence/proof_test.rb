@@ -197,6 +197,69 @@ class OutcomeEvidenceProofTest < Minitest::Test
     end
   end
 
+  def test_materializes_task_evidence_into_controller_custody_before_review
+    with_tmp_dir do |root|
+      files = valid_files(root)
+      value = proof(
+        "document", files,
+        original: [ "report.md", "text/markdown" ],
+        review: [ "report.txt", "text/plain" ]
+      )
+      FileUtils.mkdir_p(File.join(root, "retained", "attempt-1"))
+
+      retained = Hive::Artifacts::OutcomeEvidence::Proof.materialize!(
+        value, task_folder: root, expected_head: HEAD,
+        destination_root: "retained/attempt-1/entry-01"
+      )
+
+      retained.fetch("representations").each do |representation|
+        assert_match(%r{\Aretained/attempt-1/entry-01/}, representation.fetch("path"))
+        assert_equal 0o600,
+                     File.stat(File.join(root, representation.fetch("path"))).mode & 0o777
+      end
+      original_copy = retained.fetch("representations").first
+      before = File.binread(File.join(root, original_copy.fetch("path")))
+      File.write(File.join(root, "report.md"), "producer changed this after returning\n")
+      assert_equal before, File.binread(File.join(root, original_copy.fetch("path")))
+    end
+  end
+
+  def test_rejects_pdf_documents_and_secret_shaped_visual_ocr
+    with_tmp_dir do |root|
+      files = valid_files(root)
+      pdf = File.join(root, "report.pdf")
+      File.binwrite(pdf, "%PDF-1.7\n")
+      value = proof(
+        "document", files.merge("report.pdf" => true),
+        original: [ "report.pdf", "application/pdf" ],
+        review: [ "report.txt", "text/plain" ]
+      )
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        admit(root, value)
+      end
+      assert_match(/unsafe media type/, error.message)
+
+      secret = "api_key=abcdefghijklmnopqrstuvwxyz0123456789"
+      which = Hive::InvokedBinary.method(:which)
+      replacement = ->(name) { name == "tesseract" ? "/bin/true" : which.call(name) }
+      with_replaced_singleton_method(Hive::InvokedBinary, :which, replacement) do
+        with_replaced_singleton_method(
+          Hive::Artifacts::OutcomeEvidence::Proof, :ocr_command,
+          ->(_argv, source_root:, failure:) { "Captured #{secret}" }
+        ) do
+          error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+            Hive::Artifacts::OutcomeEvidence::Proof.send(
+              :inspect_visual_secrets!, File.join(root, "shot-original.png"),
+              media_type: "image/png", duration: nil
+            )
+          end
+          assert_match(/secret-shaped/, error.message)
+          refute_includes error.message, "abcdefghijklmnopqrstuvwxyz"
+        end
+      end
+    end
+  end
+
   private
 
   def admit(root, value)

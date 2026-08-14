@@ -132,6 +132,61 @@ class OutcomeEvidenceContractTest < Minitest::Test
     end
   end
 
+  def test_rejects_secret_shaped_semantic_claims_exclusions_and_verdicts
+    secret = "api_key=abcdefghijklmnopqrstuvwxyz0123456789"
+    input = {
+      implementation: { "changed_paths" => %w[app/checkout.rb] },
+      claims: [
+        claim(
+          "claim-flow", "A buyer sees #{secret} after completing checkout.",
+          "document", %w[app/checkout.rb]
+        )
+      ],
+      exclusions: [],
+      inference: { "context_id" => "inference-1", "agent" => "claude" }
+    }
+    error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.requirement!(**input)
+    end
+    assert_match(/secret-shaped/, error.message)
+    refute_includes error.message, "abcdefghijklmnopqrstuvwxyz"
+
+    requirement = Contract.requirement!(
+      **input.merge(
+        claims: [
+          claim(
+            "claim-flow", "A buyer sees confirmation after completing checkout.",
+            "document", %w[app/checkout.rb]
+          )
+        ]
+      )
+    )
+    evidence = [
+      {
+        "kind" => "document", "claims" => [ "claim-flow" ],
+        "representations" => [ { "sha256" => "a" * 64 }, { "sha256" => "b" * 64 } ]
+      }
+    ]
+    error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.review!(
+        requirement: requirement, evidence: evidence,
+        producer: { "context_id" => "producer-1", "agent" => "claude" },
+        reviewer: { "context_id" => "reviewer-1", "agent" => "claude" },
+        output: {
+          "inspected_hashes" => [ "a" * 64, "b" * 64 ],
+          "verdicts" => [
+            {
+              "target_id" => "claim-flow", "verdict" => "accepted",
+              "reason" => "The proof exposes #{secret} in its completed state."
+            }
+          ]
+        }
+      )
+    end
+    assert_match(/secret-shaped/, error.message)
+    refute_includes error.message, "abcdefghijklmnopqrstuvwxyz"
+  end
+
   private
 
   def claim(id, statement, proof_kind, paths)

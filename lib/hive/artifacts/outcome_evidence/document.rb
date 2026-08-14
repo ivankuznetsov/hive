@@ -25,7 +25,7 @@ module Hive
 
         def parse(source, schema:, label:, version: nil)
           value = JSON.parse(
-            source, object_class: StrictHash, allow_duplicate_key: true
+            source, object_class: StrictHash, allow_duplicate_key: false
           )
           unless value.is_a?(Hash)
             raise StoreError, "#{label} must contain a JSON object"

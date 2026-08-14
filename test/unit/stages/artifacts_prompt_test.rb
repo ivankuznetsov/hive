@@ -82,6 +82,9 @@ class StagesArtifactsPromptTest < Minitest::Test
       assert_match(/Never edit\s+the worktree/, producer)
       assert_includes reviewer, "third fresh"
       assert_includes reviewer, "actual temporal video"
+      assert_includes reviewer, "`task.md`, `plan.md` when present"
+      assert_includes reviewer, "exact Git diff"
+      assert_includes reviewer, "omit a requested outcome"
       assert_includes reviewer, "every representation SHA-256"
       assert_includes reviewer, "accepted`, `revise`, or `blocked"
       [ inference, producer, reviewer ].each { |prompt| assert_includes prompt, "untrusted data" }

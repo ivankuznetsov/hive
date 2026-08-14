@@ -172,6 +172,32 @@ class TaskTest < ActiveSupport::TestCase
     FileUtils.remove_entry(root) if root&.exist?
   end
 
+  test "projects a validated blocked package with exact recovery guidance" do
+    root = Pathname(Dir.mktmpdir("hive-web-blocked-outcome-evidence"))
+    folder = root.join("task")
+    folder.mkpath
+    slug = "ship-it-260720-abcd"
+    result = write_blocked_outcome_evidence(
+      folder, slug: slug, project: "alpha", project_root: root
+    )
+    task = Task.new(
+      project: Project.new("name" => "alpha", "path" => root.to_s),
+      attributes: { "slug" => slug, "folder" => folder.to_s }
+    )
+
+    package = task.outcome_evidence
+    assert_equal "blocked", package.fetch("status")
+    assert_equal "recaptures_exhausted", package.dig("blocker", "reason")
+    assert_equal [ "claim-checkout" ], package.dig("blocker", "failed_claims")
+    assert_includes package.dig("blocker", "reviewer_reasons").first,
+                    "final confirmation"
+    assert_includes package.dig("blocker", "command"), result.dig(:pointer, "generation")
+    assert_includes package.dig("blocker", "command"),
+                    result.dig(:pointer, "recovery_digest")
+  ensure
+    FileUtils.remove_entry(root) if root&.exist?
+  end
+
   test "renders verified capture-manifest artifacts as stills and videos" do
     root = Pathname(Dir.mktmpdir("hive-web-capture-model"))
     folder = root.join("task")

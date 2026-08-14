@@ -41,6 +41,34 @@ class CommandsEvidenceTest < Minitest::Test
     end
   end
 
+  def test_recover_revalidates_the_complete_blocked_package_before_advancing
+    with_tmp_dir do |dir|
+      task = fake_task(dir)
+      pointer = blocked_package(task)
+      Hive::Markers.set(
+        task.state_file, :error,
+        reason: "outcome_evidence_capability_blocked",
+        generation: pointer.fetch("generation"),
+        recovery_digest: pointer.fetch("recovery_digest")
+      )
+      current_path = File.join(task.folder, "outcome-evidence", "current.json")
+      tampered = JSON.parse(File.read(current_path))
+      tampered["failed_claims"] = [ "claim-other" ]
+      File.write(current_path, JSON.generate(tampered) << "\n")
+      command = Hive::Commands::Evidence.new(
+        "recover", task.slug,
+        generation: pointer.fetch("generation"),
+        recovery_digest: pointer.fetch("recovery_digest"),
+        task_resolver: -> { task }
+      )
+
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { command.call }
+      refute File.exist?(File.join(task.folder, "outcome-evidence", "recovery.json"))
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal "outcome_evidence_capability_blocked", marker.attrs.fetch("reason")
+    end
+  end
+
   private
 
   def fake_task(dir)

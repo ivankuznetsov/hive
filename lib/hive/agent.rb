@@ -131,6 +131,11 @@ module Hive
     SCRUBBED_CHILD_ENV = {
       "HIVE_SCREENOTE_BASE_URL" => nil
     }.freeze
+    ISOLATED_CHILD_ENV_KEYS = %w[
+      HOME PATH LANG LC_ALL LC_CTYPE TMPDIR TZ SSL_CERT_FILE SSL_CERT_DIR
+      XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_RUNTIME_DIR
+      DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS TERM COLORTERM
+    ].freeze
 
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :max_tokens, :max_turns, :timeout_sec,
                 :profile, :expected_output, :status_mode, :permission_mode,
@@ -143,7 +148,8 @@ module Hive
                    disallowed_tools: nil, cli_flags: [], max_tokens: nil,
                    max_turns: nil, identity_arguments: [], runtime_policy: nil,
                    launch_arguments: nil, routing_arguments: nil,
-                   launch_environment: {}, provider_route: nil, log_stream: true)
+                   launch_environment: {}, provider_route: nil, log_stream: true,
+                   isolate_environment: false)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -157,6 +163,7 @@ module Hive
       @profile = profile || Hive::AgentProfiles.lookup(:claude)
       @provider_route = provider_route
       @runtime_policy = runtime_policy
+      @isolate_environment = isolate_environment == true
       @expected_output = expected_output
       # Per-spawn override of the profile's default detection mode. The
       # same CLI (e.g., claude) serves multiple roles — 4-execute uses
@@ -183,7 +190,14 @@ module Hive
         @disallowed_tools = disallowed_tools
         @cli_flags = Array(cli_flags)
         @runtime_cli_flags = []
-        @child_environment = SCRUBBED_CHILD_ENV
+        @child_environment = if @isolate_environment
+          ISOLATED_CHILD_ENV_KEYS.each_with_object({}) do |key, environment|
+            value = ENV[key]
+            environment[key] = value if value && !value.empty?
+          end.merge(SCRUBBED_CHILD_ENV)
+        else
+          SCRUBBED_CHILD_ENV
+        end
       end
       @child_environment = @child_environment
         .merge(launch_environment || {})
@@ -309,7 +323,7 @@ module Hive
       end
       r, w = IO.pipe
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
-      spawn_opts[:unsetenv_others] = true if @runtime_policy
+      spawn_opts[:unsetenv_others] = true if @runtime_policy || @isolate_environment
       spawn_opts[:in] = stdin_file if stdin_file
       pid = Process.spawn(@child_environment, *cmd, **spawn_opts)
       w.close

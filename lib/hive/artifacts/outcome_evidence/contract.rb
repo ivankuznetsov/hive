@@ -2,6 +2,7 @@ require "set"
 require "hive/artifacts/outcome_evidence/document"
 require "hive/artifacts/outcome_evidence/identity"
 require "hive/artifacts/outcome_evidence/proof"
+require "hive/secret_patterns"
 
 module Hive
   module Artifacts
@@ -163,9 +164,17 @@ module Hive
           if text.bytesize > MAX_STATEMENT_BYTES || words.length < 4 || VAGUE.include?(normalized)
             raise StoreError, "#{label} must be a meaningful bounded explanation"
           end
-          text
+          secret_free!(text, label)
         end
         private_class_method :meaningful!
+
+        def secret_free!(text, label)
+          hits = Hive::SecretPatterns.scan(text)
+          return text if hits.empty?
+
+          names = hits.map { |hit| hit.fetch(:name) }.uniq.join(", ")
+          raise StoreError, "#{label} contains secret-shaped content: #{names}"
+        end
 
         def actor!(value, label)
           actor = object!(value, label)

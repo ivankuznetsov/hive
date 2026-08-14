@@ -721,7 +721,8 @@ module Hive
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
                       disallowed_tools: nil, cli_flags: nil,
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
-                      routing_resolution: nil, routing_arguments: nil)
+                      routing_resolution: nil, routing_arguments: nil,
+                      isolate_environment: false)
         context = Hive::Attempts::Context.current
         launch_binding = nil
         provider_route = nil
@@ -827,7 +828,8 @@ module Hive
           runtime_policy: runtime_policy,
           routing_arguments: routing_arguments,
           launch_environment: launch_binding&.environment || {},
-          provider_route: provider_route
+          provider_route: provider_route,
+          isolate_environment: isolate_environment
         ).run!
         if result[:status] == :ok && runtime_policy&.host_outputs?
           begin

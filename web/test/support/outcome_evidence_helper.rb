@@ -4,6 +4,67 @@ module OutcomeEvidenceHelper
   EvidenceTask = Data.define(:folder, :slug, :project_root)
 
   def write_accepted_outcome_evidence(folder, slug:, project:, project_root:)
+    fixture = outcome_evidence_fixture(
+      folder, slug: slug, project: project, project_root: project_root
+    )
+    evidence = fixture.fetch(:evidence)
+    hashes = evidence.fetch("representations").map { |item| item.fetch("sha256") }
+    attempt = fixture.fetch(:store).append_attempt!(
+      generation: fixture.dig(:requirement, "generation"),
+      attempt_id: "attempt-01-web", status: "accepted", evidence: [ evidence ],
+      producer: fixture.fetch(:actor).call("producer-1"),
+      review: {
+        "reviewer" => fixture.fetch(:actor).call("reviewer-1"),
+        "inspected_hashes" => hashes,
+        "verdicts" => [
+          {
+            "target_id" => "claim-checkout", "verdict" => "accepted",
+            "reason" => "The retained document directly explains the completed checkout outcome."
+          }
+        ]
+      }
+    )
+    fixture.fetch(:store).publish_current!(
+      generation: fixture.dig(:requirement, "generation"),
+      attempt_id: attempt.fetch("attempt_id")
+    )
+    { store: fixture.fetch(:store), evidence: evidence }
+  end
+
+  def write_blocked_outcome_evidence(folder, slug:, project:, project_root:)
+    fixture = outcome_evidence_fixture(
+      folder, slug: slug, project: project, project_root: project_root
+    )
+    evidence = fixture.fetch(:evidence)
+    hashes = evidence.fetch("representations").map { |item| item.fetch("sha256") }
+    attempt = fixture.fetch(:store).append_attempt!(
+      generation: fixture.dig(:requirement, "generation"),
+      attempt_id: "attempt-01-blocked", status: "revise", evidence: [ evidence ],
+      producer: fixture.fetch(:actor).call("producer-blocked"),
+      diagnostic: "The checkout proof does not show the final confirmation state.",
+      review: {
+        "reviewer" => fixture.fetch(:actor).call("reviewer-blocked"),
+        "inspected_hashes" => hashes,
+        "verdicts" => [
+          {
+            "target_id" => "claim-checkout", "verdict" => "revise",
+            "reason" => "The checkout proof does not show the final confirmation state."
+          }
+        ]
+      }
+    )
+    pointer = fixture.fetch(:store).publish_blocked!(
+      generation: fixture.dig(:requirement, "generation"),
+      reason: "recaptures_exhausted", failed_claims: [ "claim-checkout" ],
+      reviewer_reasons: [ "The checkout proof does not show the final confirmation state." ],
+      attempt_ids: [ attempt.fetch("attempt_id") ]
+    )
+    { store: fixture.fetch(:store), evidence: evidence, pointer: pointer }
+  end
+
+  private
+
+  def outcome_evidence_fixture(folder, slug:, project:, project_root:)
     task = EvidenceTask.new(folder: folder.to_s, slug: slug, project_root: project_root.to_s)
     paths = [ "app/checkout.rb" ]
     head = "b" * 40
@@ -59,23 +120,6 @@ module OutcomeEvidenceHelper
         "proof_kinds" => [ "document" ], "temporal_video" => false
       }
     )
-    hashes = evidence.fetch("representations").map { |item| item.fetch("sha256") }
-    attempt = store.append_attempt!(
-      generation: requirement.fetch("generation"), attempt_id: "attempt-01-web",
-      status: "accepted", evidence: [ evidence ], producer: actor.call("producer-1"),
-      review: {
-        "reviewer" => actor.call("reviewer-1"), "inspected_hashes" => hashes,
-        "verdicts" => [
-          {
-            "target_id" => "claim-checkout", "verdict" => "accepted",
-            "reason" => "The retained document directly explains the completed checkout outcome."
-          }
-        ]
-      }
-    )
-    store.publish_current!(
-      generation: requirement.fetch("generation"), attempt_id: attempt.fetch("attempt_id")
-    )
-    { store: store, evidence: evidence }
+    { store: store, evidence: evidence, actor: actor, requirement: requirement }
   end
 end

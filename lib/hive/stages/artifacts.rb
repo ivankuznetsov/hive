@@ -142,6 +142,9 @@ module Hive
           )
           replacements = Array(producer.fetch(:output).fetch("evidence"))
           ensure_producer_paths!(task, writable_root, replacements)
+          replacements = store.retain_candidate!(
+            generation: generation, attempt_id: attempt_id, evidence: replacements
+          )
           evidence = merge_candidate_evidence!(prior, replacements, revision)
 
           reviewer_prompt = render_role_prompt(
@@ -220,6 +223,7 @@ module Hive
             status_mode: :exit_code_only, cfg: cfg,
             model: actor_cfg["model"], effort: actor_cfg["effort"],
             routing_arguments: routing,
+            isolate_environment: true,
             **security
           )
         rescue Hive::AgentError => e
@@ -424,7 +428,7 @@ module Hive
         end
         value = JSON.parse(
           text, object_class: Hive::Artifacts::OutcomeEvidence::Document::StrictHash,
-          allow_duplicate_key: true
+          allow_duplicate_key: false
         )
         raise Hive::Artifacts::OutcomeEvidence::StoreError, "#{role} output must be one exact JSON object" unless value.is_a?(Hash)
         value
@@ -436,6 +440,8 @@ module Hive
         relative_root = Pathname.new(writable_root).relative_path_from(Pathname.new(task.folder)).to_s
         prefix = "#{relative_root}/"
         Array(evidence).each do |entry|
+          next if entry.dig("source", "type").to_s == "project_provider"
+
           Array(entry["representations"]).each do |representation|
             path = Hive::Artifacts::OutcomeEvidence::Identity.validate_changed_path!(representation.fetch("path"))
             unless path.start_with?(prefix)

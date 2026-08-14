@@ -94,7 +94,7 @@ module Hive
             value
           end
           value = JSON.parse(
-            source, object_class: Document::StrictHash, allow_duplicate_key: true
+            source, object_class: Document::StrictHash, allow_duplicate_key: false
           )
           expected = %w[
             advanced_at blocked_digest blocked_generation epoch project schema

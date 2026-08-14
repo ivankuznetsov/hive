@@ -1,5 +1,6 @@
 require "digest"
 require "fileutils"
+require "pathname"
 require "time"
 require "hive/atomic_file"
 require "hive/attempts/context"
@@ -137,6 +138,7 @@ module Hive
           if status != "accepted" && diagnostic.to_s.empty?
             raise StoreError, "non-accepted outcome evidence requires a diagnostic"
           end
+          Contract.secret_free!(diagnostic, "outcome-evidence attempt diagnostic") if diagnostic
 
           document = {
             "schema" => SCHEMAS.fetch(:attempt),
@@ -156,6 +158,41 @@ module Hive
             attempt_path(generation, attempt_id), document,
             schema: SCHEMAS.fetch(:attempt), label: "outcome-evidence attempt"
           )
+        end
+
+        def retain_candidate!(generation:, attempt_id:, evidence:)
+          generation = validate_digest!(generation, "generation")
+          attempt_id = validate_id!(attempt_id, "attempt ID")
+          requirement = read_document(
+            requirement_path(generation), schema: SCHEMAS.fetch(:requirement),
+            label: "outcome-evidence requirement"
+          )
+          ensure_generation_directories!(generation)
+          retained_root = File.join(generation_root(generation), "retained")
+          ensure_private_directory!(retained_root, "outcome-evidence retained directory")
+          attempt_root = File.join(retained_root, attempt_id)
+          begin
+            Dir.mkdir(attempt_root, 0o700)
+          rescue Errno::EEXIST, Errno::ELOOP
+            raise StoreError, "outcome-evidence attempt custody root already exists"
+          end
+          relative_attempt_root = Pathname.new(attempt_root)
+            .relative_path_from(Pathname.new(@task.folder)).to_s
+          entries = Array(evidence).map.with_index do |entry, index|
+            Proof.materialize!(
+              entry, task_folder: @task.folder,
+              expected_head: requirement.dig("implementation", "implementation_head"),
+              destination_root: File.join(
+                relative_attempt_root, format("entry-%02d", index + 1)
+              )
+            )
+          end
+          Hive::AtomicFile.fsync_directory(attempt_root)
+          entries
+        rescue StoreError, SystemCallError
+          FileUtils.remove_entry_secure(attempt_root) if
+            attempt_root && File.directory?(attempt_root)
+          raise
         end
 
         def publish_current!(generation:, attempt_id:)
@@ -256,7 +293,7 @@ module Hive
             unless text.bytesize.between?(1, Contract::MAX_STATEMENT_BYTES)
               raise StoreError, "reviewer blocker reason is empty or oversized"
             end
-            text
+            Contract.secret_free!(text, "reviewer blocker reason")
           end.uniq
           unless reason == "capability_blocked" || claims.any?
             raise StoreError, "semantic review blocker requires failed claims"
@@ -572,6 +609,18 @@ module Hive
             stat = File.lstat(directory)
             raise StoreError, "outcome-evidence generation directory is not a directory" unless stat.directory?
           end
+        end
+
+        def ensure_private_directory!(directory, label)
+          reject_symlink!(directory, label)
+          FileUtils.mkdir_p(directory, mode: 0o700)
+          stat = File.lstat(directory)
+          unless stat.directory? && !stat.symlink?
+            raise StoreError, "#{label} is not a directory"
+          end
+          FileUtils.chmod(0o700, directory)
+        rescue Errno::ELOOP
+          raise StoreError, "#{label} must not be a symlink"
         end
 
         def canonical_identity(identity)

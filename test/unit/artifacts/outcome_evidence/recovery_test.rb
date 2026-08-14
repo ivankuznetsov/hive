@@ -54,6 +54,45 @@ class OutcomeEvidenceRecoveryTest < Minitest::Test
     end
   end
 
+  def test_corrupt_oversize_duplicate_and_symlinked_recovery_records_fail_closed
+    with_tmp_dir do |dir|
+      task = FakeTask.new(folder: dir, slug: "demo-task")
+      recovery = Recovery.new(task: task, project: "demo", clock: -> { NOW })
+      pointer = blocked_pointer(epoch: 0)
+      recovery.advance!(
+        pointer: pointer, task_generation: "task-generation-1",
+        expected_generation: pointer.fetch("generation"),
+        expected_digest: pointer.fetch("recovery_digest")
+      )
+      path = File.join(dir, "outcome-evidence", "recovery.json")
+      valid = File.binread(path)
+      invalid_documents = [
+        "{",
+        valid.sub('"schema":', '"schema":"duplicate","schema":'),
+        "x" * (Recovery::MAX_BYTES + 1)
+      ]
+      invalid_documents.each do |source|
+        File.binwrite(path, source)
+        error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          recovery.epoch(task_generation: "task-generation-1")
+        end
+        assert_match(/recovery/, error.message)
+        assert_equal source, File.binread(path)
+      end
+
+      FileUtils.rm_f(path)
+      target = File.join(dir, "outside-recovery.json")
+      File.binwrite(target, valid)
+      File.symlink(target, path)
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        recovery.epoch(task_generation: "task-generation-1")
+      end
+      assert_match(/symlink/, error.message)
+      assert File.symlink?(path)
+      assert_equal valid, File.binread(target)
+    end
+  end
+
   private
 
   def blocked_pointer(epoch:, generation: "a" * 64, digest: "f" * 64)

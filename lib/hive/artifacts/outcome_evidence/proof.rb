@@ -1,6 +1,9 @@
 require "digest"
+require "fileutils"
 require "json"
 require "pathname"
+require "tmpdir"
+require "hive/atomic_file"
 require "hive/artifacts/outcome_evidence/document"
 require "hive/artifacts/outcome_evidence/identity"
 require "hive/invoked_binary"
@@ -22,6 +25,7 @@ module Hive
         MAX_REPRESENTATIONS = 8
         MAX_CLAIMS = 64
         MAX_TEXT_BYTES = 4 * 1024 * 1024
+        MAX_VIDEO_DURATION_SECONDS = 30
         SAFE_NAME = /\A[a-z][a-z0-9_-]{0,63}\z/
         SAFE_CLAIM = /\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z/
         DIGEST = /\A[0-9a-f]{64}\z/
@@ -42,8 +46,7 @@ module Hive
           },
           "document" => {
             "original" => %w[
-              text/plain text/markdown application/json application/pdf
-              image/png image/jpeg image/webp
+              text/plain text/markdown application/json image/png image/jpeg image/webp
             ],
             "review" => %w[text/plain image/png image/jpeg image/webp]
           }
@@ -85,6 +88,42 @@ module Hive
           raise StoreError, "outcome evidence is missing #{e.key}"
         rescue ArgumentError, TypeError, ResolutionError => e
           raise StoreError, e.message
+        end
+
+        # Move producer-owned task evidence across a controller custody
+        # boundary before the independent reviewer sees it. The copy is read
+        # through a no-follow descriptor, must reproduce the producer's exact
+        # byte count and digest, and is admitted again from its immutable
+        # generation/attempt path. Project-provider files already live in the
+        # controller-owned media store and remain bound to their manifest.
+        def materialize!(value, task_folder:, expected_head:, destination_root:)
+          admitted = admit!(
+            value, task_folder: task_folder, expected_head: expected_head
+          )
+          return admitted if admitted.dig("source", "type") == "project_provider"
+
+          relative_root = Identity.validate_changed_path!(destination_root)
+          task_root = File.realpath(task_folder)
+          destination = File.join(task_root, relative_root)
+          prepare_materialization_root!(task_root, destination)
+          copied = admitted.merge(
+            "representations" => admitted.fetch("representations").map.with_index do |representation, index|
+              relative = File.join(
+                relative_root, format("representation-%02d-%s", index + 1, representation.fetch("role"))
+              )
+              copy_representation!(
+                task_root, representation, File.join(task_root, relative)
+              ).merge("path" => relative)
+            end
+          )
+          canonical = admit!(
+            copied, task_folder: task_folder, expected_head: expected_head
+          )
+          Hive::AtomicFile.fsync_directory(destination)
+          canonical
+        rescue StoreError, SystemCallError
+          FileUtils.remove_entry_secure(destination) if destination && File.directory?(destination)
+          raise
         end
 
         def canonical_claims(value)
@@ -141,6 +180,16 @@ module Hive
           unless representations.length.between?(2, MAX_REPRESENTATIONS)
             raise StoreError,
                   "outcome evidence requires 2-#{MAX_REPRESENTATIONS} representations"
+          end
+          if kind == "video"
+            review = representations.find do |item|
+              item.respond_to?(:to_h) && item.to_h.transform_keys(&:to_s)["role"].to_s == "review"
+            end
+            unless review && review.to_h.transform_keys(&:to_s)["media_type"].to_s.start_with?("video/")
+              raise StoreError,
+                    "video outcome evidence requires an actual temporal review representation; " \
+                    "storyboard frames are supplemental only"
+            end
           end
           canonical = representations.map do |item|
             canonical_representation(item, kind: kind, task_folder: task_folder)
@@ -238,10 +287,76 @@ module Hive
         end
         private_class_method :secure_digest
 
+        def prepare_materialization_root!(task_root, destination)
+          parent = File.realpath(File.dirname(destination))
+          unless parent == task_root || parent.start_with?("#{task_root}#{File::SEPARATOR}")
+            raise StoreError, "outcome evidence custody root escapes the task folder"
+          end
+          begin
+            File.lstat(destination)
+            raise StoreError, "outcome evidence custody root already exists"
+          rescue Errno::ENOENT
+            nil
+          end
+          Dir.mkdir(destination, 0o700)
+          stat = File.lstat(destination)
+          unless stat.directory? && !stat.symlink?
+            raise StoreError, "outcome evidence custody root is not a directory"
+          end
+          Hive::AtomicFile.fsync_directory(parent)
+        rescue Errno::EEXIST, Errno::ELOOP
+          raise StoreError, "outcome evidence custody root is unavailable"
+        end
+        private_class_method :prepare_materialization_root!
+
+        def copy_representation!(task_root, representation, destination)
+          source, = retained_regular_file!(task_root, representation.fetch("path"))
+          digest = Digest::SHA256.new
+          total = 0
+          File.open(source, File::RDONLY | File::NOFOLLOW) do |input|
+            before = input.stat
+            raise StoreError, "producer evidence must be a regular file" unless before.file?
+
+            File.open(
+              destination,
+              File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW,
+              0o600
+            ) do |output|
+              while (chunk = input.read(1024 * 1024))
+                total += chunk.bytesize
+                if total > representation.fetch("bytes")
+                  raise StoreError, "producer evidence changed during custody transfer"
+                end
+                digest << chunk
+                output.write(chunk)
+              end
+              output.flush
+              output.fsync
+            end
+            after = input.stat
+            unless [ before.dev, before.ino, before.size ] == [ after.dev, after.ino, after.size ]
+              raise StoreError, "producer evidence changed during custody transfer"
+            end
+          end
+          unless total == representation.fetch("bytes") &&
+                 digest.hexdigest == representation.fetch("sha256")
+            raise StoreError, "producer evidence changed during custody transfer"
+          end
+          Hive::AtomicFile.fsync_directory(File.dirname(destination))
+          representation.merge("bytes" => total, "sha256" => digest.hexdigest)
+        rescue Errno::EEXIST, Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR
+          raise StoreError, "producer evidence is unavailable for custody transfer"
+        rescue StoreError
+          FileUtils.rm_f(destination)
+          raise
+        end
+        private_class_method :copy_representation!
+
         def inspect_representation!(path, kind:, role:, media_type:)
           case media_type
           when "image/png", "image/jpeg", "image/webp", "video/webm", "video/mp4"
-            inspect_media!(path, media_type: media_type)
+            duration = inspect_media!(path, media_type: media_type)
+            inspect_visual_secrets!(path, media_type: media_type, duration: duration)
           when "application/x-asciinema+json"
             inspect_terminal_cast!(path)
           when "text/plain", "text/markdown", "application/json"
@@ -250,8 +365,6 @@ module Hive
               json: media_type == "application/json",
               reject_active_document: kind == "document"
             )
-          when "application/pdf"
-            inspect_pdf!(path)
           else
             raise StoreError, "unsupported #{kind} #{role} representation"
           end
@@ -305,12 +418,6 @@ module Hive
         end
         private_class_method :inspect_safe_text!
 
-        def inspect_pdf!(path)
-          header = File.binread(path, 5)
-          raise StoreError, "document PDF original is malformed" unless header == "%PDF-"
-        end
-        private_class_method :inspect_pdf!
-
         def inspect_media!(path, media_type:)
           ffprobe = Hive::InvokedBinary.which("ffprobe")
           ffmpeg = Hive::InvokedBinary.which("ffmpeg")
@@ -340,15 +447,87 @@ module Hive
           end
           raise StoreError, "proof media is not valid decodable #{media_type}" unless valid
 
+          duration = if media_type.start_with?("video/")
+            Float(format["duration"], exception: false)
+          end
+          if duration && duration > MAX_VIDEO_DURATION_SECONDS
+            raise StoreError,
+                  "proof video exceeds #{MAX_VIDEO_DURATION_SECONDS} seconds"
+          end
+
           media_command(
             [ ffmpeg, "-nostdin", "-v", "error", "-i", path, "-map", "0:v:0",
               "-frames:v", "1", "-f", "null", "-" ],
             source_root: File.dirname(path)
           )
+          duration
         rescue JSON::ParserError, KeyError, TypeError
           raise StoreError, "proof media is not valid decodable #{media_type}"
         end
         private_class_method :inspect_media!
+
+        def inspect_visual_secrets!(path, media_type:, duration:)
+          tesseract = Hive::InvokedBinary.which("tesseract")
+          raise StoreError, "tesseract is required to inspect visual proof for secrets" unless tesseract
+
+          text = if media_type.start_with?("video/")
+            ffmpeg = Hive::InvokedBinary.which("ffmpeg")
+            raise StoreError, "ffmpeg is required to inspect visual proof for secrets" unless ffmpeg
+
+            Dir.mktmpdir("hive-proof-ocr") do |directory|
+              pattern = File.join(directory, "frame-%03d.png")
+              ocr_command(
+                [ ffmpeg, "-nostdin", "-v", "error", "-i", path, "-vf",
+                  "fps=1,scale=1280:-2", "-frames:v", MAX_VIDEO_DURATION_SECONDS.to_s,
+                  pattern ],
+                source_root: directory, failure: "proof video keyframe extraction failed"
+              )
+              frames = Dir.glob(File.join(directory, "frame-*.png")).sort
+              if frames.empty?
+                first = File.join(directory, "frame-001.png")
+                ocr_command(
+                  [ ffmpeg, "-nostdin", "-v", "error", "-i", path,
+                    "-frames:v", "1", first ],
+                  source_root: directory, failure: "proof video keyframe extraction failed"
+                )
+                frames = [ first ]
+              end
+              frames.map do |frame|
+                ocr_command(
+                  [ tesseract, frame, "stdout", "--psm", "11" ],
+                  source_root: directory, failure: "proof visual secret inspection failed"
+                )
+              end.join("\n")
+            end
+          else
+            ocr_command(
+              [ tesseract, path, "stdout", "--psm", "11" ],
+              source_root: File.dirname(path), failure: "proof visual secret inspection failed"
+            )
+          end
+          reject_secrets!(text, "visual proof OCR")
+        end
+        private_class_method :inspect_visual_secrets!
+
+        def ocr_command(argv, source_root:, failure:)
+          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30
+          result = Hive::Web::ProjectCaptureProvider.capture_command_with_custody(
+            argv: argv, source_root: source_root,
+            environment: { "PATH" => ENV.fetch("PATH", "/usr/local/bin:/usr/bin:/bin") },
+            deadline: deadline
+          )
+          status = result["status"] || {}
+          unless !result["internal_error"] && !result["timed_out"] &&
+                 !result["cleanup_failed"] && !result["stdout_overflow"] &&
+                 !result["stderr_overflow"] && !result["leftover_processes"] &&
+                 status["success"]
+            raise StoreError, failure
+          end
+          result.fetch("stdout")
+        rescue Hive::Web::ProjectCaptureProvider::ProviderError, SystemCallError
+          raise StoreError, failure
+        end
+        private_class_method :ocr_command
 
         def media_command(argv, source_root:)
           deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 10

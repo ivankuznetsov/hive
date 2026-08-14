@@ -119,7 +119,7 @@
           "enum": [
             "image/png", "image/jpeg", "image/webp", "video/webm", "video/mp4",
             "application/x-asciinema+json", "text/plain", "text/markdown",
-            "application/json", "application/pdf"
+            "application/json"
           ]
         },
         "rendering": { "enum": ["original", "raster", "temporal", "escaped_text", "supplemental"] },

@@ -20,7 +20,8 @@ tests and 236 assertions; the coverage-instrumented Workflow Creator gateway
 and supervisor suites pass with 21 tests and 152 assertions; RuboCop is clean.
 A deliberate nonzero-shard probe
 with full-catalog preload failed four clean-load gateway tests, so that
-experiment was rejected and the shard-zero-only preload contract remains.
+experiment was initially rejected; the later coverage-shard-preload correction
+records the succeeding probe after the fixture deadline fix.
 Two exhaustive local coverage attempts then exposed one-second subprocess
 deadlines in the gateway and lower-level supervisor success fixtures under
 coverage-instrumented `exit!` flushing. Their ordinary success-path deadlines

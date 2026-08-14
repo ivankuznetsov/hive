@@ -145,9 +145,11 @@ namespace :coverage do
     ENV["HIVE_COVERAGE"] = "1"
     ENV["HIVE_COVERAGE_ROOT"] = root
     ENV["HIVE_COVERAGE_COLLECT_ONLY"] = "1"
-    # Keep the catalog preload in shard zero. Several tests intentionally prove
-    # clean-load behavior and fail when an unrelated shard preloads all sources.
-    ENV["HIVE_COVERAGE_LOAD_ALL"] = shard_index.zero? ? "1" : "0"
+    # Match the monolithic exact-coverage process: every partition starts from
+    # the complete source catalog before its tests run. The Workflow Creator
+    # subprocess fixtures have coverage-aware deadlines so this preload remains
+    # safe under instrumented exit flushing.
+    ENV["HIVE_COVERAGE_LOAD_ALL"] = "1"
     ENV["HIVE_REQUIRE_TEST_RUNS"] = "1"
     coverage_rubyopt = "-I#{File.join(root, 'test')} -rhive_coverage_boot"
     ENV["RUBYOPT"] = [ coverage_rubyopt, ENV["RUBYOPT"] ].compact.join(" ")

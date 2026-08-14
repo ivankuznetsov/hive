@@ -379,6 +379,22 @@ class CiTestPartitionTest < Minitest::Test
     end
   end
 
+  def test_coverage_prepare_shard_preloads_the_catalog_on_nonzero_partitions
+    env = {
+      "HIVE_COVERAGE_SHARD_INDEX" => "1",
+      "HIVE_COVERAGE_SHARD_COUNT" => "6",
+      "HIVE_COVERAGE_RUN_ID" => "preload-contract"
+    }
+
+    with_env(env) do
+      with_loaded_rakefile do
+        Rake::Task["coverage:prepare_shard"].invoke
+
+        assert_equal "1", ENV.fetch("HIVE_COVERAGE_LOAD_ALL")
+      end
+    end
+  end
+
   def test_coverage_collect_rejects_missing_results_and_errors_then_writes_manifest
     run_id = "task-contract-#{Process.pid}"
     resultset = File.join(ROOT, "coverage", ".resultset", run_id)

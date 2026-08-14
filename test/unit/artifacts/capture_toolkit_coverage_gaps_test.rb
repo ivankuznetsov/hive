@@ -30,6 +30,20 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
     end
   end
 
+  def test_prepare_normalizes_capture_gateway_failures
+    Dir.mktmpdir("hive-capture-toolkit-gateway") do |root|
+      replacement = lambda do |**|
+        raise Hive::Artifacts::BrowserGateway::GatewayError, "gateway"
+      end
+      error = with_replaced_singleton_method(
+        Hive::Artifacts::BrowserGateway, :new, replacement
+      ) do
+        assert_raises(Hive::ConfigError) { prepare_visual(prepared_toolkit, root) }
+      end
+      assert_match(/managed capture gateway is unavailable/, error.message)
+    end
+  end
+
   def test_managed_web_server_default_and_error_paths
     Dir.mktmpdir("hive-capture-toolkit-server") do |root|
       source = hive_web_source(root)
@@ -262,6 +276,127 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
 
     toolkit.define_singleton_method(:close) { raise Hive::ConfigError, "cleanup" }
     assert_nil toolkit.send(:close_after_prepare_error)
+  end
+
+  def test_capture_request_dispatch_and_project_provider_admission_are_fail_closed
+    toolkit = Toolkit.new
+    toolkit.instance_variable_set(:@task_root, "/task")
+    toolkit.instance_variable_set(:@source_sha, "a" * 40)
+    project_provider = {
+      "kind" => "screenshot",
+      "source" => {
+        "type" => "project_provider", "manifest_path" => "media/manifest.json"
+      },
+      "representations" => [ { "path" => "media/proof.png" } ]
+    }
+    replacement = ->(value, **) { value }
+    with_replaced_singleton_method(
+      Hive::Artifacts::OutcomeEvidence::Proof, :admit!, replacement
+    ) do
+      assert toolkit.verify_captures!([ project_provider ])
+
+      invalid = Marshal.load(Marshal.dump(project_provider))
+      invalid.fetch("representations").first["path"] = "work/proof.png"
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        toolkit.send(:verify_project_provider!, invalid)
+      end
+    end
+
+    assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      toolkit.verify_captures!([ { "kind" => "screenshot" } ])
+    end
+
+    unavailable = toolkit.send(:handle_capture_request, "operation" => "browser")
+    assert_equal 64, unavailable.fetch("status")
+    assert_match(/unavailable/, unavailable.fetch("error"))
+
+    calls = []
+    gateway = Object.new
+    gateway.define_singleton_method(:call) do |argv|
+      calls << argv
+      { "ok" => true, "status" => 0 }
+    end
+    toolkit.instance_variable_set(:@browser_gateway, gateway)
+    assert_equal true,
+                 toolkit.send(
+                   :handle_capture_request, "operation" => "browser", "argv" => [ "snapshot" ]
+                 ).fetch("ok")
+    assert_equal [ [ "snapshot" ] ], calls
+    assert_equal 64,
+                 toolkit.send(:handle_capture_request, "operation" => "unknown").fetch("status")
+    assert_match(/invalid/,
+                 toolkit.send(:handle_capture_request, {}).fetch("error"))
+    assert_match(
+      /terminal capture request is invalid/,
+      toolkit.send(
+        :handle_capture_request, "operation" => "terminal", "name" => "../bad", "argv" => []
+      ).fetch("error")
+    )
+  end
+
+  def test_controller_capture_receipts_detect_invalid_files_digests_and_races
+    Dir.mktmpdir("hive-controller-capture") do |root|
+      toolkit = Toolkit.new
+      toolkit.instance_variable_set(:@task_root, root)
+
+      empty = File.join(root, "empty.png")
+      File.write(empty, "")
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        toolkit.send(:record_capture!, "path" => empty, "media_type" => "image/png")
+      end
+
+      changed = File.join(root, "changed.png")
+      File.binwrite(changed, "png")
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        toolkit.send(
+          :record_capture!, "path" => changed, "media_type" => "image/png",
+          "sha256" => "0" * 64
+        )
+      end
+
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        toolkit.send(
+          :record_capture!, "path" => File.join(root, "missing.png"),
+          "media_type" => "image/png"
+        )
+      end
+      refute toolkit.send(
+        :capture_file_matches?, "missing.png", "bytes" => 1, "sha256" => "0" * 64
+      )
+
+      short = File.join(root, "short.png")
+      File.binwrite(short, "png")
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        toolkit.send(:bounded_digest, short, 4)
+      end
+
+      pathname = Object.new
+      pathname.define_singleton_method(:relative_path_from) { |_| raise ArgumentError, "roots" }
+      with_replaced_singleton_method(Pathname, :new, ->(*) { pathname }) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          toolkit.send(:task_relative_path, short)
+        end
+      end
+    end
+  end
+
+  def test_browser_state_cleanup_unlinks_symlinks_and_tolerates_absence
+    Dir.mktmpdir("hive-browser-state-cleanup") do |root|
+      target = File.join(root, "target")
+      File.write(target, "keep")
+      link = File.join(root, "state-link")
+      File.symlink(target, link)
+      toolkit = Toolkit.new
+      toolkit.instance_variable_set(:@browser_state_root, link)
+      toolkit.send(:remove_browser_state_root)
+      refute_path_exists link
+      assert_path_exists target
+      assert_nil toolkit.instance_variable_get(:@browser_state_root)
+
+      toolkit.instance_variable_set(:@browser_state_root, File.join(root, "missing"))
+      assert_nil toolkit.send(:remove_browser_state_root)
+      assert_nil toolkit.instance_variable_get(:@browser_state_root)
+    end
   end
 
   private

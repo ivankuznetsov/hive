@@ -1532,6 +1532,7 @@ class StagesArtifactsTest < Minitest::Test
       Hive::Stages::Artifacts.remove_producer_work!(task, link)
       refute File.exist?(link)
       assert_equal "keep", File.read(outside)
+      assert_nil Hive::Stages::Artifacts.remove_producer_work!(task, link)
     end
   end
 

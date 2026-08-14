@@ -825,6 +825,18 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         store.send(:validate_retained_evidence!, requirement, noncanonical_review)
       end
+
+      noncanonical_metadata = plain_copy(attempt)
+      noncanonical_metadata.dig("evidence", 0, "claims").reverse!
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        store.send(:validate_retained_metadata!, requirement, noncanonical_metadata)
+      end
+
+      noncanonical_review_metadata = plain_copy(attempt)
+      noncanonical_review_metadata.dig("review", "review_scope_hashes").reverse!
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        store.send(:validate_retained_metadata!, requirement, noncanonical_review_metadata)
+      end
     end
   end
 

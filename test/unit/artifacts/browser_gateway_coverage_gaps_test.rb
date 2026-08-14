@@ -20,6 +20,11 @@ class ArtifactsBrowserGatewayCoverageGapsTest < Minitest::Test
       failing = build_gateway(root)
       failing.instance_variable_set(:@private_root, File.join(root, "missing"))
       assert failing.close
+
+      failing = build_gateway(root)
+      failing.define_singleton_method(:remove_owned_root) { |_| raise Errno::EACCES, "denied" }
+      refute failing.close
+      assert_nil failing.instance_variable_get(:@private_root)
     end
   end
 
@@ -128,6 +133,23 @@ class ArtifactsBrowserGatewayCoverageGapsTest < Minitest::Test
         callback.send(:publish_media!, callback_source, callback_destination)
       end
       refute_path_exists callback_destination
+
+      changed_source = File.join(root, "changed.png")
+      changed_destination = File.join(root, "changed-published.png")
+      File.binwrite(changed_source, "png")
+      real_lstat = File.method(:lstat)
+      changed_stat = Struct.new(:file?, :symlink?, :uid, :size)
+        .new(true, false, Process.uid, 4)
+      replacement = lambda do |path|
+        path == changed_source ? changed_stat : real_lstat.call(path)
+      end
+      with_replaced_singleton_method(File, :lstat, replacement) do
+        error = assert_raises(Gateway::GatewayError) do
+          gateway.send(:publish_media!, changed_source, changed_destination)
+        end
+        assert_match(/changed while it was published/, error.message)
+      end
+      refute_path_exists changed_destination
     end
   end
 

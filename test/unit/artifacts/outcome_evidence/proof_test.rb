@@ -190,6 +190,20 @@ class OutcomeEvidenceProofTest < Minitest::Test
           {}, task_folder: root, expected_head: HEAD, destination_root: "retained/broken"
         )
       end
+
+      File.write(File.join(root, "empty.txt"), "")
+      empty = {
+        "kind" => "document", "summary" => "Empty proof is rejected", "claims" => [ "claim-a" ],
+        "representations" => [
+          { "role" => "original", "media_type" => "text/plain", "path" => "empty.txt" },
+          { "role" => "review", "media_type" => "text/plain", "path" => "report.txt" }
+        ]
+      }
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.materialize_producer!(
+          empty, task_folder: root, expected_head: HEAD, destination_root: "retained/empty"
+        )
+      end
     end
   end
 
@@ -280,6 +294,26 @@ class OutcomeEvidenceProofTest < Minitest::Test
       )
       candidate.fetch("representations").last["sha256"] = "0" * 64
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { admit(root, candidate) }
+
+      malformed_digest = proof(
+        "document", files,
+        original: [ "report.md", "text/markdown" ],
+        review: [ "report.txt", "text/plain" ]
+      )
+      malformed_digest.fetch("representations").last["sha256"] = "short"
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        admit(root, malformed_digest)
+      end
+
+      mismatched_size = proof(
+        "document", files,
+        original: [ "report.md", "text/markdown" ],
+        review: [ "report.txt", "text/plain" ]
+      )
+      mismatched_size.fetch("representations").last["bytes"] += 1
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        admit(root, mismatched_size)
+      end
 
       diagnostic = proof(
         "screenshot", files,
@@ -500,6 +534,11 @@ class OutcomeEvidenceProofTest < Minitest::Test
       end
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         Proof.send(:secure_digest, File.join(root, "escape"))
+      end
+      bounded = File.join(root, "bounded.txt")
+      File.write(bounded, "too large")
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(:secure_digest, bounded, max_bytes: 1)
       end
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         Proof.send(

@@ -220,7 +220,6 @@ module Hive
 
         commands.join(", ")
       end
-
     end
   end
 end

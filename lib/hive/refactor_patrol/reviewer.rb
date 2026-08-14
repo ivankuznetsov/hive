@@ -256,7 +256,6 @@ module Hive
       def max_review_seconds_per_run
         @cfg.dig("refactor_patrol", "max_review_seconds_per_run") || 3600
       end
-
     end
   end
 end

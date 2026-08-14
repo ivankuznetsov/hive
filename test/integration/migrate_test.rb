@@ -460,7 +460,7 @@ class MigrateTest < Minitest::Test
           "leverage: {weights: {churn: 1.0}}}\n"
         )
 
-        capture_io { migrate_command(dir, daemon_restarter: -> {}).call }
+        capture_io { migrate_command(dir, daemon_restarter: -> { }).call }
 
         migrated = YAML.safe_load(File.read(cfg_path))
         assert_equal 1_000_000_000, migrated.dig("patrol", "max_tokens_per_agent")
@@ -494,7 +494,7 @@ class MigrateTest < Minitest::Test
             enabled: false
         YAML
 
-        capture_io { migrate_command(dir, daemon_restarter: -> {}).call }
+        capture_io { migrate_command(dir, daemon_restarter: -> { }).call }
 
         migrated_bytes = File.read(cfg_path)
         migrated = YAML.safe_load(migrated_bytes)

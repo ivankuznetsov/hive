@@ -3129,7 +3129,7 @@ module Hive
       [ "max_fixes_per_feature_per_cycle", 1 ],
       [ "max_fix_attempts_per_cycle", 1 ],
       [ "max_prs_per_cycle", 1 ],
-      [ "max_tokens_per_agent", 1 ],
+      [ "max_tokens_per_agent", 1 ]
     ].freeze
 
     def validate_patrol!(cfg, source_path)

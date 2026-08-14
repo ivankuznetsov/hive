@@ -658,7 +658,7 @@ module Hive
           raise Hive::ConfigError, "config.yml at #{path} must be a hash"
         end
 
-        target = Marshal.load(Marshal.dump(parsed))
+        target = parsed
         changed = delete_retired_patrol_values!(target)
         return [ content, false ] unless changed
 

@@ -460,12 +460,12 @@ config type errors, and dry-run digest completion failures.
 
 Coverage-included tests that only need a generic stdout/stderr subprocess should avoid `RbConfig.ruby` children unless they are explicitly testing Ruby coverage propagation. Those nested Ruby processes inherit the coverage `RUBYOPT`, which can make startup latency part of otherwise unrelated timeout assertions; use a tiny executable fixture script for generic capture/timeout seams.
 
-Every hosted coverage shard preloads the complete `lib/` catalog before running
-its partition. This preserves the same source-loading and test-order contract as
-the monolithic exact-coverage gate; preloading only shard zero can leave methods
-uncovered when their exercising tests run in a different process. Subprocess
-success fixtures must allow for the coverage-aware `exit!` flush cost rather
-than weakening the shared preload contract.
+Hosted coverage collectors load sources lazily through their assigned tests.
+Forked custody children inherit the parent process coverage catalog, so a full
+collector preload makes even sparse `exit!` flushes expensive enough to lose
+subprocess results under six-runner contention. The downstream aggregate still
+enumerates every `lib/` source, treats absent entries as unloaded, and enforces
+the same exact line threshold; lazy collection does not weaken the final gate.
 
 In CI (`CI=true`), tests that exercise backgrounding commands must force a foreground path (for example `foreground: true`) or stub daemonization. Otherwise the test process can daemonize before Minitest `after_run` writes `coverage/coverage.json`, leaving the parent coverage task with a missing report while child output keeps streaming. Bundler evaluates the gemspec before coverage starts, so the bootstrap reloads the preloaded `lib/hive/version.rb`, `lib/hive/errors.rb`, and `lib/hive.rb` files in dependency order. Reloaded code must therefore be idempotent; for example, self-derived enum constants must exclude `:ALL` to stay reload-safe.
 

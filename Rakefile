@@ -145,11 +145,12 @@ namespace :coverage do
     ENV["HIVE_COVERAGE"] = "1"
     ENV["HIVE_COVERAGE_ROOT"] = root
     ENV["HIVE_COVERAGE_COLLECT_ONLY"] = "1"
-    # Match the monolithic exact-coverage process: every partition starts from
-    # the complete source catalog before its tests run. The Workflow Creator
-    # subprocess fixtures have coverage-aware deadlines so this preload remains
-    # safe under instrumented exit flushing.
-    ENV["HIVE_COVERAGE_LOAD_ALL"] = "1"
+    # Keep collector processes lazy. Forked custody children inherit the
+    # parent's measured files; preloading the complete catalog makes their
+    # coverage-aware exit! flush exceed bounded test deadlines under six-runner
+    # contention. The aggregate still enumerates every lib/ source and fails
+    # unloaded files, so the exact gate remains fail-closed.
+    ENV["HIVE_COVERAGE_LOAD_ALL"] = "0"
     ENV["HIVE_REQUIRE_TEST_RUNS"] = "1"
     coverage_rubyopt = "-I#{File.join(root, 'test')} -rhive_coverage_boot"
     ENV["RUBYOPT"] = [ coverage_rubyopt, ENV["RUBYOPT"] ].compact.join(" ")

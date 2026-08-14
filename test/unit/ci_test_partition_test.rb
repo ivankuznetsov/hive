@@ -379,7 +379,7 @@ class CiTestPartitionTest < Minitest::Test
     end
   end
 
-  def test_coverage_prepare_shard_preloads_the_catalog_on_nonzero_partitions
+  def test_coverage_prepare_shard_keeps_collectors_lazy
     env = {
       "HIVE_COVERAGE_SHARD_INDEX" => "1",
       "HIVE_COVERAGE_SHARD_COUNT" => "6",
@@ -390,7 +390,7 @@ class CiTestPartitionTest < Minitest::Test
       with_loaded_rakefile do
         Rake::Task["coverage:prepare_shard"].invoke
 
-        assert_equal "1", ENV.fetch("HIVE_COVERAGE_LOAD_ALL")
+        assert_equal "0", ENV.fetch("HIVE_COVERAGE_LOAD_ALL")
       end
     end
   end

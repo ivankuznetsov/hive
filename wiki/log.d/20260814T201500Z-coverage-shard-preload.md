@@ -14,4 +14,6 @@ must preserve the monolithic source-loading contract in each test process.
 first full-preload experiment after raising its coverage-instrumented subprocess
 fixture deadlines. It passed 3,395 tests and 17,762 assertions in 321 seconds,
 including the Workflow Creator gateway paths that previously timed out. Hosted
-six-shard exact coverage remains the final proof.
+six-shard evidence later showed that passing tests were insufficient: preload
+reduced durable subprocess results and exact coverage. The subsequent sparse
+fork correction supersedes this collector preload decision.

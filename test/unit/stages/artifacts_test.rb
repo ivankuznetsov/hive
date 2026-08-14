@@ -710,6 +710,35 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_role_receipt_uses_provider_defaults_when_no_model_route_is_configured
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = { "implementation_head" => "a" * 40 }
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      spawn = lambda do |_task, **|
+        {
+          status: :ok, final_message: '{"claims":[],"exclusions":[]}',
+          final_message_truncated: false
+        }
+      end
+
+      with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Identity, :new,
+        ->(**_kwargs) { resolver }
+      ) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          result = Hive::Stages::Artifacts.run_role!(
+            role: "inference", task: task, cfg: {}, prompt: "infer",
+            identity: identity
+          )
+
+          assert_equal "provider-default", result.dig(:actor, "model")
+          assert_equal "default", result.dig(:actor, "effort")
+        end
+      end
+    end
+  end
+
   def test_symlinked_producer_evidence_is_rejected_before_reviewer_launch
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
@@ -726,6 +755,7 @@ class StagesArtifactsTest < Minitest::Test
         controller_binding: -> { { "task_generation" => "1", "recovery_epoch" => 0 } }
       )
       reviewer_launched = false
+      producer_root = nil
       original = Hive::Stages::Artifacts.method(:run_role!)
       Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |role:, writable_root: nil, **|
         case role
@@ -744,6 +774,7 @@ class StagesArtifactsTest < Minitest::Test
             }
           }
         when "producer"
+          producer_root = writable_root
           FileUtils.mkdir_p(writable_root)
           target = File.join(writable_root, "target.md")
           link = File.join(writable_root, "original.md")
@@ -791,6 +822,7 @@ class StagesArtifactsTest < Minitest::Test
       end
       assert_match(/regular file/, error.message)
       refute reviewer_launched
+      refute File.exist?(producer_root)
     ensure
       Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
     end

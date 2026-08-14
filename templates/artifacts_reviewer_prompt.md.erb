@@ -24,6 +24,8 @@ exact Git diff from the requirement's implementation base to implementation
 head. Reject the package if its claims omit a requested outcome even when its
 changed-path traceability is complete. Reject unrelated fixtures, mismatched
 states, vague evidence, or proof that does not establish the named outcome.
+Reject generated slides, diagrams, narrated summaries, or pictures of test
+output when the claim requires actual screenshot, flow, or terminal behavior.
 
 Return only one JSON object with `inspected_hashes` (every representation SHA-256)
 and `verdicts` (exactly one object per claim and exclusion, with `target_id`,

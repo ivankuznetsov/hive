@@ -1073,3 +1073,23 @@ one-file shape remains rejected and no compatibility reader exists. No
 provider-backed exact-head run, publication, or release qualification was
 performed here; hostile/property campaigns remain optional and outside the
 normal merge gate.
+
+## Outcome evidence needs one accepted live package (2026-08-14)
+
+A read-only retrospective ran the completed conditional-plan-critique task at
+source `48223ab9c2fab1b9c8716d759da6eea968d3fb7e` over its reconstructed exact
+159-path implementation range. Inference produced four outcome claims with the
+appropriate video, screenshot, and terminal proof kinds, plus two supporting
+documentation/test exclusions. Three fresh reviewer passes accepted both
+exclusions but rejected every behavior claim: the producer repeatedly supplied
+fixture-like summaries, selected test output, terminal-styled composites, or
+curated commandless output instead of real product surfaces and transitions.
+The controller exhausted its two recaptures and published a semantic blocked
+package rather than accepting the historical synthetic Hivebox screenshot and
+two-second board-to-task video.
+
+This proves the fail-closed reviewer and bounded-recapture path against the
+historical bad-evidence class. It does not yet prove that a producer can capture
+and win independent acceptance for a substantial real task. Keep this gap open
+until one current task publishes an accepted package from genuine Web/CLI/TUI or
+document behavior without weakening the reviewer contract.

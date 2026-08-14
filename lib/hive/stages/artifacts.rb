@@ -129,22 +129,30 @@ module Hive
           writable_root = File.join(
             task.folder, "outcome-evidence", "work", generation, attempt_id
           )
+          writable_relative_root = Pathname.new(writable_root)
+            .relative_path_from(Pathname.new(task.folder)).to_s
           producer_prompt = render_role_prompt(
             "artifacts_producer_prompt.md.erb", task,
             requirement_json: JSON.pretty_generate(requirement),
             prior_evidence_json: JSON.pretty_generate(prior ? prior.fetch("evidence") : []),
             revision_json: JSON.pretty_generate(revision),
-            writable_root: writable_root
+            writable_root: writable_root,
+            writable_relative_root: writable_relative_root
           )
-          producer = run_role!(
-            role: "producer", task: task, cfg: cfg, prompt: producer_prompt,
-            identity: identity, writable_root: writable_root
-          )
-          replacements = Array(producer.fetch(:output).fetch("evidence"))
-          ensure_producer_paths!(task, writable_root, replacements)
-          replacements = store.retain_candidate!(
-            generation: generation, attempt_id: attempt_id, evidence: replacements
-          )
+          producer = nil
+          replacements = begin
+            producer = run_role!(
+              role: "producer", task: task, cfg: cfg, prompt: producer_prompt,
+              identity: identity, writable_root: writable_root
+            )
+            candidate = Array(producer.fetch(:output).fetch("evidence"))
+            ensure_producer_paths!(task, writable_root, candidate)
+            store.retain_candidate!(
+              generation: generation, attempt_id: attempt_id, evidence: candidate
+            )
+          ensure
+            remove_producer_work!(task, writable_root)
+          end
           evidence = merge_candidate_evidence!(prior, replacements, revision)
 
           reviewer_prompt = render_role_prompt(
@@ -256,8 +264,8 @@ module Hive
           actor: {
             "context_id" => context_id,
             "agent" => profile.name.to_s,
-            "model" => (routing.model || actor_cfg["model"] || "provider-default").to_s,
-            "effort" => (routing.effort || actor_cfg["effort"] || "default").to_s
+            "model" => (routing&.model || actor_cfg["model"] || "provider-default").to_s,
+            "effort" => (routing&.effort || actor_cfg["effort"] || "default").to_s
           },
           output: parse_role_output!(result[:final_message], role)
         }
@@ -450,6 +458,25 @@ module Hive
             end
           end
         end
+      end
+
+      def remove_producer_work!(task, writable_root)
+        work_root = File.join(task.folder, "outcome-evidence", "work")
+        path = File.expand_path(writable_root)
+        prefix = "#{File.expand_path(work_root)}#{File::SEPARATOR}"
+        unless path.start_with?(prefix)
+          raise Hive::Artifacts::OutcomeEvidence::StoreError,
+                "producer cleanup root escapes controller-owned work storage"
+        end
+
+        stat = File.lstat(path)
+        if stat.symlink? || !stat.directory?
+          File.unlink(path)
+        else
+          FileUtils.remove_entry_secure(path)
+        end
+      rescue Errno::ENOENT
+        nil
       end
 
       def role_firewall_manifest(task, writable_root)

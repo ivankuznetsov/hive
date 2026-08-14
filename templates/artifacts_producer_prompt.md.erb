@@ -3,6 +3,7 @@ inference and review.
 
 Frozen source worktree (read only): <%= worktree_path %>
 Controller-owned evidence-write root: <%= writable_root %>
+Required task-relative representation path prefix: <%= writable_relative_root %>/
 
 Validated requirement:
 ```json
@@ -28,10 +29,30 @@ only below the evidence-write root.
 
 Produce the requested proof kinds. A video claim requires an actual temporal
 video review representation; storyboard frames may only be supplemental.
-Terminal and document originals need safe text review representations. Return
-only one JSON object: `{ "evidence": [...] }`, using the strict outcome-evidence
-entry contract with source SHA equal to the implementation head and exact byte
-sizes/SHA-256 hashes. On a recapture, return replacements for exactly the claim
-IDs in the revision guidance; the controller preserves accepted prior artifacts
-and reassembles the full package. Do not wrap JSON in Markdown and do not write a Hive
-terminal marker.
+Terminal and document originals need safe text review representations. Capture
+the real implemented interface, transition, or terminal behavior. Generated
+slides, labels, diagrams, narrated claim summaries, and pictures of test output
+do not establish screenshot or video behavior. A document proof may explain an
+invisible refactor only when it is concretely grounded in the frozen diff.
+
+Return only `{ "evidence": [...] }`. Every entry has this exact minimal shape:
+`{ "kind": "screenshot|video|terminal|document", "summary": "...", "claims":
+["claim-id"], "source": { "type": "task", "name": "artifact-agent",
+"source_sha": "<implementation head>" }, "representations": [
+{ "role": "original", "media_type": "...", "path": "...", "sha256": "...",
+"bytes": 123 }, { "role": "review", "media_type": "...", "path": "...",
+"sha256": "...", "bytes": 123 } ] }`. Screenshot original/review media types
+are `image/png`, `image/jpeg`, or `image/webp`. Video original/review media types
+are `video/webm` or `video/mp4`. Terminal requires an asciinema v2 JSON-lines
+original with media type `application/x-asciinema+json` and a `text/plain`
+review. Document originals may use `text/plain`, `text/markdown`,
+`application/json`, or a static image; document reviews use plain text or a
+static image. A video may also include one `storyboard` image, but it never
+replaces the review video.
+
+Use exact byte sizes and SHA-256 hashes. Every `representations[].path` is
+relative to the task folder, not the current working directory, and must begin
+with the required prefix above. On a recapture, return replacements for exactly
+the claim IDs in the revision guidance; the controller preserves accepted prior
+artifacts and reassembles the full package. Do not wrap JSON in Markdown and do
+not write a Hive terminal marker.

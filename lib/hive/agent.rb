@@ -562,7 +562,50 @@ module Hive
     # and #test_argv_includes_verbose_when_stream_json which still pass after
     # the refactor — the claude profile's flag set IS today's flag set).
     def build_cmd
-      compiled_invocation.argv.dup
+      command = compiled_invocation.argv.dup
+      command[0] = isolated_executable(command.fetch(0)) if @isolate_environment
+      command
+    end
+
+    # Resolve a bare agent command before `unsetenv_others` removes the shell
+    # activation state that some local tool-manager launchers require. Prefer
+    # the configured PATH entry, but when that entry is only a mise/asdf/rbenv
+    # trampoline select the next distinct executable of the same name. The
+    # child receives the concrete path, never opaque tool-manager session
+    # blobs that could encode project environment values.
+    def isolated_executable(value)
+      name = value.to_s
+      return name if name.include?(File::SEPARATOR)
+
+      candidates = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).filter_map do |directory|
+        candidate = File.join(directory, name)
+        candidate if File.file?(candidate) && File.executable?(candidate)
+      end
+      first = candidates.first
+      return name unless first
+      return first unless tool_manager_launcher?(first)
+
+      first_identity = File.realpath(first)
+      alternatives = candidates.select do |candidate|
+        File.realpath(candidate) != first_identity && !tool_manager_launcher?(candidate)
+      rescue SystemCallError
+        false
+      end
+      managed_segment = [ "mise", "installs", name ].join(File::SEPARATOR)
+      alternatives.find { |candidate| candidate.include?(managed_segment) } ||
+        alternatives.first || first
+    rescue SystemCallError
+      name
+    end
+
+    def tool_manager_launcher?(path)
+      source = File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
+        file.read(4096)
+      end
+      source.start_with?("#!") &&
+        source.match?(/\b(?:mise|asdf|rbenv)\b/)
+    rescue SystemCallError
+      false
     end
 
     def prompt_via_stdin?

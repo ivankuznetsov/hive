@@ -86,10 +86,21 @@ traceability; it does not guess user meaning from filenames.
 
 Each evidence role starts with an isolated child environment containing only
 reviewed runtime, locale, provider-session, and desktop-session keys. Arbitrary
-project credentials are not inherited. Producer files cross a no-follow,
-hash-checked controller custody copy before the reviewer starts; the reviewer
-reads the original task, plan when present, and exact frozen diff as well as the
-validated requirement.
+project credentials are not inherited. Before that environment is cleared,
+Hive resolves a bare provider command past tool-manager launchers to a concrete
+executable; opaque tool-manager session variables are never copied into the
+role. Producer paths are task-relative, must begin with the controller-issued
+attempt root, and cross a no-follow, hash-checked custody copy before the
+reviewer starts. Raw producer workspace files are removed after admission or
+failure. The reviewer reads the original task, plan when present, and exact
+frozen diff as well as the validated requirement.
+
+The producer contract names the exact representation shape and media types, but
+it does not lower the semantic bar to whatever can be rendered. Generated
+slides, terminal-styled composites, narrated summaries, diagrams, and pictures
+of test output do not establish actual screenshot, flow, or terminal behavior.
+The independent reviewer must reject those substitutes and request a targeted
+recapture of the real product surface or transition.
 
 ## Ledger and recovery
 

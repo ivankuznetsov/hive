@@ -1,9 +1,12 @@
 require "test_helper"
+require "json"
 require "open3"
 require "rake"
 require "yaml"
 
 class CiTestPartitionTest < Minitest::Test
+  include HiveTestHelper
+
   ROOT = File.expand_path("../..", __dir__)
   UPLOAD_ARTIFACT_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
   DOWNLOAD_ARTIFACT_ACTION = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
@@ -55,6 +58,7 @@ class CiTestPartitionTest < Minitest::Test
       assert_equal shard_count, shards.length
       assert_equal files.sort, shards.flatten.sort
       assert_equal files.length, shards.flatten.uniq.length
+      refute shards.any?(&:empty?)
       assert shards.all?(&:frozen?)
       assert shards.frozen?
 
@@ -118,6 +122,9 @@ class CiTestPartitionTest < Minitest::Test
       assert_equal "${{ matrix.shard }}", collect.fetch("env").fetch("HIVE_COVERAGE_SHARD_INDEX")
       assert_equal "6", collect.fetch("env").fetch("HIVE_COVERAGE_SHARD_COUNT")
       assert_equal "shard-${{ matrix.shard }}", collect.fetch("env").fetch("HIVE_COVERAGE_RUN_ID")
+      assert_equal "${{ github.sha }}", collect.fetch("env").fetch("HIVE_COVERAGE_REVISION")
+      assert_equal "${{ github.run_id }}",
+                   collect.fetch("env").fetch("HIVE_COVERAGE_WORKFLOW_RUN_ID")
 
       upload = coverage_shards.fetch("steps").find { |step| step["name"] == "Retain raw coverage results" }
       assert_equal UPLOAD_ARTIFACT_ACTION, upload.fetch("uses")
@@ -126,19 +133,31 @@ class CiTestPartitionTest < Minitest::Test
       assert_equal "coverage/.resultset/shard-${{ matrix.shard }}", upload.dig("with", "path")
       assert_equal true, upload.dig("with", "include-hidden-files")
       assert_equal "error", upload.dig("with", "if-no-files-found")
+      assert_equal true, upload.dig("with", "overwrite")
 
       coverage_gate = workflow.fetch("jobs").fetch("test")
       assert_equal "coverage (Ruby 3.4)", coverage_gate.fetch("name")
+      assert_equal "${{ always() }}", coverage_gate.fetch("if")
       assert_equal "coverage-shards", coverage_gate.fetch("needs")
+      shard_verdict = coverage_gate.fetch("steps").fetch(0)
+      assert_equal "Require every coverage collector", shard_verdict.fetch("name")
+      assert_equal "bash", shard_verdict.fetch("shell")
+      assert_equal "${{ needs.coverage-shards.result }}",
+                   shard_verdict.dig("env", "HIVE_COVERAGE_SHARDS_RESULT")
+      assert_equal 'test "$HIVE_COVERAGE_SHARDS_RESULT" = "success"', shard_verdict.fetch("run")
       download = coverage_gate.fetch("steps").find { |step| step["name"] == "Download coverage shards" }
       assert_equal DOWNLOAD_ARTIFACT_ACTION, download.fetch("uses")
       assert_equal "coverage-shard-*", download.dig("with", "pattern")
       assert_equal "coverage/.resultset/merged", download.dig("with", "path")
-      assert_equal true, download.dig("with", "merge-multiple")
+      refute download.fetch("with").key?("merge-multiple")
       merge = coverage_gate.fetch("steps").find { |step| step["name"] == "Merge shards and enforce exact coverage" }
       assert_equal "bundle exec rake coverage:report", merge.fetch("run")
       assert_equal "100", merge.fetch("env").fetch("HIVE_COVERAGE_MIN_LINE")
       assert_equal "merged", merge.fetch("env").fetch("HIVE_COVERAGE_RUN_ID")
+      assert_equal "6", merge.fetch("env").fetch("HIVE_COVERAGE_EXPECTED_SHARDS")
+      assert_equal "${{ github.sha }}", merge.fetch("env").fetch("HIVE_COVERAGE_REVISION")
+      assert_equal "${{ github.run_id }}",
+                   merge.fetch("env").fetch("HIVE_COVERAGE_WORKFLOW_RUN_ID")
 
       required_gate = workflow.fetch("jobs").fetch("required-test-gate")
       assert_equal "rake test (Ruby 3.4)", required_gate.fetch("name")
@@ -210,18 +229,36 @@ class CiTestPartitionTest < Minitest::Test
     assert_equal false, web_tests.dig("strategy", "fail-fast")
 
     steps = web_tests.fetch("steps")
-    assert_equal "${{ matrix.suite != 'integration' }}",
-                 steps.find { |step| step["name"] == "Install Playwright chromium for Capybara system tests" }
-                   .fetch("if")
-    assert_equal "${{ matrix.suite == 'integration' }}",
-                 steps.find { |step| step["name"] == "Rails integration tests" }.fetch("if")
-    assert_equal "${{ matrix.suite == 'system' }}",
-                 steps.find { |step| step["name"] == "Rails system tests (Capybara + Playwright)" }.fetch("if")
-    assert_equal "${{ matrix.suite == 'golden' }}",
-                 steps.find { |step| step["name"] == "Hive web golden-path E2E (claim → idea → Q&A → daemon → PR gate)" }
-                   .fetch("if")
-    assert_equal "${{ matrix.suite == 'integration' }}",
-                 steps.find { |step| step["name"] == "rubocop (web)" }.fetch("if")
+    playwright = steps.find do |step|
+      step["name"] == "Install Playwright chromium for Capybara system tests"
+    end
+    integration = steps.find { |step| step["name"] == "Rails integration tests" }
+    system = steps.find { |step| step["name"] == "Rails system tests (Capybara + Playwright)" }
+    golden = steps.find do |step|
+      step["name"] == "Hive web golden-path E2E (claim → idea → Q&A → daemon → PR gate)"
+    end
+    golden_bundle = steps.find do |step|
+      step["name"] == "Install the gem bundle (the golden-path E2E spawns a real daemon)"
+    end
+    lint = steps.find { |step| step["name"] == "rubocop (web)" }
+
+    assert_equal "${{ matrix.suite != 'integration' }}", playwright.fetch("if")
+    assert_equal "${{ matrix.suite == 'integration' }}", integration.fetch("if")
+    assert_equal "bin/rails test", integration.fetch("run")
+    assert_equal "${{ matrix.suite == 'system' }}", system.fetch("if")
+    assert_equal "bin/rails test:system", system.fetch("run")
+    assert_equal "${{ matrix.suite == 'golden' }}", golden.fetch("if")
+    assert_equal "bin/rails test test/e2e/golden_path_e2e.rb", golden.fetch("run")
+    assert_equal "${{ github.workspace }}/vendor/root-bundle",
+                 golden.dig("env", "GOLDEN_E2E_BUNDLE_PATH")
+    assert_equal "${{ matrix.suite == 'golden' }}", golden_bundle.fetch("if")
+    assert_equal ".", golden_bundle.fetch("working-directory")
+    assert_equal "bundle install --jobs 4", golden_bundle.fetch("run")
+    assert_equal "${{ github.workspace }}/Gemfile", golden_bundle.dig("env", "BUNDLE_GEMFILE")
+    assert_equal "${{ github.workspace }}/vendor/root-bundle",
+                 golden_bundle.dig("env", "BUNDLE_PATH")
+    assert_equal "${{ matrix.suite == 'integration' }}", lint.fetch("if")
+    assert_equal "bin/rubocop --format github", lint.fetch("run")
 
     web_gate = jobs.fetch("web")
     assert_equal "Hive web (Rails tests + system)", web_gate.fetch("name")
@@ -314,6 +351,89 @@ class CiTestPartitionTest < Minitest::Test
 
     refute status.success?, output
     assert_includes output, "CI gate selected zero non-skipped tests with assertions"
+  end
+
+  def test_coverage_prepare_shard_rejects_invalid_metadata
+    cases = [
+      [ { "HIVE_COVERAGE_SHARD_INDEX" => nil }, "index, count, and run ID must be provided" ],
+      [ { "HIVE_COVERAGE_SHARD_INDEX" => "nope" }, "index, count, and run ID must be provided" ],
+      [ { "HIVE_COVERAGE_SHARD_INDEX" => "6" }, "coverage shard must be 0..5 of 6" ],
+      [ { "HIVE_COVERAGE_SHARD_COUNT" => "5" }, "coverage shard must be 0..5 of 6" ],
+      [ { "HIVE_COVERAGE_RUN_ID" => "" }, "HIVE_COVERAGE_RUN_ID must not be empty" ]
+    ]
+    baseline = {
+      "HIVE_COVERAGE_SHARD_INDEX" => "0",
+      "HIVE_COVERAGE_SHARD_COUNT" => "6",
+      "HIVE_COVERAGE_RUN_ID" => "task-contract"
+    }
+
+    cases.each do |overrides, expected|
+      output = capture_io do
+        with_env(baseline.merge(overrides)) do
+          with_loaded_rakefile do
+            assert_raises(SystemExit) { Rake::Task["coverage:prepare_shard"].invoke }
+          end
+        end
+      end.join
+      assert_includes output, expected
+    end
+  end
+
+  def test_coverage_collect_rejects_missing_results_and_errors_then_writes_manifest
+    run_id = "task-contract-#{Process.pid}"
+    resultset = File.join(ROOT, "coverage", ".resultset", run_id)
+    env = {
+      "HIVE_COVERAGE_RUN_ID" => run_id,
+      "HIVE_COVERAGE_SHARD_INDEX" => "0",
+      "HIVE_COVERAGE_SHARD_COUNT" => "6",
+      "HIVE_COVERAGE_REVISION" => "reviewed-head",
+      "HIVE_COVERAGE_WORKFLOW_RUN_ID" => "1234"
+    }
+    FileUtils.rm_rf(resultset)
+    FileUtils.mkdir_p(resultset)
+
+    output = capture_io do
+      with_env(env) do
+        with_loaded_rakefile do
+          task = Rake::Task["coverage:collect"]
+          task.clear_prerequisites
+          assert_raises(SystemExit) { task.invoke }
+        end
+      end
+    end.join
+    assert_includes output, "coverage shard wrote no process results"
+
+    File.binwrite(File.join(resultset, "1-8.marshal"), Marshal.dump({}))
+    File.write(File.join(resultset, "1-8.error.json"), JSON.dump(error_class: "IOError"))
+    output = capture_io do
+      with_env(env) do
+        with_loaded_rakefile do
+          task = Rake::Task["coverage:collect"]
+          task.clear_prerequisites
+          assert_raises(SystemExit) { task.invoke }
+        end
+      end
+    end.join
+    assert_includes output, "coverage shard recorded dump errors"
+
+    FileUtils.rm_f(File.join(resultset, "1-8.error.json"))
+    output = capture_io do
+      with_env(env) do
+        with_loaded_rakefile do
+          task = Rake::Task["coverage:collect"]
+          task.clear_prerequisites
+          task.invoke
+        end
+      end
+    end.join
+    manifest = JSON.parse(File.read(File.join(resultset, "manifest.json")))
+    assert_includes output, "Collected 1 coverage process result(s)"
+    assert_equal HiveTestCoverage::SHARD_MANIFEST_SCHEMA, manifest.fetch("schema")
+    assert_equal 0, manifest.fetch("shard_index")
+    assert_equal [ "1-8.marshal" ], manifest.fetch("process_results")
+    refute_empty manifest.fetch("test_files")
+  ensure
+    FileUtils.rm_rf(resultset) if resultset
   end
 
   private

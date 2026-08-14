@@ -48,6 +48,8 @@ jobs:
           HIVE_COVERAGE_RUN_ID: shard-${{ matrix.shard }}
           HIVE_COVERAGE_SHARD_INDEX: ${{ matrix.shard }}
           HIVE_COVERAGE_SHARD_COUNT: "6"
+          HIVE_COVERAGE_REVISION: ${{ github.sha }}
+          HIVE_COVERAGE_WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: bundle exec rake coverage:collect
       - name: Retain raw coverage results
         if: always()
@@ -57,13 +59,20 @@ jobs:
           path: coverage/.resultset/shard-${{ matrix.shard }}
           include-hidden-files: true
           if-no-files-found: error
+          overwrite: true
           retention-days: 1
 
   test:
     name: coverage (Ruby 3.4)
+    if: ${{ always() }}
     needs: coverage-shards
     runs-on: ubuntu-latest
     steps:
+      - name: Require every coverage collector
+        shell: bash
+        env:
+          HIVE_COVERAGE_SHARDS_RESULT: ${{ needs.coverage-shards.result }}
+        run: test "$HIVE_COVERAGE_SHARDS_RESULT" = "success"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
@@ -75,11 +84,13 @@ jobs:
         with:
           pattern: coverage-shard-*
           path: coverage/.resultset/merged
-          merge-multiple: true
       - name: Merge shards and enforce exact coverage
         env:
           HIVE_COVERAGE_MIN_LINE: "100"
           HIVE_COVERAGE_RUN_ID: merged
+          HIVE_COVERAGE_EXPECTED_SHARDS: "6"
+          HIVE_COVERAGE_REVISION: ${{ github.sha }}
+          HIVE_COVERAGE_WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: bundle exec rake coverage:report
 
   expensive-test-gates:

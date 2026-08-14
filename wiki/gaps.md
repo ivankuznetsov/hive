@@ -30,8 +30,8 @@ completed in 560 seconds but one 0.5-second subprocess-start assertion lost a
 race while another repository-wide test process saturated the host; that test
 passed immediately in an isolated coverage reproduction. The source-byte
 heuristic is intentionally only an initial partition, and local green shard
-wall times ranged from 187 to 486 seconds. Until a successful exact-head
-GitHub Actions run `31818138021` proved artifact upload/download, the exact
+wall times ranged from 187 to 486 seconds. Exact-head GitHub Actions run
+`31818138021` then proved artifact upload/download, the exact
 100% merge, and the unchanged protected aggregate. The workflow completed in
 484 seconds versus the 1,592-second four-run `main` median; hosted shard jobs
 took 300, 284, 430, and 388 seconds, and the merge gate took 44 seconds. This
@@ -48,6 +48,15 @@ original partition then became the 370-second long pole, consistent with its
 collector seconds each (172- and 176-second jobs), reducing the prior
 long-pole step by 58.4% while exact 100% coverage and the protected aggregate
 remained green. This closes the final hosted-timing gap for the six-way design.
+
+Post-review accounting found that flattened artifact download consumed four
+fewer process results than the collectors produced in both sampled six-way
+runs. The branch now preserves one directory per artifact and requires a
+revision/run/Ruby/shard/test-file/result-list manifest before merging. Focused
+tests prove same-basename preservation and rejection of missing, duplicate,
+foreign, empty, corrupt, error-marked, and unlisted inputs. A new exact-head
+hosted run is still required to prove the hardened transport consumes every
+collector result without regressing the six-way critical path.
 
 ## Provider-routing trusted captures (updated 2026-08-11)
 

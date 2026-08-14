@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, bin/hive-patrol-installed-live-smoke, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate,patrol_evidence}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-08-10
+updated: 2026-08-14
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, terminal-outcomes, release-proof, bounded-storage]
 ---
 
@@ -414,15 +414,32 @@ The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch c
 
 Hosted CI separates collection from enforcement. Six `coverage:collect`
 matrix legs run a complete, disjoint partition of the default test-file set and
-upload their raw process results. Shard zero also runs the Agent CLI Runtime
+upload their raw process results plus a `hive-coverage-shard.v1` manifest.
+Each manifest binds the artifact to the checked-out revision, workflow run,
+Ruby version, shard index/count, exact test-file partition, and complete list
+of process-result files. Shard zero also runs the Agent CLI Runtime
 component suite and loads every source file, which preserves unloaded-file
 detection without repeating that fixed catalog cost in every collector. The
 partition begins with four source-byte-balanced groups, then splits the third
 and fourth groups after hosted measurements identified them as the two long
-poles; the first two groups remain stable. The downstream `coverage:report` job downloads all six artifacts, merges them into
-one result set, and applies the same exact 100% gate. A collector never lowers
+poles; the first two groups remain stable. The downstream `coverage:report`
+job retains each artifact in its own `coverage-shard-N` directory, rejects
+missing, duplicate, foreign, empty, corrupt, or unlisted inputs, merges only
+the manifest-listed results, and applies the same exact 100% gate. The
+per-artifact directories are required because independent runners can emit
+identical PID/object-ID result basenames. Collector uploads use overwrite
+semantics so a failed-job rerun replaces the earlier immutable artifact for
+that shard. A collector never lowers
 the threshold or publishes a partial report as passing; collection mode only
 defers percentage enforcement to the downstream merge.
+
+Catalog-load failures are persisted as `.error.json` markers in collection
+mode so they survive the collector/aggregate process boundary. Every collector
+must select at least one test file and produce at least one process result.
+The named coverage aggregate runs under `always()` and first rejects any
+failed, skipped, or cancelled collector before downloading artifacts; the
+outer protected `rake test (Ruby 3.4)` aggregate remains the final fail-closed
+branch-protection contract.
 
 `bundle exec rake coverage` remains the exhaustive single-process local
 coverage-report path, not an after-every-commit agent loop. Hosted CI uses the

@@ -120,7 +120,11 @@ end
 
 namespace :coverage do
   coverage_shard_index = Integer(ENV["HIVE_COVERAGE_SHARD_INDEX"], exception: false)
-  coverage_shard_files = coverage_shard_index ? HIVE_COVERAGE_SHARDS.fetch(coverage_shard_index, []) : []
+  coverage_shard_files = if coverage_shard_index&.between?(0, HIVE_COVERAGE_SHARD_COUNT - 1)
+    HIVE_COVERAGE_SHARDS.fetch(coverage_shard_index)
+  else
+    []
+  end
 
   task :prepare_shard do
     shard_index = Integer(ENV.fetch("HIVE_COVERAGE_SHARD_INDEX"))
@@ -129,6 +133,8 @@ namespace :coverage do
       abort "coverage shard must be 0..#{HIVE_COVERAGE_SHARD_COUNT - 1} " \
             "of #{HIVE_COVERAGE_SHARD_COUNT}"
     end
+    shard_files = HIVE_COVERAGE_SHARDS.fetch(shard_index)
+    abort "coverage shard #{shard_index} has no test files" if shard_files.empty?
 
     root = File.expand_path(__dir__)
     run_id = ENV.fetch("HIVE_COVERAGE_RUN_ID")
@@ -139,6 +145,8 @@ namespace :coverage do
     ENV["HIVE_COVERAGE"] = "1"
     ENV["HIVE_COVERAGE_ROOT"] = root
     ENV["HIVE_COVERAGE_COLLECT_ONLY"] = "1"
+    # Keep the catalog preload in shard zero. Several tests intentionally prove
+    # clean-load behavior and fail when an unrelated shard preloads all sources.
     ENV["HIVE_COVERAGE_LOAD_ALL"] = shard_index.zero? ? "1" : "0"
     ENV["HIVE_REQUIRE_TEST_RUNS"] = "1"
     coverage_rubyopt = "-I#{File.join(root, 'test')} -rhive_coverage_boot"
@@ -164,7 +172,20 @@ namespace :coverage do
     abort "coverage shard wrote no process results to #{resultset_dir}" if process_results.empty?
     abort "coverage shard recorded dump errors in #{resultset_dir}" if dump_errors.any?
 
+    shard_index = Integer(ENV.fetch("HIVE_COVERAGE_SHARD_INDEX"))
+    shard_count = Integer(ENV.fetch("HIVE_COVERAGE_SHARD_COUNT"))
+    HiveTestCoverage.configure!(root: File.expand_path(__dir__))
+    HiveTestCoverage.write_shard_manifest!(
+      shard_index: shard_index,
+      shard_count: shard_count,
+      revision: ENV.fetch("HIVE_COVERAGE_REVISION"),
+      workflow_run_id: ENV.fetch("HIVE_COVERAGE_WORKFLOW_RUN_ID"),
+      test_files: HIVE_COVERAGE_SHARDS.fetch(shard_index)
+    )
+
     puts "Collected #{process_results.length} coverage process result(s) for #{run_id}"
+  rescue ArgumentError, KeyError, HiveTestCoverage::ShardManifestError => e
+    abort "coverage shard manifest error: #{e.message}"
   end
 
   desc "Merge previously collected CI coverage artifacts and apply the exact coverage gate"
@@ -172,9 +193,19 @@ namespace :coverage do
     root = File.expand_path(__dir__)
     report_path = File.join(root, "coverage", "coverage.json")
     HiveTestCoverage.configure!(root: root)
+    if ENV.key?("HIVE_COVERAGE_EXPECTED_SHARDS")
+      HiveTestCoverage.verify_shard_manifests!(
+        expected_shards: Integer(ENV.fetch("HIVE_COVERAGE_EXPECTED_SHARDS")),
+        revision: ENV.fetch("HIVE_COVERAGE_REVISION"),
+        workflow_run_id: ENV.fetch("HIVE_COVERAGE_WORKFLOW_RUN_ID"),
+        test_files_by_shard: HIVE_COVERAGE_SHARDS
+      )
+    end
     HiveTestCoverage.report!
     report = HiveTestCoverage.read_report(report_path)
     abort HiveTestCoverage.failure_message(report) unless HiveTestCoverage.coverage_ok?(report)
+  rescue ArgumentError, KeyError, HiveTestCoverage::ShardManifestError => e
+    abort "coverage shard manifest error: #{e.message}"
   end
 end
 

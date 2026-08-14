@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "rake"
 require "yaml"
+require_relative "../support/coverage"
 
 class CiTestPartitionTest < Minitest::Test
   include HiveTestHelper
@@ -394,7 +395,11 @@ class CiTestPartitionTest < Minitest::Test
 
     with_env(env) do
       with_loaded_rakefile do
-        Rake::Task["coverage:prepare_shard"].invoke
+        with_replaced_singleton_method(FileUtils, :rm_rf, ->(_path) { }) do
+          with_replaced_singleton_method(FileUtils, :rm_f, ->(_path) { }) do
+            Rake::Task["coverage:prepare_shard"].invoke
+          end
+        end
 
         assert_equal "0", ENV.fetch("HIVE_COVERAGE_LOAD_ALL")
       end
@@ -402,6 +407,7 @@ class CiTestPartitionTest < Minitest::Test
   end
 
   def test_coverage_collect_rejects_missing_results_and_errors_then_writes_manifest
+    coverage_state = coverage_state_snapshot
     run_id = "task-contract-#{Process.pid}"
     resultset = File.join(ROOT, "coverage", ".resultset", run_id)
     env = {
@@ -455,6 +461,7 @@ class CiTestPartitionTest < Minitest::Test
     assert_equal [ "1-8.marshal" ], manifest.fetch("process_results")
     refute_empty manifest.fetch("test_files")
   ensure
+    restore_coverage_state(coverage_state) if coverage_state
     FileUtils.rm_rf(resultset) if resultset
   end
 
@@ -469,6 +476,19 @@ class CiTestPartitionTest < Minitest::Test
       byte_counts[shard] += File.size(File.join(ROOT, path))
     end
     shards
+  end
+
+  def coverage_state_snapshot
+    HiveTestCoverage.instance_variables.to_h do |ivar|
+      [ ivar, HiveTestCoverage.instance_variable_get(ivar) ]
+    end
+  end
+
+  def restore_coverage_state(snapshot)
+    HiveTestCoverage.instance_variables.each do |ivar|
+      HiveTestCoverage.remove_instance_variable(ivar) unless snapshot.key?(ivar)
+    end
+    snapshot.each { |ivar, value| HiveTestCoverage.instance_variable_set(ivar, value) }
   end
 
   def with_loaded_rakefile

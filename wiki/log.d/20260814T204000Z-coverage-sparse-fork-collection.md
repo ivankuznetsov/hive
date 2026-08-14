@@ -19,4 +19,12 @@ A first exact-head lazy-collector run exposed a test-only environment leak: the
 new prepare-task contract test restored its input metadata but not the six
 coverage variables mutated by the Rake task, so a later subprocess inherited
 the nonempty-test guard and failed. The fixture now restores the complete
-environment mutation surface. Exact-head lazy-collector proof is pending.
+environment mutation surface. The next run captured 1,636 results but exposed
+the deeper fixture leak: its successful `coverage:collect` invocation also
+left `HiveTestCoverage` configured for the synthetic contract run, redirecting
+the partition parent process dump outside the uploaded shard. The test now
+snapshots and restores every coverage-module instance variable. The same
+prepare-task fixture also invoked the production resultset cleanup against the
+live test root, erasing subprocess files collected earlier in its shard; its
+filesystem cleanup calls are now isolated as test doubles. Exact-head
+lazy-collector proof is pending.

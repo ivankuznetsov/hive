@@ -15,7 +15,8 @@ module Hive
         @project = project
         @resolver = resolver || lambda do
           Hive::TaskResolver.new(
-            @target, project_filter: @project, stage_filter: "3-plan"
+            @target, project_filter: @project,
+            stage_filter: Hive::PlanReview::TransitionGuard::PLAN_STAGE
           ).resolve
         end
         @automation = automation || Hive::PlanReview::Automation.method(:run!)

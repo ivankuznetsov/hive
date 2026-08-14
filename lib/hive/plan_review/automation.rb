@@ -20,7 +20,7 @@ module Hive
           raise TransitionBlocked.new(
             "plan review automation applies only to built-in coding tasks at 3-plan",
             current_stage: "#{task.stage_index}-#{task.stage_name}",
-            target_stage: "4-execute"
+            target_stage: TransitionGuard::EXECUTE_STAGE
           )
         end
 
@@ -38,7 +38,8 @@ module Hive
         projection || raise(
           TransitionBlocked.new(
             "plan review could not initialize from the current plan",
-            current_stage: "3-plan", target_stage: "4-execute"
+            current_stage: TransitionGuard::PLAN_STAGE,
+            target_stage: TransitionGuard::EXECUTE_STAGE
           )
         )
       end

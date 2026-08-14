@@ -824,7 +824,9 @@ module Hive
     end
 
     def load_plan_review
-      return nil unless File.directory?(task.folder)
+      # Folderless tasks (a bare state file with no task directory) have no
+      # place to keep review evidence, so they can never carry a projection.
+      return nil unless task.folder && File.directory?(task.folder)
       return nil unless Hive::Workflows.coding_id?(task_workflow.id)
       review_root = File.join(task.folder, Hive::PlanReview::Store::ROOT_BASENAME)
       unless File.exist?(review_root)

@@ -164,7 +164,9 @@ class HiveBotWaitingRowsTest < Minitest::Test
       tasks = payload.fetch("projects").first.fetch("tasks")
 
       assert_equal 1, tasks.count { |task| task.fetch("slug") == slug }
-      assert_equal "needs_input", tasks.find { |task| task.fetch("slug") == slug }.fetch("action")
+      # A waiting coding plan with no `plan-review/` evidence yet reports the
+      # uninitialized review as `plan_reviewing`; the row itself is unchanged.
+      assert_equal "plan_reviewing", tasks.find { |task| task.fetch("slug") == slug }.fetch("action")
     end
   end
 end

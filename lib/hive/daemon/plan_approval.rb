@@ -67,10 +67,12 @@ module Hive
           locked = Hive::Task.new(task.folder)
           cfg = Hive::Config.load(locked.project_root)
           observation = Hive::PlanReview::TransitionGuard.prepare_existing!(
-            task: locked, destination: "4-execute", config: cfg
+            task: locked, destination: Hive::PlanReview::TransitionGuard::EXECUTE_STAGE,
+            config: cfg
           )
           Hive::PlanReview::TransitionGuard.verify!(
-            task: locked, destination: "4-execute", observation:, config: cfg
+            task: locked, destination: Hive::PlanReview::TransitionGuard::EXECUTE_STAGE,
+            observation:, config: cfg
           )
           finalize_marker!(locked.state_file)
         end

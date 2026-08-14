@@ -20,8 +20,8 @@ module Hive
     # before the caller takes the global commit lock; verify! then compares the
     # exact observation under the task lock immediately before folder mutation.
     module TransitionGuard
-      PLAN_STAGE = "3-plan".freeze
-      EXECUTE_STAGE = "4-execute".freeze
+      PLAN_STAGE = "3-plan".freeze # coding-scoped: plan review only gates the coding plan stage
+      EXECUTE_STAGE = "4-execute".freeze # coding-scoped: plan review only gates the coding execute hop
       ADOPTION_SCHEMA = "hive-plan-review-adoption".freeze
 
       Observation = Data.define(

@@ -259,7 +259,7 @@ module Hive
       # project-standards reviewers).
       def plan_approval?(action, stage, workflow)
         %w[ready_to_develop plan_review_degraded].include?(action) &&
-          Hive::Workflows.coding_id?(workflow) && stage == "3-plan"
+          Hive::Workflows.coding_id?(workflow) && stage == "3-plan" # coding-scoped: plan auto-approval is a coding workflow rule
       end
 
       # Generic-stage run decision. First sight (no prior dispatch) runs the

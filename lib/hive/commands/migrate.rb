@@ -477,7 +477,8 @@ module Hive
 
       def commit_migration(hive_state, moved, config_only: false, backfilled_count: 0,
                            recovery_marker_count: 0,
-                           workflow_task_count: 0)
+                           workflow_task_count: 0,
+                           plan_review_requirement_count: 0)
         ops = Hive::GitOps.new(@project_path)
         ops.run_git!("-C", hive_state, "add", "-A")
         _out, _err, status = Open3.capture3("git", "-C", hive_state, "diff", "--cached", "--quiet")
@@ -486,7 +487,8 @@ module Hive
         message = migrate_commit_message(
           moved, config_only: config_only, backfilled_count: backfilled_count,
           recovery_marker_count: recovery_marker_count,
-          workflow_task_count: workflow_task_count
+          workflow_task_count: workflow_task_count,
+          plan_review_requirement_count: plan_review_requirement_count
         )
         ops.run_git!("-C", hive_state, "commit", "-m", message)
       rescue Hive::GitError => e
@@ -504,7 +506,8 @@ module Hive
         message = migrate_commit_message(
           moved, config_only: config_only, backfilled_count: backfilled_count,
           recovery_marker_count: recovery_marker_count,
-          workflow_task_count: workflow_task_count
+          workflow_task_count: workflow_task_count,
+          plan_review_requirement_count: plan_review_requirement_count
         )
         warn "hive: migrate completed the on-disk mv operations but " \
              "could not commit them to the hive-state git history: " \

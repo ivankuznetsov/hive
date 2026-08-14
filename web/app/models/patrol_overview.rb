@@ -66,7 +66,7 @@ class PatrolOverview
   def architecture
     return disabled_section unless architecture_enabled?
 
-    payload = @architecture_query.recent_envelope(
+    payload = @architecture_query.recent_projection(
       project: project.name,
       project_root: project.path,
       limit: ITEM_LIMIT
@@ -91,7 +91,7 @@ class PatrolOverview
       counts: counts,
       items: jobs,
       last_run_at: jobs.map { |job| job["updated_at"] }.compact.max,
-      truncated: payload.dig("page", "has_more") == true,
+      truncated: payload.fetch("truncated") == true,
       error: nil
     )
   rescue StandardError => error

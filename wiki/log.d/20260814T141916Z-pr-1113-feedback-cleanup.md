@@ -18,3 +18,10 @@
 - TUI boundary and hyperlink tests now pin their intended stdout TTY state, so
   running the test suite from an interactive terminal cannot enter the live TUI
   loop or change plain-output assertions.
+- An on-demand review that exhausts the thesis cap now reports partial scope
+  and retains its prior scan watermark instead of claiming the omitted tail.
+- A standalone retired-policy config rewrite requests its daemon restart before
+  later project-specific migration work can fail. The YAML surgery also keeps
+  following comments with the surviving key or section they document.
+- Hive Web's bounded newest-first job snapshot is now an explicitly internal
+  projection; only CLI list/show responses claim the public jobs-v2 schema.

@@ -70,6 +70,13 @@ keep. Generated Hive configs use a block-form `review:` mapping; a hand-written
 flow mapping must be converted manually before the comment-preserving rewrite
 can run.
 
+The Patrol-policy cutover removes only the retired mapping entry and its value.
+Blank lines and comments that follow it remain attached to the next surviving
+key or section. The rewrite is committed independently before current config
+loading; a single-project migration requests its best-effort daemon restart at
+that point, so a later project-specific migration failure cannot leave a live
+daemon on the removed policy.
+
 After replacing the installed CLI through its package channel, `hive update`
 runs the new binary's `hive migrate --all`. That can mutate and commit each
 registered project's tracked `.hive-state` exactly as an explicit

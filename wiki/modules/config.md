@@ -310,6 +310,9 @@ child. Usage totals remain telemetry. `hive migrate`, including the automatic
 fleet migration run by `hive update`, deletes the retired
 cycle/day/launch/USD/multiplier keys and leverage thresholds before the current
 config is loaded, then requests one daemon restart after the fleet succeeds.
+Standalone migration requests the normal best-effort restart immediately after
+that independent config commit, before later project-specific preparation can
+fail; fleet mode injects the coalescing restart request instead.
 
 `patrol.max_features_per_cycle` defaults to 12, is validated as an integer at
 least one, bounds each ordinary-patrol reviewer batch, and is likewise not

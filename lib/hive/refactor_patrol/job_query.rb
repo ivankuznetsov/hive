@@ -101,22 +101,20 @@ module Hive
         raise UsageError, "refactor patrol query --cursor is invalid"
       end
 
-      def recent_envelope(project:, project_root:, limit: nil)
+      # Internal newest-first snapshot for Hive Web. This is deliberately not
+      # a public jobs-v2 envelope: it has no resumable cursor and therefore
+      # must not advertise the list/show schema contract.
+      def recent_projection(project:, project_root:, limit: nil)
         page_limit = self.class.normalize_limit(limit)
         indexed = @store.recent_job_query_page(limit: page_limit)
         jobs = indexed.fetch("jobs")
-        success_envelope(project, project_root, "recent").merge(
+        {
+          "project" => project,
+          "project_root" => project_root,
           "count" => indexed.fetch("total"),
-          "page" => {
-            "cursor" => nil,
-            "limit" => page_limit,
-            "returned" => jobs.size,
-            "total" => indexed.fetch("total"),
-            "has_more" => indexed.fetch("has_more"),
-            "next_cursor" => nil
-          },
+          "truncated" => indexed.fetch("has_more"),
           "jobs" => jobs.map { |job| summary(job) }
-        )
+        }
       end
 
       def show_envelope(project:, project_root:, job_id:, limit: nil, full: false)

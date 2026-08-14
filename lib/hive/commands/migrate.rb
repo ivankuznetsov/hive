@@ -115,11 +115,12 @@ module Hive
               hive_state, [], config_only: true
             ) if config_changed
           end
-          # MigrateAll injects a coalescing restarter. Request it immediately
-          # after the independently committed config rewrite so a later
-          # project-specific failure is reported as a deferred daemon restart.
-          if config_changed && @daemon_restarter
-            @daemon_restarter.call
+          # Request the restart immediately after the independently committed
+          # config rewrite. MigrateAll injects a coalescing restarter; a
+          # standalone migration uses the normal best-effort daemon restart.
+          # Either path must run before later project-specific work can fail.
+          if config_changed
+            (@daemon_restarter || method(:restart_daemon_if_running!)).call
             restart_requested = true
           end
           store = @managed_store_factory.call(hive_state)
@@ -793,6 +794,10 @@ module Hive
           break if indent == child_indent && !line.lstrip.start_with?("-")
 
           entry_end += 1
+        end
+        while entry_end > index + 1 &&
+              lines[entry_end - 1]&.match?(/\A\s*(?:#.*)?(?:\r?\n)?\z/)
+          entry_end -= 1
         end
         lines.slice!(index...entry_end)
         lines.join

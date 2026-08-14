@@ -50,6 +50,31 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  class ThesisCapReviewer
+    attr_reader :review_errors, :seen_feature_ids, :feature_results
+
+    def initialize(thesis)
+      @thesis = thesis
+      @review_errors = []
+      @seen_feature_ids = []
+      @feature_results = []
+    end
+
+    def call(features)
+      feature = features.fetch(0)
+      @seen_feature_ids << feature.id
+      @feature_results = [
+        {
+          "feature_id" => feature.id.to_s,
+          "complete" => true,
+          "thesis_ids" => [ @thesis.id ],
+          "errors" => []
+        }
+      ]
+      [ @thesis ]
+    end
+  end
+
   class CrashingCheckpointReviewer
     attr_reader :review_errors, :seen_feature_ids, :feature_results
 
@@ -1277,6 +1302,31 @@ class RefactorPatrolCommandTest < Minitest::Test
       refute payload.fetch("review_complete")
       assert_equal "agent_failed", payload.fetch("review_errors").first.fetch("error")
       refute payload.fetch("feature_results").first.fetch("complete")
+      assert_equal "PRIOR", JSON.parse(File.read(File.join(state_dir, "state.json"))).fetch("last_scanned_sha")
+    end
+  end
+
+  def test_thesis_cap_does_not_complete_or_advance_a_partially_scanned_scope
+    with_refactor_patrol_project do |repo|
+      state_dir = File.join(repo, ".hive-state", "refactor_patrol")
+      FileUtils.mkdir_p(state_dir)
+      File.write(File.join(state_dir, "state.json"), JSON.generate("last_scanned_sha" => "PRIOR"))
+      reviewer = ThesisCapReviewer.new(
+        thesis("checkout", feature_id: "checkout", fingerprint: "fp-checkout")
+      )
+
+      out, _err, status = with_captured_exit do
+        command_for(
+          features: [ feature("checkout"), feature("payments") ],
+          reviewer: reviewer
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      payload = JSON.parse(out)
+      assert_equal [ "checkout" ], reviewer.seen_feature_ids
+      refute payload.fetch("review_complete")
+      assert_equal "PRIOR", payload.fetch("last_scanned_sha")
       assert_equal "PRIOR", JSON.parse(File.read(File.join(state_dir, "state.json"))).fetch("last_scanned_sha")
     end
   end

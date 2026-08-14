@@ -615,6 +615,10 @@ Their query-specific error arm preserves the requested `action` (`list` or
 `show`, or null for a selector-less query modifier) without falling through to
 either discovery reporter.
 
+Hive Web reads a separate internal newest-first recent projection. That
+projection is bounded but deliberately non-resumable, so it does not advertise
+the public jobs-v2 schema, action, or cursor contract.
+
 Daemon children write their v4 document atomically to the job-bound internal
 result file. Stdout remains operator logging, so a valid snapshot larger than
 the supervisor's ordinary 64 KiB log tail is not truncated into a false retry.

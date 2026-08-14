@@ -252,7 +252,9 @@ module Hive
 
         unless ephemeral_discovery?
           persist(state, theses, suppressed)
-          update_scan_state(state, project_root, cfg, reviewer)
+          update_scan_state(
+            state, project_root, cfg, reviewer, complete: scope_complete
+          )
         end
         payload = build_payload(
           entry, project_root, cfg, state, reported_features, theses, suppressed,
@@ -379,7 +381,7 @@ module Hive
           theses: theses,
           suppressed: suppressed,
           last_scanned_sha: scanned_sha,
-          complete: Array(reviewer.review_errors).empty?,
+          complete: complete == true,
           review_errors: reviewer.review_errors,
           feature_results: feature_results,
           version: Hive::RefactorPatrol::Reporter::V4_SCHEMA_VERSION
@@ -433,9 +435,11 @@ module Hive
         state.write_fingerprints(fingerprints)
       end
 
-      def update_scan_state(state, project_root, cfg, reviewer)
+      def update_scan_state(state, project_root, cfg, reviewer, complete:)
         now_iso = Time.now.utc.iso8601
-        if reviewer.respond_to?(:review_errors) && Array(reviewer.review_errors).any?
+        incomplete = complete != true
+        errored = reviewer.respond_to?(:review_errors) && Array(reviewer.review_errors).any?
+        if incomplete || errored
           state.update_state("last_run_at" => now_iso)
         else
           state.update_state("last_run_at" => now_iso, "last_scanned_sha" => current_default_sha(project_root, cfg))

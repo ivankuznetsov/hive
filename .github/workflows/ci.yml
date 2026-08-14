@@ -177,9 +177,19 @@ jobs:
           HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
         run: ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --timing-only
 
-  web:
-    name: Hive web (Rails tests + system)
+  web-tests:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Hive web integration tests
+            suite: integration
+          - name: Hive web system tests
+            suite: system
+          - name: Hive web golden-path E2E
+            suite: golden
     defaults:
       run:
         working-directory: web
@@ -191,14 +201,18 @@ jobs:
           bundler-cache: true
           working-directory: web
       - name: Install Playwright chromium for Capybara system tests
+        if: ${{ matrix.suite != 'integration' }}
         run: |
           npm install playwright
           npx playwright install --with-deps chromium
       - name: Rails integration tests
+        if: ${{ matrix.suite == 'integration' }}
         run: bin/rails test
       - name: Rails system tests (Capybara + Playwright)
+        if: ${{ matrix.suite == 'system' }}
         run: bin/rails test:system
       - name: Install the gem bundle (the golden-path E2E spawns a real daemon)
+        if: ${{ matrix.suite == 'golden' }}
         working-directory: .
         env:
           BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
@@ -207,11 +221,25 @@ jobs:
           BUNDLE_FROZEN: ""
         run: bundle install --jobs 4
       - name: Hive web golden-path E2E (claim → idea → Q&A → daemon → PR gate)
+        if: ${{ matrix.suite == 'golden' }}
         env:
           GOLDEN_E2E_BUNDLE_PATH: ${{ github.workspace }}/vendor/root-bundle
         run: bin/rails test test/e2e/golden_path_e2e.rb
       - name: rubocop (web)
+        if: ${{ matrix.suite == 'integration' }}
         run: bin/rubocop --format github
+
+  web:
+    name: Hive web (Rails tests + system)
+    if: ${{ always() }}
+    needs: web-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require Rails integration, system, and golden-path gates
+        shell: bash
+        env:
+          HIVE_WEB_TESTS_RESULT: ${{ needs.web-tests.result }}
+        run: test "$HIVE_WEB_TESTS_RESULT" = "success"
 
   # Hosted Windows runners cannot run Linux containers (Windows-container
   # mode only, no WSL2) — the per-OS surface that CAN break is our

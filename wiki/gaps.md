@@ -3,13 +3,23 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-10
+updated: 2026-08-14
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
-## Sharded CI coverage needs exact-head hosted timing (2026-08-14)
+## Parallel Hive web CI needs exact-head hosted timing (2026-08-14)
+
+The serial Hive web job took 441 seconds in exact-head run `31818138021`, led
+by the 184-second Playwright system-test step and the 149-second Rails
+integration step. CI now schedules integration/lint, system, and golden-path
+cells independently behind the existing aggregate check name. Focused workflow
+contract tests prove the static matrix and fail-closed dependency, but only a
+successful exact-head GitHub Actions run can establish the new wall time and
+prove all three hosted browser/test cells pass concurrently.
+
+## Sharded CI coverage exact-head evidence (2026-08-14)
 
 The four-way coverage collector and downstream exact merge are locally pinned
 at the harness level: all four disjoint file partitions ran, and their 1,546
@@ -20,9 +30,13 @@ race while another repository-wide test process saturated the host; that test
 passed immediately in an isolated coverage reproduction. The source-byte
 heuristic is intentionally only an initial partition, and local green shard
 wall times ranged from 187 to 486 seconds. Until a successful exact-head
-GitHub Actions run proves artifact
-download/merge behavior and exposes isolated hosted shard timings, do not quote
-a hosted before/after improvement or treat the current partition as balanced.
+GitHub Actions run `31818138021` proved artifact upload/download, the exact
+100% merge, and the unchanged protected aggregate. The workflow completed in
+484 seconds versus the 1,592-second four-run `main` median; hosted shard jobs
+took 300, 284, 430, and 388 seconds, and the merge gate took 44 seconds. This
+closes the missing hosted-proof gap, while confirming that source bytes are
+only an approximate runtime weight: the 146-second fastest-to-slowest spread
+still leaves measured rebalancing or further splitting as optimization work.
 
 ## Provider-routing trusted captures (updated 2026-08-11)
 

@@ -185,6 +185,43 @@ class CiTestPartitionTest < Minitest::Test
     refute_includes command, "--path web"
   end
 
+  def test_ci_runs_independent_web_suites_in_parallel_behind_the_existing_gate
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+    jobs = workflow.fetch("jobs")
+    web_tests = jobs.fetch("web-tests")
+    matrix = web_tests.dig("strategy", "matrix", "include")
+
+    assert_equal [
+      { "name" => "Hive web integration tests", "suite" => "integration" },
+      { "name" => "Hive web system tests", "suite" => "system" },
+      { "name" => "Hive web golden-path E2E", "suite" => "golden" }
+    ], matrix
+    assert_equal "${{ matrix.name }}", web_tests.fetch("name")
+    assert_equal false, web_tests.dig("strategy", "fail-fast")
+
+    steps = web_tests.fetch("steps")
+    assert_equal "${{ matrix.suite != 'integration' }}",
+                 steps.find { |step| step["name"] == "Install Playwright chromium for Capybara system tests" }
+                   .fetch("if")
+    assert_equal "${{ matrix.suite == 'integration' }}",
+                 steps.find { |step| step["name"] == "Rails integration tests" }.fetch("if")
+    assert_equal "${{ matrix.suite == 'system' }}",
+                 steps.find { |step| step["name"] == "Rails system tests (Capybara + Playwright)" }.fetch("if")
+    assert_equal "${{ matrix.suite == 'golden' }}",
+                 steps.find { |step| step["name"] == "Hive web golden-path E2E (claim → idea → Q&A → daemon → PR gate)" }
+                   .fetch("if")
+    assert_equal "${{ matrix.suite == 'integration' }}",
+                 steps.find { |step| step["name"] == "rubocop (web)" }.fetch("if")
+
+    web_gate = jobs.fetch("web")
+    assert_equal "Hive web (Rails tests + system)", web_gate.fetch("name")
+    assert_equal "${{ always() }}", web_gate.fetch("if")
+    assert_equal "web-tests", web_gate.fetch("needs")
+    gate_step = web_gate.fetch("steps").fetch(0)
+    assert_equal "${{ needs.web-tests.result }}", gate_step.dig("env", "HIVE_WEB_TESTS_RESULT")
+    assert_equal 'test "$HIVE_WEB_TESTS_RESULT" = "success"', gate_step.fetch("run")
+  end
+
   def test_incident_duration_budget_is_advisory_and_separate_from_functional_e2e
     workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
     jobs = workflow.fetch("jobs")

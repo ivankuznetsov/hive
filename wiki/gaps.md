@@ -43,9 +43,11 @@ therefore split that measured hot partition into two source-byte-balanced
 halves. Five-way exact-head run `31821818842` passed at 469 seconds overall;
 the two halves took 219 and 280 collector seconds. The unchanged fourth
 original partition then became the 370-second long pole, consistent with its
-368- and 294-second samples in the prior runs. CI now splits that partition too.
-The final six-way exact-head timing remains pending; do not assume its halves
-are runtime-balanced until the hosted result is recorded.
+368- and 294-second samples in the prior runs. Six-way exact-head run
+`31823734367` passed all 23 jobs at 394 seconds overall. The new pair took 154
+collector seconds each (172- and 176-second jobs), reducing the prior
+long-pole step by 58.4% while exact 100% coverage and the protected aggregate
+remained green. This closes the final hosted-timing gap for the six-way design.
 
 ## Provider-routing trusted captures (updated 2026-08-11)
 

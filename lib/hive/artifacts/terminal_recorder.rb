@@ -73,11 +73,27 @@ module Hive
 
       def capture_with_custody
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout_seconds + 1
+        load_paths = [
+          File.expand_path("../..", __dir__),
+          *Gem.loaded_specs.fetch("agent-cli-runtime").full_require_paths
+        ].uniq
+        worker_environment = {
+          "PATH" => ENV.fetch("PATH", "/usr/local/bin:/usr/bin:/bin")
+        }
+        if ENV["HIVE_COVERAGE"]
+          %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID RUBYOPT].each do |key|
+            worker_environment[key] = ENV[key] if ENV[key]
+          end
+        end
         result = Hive::Web::ProjectCaptureProvider.capture_command_with_custody(
-          argv: [ RbConfig.ruby, "-I", File.expand_path("../..", __dir__), __FILE__, "--worker" ],
+          argv: [
+            RbConfig.ruby,
+            *load_paths.flat_map { |path| [ "-I", path ] },
+            __FILE__, "--worker"
+          ],
           request: worker_request,
           source_root: @cwd,
-          environment: { "PATH" => ENV.fetch("PATH", "/usr/local/bin:/usr/bin:/bin") },
+          environment: worker_environment,
           deadline: deadline
         )
         status = result.fetch("status")

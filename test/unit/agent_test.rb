@@ -36,6 +36,18 @@ class AgentTest < Minitest::Test
     Hive::Task.new(folder)
   end
 
+  def test_runtime_policy_and_raw_permission_arguments_are_mutually_exclusive
+    Dir.mktmpdir("hive-agent-permission-contract") do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: make_task(dir), prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+          runtime_policy: Object.new, permission_arguments: [ "--unsafe" ]
+        )
+      end
+      assert_match(/cannot be combined/, error.message)
+    end
+  end
+
   def run_delta_before_write(dir, max_turns: nil, max_tokens: nil)
     task = make_task(dir)
     output = File.join(dir, "findings.json")

@@ -184,6 +184,118 @@ class CommandsEvidenceTest < Minitest::Test
     end
   end
 
+  def test_terminal_capture_validates_names_targets_directories_and_plain_output
+    with_tmp_dir do |dir|
+      task_root = File.join(dir, "task")
+      source_root = File.join(dir, "source")
+      writable_root = File.join(task_root, "work")
+      FileUtils.mkdir_p([ task_root, source_root, writable_root ])
+      environment = {
+        "HIVE_EVIDENCE_TASK_ROOT" => task_root,
+        "HIVE_EVIDENCE_SOURCE_ROOT" => source_root,
+        "HIVE_EVIDENCE_WRITE_ROOT" => writable_root
+      }
+      assert_raises(Hive::UsageError) do
+        Hive::Commands::Evidence.new(
+          "terminal", "../bad", command: [ "true" ], environment: environment
+        ).call
+      end
+
+      File.write(File.join(writable_root, "exists.cast"), "owned")
+      assert_raises(Hive::UsageError) do
+        Hive::Commands::Evidence.new(
+          "terminal", "exists", command: [ "true" ], environment: environment
+        ).call
+      end
+
+      out, = capture_io do
+        Hive::Commands::Evidence.new(
+          "terminal", "plain", command: [ RbConfig.ruby, "-e", "puts 'ok'" ],
+          environment: environment
+        ).call
+      end
+      assert_includes out, "recorded terminal evidence"
+      assert_includes out, "review:"
+      assert_includes out, "exit: 0"
+
+      assert_raises(Hive::UsageError) do
+        Hive::Commands::Evidence.new(
+          "terminal", "bad-dir", command: [ "true" ],
+          environment: environment.merge("HIVE_EVIDENCE_SOURCE_ROOT" => "relative")
+        ).call
+      end
+
+      link = File.join(dir, "source-link")
+      File.symlink(source_root, link)
+      assert_raises(Hive::UsageError) do
+        Hive::Commands::Evidence.new(
+          "terminal", "bad-owner", command: [ "true" ],
+          environment: environment.merge("HIVE_EVIDENCE_SOURCE_ROOT" => link)
+        ).call
+      end
+
+      real_lstat = File.method(:lstat)
+      with_replaced_singleton_method(
+        File, :lstat, ->(path) { path == source_root ? raise(Errno::ELOOP) : real_lstat.call(path) }
+      ) do
+        assert_raises(Hive::UsageError) do
+          Hive::Commands::Evidence.new(
+            "terminal", "raced", command: [ "true" ], environment: environment
+          ).call
+        end
+      end
+    end
+  end
+
+  def test_terminal_and_browser_runtime_failures_are_usage_errors
+    with_tmp_dir do |dir|
+      task_root = File.join(dir, "task")
+      source_root = File.join(dir, "source")
+      writable_root = File.join(task_root, "work")
+      FileUtils.mkdir_p([ task_root, source_root, writable_root ])
+      environment = {
+        "HIVE_EVIDENCE_TASK_ROOT" => task_root,
+        "HIVE_EVIDENCE_SOURCE_ROOT" => source_root,
+        "HIVE_EVIDENCE_WRITE_ROOT" => writable_root
+      }
+      recorder = Object.new
+      recorder.define_singleton_method(:record!) do
+        raise Hive::Artifacts::TerminalRecorder::CaptureError, "capture failed"
+      end
+      with_replaced_singleton_method(
+        Hive::Artifacts::TerminalRecorder, :new, ->(**) { recorder }
+      ) do
+        error = assert_raises(Hive::UsageError) do
+          Hive::Commands::Evidence.new(
+            "terminal", "failed", command: [ "true" ], environment: environment
+          ).call
+        end
+        assert_match(/capture failed/, error.message)
+      end
+
+      assert_raises(Hive::UsageError) do
+        Hive::Commands::Evidence.new(
+          "browser", "snapshot", environment: {}
+        ).call
+      end
+    end
+  end
+
+  def test_browser_gateway_response_must_be_bounded_json_and_successful
+    with_tmp_dir do |dir|
+      invalid = run_browser_protocol(dir, "not-json\n")
+      assert_raises(Hive::UsageError) { invalid.call }
+
+      incomplete = run_browser_protocol(dir, "{}")
+      assert_raises(Hive::UsageError) { incomplete.call }
+
+      failed = run_browser_protocol(
+        dir, JSON.generate("ok" => false, "status" => 1, "stdout" => "", "stderr" => "bad") << "\n"
+      )
+      assert_raises(Hive::UsageError) { capture_io { failed.call } }
+    end
+  end
+
   private
 
   def fake_task(dir)
@@ -226,5 +338,27 @@ class CommandsEvidenceTest < Minitest::Test
       reviewer_reasons: [ "The configured reviewer cannot inspect the required proof kind." ],
       attempt_ids: []
     )
+  end
+
+  def run_browser_protocol(dir, response)
+    socket_path = File.join(dir, "gateway-#{SecureRandom.hex(3)}.sock")
+    server = UNIXServer.new(socket_path)
+    thread = Thread.new do
+      client = server.accept
+      client.gets
+      client.write(response)
+      client.close
+      server.close
+    end
+    command = Hive::Commands::Evidence.new(
+      "browser", "snapshot",
+      environment: { "HIVE_EVIDENCE_BROWSER_SOCKET" => socket_path }
+    )
+    command.define_singleton_method(:call) do
+      super()
+    ensure
+      thread.join(1)
+    end
+    command
   end
 end

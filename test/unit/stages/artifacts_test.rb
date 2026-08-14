@@ -1176,6 +1176,162 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_capture_capability_failure_publishes_a_durable_blocked_pointer
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = outcome_identity
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      requirement = outcome_requirement(identity)
+      published = []
+      prior = {
+        "attempt_id" => "attempt-01-prior", "status" => "revise",
+        "evidence" => [],
+        "review" => {
+          "verdicts" => [
+            {
+              "target_id" => "claim-flow", "verdict" => "revise",
+              "reason" => "The retained proof needs the final state."
+            }
+          ]
+        }
+      }
+      store = terminal_store(requirement, [ prior ], published)
+      store.define_singleton_method(:review_context_for_identity) do |_value|
+        { "path" => "outcome-evidence/context.diff" }
+      end
+      toolkit = Object.new
+      toolkit.define_singleton_method(:prepare!) do |**|
+        raise Hive::ConfigError, "ffmpeg unavailable"
+      end
+
+      result = Hive::Stages::Artifacts.run_outcome_evidence!(
+        task, {}, identity_resolver: resolver, store: store, capture_toolkit: toolkit
+      )
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "capability_blocked", published.first.fetch(:reason)
+      assert_equal [ "claim-flow" ], published.first.fetch(:failed_targets)
+      assert_equal :error, Hive::Markers.current(task.state_file).name
+    end
+  end
+
+  def test_initial_capture_capability_failure_names_all_required_claims
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = outcome_identity
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      requirement = outcome_requirement(identity)
+      published = []
+      store = terminal_store(requirement, [], published)
+      toolkit = Object.new
+      toolkit.define_singleton_method(:prepare!) do |**|
+        raise Hive::ConfigError, "capture unavailable"
+      end
+
+      result = Hive::Stages::Artifacts.run_outcome_evidence!(
+        task, {}, identity_resolver: resolver, store: store, capture_toolkit: toolkit
+      )
+      assert_equal :error, result.fetch(:status)
+      assert_equal [ "claim-flow" ], published.first.fetch(:failed_targets)
+    end
+  end
+
+  def test_reviewer_output_rejects_extra_top_level_authority
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = outcome_identity
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      requirement = outcome_requirement(identity)
+      store = terminal_store(requirement, [], [])
+      store.define_singleton_method(:retain_candidate!) { |evidence:, **| evidence }
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |role:, task:, writable_root: nil, **|
+        if role == "producer"
+          relative = Pathname.new(writable_root).relative_path_from(Pathname.new(task.folder)).to_s
+          {
+            actor: { "context_id" => "producer-1", "agent" => "claude" },
+            output: {
+              "evidence" => [
+                {
+                  "kind" => "document", "claims" => [ "claim-flow" ],
+                  "representations" => [ { "path" => "#{relative}/proof.md" } ]
+                }
+              ]
+            }
+          }
+        else
+          {
+            actor: { "context_id" => "reviewer-1", "agent" => "claude" },
+            output: { "verdicts" => [], "extra" => true }
+          }
+        end
+      end
+
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Hive::Stages::Artifacts.run_outcome_evidence!(
+          task, {}, identity_resolver: resolver, store: store
+        )
+      end
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
+  def test_producer_process_cleanup_and_visual_profile_preflight_are_fail_closed
+    kills = []
+    with_replaced_singleton_method(Process, :kill, ->(signal, pgid) { kills << [ signal, pgid ] }) do
+      Hive::Stages::Artifacts.cleanup_producer_process_group(pgid: 123)
+    end
+    assert_equal [ [ "TERM", -123 ], [ "KILL", -123 ] ], kills
+    with_replaced_singleton_method(Process, :kill, ->(*) { raise Errno::ESRCH }) do
+      assert_nil Hive::Stages::Artifacts.cleanup_producer_process_group(pgid: 123)
+    end
+
+    profile = Object.new
+    profile.define_singleton_method(:name) { :codex }
+    profile.define_singleton_method(:workspace_write_supported?) { false }
+    profile.define_singleton_method(:add_dir_flag) { nil }
+    with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(*) { profile }) do
+      assert_raises(Hive::ConfigError) do
+        Hive::Stages::Artifacts.preflight_producer!(
+          { "artifacts" => { "evidence" => { "producer" => { "agent" => "codex" } } } },
+          [ { "proof_kind" => "video" } ]
+        )
+      end
+    end
+  end
+
+  def test_non_claude_artifacts_spawn_and_action_mapping
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      profile = Hive::AgentProfiles.lookup(:codex)
+      scope = {
+        add_dirs: [], permission_mode: "workspace-write",
+        allowed_tools: nil, disallowed_tools: nil
+      }
+      captured = nil
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :stage_permission_scope_or_mark!, ->(*) { scope }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :model_routing_arguments, ->(*) { [] }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Stages::Base, :spawn_agent, ->(_task, **kwargs) { captured = kwargs }
+          ) do
+            Hive::Stages::Artifacts.spawn_artifacts_agent(
+              task, {}, "prompt", profile,
+              screenote: { connected: false }
+            )
+          end
+        end
+      end
+      assert_equal profile, captured.fetch(:profile)
+      assert_equal "error", Hive::Stages::Artifacts.action_for(:error)
+      assert_equal "waiting", Hive::Stages::Artifacts.action_for(:waiting)
+    end
+  end
+
   def test_role_process_boundary_rejects_agent_firewall_status_and_truncation_failures
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)

@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/artifacts/terminal_recorder"
 
 class ArtifactsTerminalRecorderTest < Minitest::Test
+  include HiveTestHelper
+
   def test_records_one_argv_command_as_asciinema_and_plain_text
     Dir.mktmpdir("hive-terminal-recorder") do |root|
       cast = File.join(root, "proof.cast")
@@ -123,6 +125,133 @@ class ArtifactsTerminalRecorderTest < Minitest::Test
       assert_match(/already exists/, error.message)
       assert_equal "owned cast\n", File.read(cast)
       assert_equal "owned review\n", File.read(review)
+    end
+  end
+
+  def test_worker_uses_the_activated_runtime_path_without_inheriting_ruby_injection
+    Dir.mktmpdir("hive-terminal-recorder-runtime") do |root|
+      captured = nil
+      result = {
+        "status" => { "success" => true },
+        "internal_error" => false, "timed_out" => false,
+        "cleanup_failed" => false, "stdout_overflow" => false,
+        "stderr_overflow" => false, "leftover_processes" => false,
+        "stdout" => JSON.generate("exit_status" => 0, "representations" => []),
+        "stderr" => ""
+      }
+      fake = lambda do |**attributes|
+        captured = attributes
+        result
+      end
+
+      with_env("HIVE_COVERAGE" => nil, "RUBYOPT" => "-r/untrusted") do
+        with_replaced_singleton_method(
+          Hive::Web::ProjectCaptureProvider, :capture_command_with_custody, fake
+        ) do
+          Hive::Artifacts::TerminalRecorder.new(
+            argv: [ RbConfig.ruby, "-e", "exit" ], cwd: root,
+            cast_path: File.join(root, "proof.cast"),
+            review_path: File.join(root, "proof.txt")
+          ).record!
+        end
+      end
+
+      runtime_path = Gem.loaded_specs.fetch("agent-cli-runtime").full_require_paths.first
+      assert_includes captured.fetch(:argv), runtime_path
+      assert_equal [ "PATH" ], captured.fetch(:environment).keys
+    end
+  end
+
+  def test_record_normalizes_empty_worker_provider_json_and_configuration_failures
+    Dir.mktmpdir("hive-terminal-recorder-normalize") do |root|
+      build = lambda do
+        Hive::Artifacts::TerminalRecorder.new(
+          argv: [ "true" ], cwd: root,
+          cast_path: File.join(root, "proof.cast"),
+          review_path: File.join(root, "proof.txt")
+        )
+      end
+
+      recorder = build.call
+      recorder.define_singleton_method(:capture_with_custody) { nil }
+      assert_raises(Hive::Artifacts::TerminalRecorder::CaptureError) { recorder.record! }
+
+      provider_error = Hive::Web::ProjectCaptureProvider::ProviderError.new("custody")
+      recorder = build.call
+      recorder.define_singleton_method(:capture_with_custody) { raise provider_error }
+      error = assert_raises(Hive::Artifacts::TerminalRecorder::CaptureError) { recorder.record! }
+      assert_match(/custody failed/, error.message)
+
+      invalid_result = {
+        "status" => { "success" => true }, "internal_error" => false,
+        "timed_out" => false, "cleanup_failed" => false,
+        "stdout_overflow" => false, "stderr_overflow" => false,
+        "leftover_processes" => false, "stdout" => "not-json", "stderr" => ""
+      }
+      replacement = ->(**) { invalid_result }
+      recorder = build.call
+      with_replaced_singleton_method(
+        Hive::Web::ProjectCaptureProvider, :capture_command_with_custody, replacement
+      ) do
+        error = assert_raises(Hive::Artifacts::TerminalRecorder::CaptureError) do
+          recorder.record!
+        end
+        assert_match(/invalid output/, error.message)
+      end
+
+      recorder = build.call
+      recorder.define_singleton_method(:capture_with_custody) { raise ArgumentError, "bad" }
+      error = assert_raises(Hive::Artifacts::TerminalRecorder::CaptureError) { recorder.record! }
+      assert_match(/configuration is invalid/, error.message)
+
+      recorder = build.call
+      recorder.define_singleton_method(:capture) { |*| raise ArgumentError, "bad" }
+      assert_raises(Hive::Artifacts::TerminalRecorder::CaptureError) do
+        recorder.send(:record_direct!)
+      end
+    end
+  end
+
+  def test_validation_and_direct_capture_cover_native_failure_boundaries
+    Dir.mktmpdir("hive-terminal-recorder-boundaries") do |root|
+      common = {
+        argv: [ "true" ], cwd: root,
+        cast_path: File.join(root, "proof.cast"),
+        review_path: File.join(root, "proof.txt")
+      }
+      assert_raises(Hive::Artifacts::TerminalRecorder::CaptureError) do
+        Hive::Artifacts::TerminalRecorder.new(**common, timeout_seconds: 0).record!
+      end
+      assert_raises(Hive::Artifacts::TerminalRecorder::CaptureError) do
+        Hive::Artifacts::TerminalRecorder.new(**common, width: 10).record!
+      end
+
+      recorder = Hive::Artifacts::TerminalRecorder.new(
+        **common.merge(argv: [ "/missing/terminal-command" ])
+      )
+      assert_raises(Hive::Artifacts::TerminalRecorder::CaptureError) do
+        recorder.send(:record_direct!)
+      end
+
+      reader = Object.new
+      reader.define_singleton_method(:winsize=) { |_| raise RuntimeError, "pty failed" }
+      reader.define_singleton_method(:closed?) { false }
+      reader.define_singleton_method(:close) { true }
+      writer = Object.new
+      writer.define_singleton_method(:closed?) { false }
+      writer.define_singleton_method(:close) { true }
+      recorder = Hive::Artifacts::TerminalRecorder.new(**common)
+      with_replaced_singleton_method(PTY, :spawn, ->(*) { [ reader, writer, 123 ] }) do
+        with_replaced_singleton_method(Process, :waitpid, ->(*) { raise Errno::ECHILD }) do
+          recorder.define_singleton_method(:terminate_group) { |_| nil }
+          assert_raises(RuntimeError) { recorder.send(:capture, 0, [], +"") }
+        end
+      end
+
+      with_replaced_singleton_method(Process, :kill, ->(*) { raise Errno::ESRCH }) do
+        fresh = Hive::Artifacts::TerminalRecorder.new(**common)
+        assert_nil fresh.send(:terminate_group, 123)
+      end
     end
   end
 end

@@ -801,10 +801,12 @@ module Hive
             end
             Hive::AtomicFile.fsync_directory(File.dirname(path))
           rescue Errno::EEXIST
-            existing = File.open(path, File::RDONLY | File::NOFOLLOW, &:read)
+            existing = begin
+              File.open(path, File::RDONLY | File::NOFOLLOW, &:read)
+            rescue Errno::ELOOP
+              raise StoreError, "exact implementation diff must be a regular file"
+            end
             raise StoreError, "exact implementation diff is append-only and already differs" unless existing == source
-          rescue Errno::ELOOP
-            raise StoreError, "exact implementation diff must be a regular file"
           end
         end
 

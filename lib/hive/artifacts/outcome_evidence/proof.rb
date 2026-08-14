@@ -204,10 +204,9 @@ module Hive
             source_root: destination
           )
           stat = File.lstat(storyboard)
-          unless stat.file? && !stat.symlink? && stat.size.positive? &&
-                 stat.size <= MAX_REVIEW_BYTES
-            raise StoreError, "controller video storyboard is unavailable"
-          end
+          valid_storyboard = stat.file? && !stat.symlink? && stat.size.positive? &&
+            stat.size <= MAX_REVIEW_BYTES
+          raise StoreError, "controller video storyboard is unavailable" unless valid_storyboard
           representations = entry.fetch("representations")
             .reject { |item| item.fetch("role") == "storyboard" }
           representations << {

@@ -804,6 +804,58 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     end
   end
 
+  def test_exact_diff_materialization_and_read_context_are_fail_closed
+    with_store do |store, _task, _controller|
+      requirement = store.open_generation!(**requirement_input)
+      generation = requirement.fetch("generation")
+      failed = Hive::AgentGitGate::ReadResult.new(
+        operation: :diff, stdout: "", stderr: "failed", exitstatus: 1, overflow: false
+      )
+      with_replaced_singleton_method(Hive::AgentGitGate, :read, ->(*) { failed }) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          store.materialize_review_context!(identity: identity, source_root: "/source")
+        end
+      end
+
+      with_replaced_singleton_method(
+        Hive::AgentGitGate, :read, ->(*) { raise Hive::AgentGitGate::Error, "gate" }
+      ) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          store.materialize_review_context!(identity: identity, source_root: "/source")
+        end
+      end
+
+      assert_nil store.review_context_for_identity(identity)
+      diff = File.join(
+        store.send(:generation_root, generation), "implementation.diff"
+      )
+      Dir.mkdir(diff)
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        store.review_context_for_identity(identity)
+      end
+    end
+  end
+
+  def test_exact_diff_write_is_bounded_append_only_and_rejects_symlinks
+    with_store do |store, _task, _controller|
+      generation = store.open_generation!(**requirement_input).fetch("generation")
+      root = store.send(:generation_root, generation)
+      oversized = "x" * (Hive::Artifacts::OutcomeEvidence::Store::MAX_DIFF_BYTES + 1)
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        store.send(:write_once_bytes, File.join(root, "oversized.diff"), oversized,
+                   generation: generation)
+      end
+
+      target = File.join(root, "target")
+      File.write(target, "target")
+      link = File.join(root, "linked.diff")
+      File.symlink(target, link)
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        store.send(:write_once_bytes, link, "diff", generation: generation)
+      end
+    end
+  end
+
   private
 
   def plain_copy(value)

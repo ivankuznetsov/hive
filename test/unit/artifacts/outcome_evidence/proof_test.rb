@@ -147,6 +147,77 @@ class OutcomeEvidenceProofTest < Minitest::Test
     end
   end
 
+  def test_producer_cannot_supply_storyboards_or_malformed_entries
+    with_tmp_dir do |root|
+      valid_files(root)
+      value = {
+        "kind" => "video", "summary" => "Flow completes", "claims" => [ "claim-a" ],
+        "representations" => [
+          { "role" => "storyboard", "media_type" => "image/png", "path" => "storyboard.png" }
+        ]
+      }
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.materialize_producer!(
+          value, task_folder: root, expected_head: HEAD, destination_root: "retained/video"
+        )
+      end
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.materialize_producer!(
+          {}, task_folder: root, expected_head: HEAD, destination_root: "retained/broken"
+        )
+      end
+    end
+  end
+
+  def test_controller_storyboard_requires_a_regular_nonempty_output
+    with_tmp_dir do |root|
+      valid_files(root)
+      entry = {
+        "representations" => [
+          { "role" => "review", "media_type" => "video/webm", "path" => "video-review.webm" }
+        ]
+      }
+      original = Proof.method(:media_command)
+      empty_output = lambda do |argv, **kwargs|
+        if argv.include?("-show_entries")
+          original.call(argv, **kwargs)
+        else
+          FileUtils.mkdir_p(File.dirname(argv.last))
+          File.write(argv.last, "")
+        end
+      end
+      storyboard = File.join(root, "retained", "empty", "controller-storyboard.png")
+      real_lstat = File.method(:lstat)
+      empty_stat = Struct.new(:file?, :symlink?, :size).new(true, false, 0)
+      with_replaced_singleton_method(Proof, :media_command, empty_output) do
+        with_replaced_singleton_method(
+          File, :lstat, ->(path) { path == storyboard ? empty_stat : real_lstat.call(path) }
+        ) do
+          error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+            Proof.send(
+              :add_controller_storyboard!, entry, task_folder: root,
+              expected_head: HEAD, destination_root: "retained/empty"
+            )
+          end
+          assert_equal "controller video storyboard is unavailable", error.message
+        end
+      end
+
+      missing_output = lambda do |argv, **kwargs|
+        original.call(argv, **kwargs) if argv.include?("-show_entries")
+      end
+      with_replaced_singleton_method(Proof, :media_command, missing_output) do
+        error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          Proof.send(
+            :add_controller_storyboard!, entry, task_folder: root,
+            expected_head: HEAD, destination_root: "retained/missing"
+          )
+        end
+        assert_equal "controller video storyboard is unavailable", error.message
+      end
+    end
+  end
+
   def test_rejects_traversal_symlink_oversize_hash_mismatch_and_diagnostic_capture
     with_tmp_dir do |root|
       files = valid_files(root)
@@ -263,6 +334,13 @@ class OutcomeEvidenceProofTest < Minitest::Test
       before = File.binread(File.join(root, original_copy.fetch("path")))
       File.write(File.join(root, "report.md"), "producer changed this after returning\n")
       assert_equal before, File.binread(File.join(root, original_copy.fetch("path")))
+
+      File.write(File.join(root, "report.md"), "# Verification\n\nAll checks passed.\n")
+      producer_retained = Proof.materialize_producer!(
+        value, task_folder: root, expected_head: HEAD,
+        destination_root: "retained/attempt-1/entry-02"
+      )
+      assert_equal "document", producer_retained.fetch("kind")
     end
   end
 

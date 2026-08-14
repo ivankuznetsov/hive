@@ -1416,6 +1416,35 @@ class WebTaskCaptureTest < Minitest::Test
     end
   end
 
+  def test_browser_recording_cleanup_swallows_stop_and_close_failures
+    with_capture_task do |root, task_folder, source|
+      FileUtils.mkdir_p(File.join(source, "web"))
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+      entry = Struct.new(
+        :browsers_path, :agent_browser_cli, :browser_executable, :skills_path
+      ).new("/browsers", "/managed/agent-browser", "/managed/chrome", "/managed/skills")
+      calls = []
+      capture.define_singleton_method(:run_command!) do |argv, **|
+        calls << argv
+        return [ "", "" ] if argv.include?("start")
+
+        raise RuntimeError, "browser failed"
+      end
+
+      error = assert_raises(RuntimeError) do
+        capture.send(
+          :record_browser!, source_root: source, browser_entry: entry,
+          runtime_root: File.join(root, "runtime"), base_url: "http://127.0.0.1:4567",
+          screenshot: File.join(root, "capture.png"),
+          video_directory: File.join(root, "video")
+        )
+      end
+      assert_match(/browser failed/, error.message)
+      assert calls.any? { |argv| argv.include?("stop") }
+      assert calls.any? { |argv| argv.include?("close") }
+    end
+  end
+
   def test_media_validation_checks_png_video_toolchain_and_duration
     with_capture_task do |root, task_folder, _source|
       capture = Hive::Web::TaskCapture.new(task_folder: task_folder)

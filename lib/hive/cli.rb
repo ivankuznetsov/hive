@@ -762,7 +762,7 @@ module Hive
       ).call
     end
 
-    desc "evidence SUBCOMMAND TARGET [-- COMMAND...]", "Recover or capture outcome evidence"
+    desc "evidence SUBCOMMAND [ARGS...]", "Recover or capture outcome evidence"
     long_desc <<~DESC
       Subcommands:
         recover TARGET --generation SHA256 --recovery-digest SHA256

@@ -135,6 +135,145 @@ class PlanReviewStoreTest < Minitest::Test
     end
   end
 
+  def test_projection_version_must_follow_the_observed_version
+    with_store do |store|
+      manifest = manifest_record
+      store.create_review!(manifest)
+
+      error = assert_raises(Hive::PlanReview::StaleObservation) do
+        store.publish_current!(projection_record(manifest, version: 2), expected_version: nil)
+      end
+      assert_includes error.message, "does not follow 0"
+    end
+  end
+
+  def test_cas_rejects_a_publish_against_a_version_that_was_never_observed
+    with_store do |store|
+      manifest = manifest_record
+      store.create_review!(manifest)
+      store.publish_current!(projection_record(manifest), expected_version: nil)
+
+      error = assert_raises(Hive::PlanReview::StaleObservation) do
+        store.publish_current!(projection_record(manifest, version: 2), expected_version: 7)
+      end
+      assert_includes error.message, "expected version 7"
+    end
+  end
+
+  def test_an_unrelated_review_cannot_take_over_the_current_pointer
+    with_store do |store|
+      manifest = manifest_record
+      store.create_review!(manifest)
+      store.publish_current!(projection_record(manifest), expected_version: nil)
+      unrelated = Hive::PlanReview::Record.new(
+        manifest.to_h.merge("review_id" => "pr-#{'e' * 64}", "prior_review_id" => nil)
+      )
+
+      error = assert_raises(Hive::PlanReview::StaleObservation) do
+        store.publish_current!(projection_record(unrelated, version: 2), expected_version: 1)
+      end
+      assert_includes error.message, "does not link to the current review"
+    end
+  end
+
+  def test_corrupt_current_and_manifest_json_fail_closed
+    with_store do |store|
+      manifest = manifest_record
+      store.create_review!(manifest)
+      File.binwrite(store.current_path, "{not json")
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) { store.current }
+      assert_includes error.message, "current projection is invalid JSON"
+
+      manifest_path = File.join(store.root, "reviews", manifest.review_id, "manifest.json")
+      File.binwrite(manifest_path, "{not json")
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        store.write_review_artifact!(review_id: manifest.review_id, basename: "critique.md",
+                                     content: "hi")
+      end
+      assert_includes error.message, "review manifest is invalid JSON"
+    end
+  end
+
+  def test_oversized_json_artifacts_and_unwritable_paths_fail_closed
+    with_store do |store|
+      manifest = manifest_record
+      store.create_review!(manifest)
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        store.write_review_artifact!(review_id: manifest.review_id, basename: "huge.json",
+                                     content: "x" * (2 * 1024 * 1024 + 10), json: true)
+      end
+      assert_includes error.message, "exceeds the size limit"
+
+      # SAFE_SEGMENT allows 256 characters but the filesystem caps a name at
+      # 255 bytes, so this reaches the write and fails as ENAMETOOLONG.
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        store.write_review_artifact!(review_id: manifest.review_id, basename: "a" * 256,
+                                     content: "hi")
+      end
+      assert_includes error.message, "could not be written"
+    end
+  end
+
+  def test_unsafe_segments_are_rejected_and_symbols_are_stringified
+    with_store do |store|
+      manifest = manifest_record
+      store.create_review!(manifest)
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        store.write_decision!(review_id: manifest.review_id, target_fingerprint: "../escape",
+                              decision_id: "d1", data: {})
+      end
+      assert_includes error.message, "decision target is unsafe"
+
+      reference = store.write_review_artifact!(
+        review_id: manifest.review_id, basename: "kinds.json",
+        content: { "kind" => :adversarial }, json: true
+      )
+      assert_equal({ "kind" => "adversarial" }, JSON.parse(store.read_reference(reference)))
+    end
+  end
+
+  def test_malformed_artifact_references_are_rejected_before_any_read
+    with_store do |store|
+      manifest = manifest_record
+      store.create_review!(manifest)
+      good = store.write_review_artifact!(review_id: manifest.review_id, basename: "notes.md",
+                                          content: "hello")
+
+      [
+        [ "not-a-hash", "invalid plan review artifact reference" ],
+        [ { path: "notes.md", sha256: "a" * 64, bytes: 5 }, "invalid plan review artifact reference" ],
+        [ good.merge("path" => "../escape.md"), "artifact path is unsafe" ],
+        [ good.merge("path" => "~"), "artifact path escapes its root" ],
+        [ good.merge("sha256" => "f" * 64), "hash or size mismatch" ]
+      ].each do |reference, expected|
+        error = assert_raises(Hive::PlanReview::InvalidRecord) { store.read_reference(reference) }
+        assert_includes error.message, expected
+      end
+    end
+  end
+
+  def test_directories_outside_the_task_or_unwritable_fail_closed
+    with_store do |store, task_folder|
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        store.send(:ensure_directory!, Dir.tmpdir)
+      end
+      assert_includes error.message, "directory escapes the task"
+
+      File.chmod(0o500, task_folder)
+      begin
+        error = assert_raises(Hive::PlanReview::InvalidRecord) do
+          store.send(:ensure_directory!, store.root)
+        end
+        assert_includes error.message, "directory is unavailable"
+      ensure
+        File.chmod(0o700, task_folder)
+      end
+    end
+  end
+
   private
 
   def with_store

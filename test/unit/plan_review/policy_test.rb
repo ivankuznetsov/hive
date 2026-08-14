@@ -108,6 +108,17 @@ class PlanReviewPolicyTest < Minitest::Test
     assert_equal first.policy_fingerprint, second.policy_fingerprint
   end
 
+  def test_non_integer_classifier_version_is_a_config_error
+    error = assert_raises(Hive::ConfigError) do
+      Hive::PlanReview::Policy.evaluate(
+        workflow_id: "coding", signals: signals(skip: false),
+        config: config.merge("classifier_version" => "one")
+      )
+    end
+
+    assert_match(/classifier_version must be an Integer/, error.message)
+  end
+
   private
 
   def config

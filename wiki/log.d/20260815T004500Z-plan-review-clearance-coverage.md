@@ -15,3 +15,10 @@ Three more plan-review units now have tests behind every branch:
   the review state when no blocker names one.
 
 See [[modules/plan_review]] and [[testing]].
+
+Two further single-branch gaps are closed alongside them:
+
+- `Policy.classifier_version` raising `Hive::ConfigError` on a non-Integer
+  `plan_review.classifier_version`.
+- `Identity.task_generation` falling back to the slug for a task object that
+  exposes neither `id`, `meta_yml_path`, nor `workflow`.

@@ -35,4 +35,15 @@ class PlanReviewIdentityTest < Minitest::Test
     assert_equal first, same
     refute_equal first, conflict
   end
+
+  def test_task_generation_falls_back_to_the_slug_on_a_bare_task
+    bare = Data.define(:slug).new(slug: "slug-260812-abcd")
+    other = Data.define(:slug).new(slug: "slug-260812-beef")
+
+    assert_match(/\A[0-9a-f]{64}\z/, Hive::PlanReview::Identity.task_generation(bare))
+    assert_equal Hive::PlanReview::Identity.task_generation(bare),
+                 Hive::PlanReview::Identity.task_generation(bare)
+    refute_equal Hive::PlanReview::Identity.task_generation(bare),
+                 Hive::PlanReview::Identity.task_generation(other)
+  end
 end

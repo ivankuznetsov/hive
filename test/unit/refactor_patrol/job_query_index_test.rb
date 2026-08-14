@@ -167,6 +167,39 @@ class RefactorPatrolJobQueryIndexTest < Minitest::Test
     end
   end
 
+  def test_recent_page_is_bounded_and_newest_first
+    with_index do |index, root|
+      30.times { |number| register(index, root, "job-#{number}") }
+
+      page = index.recent_page(limit: 25)
+
+      assert_equal 30, page.fetch("total")
+      assert_equal true, page.fetch("has_more")
+      assert_equal "job-29", page.fetch("job_ids").first
+      assert_equal "job-5", page.fetch("job_ids").last
+      assert_equal 25, page.fetch("job_ids").size
+    end
+  end
+
+  def test_recent_page_rejects_a_missing_job_and_invalid_limit
+    with_index do |index, root|
+      [ nil, "invalid" ].each do |limit|
+        error = assert_raises(ArgumentError) do
+          index.recent_page(limit: limit)
+        end
+        assert_equal "job query page limit must be positive", error.message
+      end
+
+      register(index, root, "job-1")
+      File.delete(File.join(root, "jobs", "job-1.json"))
+
+      error = assert_raises(InconsistentRecord) do
+        index.recent_page(limit: 10)
+      end
+      assert_match(/references a missing job/, error.message)
+    end
+  end
+
   def test_registration_requires_its_authoritative_job
     with_index do |index, _root|
       assert_raises(InconsistentRecord) do

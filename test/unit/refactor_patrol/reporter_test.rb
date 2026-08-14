@@ -5,8 +5,9 @@ require "hive/refactor_patrol/reporter"
 require "hive/refactor_patrol/thesis"
 
 class RefactorPatrolReporterTest < Minitest::Test
-  def test_v3_dispositions_are_exhaustive_and_below_threshold_is_flagged
-    accepted = thesis("accepted", confidence: "high", fingerprint: "fp-accepted")
+  def test_v4_routes_are_exhaustive_and_hive_forces_unsafe_findings_down
+    accepted = thesis("accepted", route: "fix", confidence: "high", fingerprint: "fp-accepted")
+    discussion = thesis("discussion", route: "discuss", fingerprint: "fp-discussion")
     below_threshold = thesis("below", confidence: "low", fingerprint: "fp-below")
     inadmissible = thesis(
       "inadmissible",
@@ -17,44 +18,34 @@ class RefactorPatrolReporterTest < Minitest::Test
     )
     suppressed = thesis("suppressed", fingerprint: "fp-suppressed")
 
-    payload = reporter.v3_envelope(
-      **v3_args(
-        theses: [ accepted, below_threshold, inadmissible, suppressed ],
+    payload = reporter.v4_envelope(
+      **v4_args(
+        theses: [ accepted, discussion, below_threshold, inadmissible, suppressed ],
         suppressed: [ { "id" => "suppressed", "reason" => "collision_already_seen", "reference" => "legacy-fp" } ]
       )
     )
 
-    all_ids = %w[accepted flagged suppressed].flat_map { |key| payload.fetch(key).map { |item| item.fetch("id") } }
-    assert_equal %w[accepted below inadmissible suppressed], all_ids.sort
+    all_ids = %w[fix discuss dismiss].flat_map { |key| payload.fetch(key).map { |item| item.fetch("id") } }
+    assert_equal %w[accepted below discussion inadmissible suppressed], all_ids.sort
     assert_equal all_ids.uniq, all_ids
-    assert_equal accepted.to_h, payload.fetch("accepted").first.fetch("thesis")
+    assert_equal accepted.to_h, payload.fetch("fix").first.fetch("thesis")
+    assert_equal "discuss", payload.fetch("discuss").first.fetch("route")
 
-    flagged = payload.fetch("flagged").to_h { |item| [ item.fetch("id"), item ] }
-    assert_equal true, flagged.fetch("below").fetch("admissible")
-    assert_equal [ "below_min_confidence" ], flagged.fetch("below").fetch("reasons")
-    assert_equal false, flagged.fetch("inadmissible").fetch("admissible")
-    assert_includes flagged.fetch("inadmissible").fetch("reasons"), "inadmissible"
-    assert_includes flagged.fetch("inadmissible").fetch("reasons"), "missing measurable signal"
-    assert v3_schemer.valid?(payload), v3_schemer.validate(payload).map { |error| error["error"] }.inspect
+    dismissed = payload.fetch("dismiss").to_h { |item| [ item.fetch("id"), item ] }
+    assert_equal true, dismissed.fetch("below").fetch("admissible")
+    assert_equal [ "below_min_confidence" ], dismissed.fetch("below").fetch("reasons")
+    assert_equal false, dismissed.fetch("inadmissible").fetch("admissible")
+    assert_includes dismissed.fetch("inadmissible").fetch("reasons"), "inadmissible"
+    assert_includes dismissed.fetch("inadmissible").fetch("reasons"), "missing measurable signal"
+    assert v4_schemer.valid?(payload), v4_schemer.validate(payload).map { |error| error["error"] }.inspect
   end
 
-  def test_historical_v2_report_fixture_with_size_estimates_remains_valid
-    payload = reporter.v3_envelope(**v3_args(theses: [ thesis("accepted", confidence: "high") ]))
-    payload["schema_version"] = 2
-    payload.dig("accepted", 0, "thesis", "risk", "caps").merge!(
-      "est_files" => 8,
-      "est_diff_lines" => 400
-    )
-
-    assert v2_schemer.valid?(payload), v2_schemer.validate(payload).map { |error| error["error"] }.inspect
-  end
-
-  def test_v3_zero_reasons_distinguish_no_slice_no_theses_and_all_suppressed
-    no_slice = reporter.v3_envelope(**v3_args(features: [], theses: []))
-    no_theses = reporter.v3_envelope(**v3_args(features: [ feature ], theses: []))
+  def test_v4_zero_reasons_distinguish_no_slice_no_theses_and_all_dismissed
+    no_slice = reporter.v4_envelope(**v4_args(features: [], theses: []))
+    no_theses = reporter.v4_envelope(**v4_args(features: [ feature ], theses: []))
     only = thesis("only", fingerprint: "fp-only")
-    all_suppressed = reporter.v3_envelope(
-      **v3_args(
+    all_dismissed = reporter.v4_envelope(
+      **v4_args(
         features: [ feature ],
         theses: [ only ],
         suppressed: [ { "id" => "only", "reason" => "collision_dismissed" } ]
@@ -63,16 +54,16 @@ class RefactorPatrolReporterTest < Minitest::Test
 
     assert_equal "no_mapped_slice", no_slice.fetch("zero_reason")
     assert_equal "no_theses", no_theses.fetch("zero_reason")
-    assert_equal "all_suppressed", all_suppressed.fetch("zero_reason")
-    [ no_slice, no_theses, all_suppressed ].each do |payload|
+    assert_equal "all_dismissed", all_dismissed.fetch("zero_reason")
+    [ no_slice, no_theses, all_dismissed ].each do |payload|
       assert payload.fetch("complete")
-      assert v3_schemer.valid?(payload), v3_schemer.validate(payload).map { |error| error["error"] }.inspect
+      assert v4_schemer.valid?(payload), v4_schemer.validate(payload).map { |error| error["error"] }.inspect
     end
   end
 
-  def test_v3_review_errors_force_partial_even_when_caller_reports_complete
-    payload = reporter.v3_envelope(
-      **v3_args(
+  def test_v4_review_errors_force_partial_even_when_caller_reports_complete
+    payload = reporter.v4_envelope(
+      **v4_args(
         features: [ feature ],
         theses: [],
         complete: true,
@@ -83,10 +74,10 @@ class RefactorPatrolReporterTest < Minitest::Test
     assert_equal false, payload.fetch("complete")
     assert_nil payload.fetch("zero_reason")
     assert_equal "agent_failed", payload.fetch("review_errors").first.fetch("error")
-    assert v3_schemer.valid?(payload), v3_schemer.validate(payload).map { |error| error["error"] }.inspect
+    assert v4_schemer.valid?(payload), v4_schemer.validate(payload).map { |error| error["error"] }.inspect
   end
 
-  def test_v3_actions_do_not_change_analysis_disposition
+  def test_v4_actions_do_not_change_analysis_disposition
     item = thesis("accepted", confidence: "high", fingerprint: "fp-accepted")
     action = {
       "canonical_action_id" => "fix-fp-accepted",
@@ -99,70 +90,67 @@ class RefactorPatrolReporterTest < Minitest::Test
       "receipts" => { "validation" => { "ok" => false } }
     }
 
-    payload = reporter.v3_envelope(**v3_args(theses: [ item ], actions: [ action ]))
+    payload = reporter.v4_envelope(**v4_args(theses: [ item ], actions: [ action ]))
 
-    assert_equal [ "accepted" ], payload.fetch("accepted").map { |entry| entry.fetch("id") }
-    assert_empty payload.fetch("flagged")
+    assert_equal [ "accepted" ], payload.fetch("fix").map { |entry| entry.fetch("id") }
+    assert_empty payload.fetch("discuss")
     assert_equal "validation_failed", payload.fetch("actions").first.fetch("outcome")
-    assert v3_schemer.valid?(payload), v3_schemer.validate(payload).map { |error| error["error"] }.inspect
+    assert v4_schemer.valid?(payload), v4_schemer.validate(payload).map { |error| error["error"] }.inspect
   end
 
-  def test_v3_retains_incomplete_measurement_diagnostics_on_flagged_theses
+  def test_v4_retains_inadmissibility_details_on_dismissed_theses
     item = thesis(
       "partial", admissible: false,
-      admissibility_reason: "incomplete feature leverage measurement",
-      flags: [ "incomplete_leverage_measurement" ]
+      admissibility_reason: "evidence could not be verified",
+      flags: [ "unverified_evidence" ]
     )
-    item.feature_hotspot["measurement"] = {
-      "status" => "incomplete",
-      "diagnostics" => [
-        {
-          "kind" => "architecture_map_failed",
-          "error_class" => "ParserUnavailable",
-          "message" => "dependency graph measurement failed"
-        }
-      ]
-    }
 
-    payload = reporter.v3_envelope(**v3_args(theses: [ item ]))
-    retained = payload.dig("flagged", 0, "thesis", "feature_hotspot", "measurement")
+    payload = reporter.v4_envelope(**v4_args(theses: [ item ]))
+    retained = payload.dig("dismiss", 0)
 
-    assert_equal "incomplete", retained.fetch("status")
-    assert_equal "architecture_map_failed", retained.dig("diagnostics", 0, "kind")
-    assert v3_schemer.valid?(payload), v3_schemer.validate(payload).map { |error| error["error"] }.inspect
+    assert_equal "dismiss", retained.fetch("route")
+    assert_includes retained.fetch("reasons"), "unverified_evidence"
+    assert_includes retained.fetch("reasons"), "evidence could not be verified"
+    assert v4_schemer.valid?(payload), v4_schemer.validate(payload).map { |error| error["error"] }.inspect
   end
 
-  def test_v3_rejects_duplicate_thesis_ids_instead_of_losing_a_disposition
+  def test_v4_rejects_duplicate_thesis_ids_instead_of_losing_a_disposition
     duplicate = thesis("same", fingerprint: "fp-one")
 
     error = assert_raises(ArgumentError) do
-      reporter.v3_envelope(**v3_args(theses: [ duplicate, thesis("same", fingerprint: "fp-two") ]))
+      reporter.v4_envelope(**v4_args(theses: [ duplicate, thesis("same", fingerprint: "fp-two") ]))
     end
 
     assert_includes error.message, "duplicate thesis id"
   end
 
-  def test_same_feature_proposals_rank_by_proposal_specific_leverage_with_stable_ties
-    low = thesis("z-low", score: 0.2)
-    high_b = thesis("b-high", score: 0.7)
-    high_a = thesis("a-high", score: 0.7)
+  def test_local_v4_projects_scoreless_routes_without_ranked_compatibility_fields
+    dismissed = thesis("z-dismissed", route: "dismiss")
+    discuss = thesis("b-discuss", route: "discuss")
+    fixed = thesis("a-fix", route: "fix")
 
     payload = reporter.envelope(
       project: "demo",
       project_root: "/tmp/demo",
       dry_run: true,
       features: [ feature ],
-      theses: [ low, high_b, high_a ],
+      theses: [ dismissed, discuss, fixed ],
       suppressed: [],
       last_scanned_sha: "abc"
     )
 
-    assert_equal %w[a-high b-high z-low], payload.fetch("ranked").map { |item| item.fetch("id") }
+    assert_equal [ "a-fix" ], payload.fetch("fix").map { |item| item.fetch("id") }
+    assert_equal [ "b-discuss" ], payload.fetch("discuss").map { |item| item.fetch("id") }
+    assert_equal [ "z-dismissed" ], payload.fetch("dismiss").map { |item| item.fetch("id") }
+    %w[fix discuss dismiss].flat_map { |route| payload.fetch(route) }.each do |item|
+      refute item.key?("score")
+    end
+    refute payload.key?("ranked")
     assert payload.fetch("review_complete")
     assert_empty payload.fetch("review_errors")
   end
 
-  def test_v1_review_errors_are_explicit_partial_results
+  def test_v4_review_errors_are_explicit_partial_results
     error = {
       "feature_id" => "checkout",
       "error" => "agent_failed",
@@ -190,7 +178,7 @@ class RefactorPatrolReporterTest < Minitest::Test
     end
   end
 
-  def test_v3_rejects_duplicate_suppression_ids
+  def test_v4_rejects_duplicate_suppression_ids
     item = thesis("only")
     suppressions = [
       { "id" => "only", "reason" => "already_seen" },
@@ -198,18 +186,18 @@ class RefactorPatrolReporterTest < Minitest::Test
     ]
 
     error = assert_raises(ArgumentError) do
-      reporter.v3_envelope(**v3_args(theses: [ item ], suppressed: suppressions))
+      reporter.v4_envelope(**v4_args(theses: [ item ], suppressed: suppressions))
     end
 
     assert_includes error.message, "duplicate suppressed thesis id"
   end
 
-  def test_v3_rejects_unsupported_and_inconsistent_zero_reasons
+  def test_v4_rejects_unsupported_and_inconsistent_zero_reasons
     unsupported = assert_raises(ArgumentError) do
-      reporter.v3_envelope(**v3_args(features: [], zero_reason: "nothing_here"))
+      reporter.v4_envelope(**v4_args(features: [], zero_reason: "nothing_here"))
     end
     inconsistent = assert_raises(ArgumentError) do
-      reporter.v3_envelope(**v3_args(features: [], zero_reason: "no_theses"))
+      reporter.v4_envelope(**v4_args(features: [], zero_reason: "no_theses"))
     end
 
     assert_includes unsupported.message, "unsupported zero reason"
@@ -224,7 +212,7 @@ class RefactorPatrolReporterTest < Minitest::Test
     )
   end
 
-  def v3_args(overrides = {})
+  def v4_args(overrides = {})
     {
       job_id: "job-1",
       project: "demo",
@@ -264,7 +252,7 @@ class RefactorPatrolReporterTest < Minitest::Test
     )
   end
 
-  def thesis(id, score: 0.8, confidence: "medium", admissible: true, admissibility_reason: "ok", flags: [], fingerprint: "fp")
+  def thesis(id, route: "fix", confidence: "medium", admissible: true, admissibility_reason: "ok", flags: [], fingerprint: "fp")
     Hive::RefactorPatrol::Thesis.new(
       id: id,
       feature_id: "checkout",
@@ -281,15 +269,8 @@ class RefactorPatrolReporterTest < Minitest::Test
       ],
       proposed_refactor: "Extract a service",
       feature_boundary: { "owned_files" => [ "lib/checkout.rb" ], "entrypoints" => [ "lib/checkout.rb" ] },
-      feature_hotspot: {
-        "scope" => "feature", "score" => 1.0,
-        "breakdown" => { "churn" => 1.0 }, "signals" => { "churn" => 7 }, "normalized" => { "churn" => 1.0 }
-      },
-      expected_leverage: {
-        "score" => score,
-        "breakdown" => { "churn" => score },
-        "drivers" => [ { "signal" => "churn", "relief" => score, "mechanism" => "isolate recurring edits" } ]
-      },
+      architecture_effects: [ "isolate recurring edits behind one owner" ],
+      route: route,
       confidence: confidence,
       risk: {
         "caps" => { "single_feature" => true },
@@ -308,11 +289,7 @@ class RefactorPatrolReporterTest < Minitest::Test
     )
   end
 
-  def v3_schemer
-    @v3_schemer ||= JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3))))
-  end
-
-  def v2_schemer
-    @v2_schemer ||= JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2))))
+  def v4_schemer
+    @v4_schemer ||= JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 4))))
   end
 end

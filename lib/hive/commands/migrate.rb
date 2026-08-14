@@ -2,6 +2,7 @@ require "fileutils"
 require "open3"
 require "time"
 require "yaml"
+require "hive/atomic_file"
 require "hive/config"
 require "hive/display_name/generator"
 require "hive/git_ops"
@@ -46,6 +47,18 @@ module Hive
         %w[budget_usd pr] => %w[budget_usd finalize],
         %w[timeout_sec pr] => %w[timeout_sec finalize]
       }.freeze
+      RETIRED_PATROL_CONFIG_KEYS = %w[
+        max_tokens_per_cycle
+        max_tokens_per_day
+        max_agent_spawns_per_cycle
+        max_agent_spawns_per_day
+        max_architecture_review_spawns_per_day
+        max_architecture_unmetered_spawns_per_day
+        max_budget_usd_per_agent
+        architecture_budget_multiplier
+        fix_budget_multiplier
+      ].freeze
+      RETIRED_REFACTOR_PATROL_CONFIG_KEYS = %w[min_leverage_score].freeze
       ROOT_REVIEWERS_LINE = /\A(?:reviewers|["']reviewers["'])\s*:/.freeze
       REVIEW_BLOCK_LINE = /\A(?:review|["']review["'])\s*:\s*(?:#.*)?(?:\r?\n)?\z/.freeze
 
@@ -81,6 +94,8 @@ module Hive
 
         @global_migration.call
         moved = []
+        config_changed = false
+        restart_requested = false
         backfilled_count = 0
         recovery_marker_count = 0
         workflow_task_count = 0
@@ -89,6 +104,25 @@ module Hive
         begin
           plan = build_migration_plan(stages)
           preflight_collisions!(plan)
+          # Retired Patrol keys must be removed before Config.load: the current
+          # runtime deliberately has no read-through compatibility for them.
+          # Commit this independently valid forward migration before preparing
+          # managed tasks, so a later project-specific failure cannot leave a
+          # rewritten config uncommitted or require the old schema to recover.
+          Hive::Lock.with_commit_lock(hive_state) do
+            config_changed = rewrite_legacy_config_keys(hive_state)
+            commit_migration(
+              hive_state, [], config_only: true
+            ) if config_changed
+          end
+          # Request the restart immediately after the independently committed
+          # config rewrite. MigrateAll injects a coalescing restarter; a
+          # standalone migration uses the normal best-effort daemon restart.
+          # Either path must run before later project-specific work can fail.
+          if config_changed
+            (@daemon_restarter || method(:restart_daemon_if_running!)).call
+            restart_requested = true
+          end
           store = @managed_store_factory.call(hive_state)
           project_config = @config_loader.call(@project_path)
           migrator = Hive::WorkflowPackage::TaskMigrator.new(
@@ -109,7 +143,6 @@ module Hive
                 # generations are validated before this first legacy write.
                 # A removed semantic stage or live managed task therefore
                 # cannot leave config or ordinary task folders half-migrated.
-                config_changed = rewrite_legacy_config_keys(hive_state)
                 plan.each { |op| FileUtils.mv(op[:src], op[:dst]) }
                 moved.concat(plan.map { |op| [ op[:old_stage], op[:new_stage], op[:entry] ] })
                 workflow_task_count = preview.task_count
@@ -122,10 +155,10 @@ module Hive
                   workflow_generation: workflow_generation
                 )
 
-                if config_changed || moved.any? || backfilled_count.positive? ||
+                if moved.any? || backfilled_count.positive? ||
                    recovery_marker_count.positive? || workflow_task_count.positive?
                   commit_migration(
-                    hive_state, moved, config_only: config_changed && moved.empty?,
+                    hive_state, moved, config_only: false,
                     backfilled_count: backfilled_count,
                     recovery_marker_count: recovery_marker_count,
                     workflow_task_count: workflow_task_count
@@ -180,7 +213,7 @@ module Hive
         if repository_identity
           puts "hive: migrate backfilled registered repository identity #{repository_identity}"
         end
-        if moved.any? || workflow_task_count.positive?
+        if !restart_requested && (config_changed || moved.any? || workflow_task_count.positive?)
           (@daemon_restarter || method(:restart_daemon_if_running!)).call
         end
         moved
@@ -349,16 +382,6 @@ module Hive
         # state file safely. Preserve it unchanged; recovery remains blocked
         # until the workflow is restored and migrate can be rerun.
         nil
-      end
-
-      def migrate_managed_workflow_tasks(hive_state)
-        store = @managed_store_factory.call(hive_state)
-        migrator = Hive::WorkflowPackage::TaskMigrator.new(
-          hive_state, store: store, cfg: @config_loader.call(@project_path)
-        )
-        result = nil
-        with_store_mutation_lock(store) { result = migrator.call }
-        result
       end
 
       def with_store_mutation_lock(store, &block)
@@ -570,6 +593,8 @@ module Hive
 
         content = File.read(path)
         changed = false
+        content, rewritten = rewrite_retired_patrol_policy(content, path)
+        changed ||= rewritten
         content, rewritten = rewrite_legacy_root_reviewers(content, path)
         changed ||= rewritten
         CONFIG_KEY_RENAMES.each do |from, to|
@@ -580,7 +605,11 @@ module Hive
           content, rewritten = rewrite_section_key(content, section, key, dst_key)
           changed ||= rewritten
         end
-        File.write(path, content) if changed
+        if changed
+          mode = File.stat(path).mode & 0o777
+          Hive::AtomicFile.write(path, content, mode: mode)
+          Hive::AtomicFile.fsync_directory(File.dirname(path))
+        end
         changed
       end
 
@@ -623,6 +652,212 @@ module Hive
         [ lines.join, true ]
       rescue Psych::Exception => e
         raise Hive::ConfigError, "config.yml at #{path} is not valid YAML: #{e.message}"
+      end
+
+      # Remove retired Patrol allowance/leverage policy without retaining a
+      # compatibility reader. Block-style YAML is edited in place to preserve
+      # unrelated comments and formatting. Rare flow-style/quoted layouts
+      # normalize only a target top-level section after proving which section
+      # the block-preserving rewrite could not represent.
+      def rewrite_retired_patrol_policy(content, path)
+        parsed = YAML.safe_load(content) || {}
+        unless parsed.is_a?(Hash)
+          raise Hive::ConfigError, "config.yml at #{path} must be a hash"
+        end
+
+        target = parsed
+        changed_sections = delete_retired_patrol_values!(target)
+        return [ content, false ] if changed_sections.empty?
+
+        rewritten = content
+        RETIRED_PATROL_CONFIG_KEYS.each do |key|
+          rewritten = remove_block_mapping_key(rewritten, [ "patrol" ], key)
+        end
+        RETIRED_REFACTOR_PATROL_CONFIG_KEYS.each do |key|
+          rewritten = remove_block_mapping_key(rewritten, [ "refactor_patrol" ], key)
+        end
+        rewritten = remove_block_mapping_key(
+          rewritten, [ "refactor_patrol", "issue_filing" ], "min_leverage_score"
+        )
+        rewritten = remove_block_mapping(rewritten, [ "refactor_patrol", "leverage" ])
+
+        reparsed = YAML.safe_load(rewritten) || {}
+        changed_sections.each do |section|
+          next if reparsed[section] == target[section]
+
+          rewritten = normalize_retired_patrol_section(
+            rewritten, section, target.fetch(section), path
+          )
+          reparsed = YAML.safe_load(rewritten) || {}
+        end
+        unless reparsed == target
+          raise Hive::ConfigError,
+                "cannot automatically migrate retired Patrol policy in #{path} " \
+                "without rewriting unrelated config"
+        end
+        [ rewritten, true ]
+      rescue Psych::Exception => e
+        raise Hive::ConfigError, "config.yml at #{path} is not valid YAML: #{e.message}"
+      end
+
+      def delete_retired_patrol_values!(config)
+        changed_sections = []
+        patrol = config["patrol"]
+        if patrol.is_a?(Hash)
+          patrol_changed = false
+          RETIRED_PATROL_CONFIG_KEYS.each do |key|
+            next unless patrol.key?(key)
+
+            patrol.delete(key)
+            patrol_changed = true
+          end
+          changed_sections << "patrol" if patrol_changed
+        end
+
+        refactor = config["refactor_patrol"]
+        return changed_sections unless refactor.is_a?(Hash)
+
+        refactor_changed = false
+        RETIRED_REFACTOR_PATROL_CONFIG_KEYS.each do |key|
+          next unless refactor.key?(key)
+
+          refactor.delete(key)
+          refactor_changed = true
+        end
+        issue_filing = refactor["issue_filing"]
+        if issue_filing.is_a?(Hash) && issue_filing.key?("min_leverage_score")
+          issue_filing.delete("min_leverage_score")
+          refactor_changed = true
+        end
+        if refactor.key?("leverage")
+          refactor.delete("leverage")
+          refactor_changed = true
+        end
+        changed_sections << "refactor_patrol" if refactor_changed
+        changed_sections
+      end
+
+      def normalize_retired_patrol_section(content, section, value, path)
+        document = Psych.parse(content)
+        mapping = document&.root
+        unless mapping.is_a?(Psych::Nodes::Mapping)
+          raise Hive::ConfigError, "config.yml at #{path} must be a hash"
+        end
+
+        pair = mapping.children.each_slice(2).find do |key_node, _value_node|
+          key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == section &&
+            key_node.start_column.zero?
+        end
+        unless pair
+          raise Hive::ConfigError,
+                "cannot locate top-level `#{section}` in #{path} for migration"
+        end
+
+        key_node, value_node = pair
+        lines = content.lines
+        end_idx = value_node.end_line
+        end_idx += 1 unless value_node.end_column.zero?
+        end_idx = [ end_idx, key_node.start_line + 1 ].max
+        while end_idx > key_node.start_line + 1 &&
+              lines[end_idx - 1]&.match?(/\A\s*(?:#.*)?(?:\r?\n)?\z/)
+          end_idx -= 1
+        end
+
+        replacement = { section => value }.to_yaml.lines.drop(1)
+        lines[key_node.start_line...end_idx] = replacement
+        lines.join
+      end
+
+      def remove_block_mapping_key(content, mapping_path, key)
+        lines = content.lines
+        range = block_mapping_range(lines, mapping_path)
+        return content unless range
+
+        start_idx, end_idx, parent_indent = range
+        child_indent = direct_child_indent(lines, start_idx, end_idx, parent_indent)
+        return content unless child_indent
+
+        pattern = mapping_key_pattern(key, child_indent, value_required: true)
+        index = (start_idx...end_idx).find { |idx| pattern.match?(lines[idx]) }
+        return content unless index
+
+        entry_end = index + 1
+        while entry_end < end_idx
+          line = lines[entry_end]
+          if line.strip.empty? || line.lstrip.start_with?("#")
+            entry_end += 1
+            next
+          end
+
+          indent = line[/\A */].size
+          break if indent < child_indent
+          break if indent == child_indent && !line.lstrip.start_with?("-")
+
+          entry_end += 1
+        end
+        while entry_end > index + 1 &&
+              lines[entry_end - 1]&.match?(/\A\s*(?:#.*)?(?:\r?\n)?\z/)
+          entry_end -= 1
+        end
+        lines.slice!(index...entry_end)
+        lines.join
+      end
+
+      def remove_block_mapping(content, mapping_path)
+        lines = content.lines
+        range = block_mapping_range(lines, mapping_path)
+        return content unless range
+
+        start_idx, end_idx, = range
+        lines.slice!(start_idx...end_idx)
+        lines.join
+      end
+
+      def block_mapping_range(lines, mapping_path)
+        start_idx = 0
+        end_idx = lines.length
+        parent_indent = -1
+
+        mapping_path.each do |key|
+          child_indent = direct_child_indent(lines, start_idx, end_idx, parent_indent)
+          return nil unless child_indent
+
+          pattern = mapping_key_pattern(key, child_indent, value_required: false)
+          index = (start_idx...end_idx).find { |idx| pattern.match?(lines[idx]) }
+          return nil unless index
+
+          parent_indent = child_indent
+          start_idx = index
+          end_idx = mapping_end_index(lines, index, parent_indent, end_idx)
+        end
+        [ start_idx, end_idx, parent_indent ]
+      end
+
+      def direct_child_indent(lines, start_idx, end_idx, parent_indent)
+        first = start_idx
+        first += 1 if parent_indent >= 0
+        indents = (first...end_idx).filter_map do |idx|
+          line = lines[idx]
+          next if line.strip.empty? || line.lstrip.start_with?("#")
+
+          indent = line[/\A */].length
+          indent if indent > parent_indent
+        end
+        indents.min
+      end
+
+      def mapping_end_index(lines, index, indent, outer_end)
+        ((index + 1)...outer_end).find do |idx|
+          line = lines[idx]
+          next false if line.strip.empty? || line.lstrip.start_with?("#")
+
+          line[/\A */].length <= indent
+        end || outer_end
+      end
+
+      def mapping_key_pattern(key, indent, value_required:)
+        value = value_required ? "[^\\r\\n]*(?:\\r?\\n)?" : "(?:#.*)?(?:\\r?\\n)?"
+        /\A {#{indent}}(?:#{Regexp.escape(key)}|["']#{Regexp.escape(key)}["']):\s*#{value}\z/
       end
 
       def rewrite_section_key(content, section, legacy_key, canonical_key)

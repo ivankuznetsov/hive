@@ -1,8 +1,19 @@
 require "test_helper"
+require "stringio"
+require_relative "../support/outcome_evidence_helper"
 
 class TaskTest < ActiveSupport::TestCase
+  include OutcomeEvidenceHelper
   ProcessStatus = Data.define(:successful) do
     def success? = successful
+  end
+
+  test "verified evidence bodies never stream beyond the admitted byte count" do
+    io = StringIO.new("admitted-extra")
+    body = Task::VerifiedEvidenceBody.new(io, 8)
+
+    assert_equal "admitted", body.to_a.join
+    assert io.closed?
   end
 
   test "finds the task in its project snapshot" do
@@ -134,6 +145,64 @@ class TaskTest < ActiveSupport::TestCase
     assert_equal media.join("demo.webm").realpath.to_s, task.media_path("demo.webm")
     assert_nil task.media_path("../outside.png")
     assert_nil task.media_path("still.rb")
+  ensure
+    FileUtils.remove_entry(root) if root&.exist?
+  end
+
+  test "projects only revalidated outcome evidence and serves files by admitted digest" do
+    root = Pathname(Dir.mktmpdir("hive-web-outcome-evidence"))
+    folder = root.join("task")
+    folder.mkpath
+    slug = "ship-it-260720-abcd"
+    result = write_accepted_outcome_evidence(
+      folder, slug: slug, project: "alpha", project_root: root
+    )
+    task = Task.new(
+      project: Project.new("name" => "alpha", "path" => root.to_s),
+      attributes: { "slug" => slug, "folder" => folder.to_s }
+    )
+
+    package = task.outcome_evidence
+    assert_equal "accepted", package.fetch("status")
+    assert_equal "A buyer sees the checkout confirmation after completing payment.",
+                 package.dig("claims", 0, "statement")
+    representation = result.fetch(:evidence).fetch("representations").last
+    file = task.outcome_evidence_file("attempt-01-web", representation.fetch("sha256"))
+    assert_equal "text/plain; charset=utf-8", file.fetch("content_type")
+    assert_includes file.fetch("body").to_a.join, "Checkout outcome"
+
+    pointer = folder.join("outcome-evidence", "current.json")
+    document = JSON.parse(pointer.read)
+    document["attempt_sha256"] = "0" * 64
+    pointer.write(JSON.generate(document))
+    assert_equal "invalid", task.outcome_evidence.fetch("status")
+    assert_nil task.outcome_evidence_file("attempt-01-web", representation.fetch("sha256"))
+  ensure
+    FileUtils.remove_entry(root) if root&.exist?
+  end
+
+  test "projects a validated blocked package with exact recovery guidance" do
+    root = Pathname(Dir.mktmpdir("hive-web-blocked-outcome-evidence"))
+    folder = root.join("task")
+    folder.mkpath
+    slug = "ship-it-260720-abcd"
+    result = write_blocked_outcome_evidence(
+      folder, slug: slug, project: "alpha", project_root: root
+    )
+    task = Task.new(
+      project: Project.new("name" => "alpha", "path" => root.to_s),
+      attributes: { "slug" => slug, "folder" => folder.to_s }
+    )
+
+    package = task.outcome_evidence
+    assert_equal "blocked", package.fetch("status")
+    assert_equal "recaptures_exhausted", package.dig("blocker", "reason")
+    assert_equal [ "claim-checkout" ], package.dig("blocker", "failed_targets")
+    assert_includes package.dig("blocker", "reviewer_reasons").first,
+                    "final confirmation"
+    assert_includes package.dig("blocker", "command"), result.dig(:pointer, "generation")
+    assert_includes package.dig("blocker", "command"),
+                    result.dig(:pointer, "recovery_digest")
   ensure
     FileUtils.remove_entry(root) if root&.exist?
   end

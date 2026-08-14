@@ -21,7 +21,6 @@ require "hive/refactor_patrol/checkout_guard"
 require "hive/refactor_patrol/fingerprint"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/job_query"
-require "hive/refactor_patrol/leverage"
 require "hive/refactor_patrol/policy"
 require "hive/refactor_patrol/process_group_resolver"
 require "hive/refactor_patrol/pr_manifest"
@@ -40,6 +39,10 @@ module Hive
     class RefactorPatrol
       CLAIM_HEARTBEAT_INTERVAL_SEC = 30
       CLAIM_HEARTBEAT_LEASE_SEC = 7200
+      # Durable discovery checkpoints each completed slice before returning,
+      # so a fixed batch keeps daemon fan-out bounded without truncating an
+      # ordinary on-demand scan.
+      DURABLE_DISCOVERY_FEATURE_SLICE = 12
 
       # Unlike the expired-claim resolver, heartbeat liveness checks are
       # strictly observational: a live worker must never be terminated merely
@@ -65,7 +68,7 @@ module Hive
       def initialize(project, json: false, dry_run: false, feature: nil, entrypoint: nil, path: nil, changed_since: nil, pr: nil,
                      job_manifest: nil, actions: false, result_file: nil, list: false, show: nil,
                      limit: nil, cursor: nil, full: false,
-                     mapper_factory: nil, reviewer_factory: nil, leverage_factory: nil,
+                     mapper_factory: nil, reviewer_factory: nil,
                      caps_factory: nil, collisions_factory: nil, manifest_resolver_factory: nil,
                      action_runner_factory: nil, job_store_factory: nil,
                      repository_ownership: nil, checkout_guard_factory: nil,
@@ -103,7 +106,6 @@ module Hive
           )
         end
         @reviewer_factory = reviewer_factory
-        @leverage_factory = leverage_factory || ->(root, cfg) { Hive::RefactorPatrol::Leverage.new(root, cfg: cfg) }
         @caps_factory = caps_factory || ->(cfg) { Hive::RefactorPatrol::Caps.new(cfg) }
         @collisions_factory = collisions_factory || lambda do |root, state, terminal_fingerprints|
           Hive::RefactorPatrol::Collisions.new(
@@ -200,19 +202,22 @@ module Hive
         existing_suppressions = prior_suppressions
         pending_features = features.reject { |feature| completed.key?(feature.id.to_s) }
         token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
-        review_features = bounded_review_features(pending_features, token_budget)
+        review_features = if pr_mode? && !@dry_run
+          pending_features.first(DURABLE_DISCOVERY_FEATURE_SLICE)
+        else
+          pending_features
+        end
         reviewer = build_reviewer(analysis_root, cfg, state, token_budget)
         yielded_thesis_ids = {}
         incrementally_suppressed = []
         completed_new_theses = []
         completed_new_suppressions = []
         completed_new_results = {}
+        caps = @caps_factory.call(cfg)
+        collisions = build_collisions(project_root, state)
         new_theses = with_claim_heartbeat(@manifest&.fetch("job_id", nil)) do
-          reviewer.call(
-            review_features,
-            leverage_by_feature: score_features(review_features, analysis_root, cfg)
-          ) do |reviewed_feature, feature_theses, feature_result|
-            guarded = guard_theses(feature_theses, project_root, cfg, state)
+          reviewer.call(review_features) do |reviewed_feature, feature_theses, feature_result|
+            guarded = guard_theses(feature_theses, caps: caps, collisions: collisions)
             incrementally_suppressed.concat(guarded)
             feature_theses.each do |thesis|
               yielded_thesis_ids[[ thesis.feature_id.to_s, thesis.id.to_s ]] = true
@@ -233,7 +238,9 @@ module Hive
         unyielded = new_theses.reject do |thesis|
           yielded_thesis_ids[[ thesis.feature_id.to_s, thesis.id.to_s ]]
         end
-        new_suppressed = incrementally_suppressed + guard_theses(unyielded, project_root, cfg, state)
+        new_suppressed = incrementally_suppressed + guard_theses(
+          unyielded, caps: caps, collisions: collisions
+        )
         theses = existing_theses + new_theses
         suppressed = existing_suppressions + new_suppressed
         feature_results = merged_feature_results(
@@ -245,7 +252,9 @@ module Hive
 
         unless ephemeral_discovery?
           persist(state, theses, suppressed)
-          update_scan_state(state, project_root, cfg, reviewer)
+          update_scan_state(
+            state, project_root, cfg, reviewer, complete: scope_complete
+          )
         end
         payload = build_payload(
           entry, project_root, cfg, state, reported_features, theses, suppressed,
@@ -320,25 +329,9 @@ module Hive
         apply_scope_hints(features, project_root)
       end
 
-      def score_features(features, project_root, cfg)
-        changed = changed_files(project_root)
-        leverage = @leverage_factory.call(project_root, cfg)
-        baseline = pr_mode? ? @manifest.dig("source", "base_sha") : @changed_since
-        features.to_h do |feature|
-          boost = changed_path?(feature.owned_files, changed)
-          [ feature.id, leverage.score(feature, changed_since: baseline, changed_boost: boost) ]
-        end
-      end
-
-      def guard_theses(theses, project_root, cfg, state)
-        caps = @caps_factory.call(cfg)
-        collisions = build_collisions(project_root, state)
+      def guard_theses(theses, caps:, collisions:)
         theses.filter_map do |thesis|
           caps.apply(thesis)
-          if Array(thesis.risk && thesis.risk["flags"]).include?("below_min_leverage")
-            next({ "id" => thesis.id, "reason" => "below_min_leverage" })
-          end
-
           collision = collisions.check(thesis)
           { "id" => thesis.id, "reason" => collision.reason, "reference" => collision.reference } if collision.suppressed
         end
@@ -374,7 +367,7 @@ module Hive
       def build_payload(entry, project_root, cfg, state, features, theses, suppressed, reviewer,
                         feature_results: nil, complete: nil)
         @reporter = Hive::RefactorPatrol::Reporter.new(cfg)
-        return build_v3_payload(
+        return build_v4_payload(
           entry, project_root, features, theses, suppressed, reviewer,
           feature_results: feature_results, complete: complete
         ) if pr_mode?
@@ -388,10 +381,10 @@ module Hive
           theses: theses,
           suppressed: suppressed,
           last_scanned_sha: scanned_sha,
-          complete: Array(reviewer.review_errors).empty?,
+          complete: complete == true,
           review_errors: reviewer.review_errors,
           feature_results: feature_results,
-          version: Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION
+          version: Hive::RefactorPatrol::Reporter::V4_SCHEMA_VERSION
         )
       end
 
@@ -442,9 +435,11 @@ module Hive
         state.write_fingerprints(fingerprints)
       end
 
-      def update_scan_state(state, project_root, cfg, reviewer)
+      def update_scan_state(state, project_root, cfg, reviewer, complete:)
         now_iso = Time.now.utc.iso8601
-        if reviewer.respond_to?(:review_errors) && Array(reviewer.review_errors).any?
+        incomplete = complete != true
+        errored = reviewer.respond_to?(:review_errors) && Array(reviewer.review_errors).any?
+        if incomplete || errored
           state.update_state("last_run_at" => now_iso)
         else
           state.update_state("last_run_at" => now_iso, "last_scanned_sha" => current_default_sha(project_root, cfg))
@@ -469,7 +464,7 @@ module Hive
         changed = changed_files(project_root)
         # A git failure yields nil (distinct from an empty "no changes" diff);
         # degrade to the scoped set rather than filtering it down to zero, in
-        # keeping with the churn/leverage graceful-degradation posture.
+        # keeping with the scoped-discovery graceful-degradation posture.
         return scoped if changed.nil?
 
         scoped.select { |feature| (Array(feature.owned_files) & changed).any? }
@@ -564,6 +559,11 @@ module Hive
                   "hive refactor-patrol --actions cannot be combined with discovery scope hints"
           end
           return
+        end
+
+        if !pr_mode? && @changed_since && !(@feature_hint || @entrypoint_hint || @path_hint)
+          raise Hive::ConfigError,
+                "hive refactor-patrol --changed-since requires --feature, --entrypoint, or --path"
         end
 
         return unless pr_mode?
@@ -912,7 +912,7 @@ module Hive
         return [] unless @durable_aggregate
 
         completed = completed_feature_results.keys
-        @durable_aggregate.dig("dispositions", "suppressed").filter_map do |item|
+        @durable_aggregate.dig("dispositions", "dismiss").filter_map do |item|
           next unless completed.include?(item.fetch("feature_id"))
 
           {
@@ -942,14 +942,6 @@ module Hive
         completed.merge(by_feature).values.sort_by { |item| item.fetch("feature_id") }
       end
 
-      def bounded_review_features(pending_features, token_budget)
-        return pending_features unless pr_mode?
-        return [] if pending_features.empty?
-
-        capacity = token_budget.remaining_launches(stage: Hive::RefactorPatrol::ReviewAgentRunner::STAGE)
-        pending_features.first([ capacity, 1 ].max)
-      end
-
       def lifecycle_theses(aggregate)
         Hive::RefactorPatrol::JobStore::DISPOSITIONS.flat_map do |name|
           aggregate.dig("dispositions", name).map do |item|
@@ -961,7 +953,7 @@ module Hive
       def lifecycle_payload(entry, project_root, aggregate)
         {
           "schema" => "hive-refactor-patrol",
-          "schema_version" => Hive::RefactorPatrol::Reporter::V3_SCHEMA_VERSION,
+          "schema_version" => Hive::RefactorPatrol::Reporter::V4_SCHEMA_VERSION,
           "ok" => true,
           "job_id" => aggregate.fetch("job_id"),
           "project" => entry.fetch("name"),
@@ -971,9 +963,9 @@ module Hive
           "analysis_sha" => aggregate.fetch("analysis_sha").to_s,
           "complete" => aggregate.fetch("complete"),
           "features_mapped" => aggregate.fetch("feature_results").size,
-          "accepted" => aggregate.dig("dispositions", "accepted"),
-          "flagged" => aggregate.dig("dispositions", "flagged"),
-          "suppressed" => aggregate.dig("dispositions", "suppressed"),
+          "fix" => aggregate.dig("dispositions", "fix"),
+          "discuss" => aggregate.dig("dispositions", "discuss"),
+          "dismiss" => aggregate.dig("dispositions", "dismiss"),
           "review_errors" => aggregate.fetch("review_errors"),
           "feature_results" => aggregate.fetch("feature_results"),
           "zero_reason" => aggregate.fetch("zero_reason"),
@@ -1017,12 +1009,6 @@ module Hive
         end
       end
 
-      def changed_path?(paths, changed)
-        return Array(paths).any? { |path| manifest_changed_paths.include?(path) } if pr_mode?
-
-        !Array(changed).empty? && (Array(paths) & Array(changed)).any?
-      end
-
       def manifest_changed_paths
         @manifest_changed_paths ||= begin
           paths = @manifest.fetch("changed_paths") + @manifest.fetch("files").filter_map { |file| file["previous_path"] }
@@ -1030,7 +1016,7 @@ module Hive
         end
       end
 
-      def build_v3_payload(entry, project_root, features, theses, suppressed, reviewer,
+      def build_v4_payload(entry, project_root, features, theses, suppressed, reviewer,
                            feature_results: nil, complete: nil)
         progress = Array(feature_results)
         errors = if progress.empty? && features.empty?
@@ -1046,7 +1032,7 @@ module Hive
         current_theses = theses.reject { |thesis| completed_ids.include?(thesis.feature_id.to_s) }
         current_thesis_ids = current_theses.to_h { |thesis| [ thesis.id.to_s, true ] }
         current_suppressions = suppressed.select { |item| current_thesis_ids[item.fetch("id").to_s] }
-        payload = @reporter.v3_envelope(
+        payload = @reporter.v4_envelope(
           job_id: @manifest.fetch("job_id"),
           project: entry.fetch("name"),
           project_root: project_root,
@@ -1083,10 +1069,10 @@ module Hive
       end
 
       def final_zero_reason(features, theses, payload)
-        return nil unless payload.fetch("accepted").empty? && payload.fetch("flagged").empty?
+        return nil unless payload.fetch("fix").empty? && payload.fetch("discuss").empty?
         return "no_mapped_slice" if features.empty?
         return "no_theses" if theses.empty?
-        return "all_suppressed" if payload.fetch("suppressed").size == theses.size
+        return "all_dismissed" if payload.fetch("dismiss").size == theses.size
 
         nil
       end
@@ -1101,7 +1087,7 @@ module Hive
         dispositions = aggregate.fetch("dispositions")
         {
           "schema" => "hive-refactor-patrol",
-          "schema_version" => Hive::RefactorPatrol::Reporter::V3_SCHEMA_VERSION,
+          "schema_version" => Hive::RefactorPatrol::Reporter::V4_SCHEMA_VERSION,
           "ok" => true,
           "job_id" => aggregate.fetch("job_id"),
           "project" => entry.fetch("name"),
@@ -1111,9 +1097,9 @@ module Hive
           "analysis_sha" => aggregate.fetch("analysis_sha"),
           "complete" => aggregate.fetch("complete"),
           "features_mapped" => aggregate.fetch("feature_results").size,
-          "accepted" => dispositions.fetch("accepted"),
-          "flagged" => dispositions.fetch("flagged"),
-          "suppressed" => dispositions.fetch("suppressed"),
+          "fix" => dispositions.fetch("fix"),
+          "discuss" => dispositions.fetch("discuss"),
+          "dismiss" => dispositions.fetch("dismiss"),
           "review_errors" => aggregate.fetch("review_errors"),
           "feature_results" => aggregate.fetch("feature_results"),
           "zero_reason" => aggregate.fetch("zero_reason"),
@@ -1293,7 +1279,7 @@ module Hive
         else
           Hive::RefactorPatrol::Reporter.error_envelope(
             error,
-            version: pr_mode? ? Hive::RefactorPatrol::Reporter::V3_SCHEMA_VERSION : Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION,
+            version: Hive::RefactorPatrol::Reporter::V4_SCHEMA_VERSION,
             error_kind: error.is_a?(Hive::ConfigError) ? "config" : "error",
             job_id: @manifest && @manifest["job_id"],
             source_pr: @manifest && source_pr_context

@@ -33,6 +33,12 @@ module Hive
       "hive-web-status" => 1,
       "hive-web-install" => 1,
       "hive-capture-requirement" => 1,
+      # Controller-owned, generation-bound outcome-evidence ledger. Legacy
+      # visual capture remains readable through its own v1/v2 contracts but
+      # cannot satisfy these universal coding-task requirements.
+      "hive-outcome-evidence-requirement" => 1,
+      "hive-outcome-evidence-attempt" => 1,
+      "hive-outcome-evidence-current" => 1,
       "hive-web-capture-runtime" => 1,
       "hive-artifact-capture" => 2,
       "hive-doctor" => 2,
@@ -47,6 +53,7 @@ module Hive
       "hive-forget" => 1,
       "hive-drop" => 2,
       "hive-prune" => 1,
+      "hive-worktree" => 1,
       "hive-daemon-status" => 1,
       "hive-daemon-stop" => 1,
       "hive-daemon-enroll" => 1,
@@ -57,10 +64,11 @@ module Hive
       # `Hive::Commands::Daemon#queue_command`.
       "hive-daemon-queue" => 1,
       "hive-patrol" => 3,
+      "hive-patrol-findings" => 1,
       "hive-patrol-finding" => 3,
-      "hive-refactor-patrol" => 3,
-      "hive-refactor-patrol-jobs" => 1,
-      "hive-refactor-patrol-thesis" => 3,
+      "hive-refactor-patrol" => 4,
+      "hive-refactor-patrol-jobs" => 2,
+      "hive-refactor-patrol-thesis" => 4,
       # Scaffold a blank per-project workflow descriptor (`hive workflow new ID
       # --json`). The error arm routes through Hive::Schemas::ErrorEnvelope so
       # its output carries the same schema/schema_version/error_kind keys as
@@ -328,12 +336,11 @@ module Hive
     #   * `envelope_error_kind(error)` — map an exception to a
     #     closed-enum `error_kind` value
     #
-    # Used by default-stdout command producers whose error schemas share
-    # ErrorEnvelope's common shape. Commands with injected output streams,
-    # variant schema routing, or schema-specific payloads keep specialised
-    # emitters. Metrics, for example, deliberately retains its narrower v1
-    # payload, which omits `error_class`; forcing it through this mixin would
-    # change a published contract rather than remove duplication.
+    # Used by default-stdout command producers. Commands with injected output
+    # streams or variant schema routing keep specialised emitters. Consumers
+    # with a narrower published schema may override `envelope_payload_for`;
+    # Metrics does this to retain its v1 payload without `error_class` while
+    # still sharing the rescue, single-document guard, and write handling.
     #
     # Consumers may also override `envelope_extras` to merge per-command
     # fields (e.g. `{"verb" => "review"}`) into the envelope; the default is

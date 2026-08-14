@@ -46,6 +46,20 @@ class HiveRefactorPatrolJobQueryTest < Minitest::Test
       }
     end
 
+    def recent_job_query_page(limit:)
+      selected = @records.last(limit).reverse
+      {
+        "generation" => @generation,
+        "after_sequence" => 0,
+        "through_sequence" => @records.size,
+        "next_after_sequence" => 0,
+        "total" => @records.size,
+        "has_more" => @records.size > limit,
+        "job_ids" => selected.map { |record| record.fetch("job_id") },
+        "jobs" => selected
+      }
+    end
+
     def add(record)
       @records << record
     end
@@ -102,6 +116,22 @@ class HiveRefactorPatrolJobQueryTest < Minitest::Test
     ).list_envelope(project: "demo", project_root: "/repo")
 
     assert_equal %w[first rollback], payload.fetch("jobs").map { |job| job.fetch("job_id") }
+  end
+
+  def test_recent_projection_returns_newest_durable_memberships_without_claiming_the_public_schema
+    records = 30.times.map { |index| aggregate(job_id: "job-#{index}") }
+
+    payload = Hive::RefactorPatrol::JobQuery.new(
+      FakeStore.new(records)
+    ).recent_projection(project: "demo", project_root: "/repo", limit: 25)
+
+    assert_equal 30, payload.fetch("count")
+    assert_equal "job-29", payload.dig("jobs", 0, "job_id")
+    assert_equal "job-5", payload.dig("jobs", -1, "job_id")
+    assert_equal true, payload.fetch("truncated")
+    refute payload.key?("schema")
+    refute payload.key?("schema_version")
+    refute payload.key?("action")
   end
 
   def test_list_is_bounded_and_resumes_from_an_opaque_cursor
@@ -587,7 +617,7 @@ class HiveRefactorPatrolJobQueryTest < Minitest::Test
       "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => false },
       "state" => "blocked",
       "complete" => false,
-      "dispositions" => { "accepted" => [], "flagged" => [], "suppressed" => [] },
+      "dispositions" => { "fix" => [], "discuss" => [], "dismiss" => [] },
       "feature_results" => [],
       "review_errors" => [],
       "zero_reason" => nil,

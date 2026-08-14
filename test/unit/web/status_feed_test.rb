@@ -862,7 +862,7 @@ class StatusFeedTest < Minitest::Test
       assert_equal 1, status.max_active
       assert_equal 1, feed.scan_count
       delivered = 6.times.map { states.pop(true) }
-      assert delivered.all?(&:fresh?)
+      assert delivered.all? { |state| state.availability == "fresh" }
       assert_equal 1, delivered.map(&:token).uniq.size
     ensure
       threads&.each(&:kill)
@@ -895,12 +895,12 @@ class StatusFeedTest < Minitest::Test
     _out, _err = capture_io { @degraded_state = feed.snapshot_state }
     recovered = feed.snapshot_state
 
-    assert fresh.fresh?
-    assert @degraded_state.degraded?
+    assert_equal "fresh", fresh.availability
+    assert_equal "degraded", @degraded_state.availability
     assert_same first, @degraded_state.payload
     assert_equal fresh.last_success_at, @degraded_state.last_success_at
     refute_equal fresh.token, @degraded_state.token
-    assert recovered.fresh?
+    assert_equal "fresh", recovered.availability
     assert_same second, recovered.payload
     refute_equal @degraded_state.token, recovered.token
     assert_equal 3, feed.scan_count
@@ -920,7 +920,7 @@ class StatusFeedTest < Minitest::Test
         refute subscriber.alive?
       end
 
-      assert first.fresh?
+      assert_equal "fresh", first.availability
       assert_equal 1, status.calls
       assert_equal 1, feed.scan_count
     ensure

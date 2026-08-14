@@ -16,7 +16,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
 
       assert_equal aggregate, store.write_job!(aggregate)
       assert_equal aggregate, store.read_job("job-1")
-      assert_equal File.join(dir, ".hive-state", "refactor_patrol", "v3"), store.root
+      assert_equal File.join(dir, ".hive-state", "refactor_patrol", "v4"), store.root
       assert_empty Dir.glob(File.join(store.root, "jobs", ".*.tmp.*"))
     end
   end
@@ -36,6 +36,174 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       )
       complete.write_job!(job)
       refute complete.incomplete_jobs?
+    end
+  end
+
+  def test_obsolete_unpublished_source_is_terminalized_once
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+
+      assert_equal :retired, store.retire_obsolete_source!(
+        "pr-7-stable",
+        merge_sha: "b" * 40,
+        trunk_sha: "c" * 40,
+        now: T0 + 1
+      )
+
+      retired = store.read_job("pr-7-stable")
+      assert retired.fetch("complete")
+      assert_equal "complete", retired.fetch("state")
+      assert_equal "source_no_longer_on_trunk", retired.fetch("zero_reason")
+      retirement = retired.fetch("attempts").last
+      assert_equal "source_retirement", retirement.fetch("kind")
+      assert_equal "source_no_longer_on_trunk", retirement.fetch("reason")
+      assert_equal "b" * 40, retirement.dig("evidence", "merge_sha")
+      assert_equal "c" * 40, retirement.dig("evidence", "trunk_sha")
+      assert_empty store.claimable_jobs(now: T0 + 1_000_000)
+
+      assert_equal :already_terminal, store.retire_obsolete_source!(
+        "pr-7-stable",
+        merge_sha: "b" * 40,
+        trunk_sha: "c" * 40,
+        now: T0 + 2
+      )
+      assert_equal retired, store.read_job("pr-7-stable")
+    end
+  end
+
+  def test_obsolete_source_retirement_rejects_a_different_merge_commit
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      before = store.read_job("pr-7-stable")
+
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.retire_obsolete_source!(
+          "pr-7-stable",
+          merge_sha: "d" * 40,
+          trunk_sha: "c" * 40,
+          now: T0 + 1
+        )
+      end
+
+      assert_match(/does not match the job merge commit/, error.message)
+      assert_equal before, store.read_job("pr-7-stable")
+    end
+  end
+
+  def test_obsolete_source_retirement_fails_closed_when_claim_resolution_errors
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      store.claim_discovery!(
+        "pr-7-stable", owner: "runner", analysis_sha: "c" * 40, now: T0
+      )
+
+      status = store.obsolete_source_retirement_status(
+        "pr-7-stable",
+        claim_resolver: ->(_claim) { raise "resolver unavailable" }
+      )
+
+      assert_equal :claim_active, status
+    end
+  end
+
+  def test_obsolete_source_terminalizes_all_unpublished_actions_together
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.write_job!(classified_job(
+        "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => true }
+      ))
+      initialized = store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => "fix", "kind" => "fix" },
+          { "thesis_id" => "fix", "kind" => "issue", "family_id" => "af1-#{'f' * 64}" }
+        ],
+        now: T0
+      )
+      assert_equal 2, initialized.fetch("actions").size
+
+      assert_equal :retired, store.retire_obsolete_source!(
+        "job-1",
+        merge_sha: "b" * 40,
+        trunk_sha: "c" * 40,
+        now: T0 + 1
+      )
+
+      retired = store.read_job("job-1")
+      assert retired.fetch("complete")
+      assert_nil retired.fetch("zero_reason")
+      assert retired.fetch("actions").all? { |action| action.fetch("terminal") }
+      assert_equal [ "source_no_longer_on_trunk" ],
+                   retired.fetch("actions").map { |action| action.fetch("outcome") }.uniq
+    end
+  end
+
+  def test_obsolete_source_retires_unpublished_siblings_and_fences_surviving_continuations
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.write_job!(classified_job(
+        "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => true }
+      ))
+      initialized = store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => "fix", "kind" => "fix" },
+          { "thesis_id" => "fix", "kind" => "issue", "family_id" => "af1-#{'f' * 64}" }
+        ],
+        now: T0
+      )
+      fix = initialized.fetch("actions").find { |action| action.fetch("kind") == "fix" }
+      issue = initialized.fetch("actions").find { |action| action.fetch("kind") == "issue" }
+      token = store.claim_action!(
+        "job-1", fix.fetch("canonical_action_id"), owner: "runner", now: T0
+      )
+      store.record_creation_intent!(
+        token,
+        intent: {
+          "operation" => "create_pr",
+          "canonical_action_id" => fix.fetch("canonical_action_id"),
+          "repository" => "acme/demo",
+          "branch" => "hive-refactor/#{fix.fetch('canonical_action_id')}",
+          "commit_sha" => "d" * 40
+        },
+        now: T0 + 1
+      )
+
+      resolver = ->(_claim) { :resolved }
+      assert_equal :retireable,
+                   store.obsolete_source_retirement_status(
+                     "job-1", claim_resolver: resolver
+                   )
+      assert_equal :retired, store.retire_obsolete_source!(
+        "job-1",
+        merge_sha: "b" * 40,
+        trunk_sha: "c" * 40,
+        now: T0 + 2,
+        claim_resolver: resolver
+      )
+      retired = store.read_job("job-1")
+      refute retired.fetch("complete")
+      survivor = retired.fetch("actions").find do |action|
+        action.fetch("canonical_action_id") == fix.fetch("canonical_action_id")
+      end
+      sibling = retired.fetch("actions").find do |action|
+        action.fetch("canonical_action_id") == issue.fetch("canonical_action_id")
+      end
+      refute survivor.fetch("terminal")
+      assert sibling.fetch("terminal")
+      assert_equal "source_no_longer_on_trunk", sibling.fetch("outcome")
+      assert_equal :continuation_required,
+                   store.obsolete_source_retirement_status("job-1")
+
+      continuation = store.claim_action!(
+        "job-1", fix.fetch("canonical_action_id"), owner: "reconciler",
+        authority: true, now: T0 + 3
+      )
+      assert continuation.fetch(:continuation_only),
+             "source retirement must override a caller's full authority"
     end
   end
 
@@ -121,6 +289,12 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_equal 2, second.fetch("total")
       refute second.fetch("has_more")
       assert_equal 3, store.job_query_page(limit: 100).fetch("total")
+
+      recent = store.recent_job_query_page(limit: 2)
+      assert_equal %w[job-3 job-2], recent.fetch("job_ids")
+      assert_equal recent.fetch("job_ids"),
+                   recent.fetch("jobs").map { |job| job.fetch("job_id") }
+      assert recent.fetch("has_more")
     end
   end
 
@@ -259,21 +433,19 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
-  def test_rebuilds_derived_indexes_after_deletion_or_corruption
+  def test_rebuilds_fingerprint_index_after_corruption
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       store.write_job!(job)
 
       first = store.rebuild_indexes!
       assert_equal "job-1", first.fetch("actions").fetch("actions").fetch("fix-fp-accepted").fetch("owner_job_id")
-      assert_equal "accepted", first.fetch("fingerprints").fetch("fingerprints").fetch("fp-accepted")
+      assert_equal "fix", first.fetch("fingerprints").fetch("fingerprints").fetch("fp-accepted")
                                          .fetch("occurrences").first.fetch("disposition")
       refute first.fetch("actions").fetch("actions").fetch("fix-fp-accepted").key?("receipts")
 
-      FileUtils.rm_f(store.action_index_path)
       File.write(store.fingerprint_index_path, "{")
 
-      assert_equal first.fetch("actions"), store.action_index
       assert_equal first.fetch("fingerprints"), store.fingerprint_index
     end
   end
@@ -286,9 +458,9 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         "job_id" => "job-2",
         "source" => source("number" => 8, "merge_sha" => "d" * 40),
         "dispositions" => {
-          "accepted" => [ disposition("accepted-2", "fp-accepted") ],
-          "flagged" => [],
-          "suppressed" => []
+          "fix" => [ disposition("accepted-2", "fp-accepted") ],
+          "discuss" => [],
+          "dismiss" => []
         },
         "actions" => [ action.merge("thesis_id" => "accepted-2", "owner_job_id" => "job-1", "receipts" => {}) ]
       )
@@ -305,22 +477,23 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
-  def test_first_mutation_creates_only_v3_and_leaves_v2_jobs_byte_identical
+  def test_first_mutation_creates_only_v4_and_leaves_v3_jobs_byte_identical
     with_tmp_dir do |dir|
-      legacy_jobs = File.join(
-        dir, ".hive-state", "refactor_patrol", "v2", "jobs"
+      released_jobs = File.join(
+        dir, ".hive-state", "refactor_patrol", "v3", "jobs"
       )
-      FileUtils.mkdir_p(legacy_jobs)
-      legacy_path = File.join(legacy_jobs, "opaque-job.bytes")
-      File.binwrite(legacy_path, "\x00released-v2-is-not-read\xff".b)
-      before = File.binread(legacy_path)
+      FileUtils.mkdir_p(released_jobs)
+      released_path = File.join(released_jobs, "opaque-job.bytes")
+      File.binwrite(released_path, "\x00released-v3-is-not-read\xff".b)
+      before = File.binread(released_path)
       store = Hive::RefactorPatrol::JobStore.new(dir)
 
-      refute Dir.exist?(store.root), "construction must not create v3 state"
-      store.write_job!(job)
+      assert_match(%r{/refactor_patrol/v4\z}, store.root)
+      refute Dir.exist?(store.root), "construction must not create v4 state"
+      store.send(:prepare_current_namespace!)
 
-      assert File.file?(File.join(store.root, "jobs", "job-1.json"))
-      assert_equal before, File.binread(legacy_path)
+      assert Dir.exist?(store.root)
+      assert_equal before, File.binread(released_path)
     end
   end
 
@@ -337,20 +510,22 @@ class RefactorPatrolJobStoreTest < Minitest::Test
 
       acting = store.initialize_actions!(
         "job-1",
-        specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ],
+        specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ],
         now: Time.iso8601("2026-07-10T10:02:00Z")
       )
-      assert_equal "accepted", store.read_job("job-1").dig("dispositions", "accepted", 0, "id")
+      assert_equal "fix", store.read_job("job-1").dig("dispositions", "fix", 0, "id")
 
       reclassified = acting.merge(
         "dispositions" => {
-          "accepted" => [],
-          "flagged" => [ disposition("accepted", "fp-accepted").merge("reasons" => [ "validation_failed" ]) ],
-          "suppressed" => []
+          "fix" => [],
+          "discuss" => [ disposition("fix", "fp-accepted", route: "discuss").merge(
+            "reasons" => [ "validation_failed" ]
+          ) ],
+          "dismiss" => []
         }
       )
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) { store.write_job!(reclassified) }
-      assert_equal "accepted", store.read_job("job-1").dig("dispositions", "accepted", 0, "id")
+      assert_equal "fix", store.read_job("job-1").dig("dispositions", "fix", 0, "id")
     end
   end
 
@@ -406,7 +581,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
-  def test_eligible_jobs_filters_backoff_per_job_without_starving_later_work
+  def test_claimable_jobs_filters_backoff_per_job_without_starving_later_work
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       first_manifest = manifest(
@@ -433,9 +608,9 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       )
 
       assert_equal [ second.fetch("job_id") ],
-                   store.eligible_jobs(now: T0 + 180).map { |entry| entry.fetch("job_id") }
+                   store.claimable_jobs(now: T0 + 180).map { |entry| entry.fetch("job_id") }
       assert_equal %w[pr-7-stable pr-8-stable],
-                   store.eligible_jobs(now: T0 + 7200).map { |entry| entry.fetch("job_id") }
+                   store.claimable_jobs(now: T0 + 7200).map { |entry| entry.fetch("job_id") }
     end
   end
 
@@ -456,7 +631,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_raises(Hive::RefactorPatrol::JobStore::StaleClaim) do
         store.checkpoint_discovery!(stale, envelope: complete_zero_envelope(dir), now: T0 + 2)
       end
-      assert_empty store.read_job("pr-7-stable").dig("dispositions", "accepted")
+      assert_empty store.read_job("pr-7-stable").dig("dispositions", "fix")
 
       completed = store.checkpoint_discovery!(token, envelope: complete_zero_envelope(dir), now: T0 + 3)
       assert completed.fetch("complete")
@@ -480,7 +655,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         "thesis" => thesis_snapshot("checkout-thesis", "fp-checkout")
       )
       envelope = complete_zero_envelope(dir).merge(
-        "accepted" => [ accepted ],
+        "fix" => [ accepted ],
         "zero_reason" => nil,
         "feature_results" => [
           {
@@ -508,12 +683,12 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60
       )
-      flagged = disposition("checkout-thesis", "fp-checkout").merge(
+      flagged = disposition("checkout-thesis", "fp-checkout", route: "discuss").merge(
         "reasons" => [ "cross_feature_impact" ],
         "thesis" => thesis_snapshot("checkout-thesis", "fp-checkout")
       )
       envelope = complete_zero_envelope(dir).merge(
-        "flagged" => [ flagged ],
+        "discuss" => [ flagged ],
         "zero_reason" => nil,
         "feature_results" => [
           {
@@ -731,9 +906,9 @@ class RefactorPatrolJobStoreTest < Minitest::Test
 
       assert_equal "blocked", released.fetch("state")
       assert_equal (T0 + 61).iso8601, released.fetch("attempts").last.fetch("next_eligible_at")
-      assert_empty released.dig("dispositions", "accepted")
-      assert_empty store.eligible_jobs(now: T0 + 60)
-      assert_equal [ "pr-7-stable" ], store.eligible_jobs(now: T0 + 61).map { |item| item.fetch("job_id") }
+      assert_empty released.dig("dispositions", "fix")
+      assert_empty store.claimable_jobs(now: T0 + 60)
+      assert_equal [ "pr-7-stable" ], store.claimable_jobs(now: T0 + 61).map { |item| item.fetch("job_id") }
     end
   end
 
@@ -752,7 +927,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       partial = complete_zero_envelope(dir).merge(
         "complete" => false,
         "features_mapped" => 2,
-        "accepted" => [ accepted ],
+        "fix" => [ accepted ],
         "review_errors" => [ error ],
         "zero_reason" => nil,
         "feature_results" => [
@@ -767,7 +942,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
 
       refute checkpoint.fetch("complete")
       assert_equal "blocked", checkpoint.fetch("state")
-      assert_equal [ "checkout-thesis" ], checkpoint.dig("dispositions", "accepted").map { |item| item.fetch("id") }
+      assert_equal [ "checkout-thesis" ], checkpoint.dig("dispositions", "fix").map { |item| item.fetch("id") }
       assert_equal [ "checkout" ], checkpoint.fetch("feature_results").select { |item| item.fetch("complete") }
                                               .map { |item| item.fetch("feature_id") }
       assert_equal [ error ], checkpoint.fetch("review_errors")
@@ -794,7 +969,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       )
 
       assert completed.fetch("complete")
-      assert_equal [ "checkout-thesis" ], completed.dig("dispositions", "accepted").map { |item| item.fetch("id") }
+      assert_equal [ "checkout-thesis" ], completed.dig("dispositions", "fix").map { |item| item.fetch("id") }
       assert completed.fetch("feature_results").all? { |item| item.fetch("complete") }
     end
   end
@@ -813,7 +988,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       progress = complete_zero_envelope(dir).merge(
         "complete" => false,
         "features_mapped" => 1,
-        "accepted" => [ accepted ],
+        "fix" => [ accepted ],
         "zero_reason" => nil,
         "feature_results" => [
           { "feature_id" => "checkout", "complete" => true,
@@ -828,7 +1003,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_equal "analyzing", checkpoint.fetch("state")
       refute checkpoint.fetch("complete")
       assert_equal [ "checkout" ], checkpoint.fetch("feature_results").map { |item| item.fetch("feature_id") }
-      assert_equal [ "checkout-thesis" ], checkpoint.dig("dispositions", "accepted").map { |item| item.fetch("id") }
+      assert_equal [ "checkout-thesis" ], checkpoint.dig("dispositions", "fix").map { |item| item.fetch("id") }
       attempt = checkpoint.fetch("attempts").last
       assert_equal "claimed", attempt.fetch("state")
       assert_equal (T0 + 110).iso8601, attempt.fetch("expires_at")
@@ -848,22 +1023,22 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_initializes_deterministic_actions_without_reclassifying_theses
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      accepted = disposition("accepted", "fp-accepted").merge("thesis" => thesis_snapshot("accepted", "fp-accepted"))
-      flagged = disposition("flagged", "fp-flagged").merge(
+      accepted = disposition("fix", "fp-accepted").merge("thesis" => thesis_snapshot("fix", "fp-accepted"))
+      flagged = disposition("discuss", "fp-flagged", route: "discuss").merge(
         "reasons" => [ "exceeds_file_cap" ],
-        "thesis" => thesis_snapshot("flagged", "fp-flagged")
+        "thesis" => thesis_snapshot("discuss", "fp-flagged")
       )
       classified = classified_job(
         "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => true },
-        "dispositions" => { "accepted" => [ accepted ], "flagged" => [ flagged ], "suppressed" => [] }
+        "dispositions" => { "fix" => [ accepted ], "discuss" => [ flagged ], "dismiss" => [] }
       )
       store.write_job!(classified)
 
       initialized = store.initialize_actions!(
         "job-1",
         specifications: [
-          { "thesis_id" => "flagged", "kind" => "issue", "family_id" => "af1-#{'f' * 64}" },
-          { "thesis_id" => "accepted", "kind" => "fix" }
+          { "thesis_id" => "discuss", "kind" => "issue", "family_id" => "af1-#{'f' * 64}" },
+          { "thesis_id" => "fix", "kind" => "fix" }
         ],
         now: T0
       )
@@ -876,8 +1051,8 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_equal initialized, store.initialize_actions!(
         "job-1",
         specifications: [
-          { "thesis_id" => "accepted", "kind" => "fix" },
-          { "thesis_id" => "flagged", "kind" => "issue", "family_id" => "af1-#{'f' * 64}" }
+          { "thesis_id" => "fix", "kind" => "fix" },
+          { "thesis_id" => "discuss", "kind" => "issue", "family_id" => "af1-#{'f' * 64}" }
         ],
         now: T0 + 1
       )
@@ -891,7 +1066,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
 
       blocked = store.block_actions!(
         "job-1", reason: "family_ambiguous",
-        evidence: { "thesis_id" => "accepted" },
+        evidence: { "thesis_id" => "fix" },
         now: T0, backoff_sec: 60
       )
 
@@ -909,21 +1084,21 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_disposition_thesis_snapshot_must_be_complete_and_match_identity
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      mismatched = disposition("accepted", "fp-accepted").merge(
+      mismatched = disposition("fix", "fp-accepted").merge(
         "thesis" => thesis_snapshot("other", "fp-accepted")
       )
-      incomplete = disposition("accepted", "fp-accepted").merge(
-        "thesis" => { "id" => "accepted", "feature_id" => "checkout", "fingerprint" => "fp-accepted" }
+      incomplete = disposition("fix", "fp-accepted").merge(
+        "thesis" => { "id" => "fix", "feature_id" => "checkout", "fingerprint" => "fp-accepted" }
       )
 
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         store.write_job!(classified_job(
-          "dispositions" => { "accepted" => [ mismatched ], "flagged" => [], "suppressed" => [] }
+          "dispositions" => { "fix" => [ mismatched ], "discuss" => [], "dismiss" => [] }
         ))
       end
       assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
         store.write_job!(classified_job(
-          "dispositions" => { "accepted" => [ incomplete ], "flagged" => [], "suppressed" => [] }
+          "dispositions" => { "fix" => [ incomplete ], "discuss" => [], "dismiss" => [] }
         ))
       end
     end
@@ -1103,17 +1278,17 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_patch_fix_and_terminal_receipts_complete_parent_only_after_all_actions
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      accepted = disposition("accepted", "fp-accepted")
-      flagged = disposition("flagged", "fp-flagged").merge("reasons" => [ "exceeds_file_cap" ])
+      accepted = disposition("fix", "fp-accepted")
+      flagged = disposition("discuss", "fp-flagged", route: "discuss").merge("reasons" => [ "exceeds_file_cap" ])
       store.write_job!(classified_job(
         "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => true },
-        "dispositions" => { "accepted" => [ accepted ], "flagged" => [ flagged ], "suppressed" => [] }
+        "dispositions" => { "fix" => [ accepted ], "discuss" => [ flagged ], "dismiss" => [] }
       ))
       initialized = store.initialize_actions!(
         "job-1",
         specifications: [
-          { "thesis_id" => "accepted", "kind" => "fix" },
-          { "thesis_id" => "flagged", "kind" => "issue", "family_id" => "af1-#{'f' * 64}" }
+          { "thesis_id" => "fix", "kind" => "fix" },
+          { "thesis_id" => "discuss", "kind" => "issue", "family_id" => "af1-#{'f' * 64}" }
         ],
         now: T0
       )
@@ -1461,11 +1636,11 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         "job-1",
         specifications: [
           {
-            "thesis_id" => "accepted", "kind" => "fix",
+            "thesis_id" => "fix", "kind" => "fix",
             "family_id" => "af1-#{'f' * 64}"
           },
           {
-            "thesis_id" => "accepted", "kind" => "issue",
+            "thesis_id" => "fix", "kind" => "issue",
             "family_id" => "af1-#{'f' * 64}"
           }
         ],
@@ -1506,7 +1681,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       store.write_job!(classified_job(
         "job_id" => "job-2",
         "source" => source("number" => 8, "merge_sha" => "d" * 40),
-        "dispositions" => { "accepted" => [ second_disposition ], "flagged" => [], "suppressed" => [] },
+        "dispositions" => { "fix" => [ second_disposition ], "discuss" => [], "dismiss" => [] },
         "created_at" => (T0 + 1).iso8601,
         "updated_at" => (T0 + 1).iso8601
       ))
@@ -1597,7 +1772,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         "updated_at" => (T0 + 1).iso8601
       ))
       linked = linked_store.initialize_actions!(
-        "job-2", specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ],
+        "job-2", specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ],
         now: T0 + 2
       )
       linked_id = linked.dig("actions", 0, "canonical_action_id")
@@ -1659,7 +1834,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       store.write_job!(classified_job)
-      specification = { "thesis_id" => "accepted", "kind" => "fix" }
+      specification = { "thesis_id" => "fix", "kind" => "fix" }
       unknown_id = "fix-#{'f' * 64}"
 
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
@@ -1725,7 +1900,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       )
       store.define_singleton_method(:jobs) { [ queued ] }
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
-        store.eligible_jobs(now: T0)
+        store.claimable_jobs(now: T0)
       end
 
       active = initialized_store(File.join(dir, "actions"))
@@ -1839,7 +2014,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       end
 
       initialized = store.initialize_actions!(
-        "job-1", specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ], now: T0
+        "job-1", specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ], now: T0
       )
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         store.initialize_actions!("job-1", specifications: [], now: T0 + 1)
@@ -1872,7 +2047,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
                    store.initialize_actions!("job-1", specifications: [], now: T0)
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         store.initialize_actions!(
-          "job-1", specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ], now: T0
+          "job-1", specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ], now: T0
         )
       end
     end
@@ -1888,7 +2063,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         "created_at" => (T0 + 1).iso8601, "updated_at" => (T0 + 1).iso8601
       ))
       linked = store.initialize_actions!(
-        "job-2", specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ], now: T0 + 2
+        "job-2", specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ], now: T0 + 2
       )
       assert_equal action_id, linked.dig("actions", 0, "canonical_action_id")
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
@@ -1976,7 +2151,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       store.write_job!(classified_job)
 
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
-        store.plan_actions("job-1", specifications: [ { "thesis_id" => "accepted", "kind" => "other" } ])
+        store.plan_actions("job-1", specifications: [ { "thesis_id" => "fix", "kind" => "other" } ])
       end
       denied_fix = Hive::RefactorPatrol::JobStore.new(File.join(dir, "denied-fix"))
       denied_fix.write_job!(classified_job(
@@ -1984,7 +2159,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       ))
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         denied_fix.plan_actions(
-          "job-1", specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ]
+          "job-1", specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ]
         )
       end
 
@@ -1995,7 +2170,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       ))
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         issue_store.plan_actions(
-          "job-1", specifications: [ { "thesis_id" => "accepted", "kind" => "issue", "family_id" => "af1" } ]
+          "job-1", specifications: [ { "thesis_id" => "fix", "kind" => "issue", "family_id" => "af1" } ]
         )
       end
 
@@ -2005,7 +2180,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       ))
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         enabled_issue.plan_actions(
-          "job-1", specifications: [ { "thesis_id" => "accepted", "kind" => "issue" } ]
+          "job-1", specifications: [ { "thesis_id" => "fix", "kind" => "issue" } ]
         )
       end
 
@@ -2020,7 +2195,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         enabled_issue.send(
           :normalize_action_specifications,
           invalid_url,
-          [ { "thesis_id" => "accepted", "kind" => "fix" } ],
+          [ { "thesis_id" => "fix", "kind" => "fix" } ],
           "/tmp/job.json"
         )
       end
@@ -2054,8 +2229,8 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         "job_id" => "job-2",
         "source" => source("number" => 8, "merge_sha" => "d" * 40),
         "dispositions" => {
-          "accepted" => [ disposition("accepted-2", "fp-accepted") ],
-          "flagged" => [], "suppressed" => []
+          "fix" => [ disposition("accepted-2", "fp-accepted") ],
+          "discuss" => [], "dismiss" => []
         },
         "actions" => [ action.merge("thesis_id" => "accepted-2", "owner_job_id" => "job-2") ]
       ))
@@ -2071,8 +2246,8 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         "job_id" => "job-2",
         "source" => source("number" => 8, "merge_sha" => "d" * 40),
         "dispositions" => {
-          "accepted" => [ disposition("accepted-2", "fp-accepted") ],
-          "flagged" => [], "suppressed" => []
+          "fix" => [ disposition("accepted-2", "fp-accepted") ],
+          "discuss" => [], "dismiss" => []
         },
         "actions" => [
           action.merge(
@@ -2143,11 +2318,11 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         "thesis_ids" => [ "checkout-thesis" ], "errors" => []
       }
       aggregate = classified_job(
-        "dispositions" => { "accepted" => [ accepted ], "flagged" => [], "suppressed" => [] },
+        "dispositions" => { "fix" => [ accepted ], "discuss" => [], "dismiss" => [] },
         "feature_results" => [ prior_result ]
       )
       changed_feature = complete_zero_envelope(dir).merge(
-        "accepted" => [ accepted ], "zero_reason" => nil,
+        "fix" => [ accepted ], "zero_reason" => nil,
         "feature_results" => [ prior_result.merge("thesis_ids" => []) ]
       )
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
@@ -2163,7 +2338,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       end
 
       changed_thesis = JSON.parse(JSON.generate(changed_feature))
-      changed_thesis["accepted"][0]["score"] = 0.1
+      changed_thesis["fix"][0]["thesis"]["architecture_effects"] = [ "different effect" ]
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         store.send(:merge_discovery_progress!, no_prior, changed_thesis)
       end
@@ -2198,7 +2373,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         [ job("schema_version" => 99), Hive::RefactorPatrol::JobStore::UnsupportedVersion ],
         [ job("complete" => false), Hive::RefactorPatrol::JobStore::InconsistentRecord ],
         [ job("zero_reason" => "unknown"), Hive::RefactorPatrol::JobStore::InconsistentRecord ],
-        [ job("dispositions" => { "accepted" => [], "flagged" => [], "suppressed" => [] },
+        [ job("dispositions" => { "fix" => [], "discuss" => [], "dismiss" => [] },
               "actions" => [], "zero_reason" => nil), Hive::RefactorPatrol::JobStore::InconsistentRecord ],
         [ job("actions" => [ action.merge("terminal" => false, "outcome" => "queued") ]),
           Hive::RefactorPatrol::JobStore::InconsistentRecord ]
@@ -2233,9 +2408,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         "commands" => { "docs" => nil, "format" => nil, "lint" => nil,
                         "typecheck" => nil, "test" => "bin/test", "public_contract" => nil },
         "caps" => { "single_feature_only" => true, "allow_dependency_bumps" => false,
-                    "allow_public_api_changes" => false, "max_files" => 8,
-                    "max_diff_lines" => 400, "allow_cross_feature" => false },
-        "issue_min_leverage_score" => 0.5
+                    "allow_public_api_changes" => false, "allow_cross_feature" => false }
       }
       valid = job("policy" => job.fetch("policy").merge(
         "action" => action_policy, "epoch" => "a" * 64, "captured_at" => T0.iso8601
@@ -2247,8 +2420,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         ->(value) { value.dig("policy", "action")["auto_fix_model"] = "" },
         ->(value) { value.dig("policy", "action")["min_confidence"] = "certain" },
         ->(value) { value.dig("policy", "action", "commands")["test"] = "" },
-        ->(value) { value.dig("policy", "action", "caps")["max_files"] = 0 },
-        ->(value) { value.dig("policy", "action")["issue_min_leverage_score"] = 2 }
+        ->(value) { value.dig("policy", "action", "caps")["allow_cross_feature"] = "sometimes" }
       ]
       mutations.each do |mutate|
         candidate = JSON.parse(JSON.generate(valid))
@@ -2287,13 +2459,13 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         "thesis" => thesis_snapshot("checkout-thesis", "fp-checkout")
       )
       aggregate = classified_job(
-        "dispositions" => { "accepted" => [ accepted ], "flagged" => [], "suppressed" => [] },
+        "dispositions" => { "fix" => [ accepted ], "discuss" => [], "dismiss" => [] },
         "feature_results" => []
       )
       changed = JSON.parse(JSON.generate(accepted))
-      changed["score"] = 0.1
+      changed["thesis"]["architecture_effects"] = [ "different effect" ]
       payload = complete_zero_envelope(dir).merge(
-        "accepted" => [ changed ], "zero_reason" => nil,
+        "fix" => [ changed ], "zero_reason" => nil,
         "feature_results" => [
           { "feature_id" => "checkout", "complete" => true,
             "thesis_ids" => [ "checkout-thesis" ], "errors" => [] }
@@ -2314,7 +2486,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       claimed = store.read_job("job-1")
 
       invalid_thesis = classified_job
-      invalid_thesis.dig("dispositions", "accepted", 0)["thesis"] = []
+      invalid_thesis.dig("dispositions", "fix", 0)["thesis"] = []
       assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
         store.send(:validate_job!, invalid_thesis, path: "/tmp/job.json")
       end
@@ -2351,7 +2523,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       end
 
       second_active = JSON.parse(JSON.generate(claimed))
-      second_active.dig("dispositions", "accepted") << disposition("accepted-2", "fp-2")
+      second_active.dig("dispositions", "fix") << disposition("accepted-2", "fp-2")
       duplicate = JSON.parse(JSON.generate(second_active.dig("actions", 0)))
       duplicate["canonical_action_id"] = "fix-#{'a' * 64}"
       duplicate["thesis_id"] = "accepted-2"
@@ -2434,7 +2606,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
-  def test_low_level_validation_and_index_recovery_are_fail_closed
+  def test_low_level_validation_is_fail_closed
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       assert_equal [ { "a" => 1 } ], store.send(:deep_sort, [ { "a" => 1 } ])
@@ -2447,14 +2619,6 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
         store.send(:json_copy, Float::NAN)
       end
-
-      store.write_job!(job)
-      store.rebuild_indexes!
-      assert_equal "job-1", store.action_index.dig("actions", "fix-fp-accepted", "owner_job_id")
-      File.write(store.action_index_path, "[]")
-      assert_equal "job-1", store.action_index.dig("actions", "fix-fp-accepted", "owner_job_id")
-      File.write(store.action_index_path, "{")
-      assert_equal "job-1", store.action_index.dig("actions", "fix-fp-accepted", "owner_job_id")
     end
   end
 
@@ -2709,8 +2873,6 @@ class RefactorPatrolJobStoreTest < Minitest::Test
           )
         end
       end
-      assert_equal File.join(store.root, "jobs"),
-                   store.send(:jobs_dir)
     end
   end
 
@@ -2739,7 +2901,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     store = Hive::RefactorPatrol::JobStore.new(dir)
     store.write_job!(classified_job)
     store.initialize_actions!(
-      "job-1", specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ], now: T0
+      "job-1", specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ], now: T0
     )
     store
   end
@@ -2830,8 +2992,8 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       "evidence" => [],
       "proposed_refactor" => "Consolidate policy",
       "feature_boundary" => { "owned_files" => [ "lib/checkout.rb" ] },
-      "feature_hotspot" => {},
-      "expected_leverage" => { "score" => 0.8 },
+      "architecture_effects" => [ "one policy owner replaces repeated edits" ],
+      "route" => "fix",
       "confidence" => "high",
       "risk" => { "flags" => [], "advisories" => [] },
       "required_validation" => { "commands" => [ "bin/test" ] },
@@ -2854,12 +3016,12 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       "state" => "complete",
       "complete" => true,
       "dispositions" => {
-        "accepted" => [ disposition("accepted", "fp-accepted") ],
-        "flagged" => [],
-        "suppressed" => []
+        "fix" => [ disposition("fix", "fp-accepted") ],
+        "discuss" => [],
+        "dismiss" => []
       },
       "feature_results" => [
-        { "feature_id" => "checkout", "complete" => true, "thesis_ids" => [ "accepted" ], "errors" => [] }
+        { "feature_id" => "checkout", "complete" => true, "thesis_ids" => [ "fix" ], "errors" => [] }
       ],
       "review_errors" => [],
       "zero_reason" => nil,
@@ -2882,12 +3044,12 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     }.merge(overrides)
   end
 
-  def disposition(id, fingerprint)
+  def disposition(id, fingerprint, route: "fix")
     {
       "id" => id,
       "feature_id" => "checkout",
       "fingerprint" => fingerprint,
-      "score" => 0.8,
+      "route" => route,
       "admissible" => true,
       "reasons" => []
     }
@@ -2919,7 +3081,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def action
     {
       "canonical_action_id" => "fix-fp-accepted",
-      "thesis_id" => "accepted",
+      "thesis_id" => "fix",
       "thesis_fingerprint" => "fp-accepted",
       "kind" => "fix",
       "owner_job_id" => "job-1",
@@ -3003,7 +3165,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def complete_zero_envelope(project_root)
     {
       "schema" => "hive-refactor-patrol",
-      "schema_version" => 3,
+      "schema_version" => Hive::RefactorPatrol::Reporter::V4_SCHEMA_VERSION,
       "ok" => true,
       "job_id" => "pr-7-stable",
       "project" => "demo",
@@ -3017,9 +3179,9 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       "analysis_sha" => "c" * 40,
       "complete" => true,
       "features_mapped" => 1,
-      "accepted" => [],
-      "flagged" => [],
-      "suppressed" => [],
+      "fix" => [],
+      "discuss" => [],
+      "dismiss" => [],
       "review_errors" => [],
       "feature_results" => [
         { "feature_id" => "checkout", "complete" => true, "thesis_ids" => [], "errors" => [] }

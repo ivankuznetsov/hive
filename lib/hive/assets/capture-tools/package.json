@@ -1,0 +1,8 @@
+{
+  "name": "hive-capture-tools",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "agent-browser": "0.34.0"
+  }
+}

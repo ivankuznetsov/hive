@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-08-11
+updated: 2026-08-14
 tags: [command, web, rails, turbo, hivebox-container, archive, retention]
 ---
 
@@ -175,10 +175,9 @@ sharing the URL.
 A locally authenticated operator sees the
 complete primary navigation under the `hive` product identity and is labelled
 `Local`; GitHub-dependent repository browsing stays behind an explicit
-**Connect GitHub** action. At the 390px mobile breakpoint, all six primary
-capabilities fit beside the account action without starting inside a horizontal
-scroll overflow; spacing uses fixed small insets so Linux and local Chromium
-font metrics preserve the same visible set. Navigation state is grouped by the first segment of
+**Connect GitHub** action. At the 390px mobile breakpoint, all seven primary
+capabilities remain visible in a bounded four-column grid below the account
+action, without starting inside a horizontal scroll overflow. Navigation state is grouped by the first segment of
 Rails `controller_path`, so namespaced task, workflow, and Telegram resource
 controllers retain their parent section's active link when they render a
 complete page. Completing the optional GitHub connection from verified
@@ -200,13 +199,26 @@ login gate can run; Host never grants the no-auth bypass unless it is loopback.
 
 The project-filtered **Modules** surface presents installed and historical
 module rows using the same redacted `Hive::Modules::Status` object as CLI
-list/status/inspect. Rails does not parse generation locks or patrol stores.
+list/status/inspect; that surface does not parse generation locks or patrol
+stores.
 Install, update, enable, disable, settings changes, and uninstall use the same
 preview-bound lifecycle service as CLI: signed receipts bind candidate/current
 identity, settings, hooks, bindings, cursors, and individual grants, and any
 drift returns a no-write preview-again response. `/workflows` remains the
 workflow authoring/selection surface and preserves its existing managed
 Honeycomb projections.
+
+- **Patrol (`/patrol`)** — A read-only project-filtered view combines ordinary
+  Patrol finding health with Architecture Patrol job health. Ordinary findings
+  come from Patrol's writer-maintained 25-row projection and are active-first
+  and newest-first; Architecture jobs use the newest page of the native durable
+  query index and show accepted finding summaries from a bounded detail sample.
+  Each section isolates read failures instead of failing the page. The response
+  renders at most 25 rows per patrol kind and enriches at most five Architecture
+  jobs; operators use `hive patrol PROJECT --list --json` and the paginated
+  `hive refactor-patrol` inspection commands for CLI evidence. The page has no
+  retry, archive, or mutation controls. Internal exceptions are redacted in
+  server logs and exposed to the browser only as a stable unavailable message.
 
 - **Status board and grid (`/board`, `/grid`, `/`)** — Board is the first-visit
   default. The view-switch forms store a signed browser preference that `/`
@@ -455,8 +467,22 @@ Honeycomb projections.
   (redcarpet, GFM tables/fenced code; raw HTML escaped at render AND
   sanitized after; leading YAML front matter and standalone
   `Hive::Markers::MARKER_RE` comments dropped, while non-marker comments and
-  fenced examples of markers remain visible as escaped text). Visual media from
-  `7-artifacts` renders in a dedicated Demo section before the text artifacts:
+  fenced examples of markers remain visible as escaped text). A valid
+  `outcome-evidence/current.json` renders before text artifacts as an
+  **Outcome evidence** package: user-meaningful claims, required proof kinds,
+  admitted originals/review representations, independent verdict reasons,
+  changed-path traceability, exclusions, attempt history, role
+  agent/model/effort, and reviewer capability. Rails revalidates the complete
+  pointer/requirement/attempt digest chain and every retained proof before
+  display; invalid packages show one integrity warning and no proof. Evidence
+  files are served only through their admitted attempt ID and SHA-256 at
+  `GET /tasks/:project/:slug/evidence/:attempt_id/:digest`; the model repeats
+  package validation, verifies size/hash again with `NOFOLLOW`, and maps only
+  the closed safe media types before streaming. Blocked packages show the exact
+  generation-and-recovery-digest `hive evidence recover` command.
+
+  Legacy visual media from `7-artifacts` follows in a visibly labelled
+  `Legacy diagnostic` Demo section:
   captured PNG/JPEG/GIF files are served from
   `GET /tasks/:project/:slug/media/:filename` and shown as an inline gallery
   with captions plus screenote links when the manifest carries
@@ -534,7 +560,7 @@ Honeycomb projections.
   through the adapter for the full preview/apply lifecycle.
   The known legacy-vs-v2 `workflow publish` gap is stated in the page instead
   of exposing a button that opens an unusable registry PR. At mobile widths the
-  primary header wraps to a second full-width row, keeping all five sections
+  primary header wraps to a second full-width row, keeping every section
   visible without document overflow while preserving the local GitHub-connect
   action.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:
@@ -711,8 +737,10 @@ removal-retention disclosure,
 running/stopped daemon banner behavior plus descriptor-derived terminal-stage
 suppression,
 plain-vs-deep health semantics, the oversized diff cap/truncation notice,
-media route streaming/refusal cases, and captured/skipped/failed Demo
-rendering. Repos coverage pins the workflow select's built-in fresh list and
+media route streaming/refusal cases, accepted outcome-evidence projection,
+tamper fail-closed behavior, hash-bound evidence serving, and
+captured/skipped/failed legacy Demo rendering. Repos coverage pins the workflow
+select's built-in fresh list and
 that posting `settings[workflow]` writes the same real `default_workflow` that
 CLI init writes.
 `web/test/system/` runs Capybara +
@@ -765,12 +793,25 @@ assets (propshaft — no node build) at `/app/web` with a dummy build-time
 secret. The slim Ruby image installs `libffi-dev` before the root bundle so
 the explicit Fiddle runtime dependency can build its native extension. Local
 non-Docker installs instead use the managed release bundle
-described in [[commands/setup]]. The image includes `asciinema` (records a terminal `.cast`) and
-`ffmpeg`, but NOT a terminal-GIF encoder (`agg`/`vhs`) — `ffmpeg` cannot read a
-`.cast`, so an in-box TUI/CLI demo records a `.cast` and then writes a `failed`
-capture unless the agent installs `agg`/`vhs`. Browser capture depends on the
-project/agent environment having agent-browser or Playwright available, and
-missing tools record a failed media manifest instead of failing the pipeline.
+described in [[commands/setup]]. The image prewarms Hive's exact native
+`agent-browser` plus managed Chrome outside the runtime `/data` volume, ships
+Hive's Ruby PTY recorder for terminal casts/text, and includes
+`ffmpeg`/`ffprobe`/Tesseract for media admission. It does not ship or discover
+asciinema, Firefox, Playwright, VHS, or terminal-GIF tooling for evidence.
+Missing required capability publishes an outcome-evidence blocker before the
+producer starts. Outcome-evidence browser sessions use `hive evidence browser`,
+a controller-owned gateway to the configured `agent-browser` session, and one
+random `.invalid` origin mapped to one issued loopback application port. Hive
+opens and verifies the named session before the producer starts. The producer
+receives only the bounded `hive evidence` filesystem mailbox; the raw browser
+socket, browser state, and private media staging stay controller-owned. Codex's
+managed limited network proxy permits local binding without admitting outbound
+domains or arbitrary loopback connections. The gateway rejects other origins
+and path-like output names, then exclusively publishes receipted PNG/WebM media
+into the attempt root. Hive closes the mailbox, gateway, and named session,
+then cleans their private roots, managed app/proxy, and producer process group.
+Terminal evidence runs controller-side, reuses Linux child-subreaper custody,
+and rejects detached descendants.
 The image sets git's system credential helper for `https://github.com`
 to `gh auth git-credential`, so the Agents-page `gh` login also supplies push
 credentials for repos under `/data/repos`. The supervisor still spawns
@@ -862,7 +903,8 @@ provider, capture stops with an actionable configuration diagnostic; it never
 asks the project to fabricate Hivebox dependency files.
 
 The built-in path seeds deterministic private fixture data, records the
-board-to-task flow through pinned Playwright Chromium, verifies PNG and WebM
+board-to-task flow through pinned native `agent-browser` and managed Chrome,
+verifies PNG and WebM
 output with ffmpeg/ffprobe, rechecks the clean source HEAD, and publishes
 task-local media plus `media/capture-manifest.json` only after teardown.
 `--json` emits that manifest; the text form reports the retained artifact count
@@ -952,10 +994,13 @@ production web service asset handling is unchanged.
 The built-in environment is deny-by-default: it gets private HOME/XDG/Hive/storage,
 bundle, assets, and tmp roots plus an ephemeral Rails secret; provider,
 GitHub/Telegram/release, SSH-agent, proxy, Bundler/Gem override, and Ruby hook
-state is not inherited. `BrowserBundle` installs the exact Playwright 1.60.0
-package declared in `web/package-lock.json` and its Chromium payload into a
-private lockfile-keyed cache outside linked worktrees. Capture preflights that
-cache, ffmpeg, and ffprobe.
+state is not inherited. `BrowserBundle` installs the exact `agent-browser`
+version declared in Hive's shipped
+`lib/hive/assets/capture-tools/package-lock.json`, uses its native platform
+binary directly, and installs a managed Chrome payload into a private
+lockfile-keyed cache outside linked worktrees. Capture preflights that cache,
+ffmpeg, ffprobe, and Tesseract. The separate Playwright dependency in
+`web/package-lock.json` remains for Rails system tests and manual demo scripts.
 
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]], [[decisions]].

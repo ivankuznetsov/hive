@@ -469,7 +469,10 @@ module Hive
         [ "rev-list", "--objects", "--no-object-names", "#{base}..#{head}" ]
       when :status
         expect_parameters!(parameters)
-        [ "status", "--porcelain=v1", "--untracked-files=all", "-z" ]
+        [
+          "status", "--porcelain=v1", "--untracked-files=all",
+          "--ignore-submodules=none", "-z"
+        ]
       when :object_type
         oid = exact_oid(parameters.delete(:oid), label: "object OID")
         expect_parameters!(parameters)
@@ -487,6 +490,14 @@ module Hive
         head = exact_oid(parameters.delete(:head_oid), label: "head OID")
         expect_parameters!(parameters)
         [ "diff", "--name-only", "--diff-filter=ACMRT", "-z", base, head ]
+      when :raw_changed_paths
+        base = exact_oid(parameters.delete(:base_oid), label: "base OID")
+        head = exact_oid(parameters.delete(:head_oid), label: "head OID")
+        expect_parameters!(parameters)
+        [
+          "diff", "--raw", "--diff-filter=ACDMRTUXB", "-z",
+          base, head, "--"
+        ]
       when :diff
         base = exact_oid(parameters.delete(:base_oid), label: "base OID")
         head = exact_oid(parameters.delete(:head_oid), label: "head OID")

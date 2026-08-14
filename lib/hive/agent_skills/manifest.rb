@@ -37,7 +37,6 @@ module Hive
         end
 
         def bundled? = distribution == "bundled"
-        def native? = distribution == "native"
       end
       AgentContract = Data.define(:agent, :invocation, :probe, :alias_spec)
       Capability = Data.define(:id, :package_id, :agents) do

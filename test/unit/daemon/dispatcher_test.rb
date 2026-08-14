@@ -238,7 +238,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       {
         status: completion_status, job_id: dispatch_token.fetch(:job_id), pr_number: 7,
         pr_url: "https://github.com/acme/demo/pull/7",
-        accepted_count: 0, flagged_count: 0, suppressed_count: 0
+        fix_count: 0, discuss_count: 0, dismiss_count: 0
       }
     end
   end
@@ -943,7 +943,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     dispatcher.tick(now: T0)
 
-    refute controller.project_dropped?("p1")
+    refute_includes controller.dropped_projects, "p1"
     refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "p1" }
     assert_equal(
       [
@@ -2196,7 +2196,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     dispatcher.tick(now: T0)
 
-    refute ctrl.project_dropped?("answer_digest")
+    refute_includes ctrl.dropped_projects, "answer_digest"
     refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "answer_digest" }
     assert_equal [ { date: "2026-06-13", exit_code: Hive::ExitCodes::CONFIG, now: T0 } ],
                  answer_digest.completed
@@ -3319,7 +3319,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       status_consumer: status, logger: logger
     )
     dispatcher.tick(now: T0)
-    assert controller.project_dropped?("p1")
+    assert_includes controller.dropped_projects, "p1"
     assert events_include?(logger, :project_dropped)
   end
 
@@ -3339,7 +3339,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     dispatcher.tick(now: T0)
 
-    refute controller.project_dropped?("p1")
+    refute_includes controller.dropped_projects, "p1"
     refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "p1" }
   end
 

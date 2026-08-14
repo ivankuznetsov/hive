@@ -87,23 +87,17 @@ bash "$tmpdir/hive-install.sh"
 
 ## Install / Repair QMD
 
-The bash installer installs QMD automatically when npm is available. For Homebrew/AUR installs, or when `qmd --version` fails with a native module / `NODE_MODULE_VERSION` error, install or repair Hive's managed QMD copy:
+The bash installer installs QMD automatically when npm is available. When
+`qmd --version` fails with a native module / `NODE_MODULE_VERSION` error, rerun
+Hive's channel-aware updater and follow any package-manager instruction it
+prints:
 
 ```bash
-if command -v npm >/dev/null 2>&1; then
-  qmd_prefix="${XDG_DATA_HOME:-$HOME/.local/share}/hive/qmd"
-  qmd_bin_home="${XDG_BIN_HOME:-$HOME/.local/bin}"
-  mkdir -p "$qmd_bin_home"
-  npm install --global --prefix "$qmd_prefix" --no-audit --no-fund "${HIVE_QMD_NPM_PACKAGE:-@tobilu/qmd}"
-  npm rebuild --global --prefix "$qmd_prefix" better-sqlite3 >/dev/null 2>&1 || true
-  ln -sfn "$qmd_prefix/bin/qmd" "$qmd_bin_home/qmd"
-  "$qmd_prefix/bin/qmd" --version
-else
-  echo "qmd install skipped: npm is missing; install Node.js/npm and rerun this section" >&2
-fi
+hive update
+qmd --version
 ```
 
-Two env knobs tune this step: `HIVE_QMD_BIN` is a runtime override pointing at an executable `qmd` (read by the generated wiki scripts and `hive doctor` when PATH or the managed install path is not enough), and `HIVE_QMD_NPM_PACKAGE` overrides the npm package spec used for the install (defaults to `@tobilu/qmd`).
+`HIVE_QMD_BIN` is a runtime override pointing at an executable `qmd` (read by the generated wiki scripts and `hive doctor` when PATH or the managed install path is not enough). The bash installer pins QMD to `@tobilu/qmd@2.5.3`, downloads that exact tarball once, verifies its sha512 integrity locally, and installs it with the release-owned `package-lock.json`; `npm ci` therefore checks the complete transitive dependency closure rather than resolving mutable ranges at install time. `HIVE_QMD_NPM_PACKAGE` must match the version represented by that lock. Optional npm and Node operations time out after `HIVE_QMD_TIMEOUT_SECONDS` (default 600 seconds). Do not repair this managed tree with a direct `npm install`, which bypasses the release lock.
 
 Do not install Node.js/npm automatically. If npm is missing, report that Hive core is installed but QMD-backed wiki search needs Node.js/npm.
 

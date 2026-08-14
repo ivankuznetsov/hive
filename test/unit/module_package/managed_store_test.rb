@@ -72,6 +72,8 @@ class ModulePackageManagedStoreTest < Minitest::Test
       one.apply(preview_for(resolution, descriptor), package_root: package, resolution: resolution)
 
       assert one.selected("demo")
+      assert_equal [ "demo" ],
+                   one.inspect_selections.map { |selection| selection.fetch("name") }
       assert_nil two.selected("demo")
     end
   end

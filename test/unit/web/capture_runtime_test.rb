@@ -64,6 +64,7 @@ class WebCaptureRuntimeTest < Minitest::Test
       assert_equal 2, first.fetch("schema_version")
       assert_equal "built_in", first.dig("recorder", "kind")
       assert_equal "hivebox", first.dig("evidence", "type")
+      assert_equal "diagnostic_only", first.fetch("evidence_role")
       assert_equal %w[a.png b.png], first.fetch("artifacts").map { |item| item.fetch("file") }
       assert first.fetch("artifacts").all? { |item| item.fetch("sha256").match?(/\A[0-9a-f]{64}\z/) }
     end
@@ -96,6 +97,7 @@ class WebCaptureRuntimeTest < Minitest::Test
 
       manifest = runtime.capture_manifest(**attributes, environment_keys: [ "PATH" ])
       assert_equal [ "PATH" ], manifest.fetch("environment_keys")
+      assert_equal "claim_evidence", manifest.fetch("evidence_role")
     end
   end
 

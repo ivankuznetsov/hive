@@ -10,6 +10,8 @@ require "hive/claude_launcher"
 require "hive/stages"
 require "hive/stages/base"
 require "hive/stages/clean_exit"
+require "base64"
+require "json"
 require "hive/worktree"
 
 module Hive
@@ -282,12 +284,16 @@ module Hive
             log_finalize_residue_committed(task, result)
             # Fall through to the push / pushed? logic below — the
             # residue is now part of the branch history.
-          when :scope_violation, :git_failed
+          when :scope_violation, :safety_violation, :git_failed
             attrs = {
               reason: "ensure_clean_on_exit_failed",
               detail: result[:message].to_s[0, 200]
             }
-            attrs[:residue_paths] = Array(result[:paths]).join(",")[0, 200] if result[:paths]
+            if result[:paths]
+              paths = Array(result[:paths]).first(Hive::Events::MAX_EVENT_PATHS).map(&:to_s)
+              attrs[:residue_paths] = paths.join(",")[0, 200]
+              attrs[:residue_paths_b64] = Base64.strict_encode64(JSON.generate(paths))
+            end
             Hive::Markers.set(task.state_file, :error, **attrs)
             return { commit: "finalize_dirty_worktree", status: :error }
           when :clean
@@ -414,6 +420,17 @@ module Hive
       # produced by the finalize backstop (vs. a per-stage `stage_exit`
       # hook). Best-effort — log-write failure must not abort finalize.
       def log_finalize_residue_committed(task, result)
+        paths = Hive::Events.clean_exit_paths(result[:paths])
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: "8-finalize", # coding-scoped: finalize backstop event
+          event_type: :clean_exit_auto_committed,
+          message: "reason=finalize_backstop head=#{result[:head]} paths=#{paths.join(',')[0, 200]}",
+          data: Hive::Events.clean_exit_data(
+            head: result[:head], reason: "finalize_backstop", paths: paths
+          )
+        )
         return unless task.respond_to?(:log_dir)
 
         FileUtils.mkdir_p(task.log_dir)
@@ -424,7 +441,7 @@ module Hive
           head: #{result[:head]}
           commit_subject: #{result[:commit_subject]}
           paths:
-          #{Array(result[:paths]).map { |p| "  - #{p}" }.join("\n")}
+          #{paths.map { |p| "  - #{p}" }.join("\n")}
         LOG
         File.write(path, body)
       rescue StandardError => e

@@ -3,7 +3,7 @@ title: Hive::AgentGitGate
 type: module
 source: lib/hive/agent_git_gate.rb, lib/hive/managed_git.rb
 created: 2026-07-26
-updated: 2026-07-27
+updated: 2026-08-14
 tags: [git, security, publication, worktree, boundary]
 ---
 
@@ -40,10 +40,13 @@ Typed failures are `InvalidRequest`, `UnsupportedOperation`, `CommandFailed`,
 
 `read(repository, operation, ...)` accepts only declared shapes for current
 branch, exact HEAD/commit identity, ancestry, commit count/list, object
-type/size/content, status, changed paths, diffs, commit patches, and worktree
-inventory. Callers cannot supply Git options, helper paths, config entries, or
-environment names. Unknown operations or parameters fail before process spawn.
-Bounded reads kill the Git process group when stdout exceeds the declared cap.
+type/size/content, strict status (including dirty submodules), changed paths,
+raw changed-path metadata, diffs, commit patches, and worktree inventory. The
+raw form retains destination modes and rename pairs so evidence-range consumers
+can reject symlinks and bind the current destination path without raw Git argv.
+Callers cannot supply Git options, helper paths, config entries, or environment
+names. Unknown operations or parameters fail before process spawn. Bounded
+reads kill the Git process group when stdout exceeds the declared cap.
 
 `remote_urls` reads one named remote through the same process boundary.
 `observe_remote_branch` resolves a named remote to exactly one fetch URL, or
@@ -108,6 +111,9 @@ details rather than potentially credential-bearing transport output.
   observations, and publishes through the exact expected-OID/absence gate.
   Its append-only action ledger remains the authority deciding which old OID is
   replaceable.
+- Outcome evidence resolves its clean controller-owned base-to-head range
+  through bounded status, ancestry, exact-commit, and raw changed-path reads;
+  it never invokes the private Git executor directly.
 - `Hive::Worktree#create_detached_exact!` delegates exact analysis-tree
   materialization while preserving its `created`/`existing` return contract.
 

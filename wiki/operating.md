@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-07-25
+updated: 2026-08-13
 tags: [operating, daemon, bot, systemd, launchd, install, skills]
 ---
 
@@ -69,12 +69,14 @@ bash "$tmpdir/hive-install.sh"
 | Flag / env | Purpose |
 |------------|---------|
 | `--dry-run` | Resolve target + version + URLs and run the runtime preflight without downloading or writing anything. |
-| `--prefix=<dir>` (or `HIVE_PREFIX=<dir>`) | Stage the versioned payload + prefix marker under `<dir>/hive/…` and mirror `install-channel`/`install-prefix` under `${XDG_DATA_HOME}/hive`, so `hive update` can re-use the prefix without re-exporting `HIVE_PREFIX`. |
+| `--prefix=<dir>` (or `HIVE_PREFIX=<dir>`) | Normalize the prefix to an absolute path, stage the versioned payload + prefix marker under `<dir>/hive/…`, and mirror `install-channel`/`install-prefix` under `${XDG_DATA_HOME}/hive`, so `hive update` can re-use the prefix without re-exporting `HIVE_PREFIX`. |
 | `--version=<tag>` (or `HIVE_VERSION=<tag>`) | Skip the GitHub API call and install a specific `vX.Y.Z` tag. |
 | `HIVE_REPO_OWNER` / `HIVE_REPO_NAME` | Override the upstream owner/repo (for forks or mirror staging). Inputs are shape-validated. |
 | `HIVE_BIN_OVERRIDE` (read by `hv` wrapper) | Point `hv` at a custom install path when Apache Hive shadows it. |
 | `HIVE_INSTALL_QMD=0` | Skip the managed QMD install step. Use only when npm is unavailable or a host policy forbids npm package installs. |
-| `HIVE_QMD_NPM_PACKAGE` | Override the npm package spec used for QMD install; defaults to `@tobilu/qmd`. |
+| `HIVE_QMD_NPM_PACKAGE` | Deprecated compatibility input; when set it must equal the release-owned `@tobilu/qmd@2.5.3` package exactly. Other versions, packages, URLs, tags, and ranges fail before npm runs. |
+| `HIVE_QMD_NPM_INTEGRITY` | Deprecated compatibility input; when set it must equal the release-owned QMD tarball integrity exactly. Caller-selected digests fail before npm runs. |
+| `HIVE_QMD_TIMEOUT_SECONDS` | Positive timeout for each optional npm, QMD, or Node health subprocess; defaults to 600 seconds. A timeout preserves the previous managed QMD and does not fail the core Hive install. |
 | `HIVE_QMD_BIN` | Runtime override read by generated wiki scripts and `hive doctor`; points at an executable `qmd` when PATH or the managed install path is not enough. |
 
 On upgrade, the installer recognizes only Hive-managed wrappers and snapshots
@@ -93,6 +95,19 @@ installs or repairs the QMD wiki indexer when npm is available, verifies
 loopback Hive web service are installed and truthfully reported, offers
 `hive init`, and treats the
 skills package as optional marketplace content.
+
+The managed QMD step downloads the exact package tarball once, checks its local
+sha512 digest against Hive's expected value, installs the release-owned lock
+with lifecycle scripts disabled, and builds `better-sqlite3` from its
+integrity-checked source using the locked `node-gyp` and local Node headers.
+This prevents package lifecycle scripts and native prebuild downloaders from
+introducing artifacts outside the lock. It then opens an in-memory SQLite
+database before activation. A download, install, local-header discovery,
+native build, startup, native-health, timeout, or activation failure leaves the
+previous managed tree and link intact.
+`qmd --version` alone is not treated as native-module health. Link ownership is
+resolved with Ruby `File.realpath`, so the update path does not depend on GNU
+`readlink -f` being available on macOS.
 
 Fresh installs use XDG locations:
 

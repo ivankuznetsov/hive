@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-08-02
+updated: 2026-08-14
 tags: [command, daemon, automation, json]
 ---
 
@@ -85,7 +85,7 @@ stage.
 | `ready_to_artifacts`  | Dispatch `hive artifacts <slug> --from 6-review` (6→7) |
 | `ready_to_finalize`   | Dispatch `hive finalize <slug> --from 7-artifacts` (7→8) |
 | Any coding task with `pr_url` in stages `5-open-pr` through `8-finalize` | **Observe before policy dispatch.** Persist the exact task generation and PR binding, poll with per-candidate durable backoff, verify the observed head and reachable merge SHA, checkpoint required architecture intake, then use a daemon-owned `remote_merge` closure receipt to move the same generation to `9-done`. This includes recoverable error rows; no marker-reason allowlist or archive child exists. |
-| Held PR-bearing task | Keep the candidate in `pr-merge-reconciliation.json` with its hold reason, but do not poll or archive until a later status observation clears the dependency/admission hold. |
+| Held PR-bearing task | Keep the candidate in `pr-merge-reconciliation.json` with its hold reason. Current dependency, admission, repository, and PR-identity holds take precedence over historical head drift and do not poll or archive until a later status observation clears them. An `observed_head_changed` hold may poll only the identity-matched bound PR's remote state: `OPEN` or closed-unmerged releases ordinary error recovery so the new generation can be reviewed, while merged, delivered-elsewhere, or ambiguous evidence remains durably blocked before architecture intake or automatic archive and is not polled again. |
 | `needs_input` at `3-plan` | **Auto-dispatch immediately.** Plan-stage `:waiting` is an approval pause, not a Q&A wait — `daemon.enabled: true` is the durable consent. `Hive::Daemon::PlanApproval.prepare` rewrites the row's `hive plan ...` command to `hive develop ...` and flips the `:waiting` marker to `:complete` before dispatch so the workflow verb's terminal-marker gate (`VALID_TERMINAL_MARKERS`) accepts the advance. Logged as `:dispatched` with `trigger: "plan_approval"`. |
 | `needs_input` (any other stage) | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. Brainstorm/execute/review WAITING represent actual user-authored answers; auto-dispatch without an edit would either spam the agent or skip real user input. The `[project, slug] → mtime` baseline this compares against is **persisted** (`daemon_dispatch_baselines.json` under the state home, beside `.daemon.pid`), so a daemon restart no longer re-strands a task answered while it was down — see [[modules/daemon]] "Persisted dispatch baselines". **Brainstorm Q&A gate:** mtime-debounce alone can't tell "answered 1 of 3, still going" from "done" — each Telegram answer bumps the file mtime — so a `2-brainstorm` `needs_input` row whose `brainstorm.md` still has unanswered `### Q{n}.` slots is **held** (`Policy :wait_for_answers`, logged `:skipped reason=answers_pending`) until every question is answered, whether they arrive one-at-a-time via the bot or in one editor save. See [[modules/daemon]] "Brainstorm answers-pending gate". |
 | `recover_execute` | Skip — `EXECUTE_STALE` / waiting findings are explicit human-input gates. |
@@ -123,7 +123,7 @@ hive refactor-patrol PROJECT --job-manifest MANIFEST --json
 ```
 
 After classification, separately authorized action resumes run the same
-immutable job with `--actions`; both phases emit `hive-refactor-patrol.v3` to a
+immutable job with `--actions`; both phases emit `hive-refactor-patrol.v4` to a
 job-bound result file consumed by the supervisor. Candidate selection shares
 one immutable ownership/config/identity snapshot across due jobs for the tick,
 but reservation re-resolves live ownership and config before claiming. Action

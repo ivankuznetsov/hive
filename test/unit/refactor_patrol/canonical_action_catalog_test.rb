@@ -782,14 +782,14 @@ class RefactorPatrolCanonicalActionCatalogTest < Minitest::Test
       "state" => state,
       "complete" => complete,
       "dispositions" => {
-        "accepted" => [
+        "fix" => [
           {
             "id" => "accepted", "feature_id" => "checkout",
-            "fingerprint" => "fp-accepted", "score" => 0.8,
+            "fingerprint" => "fp-accepted", "route" => "fix",
             "admissible" => true, "reasons" => []
           }
         ],
-        "flagged" => [], "suppressed" => []
+        "discuss" => [], "dismiss" => []
       },
       "feature_results" => [
         {

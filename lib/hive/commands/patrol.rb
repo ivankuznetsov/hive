@@ -11,6 +11,7 @@ require "hive/patrol/candidate_selector"
 require "hive/patrol/dismissals"
 require "hive/patrol/fingerprint"
 require "hive/patrol/finding_registry"
+require "hive/patrol/finding_query"
 require "hive/patrol/fixer"
 require "hive/patrol/feature_batch"
 require "hive/patrol/mapper"
@@ -30,7 +31,7 @@ module Hive
         %w[validated validation_failed] + Hive::Patrol::Fixer::FAILURE_REASONS
       ).uniq.freeze
 
-      def initialize(project, json: false, dry_run: false,
+      def initialize(project, json: false, dry_run: false, list: false,
                      mapper_factory: nil, reviewer_factory: nil,
                      fixer_factory: nil, pr_opener_factory: nil,
                      dismissals_factory: nil, project_entry: nil,
@@ -43,6 +44,7 @@ module Hive
         @project = project
         @json = json
         @dry_run = dry_run
+        @list = list
         @mapper_factory = mapper_factory || lambda do |root, cfg, state|
           Hive::Patrol::Mapper.new(root, cfg: cfg, state: state, capabilities: [ :architecture ])
         end
@@ -73,8 +75,9 @@ module Hive
       end
 
       def call
-        payload = run_cycle
-        emit(payload)
+        return list_findings if @list
+
+        emit(run_cycle)
       rescue Hive::Error => e
         emit_error(e)
         raise
@@ -85,6 +88,21 @@ module Hive
       end
 
       private
+
+      def list_findings
+        entry = @project_entry || Hive::Config.find_project(@project)
+        raise Hive::ConfigError, "hive patrol: unknown project #{@project.inspect}" unless entry
+
+        store = Hive::Patrol::StateStore.new(
+          entry.fetch("path"), hive_state_path: entry.fetch("hive_state_path")
+        )
+        query = Hive::Patrol::FindingQuery.new(store)
+        payload = query.list_envelope(
+          project: entry.fetch("name"), project_root: entry.fetch("path")
+        )
+        puts(@json ? JSON.generate(payload) : query.text(payload))
+        payload
+      end
 
       def run_cycle
         entry = @project_entry || Hive::Config.find_project(@project)
@@ -103,7 +121,6 @@ module Hive
         state = Hive::Patrol::StateStore.new(
           project_root, hive_state_path: entry.fetch("hive_state_path")
         )
-        state.ensure!
         state.with_cycle_lock do
           run_locked_cycle(entry, project_root, cfg, state)
         end
@@ -127,7 +144,7 @@ module Hive
         features, feature_batch, reviewer, findings = with_scan_checkout(project_root, target_sha) do |scan_root|
           mapped = @mapper_factory.call(scan_root, cfg, state).call
           batch = Hive::Patrol::FeatureBatch.new(cfg: cfg, state: state).call(
-            mapped, target_sha: target_sha, limit: review_launch_limit(token_budget, cfg)
+            mapped, target_sha: target_sha
           )
           scan_reviewer = build_reviewer(scan_root, cfg, state, token_budget)
           reviewed = stamp_findings(
@@ -235,6 +252,7 @@ module Hive
             "feature_review_cursor" => feature_batch.next_cursor
           )
         end
+        state.rebuild_finding_query_projection!
         payload = success_payload(
           entry, project_root, scanned_sha, features, review,
           findings, candidates, fixes, fix_results, pr_results, skipped
@@ -412,29 +430,10 @@ module Hive
         }
       end
 
-      # Reviewer calls consume the same cycle and daily launch envelope as
-      # fixers. Bound the selected feature batch to launches that can actually
-      # happen and, for a shipping cycle, reserve as much configured fix-attempt
-      # capacity as the current envelope permits. A zero- or one-launch
-      # remainder still selects one feature so review can progress or report
-      # the exact budget exhaustion instead of presenting an empty batch as
-      # complete.
-      def review_launch_limit(token_budget, cfg)
-        available = token_budget.remaining_launches
-        return [ available, 1 ].max if @dry_run
-
-        desired_fix_launches = cfg.dig("patrol", "max_fix_attempts_per_cycle").to_i
-        fix_launches = [ desired_fix_launches, [ available - 1, 0 ].max ].min
-        [ available - fix_launches, 1 ].max
-      end
-
       def terminal_patrol_exhaustion?(patch)
         exhaustion = patch.validation["resource_exhaustion"] || patch.validation[:resource_exhaustion]
         reason = exhaustion.is_a?(Hash) && (exhaustion["reason"] || exhaustion[:reason]).to_s
-        %w[
-          cycle_agent_spawn_limit daily_agent_spawn_limit
-          cycle_token_limit daily_token_limit usage_store_unavailable
-        ].include?(reason)
+        reason == "token_limit"
       end
 
       # A later feature failure must pin that feature, not replay already-clean
@@ -724,15 +723,20 @@ module Hive
       def emit_error(error)
         return unless @json
 
-        puts JSON.generate(
-          "schema" => "hive-patrol",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-patrol"),
-          "ok" => false,
-          "error_class" => error.class.name.split("::").last,
-          "error_kind" => error.is_a?(Hive::ConfigError) ? "config" : "error",
-          "exit_code" => error.exit_code,
-          "message" => error.message
-        )
+        payload = if @list
+          Hive::Patrol::FindingQuery.error_envelope(error)
+        else
+          {
+            "schema" => "hive-patrol",
+            "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-patrol"),
+            "ok" => false,
+            "error_class" => error.class.name.split("::").last,
+            "error_kind" => error.is_a?(Hive::ConfigError) ? "config" : "error",
+            "exit_code" => error.exit_code,
+            "message" => error.message
+          }
+        end
+        puts JSON.generate(payload)
       end
     end
   end

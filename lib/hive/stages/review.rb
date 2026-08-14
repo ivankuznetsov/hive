@@ -1996,10 +1996,6 @@ module Hive
         true
       end
 
-      def collect_answered_escalation_findings(ctx)
-        collect_answered_escalation_findings_with_count(ctx).text
-      end
-
       def collect_answered_escalation_findings_with_count(ctx)
         path = Hive::Stages::Review::Triage.escalations_path(ctx)
         questions = parse_escalation_questions(path)
@@ -2019,10 +2015,6 @@ module Hive
           out << "\n"
         end
         AcceptedFindings.new(text: out, count: answered.size)
-      end
-
-      def collect_legacy_checked_escalations(path)
-        collect_legacy_checked_escalations_with_count(path).text
       end
 
       def collect_legacy_checked_escalations_with_count(path)
@@ -2506,7 +2498,7 @@ module Hive
         when :auto_committed
           emit_pre_fix_clean_exit_event(task, cleanup)
           worktree_status(worktree_path)
-        when :git_failed
+        when :safety_violation, :git_failed
           [ :status_failed, cleanup[:message].to_s ]
         else
           :dirty
@@ -2516,12 +2508,16 @@ module Hive
       end
 
       def emit_pre_fix_clean_exit_event(task, result)
+        paths = Hive::Events.clean_exit_paths(result[:paths])
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
           stage: "6-review", # coding-scoped: coding review stage event
           event_type: :clean_exit_auto_committed,
-          message: "reason=pre_fix_dirty_worktree head=#{result[:head]} paths=#{Array(result[:paths]).join(',')[0, 200]}"
+          message: "reason=pre_fix_dirty_worktree head=#{result[:head]} paths=#{paths.join(',')[0, 200]}",
+          data: Hive::Events.clean_exit_data(
+            head: result[:head], reason: "pre_fix_dirty_worktree", paths: paths
+          )
         )
       rescue StandardError
         nil

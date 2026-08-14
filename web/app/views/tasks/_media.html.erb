@@ -4,7 +4,7 @@
 
 <% if media && media["status"] == "failed" %>
   <section class="demo" aria-labelledby="demo-heading">
-    <h2 id="demo-heading">Demo</h2>
+    <h2 id="demo-heading">Demo <span class="legacy-label">Legacy diagnostic</span></h2>
     <div class="demo-banner" role="status">
       <strong>Demo capture failed</strong>
       <% if media["reason"].present? %>
@@ -14,7 +14,7 @@
   </section>
 <% elsif media && media["status"] == "captured" && media["items"].present? %>
   <section class="demo" aria-labelledby="demo-heading">
-    <h2 id="demo-heading">Demo</h2>
+    <h2 id="demo-heading">Demo <span class="legacy-label">Legacy diagnostic</span></h2>
     <div class="demo-gallery">
         <% media["items"].each do |item| %>
           <figure class="demo-item">

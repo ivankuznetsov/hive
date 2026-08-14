@@ -1,5 +1,5 @@
 {
-  "name": "hive-web-capture-tools",
+  "name": "hive-web-browser-test-tools",
   "private": true,
   "version": "1.0.0",
   "engines": {

@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-08-10
+updated: 2026-08-14
 tags: [commands, api, skills, agents, operational, provisioning]
 ---
 
@@ -179,10 +179,9 @@ for the detected Hive CLI binary. Examples in the skill include
 `/hive web status --json`, foreground `/hive web`, `/hive tui`, `/hive
 setup-agents`, reviewed Honeycomb workflow
 lifecycle commands, ordinary and architecture patrol, digest/bench, and
-`/hive wiki compile-log --check`. The patrol section distinguishes subscription
-use from additional payment, documents the higher architecture allowance plus
-shared daily ceiling, and hands exact token-total inspection to the human-only
-TUI. `setup-agents` uses a consent-required `--json` preview followed by an
+`/hive wiki compile-log --check`. The patrol section documents one high
+per-agent runaway fuse, telemetry-only usage, and exact token-total inspection
+through the human-only TUI. `setup-agents` uses a consent-required `--json` preview followed by an
 approved `--yes --json` execution; Honeycomb install/update/remove use their
 supported `--dry-run --json` previews, with permission escalation approved
 separately. Patrol and architecture-patrol dry-runs remain consent-gated because

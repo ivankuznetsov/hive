@@ -1965,7 +1965,7 @@ module Hive
           @logger.event(
             :architecture_patrol_opened,
             project: project, job_id: reserved[:job_id], pr_number: reserved[:pr_number],
-            pr_url: reserved[:pr_url], accepted_count: 0, flagged_count: 0, suppressed_count: 0
+            pr_url: reserved[:pr_url], fix_count: 0, discuss_count: 0, dismiss_count: 0
           )
         end
         begin

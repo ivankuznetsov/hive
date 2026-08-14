@@ -48,6 +48,14 @@ emit_final_message() {
   ruby -rjson -e 'puts JSON.generate({ "type" => "result", "result" => ARGV.fetch(0) })' "$1"
 }
 
+sha256_file() {
+  ruby -rdigest -e 'puts Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$1"
+}
+
+sha256_line() {
+  ruby -rdigest -e 'puts Digest::SHA256.hexdigest(ARGV.fetch(0) + "\n")' "$1"
+}
+
 if [[ "$prompt_blob" == *"outcome-evidence inference role"* ||
       "$prompt_blob" == *"outcome-evidence producer"* ||
       "$prompt_blob" == *"independent outcome-evidence reviewer"* ]]; then
@@ -68,8 +76,8 @@ if [[ "$prompt_blob" == *"outcome-evidence inference role"* ||
     mkdir -p "$writable_root"
     printf '%s\n' 'The frozen implementation adds implementation.txt with the requested demo behavior.' > "$writable_root/original.md"
     printf '%s\n' 'Reviewed implementation.txt: it contains the committed demo implementation marker.' > "$writable_root/review.txt"
-    original_sha=$(sha256sum "$writable_root/original.md" | cut -d' ' -f1)
-    review_sha=$(sha256sum "$writable_root/review.txt" | cut -d' ' -f1)
+    original_sha=$(sha256_file "$writable_root/original.md")
+    review_sha=$(sha256_file "$writable_root/review.txt")
     original_bytes=$(wc -c < "$writable_root/original.md" | tr -d ' ')
     review_bytes=$(wc -c < "$writable_root/review.txt" | tr -d ' ')
     source_sha=$(git -C "$source_worktree" rev-parse HEAD)
@@ -81,8 +89,8 @@ if [[ "$prompt_blob" == *"outcome-evidence inference role"* ||
   fi
 
   if [[ "$prompt_blob" == *"independent outcome-evidence reviewer"* ]]; then
-    original_sha=$(printf '%s\n' 'The frozen implementation adds implementation.txt with the requested demo behavior.' | sha256sum | cut -d' ' -f1)
-    review_sha=$(printf '%s\n' 'Reviewed implementation.txt: it contains the committed demo implementation marker.' | sha256sum | cut -d' ' -f1)
+    original_sha=$(sha256_line 'The frozen implementation adds implementation.txt with the requested demo behavior.')
+    review_sha=$(sha256_line 'Reviewed implementation.txt: it contains the committed demo implementation marker.')
     printf -v final_message '{"inspected_hashes":["%s","%s"],"verdicts":[{"target_id":"implemented-demo-pipeline","verdict":"accepted","reason":"Both retained representations match the frozen committed implementation and directly support the requested outcome."}]}' \
       "$original_sha" "$review_sha"
     emit_final_message "$final_message"

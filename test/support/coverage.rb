@@ -332,8 +332,7 @@ module HiveTestCoverage
     @result_errors = (@startup_errors || []).dup
     collect_dump_errors!
     merged = {}
-    marshal_paths = @verified_marshal_paths ||
-                    Dir.glob(File.join(@resultset_dir, "**", "*.marshal")).sort
+    marshal_paths = process_result_paths
     marshal_paths.each do |path|
       raw = read_marshal_file(path)
       next unless raw
@@ -342,6 +341,11 @@ module HiveTestCoverage
     end
     detect_config_mismatch!(merged, marshal_paths)
     merged
+  end
+
+  def process_result_paths
+    @verified_marshal_paths ||
+      Dir.glob(File.join(@resultset_dir, "**", "*.marshal")).sort
   end
 
   # Surface a clear configuration error when every entry across every
@@ -470,7 +474,7 @@ module HiveTestCoverage
 
     report = {
       generated_at: Time.now.utc.iso8601,
-      process_results: Dir.glob(File.join(@resultset_dir, "*.marshal")).size,
+      process_results: process_result_paths.size,
       line_total: line_total,
       line_covered: line_covered,
       line_percent: percent(line_covered, line_total),

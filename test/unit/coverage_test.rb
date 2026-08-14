@@ -187,9 +187,11 @@ class HiveTestCoverageTest < Minitest::Test
             test_files_by_shard: [ [ "test/a_test.rb" ], [ "test/b_test.rb" ] ]
           )
           merged = HiveTestCoverage.merged_results
+          report = HiveTestCoverage.build_report(merged)
 
           assert_equal 2, paths.length
           assert_equal [ 1, 1 ], merged.fetch(source).fetch(:lines)
+          assert_equal 2, report.fetch(:process_results)
         end
       end
     end

@@ -233,6 +233,17 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     assert thesis.admissible
   end
 
+  def test_invalid_architecture_effect_item_forces_dismissal
+    thesis = normalize(
+      valid_raw_thesis.merge("architecture_effects" => [ "stable owner", nil ])
+    )
+
+    assert_equal [ "stable owner" ], thesis.architecture_effects
+    refute thesis.admissible
+    assert_includes thesis.risk.fetch("flags"), "invalid_architecture_effect"
+    assert_equal "dismiss", thesis.route
+  end
+
   def test_missing_architecture_effect_is_retained_and_forced_to_dismiss
     raw = valid_raw_thesis.merge("architecture_effects" => [])
     thesis = normalize(raw)

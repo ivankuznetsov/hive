@@ -472,6 +472,22 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_migrate_rejects_a_non_mapping_config_before_rewriting_retired_policy
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        File.write(cfg_path, "- patrol\n- refactor_patrol\n")
+
+        error = assert_raises(Hive::ConfigError) do
+          migrate_command(dir, daemon_restarter: -> { }).call
+        end
+
+        assert_match(/must be a hash/, error.message)
+      end
+    end
+  end
+
   def test_migrate_removes_complete_multiline_retired_patrol_values
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -482,6 +498,7 @@ class MigrateTest < Minitest::Test
             mode: off
             max_tokens_per_day: |
               100
+              # An old operator note must be retired with the value.
               200
             max_agent_spawns_per_day:
               - 3

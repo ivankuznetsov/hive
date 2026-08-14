@@ -81,6 +81,20 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
     assert_match(/terminal action cannot retain an active claim/, error.message)
   end
 
+  def test_record_validator_rejects_disposition_route_and_admissibility_mismatches
+    wrong_route = accepted_job
+    wrong_route.dig("dispositions", "fix", 0)["route"] = "discuss"
+    assert_invalid_job(wrong_route, /disposition route must match its fix bucket/)
+
+    inadmissible_discussion = valid_job
+    inadmissible_discussion.dig("dispositions", "discuss") << {
+      "id" => "thesis-1", "feature_id" => "feature-1", "fingerprint" => "fp-1",
+      "route" => "discuss", "admissible" => false,
+      "reasons" => [ "reviewer_requested_discussion" ]
+    }
+    assert_invalid_job(inadmissible_discussion, /discuss disposition must be admissible/)
+  end
+
   def test_record_validator_rejects_a_gap_in_diagnostic_retry_episodes
     aggregate = accepted_job
     transition = effect_transition.merge("generation" => 2)

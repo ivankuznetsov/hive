@@ -77,6 +77,7 @@ class PatrolTokenBudgetTest < Minitest::Test
         { reason: "agent_in_flight", limit: 1, observed: 1 },
         concurrent.resource_exhaustion
       )
+      assert_equal "patrol agent launch blocked (agent_in_flight)", concurrent.exhaustion_message
 
       record(budget, now, { input: 40, output: 0, cached: 0 })
       assert concurrent.acquire

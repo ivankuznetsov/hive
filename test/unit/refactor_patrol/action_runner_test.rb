@@ -242,9 +242,9 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         dir,
         policy: snapshot_policy("auto_fix" => false, "issue_filing" => true),
         dispositions: dispositions(
-          accepted: [ disposition(thesis(id: "go-fix", feature_id: "architecture-cmd-server",
+          fix: [ disposition(thesis(id: "go-fix", feature_id: "architecture-cmd-server",
                                                    files: %w[cmd/server/main.go internal/server/server.go])) ],
-          flagged: [ disposition(
+          discuss: [ disposition(
             thesis(id: "ts-issue", feature_id: "architecture-services-orders",
                    files: %w[src/orders/index.ts src/orders/service.ts], flags: [ "cross_feature_impact" ]),
             reasons: [ "cross_feature_impact" ]
@@ -278,7 +278,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "accepted-1")) ])
+        dispositions: dispositions(fix: [ disposition(thesis(id: "accepted-1")) ])
       )
       order = []
       fixer = FakeFixer.new(validated_patch).tap do |fake|
@@ -326,9 +326,9 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         dir,
         policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
         dispositions: dispositions(
-          accepted: [ disposition(accepted) ],
-          flagged: [ disposition(flagged, reasons: [ "cross_feature_impact" ]) ],
-          suppressed: [ disposition(suppressed, reasons: [ "collision_already_seen" ]) ]
+          fix: [ disposition(accepted) ],
+          discuss: [ disposition(flagged, reasons: [ "cross_feature_impact" ]) ],
+          dismiss: [ disposition(suppressed, reasons: [ "collision_already_seen" ]) ]
         )
       )
       fixer = FakeFixer.new(validated_patch(fingerprint: accepted.fingerprint))
@@ -353,21 +353,21 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       assert_equal 1, filer.calls.size
       assert_equal %w[issue_created issue_not_needed pr_opened],
                    first.actions.map { |action| action.fetch("outcome") }.sort
-      assert_equal [ "suppressed-mixed" ], first.aggregate.dig("dispositions", "suppressed")
+      assert_equal [ "suppressed-mixed" ], first.aggregate.dig("dispositions", "dismiss")
                                                     .map { |item| item.fetch("id") }
     end
   end
 
   def test_missing_action_policy_snapshot_fails_closed_without_effects
     with_tmp_dir do |dir|
-      item = thesis(id: "accepted", fingerprint: "fp-accepted")
+      item = thesis(id: "fix", fingerprint: "fp-accepted")
       store = write_classified_job(
         dir,
         policy: {
           "discovery" => true, "auto_fix" => true, "issue_filing" => true,
           "captured_at" => T0.iso8601
         },
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       runner = build_runner(dir, store: store)
 
@@ -384,11 +384,11 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
 
   def test_changed_validation_command_revokes_an_existing_fix_snapshot
     with_tmp_dir do |dir|
-      item = thesis(id: "accepted", fingerprint: "fp-accepted")
+      item = thesis(id: "fix", fingerprint: "fp-accepted")
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       current = config
       current["refactor_patrol"]["commands"]["test"] = "bin/test --changed"
@@ -409,7 +409,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       current = config(auto_fix: false)
       runner = build_runner(
@@ -438,7 +438,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       runner = build_runner(dir, store: store)
       runner.instance_variable_set(:@owner_process_start_time, nil)
@@ -458,7 +458,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       order = []
       fixer = FakeFixer.new(fix_result("validation_failed", terminal: true)).tap do |fake|
@@ -498,7 +498,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         dir,
         policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
         dispositions: dispositions(
-          flagged: [ disposition(item, reasons: [ "missing_docs_validation" ]) ]
+          discuss: [ disposition(item, reasons: [ "missing_docs_validation" ]) ]
         )
       )
       filer = FakeIssueFiler.new(issue_result)
@@ -519,7 +519,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "accepted-retry")) ])
+        dispositions: dispositions(fix: [ disposition(thesis(id: "accepted-retry")) ])
       )
       fixer = FakeFixer.new(
         fix_result("fix_agent_failed", terminal: false),
@@ -546,7 +546,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "accepted-evidence")) ])
+        dispositions: dispositions(fix: [ disposition(thesis(id: "accepted-evidence")) ])
       )
       failed = Hive::RefactorPatrol::Fixer::Result.new(
         outcome: "fix_error", terminal: false, analysis_sha: "c" * 40,
@@ -576,7 +576,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         dir,
         policy: snapshot_policy("auto_fix" => true),
         dispositions: dispositions(
-          accepted: [ disposition(thesis(id: "hourly-retry")) ]
+          fix: [ disposition(thesis(id: "hourly-retry")) ]
         )
       )
       failed = Hive::RefactorPatrol::Fixer::Result.new(
@@ -608,38 +608,35 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_daily_fix_budget_exhaustion_retries_at_the_next_utc_day
+  def test_fix_runaway_ceiling_uses_the_normal_fixed_retry
     with_tmp_dir do |dir|
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(
-          accepted: [ disposition(thesis(id: "daily-budget")) ]
-        )
+        dispositions: dispositions(fix: [ disposition(thesis(id: "runaway")) ])
       )
       exhausted = Hive::RefactorPatrol::Fixer::Result.new(
         outcome: "fix_agent_failed", terminal: false,
         analysis_sha: "c" * 40,
         details: {
-          "error" => "daily budget exhausted",
+          "error" => "agent exceeded runaway ceiling",
           "resource_exhaustion" => {
-            "reason" => "daily_token_limit",
-            "limit" => 600_000,
-            "observed" => 700_000
+            "reason" => "token_limit",
+            "limit" => 100_000_000,
+            "observed" => 100_000_001
           }
         }
       )
       runner = build_runner(
         dir, store: store, fixer: FakeFixer.new(exhausted),
-        clock: -> { T0 }
+        clock: -> { T0 }, backoff_sec: 3600
       )
 
       first = runner.run(job_id: "job-1")
       claim = first.actions.find { |action| action.fetch("kind") == "fix" }
                    .fetch("claims").last
 
-      assert_equal Time.utc(2026, 7, 11).iso8601,
-                   claim.fetch("next_eligible_at")
+      assert_equal (T0 + 3600).iso8601, claim.fetch("next_eligible_at")
     end
   end
 
@@ -649,7 +646,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       closed = Hive::RefactorPatrol::PrOpener::Result.new(
         outcome: "closed_without_merge", terminal: true,
@@ -677,7 +674,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "accepted-crash")) ])
+        dispositions: dispositions(fix: [ disposition(thesis(id: "accepted-crash")) ])
       )
       fixer = FakeFixer.new(validated_patch(fingerprint: "fp-accepted-crash"))
       crashing = FakePrOpener.new(crash_after_intent: true)
@@ -709,7 +706,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       patch = validated_patch(fingerprint: item.fingerprint)
       calls = 0
@@ -777,7 +774,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       operations = []
       recording = Module.new
@@ -912,7 +909,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
           hive_state_path: state_path,
           policy: snapshot_policy("issue_filing" => true),
           dispositions: dispositions(
-            flagged: [ disposition(item, reasons: [ "cross_feature_impact" ]) ]
+            discuss: [ disposition(item, reasons: [ "cross_feature_impact" ]) ]
           )
         )
 
@@ -945,7 +942,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
           dir,
           hive_state_path: state_path,
           policy: snapshot_policy("auto_fix" => true),
-          dispositions: dispositions(accepted: [ disposition(item) ])
+          dispositions: dispositions(fix: [ disposition(item) ])
         )
         fixer = FakeFixer.new(validated_patch(fingerprint: item.fingerprint))
 
@@ -985,7 +982,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
           dir,
           hive_state_path: state_path,
           policy: snapshot_policy("auto_fix" => true),
-          dispositions: dispositions(accepted: [ disposition(first_thesis) ])
+          dispositions: dispositions(fix: [ disposition(first_thesis) ])
         )
         first = build_runner(
           dir,
@@ -1002,7 +999,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
           job_id: "job-2",
           hive_state_path: state_path,
           policy: snapshot_policy("auto_fix" => true),
-          dispositions: dispositions(accepted: [ disposition(second_thesis) ])
+          dispositions: dispositions(fix: [ disposition(second_thesis) ])
         )
 
         linked = build_runner(
@@ -1027,7 +1024,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "accepted-handoff")) ])
+        dispositions: dispositions(fix: [ disposition(thesis(id: "accepted-handoff")) ])
       )
       fixer = FakeFixer.new(validated_patch(fingerprint: "fp-accepted-handoff"))
       pending = Hive::RefactorPatrol::PrOpener::Result.new(
@@ -1062,7 +1059,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       first_patch = validated_patch(fingerprint: item.fingerprint)
       second_patch = validated_patch(
@@ -1129,7 +1126,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         repo,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ]),
+        dispositions: dispositions(fix: [ disposition(item) ]),
         analysis_sha: analysis_sha
       )
       action_id = store.canonical_action_id(
@@ -1269,7 +1266,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       wrong = validated_patch(fingerprint: "another-action")
       opener = FakePrOpener.new(pr_result)
@@ -1292,7 +1289,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       initialized = store.initialize_actions!(
         "job-1", specifications: [ { "thesis_id" => item.id, "kind" => "fix" } ],
@@ -1333,7 +1330,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       incomplete = Hive::RefactorPatrol::PrOpener::Result.new(
         outcome: "pr_opened", terminal: true,
@@ -1358,7 +1355,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       creates = 0
       success = pr_result
@@ -1418,7 +1415,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       requests = 0
       opener = Object.new
@@ -1450,7 +1447,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("issue_filing" => true),
-        dispositions: dispositions(flagged: [ disposition(item, reasons: [ "cross_feature_impact" ]) ])
+        dispositions: dispositions(discuss: [ disposition(item, reasons: [ "cross_feature_impact" ]) ])
       )
       creates = 0
       success = issue_result
@@ -1487,8 +1484,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         dir,
         policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
         dispositions: dispositions(
-          accepted: [ disposition(accepted) ],
-          flagged: [ disposition(flagged, reasons: [ "cross_feature_impact" ]) ]
+          fix: [ disposition(accepted) ],
+          discuss: [ disposition(flagged, reasons: [ "cross_feature_impact" ]) ]
         )
       )
       filer = FakeIssueFiler.new(issue_result)
@@ -1511,7 +1508,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "accepted-revoked")) ])
+        dispositions: dispositions(fix: [ disposition(thesis(id: "accepted-revoked")) ])
       )
       cfg = config(auto_fix: false)
       fixer = FakeFixer.new(validated_patch(fingerprint: "fp-accepted-revoked"))
@@ -1551,8 +1548,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         dir,
         policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
         dispositions: dispositions(
-          accepted: [ disposition(continued) ],
-          flagged: [ disposition(untouched, reasons: [ "cross_feature_impact" ]) ]
+          fix: [ disposition(continued) ],
+          discuss: [ disposition(untouched, reasons: [ "cross_feature_impact" ]) ]
         )
       )
       family_id = Hive::RefactorPatrol::SemanticFamily.id_for(
@@ -1621,7 +1618,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "duplicate-owner")) ])
+        dispositions: dispositions(fix: [ disposition(thesis(id: "duplicate-owner")) ])
       )
       cfg = config
       entries = [
@@ -1661,7 +1658,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         dir,
         policy: snapshot_policy("issue_filing" => true),
         dispositions: dispositions(
-          flagged: [ disposition(item, reasons: [ "cross_feature_impact" ]) ]
+          discuss: [ disposition(item, reasons: [ "cross_feature_impact" ]) ]
         )
       )
       family_id = Hive::RefactorPatrol::SemanticFamily.id_for(
@@ -1724,7 +1721,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         dir,
         policy: snapshot_policy("issue_filing" => true),
         dispositions: dispositions(
-          flagged: [ disposition(flagged, reasons: [ "cross_feature_impact" ]) ]
+          discuss: [ disposition(flagged, reasons: [ "cross_feature_impact" ]) ]
         )
       )
       cfg = config
@@ -1781,8 +1778,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         dir,
         policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
         dispositions: dispositions(
-          accepted: [ disposition(untouched) ],
-          flagged: [ disposition(continued, reasons: [ "cross_feature_impact" ]) ]
+          fix: [ disposition(untouched) ],
+          discuss: [ disposition(continued, reasons: [ "cross_feature_impact" ]) ]
         )
       )
       family_id = Hive::RefactorPatrol::SemanticFamily.id_for(
@@ -1836,7 +1833,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "first", fingerprint: "shared-fp")) ])
+        dispositions: dispositions(fix: [ disposition(thesis(id: "first", fingerprint: "shared-fp")) ])
       )
       first = build_runner(
         dir, store: store,
@@ -1848,7 +1845,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         dir,
         job_id: "job-2",
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "second", fingerprint: "shared-fp")) ])
+        dispositions: dispositions(fix: [ disposition(thesis(id: "second", fingerprint: "shared-fp")) ])
       )
       fixer = FakeFixer.new(validated_patch)
       opener = FakePrOpener.new(pr_result)
@@ -1875,7 +1872,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         policy: snapshot_policy("auto_fix" => true),
         dispositions:
           dispositions(
-            accepted: [ disposition(first_thesis) ]
+            fix: [ disposition(first_thesis) ]
           )
       )
       owner = store.initialize_actions!(
@@ -1893,7 +1890,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         policy: snapshot_policy("auto_fix" => true),
         dispositions:
           dispositions(
-            accepted: [ disposition(second_thesis) ]
+            fix: [ disposition(second_thesis) ]
           )
       )
       store.initialize_actions!(
@@ -1940,7 +1937,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       initialized = store.initialize_actions!(
         "job-1", specifications: [ { "thesis_id" => item.id, "kind" => "fix" } ],
@@ -1971,7 +1968,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         dir,
         policy: snapshot_policy("issue_filing" => true),
         dispositions: dispositions(
-          flagged: [ disposition(
+          discuss: [ disposition(
             thesis(id: "dry-issue", flags: [ "dependency_change" ]),
             reasons: [ "dependency_change" ]
           ) ]
@@ -2006,8 +2003,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         repo,
         policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
         dispositions: dispositions(
-          accepted: [ disposition(accepted) ],
-          flagged: [ disposition(flagged, reasons: [ "cross_feature_impact" ]) ]
+          fix: [ disposition(accepted) ],
+          discuss: [ disposition(flagged, reasons: [ "cross_feature_impact" ]) ]
         )
       )
       fixer = FakeFixer.new(validated_patch(fingerprint: accepted.fingerprint))
@@ -2033,7 +2030,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "dry-resume")) ])
+        dispositions: dispositions(fix: [ disposition(thesis(id: "dry-resume")) ])
       )
       store.initialize_actions!(
         "job-1",
@@ -2063,7 +2060,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         dir,
         policy: snapshot_policy("issue_filing" => true),
         dispositions: dispositions(
-          flagged: [ disposition(
+          discuss: [ disposition(
             thesis(id: "paused", flags: [ "dependency_change" ]),
             reasons: [ "dependency_change" ]
           ) ]
@@ -2113,7 +2110,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         dir,
         policy: snapshot_policy("issue_filing" => true),
         dispositions: dispositions(
-          flagged: [ disposition(
+          discuss: [ disposition(
             thesis(id: "ambiguous", flags: [ "cross_feature_impact" ]),
             reasons: [ "cross_feature_impact" ]
           ) ]
@@ -2148,7 +2145,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       old_store = write_classified_job(
         old_root,
         policy: policy,
-        dispositions: dispositions(accepted: [ disposition(item) ]),
+        dispositions: dispositions(fix: [ disposition(item) ]),
         registration: "old",
         project: entries.fetch(0)
       )
@@ -2168,7 +2165,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         new_root,
         job_id: "job-2",
         policy: policy,
-        dispositions: dispositions(accepted: [ disposition(item) ]),
+        dispositions: dispositions(fix: [ disposition(item) ]),
         registration: "new",
         project: entries.fetch(1)
       )
@@ -2215,7 +2212,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       )
       policy = snapshot_policy("issue_filing" => true)
       classified = dispositions(
-        flagged: [ disposition(item, reasons: [ "cross_feature_impact" ]) ]
+        discuss: [ disposition(item, reasons: [ "cross_feature_impact" ]) ]
       )
       entries = [
         registered_entry("old", old_root),
@@ -2278,7 +2275,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       catalog = LateProofCatalog.new(proof_after: 3) do |action_id|
         terminal_proof(
@@ -2329,7 +2326,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       catalog = LateProofCatalog.new(proof_after: 2) do |action_id|
         terminal_proof(
@@ -2367,7 +2364,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       calls = 0
       catalog = Object.new
@@ -2412,7 +2409,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       catalog = Object.new
       catalog.define_singleton_method(:resolve) { |**| {} }
@@ -2468,7 +2465,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "accepted")) ])
+        dispositions: dispositions(fix: [ disposition(thesis(id: "fix")) ])
       )
       ownership = Object.new
       ownership.define_singleton_method(:call) do |**|
@@ -2490,7 +2487,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "accepted")) ])
+        dispositions: dispositions(fix: [ disposition(thesis(id: "fix")) ])
       )
       reads = 0
       gate_reader = lambda do
@@ -2511,7 +2508,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("issue_filing" => true),
-        dispositions: dispositions(flagged: [
+        dispositions: dispositions(discuss: [
           disposition(thesis(id: "issue", flags: [ "cross_feature_impact" ]),
                       reasons: [ "cross_feature_impact" ])
         ])
@@ -2532,239 +2529,21 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     with_tmp_dir do |dir|
       store = write_classified_job(
         dir, policy: snapshot_policy,
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "accepted")) ])
+        dispositions: dispositions(fix: [ disposition(thesis(id: "fix")) ])
       )
       runner = build_runner(dir, store: store)
       aggregate = store.read_job("job-1")
 
       missing = JSON.parse(JSON.generate(aggregate))
-      missing.dig("dispositions", "accepted", 0).delete("thesis")
+      missing.dig("dispositions", "fix", 0).delete("thesis")
       _entries, errors = runner.send(:reconstruct_entries, missing)
       assert_equal "invalid_thesis_snapshot", errors.first.fetch("outcome")
       assert_includes errors.first.fetch("error"), "missing immutable"
 
       malformed = JSON.parse(JSON.generate(aggregate))
-      malformed.dig("dispositions", "accepted", 0, "thesis").delete("problem")
+      malformed.dig("dispositions", "fix", 0, "thesis").delete("problem")
       _entries, errors = runner.send(:reconstruct_entries, malformed)
       assert_equal "invalid_thesis_snapshot", errors.first.fetch("outcome")
-    end
-  end
-
-  def test_snapshot_reconstruction_promotes_legacy_size_only_findings
-    with_tmp_dir do |dir|
-      item = thesis(
-        id: "formerly-oversized", fingerprint: "fp-formerly-oversized",
-        flags: [ "exceeds_max_files", "exceeds_max_diff_lines" ]
-      )
-      stored = disposition(
-        item, reasons: [ "exceeds_max_files", "exceeds_max_diff_lines" ]
-      )
-      store = write_classified_job(
-        dir, policy: snapshot_policy,
-        dispositions: dispositions(flagged: [ stored ])
-      )
-
-      entries, errors = build_runner(dir, store: store).send(
-        :reconstruct_entries, store.read_job("job-1")
-      )
-
-      assert_empty errors
-      assert_empty entries.fetch("flagged")
-      recovered = entries.fetch("accepted").fetch(0)
-      assert_equal "accepted", recovered.fetch(:disposition)
-      assert_empty recovered.dig(:item, "reasons")
-      assert_empty recovered.fetch(:thesis).risk.fetch("flags")
-
-      guarded = thesis(
-        id: "still-guarded", fingerprint: "fp-still-guarded",
-        flags: [ "exceeds_max_files", "public_api_impact" ]
-      )
-      aggregate = store.read_job("job-1")
-      aggregate.fetch("dispositions").fetch("flagged") << disposition(
-        guarded, reasons: [ "exceeds_max_files", "public_api_impact" ]
-      )
-      entries, errors = build_runner(dir, store: store).send(:reconstruct_entries, aggregate)
-
-      assert_empty errors
-      assert_equal [ "public_api_impact" ], entries.fetch("flagged").fetch(0).dig(:item, "reasons")
-      assert_equal [ "public_api_impact" ], entries.fetch("flagged").fetch(0).fetch(:thesis).risk.fetch("flags")
-    end
-  end
-
-  def test_runs_fix_for_persisted_legacy_size_only_flagged_job
-    with_tmp_dir do |dir|
-      item = thesis(
-        id: "legacy-size-fix", fingerprint: "fp-legacy-size-fix",
-        flags: [ "exceeds_max_files", "exceeds_max_diff_lines" ]
-      )
-      stored = disposition(
-        item, reasons: [ "exceeds_max_files", "exceeds_max_diff_lines" ]
-      )
-      store = write_classified_job(
-        dir,
-        policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(flagged: [ stored ])
-      )
-      fixer = FakeFixer.new(fix_result("no_diff", terminal: true))
-
-      result = build_runner(dir, store: store, fixer: fixer).run(job_id: "job-1")
-
-      assert result.complete?
-      assert_equal 1, fixer.calls.size
-      assert_equal "no_diff", result.actions.fetch(0).fetch("outcome")
-      assert_equal "fix", result.actions.fetch(0).fetch("kind")
-      assert_equal [ "exceeds_max_files", "exceeds_max_diff_lines" ],
-                   result.aggregate.dig("dispositions", "flagged", 0, "reasons")
-    end
-  end
-
-  def test_does_not_run_fix_when_legacy_size_row_or_thesis_is_inadmissible
-    with_tmp_dir do |dir|
-      %w[item thesis].each do |inadmissible_source|
-        root = File.join(dir, inadmissible_source)
-        item = thesis(
-          id: "inadmissible-#{inadmissible_source}",
-          fingerprint: "fp-inadmissible-#{inadmissible_source}",
-          flags: [ "exceeds_max_files" ]
-        )
-        stored = disposition(item, reasons: [ "exceeds_max_files" ])
-        if inadmissible_source == "item"
-          stored["admissible"] = false
-        else
-          stored.fetch("thesis")["admissible"] = false
-        end
-        store = write_classified_job(
-          root,
-          policy: snapshot_policy("auto_fix" => true),
-          dispositions: dispositions(flagged: [ stored ])
-        )
-        fixer = FakeFixer.new(fix_result("no_diff", terminal: true))
-
-        result = build_runner(root, store: store, fixer: fixer).run(job_id: "job-1")
-
-        assert result.complete?, inadmissible_source
-        assert_empty result.actions, inadmissible_source
-        assert_empty fixer.calls, inadmissible_source
-        assert_equal [ "exceeds_max_files" ],
-                     result.aggregate.dig("dispositions", "flagged", 0, "reasons")
-      end
-    end
-  end
-
-  def test_reconciles_initialized_legacy_size_issue_with_remote_intent
-    with_tmp_dir do |dir|
-      item = thesis(
-        id: "legacy-size-issue", fingerprint: "fp-legacy-size-issue",
-        flags: [ "exceeds_max_files" ]
-      )
-      stored = disposition(item, reasons: [ "exceeds_max_files" ])
-      store = write_classified_job(
-        dir,
-        policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
-        dispositions: dispositions(flagged: [ stored ])
-      )
-      family_id = Hive::RefactorPatrol::SemanticFamily.id_for(
-        Hive::RefactorPatrol::SemanticDescriptor.call(thesis: item, source: source(7))
-      )
-      initialized = store.initialize_actions!(
-        "job-1",
-        specifications: [
-          { "thesis_id" => item.id, "kind" => "issue", "family_id" => family_id }
-        ],
-        now: T0
-      )
-      action = initialized.fetch("actions").fetch(0)
-      token = store.claim_action!(
-        "job-1", action.fetch("canonical_action_id"), owner: "legacy-runner", now: T0
-      )
-      store.record_creation_intent!(
-        token,
-        intent: Hive::RefactorPatrol::IssueFiler.create_intent_payload(
-          canonical_action_id: action.fetch("canonical_action_id"),
-          repository: source(7).fetch("repository"),
-          family_id: family_id,
-          thesis_fingerprint: item.fingerprint
-        ),
-        now: T0
-      )
-      store.release_action!(
-        token, outcome: "remote_outcome_unknown", now: T0, backoff_sec: 0
-      )
-      filer = FakeIssueFiler.new(issue_result)
-
-      result = build_runner(dir, store: store, issue_filer: filer).run(job_id: "job-1")
-
-      assert result.complete?
-      assert_equal "issue_created", result.actions.fetch(0).fetch("outcome")
-      assert_equal 1, filer.calls.size
-      assert_equal true, filer.calls.fetch(0).fetch(:creation_attempted)
-    end
-  end
-
-  def test_reconciles_initialized_legacy_size_issue_from_outcome_only_evidence
-    with_tmp_dir do |dir|
-      item = thesis(
-        id: "legacy-size-outcome", fingerprint: "fp-legacy-size-outcome",
-        flags: [ "exceeds_max_files" ]
-      )
-      store = write_classified_job(
-        dir,
-        policy: snapshot_policy("auto_fix" => true, "issue_filing" => true),
-        dispositions: dispositions(flagged: [
-          disposition(item, reasons: [ "exceeds_max_files" ])
-        ])
-      )
-      family_id = Hive::RefactorPatrol::SemanticFamily.id_for(
-        Hive::RefactorPatrol::SemanticDescriptor.call(thesis: item, source: source(7))
-      )
-      initialized = store.initialize_actions!(
-        "job-1",
-        specifications: [
-          { "thesis_id" => item.id, "kind" => "issue", "family_id" => family_id }
-        ],
-        now: T0
-      )
-      action = initialized.fetch("actions").fetch(0)
-      token = store.claim_action!(
-        "job-1", action.fetch("canonical_action_id"), owner: "legacy-runner", now: T0
-      )
-      store.release_action!(
-        token, outcome: "remote_outcome_unknown", now: T0, backoff_sec: 0
-      )
-      issue_url = "https://github.com/acme/polyglot/issues/99"
-      filer = FakeIssueFiler.new(
-        Hive::RefactorPatrol::IssueFiler::Result.new(
-          outcome: "issue_linked_open", terminal: true, issue_url: issue_url,
-          receipts: { "issue_url" => issue_url }
-        )
-      )
-
-      result = build_runner(dir, store: store, issue_filer: filer).run(job_id: "job-1")
-
-      assert result.complete?
-      assert_equal "issue_linked_open", result.actions.fetch(0).fetch("outcome")
-      assert_equal true, filer.calls.fetch(0).fetch(:creation_attempted)
-    end
-  end
-
-  def test_reconstructs_persisted_legacy_size_row_with_nil_risk
-    with_tmp_dir do |dir|
-      item = thesis(id: "legacy-nil-risk", fingerprint: "fp-legacy-nil-risk")
-      stored = disposition(item, reasons: [ "exceeds_max_files" ])
-      stored.fetch("thesis")["risk"] = nil
-      store = write_classified_job(
-        dir,
-        policy: snapshot_policy,
-        dispositions: dispositions(flagged: [ stored ])
-      )
-
-      entries, errors = build_runner(dir, store: store).send(
-        :reconstruct_entries, store.read_job("job-1")
-      )
-
-      assert_empty errors
-      assert_empty entries.fetch("flagged")
-      assert_equal({ "flags" => [] }, entries.fetch("accepted").fetch(0).fetch(:thesis).risk)
     end
   end
 
@@ -2795,15 +2574,17 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store = write_classified_job(
         dir,
         policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ disposition(thesis(id: "accepted")) ])
+        dispositions: dispositions(fix: [
+          disposition(thesis(id: "owner", fingerprint: "fp-accepted"))
+        ])
       )
       store.initialize_actions!(
-        "job-1", specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ], now: T0
+        "job-1", specifications: [ { "thesis_id" => "owner", "kind" => "fix" } ], now: T0
       )
       second_item = disposition(thesis(id: "accepted-2", fingerprint: "fp-accepted"))
       write_classified_job(
         dir, job_id: "job-2", policy: snapshot_policy("auto_fix" => true),
-        dispositions: dispositions(accepted: [ second_item ])
+        dispositions: dispositions(fix: [ second_item ])
       )
       linked = store.initialize_actions!(
         "job-2", specifications: [ { "thesis_id" => "accepted-2", "kind" => "fix" } ], now: T0
@@ -2851,7 +2632,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
                    runner.instance_variable_get(:@events).first.fetch("outcome")
 
       item = thesis(id: "present")
-      entry = { disposition: "accepted", item: disposition(item), thesis: item }
+      entry = { disposition: "fix", item: disposition(item), thesis: item }
       action = action.merge("thesis_id" => "present")
       aggregate["actions"] = [ action ]
       calls = 0
@@ -2900,11 +2681,11 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       token = { job_id: "job-1", canonical_action_id: "fix-action", continuation_only: false }
       aggregate = { "job_id" => "job-1", "analysis_sha" => "c" * 40, "source" => source(7) }
       action = {
-        "canonical_action_id" => "fix-action", "thesis_id" => "accepted",
+        "canonical_action_id" => "fix-action", "thesis_id" => "fix",
         "thesis_fingerprint" => "fp-accepted", "kind" => "fix",
         "family_id" => nil, "receipts" => {}, "owner_job_id" => "job-1"
       }
-      item = thesis(id: "accepted", fingerprint: "fp-accepted")
+      item = thesis(id: "fix", fingerprint: "fp-accepted")
 
       runner.define_singleton_method(:patch_from_receipts) { |*| :invalid }
       runner.send(:process_fix, token, aggregate, action, item)
@@ -2945,14 +2726,14 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         "actions" => [ action.merge("terminal" => true, "outcome" => "failed") ]
       }
       route = runner.send(:issue_route, no_family, issue_action.except("family_id"),
-                          { thesis: item, disposition: "accepted", item: {} })
+                          { thesis: item, disposition: "fix", item: {} })
       assert_nil route.fetch(:outcome)
       assert_equal "failed", route.fetch(:reasons).first
       route = runner.send(
         :issue_route,
         { "actions" => [], "policy" => snapshot_policy("auto_fix" => false) },
         issue_action,
-        { thesis: item, disposition: "accepted", item: {} }
+        { thesis: item, disposition: "fix", item: {} }
       )
       assert_nil route.fetch(:outcome)
       assert_equal [ "auto_fix_disabled" ], route.fetch(:reasons)
@@ -2960,7 +2741,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
                    runner.send(:issue_route,
                                { "actions" => [], "policy" => snapshot_policy("auto_fix" => true) },
                                issue_action,
-                               { thesis: item, disposition: "accepted", item: {} }).fetch(:outcome)
+                               { thesis: item, disposition: "fix", item: {} }).fetch(:outcome)
 
       runner.define_singleton_method(:claim_action) { |*| token }
       runner.define_singleton_method(:effect_authorized?) { |*| false }
@@ -2980,7 +2761,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       runner = build_runner(
         dir, store: Hive::RefactorPatrol::JobStore.new(dir), cfg: current_cfg
       )
-      item = thesis(id: "accepted", fingerprint: "fp-accepted")
+      item = thesis(id: "fix", fingerprint: "fp-accepted")
       patch = validated_patch(fingerprint: item.fingerprint)
       patch.changed_paths = [ "src/orders/service.ts" ]
       policy = snapshot_policy
@@ -3149,7 +2930,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         "receipts" => { Hive::RefactorPatrol::PublicationAttempt::ATTEMPTS_KEY => [] }
       )
       assert_equal :invalid, runner.send(
-        :patch_from_receipts, malformed_patch_history, aggregate, thesis(id: "accepted")
+        :patch_from_receipts, malformed_patch_history, aggregate, thesis(id: "fix")
       )
 
       %w[push_branch create_pr].each do |operation|
@@ -3209,11 +2990,11 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
 
   def test_run_rejects_an_effect_occurrence_from_another_dispatch
     with_tmp_dir do |dir|
-      item = thesis(id: "accepted")
+      item = thesis(id: "fix")
       store = write_classified_job(
         dir,
         policy: snapshot_policy,
-        dispositions: dispositions(accepted: [ disposition(item) ])
+        dispositions: dispositions(fix: [ disposition(item) ])
       )
       runner = build_runner(dir, store: store)
       runner.instance_variable_set(
@@ -3891,7 +3672,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         "enabled" => discovery,
         "min_confidence" => "medium",
         "auto_fix" => { "enabled" => auto_fix, "agent" => "codex" },
-        "issue_filing" => { "enabled" => issue_filing, "min_leverage_score" => 0.5 },
+        "issue_filing" => { "enabled" => issue_filing },
         "commands" => {
           "docs" => nil, "format" => nil, "lint" => nil, "public_contract" => nil,
           "typecheck" => nil, "test" => "bin/test"
@@ -3906,8 +3687,10 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     }
   end
 
-  def dispositions(accepted: [], flagged: [], suppressed: [])
-    { "accepted" => accepted, "flagged" => flagged, "suppressed" => suppressed }
+  def dispositions(fix: [], discuss: [], dismiss: [])
+    { "fix" => fix, "discuss" => discuss, "dismiss" => dismiss }.to_h do |route, items|
+      [ route, items.map { |item| item.merge("route" => route) } ]
+    end
   end
 
   def disposition(item, reasons: [])
@@ -3915,7 +3698,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       "id" => item.id,
       "feature_id" => item.feature_id,
       "fingerprint" => item.fingerprint,
-      "score" => item.expected_leverage.fetch("score"),
+      "route" => item.effective_route(min_confidence: "medium"),
       "admissible" => item.admissible,
       "reasons" => reasons,
       "thesis" => item.to_h
@@ -3935,13 +3718,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       end,
       proposed_refactor: "Consolidate checkout validation policy behind one decision",
       feature_boundary: { "owned_files" => files, "entrypoints" => [ files.first ] },
-      feature_hotspot: {},
-      expected_leverage: {
-        "score" => 0.8,
-        "drivers" => [
-          { "signal" => "coupling", "relief" => 0.5, "mechanism" => "Centralize checkout policy" }
-        ]
-      },
+      route: flags.empty? ? "fix" : "discuss",
+      architecture_effects: [ "Centralize checkout policy" ],
       confidence: "high",
       risk: { "flags" => flags, "advisories" => [] },
       required_validation: { "commands" => [ "test" ] },

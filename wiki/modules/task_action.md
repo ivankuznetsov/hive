@@ -21,6 +21,11 @@ action.diagnostic  # bounded diagnostic payload for recover_review / recover_exe
 action.payload     # { "key", "label", "command", "next_action" } for JSON emission
 ```
 
+Status dispatch adapters share the classifier's derived
+`TaskAction::READY_COMMANDS` lookup. The bot exposes every ready command,
+including in-process `approve`; the web exposes only commands accepted by the
+daemon dispatch-request queue.
+
 ## Red-status diagnostic (`#diagnostic`)
 
 `#diagnostic` returns a Hash matching the `Diagnostic` shape under both the current `hive-status` contract (`tasks[].diagnostic`) and `hive-status-diagnose.v2` (`SuccessPayload.diagnostic`). It is non-nil for exactly three action keys: `recover_review`, `recover_execute`, and `error` (see `#diagnostic_action?`). Every other row returns `nil`.

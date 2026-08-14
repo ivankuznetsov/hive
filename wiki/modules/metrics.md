@@ -64,7 +64,8 @@ Two equally-valid forms count as a revert:
 
 ## Used by
 
-- `Hive::Commands::Metrics` — surfaces text + JSON output.
+- `Hive::Commands::Metrics` — surfaces text + JSON output and uses the shared
+  envelope emitter with a metrics-specific narrow v1 error payload.
 - `templates/fix_prompt.md.erb` / `templates/ci_fix_prompt.md.erb` — emit trailers (one direction).
 - `lib/hive/stages/review.rb` — passes `triage_bias_for` / `reviewer_sources_for` into the fix prompt bindings so trailers land on every fix commit.
 

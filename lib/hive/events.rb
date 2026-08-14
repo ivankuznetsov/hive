@@ -3,6 +3,7 @@ require "json"
 require "securerandom"
 require "time"
 require "hive/task_journal/envelope"
+require "hive/secret_patterns"
 
 module Hive
   module Events
@@ -34,6 +35,8 @@ module Hive
     # so concurrent emitters cannot interleave bytes within a record.
     MAX_MESSAGE_BYTES = 1024
     MESSAGE_TRUNCATION_SUFFIX = "…[truncated]".freeze
+    MAX_EVENT_PATHS = 20
+    MAX_EVENT_PATH_BYTES = 128
 
     EM_DASH = "—".freeze
 
@@ -49,7 +52,7 @@ module Hive
     # Authoritative condition records use task-journal.jsonl instead, keeping
     # this legacy telemetry contract homogeneous. status.md is derived state
     # and is rewritten with atomic rename.
-    def emit(task_folder:, slug:, stage:, event_type:, agent: nil, message: nil)
+    def emit(task_folder:, slug:, stage:, event_type:, agent: nil, message: nil, data: nil)
       event_type = event_type.to_sym
       unless EVENT_TYPES.include?(event_type)
         raise ArgumentError, "unknown event_type #{event_type.inspect}; valid: #{EVENT_TYPES.inspect}"
@@ -60,7 +63,8 @@ module Hive
         stage: stage,
         agent: agent,
         event_type: event_type,
-        message: message.nil? ? nil : truncate_message(message.to_s)
+        message: message.nil? ? nil : truncate_message(message.to_s),
+        data: data
       )
 
       FileUtils.mkdir_p(task_folder)
@@ -88,6 +92,22 @@ module Hive
       trimmed = message.byteslice(0, budget).to_s
       trimmed.scrub!("")
       "#{trimmed}#{MESSAGE_TRUNCATION_SUFFIX}"
+    end
+
+    def clean_exit_data(head:, reason:, paths:)
+      paths = Array(paths).map(&:to_s)
+      {
+        head: head, reason: reason,
+        paths: clean_exit_paths(paths),
+        path_count: paths.length
+      }
+    end
+
+    def clean_exit_paths(paths)
+      Array(paths).first(MAX_EVENT_PATHS).map do |path|
+        bounded = path.to_s.byteslice(0, MAX_EVENT_PATH_BYTES).to_s.scrub("").gsub(/[\u0000-\u001f\u007f]/, "?")
+        Hive::SecretPatterns.redact(bounded)
+      end
     end
 
     def render_status!(task_folder, last_record)
@@ -137,6 +157,51 @@ module Hive
         end
       end
       open_agents.last
+    end
+
+    # Summarize CleanExit residue commits from the current stage invocation.
+    # A stage_enter starts a new run; before the next one arrives, the summary
+    # remains visible to status, the TUI, and the bot. Legacy events without
+    # structured data still count and expose their best-effort head/path list.
+    def clean_exit_summary(task_folder)
+      events = read_recent_events(
+        File.join(task_folder, "events.jsonl"), CURRENT_AGENT_WALK_LINES
+      )
+      run_start = events.rindex { |event| event["event_type"] == "stage_enter" }
+      events = events.drop(run_start) if run_start
+      commits = events.select { |event| event["event_type"] == "clean_exit_auto_committed" }
+      return nil if commits.empty?
+
+      details = commits.map { |event| clean_exit_event_details(event) }
+      paths = details.flat_map { |detail| detail.fetch("paths") }.uniq
+      latest = details.last
+      {
+        "commits" => commits.length,
+        "path_count" => details.sum { |detail| detail.fetch("path_count") },
+        "paths" => paths.first(MAX_EVENT_PATHS),
+        "latest_head" => latest["head"],
+        "latest_reason" => latest["reason"],
+        "latest_at" => commits.last["ts"]
+      }
+    rescue SystemCallError
+      nil
+    end
+
+    def clean_exit_event_details(event)
+      data = event["data"].is_a?(Hash) ? event["data"] : {}
+      paths = Array(data["paths"]).map(&:to_s).reject(&:empty?)
+      if paths.empty?
+        legacy_paths = event["message"].to_s[/\bpaths=(.*)\z/, 1]
+        paths = legacy_paths.to_s.split(",").reject(&:empty?)
+      end
+      path_count = data["path_count"].to_i
+      path_count = paths.length unless path_count.positive?
+      {
+        "head" => data["head"] || event["message"].to_s[/\bhead=([^\s]+)/, 1],
+        "reason" => data["reason"] || event["message"].to_s[/\breason=([^\s]+)/, 1] || "stage_exit",
+        "paths" => paths,
+        "path_count" => path_count
+      }
     end
 
     # Read up to `limit` trailing events without materializing the whole

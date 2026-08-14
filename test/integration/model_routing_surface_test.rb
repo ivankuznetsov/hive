@@ -11,7 +11,6 @@ class ModelRoutingSurfaceTest < Minitest::Test
   ROUTE_LAUNCH_SOURCES = {
     "brainstorm" => %w[
       lib/hive/stages/brainstorm.rb
-      lib/hive/stages/brainstorm_tmux.rb
     ],
     "plan" => %w[lib/hive/stages/plan.rb],
     "plan_review_adversarial" => %w[lib/hive/plan_review/route_resolver.rb],

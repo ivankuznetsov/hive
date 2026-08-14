@@ -3,9 +3,18 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-12
+updated: 2026-08-14
 tags: [gap, todo, release-proof, agent-skills, plan-review]
 ---
+
+## Patrol v4 needs installed fleet dogfood (2026-08-14)
+
+Focused tests prove scoreless route normalization, fresh v4 JobStore isolation,
+automatic retired-config removal, and the single per-agent runaway fuse. This
+change has not yet been installed over the registered project fleet or observed
+through a real Architecture Patrol discovery, `fix` PR, `discuss` issue, and
+token-limit retry. Retain those four live receipts after merge before treating
+the operational migration as release-proven.
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
@@ -180,6 +189,11 @@ stable class and scope.
   `Hive::Markers.set`; an installed-daemon retry still needs to prove the fix
   live. A separate campaign-specific Hive project is no longer an intended
   validation target. Honeycomb is not a dependency of this named-workflow path.
+  The DeepSeek and Grok expansion then reproduced a second false-success path:
+  a provider process returned while Hive's pre-spawn `AGENT_WORKING` marker
+  remained current. Source tests now rewrite that state to a recoverable
+  `ERROR reason=agent_exited_without_terminal_marker`; a post-merge retry on the
+  shared current-main Hive deployment remains the required live proof.
 - The packaged mixed Sol/Terra/Grok and Opus/Fable profiles, provider-neutral
   model routes, explicit reviewer identities, and combined Sol-runner selection
   are locally test-pinned; the Opus/Fable profiles now have one paid end-to-end
@@ -1086,3 +1100,52 @@ candidate and retains its sanitized receipt, native route/model/effort and
 real-provider JSON-file behavior remain source/offline-test evidence rather
 than an authenticated live claim. The default runtime still fails mandatory
 coverage closed when that capability is unavailable.
+
+## Outcome evidence needs one fully accepted live package (2026-08-14)
+
+A read-only retrospective ran the completed conditional-plan-critique task at
+source `48223ab9c2fab1b9c8716d759da6eea968d3fb7e` over its reconstructed exact
+159-path implementation range. Inference produced four outcome claims with the
+appropriate video, screenshot, and terminal proof kinds, plus two supporting
+documentation/test exclusions. Three fresh reviewer passes accepted both
+exclusions but rejected every behavior claim: the producer repeatedly supplied
+fixture-like summaries, selected test output, terminal-styled composites, or
+curated commandless output instead of real product surfaces and transitions.
+The controller exhausted its two recaptures and published a semantic blocked
+package rather than accepting the historical synthetic Hivebox screenshot and
+two-second board-to-task video.
+
+This proves the fail-closed reviewer and bounded-recapture path against the
+historical bad-evidence class.
+
+Latest refresh (2026-08-14): Hive now ships one preflighted capture toolkit:
+pinned native agent-browser plus managed Chrome for Web, a native Ruby PTY
+recorder for terminal/TUI, and ffmpeg/ffprobe/Tesseract admission. Mechanical
+source identity, sizes, hashes, and reviewer hash inventory moved into the
+controller, and missing claim proof can be retained as `revise` instead of
+collapsing into an undurable StoreError. Focused tests, a native terminal CLI
+smoke, and a real 0.34.0 agent-browser bootstrap/managed-Chrome launch produced
+and decoded a PNG/WebM locally. A second exact-range retrospective then inferred
+three grouped claims. Its actual Hive Web coverage-blocked task screenshot was
+independently accepted: it showed review identity, failed/unsupported coverage,
+reviewer routes, audit receipts, state-valid waiver/downgrade controls, and no
+execution action. Both terminal claims remained `revise` because their casts
+summarized probes rather than driving critique, planner revision, verification,
+real cross-surface actions, and stale-token denial. After three attempts Hive
+published `blocked` with those exact reasons; it did not discard the accepted
+Web proof or overstate package completion. The run also exposed and fixed
+keep-alive Host rewriting and raw browser-daemon output custody. The prewarmed
+multi-architecture Hivebox image remains a CI merge gate and was not built
+locally. Keep this gap open until a current task publishes a fully accepted
+package from genuine Web/CLI/TUI or document behavior without weakening the
+reviewer contract.
+
+The 2026-08-14 review hardening replaced the producer-visible gateway socket
+with a bounded controller mailbox, enabled Codex's managed limited network proxy
+with local binding but no domains, moved browser state outside the producer
+write root, and requires controller receipts for screenshot/video/terminal
+representations. Media sizes are checked before hashing/copying, and Hivebox
+package listing now validates immutable metadata without rerunning OCR/ffmpeg
+for every retained file; selected downloads still recheck exact size/digest.
+Focused tests pin these boundaries, but a fully accepted live provider package
+through the new mailbox/network configuration remains part of this open gap.

@@ -72,6 +72,13 @@ ignoring the choice during a workflow rebind. Older discovery-only configs do
 not inherit mutation authority; established projects opt in by writing
 `refactor_patrol.auto_fix.enabled: true` explicitly.
 
+On-demand Architecture Patrol can select one scope with `--feature`,
+`--entrypoint`, or `--path`. `--changed-since REF` is only a filter paired with
+one of those selectors; it does not run or boost a standalone full discovery.
+Ordinary incomplete or errored discovery retries after 60 seconds, while a
+structured `token_limit` or `turn_limit` result uses the same fixed one-hour
+runaway cooldown as action retries.
+
 Durable architecture-patrol jobs have a non-mutating inspection surface:
 
 ```bash
@@ -84,7 +91,7 @@ hive refactor-patrol my-project --show JOB_ID --full --json
 
 List/show reads the authoritative job ledger without enqueueing, claiming,
 replaying, or resuming work. JSON responses use
-`hive-refactor-patrol-jobs.v1`. List pages default to 100 jobs and expose an
+`hive-refactor-patrol-jobs.v2`. List pages default to 100 jobs and expose an
 opaque continuation cursor bound to the first page's immutable intake-sequence
 high-water, so later arrivals cannot change page membership. Show defaults to the latest 100 discovery attempts,
 action claims, and publication attempts per history; `--limit 1..100` narrows
@@ -110,7 +117,7 @@ returns every flat patch and supersession receipt.
 | `hive workflow install honeycomb/NAME[@REF]` | Verify and atomically select a reviewed package. |
 | `hive workflow list` | Show built-in, authored, selected, and retained workflows with integrity/provenance; JSON v2 includes the active managed configuration and redacted input availability. |
 | `hive workflow update NAME [--dry-run]` | Report a semantic/security diff and atomically advance after consent. |
-| `hive workflow remove NAME` | Disable a managed selection while retaining task-pinned generations. |
+| `hive workflow remove NAME` | Remove a managed selection after all owned tasks are finished, archived, or reset. |
 | `hive workflow publish ID --version X.Y.Z --dry-run --json` | Build, consumer-validate, and security-lint the immutable Honeycomb package without remote or receipt effects. |
 | `hive workflow publish ID --version X.Y.Z --expected-release-digest SHA256 --json` | Submit or reconcile the exact confirmed package through the schema-v2 lifecycle. |
 | `hive tree` | Print the Thor command tree. |
@@ -173,7 +180,7 @@ never prompts; without `--yes`, planned mutation returns 64.
 
 ## JSON Output
 
-Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`, `decide`), findings triage (`findings`, `accept-finding`, `reject-finding`), patrol (`patrol`), architecture-patrol job inspection (`refactor-patrol --list` / `--show`), diagnostics/setup (`status`, `setup`, `doctor`, `setup-agents`, `web status`, `web install`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), workflow lifecycle (`workflow new/validate/install/list/update/remove/publish`), `new`, `init`, and daemon control support `--json` where documented and emit typed envelopes. Native setup uses `hive-setup.v1`; web observation and installation use `hive-web-status.v1` and `hive-web-install.v1`. These contracts keep `mode`, effective `url`, compatibility `warnings`, and service installed/enabled/running/readiness distinct. `hive doctor --json` emits `hive-doctor.v2`; `hive setup-agents --json --yes` emits `hive-setup-agents.v1`, never prompts, and requires `--yes` whenever mutation is planned. Ordinary `hive init --json` emits `hive-init.v2`; minimal preview emits `hive-init-preview.v1` without mutation. Idempotent task capture emits `hive-new.v1`, human decisions emit `hive-decide.v1`, and read-only workflow validation emits `hive-workflow-validate.v1`. Architecture-patrol list/show emits `hive-refactor-patrol-jobs.v1`. Other workflow verbs emit a `hive-stage-action` envelope. Honeycomb install, list, and update use schema v2; remove remains v1; publish uses `hive-workflow-publish.v2` while retaining the v1 file for pinned readers. Non-TTY/JSON mutations require `--yes` where documented, and an escalating workflow update separately requires `--allow-escalation`. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; `version`, `tree`, and `migrate` remain text-only.
+Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`, `decide`), findings triage (`findings`, `accept-finding`, `reject-finding`), patrol (`patrol`), architecture-patrol job inspection (`refactor-patrol --list` / `--show`), diagnostics/setup (`status`, `setup`, `doctor`, `setup-agents`, `web status`, `web install`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), workflow lifecycle (`workflow new/validate/install/list/update/remove/publish`), `new`, `init`, and daemon control support `--json` where documented and emit typed envelopes. Native setup uses `hive-setup.v1`; web observation and installation use `hive-web-status.v1` and `hive-web-install.v1`. These contracts keep `mode`, effective `url`, compatibility `warnings`, and service installed/enabled/running/readiness distinct. `hive doctor --json` emits `hive-doctor.v2`; `hive setup-agents --json --yes` emits `hive-setup-agents.v1`, never prompts, and requires `--yes` whenever mutation is planned. Ordinary `hive init --json` emits `hive-init.v2`; minimal preview emits `hive-init-preview.v1` without mutation. Idempotent task capture emits `hive-new.v1`, human decisions emit `hive-decide.v1`, and read-only workflow validation emits `hive-workflow-validate.v1`. Architecture-patrol list/show emits `hive-refactor-patrol-jobs.v2`. Other workflow verbs emit a `hive-stage-action` envelope. Honeycomb install, list, and update use schema v2; remove remains v1; publish uses `hive-workflow-publish.v2` while retaining the v1 file for pinned readers. Non-TTY/JSON mutations require `--yes` where documented, and an escalating workflow update separately requires `--allow-escalation`. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; `version`, `tree`, and `migrate` remain text-only.
 
 ## Exit Codes
 

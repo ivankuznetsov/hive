@@ -1973,7 +1973,7 @@ module Hive
           @logger.event(
             :architecture_patrol_opened,
             project: project, job_id: reserved[:job_id], pr_number: reserved[:pr_number],
-            pr_url: reserved[:pr_url], accepted_count: 0, flagged_count: 0, suppressed_count: 0
+            pr_url: reserved[:pr_url], fix_count: 0, discuss_count: 0, dismiss_count: 0
           )
         end
         begin
@@ -2273,6 +2273,12 @@ module Hive
           return
         end
 
+        if req.recovery.nil? && durable_task_request?(req) &&
+           bound_task_request?(req) && !bound_task_request_current?(req)
+          reject_request(req, reason: "stale_task_identity")
+          return
+        end
+
         if req.recovery.is_a?(Hash)
           row = rows.find do |candidate|
             candidate.project.to_s == req.project.to_s &&
@@ -2548,6 +2554,41 @@ module Hive
       def durable_task_request?(req)
         req.project != Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_PROJECT &&
           !%w[markers daemon].include?(Array(req.argv)[1].to_s)
+      end
+
+      def bound_task_request?(request)
+        !request.task_generation.to_s.empty? || !request.task_id.to_s.empty? ||
+          !request.expected_stage.to_s.empty?
+      end
+
+      def bound_task_request_current?(request)
+        task = Hive::TaskResolver.new(
+          request.slug, project_filter: request.project
+        ).resolve
+        current_stage = "#{task.stage_index}-#{task.stage_name}"
+        return false if request.task_id.to_s.empty? || task.id.to_s.empty?
+        return false unless request.task_id.to_s == task.id.to_s
+        return false unless request.expected_stage.to_s == current_stage
+
+        intended_stage = request_intended_stage(request.argv, task)
+        generation = Hive::Attempts::Generation.resolve(
+          task: task,
+          project: request.project,
+          intended_stage: intended_stage,
+          attempt_store: @attempt_reconciler&.respond_to?(:store) ? @attempt_reconciler.store : nil
+        )
+        request.task_generation.to_s == generation.task_generation.to_s
+      rescue Hive::Error, SystemCallError, IOError
+        false
+      end
+
+      def request_intended_stage(argv, task)
+        verb = Array(argv)[1].to_s
+        return "#{task.stage_index}-#{task.stage_name}" if verb == "run"
+
+        Hive::Workflows.for_verb(verb).fetch(:target)
+      rescue KeyError, Hive::Error
+        "#{task.stage_index}-#{task.stage_name}"
       end
 
       def preclaim_dispatch_request(req, now:)

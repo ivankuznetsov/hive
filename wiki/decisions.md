@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-08-12
+updated: 2026-08-14
 tags: [decisions, adr, plan-review]
 ---
 
@@ -727,7 +727,7 @@ rather than interpreting the project as fresh.
 
 ## ADR-042: JobStore authority starts directly at v3
 
-**Status:** Active
+**Status:** Superseded by ADR-043
 
 **Context:** ADR-041's explicit reset/archive path was built for an unreleased
 compatibility boundary. It added a public command and schema, generation
@@ -755,6 +755,36 @@ operator recovery promise, but Hive also leaves their bytes untouched. Daemon
 status returns to its released v0.6.9 v1 shape without `job_store_resets`, while
 retaining later valid fields such as the `binary_drift: unreadable` state. This
 decision supersedes ADR-041.
+
+## ADR-043: Architecture Patrol uses categorical routes and one runaway fuse
+
+**Status:** Active
+
+**Context:** The v3 Architecture Patrol contract assigned numerical leverage
+scores and separate acceptance/issue thresholds, while Patrol admission mixed
+per-cycle, per-day, per-agent, launch-count, architecture, unmetered, multiplier,
+and USD-style limits. Useful findings around 0.10 were incorrectly presented as
+low-confidence work, and durable allowance exhaustion prevented normal
+discovery/action progress.
+
+**Decision:** Current Architecture Patrol output is v4 and every thesis has one
+explicit `fix`, `discuss`, or `dismiss` route plus categorical route reasons and
+`architecture_effects`. Verified, sufficiently confident, unblocked work may
+`fix`; strategic or safety decisions `discuss`; unverifiable or inadmissible
+work `dismiss`es. Numerical leverage and thresholds are deleted. Ordinary and
+Architecture Patrol share exactly one deliberately high
+`patrol.max_tokens_per_agent` emergency fuse and one project-wide agent lock;
+UsageDb is telemetry, not allowance. Architecture JobStore starts fresh at v4
+and never reads or rewrites v3. `hive update` runs fleet migration that deletes
+retired config keys before starting the current runtime.
+
+**Consequences:** Existing v3 JobStore bytes remain recoverable as files but
+have no runtime continuity. `discuss` creates an issue action; `fix` is PR-first
+with a dormant deterministic-nonfixable issue fallback; `dismiss` creates no
+action. Ordinary transient discovery retries after 60 seconds; structured
+`token_limit`/`turn_limit` discovery and action retries use one fixed hour.
+Wall-clock, turn, feature/fix/PR, process-custody, and daemon concurrency bounds
+remain. This decision supersedes ADR-042.
 
 ## ADR-032: Per-stage controls overlay the current durable identity
 

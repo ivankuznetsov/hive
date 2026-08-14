@@ -41,22 +41,6 @@ module RefactorPatrolThesisFixtures
     )
   end
 
-  # The measured leverage for one feature, as ThesisNormalizer consumes it.
-  # Reviewer tests key it by feature id via +leverage_by_feature+.
-  def feature_leverage
-    {
-      "scope" => "feature",
-      "score" => 0.8,
-      "breakdown" => { "churn" => 0.5, "fan_in" => 0.3 },
-      "signals" => { "churn" => 10, "fan_in" => 4 },
-      "normalized" => { "churn" => 1.0, "fan_in" => 0.2 }
-    }
-  end
-
-  def leverage_by_feature
-    { "checkout" => feature_leverage }
-  end
-
   def valid_raw_thesis
     {
       "feature" => "Checkout",
@@ -71,20 +55,11 @@ module RefactorPatrolThesisFixtures
         }
       ],
       "proposed_refactor" => "Extract payment orchestration behind a checkout boundary",
-      "expected_leverage" => {
-        "drivers" => [
-          {
-            "signal" => "churn",
-            "relief" => 0.5,
-            "mechanism" => "isolate payment edits from validation code"
-          },
-          {
-            "signal" => "fan_in",
-            "relief" => 0.5,
-            "mechanism" => "give callers one stable checkout boundary"
-          }
-        ]
-      },
+      "route" => "fix",
+      "architecture_effects" => [
+        "isolate payment edits from validation code",
+        "give callers one stable checkout boundary"
+      ],
       "confidence" => "medium",
       "risk" => {
         "caps" => { "single_feature" => true },

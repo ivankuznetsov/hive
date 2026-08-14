@@ -170,28 +170,21 @@ hive new <project> --workflow my-flow "<your idea>"
 
 ## Reviewed Honeycomb Packages
 
-Managed Honeycomb workflows now use the generalized project-local module
-lifecycle described in [modules.md](modules.md). Existing `hive workflow
-install|list|update|remove` flags, output schemas, locks, and task-pinned
-generations remain compatibility projections of one-workflow, hook-free
-modules; existing catalog entries and installed locks require no republish or
-manual migration. Use `hive module` for packages that also expose hooks,
-schedules, events, typed settings, and grants.
+Managed Honeycomb workflows are a separate, reviewed package origin and a
+one-workflow compatibility projection of Hive's generalized module lifecycle.
+Existing catalog entries and installed locks require no republish. Updates
+automatically migrate retained tasks to the selected generation.
+Use `hive module` for packages that add hooks, schedules, events, typed
+settings, or grants.
 
-Honeycomb packages are a separate, untrusted-by-default workflow origin. Hive
-consumes the official flat `honeycomb-catalog/v2` snapshot and accepts only
-`honeycomb/<name>[@<listed-version-or-full-source-revision>]`. Bare names select
-the highest listed/discoverable version; exact soft-hidden or yanked versions
-remain available; revoked versions fail closed with their advisory IDs.
-Branches, tags, abbreviated revisions, arbitrary repositories, and unlisted
-versions are rejected.
+Typical operator commands are:
 
 ```bash
 hive workflow install honeycomb/architecture --yes
 hive workflow install honeycomb/writing --yes
 hive workflow install honeycomb/seo-content --yes --allow-escalation
-hive workflow list
-hive workflow update architecture --dry-run
+hive workflow list --json
+hive workflow update architecture --dry-run --json
 hive workflow update architecture --yes
 hive workflow remove architecture --yes
 hive workflow publish my-flow --version 1.0.0 --dry-run --json
@@ -200,105 +193,23 @@ hive workflow publish my-flow --version 1.0.0 \
 ```
 
 Architecture and Writing previously existed as lightweight `workflow new`
-scaffold templates. Their full reviewed packages now own those names in
-Honeycomb; `--template architecture` and `--template writing` return the exact
-install command instead of creating a reduced local copy. The owner-authored
-samples that remain in Hive are `blank` and `research`.
+scaffold templates. Their full reviewed packages now own those names;
+`--template architecture` and `--template writing` return the corresponding
+install command. The owner-authored samples that remain are `blank` and
+`research`.
 
-Install clones one exact catalog snapshot, materializes
-`packages/<name>/<version>/` from that catalog commit (not from the review-head
-audit identity or upstream `source_sha`), and verifies canonical `manifest.yml`
-bytes, `release_sha256`, the complete Git tree, every payload hash, catalog to
-manifest metadata binding, static security findings, and runner capabilities
-before asking for confirmation. A managed selection is an atomic lock over an
-immutable catalog-commit generation:
+The command contract—including accepted source forms, mapping/input flags,
+consent UX, dry-run behavior, statuses, and JSON fields—is maintained in the
+[`hive workflow` command page](../wiki/commands/workflow.md). The managed
+[package module page](../wiki/modules/workflow_package.md) is authoritative for
+catalog/package trust, immutable identity, task pins, disclosure versus exact
+runtime enforcement, high-risk consent classification, and publication
+recovery. The generalized native-module lifecycle is documented in
+[modules.md](modules.md).
 
-Before consent, Hive shows an agent mapping for every stage, council reviewer,
-and reviser. Suggestions start from the project choices made by `hive init`.
-When one of those agents cannot enforce an actor's non-`yolo` tool scope, Hive
-suggests Claude for that slot instead so accepting all defaults remains
-runnable. An explicit mapping is never rewritten: an incompatible explicit
-choice fails runtime admission before project state changes.
-
-```text
-.hive-state/workflows/<name>/honeycomb.lock.json
-.hive-state/workflows/<name>/versions/<catalog-commit>/
-```
-
-New tasks pin the catalog commit and release digest in `meta.yml`. Updating or
-removing the project selection therefore affects only new tasks; generations
-still referenced by existing tasks remain verifiable and runnable. Tampering
-is an integrity error, never an implicit local override.
-
-Lifecycle mutations recheck the selected source commit and manifest digest
-inside the workflow mutation lock. A first install likewise verifies that no
-selection appeared after validation. If another operator changes the selection
-between preview and apply, Hive stops with a retryable conflict instead of
-installing, updating, or removing a generation the caller did not review.
-
-`workflow update --dry-run` validates and returns descriptor, instruction,
-manifest, dependency, permission, command, domain, and file changes without
-writing project state. An applied update always needs ordinary confirmation.
-Capability additions, removed deny rules, dependency additions, or
-incomparable dependency changes additionally require a separate
-`--allow-escalation`; neither consent flag implies the other.
-
-`workflow list --json` schema v2 keeps origin, selection, integrity, and
-catalog visibility as orthogonal fields. A verified selected row also reports
-its active configuration digest, every stable-slot agent/model/effort mapping,
-and optional-input environment binding plus current availability. Values are
-never read into the document. A task-retained row carries its configuration
-digest when the task metadata has one, but does not present that historical
-snapshot as the active mapping. Owner-authored and built-in rows retain their
-generation-free shape. `workflow remove` operates only on Hive-managed locks
-and never deletes task-pinned generations or owner-authored/built-in workflows.
-List and remove work offline; catalog visibility is reported as
-`unknown_offline` until a trusted refresh is available.
-
-Hive web exposes the install/update/remove project lifecycle under **Workflows**. It lists
-built-in, authored, selected, and retained generations; scaffolds project
-workflows; and makes install/update/remove a two-step review. The first step is
-the command's real dry-run disclosure. The second uses a 15-minute signed
-receipt bound to the reviewed package, configuration, and selected baseline;
-security-expanding updates require their own checkbox in addition to ordinary
-update consent. Publication intentionally remains a CLI-only author workflow;
-Hive web does not add a competing publish or status route.
-
-Honeycomb v2 manifests carry coarse disclosure for review and consent, while
-each executable stage, reviewer, and reviser declares its exact runtime
-`permissions:`. Install rejects a manifest that understates those actor
-permissions. High-risk actors require a separate `--allow-escalation` consent.
-The strict `x-hive` extension names manifest-hashed executable tools, optional
-prompt assets, and optional environment inputs authorized for stable actor
-slots. Input values remain in the operator environment: configuration stores
-only the binding name, injects a current value only into its authorized child,
-and rejects package-declared process-control names such as `PATH`, `HOME`,
-`RUBYOPT`, and `LD_PRELOAD`.
-
-`workflow publish` builds only the immutable Honeycomb v1 directory
-`packages/<name>/<version>/`. It snapshots referenced local instructions and
-declared regular assets, records named skills as external dependencies, derives
-the conservative permission union, generates complete file hashes plus
-`release_sha256`, and runs the same consumer validator and pinned local security
-lint before any remote access. `--dry-run` performs that entire local path with
-no receipt, Git, GitHub, or catalogue side effects.
-
-A real submission must bind `--expected-release-digest` to the exact confirmed
-dry-run bytes. Hive retains an owner-private digest bundle and receipt under
-the XDG state home, journals intent before fork/push/PR effects, and reconciles
-the exact fork parent, head repository/branch, commit parent and OID, manifest,
-PR base, and catalogue entry on retry. A matching externally created PR may use
-a different branch name; names are locators, while verified bytes and remote
-identity are authority. Receipt progress and lifecycle observations are
-monotonic, so a stale concurrent retry cannot replace newer evidence.
-The schema-v2 lifecycle is `pending_review`, `merged_pending_listing`, `listed`,
-or `closed_unmerged`; freshness is independently `current` or `cached`, and
-cached results retain the original observation time. Publication never merges,
-approves, closes, force-pushes, deletes remote state, or authors catalogue and
-review evidence. A retained release is rechecked against both its recorded lint
-identity and the current policy: a new blocking rule remains visible during
-read-only reconciliation but prevents any new fork, push, or PR mutation.
-Registry maintainers own review, merge, and listing.
+Hive Web exposes install, update, and remove under **Workflows** as a two-step
+review: the command's real dry-run disclosure followed by a short-lived receipt
+bound to that reviewed state. Publication remains a CLI-only author workflow.
 
 ## Descriptor Schema
 

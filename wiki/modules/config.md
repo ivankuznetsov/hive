@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-08-13
+updated: 2026-08-14
 tags: [config, yaml, validation, plan-review]
 ---
 
@@ -110,7 +110,47 @@ bindings are expanded and canonicalized, including symlink resolution when the
 target exists, so two symbolic aliases cannot silently share one billing
 context while claiming separate account concurrency and fallback.
 
-## Project artifact capture provider
+## Outcome-evidence roles and project capture provider
+
+`artifacts.evidence` configures three fresh contexts without changing their
+security ownership:
+
+```yaml
+artifacts:
+  agent: claude
+  evidence:
+    max_recaptures: 2
+    inference:
+      permissions: read-only
+      # agent: codex
+      # model: gpt-5.6-sol
+      # effort: high
+    producer:
+      agent: codex
+    reviewer:
+      permissions: read-only
+      # agent: codex
+      capabilities:
+        proof_kinds: [screenshot, video, terminal, document]
+        temporal_video: true
+```
+
+Each role inherits `artifacts.agent` unless it names its own `agent`, and may
+independently select `model` and `effort` through the normal model-routing
+boundary. `max_recaptures` is an integer from 0 through 2 and counts targeted
+recaptures after the initial package. Inference and reviewer permissions are
+fixed to `read-only`; config cannot widen them. Producer writes are always
+controller-scoped to the active evidence root, so there is no producer
+`permissions` escape hatch. The reviewer capability object is closed:
+`proof_kinds` is a unique nonempty subset of `screenshot`, `video`, `terminal`,
+and `document`, while `temporal_video` is boolean. A generated requirement that
+the configured reviewer or producer cannot safely handle becomes an explicit
+semantic blocker before capture begins.
+
+These roles control the authoritative outcome-evidence package described in
+[[stages/artifacts]]. `artifacts.capture.provider` remains the optional runtime
+used to create project-owned media bytes; a capture manifest is not completion
+authority by itself.
 
 Hive checkouts need no declaration: the complete locked Hivebox web layout
 selects the built-in recorder. A conventional project can declare one
@@ -253,7 +293,22 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
   "plan"       => { "agent" => "claude" },
   "execute"    => { "agent" => "claude" },  # rendered template recommends `codex`
   "open_pr"    => {},
-  "artifacts"  => { "agent" => "claude", "capture" => { "provider" => nil } },
+  "artifacts"  => {
+    "agent" => "claude",
+    "evidence" => {
+      "max_recaptures" => 2,
+      "inference" => { "permissions" => "read-only" },
+      "producer" => { "agent" => "codex" },
+      "reviewer" => {
+        "permissions" => "read-only",
+        "capabilities" => {
+          "proof_kinds" => %w[screenshot video terminal document],
+          "temporal_video" => true
+        }
+      }
+    },
+    "capture" => { "provider" => nil }
+  },
   "finalize"   => { "agent" => "claude" },
   "agents" => {
     "claude" => { "bin" => "claude", "env_override" => "HIVE_CLAUDE_BIN", "min_version" => "2.1.118" },
@@ -304,16 +359,7 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
     "max_fixes_per_feature_per_cycle" => 1,
     "max_fix_attempts_per_cycle" => 6,
     "max_prs_per_cycle" => 3,
-    "max_tokens_per_cycle" => 200_000,
-    "max_tokens_per_day" => 600_000,
-    "max_tokens_per_agent" => 50_000,
-    "max_agent_spawns_per_cycle" => 3,
-    "max_agent_spawns_per_day" => 8,
-    "max_architecture_review_spawns_per_day" => 8,
-    "max_architecture_unmetered_spawns_per_day" => 96,
-    "max_budget_usd_per_agent" => 25,
-    "architecture_budget_multiplier" => 2,
-    "fix_budget_multiplier" => 2,
+    "max_tokens_per_agent" => 100_000_000,
     "draft_prs" => false,
     "review_prs" => true,
     "include" => [],
@@ -358,18 +404,29 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
 
 `worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `permissions: "yolo"` preserves existing launch behavior unless a project or stage opts into a narrower Claude tool scope; `Config.permission_spec(cfg, stage)` returns the exact stage spec (`plan.permissions`, `review.ci.permissions`, reviewer-entry `permissions`, etc.) when present, otherwise the project default, with no field merge. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `review.adhoc.reviewers: nil` inherits `review.reviewers`, while an explicit `[]` means zero ad-hoc reviewers, and `review.adhoc.fix: false` keeps ad-hoc PR reviews review-only unless an operator opts into local fix commits with `true`. `daemon.auto_retry.enabled` defaults to `true` and can be set to `false` to disable the daemon's automatic `ERROR` / `REVIEW_ERROR` submissions while leaving explicit operator recovery, ordinary daemon dispatch, and stale in-flight ownership reconciliation enabled. `patrol.review.reviewers` defaults to the single native Codex reviewer (`name: codex-native-review`, `kind: codex_review`), which runs Codex's built-in `review` subcommand and needs no CE skill; fresh init can optionally add Codex or Claude CE `ce-code-review` entries for patrol PRs. `daemon.max_concurrent_patrol_scans` (default `1`, validated `>= 1`) is a **per-project** cap bounding daemon-scheduled `hive patrol PROJECT` scans on a **separate** in-flight budget from task dispatch: a long codex-backed scan never consumes a `daemon.max_concurrent_runs` task slot — scans are tagged `kind: :patrol_scan` in the dispatcher and excluded from the per-project/global task caps, counted only against this independent cap. `ConcurrencyController#can_dispatch_patrol_scan?` counts only the **given project's** running scans (`entry[:kind] == :patrol_scan && entry[:project] == project`), so the default `1` means one scan per project at a time and **different projects patrol in parallel** rather than being serialized/starved by a global count (see `→ :patrol_scan_cap`).
 
-**Patrol is opt-in.** `resolve_patrol_mode!` runs on the raw YAML before `merge_defaults` and only derives/injects mode knobs when `mode:` is **explicitly present** in the raw config (`return unless nested_key?(data, "patrol", "mode")`). A config with **no patrol section** — or a patrol section that omits `mode:` — injects nothing and falls through to `DEFAULTS["patrol"]["enabled"] = false`, so patrol stays **disabled**. `medium` is the default offered by the `hive init` *prompt*, never a config-resolution default. The explicit modes are `ultrapatrol` (`timer`/30m, 800k tokens and 10 launches per cycle, 2.4m/36 per UTC day, 100k tokens and 100 budget-equivalent units per agent), `high` (`timer`/2h, 400k/6 per cycle, 1.2m/18 per day, 75k/50 per agent), `medium` (`timer`/4h, 200k/3 per cycle, 600k/8 per day, 50k/25 per agent), `low` (`new_commits`, 100k/1 per cycle, 200k/2 per day, 40k/10 per agent), and `off` (`enabled: false`). `fix_budget_multiplier` defaults to `2` and widens only an ordinary fix agent's streamed per-agent limit; cycle/day token and launch totals stay shared. `architecture_budget_multiplier` defaults to `2`, widening architecture stages' per-cycle token/launch limits and per-agent token limit while leaving the native budget-equivalent guard and shared project/day token ceiling unchanged; architecture fixes do not compound both multipliers. Input and output consume token ceilings, while cached tokens remain visible telemetry without being charged again. Metered architecture launches are accounted separately and never consume the mode's ordinary daily launch quota. Architecture reviews use the independent `max_architecture_review_spawns_per_day` ceiling (default `8`) without consuming fix capacity. `max_architecture_unmetered_spawns_per_day` defaults to `96` and is the independent durable backstop when an architecture provider repeatedly omits token counts. The `max_budget_usd_per_agent` name follows agent CLI terminology; with subscription-backed agents it is not a separate payment. The mode never changes finding/PR caps, per-feature diversity, confidence, or alpha gates. Explicit granular knobs always win over a set mode and survive the deep-merge.
+**Patrol is opt-in.** `resolve_patrol_mode!` derives only scheduling when
+`mode:` is explicitly present. A config with no Patrol section, or one without
+`mode:`, remains disabled. `medium` is the init prompt default, not a
+config-resolution default. The modes are `ultrapatrol` (timer/30m), `high`
+(timer/2h), `medium` (timer/4h), `low` (new commits), and `off`. They never
+change token allowance, launch counts, finding/PR caps, diversity, confidence,
+or alpha gates. One optional `max_tokens_per_agent` (default `100_000_000`) is
+the same emergency stream fuse for every ordinary and architecture review/fix
+child. Usage totals remain telemetry. `hive migrate`, including the automatic
+fleet migration run by `hive update`, deletes the retired
+cycle/day/launch/USD/multiplier keys and leverage thresholds before the current
+config is loaded, then requests one daemon restart after the fleet succeeds.
+Standalone migration requests the normal best-effort restart immediately after
+that independent config commit, before later project-specific preparation can
+fail; fleet mode injects the coalescing restart request instead.
 
 `patrol.max_features_per_cycle` defaults to 12, is validated as an integer at
 least one, bounds each ordinary-patrol reviewer batch, and is likewise not
-changed by `patrol.mode`. The runtime batch is further capped by the tighter
-remaining cycle or shared UTC-day launch headroom: normal runs reserve as many
-launches as possible up to `max_fix_attempts_per_cycle` while retaining one
-review, and dry runs may spend the whole remaining envelope on review. Ordinary
-component mapping defaults to four owned and four context files; its reviewer
+changed by `patrol.mode`; `max_fix_attempts_per_cycle` separately bounds fix
+attempts. Ordinary component mapping defaults to four owned and four context files; its reviewer
 initially receives only up to four owned files selected under a 32 KiB source
 budget. Architecture mapping retains its wider six-owned and six-context
-logical component for deterministic leverage measurement, then applies the
+logical component, then applies the
 same four-file/32 KiB initial review view. The first entrypoint is retained even
 when it alone is larger.
 
@@ -384,16 +441,16 @@ The block also owns an optional refactor identity (`agent`, `model`, `effort`)
 that inherits the resolved execute identity field by field, plus optional
 auto-fix identity overrides that inherit the resolved refactor identity. It
 also owns confidence/run caps, language-neutral include/exclude rules,
-`docs|format|lint|public_contract|typecheck|test` commands, actual patch
-caps, leverage weights, the proposal-wide `min_leverage_score` floor
-(default `0.10`), and the separate issue threshold. The default
-`max_theses_per_feature: 1` treats a finding as an exception, not a quota; a
-complete slice whose maximum possible leverage is below the floor skips its
-agent launch. `max_theses_per_run` is
+`docs|format|lint|public_contract|typecheck|test` commands, actual patch caps,
+and the categorical `fix`/`discuss`/`dismiss` route policy. The default
+`max_theses_per_feature: 1` treats a finding as an exception, not a quota.
+`max_theses_per_run` is
 a strict global reviewer-output budget; slices not reached after it is exhausted
 remain incomplete for resume. `max_review_seconds_per_run` defaults to 3600,
 must be numeric and at least 1, and caps the whole discovery review pass rather
-than resetting for every mapped feature. A configured `commands.public_contract` is an
+than resetting for every mapped feature. A fixed, non-configurable 12-slice
+safety bound separately prevents empty reviews from producing unbounded agent
+fan-out; it is not another allowance. A configured `commands.public_contract` is an
 authoritative project-owned check for every automatic fix that changes a source
 or known public-surface path, while built-in declaration guards remain in
 force. Architecture mapping reads `refactor_patrol.review.max_owned_files` and
@@ -451,7 +508,6 @@ they do not create a second writable copy of patrol checkpoints or ledgers.
 | `hive_state_dir(project_root, name = ".hive-state")` | `<project_root>/<name>` |
 | `load(project_root)` | Reads `<project_root>/.hive-state/config.yml`, treating only an initial `ENOENT` as absent and rewrapping traversal, symlink-loop, read, and YAML parse failures as path-bearing `ConfigError`s; validates raw project root keys against static keys plus registered workflow stage names; then recursively deep-merges onto DEFAULTS, validates values, and returns a Hash with `"project_root"` injected. |
 | `registered_projects` | Reads global config; returns `[{name, project_id, path, real_path, hive_state_path, repository_identity}, …]` (runtime paths `expand_path`-ed). `real_path` is the immutable canonical anchor captured at enrollment and is not recomputed by this projection. The repository identity is a normalized canonical `origin` captured at enrollment when available. The ordinary reader retains the existing one-off move of a legacy registry into XDG config storage. |
-| `registered_projects_read_only` | Observation-only registry projection for status surfaces. It reads the current XDG config when present, otherwise reads a detected legacy registry in place; it never invokes the legacy-registry move or creates the migration marker. |
 | `find_project(name)` | First entry from `registered_projects` matching `name` (or `nil`). |
 | `register_project(name:, path:, repository_identity: :detect)` | Adds or replaces an entry under `config.yml.lock`; stores private `real_path` for relink detection and the transport-independent canonical `origin` identity when detectable. Before writing, canonicalizes the proposed `.hive-state` root through its nearest existing ancestor and rejects a distinct registered project identity that would share the same state root; a same-name replacement is excluded from its own conflict check. Enrollment still succeeds without an origin, but an explicit cross-project dependency targeting that project later fails closed until identity is configured and re-enrolled. |
 | `unregister_project(name)` | Index-based delete (not `Array#-`, which would clear duplicate-content rows); `to_s`-symmetric name match so an Integer `name:` in YAML still resolves; rewrites under `config.yml.lock`. |
@@ -506,7 +562,7 @@ include:
 7. **`validate_permissions!`** — top-level, stage-level, review-role, and reviewer-entry `permissions:` specs are parsed by `Hive::PermissionScope` and must be `yolo`, `read-only`, or a valid `scoped` map. Shape errors, unknown presets/keys, malformed `Tool(specifier)` rules, unresolvable file-rule paths, unsupported file-tool path rules (use `Read(path)` / `Edit(path)`), and `bash:` plus `tools:` fail during config load; runner capability is checked later when the stage profile is known. Scoped rules run in Claude `dontAsk` mode. Task-relative `Read(path)` / `Edit(path)` rules are resolved to absolute permission patterns at spawn time, including Claude's POSIX drive form on Windows. Qualified `Edit` covers every built-in file-edit tool, so all file-edit denies are removed to prevent a bare deny from overriding the path grant. Claude merges these CLI rules with loaded managed/user/project/local permission settings, so the descriptor expresses the requested Hive scope rather than overriding trusted operator policy from those sources.
 8. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
 9. **`validate_patrol!`** — `patrol.mode` must be one of `ultrapatrol`, `high`, `medium`, `low`, or `off`; `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence, 0–100 alpha, per-feature/run counts, interval, and command shape are validated before the scheduler or `hive patrol` command can run. `patrol.review.reviewers` uses the same reviewer-entry validation as `review.reviewers`, but it is a separate list used only by synthetic `Patrol: ...` review tasks.
-10. **`validate_refactor_patrol!`** — validates discovery/auto-fix/issue booleans and nested shapes, agent names, confidence/run counts, the whole-run review deadline, include/exclude paths, all six commands including `docs` and `public_contract`, semantic scope and contract/dependency policy booleans, leverage weights, the proposal-wide leverage floor, and the issue threshold. File count and diff size are publication evidence, not config or mutation gates; runtime mutation remains protected by root/path confinement, `.hive-state` and protected-path checks, secret scanning, dependency and public-contract guards, and applicable validation commands. Invalid side-effect policy fails at config load, not in a background action.
+10. **`validate_refactor_patrol!`** — validates discovery/auto-fix/issue booleans and nested shapes, agent names, confidence/run counts, the whole-run review deadline, include/exclude paths, all six commands including `docs` and `public_contract`, and semantic scope plus contract/dependency policy booleans. File count and diff size are publication evidence, not config or mutation gates; runtime mutation remains protected by root/path confinement, `.hive-state` and protected-path checks, secret scanning, dependency and public-contract guards, and applicable validation commands. Invalid side-effect policy fails at config load, not in a background action.
 11. **`validate_daemon!`** — daemon numeric bounds, booleans, and nested hashes are checked before the daemon starts. The nested `daemon.auto_retry` block must be a hash, and `daemon.auto_retry.enabled` must be boolean when present.
 12. **`validate_dependency_gate_stage!`** — `dependency_gate_stage` must be exactly `8-finalize` or `9-done`. Runtime admission then checks reachability against the prerequisite task's selected workflow rather than assuming the coding descriptor.
 13. **`validate_model_routing_capabilities!`** — after structural role and

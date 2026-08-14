@@ -3008,10 +3008,6 @@ module Hive
         nil
       end
 
-      def usage_footer_line(usable_width = nil)
-        Views::UsageFooter.render(aggregate: usage_footer_aggregate, width: usable_width)
-      end
-
       def usage_footer_aggregate
         scope = derive_usage_scope(@hive_model)
         key = [

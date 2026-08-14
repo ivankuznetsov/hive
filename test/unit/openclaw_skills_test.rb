@@ -90,7 +90,7 @@ class OpenClawSkillsTest < Minitest::Test
 
     assert reference.file?
     assert scenarios.file?
-    assert_equal "0.1.4", Hive::AgentSkills::CanonicalSkill.new.version
+    assert_equal "0.1.5", Hive::AgentSkills::CanonicalSkill.new.version
 
     text = projection_text
     assert_includes text, "Guided is the default"

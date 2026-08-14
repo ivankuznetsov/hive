@@ -162,26 +162,24 @@ class RefactorPatrolFixerTest < Minitest::Test
       patch = fixer(repo, agent: ->(**) { agent_called = true })
               .attempt(thesis: item, job_id: "job-7", analysis_sha: analysis_sha)
 
-      assert_equal "not_accepted", patch.outcome
+      assert_equal "not_fix_routed", patch.outcome
       assert patch.terminal
       refute agent_called
     end
   end
 
-  def test_incomplete_leverage_measurement_never_creates_a_fix_worktree
+  def test_inadmissible_thesis_never_creates_a_fix_worktree
     with_repo do |repo, analysis_sha|
       item = thesis
-      item.feature_hotspot = {
-        "measurement" => { "status" => "incomplete", "diagnostics" => [] }
-      }
-      item.risk["flags"] = [ "incomplete_leverage_measurement" ]
+      item.route = "dismiss"
+      item.risk["flags"] = [ "unverified_evidence" ]
       item.admissible = false
       agent_called = false
 
       patch = fixer(repo, agent: ->(**) { agent_called = true })
               .attempt(thesis: item, job_id: "job-7", analysis_sha: analysis_sha)
 
-      assert_equal "not_accepted", patch.outcome
+      assert_equal "not_fix_routed", patch.outcome
       assert patch.terminal
       refute agent_called
     end
@@ -1340,22 +1338,22 @@ class RefactorPatrolFixerTest < Minitest::Test
       assert_equal Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE,
                    captured.fetch(:permission_mode)
       assert_equal dir, captured.fetch(:cwd)
-      assert_equal 100_000, captured.fetch(:max_tokens)
+      assert_equal Hive::Patrol::TokenBudget::DEFAULT_MAX_TOKENS_PER_AGENT,
+                   captured.fetch(:max_tokens)
+      assert_nil captured.fetch(:max_budget_usd)
       assert_equal [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=high" ],
                    captured.fetch(:identity_arguments)
       assert File.directory?(File.join(dir, "runs", "fix"))
     end
   end
 
-  def test_default_agent_runner_refuses_an_exhausted_architecture_budget
+  def test_default_agent_runner_refuses_initial_context_above_the_runaway_ceiling
     with_tmp_dir do |dir|
       budget = Object.new
-      budget.define_singleton_method(:acquire) do |stage:, minimum_tokens:|
-        minimum_tokens >= 0 && stage != "refactor-patrol-fix"
-      end
-      budget.define_singleton_method(:exhaustion_message) { "architecture cycle exhausted" }
+      budget.define_singleton_method(:acquire) { |minimum_tokens:| minimum_tokens.negative? }
+      budget.define_singleton_method(:exhaustion_message) { "runaway ceiling too small" }
       budget.define_singleton_method(:resource_exhaustion) do
-        { reason: "daily_token_limit", limit: 600_000, observed: 700_000 }
+        { reason: "insufficient_launch_headroom", limit: 10, observed: 20_001 }
       end
       subject = Hive::RefactorPatrol::Fixer.new(dir, cfg: cfg(dir), token_budget: budget)
 
@@ -1365,9 +1363,9 @@ class RefactorPatrolFixerTest < Minitest::Test
       )
 
       assert_equal :error, result.fetch(:status)
-      assert_equal "architecture cycle exhausted", result.fetch(:error_message)
+      assert_equal "runaway ceiling too small", result.fetch(:error_message)
       assert_equal(
-        { reason: "daily_token_limit", limit: 600_000, observed: 700_000 },
+        { reason: "insufficient_launch_headroom", limit: 10, observed: 20_001 },
         result.fetch(:resource_exhaustion)
       )
     end
@@ -1380,9 +1378,9 @@ class RefactorPatrolFixerTest < Minitest::Test
         agent: lambda do |**|
           {
             status: :error,
-            error_message: "daily budget exhausted",
+            error_message: "agent exceeded runaway ceiling",
             resource_exhaustion: {
-              reason: "daily_token_limit", limit: 600_000, observed: 700_000
+              reason: "token_limit", limit: 100_000_000, observed: 100_000_001
             }
           }
         end
@@ -1392,7 +1390,7 @@ class RefactorPatrolFixerTest < Minitest::Test
 
       assert_equal "fix_agent_failed", result.outcome
       refute result.terminal
-      assert_equal "daily_token_limit",
+      assert_equal "token_limit",
                    result.details.dig("resource_exhaustion", "reason")
     end
   end
@@ -1452,7 +1450,8 @@ class RefactorPatrolFixerTest < Minitest::Test
       evidence: [ { "file" => files.first, "signal" => "churn", "value" => 10 } ],
       proposed_refactor: "Extract the internal orchestration",
       feature_boundary: { "owned_files" => files, "entrypoints" => [ files.first ] },
-      expected_leverage: { "score" => 0.8, "breakdown" => { "churn" => 0.8 } },
+      route: "fix",
+      architecture_effects: [ "one orchestration owner replaces repeated edits" ],
       confidence: "medium",
       risk: { "flags" => [], "caps" => { "single_feature" => true } },
       required_validation: { "commands" => [ "test" ] }, admissible: true,

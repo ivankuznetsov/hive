@@ -6,6 +6,49 @@ require "hive/task_action"
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
 
+  def test_json_payload_exposes_resolved_clean_exit_config
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(
+        File.join(hive_state, "config.yml"),
+        { "stages" => { "ensure_clean_on_exit" => false } }.to_yaml
+      )
+
+      project = Hive::Commands::Status.new.json_payload([
+        status_project(project_root, hive_state)
+      ]).fetch("projects").first
+
+      assert_equal false,
+                   project.dig("config_summary", "stages", "ensure_clean_on_exit")
+    end
+  end
+
+  def test_json_payload_surfaces_current_run_clean_exit_residue
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = write_status_task(
+        hive_state, "4-execute", "residue-task-260813-abcd",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      Hive::Events.emit(task_folder: folder, slug: "residue-task-260813-abcd",
+                        stage: "4-execute", event_type: :stage_enter)
+      Hive::Events.emit(
+        task_folder: folder, slug: "residue-task-260813-abcd", stage: "4-execute",
+        event_type: :clean_exit_auto_committed, message: "head=abc paths=wiki/a.md",
+        data: { head: "abc", reason: "stage_exit", paths: [ "wiki/a.md" ], path_count: 1 }
+      )
+
+      task = Hive::Commands::Status.new.json_payload([
+        status_project(project_root, hive_state)
+      ]).dig("projects", 0, "tasks", 0)
+
+      assert_equal 1, task.dig("auto_residue", "commits")
+      assert_equal [ "wiki/a.md" ], task.dig("auto_residue", "paths")
+      assert_equal "abc", task.dig("auto_residue", "latest_head")
+    end
+  end
+
   def test_corrupt_metadata_in_dispatchable_stage_emits_structured_admission_error
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

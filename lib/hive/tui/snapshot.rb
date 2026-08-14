@@ -99,6 +99,7 @@ module Hive
         :task_lock_id,
         :implementation_identity,
         :plan_review,
+        :auto_residue,
         :unanswered_questions
       ) do
         # worktree_path defaults to nil so existing test factories that
@@ -126,7 +127,7 @@ module Hive
                        observation_mtime: nil, folder_mtime: nil, live_task_lock: false,
                        task_lock_pid: nil, task_lock_process_start_time: nil, task_lock_id: nil,
                        implementation_identity: nil,
-                       plan_review: nil,
+                       plan_review: nil, auto_residue: nil,
                        unanswered_questions: 0, outcomes: [], depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
                        blocked: false, admission_error: nil, held: nil, **rest)
@@ -163,6 +164,7 @@ module Hive
                 task_lock_id: task_lock_id,
                 implementation_identity: implementation_identity,
                 plan_review: plan_review,
+                auto_residue: auto_residue,
                 unanswered_questions: unanswered_questions,
                 outcomes: outcomes, **rest)
         end
@@ -283,6 +285,7 @@ module Hive
           task_lock_id: payload["task_lock_id"],
           implementation_identity: payload["implementation_identity"],
           plan_review: payload["plan_review"],
+          auto_residue: payload["auto_residue"],
           unanswered_questions: payload["unanswered_questions"].to_i
         ).freeze
       end

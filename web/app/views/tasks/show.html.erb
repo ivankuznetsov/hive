@@ -44,6 +44,7 @@
   </section>
 <% end %>
 
+<%= render "tasks/outcome_evidence", evidence: @outcome_evidence, project: @project, task: @task %>
 <%= render "tasks/media", media: @media, project: @project, task: @task %>
 
 <% if @files.any? %>

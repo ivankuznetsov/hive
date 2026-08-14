@@ -7,9 +7,7 @@ require "hive/gh"
 require "hive/lock"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
-require "hive/patrol/token_budget"
 require "hive/refactor_patrol/canonical_action_catalog"
-require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/family_store"
 require "hive/refactor_patrol/fixer"
 require "hive/refactor_patrol/effect_gateway"
@@ -46,7 +44,6 @@ module Hive
         end
       end
 
-      STRATEGIC_REASONS = IssueFiler::STRATEGIC_REASONS.freeze
       ISSUE_SUPPRESSING_FIX_OUTCOMES = %w[no_diff pr_opened merged].freeze
       REMOTE_UNCERTAIN_OUTCOME = "remote_outcome_unknown".freeze
       FIX_RELEASE_EVIDENCE_LIMIT = 2_000
@@ -327,7 +324,7 @@ module Hive
           [ entry.fetch(:thesis).id, entry.fetch(:family_id) ]
         end
         if policy.fetch("auto_fix")
-          entries.fetch("accepted").each do |entry|
+          entries.fetch("fix").each do |entry|
             specification = { "thesis_id" => entry.fetch(:thesis).id, "kind" => "fix" }
             family_id = family_by_thesis[entry.fetch(:thesis).id]
             specification["family_id"] = family_id if family_id
@@ -377,12 +374,8 @@ module Hive
       end
 
       def reconstructed_entry(disposition, item, snapshot)
-        disposition = @job_store.effective_disposition(disposition, item)
         thesis = Thesis.from_h(json_copy(snapshot))
         normalized_item = json_copy(item)
-        normalized_item["reasons"] = Caps.without_legacy_size_flags(normalized_item["reasons"])
-        thesis.risk ||= {}
-        thesis.risk["flags"] = Caps.without_legacy_size_flags(thesis.risk["flags"])
         normalized_item["thesis"] = thesis.to_h
         { disposition: disposition, item: normalized_item, thesis: thesis }
       end
@@ -390,16 +383,7 @@ module Hive
       def issue_candidates(entries, policy)
         return [] unless policy.fetch("issue_filing")
 
-        flagged = entries.fetch("flagged").select { |entry| strategic_flagged?(entry) }
-        flagged + entries.fetch("accepted")
-      end
-
-      def strategic_flagged?(entry)
-        thesis = entry.fetch(:thesis)
-        return false unless entry.dig(:item, "admissible") == true && thesis.admissible == true
-
-        reasons = Array(entry.dig(:item, "reasons")) + Array(thesis.risk && thesis.risk["flags"])
-        (reasons.map(&:to_s) & STRATEGIC_REASONS).any?
+        entries.fetch("discuss") + entries.fetch("fix")
       end
 
       def resolve_family(aggregate, entry, dry_run:)
@@ -417,7 +401,7 @@ module Hive
       def select_issue_representatives(entries)
         entries.group_by { |entry| entry.fetch(:family_id) }.values.map do |family_entries|
           family_entries.min_by do |entry|
-            [ entry.fetch(:disposition) == "flagged" ? 0 : 1, entry.fetch(:thesis).id ]
+            [ entry.fetch(:disposition) == "discuss" ? 0 : 1, entry.fetch(:thesis).id ]
           end
         end.sort_by { |entry| [ entry.fetch(:family_id), entry.fetch(:thesis).id ] }
       end
@@ -747,7 +731,7 @@ module Hive
           end
         end
 
-        if entry.fetch(:disposition) != "accepted" && fixes.empty?
+        if entry.fetch(:disposition) != "fix" && fixes.empty?
           return { outcome: nil, reasons: Array(entry.dig(:item, "reasons")) }
         end
         if fixes.empty?
@@ -793,11 +777,7 @@ module Hive
           outcome: adapter_result.outcome,
           receipts: result_receipts,
           terminal: adapter_result.terminal == true,
-          backoff_sec: backoff_sec_for(
-            adapter_result.outcome,
-            details: adapter_result.respond_to?(:details) ?
-              adapter_result.details : nil
-          )
+          backoff_sec: backoff_sec_for(adapter_result.outcome)
         )
         aggregate
       end
@@ -1754,18 +1734,13 @@ module Hive
         )
       end
 
-      def backoff_sec_for(reason, details: nil)
+      def backoff_sec_for(reason)
         return @authority_backoff_sec if AUTHORITY_RECHECK_REASONS.include?(reason.to_s)
 
-        exhaustion = if details.is_a?(Hash)
-          details["resource_exhaustion"] || details[:resource_exhaustion]
-        end
-        exhaustion_reason = if exhaustion.is_a?(Hash)
-          exhaustion["reason"] || exhaustion[:reason]
-        end
-        Hive::Patrol::TokenBudget.resource_exhaustion_backoff_sec(
-          exhaustion_reason, now: now, fallback: @backoff_sec
-        )
+        # Agent resource exhaustion follows the same fixed retry cadence as
+        # other transient action failures. Usage telemetry no longer creates
+        # a separate next-UTC-day scheduling policy.
+        @backoff_sec
       end
 
       def event(outcome, **details)

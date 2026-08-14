@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-patrol-findings.v1.json",
+  "title": "hive patrol findings output (v1)",
+  "description": "Bounded read-only finding health emitted by `hive patrol PROJECT --list --json`.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "Counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "active": { "type": "integer", "minimum": 0 },
+        "resolved": { "type": "integer", "minimum": 0 },
+        "rejected": { "type": "integer", "minimum": 0 },
+        "superseded": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "FindingSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "feature_id", "category", "severity", "confidence", "title",
+        "description", "lifecycle_state", "lifecycle_updated_at"
+      ],
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "feature_id": { "type": "string", "maxLength": 128 },
+        "category": { "type": "string", "maxLength": 64 },
+        "severity": { "type": "string", "maxLength": 32 },
+        "confidence": { "type": "string", "maxLength": 32 },
+        "title": { "type": "string", "maxLength": 512 },
+        "description": { "type": "string", "maxLength": 4096 },
+        "lifecycle_state": {
+          "enum": ["active", "resolved", "rejected", "superseded"]
+        },
+        "lifecycle_updated_at": { "type": "string", "maxLength": 64 }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "action", "project",
+        "project_root", "count", "counts", "findings", "truncated",
+        "last_run_at", "feature_review_active"
+      ],
+      "properties": {
+        "schema": { "const": "hive-patrol-findings" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "action": { "const": "list" },
+        "project": { "type": "string" },
+        "project_root": { "type": "string" },
+        "count": { "type": "integer", "minimum": 0 },
+        "counts": { "$ref": "#/$defs/Counts" },
+        "findings": {
+          "type": "array",
+          "maxItems": 25,
+          "items": { "$ref": "#/$defs/FindingSummary" }
+        },
+        "truncated": { "type": "boolean" },
+        "last_run_at": { "type": ["string", "null"] },
+        "feature_review_active": { "type": "boolean" }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind",
+        "exit_code", "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-patrol-findings" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["config", "error"] },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

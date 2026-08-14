@@ -106,6 +106,8 @@ class MetricsCommandTest < Minitest::Test
       assert_equal "unknown_project", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
       assert_match(/unknown project: no-such-project/, payload["message"])
+      assert_equal %w[error_kind exit_code message ok schema schema_version], payload.keys.sort,
+                   "the metrics v1 error payload must keep its closed narrow allowlist"
     end
   end
 
@@ -261,11 +263,11 @@ class MetricsCommandTest < Minitest::Test
     assert_equal "error", cmd.send(:error_kind_for, Hive::Error.new("plain"))
   end
 
-  def test_emit_error_envelope_swallows_broken_stdout
+  def test_shared_emit_envelope_swallows_broken_stdout
     cmd = Hive::Commands::Metrics.new("rollback-rate", json: true)
     cmd.define_singleton_method(:puts) { |_payload| raise Errno::EPIPE, "pipe closed" }
 
-    cmd.send(:emit_error_envelope, Hive::ConfigError.new("pipe closed"))
+    cmd.send(:emit_envelope, Hive::ConfigError.new("pipe closed"))
 
     assert_equal true, cmd.instance_variable_get(:@stdout_written)
   end

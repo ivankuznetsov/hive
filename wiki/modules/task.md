@@ -3,7 +3,7 @@ title: Hive::Task
 type: module
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_counter.rb
 created: 2026-04-25
-updated: 2026-08-12
+updated: 2026-08-13
 tags: [model, task, parsing, task-id, dependencies, workflows]
 ---
 
@@ -24,6 +24,13 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
    Managed task resolution keeps the same strict exception; it converts other
    managed configuration failures to `InvalidTaskPath` but never converts an
    unsupported project root key to exit 64.
+   A managed task must match the workflow's selected source, manifest, and
+   configuration digests. Historical pins are not executable: Hive raises an
+   `InvalidTaskPath` instruction to run `hive migrate`, whose dedicated
+   migration boundary reads the old descriptor and moves/repins the task to
+   the selected semantic stage. Launch-time context repeats the selection
+   check so a task object created immediately before an update cannot dispatch
+   the superseded package.
 5. Validate the parsed stage name and numeric prefix against the selected
    descriptor. A policy-only repin may retain an existing directory when that
    directory is the exact terminal stage of another registered descriptor.
@@ -53,7 +60,6 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
 | `#id` | Numeric id from `meta.yml`, or nil when absent/malformed/unallocated |
 | `#display_name` | `display_name` from `meta.yml`, or nil |
 | `#depends_on` | Single same-project id/slug or explicit `project:slug` prerequisite from `meta.yml`, or nil |
-| `#display_label` | `display_name || slug` |
 | `#lock_file` | `File.join(folder, ".lock")` |
 | `#log_dir` | `File.join(@hive_state_path, "logs", @slug)` |
 | `#commit_lock_file` | `File.join(@hive_state_path, ".commit-lock")` |

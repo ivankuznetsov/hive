@@ -3,7 +3,7 @@ title: Hive::Events
 type: module
 source: lib/hive/events.rb
 created: 2026-05-23
-updated: 2026-07-31
+updated: 2026-08-13
 tags: [module, events, observability, status, append-only]
 ---
 
@@ -92,6 +92,13 @@ contracts also use separate files: fail-soft operational telemetry stays in
 - **Path**: `<task_folder>/events.jsonl` (one file per task slug, lives next to `task.md`).
 - **Append**: single `File.write` of `JSON.generate(record) + "\n"` opened `O_WRONLY | O_APPEND | O_CREAT`. Records stay well under `PIPE_BUF` (~4 KiB), so POSIX append-atomicity holds across concurrent emitters; the single-write contract is load-bearing and must not be split into "write JSON then write newline."
 - **Failure mode**: `SystemCallError` during emit is caught and warned to stderr (`[hive.events] failed to emit ...`). The producing stage / agent control flow is not interrupted — observability must never mask the underlying run result.
+
+`clean_exit_auto_committed` records additionally carry a bounded `data`
+object: `head`, `reason`, up to 20 paths (128 bytes each), and the original
+path count. `clean_exit_summary(task_folder)` reads the 200-event walk window,
+starts at the latest `stage_enter`, and returns the current invocation's commit
+count, path summary, latest head/reason/time, or `nil`. Message-only records
+from older Hive versions remain readable through a best-effort parser.
 
 ## Derived `status.md`
 

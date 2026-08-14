@@ -22,13 +22,14 @@ module Hive
       #   { status: :clean }
       #   { status: :auto_committed, head:, paths: [...], commit_subject: }
       #   { status: :scope_violation, paths: [...], message: }
+      #   { status: :safety_violation, paths: [...], message: }
       #   { status: :git_failed, message: }
       #
       # `reason` is :stage_exit (default), :pre_fix_dirty_worktree,
       # or :finalize_entry_backstop. It feeds the
       # Hive-Auto-Commit-Reason trailer so a reader scanning
       # `git log` can tell which hook produced the residue commit.
-      def run!(worktree_path:, stage:, task:, cfg:, reason: :stage_exit)
+      def run!(worktree_path:, stage:, task:, cfg:, reason: :stage_exit, subject: nil)
         status_result = porcelain_status(worktree_path)
         return status_result unless status_result[:status] == :ok
         return { status: :clean } if status_result[:porcelain].empty?
@@ -72,7 +73,19 @@ module Hive
           end
         end
 
-        subject = commit_subject(stage)
+        safety = AutoCommit.auto_commit_safety_violations(worktree_path, staged[:paths])
+        unless safety[:success]
+          return failure_with_unstage(worktree_path, :git_failed, message: safety[:message])
+        end
+        unless safety[:violations].empty?
+          return failure_with_unstage(
+            worktree_path, :safety_violation,
+            message: AutoCommit.auto_commit_safety_failure_message(safety[:violations]),
+            paths: safety[:violations].map(&:path).uniq
+          )
+        end
+
+        subject ||= commit_subject(stage)
         message = commit_message(task: task, stage: stage, reason: reason, subject: subject)
         commit = AutoCommit.auto_commit_git_commit(worktree_path, sign_policy, message)
         unless commit[:success]
@@ -135,7 +148,7 @@ module Hive
       # mid-commit doesn't leave the index loaded. The reset is bounded
       # by the same AUTO_COMMIT_OP_TIMEOUT_SEC cap so a hung reset
       # doesn't pin the runner. Returns a CleanExit-shaped envelope
-      # (status: :scope_violation / :git_failed) so callers can
+      # (status: :scope_violation / :safety_violation / :git_failed) so callers can
       # dispatch on a single key.
       def failure_with_unstage(worktree_path, status, message:, paths: nil, timed_out: false)
         reset = AutoCommit.capture_git_with_timeout(

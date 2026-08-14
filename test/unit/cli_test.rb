@@ -17,6 +17,7 @@ require "hive/commands/rebase_status"
 require "hive/commands/stage_action"
 require "hive/commands/adhoc_review"
 require "hive/commands/status"
+require "hive/commands/worktree"
 require "hive/commands/circuits"
 require "hive/commands/watch"
 require "hive/commands/act"
@@ -35,9 +36,30 @@ require "hive/commands/bot"
 require "hive/commands/metrics"
 require "hive/commands/setup"
 require "hive/commands/setup_agents"
+require "hive/commands/evidence"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
+
+  def test_evidence_wires_the_exact_recovery_identity
+    with_command_new_stub(Hive::Commands::Evidence) do |calls|
+      Hive::CLI.start([
+        "evidence", "recover", "demo:task", "--project", "demo",
+        "--stage", "7-artifacts", "--generation", "a" * 64,
+        "--recovery-digest", "b" * 64, "--json"
+      ])
+
+      assert_equal [ "recover", "demo:task" ], calls.first.fetch(:args)
+      assert_equal(
+        {
+          project: "demo", stage: "7-artifacts", json: true,
+          generation: "a" * 64, recovery_digest: "b" * 64
+        },
+        calls.first.fetch(:kwargs)
+      )
+      assert_equal :call, calls.last
+    end
+  end
 
   def test_prdigest_delivery_command_is_absent
     refute Hive::CLI.tasks.key?("digest")
@@ -50,6 +72,13 @@ class HiveCliTest < Minitest::Test
     assert_includes out, "--json"
     assert_includes out, "--agent"
     assert_includes out, "--skill"
+  end
+
+  def test_patrol_help_distinguishes_cycle_and_findings_json_contracts
+    out, _err = capture_io { Hive::CLI.start([ "help", "patrol" ]) }
+
+    assert_includes out, "hive-patrol.v3"
+    assert_includes out, "hive-patrol-findings.v1"
   end
 
   def test_doctor_help_advertises_v2_read_only_health_contract
@@ -439,6 +468,27 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "rebase-status", "slug", "--project", "proj", "--stage", "execute", "--json" ])
       assert_equal [ "slug" ], calls.first.fetch(:args)
       assert_equal({ project: "proj", stage: "execute", json: true }, calls.first.fetch(:kwargs))
+    end
+  end
+
+  def test_worktree_passes_recovery_options
+    with_command_new_stub(Hive::Commands::Worktree) do |calls|
+      Hive::CLI.start([
+        "worktree", "repair", "slug", "--project", "proj", "--stage", "review",
+        "--paths", "wiki/a.md", "wiki/b.md", "--message", "preserve residue",
+        "--strategy", "commit", "--json"
+      ])
+
+      assert_equal [ "repair", "slug" ], calls.first.fetch(:args)
+      assert_equal(
+        {
+          project: "proj", stage: "review", json: true,
+          paths: [ "wiki/a.md", "wiki/b.md" ],
+          message: "preserve residue", strategy: "commit"
+        },
+        calls.first.fetch(:kwargs)
+      )
+      assert_equal :call, calls.last
     end
   end
 
@@ -870,7 +920,13 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Patrol) do |calls|
       Hive::CLI.start([ "patrol", "proj", "--dry-run", "--json" ])
       assert_equal [ "proj" ], calls.first.fetch(:args)
-      assert_equal({ json: true, dry_run: true }, calls.first.fetch(:kwargs))
+      assert_equal({ json: true, dry_run: true, list: false }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::Patrol) do |calls|
+      Hive::CLI.start([ "patrol", "proj", "--list", "--json" ])
+      assert_equal [ "proj" ], calls.first.fetch(:args)
+      assert_equal({ json: true, dry_run: false, list: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::RefactorPatrol) do |calls|

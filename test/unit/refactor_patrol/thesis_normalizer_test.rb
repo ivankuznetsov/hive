@@ -36,7 +36,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
 
       invalid_items.each do |evidence|
         thesis = normalizer.call(
-          feature: feature, leverage: feature_leverage,
+          feature: feature,
           raw: valid_raw_thesis.merge("evidence" => [ evidence ]), index: 0
         )
 
@@ -61,7 +61,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
         { "file" => "lib/checkout.rb", "snippet" => "def charge_and_validate", "claim" => "method is present" }
       ].each do |evidence|
         thesis = normalizer.call(
-          feature: feature, leverage: feature_leverage,
+          feature: feature,
           raw: valid_raw_thesis.merge("evidence" => [ evidence ]), index: 0
         )
         assert thesis.admissible, thesis.admissibility_reason
@@ -94,7 +94,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
       raw = valid_raw_thesis
 
       inside = normalizer.call(
-        feature: mapped_feature, leverage: feature_leverage,
+        feature: mapped_feature,
         raw: raw.merge(
           "evidence" => [
             {
@@ -108,7 +108,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
       assert inside.admissible, inside.admissibility_reason
 
       beyond = normalizer.call(
-        feature: mapped_feature, leverage: feature_leverage,
+        feature: mapped_feature,
         raw: raw.merge(
           "evidence" => [
             {
@@ -191,8 +191,8 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
       refute entry.key?("signal")
       refute entry.key?("value")
     end
-    assert_equal 10, thesis.feature_hotspot.dig("signals", "churn")
-    assert_equal "feature", thesis.feature_hotspot.fetch("scope")
+    assert_equal "fix", thesis.route
+    assert_equal valid_raw_thesis.fetch("architecture_effects"), thesis.architecture_effects
     assert_equal "pin behavior first", thesis.required_validation.fetch("notes")
     assert thesis_schemer.valid?(thesis.to_h), thesis_schemer.validate(thesis.to_h).map { |e| e["error"] }.inspect
   end
@@ -212,82 +212,82 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     assert_equal "lib/checkout.rb", thesis.evidence.first["file"]
   end
 
-  def test_agent_supplied_score_is_ignored_and_proposal_score_is_derived_from_drivers
-    raw = valid_raw_thesis
-    raw["expected_leverage"] = raw.fetch("expected_leverage").merge(
-      "score" => 999.0,
-      "breakdown" => { "bogus" => 999.0 }
+  def test_numeric_leverage_output_is_ignored
+    raw = valid_raw_thesis.merge(
+      "expected_leverage" => { "score" => 999.0, "breakdown" => { "bogus" => 999.0 } }
     )
     thesis = normalize(raw)
 
-    assert_in_delta 0.4, thesis.expected_leverage.fetch("score"), 0.0001
-    assert_equal({ "churn" => 0.25, "fan_in" => 0.15 }, thesis.expected_leverage.fetch("breakdown"))
-    assert_equal 2, thesis.expected_leverage.fetch("drivers").size
+    refute thesis.to_h.key?("expected_leverage")
+    assert_equal "fix", thesis.route
   end
 
-  def test_only_valid_unique_drivers_contribute_to_proposal_score
-    raw = valid_raw_thesis
-    raw["expected_leverage"] = {
-      "drivers" => [
-        "not a driver",
-        { "signal" => "churn", "relief" => 0.5, "mechanism" => "first valid driver" },
-        { "signal" => "churn", "relief" => 1.0, "mechanism" => "duplicate" },
-        { "signal" => "fan_in", "relief" => 0.25, "mechanism" => "stable boundary" },
-        { "signal" => "unknown", "relief" => 1.0, "mechanism" => "unknown signal" },
-        { "signal" => "coupling", "relief" => 1.1, "mechanism" => "out of range" },
-        { "signal" => "complexity", "relief" => 0.5, "mechanism" => "" }
-      ]
-    }
+  def test_architecture_effects_are_trimmed_deduplicated_and_bounded
+    raw = valid_raw_thesis.merge(
+      "architecture_effects" => [ "  stable owner  ", "stable owner", *9.times.map { |i| "effect #{i}" } ]
+    )
     thesis = normalize(raw)
 
-    assert_equal %w[churn fan_in], thesis.expected_leverage.fetch("drivers").map { |driver| driver.fetch("signal") }
-    assert_equal({ "churn" => 0.25, "fan_in" => 0.075 }, thesis.expected_leverage.fetch("breakdown"))
-    assert_in_delta 0.325, thesis.expected_leverage.fetch("score"), 0.0001
-    refute thesis.admissible
-    assert_includes thesis.risk.fetch("flags"), "invalid_leverage_driver"
-    assert_includes thesis.admissibility_reason, "invalid proposal leverage driver"
+    assert_equal 8, thesis.architecture_effects.size
+    assert_equal "stable owner", thesis.architecture_effects.first
+    assert thesis.admissible
   end
 
-  def test_missing_valid_driver_is_retained_and_flagged_inadmissible
-    raw = valid_raw_thesis.merge("expected_leverage" => { "drivers" => [] })
+  def test_invalid_architecture_effect_item_forces_dismissal
+    thesis = normalize(
+      valid_raw_thesis.merge("architecture_effects" => [ "stable owner", nil ])
+    )
+
+    assert_equal [ "stable owner" ], thesis.architecture_effects
+    refute thesis.admissible
+    assert_includes thesis.risk.fetch("flags"), "invalid_architecture_effect"
+    assert_equal "dismiss", thesis.route
+  end
+
+  def test_missing_architecture_effect_is_retained_and_forced_to_dismiss
+    raw = valid_raw_thesis.merge("architecture_effects" => [])
     thesis = normalize(raw)
 
     refute thesis.admissible
-    assert_includes thesis.admissibility_reason, "missing valid proposal leverage driver"
-    assert_empty thesis.expected_leverage.fetch("drivers")
+    assert_includes thesis.admissibility_reason, "missing architecture effect"
+    assert_includes thesis.risk.fetch("flags"), "invalid_architecture_effect"
+    assert_equal "dismiss", thesis.route
     assert thesis_schemer.valid?(thesis.to_h), thesis_schemer.validate(thesis.to_h).map { |e| e["error"] }.inspect
   end
 
-  def test_measured_proposal_below_configured_leverage_floor_is_report_only
-    thesis = normalize(valid_raw_thesis, min_leverage_score: 0.5)
+  def test_low_confidence_is_forced_to_dismiss
+    thesis = normalize(valid_raw_thesis.merge("confidence" => "low"), min_confidence: "medium")
 
     assert thesis.admissible
-    assert_in_delta 0.4, thesis.expected_leverage.fetch("score"), 0.0001
-    assert_includes thesis.risk.fetch("flags"), "below_min_leverage"
+    assert_equal "dismiss", thesis.route
+    assert_includes thesis.route_reasons(min_confidence: "medium"), "below_min_confidence"
   end
 
-  def test_incomplete_feature_measurement_is_retained_and_forces_report_only
-    partial = feature_leverage.merge(
-      "measurement" => {
-        "status" => "incomplete",
-        "diagnostics" => [
-          {
-            "kind" => "architecture_map_failed",
-            "error_class" => "ParserUnavailable",
-            "message" => "dependency graph measurement failed"
-          }
-        ]
-      }
-    )
+  def test_raw_contract_impact_waits_for_caps_policy
+    raw = valid_raw_thesis
+    raw.fetch("risk")["public_api_impact"] = true
+    thesis = normalize(raw)
 
-    thesis = normalize(valid_raw_thesis, leverage: partial)
+    assert thesis.admissible
+    assert_equal "fix", thesis.route
+  end
 
-    refute thesis.admissible
-    assert_includes thesis.risk.fetch("flags"), "incomplete_leverage_measurement"
-    assert_includes thesis.admissibility_reason, "incomplete feature leverage measurement"
-    assert_equal partial.fetch("measurement"), thesis.feature_hotspot.fetch("measurement")
-    assert thesis_schemer.valid?(thesis.to_h),
-           thesis_schemer.validate(thesis.to_h).map { |error| error["error"] }.inspect
+  def test_reviewer_dismissal_is_not_promoted_by_nonfatal_risk
+    raw = valid_raw_thesis.merge("route" => "dismiss")
+    raw.fetch("risk")["public_api_impact"] = true
+    thesis = normalize(raw)
+
+    assert thesis.admissible
+    assert_equal "dismiss", thesis.route
+    assert_includes thesis.route_reasons, "reviewer_dismissed"
+  end
+
+  def test_invalid_reviewer_route_is_retained_as_a_dismissal
+    thesis = normalize(valid_raw_thesis.merge("route" => "ship_it"))
+
+    assert thesis.admissible
+    assert_equal "dismiss", thesis.route
+    assert_includes thesis.risk.fetch("flags"), "invalid_route"
   end
 
   def test_file_and_metric_in_separate_evidence_items_do_not_form_an_admissible_anchor
@@ -365,36 +365,24 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     end
   end
 
-  def test_v3_schema_strictly_rejects_signal_and_value_on_evidence
+  def test_current_schema_strictly_rejects_signal_and_value_on_evidence
     thesis = normalize(valid_raw_thesis)
     payload = thesis.to_h
     payload.fetch("evidence").first["signal"] = "churn"
     payload.fetch("evidence").first["value"] = 10
 
     refute thesis_schemer.valid?(payload)
-    assert_equal 3, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol-thesis")
   end
 
-  def test_historical_v1_and_v2_thesis_fixtures_remain_valid_while_v3_omits_size_estimates
+  def test_current_thesis_omits_numerical_scoring_fields
     current = normalize(valid_raw_thesis).to_h
     refute current.dig("risk", "caps").key?("est_files")
     refute current.dig("risk", "caps").key?("est_diff_lines")
+    refute current.key?("feature_hotspot")
+    refute current.key?("expected_leverage")
+    assert_equal "fix", current.fetch("route")
+    refute_empty current.fetch("architecture_effects")
     assert thesis_schemer.valid?(current), thesis_schemer.validate(current).map { |error| error["error"] }.inspect
-
-    legacy_v2 = JSON.parse(JSON.generate(current))
-    legacy_v2.fetch("risk").fetch("caps").merge!("est_files" => 8, "est_diff_lines" => 400)
-    v2_schemer = JSONSchemer.schema(
-      Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 2))
-    )
-    assert v2_schemer.valid?(legacy_v2), v2_schemer.validate(legacy_v2).map { |error| error["error"] }.inspect
-
-    legacy_v1 = JSON.parse(JSON.generate(legacy_v2))
-    legacy_v1.delete("feature_hotspot")
-    legacy_v1.fetch("expected_leverage").delete("drivers")
-    v1_schemer = JSONSchemer.schema(
-      Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 1))
-    )
-    assert v1_schemer.valid?(legacy_v1), v1_schemer.validate(legacy_v1).map { |error| error["error"] }.inspect
   end
 
   def test_slice_without_tests_prescribes_characterization_and_lowers_high_confidence
@@ -408,6 +396,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     assert_includes thesis.required_validation.fetch("notes"), "Add characterization tests"
     assert_includes thesis.risk.fetch("flags"), "missing_behavior_validation"
     assert_equal "medium", thesis.confidence
+    assert_equal "discuss", thesis.route
   end
 
   def test_test_rich_slice_with_empty_commands_gets_configured_test_command
@@ -429,6 +418,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     assert_equal true, thesis.required_validation.fetch("characterization_first")
     assert_includes thesis.risk.fetch("flags"), "missing_behavior_validation"
     assert_includes thesis.required_validation.fetch("notes"), "Name explicit validation commands"
+    assert_equal "discuss", thesis.route
   end
 
   def test_documentation_thesis_without_configured_command_uses_built_in_validation
@@ -482,14 +472,14 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
 
   private
 
-  def normalize(raw, feature: self.feature(tests: [ "test/checkout_test.rb" ]), leverage: feature_leverage,
-                commands: { "test" => "rake test" }, min_leverage_score: 0.0)
+  def normalize(raw, feature: self.feature(tests: [ "test/checkout_test.rb" ]),
+                commands: { "test" => "rake test" }, min_confidence: "medium")
     with_tmp_dir do |dir|
       materialize_thesis_evidence(dir, raw_theses: [ raw ], feature: feature)
       normalizer = Hive::RefactorPatrol::ThesisNormalizer.new(
-        project_root: dir, commands: commands, min_leverage_score: min_leverage_score
+        project_root: dir, commands: commands, min_confidence: min_confidence
       )
-      return normalizer.call(feature: feature, leverage: leverage, raw: raw, index: 0)
+      return normalizer.call(feature: feature, raw: raw, index: 0)
     end
   end
 

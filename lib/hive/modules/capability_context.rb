@@ -27,7 +27,6 @@ module Hive
 
       def require_github_mutation!(operation) = require_member!("github_mutations", operation)
       def require_external_command!(command) = require_member!("external_commands", executable(command))
-      def require_secret!(binding) = require_member!("secrets", binding)
       def require_network_host!(host) = require_member!("network_hosts", normalized_host(host))
       def require_filesystem_read!(path) = require_path!("filesystem_read", path)
       def require_filesystem_write!(path) = require_path!("filesystem_write", path)

@@ -7,7 +7,6 @@ require "hive/config"
 require "hive/refactor_patrol/architecture_occurrence_store"
 require "hive/refactor_patrol/job_occurrence_lifecycle"
 require "hive/refactor_patrol/claim_transitions"
-require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/job_indexes"
 require "hive/refactor_patrol/job_query_index"
 require "hive/refactor_patrol/job_record_validator"
@@ -20,17 +19,19 @@ require "hive/refactor_patrol/thesis"
 
 module Hive
   module RefactorPatrol
-    # Authoritative v3 lifecycle storage. A job aggregate owns discovery and
+    # Authoritative v4 lifecycle storage. A job aggregate owns discovery and
     # action receipts; the indexes below are disposable projections rebuilt by
     # scanning terminal aggregates.
     class JobStore
       SCHEMA = "hive-refactor-patrol-job".freeze
-      SCHEMA_VERSION = 3
-      SUPPORTED_DISCOVERY_PAYLOAD_SCHEMA_VERSIONS = [ 3 ].freeze
+      SCHEMA_VERSION = 4
+      SUPPORTED_DISCOVERY_PAYLOAD_SCHEMA_VERSIONS = [ 4 ].freeze
       ID_PATTERN = /\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\z/
       STATES = %w[queued analyzing classified acting blocked complete].freeze
-      DISPOSITIONS = %w[accepted flagged suppressed].freeze
-      ZERO_REASONS = %w[no_mapped_slice no_theses all_suppressed].freeze
+      DISPOSITIONS = FINDING_ROUTES
+      ZERO_REASONS = %w[
+        no_mapped_slice no_theses all_dismissed source_no_longer_on_trunk
+      ].freeze
       TOP_LEVEL_KEYS = %w[
         schema schema_version job_id occurrence_id intake_transition_id source
         analysis_sha policy state complete dispositions feature_results
@@ -43,7 +44,6 @@ module Hive
       POLICY_KEYS = %w[discovery auto_fix issue_filing action epoch captured_at].freeze
       POLICY_ACTION_KEYS = %w[
         default_branch auto_fix_agent min_confidence commands caps
-        issue_min_leverage_score
       ].freeze
       POLICY_ACTION_OPTIONAL_KEYS = %w[
         auto_fix_model auto_fix_effort auto_fix_launcher_identity
@@ -54,8 +54,7 @@ module Hive
         single_feature_only allow_dependency_bumps allow_public_api_changes
         allow_cross_feature
       ].freeze
-      LEGACY_POLICY_CAP_KEYS = %w[max_files max_diff_lines].freeze
-      DISPOSITION_KEYS = %w[id feature_id fingerprint score admissible reasons reference thesis family_id].freeze
+      DISPOSITION_KEYS = %w[id feature_id fingerprint route admissible reasons reference thesis family_id].freeze
       FEATURE_RESULT_KEYS = %w[feature_id complete thesis_ids errors].freeze
       ACTION_REQUIRED_KEYS = %w[
         canonical_action_id thesis_id thesis_fingerprint kind owner_job_id
@@ -93,8 +92,9 @@ module Hive
       JOB_TRANSITION_ATTEMPT_KEYS = %w[
         kind operation occurrence_id generation transitions recorded_at
       ].freeze
+      SOURCE_RETIREMENT_ATTEMPT_KIND = "source_retirement".freeze
       DIAGNOSTIC_ATTEMPT_KINDS =
-        %w[discovery_block action_block].freeze
+        [ "discovery_block", "action_block", SOURCE_RETIREMENT_ATTEMPT_KIND ].freeze
       JOB_TRANSITION_ATTEMPT_KIND = "job_transition".freeze
       TRANSITION_KEYS = %w[
         intent_id operation generation semantic_digest outcome error_code
@@ -351,14 +351,6 @@ module Hive
         result
       rescue KeyError => e
         raise CorruptRecord, "refactor patrol manifest is missing #{e.key.inspect}"
-      end
-
-      # Expose independently due intake jobs so one old backoff-bound
-      # occurrence cannot hide later work.
-      def eligible_jobs(now: Time.now)
-        eligible_from(jobs, now: now).sort_by { |aggregate| scheduling_key(aggregate) }
-      rescue ArgumentError => e
-        raise InconsistentRecord, "refactor patrol job has invalid scheduling timestamp (#{e.message})"
       end
 
       def eligible_from(records, now:)
@@ -645,6 +637,100 @@ module Hive
         end
       end
 
+      # A merged source commit that disappeared from the freshly fetched
+      # registered trunk cannot become actionable again by retrying. Retire
+      # unpublished work in one atomic transition so the scheduler cannot
+      # append an unbounded checkout-guard history. Only actions with linked or
+      # remote-effect continuation evidence survive, and the recorded
+      # retirement attempt permanently narrows their later claims to
+      # continuation-only authority.
+      def retire_obsolete_source!(job_id, merge_sha:, trunk_sha:, now: Time.now,
+                                  claim_resolver: nil, episode: nil,
+                                  transition: nil)
+        mutate_job(job_id) do |aggregate, path|
+          next [ aggregate, :already_terminal ] if aggregate.fetch("complete")
+          unless aggregate.dig("source", "merge_sha") == merge_sha.to_s
+            raise InconsistentRecord.new(
+              "obsolete source retirement does not match the job merge commit",
+              path: path
+            )
+          end
+          status = obsolete_source_retirement_status_for(
+            aggregate, claim_resolver: claim_resolver
+          )
+          next [ aggregate, status ] unless status == :retireable
+
+          timestamp = now.utc.iso8601
+          active_discovery = active_discovery_attempt(aggregate)
+          active_actions = aggregate.fetch("actions").filter_map do |action|
+            claim = active_action_claim(action)
+            [ action, claim ] if claim
+          end
+          @claim_transitions.finish!(
+            active_discovery,
+            state: "superseded",
+            outcome: "source_no_longer_on_trunk",
+            now: now,
+            touch_heartbeat: false
+          ) if active_discovery
+          active_actions.each do |_action, claim|
+            @claim_transitions.finish!(
+              claim,
+              state: "superseded",
+              outcome: "source_no_longer_on_trunk",
+              now: now,
+              touch_heartbeat: false
+            )
+          end
+          aggregate.fetch("actions").each do |action|
+            next if action.fetch("terminal")
+            next if obsolete_source_continuation?(aggregate, action)
+
+            action["outcome"] = "source_no_longer_on_trunk"
+            action["terminal"] = true
+            action["updated_at"] = timestamp if action.key?("updated_at")
+          end
+          generation = diagnostic_episode!(
+            aggregate, SOURCE_RETIREMENT_ATTEMPT_KIND, episode
+          )
+          aggregate.fetch("attempts") << {
+            "kind" => SOURCE_RETIREMENT_ATTEMPT_KIND,
+            "occurrence_id" => aggregate.fetch("occurrence_id"),
+            "generation" => generation,
+            "state" => "blocked",
+            "reason" => "source_no_longer_on_trunk",
+            "evidence" => {
+              "merge_sha" => merge_sha.to_s,
+              "trunk_sha" => trunk_sha.to_s
+            },
+            "transitions" => transition ? [
+              transition_record(
+                transition, generation: generation, now: now
+              )
+            ] : [],
+            "finished_at" => timestamp,
+            "next_eligible_at" => timestamp
+          }
+          aggregate["review_errors"] = []
+          aggregate["zero_reason"] = "source_no_longer_on_trunk" if
+            aggregate.fetch("actions").empty?
+          remaining = aggregate.fetch("actions").any? do |action|
+            !action.fetch("terminal")
+          end
+          aggregate["state"] = remaining ? "acting" : "complete"
+          aggregate["complete"] = !remaining
+          aggregate["updated_at"] = timestamp
+          [ aggregate, :retired ]
+        end
+      end
+
+      def obsolete_source_retirement_status(job_id, claim_resolver: nil)
+        aggregate = read_job(job_id)
+        obsolete_source_retirement_status_for(
+          aggregate, claim_resolver: claim_resolver
+        )
+      end
+
       def checkpoint_discovery!(token, envelope:, now: Time.now,
                                 backoff_sec: 60, transition: nil)
         payload = json_copy(envelope)
@@ -894,7 +980,7 @@ module Hive
             return nil
           end
 
-          continuation_only = authority != true
+          continuation_only = authority != true || source_obsolete?(aggregate)
           if continuation_only && !continuation_after_revocation?(action)
             action["outcome"] = "authority_revoked"
             action["updated_at"] = now.utc.iso8601 if action.key?("updated_at")
@@ -1381,6 +1467,11 @@ module Hive
         page.merge("jobs" => page.fetch("job_ids").map { |job_id| read_job(job_id) })
       end
 
+      def recent_job_query_page(limit:)
+        page = @job_query_index.recent_page(limit: limit)
+        page.merge("jobs" => page.fetch("job_ids").map { |job_id| read_job(job_id) })
+      end
+
       def incomplete_jobs?
         cursor = nil
         loop do
@@ -1433,40 +1524,12 @@ module Hive
         rebuild_indexes!.fetch("fingerprints")
       end
 
-      def action_index
-        read_derived_index(
-          action_index_path,
-          schema: JobIndexes::ACTION_SCHEMA,
-          collection: "actions"
-        ) { rebuild_indexes!.fetch("actions") }
-      end
-
       def fingerprint_index_path
         File.join(root, "indexes", "fingerprints.json")
       end
 
       def action_index_path
         File.join(root, "indexes", "actions.json")
-      end
-
-      # Historical size caps classified otherwise admissible theses as
-      # flagged. Keep that immutable classification on disk, but treat a row
-      # whose complete reason/flag set consists only of those retired cap
-      # codes as accepted when deciding current action authority.
-      def effective_disposition(disposition, item)
-        name = disposition.to_s
-        return name unless name == "flagged"
-        return name unless item.is_a?(Hash) && item["admissible"] == true
-
-        thesis = item["thesis"]
-        return name unless thesis.is_a?(Hash) && thesis["admissible"] == true
-
-        findings = Array(item["reasons"]).map(&:to_s) +
-                   Array(thesis.dig("risk", "flags")).map(&:to_s)
-        return name if findings.empty?
-        return name unless (findings - Caps::LEGACY_SIZE_FLAGS).empty?
-
-        "accepted"
       end
 
       private
@@ -1502,7 +1565,6 @@ module Hive
           raise InconsistentRecord.new("action thesis is not classified", path: path) unless entry
 
           disposition, thesis = entry
-          disposition = effective_disposition(disposition, thesis)
           validate_action_authority!(aggregate, kind, disposition, thesis, path)
           family_id = specification["family_id"].to_s unless specification["family_id"].nil?
           identity = action_identity(kind, family_id, thesis, path)
@@ -1533,11 +1595,11 @@ module Hive
         policy = aggregate.fetch("policy")
         case kind
         when "fix"
-          unless disposition == "accepted" && policy.fetch("auto_fix")
+          unless disposition == "fix" && policy.fetch("auto_fix")
             raise InconsistentRecord.new("fix action exceeds the immutable policy/disposition snapshot", path: path)
           end
         when "issue"
-          eligible = (disposition == "flagged" && thesis.fetch("admissible")) || disposition == "accepted"
+          eligible = (disposition == "discuss" && thesis.fetch("admissible")) || disposition == "fix"
           unless eligible && policy.fetch("issue_filing")
             raise InconsistentRecord.new("issue action exceeds the immutable policy/disposition snapshot", path: path)
           end
@@ -1717,6 +1779,49 @@ module Hive
         return if resolution == :unresolved
 
         raise StaleClaim, "refactor patrol claim owner is provably gone, replaced, or unverifiable"
+      end
+
+      def claim_resolved?(claim, claim_resolver)
+        claim_resolver&.call(json_copy(claim)) == :resolved
+      rescue StandardError
+        false
+      end
+
+      def obsolete_source_retirement_status_for(aggregate, claim_resolver:)
+        return :already_terminal if aggregate.fetch("complete")
+
+        claims = [ active_discovery_attempt(aggregate) ]
+        claims.concat(
+          aggregate.fetch("actions").filter_map do |action|
+            active_action_claim(action)
+          end
+        )
+        return :claim_active unless claims.compact.all? do |claim|
+          claim_resolved?(claim, claim_resolver)
+        end
+
+        pending = aggregate.fetch("actions").reject do |action|
+          action.fetch("terminal")
+        end
+        if source_obsolete?(aggregate) && pending.any? && pending.all? do |action|
+             obsolete_source_continuation?(aggregate, action)
+           end
+          return :continuation_required
+        end
+
+        :retireable
+      end
+
+      def source_obsolete?(aggregate)
+        aggregate.fetch("attempts").any? do |attempt|
+          attempt["kind"] == SOURCE_RETIREMENT_ATTEMPT_KIND &&
+            attempt["reason"] == "source_no_longer_on_trunk"
+        end
+      end
+
+      def obsolete_source_continuation?(aggregate, action)
+        action.fetch("owner_job_id") != aggregate.fetch("job_id") ||
+          continuation_after_revocation?(action)
       end
 
       def mutate_action_claim(token, now:)
@@ -2094,10 +2199,10 @@ module Hive
 
       def action_authorized_for?(aggregate)
         policy = aggregate.fetch("policy")
-        (policy.fetch("auto_fix") && aggregate.dig("dispositions", "accepted").any?) ||
+        (policy.fetch("auto_fix") && aggregate.dig("dispositions", "fix").any?) ||
           (policy.fetch("issue_filing") && (
-            aggregate.dig("dispositions", "accepted").any? ||
-            aggregate.dig("dispositions", "flagged").any? { |item| item["admissible"] == true }
+            aggregate.dig("dispositions", "fix").any? ||
+            aggregate.dig("dispositions", "discuss").any? { |item| item["admissible"] == true }
           ))
       end
 
@@ -2161,10 +2266,6 @@ module Hive
           "candidate_source" => candidate
         }
         atomic_write(path, evidence)
-      end
-
-      def jobs_dir
-        File.join(root, "jobs")
       end
 
       def job_path(job_id)
@@ -2232,19 +2333,6 @@ module Hive
 
       def timestamp!(value, label, path)
         @record_validator.timestamp!(value, label, path)
-      end
-
-      def read_derived_index(path, schema:, collection:)
-        relative = @job_files.relative_path(path)
-        data = @job_files.read_json(relative, missing: true)
-        return yield unless data
-        unless data.is_a?(Hash) && data["schema"] == schema && data["schema_version"] == SCHEMA_VERSION &&
-               data[collection].is_a?(Hash) && (data.keys - %w[schema schema_version] - [ collection ]).empty?
-          return yield
-        end
-        data
-      rescue JSON::ParserError, SystemCallError, IOError
-        yield
       end
 
       def atomic_write(path, data)

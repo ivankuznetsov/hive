@@ -199,7 +199,6 @@ module Hive
       end
 
       def explicit_routing? = routing["mode"] == "explicit"
-      def routing_policy_digest = explicit_routing? ? routing.fetch("policy_digest") : nil
       def routing_decision = explicit_routing? ? routing.fetch("decision") : nil
       def admitted_route = explicit_routing? ? routing.fetch("route") : nil
       def circuit_generations = explicit_routing? ? routing.fetch("circuit_generations") : EMPTY_ROUTING_VALUES

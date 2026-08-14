@@ -128,6 +128,13 @@ still runs in tmux. Harness-owned `BUNDLE_GEMFILE`, `HIVE_HOME`, built-in
 agent binaries, checkout Hive binaries, and both PATH/direct GitHub shim routes
 cannot be replaced by scenario overrides.
 
+`full_pipeline_happy_path` also routes the fixture from the isolated role
+prompt rather than a scenario environment variable. It emits provider-shaped
+result events for inference, production, and review, writes two real document
+representations under the controller-issued producer root, and lets production
+custody/hash validation publish the accepted package. It never writes the
+legacy artifacts completion marker itself.
+
 CI runs the harness in a separate job, retains its run directory, and enforces
 the incident budget from the generated report:
 

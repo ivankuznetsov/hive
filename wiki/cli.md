@@ -1,9 +1,9 @@
 ---
 title: CLI Surface
 type: api
-source: bin/hive, bin/hv, lib/hive/cli.rb, lib/hive/commands/answer.rb, schemas/hive-answer.v1.json
+source: bin/hive, bin/hive-e2e, bin/hv, lib/hive/cli.rb, lib/hive/cli_argv_policy.rb, lib/hive/commands/answer.rb, schemas/hive-answer.v1.json
 created: 2026-04-25
-updated: 2026-08-12
+updated: 2026-08-14
 tags: [cli, api, skills, agents, operational, provisioning, brainstorm, plan-review]
 ---
 
@@ -22,7 +22,12 @@ recommends an answer nor advances a stage.
 
 `bin/hive` is a thin runner that loads `lib/hive` and calls `Hive::CLI.start(ARGV)`, catching `Hive::Error` to render `hive: <message>` to stderr with the error's `exit_code` (default `ExitCodes::GENERIC = 1`).
 
-Before Thor dispatch, `bin/hive` handles two wrapper-level cases itself:
+Before Thor dispatch, `bin/hive` delegates shared wrapper grammar to the pure
+`Hive::CliArgvPolicy`, while retaining command-specific JSON error contracts
+and dispatch. `bin/hive-e2e` uses the same policy for encoding validation,
+Thor-exact JSON booleans, leading-option placement, and command-local help, so
+the two executables no longer duplicate those transformations. The wrapper
+handles two user-visible cases before dispatch:
 top-level `--version` / `-v` prints `Hive::VERSION`, and command-local
 `--help` / `-h` is rewritten to `help <cmd>`. The help rewrite preserves any
 leading dash-prefixed arguments that appear before the subcommand, then drops
@@ -121,9 +126,10 @@ contracts retain their established unversioned or schema-less shapes.
 | `hive connect screenote [--base-url URL] [--json]` | Run Screenote OAuth 2.1 auth-code + PKCE setup, pick a default Screenote project via MCP `list_projects`, and persist `screenote.json` for artifacts-stage MCP injection. | `Hive::Commands::Connect` | [[commands/screenote]] |
 | `hive disconnect screenote [--json]` | Revoke the stored Screenote token when possible and clear `screenote.json`; no-op when already disconnected. | `Hive::Commands::Disconnect` | [[commands/screenote]] |
 | `hive bench submit SLUG [--project NAME] [--json]` | Extract a completed `9-done` task into a hive-bench corpus entry and open a submission PR from the hive-bench checkout. Requires `HIVE_BENCH_PATH` or `~/Dev/hive-bench`, a GitHub `origin` remote for the source project, `worktree.yml`, `pr.md`, and a clean local secret-token preflight. | `Hive::Commands::BenchSubmit` | [[commands/bench-submit]] |
-| `hive refactor-patrol PROJECT [--list \| --show JOB_ID] [--limit N] [--cursor CURSOR] [--full] [--json]` | Run architecture-patrol modes, or inspect the authoritative durable job ledger without mutation. List pages and show histories default to 100 records; list cursors freeze an immutable intake-sequence high-water and show requires explicit `--full` for unbounded histories. JSON uses `hive-refactor-patrol-jobs.v1`. | `Hive::Commands::RefactorPatrol` → `Hive::RefactorPatrol::JobQuery` | [[commands/refactor-patrol]] |
+| `hive refactor-patrol PROJECT [--list \| --show JOB_ID] [--limit N] [--cursor CURSOR] [--full] [--json]` | Run v4 architecture-patrol modes, or inspect the authoritative durable job ledger without mutation. On-demand `--changed-since` is only a filter paired with `--feature`, `--entrypoint`, or `--path`. List pages and show histories default to 100 records; list cursors freeze an immutable intake-sequence high-water and show requires explicit `--full` for unbounded histories. Job-query JSON uses `hive-refactor-patrol-jobs.v2`. | `Hive::Commands::RefactorPatrol` → `Hive::RefactorPatrol::JobQuery` | [[commands/refactor-patrol]] |
 | `hive run TARGET [--no-rebase]` | Lower-level dispatcher for a slug or task folder. `--no-rebase` skips the auto-rebase pre-step for one invocation (one-off override of `cfg.rebase.enabled`). | `Hive::Commands::Run` → stage runner | [[commands/run]] |
 | `hive rebase-status TARGET` | Read-only inspector: reports whether the next `hive run` would attempt an auto-rebase, how many commits behind `origin/<default>` the worktree is, and which guard (if any) would short-circuit. Never mutates; never calls `git fetch`. | `Hive::Commands::RebaseStatus` | [[commands/rebase-status]] |
+| `hive worktree SUBCOMMAND TARGET [--json]` | Inspect or marker-gated repair an owned task worktree. `status` is read-only; `commit-residue`, `discard-residue`, and `repair --strategy commit|discard` run under the task lock, preserve the recovery marker, and require fresh status before `workflow.retry`. | `Hive::Commands::Worktree` | [[modules/worktree]] |
 | `hive approve TARGET [--to STAGE] [--from STAGE]` | Move a task between stages + record a hive/state commit (agent-callable equivalent of shell `mv`; `--from` asserts current stage for retry idempotency) | `Hive::Commands::Approve` | [[commands/approve]] |
 | `hive decide TARGET OUTCOME --from STAGE --decision-id ID [--note TEXT] [--json]` | Apply one descriptor-declared human outcome to the observed stage visit; completing outcomes atomically verify a non-marker artifact. | `Hive::Commands::Decide` | [[commands/workflow]] |
 | `hive drop TARGET [--project NAME] [--from STAGE]` | Hard-delete an active task: kill its recorded agent, close draft PR best-effort, remove task folder(s), logs, worktree, branch, and locks, then commit an audit record. Refuses `9-done`. | `Hive::Commands::Drop` | [[commands/drop]] |

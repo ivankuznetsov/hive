@@ -34,9 +34,11 @@ class WebTaskCaptureTest < Minitest::Test
       browser_entry = Hive::Web::BrowserBundle::Entry.new(
         cache_key: "e" * 64,
         cache_root: File.join(root, "browser"),
-        node_modules_path: File.join(root, "browser", "node_modules"),
-        playwright_cli: File.join(root, "browser", "playwright"),
+        agent_browser_cli: File.join(root, "browser", "agent-browser"),
+        browser_executable: File.join(root, "browser", "chrome"),
+        agent_browser_version: "0.34.0",
         browsers_path: File.join(root, "browser", "browsers"),
+        skills_path: File.join(root, "browser", "skills"),
         package_digests: {
           "package" => "f" * 64, "package_lock" => "0" * 64
         },
@@ -1350,24 +1352,21 @@ class WebTaskCaptureTest < Minitest::Test
 
   def test_browser_recording_is_pinned_and_confined_to_staging
     with_capture_task do |root, task_folder, source|
-      script = File.join(source, "web", "script", "capture_task_page.cjs")
-      FileUtils.mkdir_p(File.dirname(script))
-      File.write(script, "// fixture")
+      FileUtils.mkdir_p(File.join(source, "web"))
       video_directory = File.join(root, "video")
-      FileUtils.mkdir_p(video_directory)
-      video = File.join(video_directory, "capture.webm")
-      File.write(video, "video")
-      entry = Struct.new(:browsers_path, :node_modules_path).new(
-        "/browsers", "/node-modules"
+      entry = Struct.new(
+        :browsers_path, :agent_browser_cli, :browser_executable, :skills_path
+      ).new(
+        "/browsers", "/managed/agent-browser", "/managed/chrome", "/managed/skills"
       )
       capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
       calls = []
       capture.define_singleton_method(:run_command!) do |argv, env:, chdir:, capture:|
         calls << [ argv, env, chdir, capture ]
-        [ JSON.generate(
-          "video_path" => video,
-          "accessibility_assertions" => [ "heading visible" ]
-        ), "" ]
+        if argv.include?("stop")
+          File.write(File.join(video_directory, "capture.webm"), "video")
+        end
+        [ "", "" ]
       end
 
       result = capture.send(
@@ -1379,20 +1378,24 @@ class WebTaskCaptureTest < Minitest::Test
         video_directory: video_directory
       )
 
-      assert_equal File.realpath(video), result.fetch("video_path")
-      assert_equal "node", calls.first.first.first
-      assert_equal "/browsers", calls.first.fetch(1).fetch("PLAYWRIGHT_BROWSERS_PATH")
-      assert_equal(
-        File.join("/node-modules", "playwright"),
-        calls.first.fetch(1).fetch("HIVE_PLAYWRIGHT_MODULE")
-      )
+      assert_equal File.realpath(File.join(video_directory, "capture.webm")),
+                   result.fetch("video_path")
+      assert_equal "/managed/agent-browser", calls.first.first.first
+      assert_equal "/browsers", calls.first.fetch(1).fetch("PUPPETEER_CACHE_DIR")
+      assert_equal "/managed/skills", calls.first.fetch(1).fetch("AGENT_BROWSER_SKILLS_DIR")
+      assert calls.any? { |argv,| argv.include?("screenshot") }
+      assert calls.any? { |argv,| argv.include?("click") }
+      refute calls.flatten.include?("playwright")
     end
   end
 
-  def test_browser_recording_rejects_missing_script_outside_media_and_invalid_json
+  def test_browser_recording_requires_managed_video_output_and_closes_on_failure
     with_capture_task do |root, task_folder, source|
+      FileUtils.mkdir_p(File.join(source, "web"))
       capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
-      entry = Struct.new(:browsers_path, :node_modules_path).new("/browsers", "/modules")
+      entry = Struct.new(
+        :browsers_path, :agent_browser_cli, :browser_executable, :skills_path
+      ).new("/browsers", "/managed/agent-browser", "/managed/chrome", "/managed/skills")
       args = {
         source_root: source, browser_entry: entry,
         runtime_root: File.join(root, "runtime"),
@@ -1400,30 +1403,45 @@ class WebTaskCaptureTest < Minitest::Test
         screenshot: File.join(root, "capture.png"),
         video_directory: File.join(root, "video")
       }
+      calls = []
+      capture.define_singleton_method(:run_command!) do |argv, **|
+        calls << argv
+        [ "", "" ]
+      end
       error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
         capture.send(:record_browser!, **args)
       end
-      assert_match(/capture script is missing/, error.message)
+      assert_match(/managed video output/, error.message)
+      assert calls.any? { |argv| argv.include?("close") }
+    end
+  end
 
-      script = File.join(source, "web", "script", "capture_task_page.cjs")
-      FileUtils.mkdir_p(File.dirname(script))
-      File.write(script, "// fixture")
-      FileUtils.mkdir_p(args.fetch(:video_directory))
-      outside = File.join(root, "outside.webm")
-      File.write(outside, "video")
-      capture.define_singleton_method(:run_command!) do |*|
-        [ JSON.generate("video_path" => outside), "" ]
-      end
-      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
-        capture.send(:record_browser!, **args)
-      end
-      assert_match(/outside its staging root/, error.message)
+  def test_browser_recording_cleanup_swallows_stop_and_close_failures
+    with_capture_task do |root, task_folder, source|
+      FileUtils.mkdir_p(File.join(source, "web"))
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+      entry = Struct.new(
+        :browsers_path, :agent_browser_cli, :browser_executable, :skills_path
+      ).new("/browsers", "/managed/agent-browser", "/managed/chrome", "/managed/skills")
+      calls = []
+      capture.define_singleton_method(:run_command!) do |argv, **|
+        calls << argv
+        return [ "", "" ] if argv.include?("start")
 
-      capture.define_singleton_method(:run_command!) { |*| [ "{", "" ] }
-      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
-        capture.send(:record_browser!, **args)
+        raise RuntimeError, "browser failed"
       end
-      assert_match(/invalid evidence/, error.message)
+
+      error = assert_raises(RuntimeError) do
+        capture.send(
+          :record_browser!, source_root: source, browser_entry: entry,
+          runtime_root: File.join(root, "runtime"), base_url: "http://127.0.0.1:4567",
+          screenshot: File.join(root, "capture.png"),
+          video_directory: File.join(root, "video")
+        )
+      end
+      assert_match(/browser failed/, error.message)
+      assert calls.any? { |argv| argv.include?("stop") }
+      assert calls.any? { |argv| argv.include?("close") }
     end
   end
 

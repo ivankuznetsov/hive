@@ -3,120 +3,213 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-08-03
-tags: [stage, artifacts, release]
+updated: 2026-08-14
+tags: [stage, artifacts, evidence, review]
 ---
 
-**TLDR**: Artifact collection is the agent-backed handoff between autonomous
-review and PR finalization. Before spawn, Hive writes a deterministic,
-generation-bound `capture-requirement.json`. Visual work must retain a valid
-task-local `media/capture-manifest.json`; a bootstrap, provider, or recorder failure keeps
-the stage in `ERROR reason=required_capture_missing`. Nonvisual work records
-`not_applicable`. Autonomous artifact collection never reads or injects
-Screenote credentials: external upload is a separate operator-confirmed action.
+**TLDR**: `7-artifacts` now completes only after Hive publishes a strict,
+identity-bound outcome-evidence package. A fresh read-only inference agent maps
+the task, plan, and exact committed diff into user-meaningful claims; a separate
+producer makes the required proof; and a third fresh read-only reviewer accepts,
+targets for recapture, or blocks every claim and supported exclusion. Legacy
+Hivebox screenshots and recordings remain visible diagnostics but never establish
+completion authority.
 
 ## Preconditions
 
-1. The task must arrive from `6-review` with `REVIEW_COMPLETE` when using `hive artifacts` as a workflow verb.
-2. `artifact.md` may be missing on first run; the runner touches it so marker writes have a target.
+1. The task arrives from `6-review` with `REVIEW_COMPLETE` when using
+   `hive artifacts` as a workflow verb.
+2. The controller-owned task worktree pointer and optional draft-PR receipt must
+   agree on the implementation branch, base, worktree, and saved head.
+3. The implementation worktree must be clean. Evidence covers only the committed
+   `base..HEAD` range; staged, unstaged, untracked, or symlink changes fail closed.
+4. The durable attempt must own the current task generation and `7-artifacts`
+   stage before the ledger can be opened.
 
-## Steps performed (`Stages::Artifacts.run!`)
+## Controller flow (`Stages::Artifacts.run!`)
 
-1. Touch `artifact.md` if it does not exist.
-2. Classify applicability from the exact implementation base/head, changed-path
-   digest, visual path rules, and explicit requested outcome, then atomically
-   write `capture-requirement.json`. If Hive cannot prove the owned worktree,
-   base/head, or changed-path evidence, classification fails closed to
-   `required`; absence of evidence is never treated as `not_applicable`.
-3. If the marker is already `COMPLETE`, accept it only when the requirement is
-   `not_applicable` or a matching retained capture manifest exists.
-4. Resolve `artifacts.agent`, render the generation-bound local-capture
-   contract, and spawn without external-upload credentials or MCP tools.
-5. Re-read the marker and validate required capture again. Missing/invalid
-   required evidence is replaced with
-   `ERROR reason=required_capture_missing` and remediation.
+1. Resolve the immutable implementation base/head and the exact sorted changed
+   paths. The controller re-resolves this identity after every agent role so a
+   role cannot change the source behind the evidence. It also materializes the
+   bounded exact binary diff once under the immutable generation and supplies
+   its path, size, and SHA-256 receipt to both read-only semantic roles; neither
+   role needs shell or Git authority.
+2. Launch a fresh read-only **inference** context. It reads `task.md`, `plan.md`,
+   and the exact diff, then returns a bounded set of outcome claims plus justified
+   exclusions. Every changed path must trace to at least one claim or exclusion.
+   Inference prefers one to three grouped outcomes and may return at most five;
+   one proof may establish multiple related claims of the same kind. Each claim
+   chooses exactly one closed proof kind: `screenshot`, `video`, `terminal`, or
+   `document`.
+3. Persist the immutable requirement under the task's outcome-evidence
+   generation. The generation binds project/task, durable task generation,
+   controller recovery epoch, base, head, and changed-path digest.
+4. Preflight the configured producer and reviewer. A video requirement needs a
+   review pipeline that retains temporal video and exposes controller-derived
+   ordered frames to the semantic reviewer. Screenshot/video/terminal
+   production needs a workspace-sandboxed producer; a document-only producer may
+   use Hive's controller-scoped Claude edit boundary.
+5. Resolve one controller-owned capture toolkit before production. Web proof
+   receives `hive evidence browser`, a closed gateway to the exact pinned
+   native `agent-browser` and managed Chrome;
+   terminal proof receives Hive's native PTY command; visual proof also requires
+   `ffmpeg`, `ffprobe`, and Tesseract. The browser gets one random `.invalid`
+   origin mapped through a controller-owned proxy to one issued loopback app
+   port, rather than access to every localhost service. Hive opens and verifies
+   that exact session before production. The producer receives only a bounded
+   filesystem mailbox used by `hive evidence`; the raw browser socket,
+   controller-private browser state, and media staging stay outside its sandbox.
+   Codex's managed network proxy runs in limited mode with no admitted domains
+   and local binding enabled, so a producer may start the issued application
+   port but cannot connect directly to arbitrary loopback services. The
+   controller executes admitted browser/terminal operations, records exact
+   file receipts, and exclusively publishes basename-only PNG/WebM media into
+   the evidence root.
+   Missing capabilities
+   publish a semantic blocker before the producer starts.
+6. Launch a distinct **producer** context with one writable root under the active
+   evidence attempt. Source and controller metadata remain read-only. Every proof
+   names one retained original, one bounded reviewer representation, and the
+   claims it establishes. The controller—not the LLM—adds exact byte counts,
+   SHA-256 digests, rendering, and implementation-head source identity.
+   Screenshot, video, and terminal representations must match a controller
+   capture receipt at handoff; producer-written lookalike media fails closed.
+7. Re-admit every retained representation deterministically: safe containment,
+   size, hash, declared media type, actual image/video decode, terminal-cast or
+   document structure, secret patterns, and provider provenance are checked
+   without deciding whether the proof is persuasive.
+8. Launch a third fresh read-only **reviewer** context. It must inspect every
+   retained representation and return exactly one reasoned verdict for every claim
+   and exclusion. For video, Hive keeps the real temporal representation as the
+   user-facing proof and derives a six-frame ordered contact sheet directly from
+   the admitted video for safe semantic inspection. Uncertainty cannot be accepted.
+   Hive records the exact immutable review scope instead of pretending a copied
+   hash list is a per-tool access log.
+9. `accepted` publishes the append-only attempt and atomic `current.json`, then
+   writes `COMPLETE`. `revise` requests only the failed claim proofs, preserves
+   already accepted evidence, and permits a bounded attempt to improve any
+   nonempty subset of requested claims. Unaddressed claim evidence is retained;
+   Hive reassembles the full package and sends it through a fresh review.
+   `blocked`, an invalid exclusion, missing
+   capability, or exhausted recaptures publishes an operator-visible blocked
+   pointer and semantic `ERROR`.
 
-## Media manifest
+The default is one initial attempt plus at most two targeted recaptures. Project
+configuration may reduce recaptures to zero or one, but cannot exceed two.
 
-Required capture writes `<task>/media/capture-manifest.json` using
-`hive-artifact-capture` v2. Its provider-neutral envelope binds the task slug,
-clean source SHA, recorder identity and argv, disclosed environment-key names,
-artifact byte sizes and SHA-256 hashes, timestamps, diagnostic, and teardown
-outcome. Built-in Hivebox evidence keeps its lock digests, immutable cache key,
-fixture ids, viewport, and accessibility assertions inside the typed `evidence`
-block; project recorders use `evidence.type: project_provider` and bounded
-provider-specific `details`. A `captured` receipt must contain at least one
-retained artifact and match the requirement's implementation head.
+## Proof selection
 
-New producers reserve headroom by rejecting the complete serialized receipt
-above 240 KiB before publishing any provider media or manifest. Policy and Hive
-Web share a 256 KiB consumer ceiling and reject larger files before parsing.
-The environment-key disclosure is always nonempty, and failed-provider blank
-diagnostics are normalized to an actionable fallback. Project-provider capture
-is Linux-only because its custody guarantee depends on child-subreaper support.
-Before and after invoking a provider, Hive rejects Git `assume-unchanged` and
-`skip-worktree` index entries and revalidates the complete source snapshot. Git
-attestation helpers and the provider share bounded output, one monotonic
-source-custody deadline, and complete descendant cleanup. Each command runs
-beneath a freshly forked subreaper custody root, so caller children outside that
-command subtree are never enumerated, signalled, or reaped. Configured commands
-always use Ruby's direct executable/argv form, including one-item commands, so
-shell punctuation in a tracked executable name remains literal.
+- Use `screenshot` for one stable web/interface state, or a coherent set of
+  stable screens establishing one outcome.
+- Use `video` for a flow, transition, timing, ordering, or behavior across
+  states. A pair of screenshots or storyboard does not replace temporal video.
+- Use `terminal` for CLI/TUI behavior. The retained original is an asciinema
+  v2-compatible cast and the reviewer representation is bounded plain text.
+  `hive evidence terminal NAME -- COMMAND...` produces both through a Ruby PTY
+  under Linux subreaper custody, without asciinema, VHS, a shell, or terminal-GIF
+  conversion. Success, nonzero exit, timeout, and output overflow all reap the
+  complete descendant tree; a detached child invalidates the capture.
+- Use `document` for invisible/refactoring outcomes, using safe text, Markdown,
+  JSON, or static image material that explains the resulting contract, schema,
+  or architecture. Active HTML, SVG, and PDF are not admitted. Static images
+  and video up to 30 seconds are OCR-scanned for secret-shaped content before
+  review.
 
-Project media must decode as its declared image/video type. Its published name
-contains both source and artifact digests, so an identical recapture is reused
-while changed bytes at the same source SHA publish under a new name; superseded
-task-owned provider media is removed only after the replacement manifest is
-durable.
+This semantic selection is intentionally agent-inferred from task intent and the
+exact diff. Controller code validates closed structure, integrity, custody, and
+traceability; it does not guess user meaning from filenames.
 
-The policy continues to validate retained `hive-artifact-capture` v1 manifests
-against the v1 schema and built-in-recorder requirements. New captures emit v2;
-the Web reader validates v2 receipts against the complete shared strict schema,
-renders valid v1 and v2 receipts, and hides unknown future versions. This is a
-read-compatible migration: existing task evidence does not need rewriting.
-Syntactically valid non-object receipts fail closed as unsatisfied, and provider
-recapture ignores a retained receipt unless both its root and `recorder` are
-objects with the expected provider identity.
+Web capture has one producer interface: the controller-issued `hive evidence
+browser` gateway to the pinned native `agent-browser` CLI. Producers do not
+receive the raw daemon socket and do not discover or choose Firefox,
+Playwright, Puppeteer, QML, or ImageMagick. Stable interface state uses a
+screenshot; navigation, ordering, timing, and state transitions use temporal
+video. The gateway accepts only the issued origin, a closed interaction
+vocabulary, and basename PNG/WebM output. It stages media privately and
+publishes it no-follow/exclusive into the writable attempt root. Hive closes
+the named browser session before it cleans the managed app/proxy and producer
+process group. Playwright remains a web-system-test dependency, not an
+outcome-evidence capture interface.
 
-The older `<task>/media/manifest.json` remains a display compatibility format
-for existing tasks:
+Inside a durable explicitly routed attempt, that admitted provider/model/effort
+is authoritative for all three fresh role processes and is what actor receipts
+report. Per-role agent/model settings remain an unrouted compatibility fallback;
+fresh context identity, read/write scope, and semantic responsibility stay
+distinct even when one admitted provider route executes all roles.
 
-```json
-{
-  "schema": 1,
-  "status": "captured | skipped | failed",
-  "reason": "required when skipped or failed",
-  "surface": "ui | tui | none",
-  "items": [
-    {
-      "file": "01-home.png",
-      "type": "still",
-      "caption": "Home page after load",
-      "screenote_url": "https://screenote.ai/...",
-      "screenote_skipped_reason": null
-    }
-  ]
-}
+Each evidence role starts with an isolated child environment containing only
+reviewed runtime, locale, provider-session, and desktop-session keys. Arbitrary
+project credentials are not inherited. Before that environment is cleared,
+Hive resolves a bare provider command past tool-manager launchers to a concrete
+executable; opaque tool-manager session variables are never copied into the
+role. Producer paths are task-relative, must begin with the controller-issued
+attempt root, and cross a no-follow, hash-checked custody copy before the
+reviewer starts. Raw producer workspace files are removed after admission or
+failure. The reviewer reads the original task, plan when present, and exact
+frozen diff as well as the validated requirement.
+
+The producer contract names the exact representation shape and media types, but
+it does not lower the semantic bar to whatever can be rendered. Generated
+slides, terminal-styled composites, narrated summaries, diagrams, and pictures
+of test output do not establish actual screenshot, flow, or terminal behavior.
+The independent reviewer must reject those substitutes and request a targeted
+recapture of the real product surface or transition.
+
+## Ledger and recovery
+
+The append-only requirement and attempts live under
+`<task>/outcome-evidence/generations/<generation>/`; the same generation also
+contains its append-only `implementation.diff`. Only
+`<task>/outcome-evidence/current.json` is replaceable. Hivebox validates the
+pointer and immutable document digests when listing a package without rerunning
+OCR/ffmpeg across every retained representation. A representation request then
+revalidates that selected file's exact size and digest before streaming it.
+Write admission and publication remain responsible for complete media decoding,
+OCR, retained-proof validation, and independent review.
+
+A semantic blocker suppresses ordinary daemon retry. The task page, status
+diagnostic, and run output expose an exact command containing the blocked
+generation and recovery digest:
+
+```sh
+hive evidence recover PROJECT:SLUG \
+  --generation <sha256> \
+  --recovery-digest <sha256>
 ```
 
-For new work, applicability is not agent-authored: `not_applicable` is the
-classifier result, while required capture failure is a stage error. Promotion
-is unrestricted; demotion requires a confirmed generation-bound operator and
-rationale. See [[commands/web]].
+That command does not rewrite history. It performs a stale-safe compare-and-set,
+advances a separate controller recovery epoch once, and leaves the existing
+generation intact for audit. Refresh operational status and invoke its guarded
+`workflow.retry` action to start a new evidence generation. See
+[[commands/evidence]].
+
+## Legacy capture diagnostics
+
+`capture-requirement.json`, `media/capture-manifest.json`, and the older
+`media/manifest.json` remain readable for historical compatibility and Hivebox
+diagnostics. Project-provider manifests may participate as a proof source only
+when they explicitly declare `evidence_role: claim_evidence` and pass the new
+proof contract. Built-in synthetic Hivebox media is always diagnostic-only and
+cannot be admitted as accepted outcome evidence.
+
+The Hivebox task page leads with the verified outcome claims, proof kind,
+representations, verdict rationale, traceability, attempts, agent/model/effort,
+and reviewer capability. Legacy media follows in a visibly labelled
+`Legacy diagnostic` section.
 
 ## Marker -> next action
 
-- Markerless or non-complete `7-artifacts` rows surface as `ready_to_artifacts` with `hive artifacts <slug> --from 7-artifacts`.
-- `:complete` rows surface as `ready_to_finalize` with `hive finalize <slug> --from 7-artifacts`.
-- Every persisted `ERROR` other than exact operator-owned semantic terminal
-  errors, including `tmux_session_terminated`,
-  `agent_orphaned`, and `timeout`, follows the universal recovery lifecycle.
-  After the shared cooldown and safety checks, `RecoveryCoordinator` admits the
-  exact marker generation and reruns artifact collection. There is no
-  artifacts-only timeout budget or healer clear path.
+- A valid accepted pointer is projected as `COMPLETE` and surfaces
+  `ready_to_finalize`.
+- Capability, review, and recapture-exhaustion blockers are semantic `ERROR`
+  rows with the exact `hive evidence recover` command. Automated recovery does
+  not clear them.
+- Integrity, role-launch, source-drift, or malformed-output failures use
+  `ERROR reason=outcome_evidence_invalid` and retain their bounded diagnostic;
+  they remain ordinary recoverable stage errors.
 
 ## Backlinks
 
 - [[stages/review]] · [[stages/finalize]]
-- [[state-model]] · [[commands/stage_action]] · [[modules/workflows]]
-- [[commands/screenote]]
+- [[state-model]] · [[commands/evidence]] · [[commands/web]]
+- [[modules/config]] · [[modules/workflows]]

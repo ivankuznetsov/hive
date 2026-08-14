@@ -52,11 +52,15 @@ module Hive
             ensure_reviewed_configuration!(resolver)
             same_generation = candidate.source_commit == current.fetch("source_commit")
             if same_generation && resolver.configuration.digest == current.fetch("configuration_digest")
+              migration = migrate_managed_tasks!(@name)
               report = noop_payload(candidate, current, resolver)
+              report["warnings"] = migration.warnings unless migration.warnings.empty?
               return emit(report, human_lines: [
                 "hive: honeycomb/#{@name} is already current",
-                *optional_input_disclosure(report.fetch("optional_inputs"))
-              ])
+                migration_line(migration),
+                *optional_input_disclosure(report.fetch("optional_inputs")),
+                *warning_lines(migration.warnings)
+              ].compact)
             end
             workflow_compatibility.admit_runtime!(
               validated.workflow, candidate_root, configuration: resolver.configuration
@@ -75,14 +79,13 @@ module Hive
                           human_lines: [ "hive: escalation declined; the previous selection is unchanged" ])
             end
 
-            workflow_compatibility.activate!(
+            migration = activate_with_task_migration!(
               candidate: compatibility_candidate,
               configuration: resolver.configuration,
               expected_current: current,
-              commit: -> { commit_state(@name, "updated") },
-              admit: false
+              action: "updated"
             )
-            warnings = []
+            warnings = migration.warnings.dup
             retained = post_commit_step(warnings, "unreferenced generation cleanup") do
               workflow_compatibility.cleanup_unreferenced(@name)
             end
@@ -91,7 +94,10 @@ module Hive
             report = report.merge("status" => "updated")
             report["retained_commits"] = retained if retained
             report["warnings"] = warnings unless warnings.empty?
-            emit(report, human_lines: human_diff(report) + warning_lines(warnings))
+            emit(
+              report,
+              human_lines: human_diff(report) + [ migration_line(migration) ].compact + warning_lines(warnings)
+            )
           end
         end
 
@@ -175,6 +181,13 @@ module Hive
             "optional-input bindings changed: #{diff.fetch('input_bindings_changed')}",
             *optional_input_disclosure(report.fetch("optional_inputs"))
           ]
+          .compact
+        end
+
+        def migration_line(migration)
+          return unless migration&.task_count&.positive?
+
+          "migrated retained tasks: #{migration.task_count} (#{migration.moved_count} stage#{migration.moved_count == 1 ? '' : 's'} moved)"
         end
 
         def envelope_schema = SCHEMA

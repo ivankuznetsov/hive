@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-08-12
+updated: 2026-08-14
 tags: [command, daemon, automation, plan-review, json]
 ---
 
@@ -85,7 +85,7 @@ stage.
 | `ready_to_artifacts`  | Dispatch `hive artifacts <slug> --from 6-review` (6→7) |
 | `ready_to_finalize`   | Dispatch `hive finalize <slug> --from 7-artifacts` (7→8) |
 | Any coding task with `pr_url` in stages `5-open-pr` through `8-finalize` | **Observe before policy dispatch.** Persist the exact task generation and PR binding, poll with per-candidate durable backoff, verify the observed head and reachable merge SHA, checkpoint required architecture intake, then use a daemon-owned `remote_merge` closure receipt to move the same generation to `9-done`. This includes recoverable error rows; no marker-reason allowlist or archive child exists. |
-| Held PR-bearing task | Keep the candidate in `pr-merge-reconciliation.json` with its hold reason, but do not poll or archive until a later status observation clears the dependency/admission hold. |
+| Held PR-bearing task | Keep the candidate in `pr-merge-reconciliation.json` with its hold reason. Current dependency, admission, repository, and PR-identity holds take precedence over historical head drift and do not poll or archive until a later status observation clears them. An `observed_head_changed` hold may poll only the identity-matched bound PR's remote state: `OPEN` or closed-unmerged releases ordinary error recovery so the new generation can be reviewed, while merged, delivered-elsewhere, or ambiguous evidence remains durably blocked before architecture intake or automatic archive and is not polled again. |
 | `plan_reviewing` or due `plan_review_retry` at coding `3-plan` | Dispatch `hive plan-review-run ...`. This automation can start/retry critique, perform an already-authorized revision, and verify, but cannot create approvals, answers, waivers, or mandatory downgrades. |
 | future `plan_review_retry` | Hold until the projection's `retry_at`; provider/transient evidence remains attached to the same attempt lineage. |
 | `plan_review_decision`, `plan_review_unsupported`, or `plan_review_blocked` | Skip. The row names the operator/configuration action; daemon enrollment creates no authority. |
@@ -126,7 +126,7 @@ hive refactor-patrol PROJECT --job-manifest MANIFEST --json
 ```
 
 After classification, separately authorized action resumes run the same
-immutable job with `--actions`; both phases emit `hive-refactor-patrol.v3` to a
+immutable job with `--actions`; both phases emit `hive-refactor-patrol.v4` to a
 job-bound result file consumed by the supervisor. Candidate selection shares
 one immutable ownership/config/identity snapshot across due jobs for the tick,
 but reservation re-resolves live ownership and config before claiming. Action

@@ -2,6 +2,7 @@ require "time"
 require "hive/paths"
 require "hive/daemon/dispatch_request_queue"
 require "hive/attempts/api"
+require "hive/attempts/generation"
 require "hive/recovery/api"
 require "hive/task"
 require "hive/task_resolver"
@@ -14,9 +15,7 @@ module Hive
     module DispatchRequestWriter
       module_function
 
-      DispatchReference = Data.define(:request_id, :attempt_id, :state, :status, :argv) do
-        def queued? = status == :queued
-      end
+      DispatchReference = Data.define(:request_id, :attempt_id, :state, :status, :argv)
 
       def generate_request_id
         Hive::Daemon::DispatchRequestQueue.generate_request_id
@@ -25,7 +24,7 @@ module Hive
       def write!(project:, slug:, argv:, chat_id: nil, update_id: nil,
                  trigger: nil, request_id: generate_request_id,
                  task_generation: nil, predecessor_attempt_id: nil,
-                 inherited_outputs: [],
+                 inherited_outputs: [], task_id: nil, expected_stage: nil,
                  state_home: Hive::Paths.state_home, now: Time.now)
         Hive::Daemon::DispatchRequestQueue.write_request!(
           project: project,
@@ -39,8 +38,21 @@ module Hive
           task_generation: task_generation,
           predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs,
+          task_id: task_id,
+          expected_stage: expected_stage,
           state_home: state_home,
           now: now
+        )
+      end
+
+      # Queue a task action bound to the task identity observed now. The daemon
+      # rejects the delivery if the task advances or a workflow migration
+      # changes its stage/generation before the queue is consumed.
+      def write_current!(project:, slug:, argv:, **attributes)
+        _task, identity = resolve_task_identity(project: project, slug: slug, argv: argv)
+        write!(
+          project: project, slug: slug, argv: argv,
+          **attributes, **identity
         )
       end
 
@@ -52,13 +64,20 @@ module Hive
                     trigger: nil, request_id: generate_request_id,
                     state_home: Hive::Paths.state_home, now: Time.now,
                     entrypoint: nil)
+        task, identity = resolve_task_identity(project: project, slug: slug, argv: argv)
         write!(
           project: project, slug: slug, argv: argv,
           chat_id: chat_id, update_id: update_id, trigger: trigger,
-          request_id: request_id, state_home: state_home, now: now
+          request_id: request_id, state_home: state_home, now: now,
+          **identity
         )
+        unless task
+          return DispatchReference.new(
+            request_id: request_id.to_s, attempt_id: nil, state: "queued",
+            status: :queued, argv: argv
+          )
+        end
 
-        task = resolve_task(project: project, slug: slug, argv: argv)
         intended_stage = intended_stage_for(argv, task)
         result = (entrypoint || Hive::Attempts::API.new).dispatch(
           task: task,
@@ -93,8 +112,7 @@ module Hive
           status: result.status,
           argv: argv
         )
-      rescue Hive::ConcurrentRunError, Hive::Attempts::UnsupportedDetachment,
-             Hive::InvalidTaskPath, Hive::ConfigError
+      rescue Hive::ConcurrentRunError, Hive::Attempts::UnsupportedDetachment
         DispatchReference.new(
           request_id: request_id.to_s, attempt_id: nil, state: "queued",
           status: :queued, argv: argv
@@ -144,6 +162,17 @@ module Hive
         ).resolve
       end
 
+      # A task can be momentarily unresolvable while migration owns and moves
+      # its folder. Keep the delivery durable, but bind it to the producer's
+      # observed stage without a task id; the daemon then rejects it as stale
+      # instead of running an unauthenticated generation.
+      def resolve_task_identity(project:, slug:, argv:)
+        task = resolve_task(project: project, slug: slug, argv: argv)
+        [ task, identity_for(task, project: project, argv: argv) ]
+      rescue Hive::InvalidTaskPath, Hive::ConfigError
+        [ nil, { expected_stage: stage_filter_for(argv) } ]
+      end
+
       def stage_filter_for(argv)
         tokens = Array(argv)
         index = tokens.index { |token| %w[--stage --from].include?(token) }
@@ -155,6 +184,18 @@ module Hive
         return "#{task.stage_index}-#{task.stage_name}" if %w[run plan-review-run].include?(verb)
 
         Hive::Workflows.for_verb(verb).fetch(:target)
+      end
+
+      def identity_for(task, project:, argv:)
+        expected_stage = "#{task.stage_index}-#{task.stage_name}"
+        generation = Hive::Attempts::Generation.resolve(
+          task: task, project: project, intended_stage: intended_stage_for(argv, task)
+        )
+        {
+          task_id: task.respond_to?(:id) ? task.id : nil,
+          expected_stage: expected_stage,
+          task_generation: generation.task_generation
+        }
       end
     end
   end

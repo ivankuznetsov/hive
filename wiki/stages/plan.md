@@ -48,6 +48,15 @@ status/run/forward-approve. Hive does not inspect plan prose for ordering.
 
 If a daemon stop or killed agent leaves a zero-byte `plan.md`, or a missing `plan.md` after a `plan-*.log` shows the plan agent started, status classifies the row as `Error` with `PLAN_MISSING_OUTPUT` instead of `Needs your input`. A freshly promoted plan folder with no `plan.md` and no plan-run log still remains `Needs your input` because it is valid and runnable. `PLAN_MISSING_OUTPUT` is a synthetic markerless error, so recovery is a direct rerun: `hive plan ... --from 3-plan`; there is no `ERROR` marker to clear.
 
+If the headless planner returns with either a zero exit or an unavailable
+captured exit status without replacing Hive's pre-spawn `AGENT_WORKING` marker,
+`Hive::Agent` writes
+`ERROR reason=agent_exited_without_terminal_marker` with the observed marker
+and provider. The plan action therefore fails instead of emitting a successful
+stage envelope that a following `develop` call cannot advance. The shared
+recovery coordinator retries this error through the same guarded lifecycle as
+other persisted agent failures.
+
 When the plan agent writes a recoverable terminal `ERROR`, the daemon's sole
 automatic scheduler submits it after the shared cooldown. `RecoveryCoordinator`
 persists the generation-bound v5 request before the sole guarded marker

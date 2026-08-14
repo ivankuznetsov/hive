@@ -244,9 +244,15 @@ module Hive
           # the tail, preserving the action and dependency signals on narrow
           # layouts while still surfacing the owner when space permits.
           parts = [ base ]
+          parts << auto_residue_token(row)
           parts << dependency_status(row) if row.blocked && !row.admission_error
           parts << implementation_owner_token(row)
           parts.reject { |part| part.to_s.empty? }.join(" ")
+        end
+
+        def auto_residue_token(row)
+          commits = row.auto_residue&.fetch("commits", 0).to_i
+          "auto-residue:#{commits}" if commits.positive?
         end
 
         def implementation_owner_token(row)

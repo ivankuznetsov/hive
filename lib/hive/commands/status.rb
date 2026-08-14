@@ -29,6 +29,7 @@ require "hive/operational_status"
 require "hive/daemon/operational_snapshot"
 require "hive/terminal_text"
 require "hive/tui/views/hyperlink"
+require "hive/events"
 
 module Hive
   module Commands
@@ -509,6 +510,12 @@ module Hive
                 projection.ordinary_rows
               end
             out = base.merge("tasks" => rows.map { |r| task_payload(r, now: now) })
+            out["config_summary"] = {
+              "stages" => {
+                "ensure_clean_on_exit" =>
+                  !config.is_a?(Hash) || config.dig("stages", "ensure_clean_on_exit") != false
+              }
+            }
             out["hidden_archived_task_count"] = projection.hidden_count unless @archive
             if include_archive_index
               # Internal cache handoff only. StateSource removes this key
@@ -572,7 +579,7 @@ module Hive
           task_count = Dir.children(dir).count do |child|
             folder = File.join(dir, child)
             Hive::Stages.task_slug?(child) && File.directory?(folder) &&
-              !managed_historical_task?(folder, workflow_generation: workflow_generation)
+              !managed_current_task?(folder, workflow_generation: workflow_generation)
           end
           next if task_count.zero?
 
@@ -580,14 +587,10 @@ module Hive
         end.sort_by { |entry| entry["stage_dir"] }
       end
 
-      # Managed tasks are immutable pins to the exact workflow generation that
-      # created them. A package update may rename its stages while the retained
-      # generation still makes an older task fully loadable. Such a directory
-      # is historical workflow state, not a core layout rename for `hive
-      # migrate` to move. Require complete provenance and a successful Task
-      # load so corrupt or missing retained generations continue to fail closed
-      # as legacy blockers.
-      def managed_historical_task?(folder, workflow_generation: nil)
+      # Ignore an out-of-union managed task only when it already resolves
+      # against the selected generation. Stale pins fail Task construction and
+      # remain visible as migration blockers.
+      def managed_current_task?(folder, workflow_generation: nil)
         meta = Hive::TaskMeta.read(folder)
         return false unless meta[:workflow] && meta[:workflow_commit] &&
                             meta[:workflow_manifest_digest]
@@ -647,6 +650,7 @@ module Hive
           "condition_warning" => row[:condition_warning],
           "plan_review" => row[:plan_review],
           "implementation_identity" => row[:implementation_identity],
+          "auto_residue" => Hive::Events.clean_exit_summary(row[:folder]),
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
           # 0 for every non-brainstorm / non-needs_input row. Lets an agent
           # or operator tell "the daemon is holding this brainstorm because

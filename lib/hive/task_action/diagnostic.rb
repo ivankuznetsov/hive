@@ -327,6 +327,17 @@ module Hive
       end
 
       def marker_detail
+        if Hive::TerminalOutcome.outcome_evidence_blocker?(marker.attrs)
+          failed = marker.attrs["failed_targets"].to_s
+          attempts = marker.attrs["attempt_count"].to_s
+          command = outcome_evidence_recovery_command
+          return [
+            marker_summary,
+            "Outcome evidence is blocked after #{attempts.empty? ? '0' : attempts} admitted attempt(s).",
+            ("Failed claims: #{failed}." unless failed.empty?),
+            ("Guarded recovery: #{command}" if command)
+          ].compact.join("\n")
+        end
         if Hive::TerminalOutcome.semantic_error?(marker.attrs)
           outcome = marker.attrs["outcome"].to_s
           description = if Hive::TerminalOutcome.blocked_error?(marker.attrs)
@@ -471,6 +482,10 @@ module Hive
         return nil unless diagnostic_action?
 
         return { "kind" => "retry", "command" => workflow_command("plan") } if incomplete_plan_artifact?
+        if marker.name == :error && Hive::TerminalOutcome.outcome_evidence_blocker?(marker.attrs)
+          command = outcome_evidence_recovery_command
+          return command ? { "kind" => "retry", "command" => command } : manual_fix
+        end
 
         # ERROR and REVIEW_ERROR are durable retry states, not permanent
         # workflow terminals. Their generated marker_id makes the command
@@ -543,6 +558,20 @@ module Hive
 
         [
           "hive", "act", action_id, target, "--observation", token
+        ].shelljoin
+      end
+
+      def outcome_evidence_recovery_command
+        generation = marker.attrs["generation"].to_s
+        digest = marker.attrs["recovery_digest"].to_s
+        return nil unless generation.match?(/\A[0-9a-f]{64}\z/) &&
+                          digest.match?(/\A[0-9a-f]{64}\z/)
+
+        project = @project_name || (task.project_name if task.respond_to?(:project_name))
+        target = project.to_s.empty? ? task.folder : "#{project}:#{task.slug}"
+        [
+          "hive", "evidence", "recover", target,
+          "--generation", generation, "--recovery-digest", digest
         ].shelljoin
       end
 

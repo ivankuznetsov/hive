@@ -19,12 +19,12 @@ class RefactorPatrolPolicyTest < Minitest::Test
     assert_equal "bin/test", policy.dig("action", "commands", "test")
     refute policy.dig("action", "caps").key?("max_files")
     refute policy.dig("action", "caps").key?("max_diff_lines")
-    assert_equal 0.4, policy.dig("action", "issue_min_leverage_score")
+    refute policy.fetch("action").key?("issue_min_leverage_score")
     assert_match(/\A[a-f0-9]{64}\z/, policy.fetch("epoch"))
     assert_equal T0.iso8601, policy.fetch("captured_at")
   end
 
-  def test_effective_policy_intersects_guards_and_thresholds_in_the_stricter_direction
+  def test_effective_policy_intersects_guards_in_the_stricter_direction
     snapshot = Hive::RefactorPatrol::Policy.capture(config, now: T0)
     current = config
     current["refactor_patrol"]["caps"].merge!(
@@ -34,7 +34,6 @@ class RefactorPatrolPolicyTest < Minitest::Test
       "single_feature_only" => false
     )
     current["refactor_patrol"]["min_confidence"] = "low"
-    current["refactor_patrol"]["issue_filing"]["min_leverage_score"] = 0.1
 
     result = Hive::RefactorPatrol::Policy.intersect(snapshot, current)
 
@@ -47,7 +46,7 @@ class RefactorPatrolPolicyTest < Minitest::Test
     assert_equal false, result.config.dig("refactor_patrol", "caps", "allow_cross_feature")
     assert_equal true, result.config.dig("refactor_patrol", "caps", "single_feature_only")
     assert_equal "medium", result.config.dig("refactor_patrol", "min_confidence")
-    assert_equal 0.4, result.config.dig("refactor_patrol", "issue_filing", "min_leverage_score")
+    refute result.config.dig("refactor_patrol", "issue_filing").key?("min_leverage_score")
   end
 
   def test_current_policy_can_narrow_a_snapshot
@@ -55,13 +54,12 @@ class RefactorPatrolPolicyTest < Minitest::Test
     current = config
     current["refactor_patrol"]["caps"]["single_feature_only"] = true
     current["refactor_patrol"]["min_confidence"] = "high"
-    current["refactor_patrol"]["issue_filing"]["min_leverage_score"] = 0.8
 
     result = Hive::RefactorPatrol::Policy.intersect(snapshot, current)
 
     assert_equal true, result.config.dig("refactor_patrol", "caps", "single_feature_only")
     assert_equal "high", result.config.dig("refactor_patrol", "min_confidence")
-    assert_equal 0.8, result.config.dig("refactor_patrol", "issue_filing", "min_leverage_score")
+    refute result.config.dig("refactor_patrol", "issue_filing").key?("min_leverage_score")
   end
 
   def test_legacy_size_limits_are_accepted_but_removed_from_effective_policy
@@ -165,7 +163,7 @@ class RefactorPatrolPolicyTest < Minitest::Test
       "refactor_patrol" => {
         "enabled" => true,
         "auto_fix" => { "enabled" => true, "agent" => "codex" },
-        "issue_filing" => { "enabled" => true, "min_leverage_score" => 0.4 },
+        "issue_filing" => { "enabled" => true },
         "min_confidence" => "medium",
         "commands" => {
           "docs" => "bin/docs", "format" => nil, "lint" => "bin/lint", "public_contract" => nil,

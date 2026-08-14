@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-08-10
+updated: 2026-08-14
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -112,7 +112,7 @@ and occurrence finalization to bounded coordinators while retaining product
 decisions and cadence. Command and daemon manifest intake share
 `ArchitectureIntakeTransitions`; `ArchitectureOccurrenceStore` validates the
 job scope over the shared journal from the immutable occurrence pointer in the
-v3 JobStore aggregate. There is no binding sidecar or compatibility lookup.
+v4 JobStore aggregate. There is no binding sidecar or compatibility lookup.
 StateStore and JobStore expose the separate product recovery APIs over the one
 streamed occurrence journal. Terminal outcomes and canonical projection bytes
 commit together; sequenced completions compact through high-water/floor state,
@@ -143,14 +143,12 @@ is byte-for-byte equivalent to the complete binding derived from its terminal
 receipt and matches the attempted patch; absent, partial, or conflicting
 bindings retain the checkout for operator-visible recovery.
 
-`JobStore` authority is fixed directly at `refactor_patrol/v3`. Construction
+`JobStore` authority is fixed directly at `refactor_patrol/v4`. Construction
 and read-only queries do not create state; the first authoritative mutation
-lazily prepares only the v3 managed directory. Runtime never probes, reads,
-hashes, moves, deletes, or interprets `v2/jobs`, so arbitrary v2 bytes neither
-block nor override an existing v3 store. The other live Architecture Patrol
-owners under `refactor_patrol/v2` remain independent and unchanged. The shared
-Patrol capture and shadow-decision protocols still contain no
-`job_store.schema_v2_import` trigger or `schema_v2_import` outcome.
+lazily prepares only the v4 managed directory. Runtime never probes, reads,
+hashes, moves, deletes, or interprets v3 JobStore bytes. The other live
+Architecture Patrol owners under `refactor_patrol/v2` remain independent and
+unchanged; the global terminal-proof catalog also remains separate.
 
 The Patrol row has a non-empty construction boundary. Shared stores and
 mechanisms, both product gateways, and intake/discovery/action/claim-maintenance

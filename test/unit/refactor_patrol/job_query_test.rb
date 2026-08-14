@@ -118,18 +118,20 @@ class HiveRefactorPatrolJobQueryTest < Minitest::Test
     assert_equal %w[first rollback], payload.fetch("jobs").map { |job| job.fetch("job_id") }
   end
 
-  def test_recent_list_returns_newest_durable_memberships
+  def test_recent_projection_returns_newest_durable_memberships_without_claiming_the_public_schema
     records = 30.times.map { |index| aggregate(job_id: "job-#{index}") }
 
     payload = Hive::RefactorPatrol::JobQuery.new(
       FakeStore.new(records)
-    ).recent_envelope(project: "demo", project_root: "/repo", limit: 25)
+    ).recent_projection(project: "demo", project_root: "/repo", limit: 25)
 
-    assert_equal "recent", payload.fetch("action")
     assert_equal 30, payload.fetch("count")
     assert_equal "job-29", payload.dig("jobs", 0, "job_id")
     assert_equal "job-5", payload.dig("jobs", -1, "job_id")
-    assert_equal true, payload.dig("page", "has_more")
+    assert_equal true, payload.fetch("truncated")
+    refute payload.key?("schema")
+    refute payload.key?("schema_version")
+    refute payload.key?("action")
   end
 
   def test_list_is_bounded_and_resumes_from_an_opaque_cursor
@@ -615,7 +617,7 @@ class HiveRefactorPatrolJobQueryTest < Minitest::Test
       "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => false },
       "state" => "blocked",
       "complete" => false,
-      "dispositions" => { "accepted" => [], "flagged" => [], "suppressed" => [] },
+      "dispositions" => { "fix" => [], "discuss" => [], "dismiss" => [] },
       "feature_results" => [],
       "review_errors" => [],
       "zero_reason" => nil,

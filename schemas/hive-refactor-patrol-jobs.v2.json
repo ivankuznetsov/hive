@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-refactor-patrol-jobs.v1.json",
-  "title": "hive refactor-patrol jobs output (v1)",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-refactor-patrol-jobs.v2.json",
+  "title": "hive refactor-patrol jobs output (v2)",
   "description": "Read-only list/show projection of the authoritative architecture-patrol job ledger.",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
@@ -11,12 +11,12 @@
     "Counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["features", "accepted", "flagged", "suppressed", "review_errors", "actions", "pending_actions"],
+      "required": ["features", "fix", "discuss", "dismiss", "review_errors", "actions", "pending_actions"],
       "properties": {
         "features": { "type": "integer", "minimum": 0 },
-        "accepted": { "type": "integer", "minimum": 0 },
-        "flagged": { "type": "integer", "minimum": 0 },
-        "suppressed": { "type": "integer", "minimum": 0 },
+        "fix": { "type": "integer", "minimum": 0 },
+        "discuss": { "type": "integer", "minimum": 0 },
+        "dismiss": { "type": "integer", "minimum": 0 },
         "review_errors": { "type": "integer", "minimum": 0 },
         "actions": { "type": "integer", "minimum": 0 },
         "pending_actions": { "type": "integer", "minimum": 0 }
@@ -151,7 +151,7 @@
       ],
       "properties": {
         "schema": { "const": "hive-refactor-patrol-jobs" },
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "ok": { "const": true },
         "action": { "type": "string", "enum": ["list", "show"] },
         "project": { "type": "string" },
@@ -168,7 +168,7 @@
       "required": ["schema", "schema_version", "ok", "action", "error_class", "error_kind", "exit_code", "message"],
       "properties": {
         "schema": { "const": "hive-refactor-patrol-jobs" },
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "ok": { "const": false },
         "action": { "type": ["string", "null"], "enum": ["list", "show", null] },
         "error_class": { "type": "string" },

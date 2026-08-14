@@ -238,7 +238,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       {
         status: completion_status, job_id: dispatch_token.fetch(:job_id), pr_number: 7,
         pr_url: "https://github.com/acme/demo/pull/7",
-        accepted_count: 0, flagged_count: 0, suppressed_count: 0
+        fix_count: 0, discuss_count: 0, dismiss_count: 0
       }
     end
   end

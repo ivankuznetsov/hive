@@ -66,9 +66,9 @@ module Hive
       "hive-patrol" => 3,
       "hive-patrol-findings" => 1,
       "hive-patrol-finding" => 3,
-      "hive-refactor-patrol" => 3,
-      "hive-refactor-patrol-jobs" => 1,
-      "hive-refactor-patrol-thesis" => 3,
+      "hive-refactor-patrol" => 4,
+      "hive-refactor-patrol-jobs" => 2,
+      "hive-refactor-patrol-thesis" => 4,
       # Scaffold a blank per-project workflow descriptor (`hive workflow new ID
       # --json`). The error arm routes through Hive::Schemas::ErrorEnvelope so
       # its output carries the same schema/schema_version/error_kind keys as

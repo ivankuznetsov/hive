@@ -48,7 +48,7 @@ module Hive
         profile = Hive::AgentProfiles.lookup(@review_identity.provider, cfg: @cfg)
         scope = read_only_scope(profile)
         launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :review)
-        unless @token_budget.acquire(stage: STAGE, minimum_tokens: launch.fetch(:minimum_tokens))
+        unless @token_budget.acquire(minimum_tokens: launch.fetch(:minimum_tokens))
           exhaustion = @token_budget.resource_exhaustion if @token_budget.respond_to?(:resource_exhaustion)
           return {
             status: :error,
@@ -64,10 +64,8 @@ module Hive
             prompt: prompt,
             add_dirs: [ @project_root ],
             cwd: @project_root,
-            max_budget_usd: @token_budget.max_budget_usd(
-              @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
-            ),
-            max_tokens: @token_budget.max_tokens(stage: STAGE),
+            max_budget_usd: nil,
+            max_tokens: @token_budget.max_tokens,
             max_turns: launch.fetch(:max_turns),
             timeout_sec: effective_timeout(timeout_sec),
             log_label: STAGE,
@@ -164,7 +162,7 @@ module Hive
       end
 
       # Kept as the runner's narrow recording seam for tests and adapters;
-      # TokenBudget owns the shared accounting semantics.
+      # TokenBudget owns the project lock and best-effort usage telemetry.
       def record_usage(result, profile, started_at)
         @token_budget.record!(
           result: result, profile: profile, stage: STAGE, started_at: started_at

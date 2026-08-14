@@ -3,9 +3,18 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-10
+updated: 2026-08-14
 tags: [gap, todo, release-proof, agent-skills]
 ---
+
+## Patrol v4 needs installed fleet dogfood (2026-08-14)
+
+Focused tests prove scoreless route normalization, fresh v4 JobStore isolation,
+automatic retired-config removal, and the single per-agent runaway fuse. This
+change has not yet been installed over the registered project fleet or observed
+through a real Architecture Patrol discovery, `fix` PR, `discuss` issue, and
+token-limit retry. Retain those four live receipts after merge before treating
+the operational migration as release-proven.
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 

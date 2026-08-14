@@ -265,7 +265,11 @@ Every limit diagnostic names the exhausted cap and observed amount. A valid
 task-projection checkpoint stores the projection plus bounded head/tail prefix
 anchors and permits only bounded suffix validation and replay in a Web request;
 it never stores, hashes, or replays the complete prefix on that request path.
-An exactly current checkpoint has an ordinary empty suffix. Missing, changed,
+The authoritative `TaskActivity` append boundary refreshes this optimization
+after a durable write; refresh failure never revokes the successful activity,
+but leaves Web mutations safely degraded until a later append or lifecycle
+rebuild repairs the checkpoint. An exactly current checkpoint has an ordinary
+empty suffix. Missing, changed,
 torn, or over-limit checkpoint evidence degrades the workspace instead of
 moving a full journal rebuild into HTTP.
 

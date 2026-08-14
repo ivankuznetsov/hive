@@ -217,10 +217,7 @@ module Hive
           path, [ "merge-base", "--is-ancestor", base_oid, head ], allow_exit: [ 0, 1 ]
         )
         return "ancestor" if status.exitstatus == 0
-        return "divergent" if status.exitstatus == 1
-
-        diagnostics << diagnostic("base_check_failed", nil, source: "local_git")
-        "unavailable"
+        "divergent"
       end
 
       def observe_commits(path, base_oid, head, diagnostics)

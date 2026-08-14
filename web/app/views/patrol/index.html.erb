@@ -87,7 +87,8 @@
                 </div>
                 <p class="patrol-meta">
                   <%= link_to "PR ##{job.dig('source', 'number')}", job.dig("source", "url"), target: "_blank", rel: "noopener noreferrer" %>
-                  · <%= job.dig("counts", "accepted") %> accepted
+                  · <%= job.dig("counts", "fix") %> fix
+                  · <%= job.dig("counts", "discuss") %> discuss
                   · <%= job.dig("counts", "pending_actions") %> pending actions
                 </p>
                 <% reasons = Array(job["blockers"]).map { |blocker| blocker["reason"] }.compact.uniq %>
@@ -96,6 +97,7 @@
                   <ul class="patrol-findings">
                     <% job.fetch("findings").each do |finding| %>
                       <li>
+                        <span class="tag"><%= finding.fetch("route") %></span>
                         <strong><%= finding["problem"].presence || finding["id"] %></strong>
                         <% if finding["proposed_refactor"].present? %> — <%= truncate(finding["proposed_refactor"], length: 220) %><% end %>
                       </li>

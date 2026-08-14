@@ -7,7 +7,7 @@ require "hive/stages/base"
 # agent writes into its state file (never from process exit). The agent-owned
 # marker templates harden that contract by making the marker the unmissable final
 # instruction. This pins that the marker is the literal last line of each of those
-# templates, and that the runner-owned templates still forbid the agent from
+# templates, and that the runner- and controller-owned templates still forbid the agent from
 # writing the marker (so the hardening did not bleed into them).
 class TemplateMarkerLastLineTest < Minitest::Test
   include HiveTestHelper
@@ -26,7 +26,6 @@ class TemplateMarkerLastLineTest < Minitest::Test
 
   AGENT_OWNED_MARKER_TEMPLATES = {
     "open_pr_prompt.md.erb" => /\A<!-- COMPLETE pr_url=.* is_draft=true -->\z/,
-    "artifacts_prompt.md.erb" => /\A<!-- COMPLETE -->\z/,
     "finalize_prompt.md.erb" => /\A<!-- COMPLETE pr_url=.* is_draft=false -->\z/,
     "plan_prompt.md.erb" => /\A<!-- COMPLETE -->\z/
   }.freeze
@@ -62,16 +61,21 @@ class TemplateMarkerLastLineTest < Minitest::Test
 
   # The hardening must NOT reach runner-owned stages, where the runner stamps the
   # marker and the agent is told not to.
-  def test_runner_owned_templates_still_forbid_agent_marker_writes
+  def test_runner_and_controller_owned_templates_still_forbid_agent_marker_writes
     dir = File.expand_path("../../../templates", __dir__)
     review = File.read(File.join(dir, "review_prompt.md.erb"))
     execute = File.read(File.join(dir, "execute_prompt.md.erb"))
+    artifacts = File.read(File.join(dir, "artifacts_prompt.md.erb"))
 
     assert_match(/must not write task\.md yourself/i, review)
     assert_match(/Do NOT update the task\.md marker yourself/i, execute)
+    assert_match(/controller-owned/i, artifacts)
+    assert_match(/never\s+publication authority/i, artifacts)
     refute_match(/Completion — REQUIRED/, review,
                  "runner-owned review template must not get the agent-marker hardening")
     refute_match(/Completion — REQUIRED/, execute,
                  "runner-owned execute template must not get the agent-marker hardening")
+    refute_match(/Completion — REQUIRED/, artifacts,
+                 "controller-owned artifacts template must not grant marker authority")
   end
 end

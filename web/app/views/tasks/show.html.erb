@@ -50,6 +50,8 @@
   </section>
 <% end %>
 
+<%= render "tasks/outcome_evidence", evidence: @outcome_evidence, project: @project, task: @task %>
+
 <div class="task-workspace" aria-label="Task evidence workspace">
   <div class="task-workspace-grid">
     <%= render "tasks/attempts", workspace: @workspace %>

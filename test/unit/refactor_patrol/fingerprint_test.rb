@@ -122,7 +122,8 @@ class RefactorPatrolFingerprintTest < Minitest::Test
       evidence: [ { "file" => "lib/checkout.rb", "signal" => "churn", "value" => 8 } ],
       proposed_refactor: "Extract payment coordination behind a checkout boundary service",
       feature_boundary: { "owned_files" => [ "lib/checkout.rb" ], "entrypoints" => [ "lib/checkout.rb" ] },
-      expected_leverage: { "score" => 0.7, "breakdown" => { "churn" => 0.7 } },
+      route: "fix",
+      architecture_effects: [ "one checkout boundary owns payment coordination" ],
       confidence: "medium",
       risk: {
         "caps" => { "single_feature" => true },

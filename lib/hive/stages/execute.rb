@@ -108,7 +108,16 @@ module Hive
                               base_override: Hive::DependencySnapshot.stacked_base(task, default_branch))
 
         Hive::Worktree.validate_pointer_path(wt.path, worktree_root)
-        wt.write_pointer!(task.folder, task.slug, execute_base_head: Hive::GitOps.new(wt.path).head_sha)
+        # Freeze the controller-selected implementation base before the agent
+        # can create commits. `execute_base_head` remains the execution-loop
+        # baseline; `base_oid` is the durable range authority consumed later
+        # by outcome evidence. They begin equal and neither is agent-authored.
+        base_oid = Hive::GitOps.new(wt.path).head_sha
+        wt.write_pointer!(
+          task.folder, task.slug,
+          execute_base_head: base_oid, base_branch: default_branch,
+          base_oid: base_oid
+        )
 
         write_initial_task_md(task)
         run_pass(task, cfg, wt.path, identity)

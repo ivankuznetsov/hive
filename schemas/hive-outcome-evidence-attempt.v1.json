@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-outcome-evidence-attempt.v1.json",
+  "title": "Hive Outcome Evidence Attempt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "task", "project", "generation",
+    "attempt_id", "status", "evidence", "producer", "review", "diagnostic", "recorded_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-outcome-evidence-attempt" },
+    "schema_version": { "const": 1 },
+    "task": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "generation": { "$ref": "#/$defs/Digest" },
+    "attempt_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "status": { "enum": ["accepted", "revise", "blocked"] },
+    "evidence": {
+      "type": "array", "maxItems": 1024,
+      "items": { "$ref": "#/$defs/Evidence" }
+    },
+    "producer": { "$ref": "#/$defs/Actor" },
+    "review": { "$ref": "#/$defs/Review" },
+    "diagnostic": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "minLength": 1, "maxLength": 16384 }
+      ]
+    },
+    "recorded_at": { "type": "string", "format": "date-time", "maxLength": 64 }
+  },
+  "$defs": {
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "SafeId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "SafePath": {
+      "type": "string", "minLength": 1, "maxLength": 4096,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\u0000]+$"
+    },
+    "Actor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["context_id", "agent", "model", "effort"],
+      "properties": {
+        "context_id": { "$ref": "#/$defs/SafeId" },
+        "agent": { "$ref": "#/$defs/SafeId" },
+        "model": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "effort": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "Review": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reviewer", "review_scope_hashes", "verdicts", "status", "accepted"],
+      "properties": {
+        "reviewer": { "$ref": "#/$defs/Actor" },
+        "review_scope_hashes": {
+          "type": "array", "maxItems": 8192, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/Digest" }
+        },
+        "verdicts": {
+          "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/Verdict" }
+        },
+        "status": { "enum": ["accepted", "revise", "blocked"] },
+        "accepted": { "type": "boolean" }
+      }
+    },
+    "Verdict": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target_id", "verdict", "reason"],
+      "properties": {
+        "target_id": { "$ref": "#/$defs/SafeId" },
+        "verdict": { "enum": ["accepted", "revise", "blocked"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    },
+    "Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "summary", "claims", "source", "representations"],
+      "properties": {
+        "kind": { "enum": ["screenshot", "video", "terminal", "document"] },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "claims": {
+          "type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
+        },
+        "source": { "$ref": "#/$defs/Source" },
+        "representations": {
+          "type": "array", "minItems": 2, "maxItems": 8,
+          "items": { "$ref": "#/$defs/Representation" }
+        }
+      }
+    },
+    "Source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "name", "source_sha"],
+      "properties": {
+        "type": { "enum": ["task", "project_provider"] },
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+        "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "manifest_path": { "$ref": "#/$defs/SafePath" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "project_provider" } } },
+          "then": { "required": ["manifest_path"] },
+          "else": { "not": { "required": ["manifest_path"] } }
+        }
+      ]
+    },
+    "Representation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "media_type", "rendering", "path", "sha256", "bytes"],
+      "properties": {
+        "role": { "enum": ["original", "review", "storyboard"] },
+        "media_type": {
+          "enum": [
+            "image/png", "image/jpeg", "image/webp", "video/webm", "video/mp4",
+            "application/x-asciinema+json", "text/plain", "text/markdown",
+            "application/json"
+          ]
+        },
+        "rendering": { "enum": ["original", "raster", "temporal", "escaped_text", "supplemental"] },
+        "path": { "$ref": "#/$defs/SafePath" },
+        "sha256": { "$ref": "#/$defs/Digest" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 268435456 }
+      }
+    }
+  }
+}

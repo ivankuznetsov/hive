@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-08-02
+updated: 2026-08-14
 tags: [command, daemon, automation, json]
 ---
 
@@ -123,7 +123,7 @@ hive refactor-patrol PROJECT --job-manifest MANIFEST --json
 ```
 
 After classification, separately authorized action resumes run the same
-immutable job with `--actions`; both phases emit `hive-refactor-patrol.v3` to a
+immutable job with `--actions`; both phases emit `hive-refactor-patrol.v4` to a
 job-bound result file consumed by the supervisor. Candidate selection shares
 one immutable ownership/config/identity snapshot across due jobs for the tick,
 but reservation re-resolves live ownership and config before claiming. Action

@@ -80,6 +80,7 @@ class RefactorPatrolCapsTest < Minitest::Test
 
     assert_includes thesis.risk.fetch("flags"), "public_api_impact"
     assert_empty thesis.risk.fetch("advisories")
+    assert_equal "discuss", thesis.effective_route
   end
 
   def test_allowed_public_api_changes_produce_no_flag_or_advisory
@@ -434,7 +435,8 @@ class RefactorPatrolCapsTest < Minitest::Test
       evidence: evidence || [ { "file" => boundary_files.first, "signal" => "churn", "value" => 7 } ],
       proposed_refactor: "Extract service",
       feature_boundary: { "owned_files" => boundary_files, "entrypoints" => boundary_files },
-      expected_leverage: { "score" => 0.5, "breakdown" => { "churn" => 0.5 } },
+      route: "fix",
+      architecture_effects: [ "one service owns checkout decisions" ],
       confidence: "medium",
       risk: risk_hash || default_risk,
       required_validation: { "commands" => [ "test" ], "characterization_first" => false, "notes" => "" },

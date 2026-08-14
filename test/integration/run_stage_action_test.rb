@@ -356,6 +356,37 @@ class RunStageActionTest < Minitest::Test
     end
   end
 
+  def test_json_error_when_plan_agent_exits_without_terminal_marker
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        inbox, slug = seed_inbox(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        File.write(File.join(brainstorm, "brainstorm.md"), "## Requirements\n<!-- COMPLETE -->\n")
+
+        out, _err, status = with_captured_exit do
+          Hive::Commands::StageAction.new("plan", slug, json: true).call
+        end
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        payload = JSON.parse(out)
+        assert_equal false, payload["ok"]
+        assert_equal "plan", payload["verb"]
+        assert_equal "error", payload["error_kind"]
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, payload["exit_code"]
+        refute payload.key?("marker_after"),
+               "a transient marker must not be emitted in a success envelope"
+
+        plan = File.join(dir, ".hive-state", "stages", "3-plan", slug)
+        marker = Hive::Markers.current(File.join(plan, "plan.md"))
+        assert_equal :error, marker.name
+        assert_equal "agent_exited_without_terminal_marker", marker.attrs["reason"]
+        assert_equal "agent_working", marker.attrs["observed_marker"]
+      end
+    end
+  end
+
   def test_json_success_envelope_promoted_and_ran_phase
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -487,10 +518,7 @@ class RunStageActionTest < Minitest::Test
         FileUtils.mv(inbox, review)
         File.write(File.join(review, "task.md"), "# task\n<!-- REVIEW_COMPLETE pass=1 browser=skipped -->\n")
         artifacts = File.join(dir, ".hive-state", "stages", "7-artifacts", slug)
-        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(artifacts, "artifact.md")
-        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# Artifacts\nNo extra artifacts.\n<!-- COMPLETE -->\n"
-
-        with_not_applicable_capture_policy do
+        with_accepted_outcome_evidence do
           capture_io { Hive::Commands::StageAction.new("artifacts", slug).call }
         end
 
@@ -508,10 +536,7 @@ class RunStageActionTest < Minitest::Test
         artifacts = File.join(dir, ".hive-state", "stages", "7-artifacts", slug)
         FileUtils.mkdir_p(File.dirname(artifacts))
         FileUtils.mv(inbox, artifacts)
-        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(artifacts, "artifact.md")
-        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# Artifacts\nNo extra artifacts.\n<!-- COMPLETE -->\n"
-
-        with_not_applicable_capture_policy do
+        with_accepted_outcome_evidence do
           capture_io { Hive::Commands::StageAction.new("artifacts", slug, from: "7-artifacts").call }
         end
 

@@ -14,6 +14,7 @@ class TasksController < Tasks::BaseController
     respond_to do |format|
       format.html do
         @media = @task.media_manifest
+        @outcome_evidence = @task.outcome_evidence
         @log = @task.latest_log
         @daemon_running = Daemon.new.running?
       end

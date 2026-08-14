@@ -57,6 +57,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[commands/daemon]] — `wiki/commands/daemon.md`
 - [[commands/doctor]] — `wiki/commands/doctor.md`
 - [[commands/drop]] — `wiki/commands/drop.md`
+- [[commands/evidence]] — `wiki/commands/evidence.md`
 - [[commands/findings]] — `wiki/commands/findings.md`
 - [[commands/forget]] — `wiki/commands/forget.md`
 - [[commands/generate-name]] — `wiki/commands/generate-name.md`

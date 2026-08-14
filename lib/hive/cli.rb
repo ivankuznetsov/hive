@@ -762,6 +762,43 @@ module Hive
       ).call
     end
 
+    desc "evidence SUBCOMMAND [ARGS...]", "Recover or capture outcome evidence"
+    long_desc <<~DESC
+      Subcommands:
+        recover TARGET --generation SHA256 --recovery-digest SHA256
+        terminal NAME -- COMMAND...
+        browser COMMAND [ARG...]
+
+      Recovery is admitted only when both values match the current immutable
+      blocked package and its semantic ERROR marker. It preserves the exhausted
+      generation, advances a controller-owned epoch once, and instructs the
+      operator to use the normal generation-guarded workflow.retry action.
+
+      `terminal` is a controller-scoped producer primitive. It is available
+      only inside an outcome-evidence producer environment and records one argv
+      command as `<NAME>.cast` plus a bounded plain-text review.
+
+      `browser` is the controller-scoped agent-browser gateway. It exposes the
+      issued origin and a closed interaction vocabulary while Hive confines
+      screenshot and recording output to the current attempt.
+    DESC
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :stage, type: :string,
+                   desc: "scope slug lookup to one stage, full or short form (#{STAGE_VOCABULARY})"
+    option :generation, type: :string, desc: "exact blocked package generation SHA-256"
+    option :recovery_digest, type: :string, desc: "exact blocked package recovery SHA-256"
+    def evidence(subcommand = nil, target = nil, *command)
+      require "hive/commands/evidence"
+      arguments = {
+        project: options[:project], stage: options[:stage], json: options[:json],
+        generation: options[:generation], recovery_digest: options[:recovery_digest]
+      }
+      arguments[:command] = command unless command.empty?
+      Hive::Commands::Evidence.new(
+        subcommand, target, **arguments
+      ).call
+    end
+
     desc "brainstorm TARGET", "Move an inbox task into brainstorm, or run an existing brainstorm task"
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
@@ -962,30 +999,30 @@ module Hive
       Hive::Commands::Patrol.new(project, **command_options).call
     end
 
-    desc "refactor-patrol PROJECT", "Discover ranked refactor theses for a registered project"
+    desc "refactor-patrol PROJECT", "Discover routed refactor theses for a registered project"
     long_desc <<~DESC
       Maps the registered project's repository into feature slices, asks the
       configured refactor-patrol agent for evidence-backed architecture
-      theses, scores them by leverage, flags scope/guardrail risks, and emits
-      a ranked report. v1 is reporting-only: it does not edit worktrees, open
-      PRs, or enqueue review tasks.
+      theses, verifies their evidence and risks, and emits explicit
+      fix/discuss/dismiss routes. On-demand reporting does not edit worktrees,
+      open PRs, or enqueue review tasks.
 
       Scope hints use precedence --feature, then --entrypoint, then --path.
-      With --changed-since alone, changed features are boosted but full
-      discovery still runs; combined with a scope hint, changed files further
-      restrict that scoped set. With --json, emits hive-refactor-patrol.v1.
+      --changed-since is only a filter paired with --feature, --entrypoint, or
+      --path; it cannot be used on its own. With --json, emits
+      hive-refactor-patrol.v4.
 
       Use --pr with a merged PR number or URL to analyze only its immutable
       changed-path manifest from a clean registered default-branch checkout.
       PR mode requires --json, cannot be combined with legacy scope hints, and
-      emits hive-refactor-patrol.v3 through an enforceable read-only agent.
+      emits hive-refactor-patrol.v4 through an enforceable read-only agent.
 
       The daemon uses --actions with --job-manifest to resume the immutable
-      per-thesis action ledger after discovery. It emits the same v3 contract.
+      per-thesis action ledger after discovery. It emits the same v4 contract.
 
       Use --list or --show JOB_ID to inspect the authoritative durable job
       ledger without enqueueing, claiming, replaying, or resuming work. With
-      --json these operations emit hive-refactor-patrol-jobs.v1. List output is
+      --json these operations emit hive-refactor-patrol-jobs.v2. List output is
       paginated with --limit/--cursor. Show output bounds retry/publication
       histories by --limit unless --full explicitly requests every entry.
     DESC
@@ -994,8 +1031,9 @@ module Hive
     option :feature, type: :string, desc: "only review matching mapped feature id"
     option :entrypoint, type: :string, desc: "only review the feature owning this entrypoint"
     option :path, type: :string, desc: "only review features with owned files under this path"
-    option :changed_since, type: :string, desc: "git ref used for changed-feature ranking/filtering"
-    option :pr, type: :string, desc: "analyze one merged PR number or URL with the v3 read-only contract"
+    option :changed_since, type: :string,
+                           desc: "git ref filter paired with --feature/--entrypoint/--path"
+    option :pr, type: :string, desc: "analyze one merged PR number or URL with the v4 read-only contract"
     option :job_manifest, type: :string,
                           desc: "analyze one immutable merge-intake manifest (daemon/internal)"
     option :actions, type: :boolean, default: false,

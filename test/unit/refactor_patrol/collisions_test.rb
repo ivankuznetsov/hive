@@ -144,7 +144,8 @@ class RefactorPatrolCollisionsTest < Minitest::Test
       evidence: [ { "file" => "lib/checkout.rb", "signal" => "churn", "value" => 7 } ],
       proposed_refactor: "Extract service",
       feature_boundary: { "owned_files" => [ "lib/checkout.rb" ], "entrypoints" => [ "lib/checkout.rb" ] },
-      expected_leverage: { "score" => 0.5, "breakdown" => { "churn" => 0.5 } },
+      route: "fix",
+      architecture_effects: [ "one service owns checkout decisions" ],
       confidence: "medium",
       risk: {
         "caps" => { "single_feature" => true },

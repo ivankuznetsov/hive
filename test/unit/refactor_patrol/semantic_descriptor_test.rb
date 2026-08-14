@@ -59,13 +59,11 @@ class RefactorPatrolSemanticDescriptorTest < Minitest::Test
     end
   end
 
-  def test_evidence_and_driver_order_do_not_change_descriptor
+  def test_evidence_and_architecture_effect_order_do_not_change_descriptor
     original = thesis
     reordered = thesis(
       evidence: original.evidence.reverse,
-      expected_leverage: original.expected_leverage.merge(
-        "drivers" => original.expected_leverage.fetch("drivers").reverse
-      )
+      architecture_effects: original.architecture_effects.reverse
     )
 
     assert_equal SemanticDescriptor.call(thesis: original, source: source),
@@ -105,9 +103,7 @@ class RefactorPatrolSemanticDescriptorTest < Minitest::Test
           cost: problem,
           proposed_refactor: proposal,
           evidence: [ { "file" => "src/domain/core.kt", "line" => 5, "claim" => problem } ],
-          expected_leverage: {
-            "drivers" => [ { "signal" => "coupling", "relief" => 0.5, "mechanism" => proposal } ]
-          }
+          architecture_effects: [ proposal ]
         ),
         source: source
       )
@@ -146,7 +142,7 @@ class RefactorPatrolSemanticDescriptorTest < Minitest::Test
         "owned_files" => [ "src/core.unknown" ],
         "entrypoints" => []
       },
-      "expected_leverage" => { "drivers" => [ Object.new ] }
+      "architecture_effects" => [ Object.new ]
     }
 
     descriptor = SemanticDescriptor.call(thesis: item, source: source)
@@ -166,7 +162,7 @@ class RefactorPatrolSemanticDescriptorTest < Minitest::Test
       proposed_refactor: "Consolidate policy decisions",
       evidence: [ { "file" => "src/core.rb", "claim" => "policy repeats" } ],
       feature_boundary: { "owned_files" => [ "src/core.rb" ], "entrypoints" => [] },
-      expected_leverage: { "drivers" => [] }
+      architecture_effects: []
     }.each do |name, value|
       item.define_singleton_method(name) { value }
     end
@@ -186,7 +182,7 @@ class RefactorPatrolSemanticDescriptorTest < Minitest::Test
              problem: "Validation policy is duplicated across payment routing handlers",
              cost: "Payment changes repeatedly touch authorization and routing",
              proposed_refactor: "Consolidate checkout validation policy behind one payment routing decision",
-             evidence: nil, feature_boundary: nil, expected_leverage: nil)
+             evidence: nil, feature_boundary: nil, architecture_effects: nil)
     evidence ||= [
       {
         "file" => "services/checkout/route.ts",
@@ -199,14 +195,10 @@ class RefactorPatrolSemanticDescriptorTest < Minitest::Test
         "claim" => "Checkout authorization repeats the validation decision"
       }
     ]
-    expected_leverage ||= {
-      "score" => 0.7,
-      "breakdown" => { "churn" => 0.4 },
-      "drivers" => [
-        { "signal" => "churn", "relief" => 0.5, "mechanism" => "Isolate payment routing edits" },
-        { "signal" => "coupling", "relief" => 0.4, "mechanism" => "Give checkout one validation policy" }
-      ]
-    }
+    architecture_effects ||= [
+      "Isolate payment routing edits",
+      "Give checkout one validation policy"
+    ]
 
     Hive::RefactorPatrol::Thesis.new(
       id: "checkout-refactor-1",
@@ -220,8 +212,8 @@ class RefactorPatrolSemanticDescriptorTest < Minitest::Test
         "owned_files" => %w[services/checkout/authorize.ts services/checkout/route.ts],
         "entrypoints" => [ "services/checkout/route.ts" ]
       },
-      feature_hotspot: {},
-      expected_leverage: expected_leverage,
+      architecture_effects: architecture_effects,
+      route: "fix",
       confidence: "high",
       risk: {},
       required_validation: {},

@@ -479,7 +479,7 @@ module Hive
           projection: projection, state: state,
           diagnostics: [ bounded_diagnostic(reason, safe_details) ],
           truncated: truncated,
-          journal_cursor: projection&.dig("journal", "cursor") || 0,
+          journal_cursor: projection&.to_h&.dig("journal", "cursor") || 0,
           journal_records: []
         )
       end

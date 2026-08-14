@@ -4,7 +4,6 @@ require "hive"
 require "hive/patrol/source_reader"
 require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/fingerprint"
-require "hive/refactor_patrol/leverage"
 require "hive/refactor_patrol/thesis"
 
 module Hive
@@ -16,27 +15,30 @@ module Hive
     # it exists in the pinned analysis checkout.
     class ThesisNormalizer
       VALID_CONFIDENCE = %w[high medium low].freeze
+      VALID_ROUTES = FINDING_ROUTES
       EVIDENCE_KEYS = %w[file line snippet claim].freeze
 
       # Returned instead of a Thesis when the normalized hash still fails the
       # thesis schema; carries the validation messages for error recording.
       Invalid = Struct.new(:errors, keyword_init: true)
 
-      def initialize(project_root:, commands:, min_leverage_score: 0.0, source_reader: nil)
+      def initialize(project_root:, commands:, min_confidence: "medium", source_reader: nil)
         @project_root = File.expand_path(project_root)
         @commands = commands
-        @min_leverage_score = min_leverage_score.to_f
+        @min_confidence = min_confidence.to_s
         @source_reader = source_reader || Hive::Patrol::SourceReader.new(@project_root)
         @schemer = JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol-thesis")))
       end
 
-      def call(feature:, leverage:, raw:, index:)
+      def call(feature:, raw:, index:)
         return nil unless raw.is_a?(Hash)
 
-        hash = defaulted_hash(feature, leverage, raw, index)
+        hash = defaulted_hash(feature, raw, index)
         enforce_behavior_guidance!(feature, hash)
         enforce_admissibility!(hash)
         thesis = Thesis.from_h(hash)
+        thesis.route = thesis.effective_route(min_confidence: @min_confidence)
+        hash["route"] = thesis.route
         thesis.fingerprint = Fingerprint.compute(thesis, project_root: @project_root)
         hash["fingerprint"] = thesis.fingerprint
         return Invalid.new(errors: schema_errors(hash)) unless @schemer.valid?(hash)
@@ -46,7 +48,7 @@ module Hive
 
       private
 
-      def defaulted_hash(feature, leverage, raw, idx)
+      def defaulted_hash(feature, raw, idx)
         boundary = {
           "owned_files" => Array(feature.owned_files),
           "entrypoints" => Array(feature.entrypoints)
@@ -55,10 +57,10 @@ module Hive
         required_validation = raw["required_validation"].is_a?(Hash) ? raw["required_validation"] : {}
         raw_feature = raw["feature"].is_a?(Hash) ? raw["feature"]["id"] : raw["feature"]
         raw_boundary = raw["feature_boundary"].is_a?(Hash) ? raw["feature_boundary"] : {}
-        feature_hotspot = normalize_feature_hotspot(leverage)
-        drivers, invalid_drivers = normalize_drivers(raw["expected_leverage"])
+        architecture_effects, invalid_effects = normalize_architecture_effects(raw["architecture_effects"])
         normalized_risk = default_risk(risk)
-        normalized_risk["flags"] |= [ "invalid_leverage_driver" ] if invalid_drivers
+        normalized_risk["flags"] |= [ "invalid_architecture_effect" ] if invalid_effects
+        normalized_risk["flags"] |= [ "invalid_route" ] unless VALID_ROUTES.include?(raw["route"].to_s)
         normalized_risk["flags"] |= [ "boundary_override_attempt" ] if boundary_override?(boundary, raw_boundary)
 
         {
@@ -73,12 +75,8 @@ module Hive
           # but it can never broaden or replace the files that the fixer is
           # permitted to touch.
           "feature_boundary" => boundary,
-          "feature_hotspot" => feature_hotspot,
-          # The model identifies which language-neutral hotspot drivers the
-          # proposal relieves and explains the mechanism. Hive ignores any
-          # model-authored score/breakdown and derives the ranking contribution
-          # from the measured feature hotspot and bounded relief fractions.
-          "expected_leverage" => Leverage.score_proposal(feature_hotspot, drivers),
+          "architecture_effects" => architecture_effects,
+          "route" => VALID_ROUTES.include?(raw["route"].to_s) ? raw["route"].to_s : "dismiss",
           "confidence" => VALID_CONFIDENCE.include?(raw["confidence"].to_s) ? raw["confidence"].to_s : "low",
           "risk" => normalized_risk,
           "required_validation" => {
@@ -93,40 +91,6 @@ module Hive
         }
       end
 
-      def normalize_feature_hotspot(leverage)
-        source = leverage.is_a?(Hash) ? leverage : {}
-        {
-          "scope" => "feature",
-          "score" => numeric(source["score"]),
-          "breakdown" => numeric_signal_hash(source["breakdown"]),
-          "signals" => numeric_signal_hash(source["signals"]),
-          "normalized" => numeric_signal_hash(source["normalized"]),
-          "measurement" => normalize_feature_measurement(source["measurement"])
-        }
-      end
-
-      def normalize_feature_measurement(value)
-        source = value.is_a?(Hash) ? value : {}
-        diagnostics = Array(source["diagnostics"]).filter_map do |diagnostic|
-          next unless diagnostic.is_a?(Hash)
-
-          kind = diagnostic["kind"].to_s.strip
-          error_class = diagnostic["error_class"].to_s.strip
-          message = diagnostic["message"].to_s.strip
-          next if kind.empty? || error_class.empty? || message.empty?
-
-          {
-            "kind" => kind[0, 80],
-            "error_class" => error_class[0, 120],
-            "message" => message[0, 500]
-          }
-        end.first(8)
-        {
-          "status" => source["status"] == "incomplete" ? "incomplete" : "complete",
-          "diagnostics" => diagnostics
-        }
-      end
-
       def boundary_override?(canonical, candidate)
         return false if candidate.empty?
 
@@ -137,44 +101,20 @@ module Hive
         normalized != canonical
       end
 
-      def normalize_drivers(expected_leverage)
-        source = expected_leverage.is_a?(Hash) ? expected_leverage : {}
-        seen = {}
+      def normalize_architecture_effects(value)
+        return [ [], true ] unless value.is_a?(Array)
+
         invalid = false
-        drivers = Array(source["drivers"]).filter_map do |driver|
-          unless driver.is_a?(Hash)
+        effects = value.filter_map do |effect|
+          unless effect.is_a?(String) && !effect.strip.empty?
             invalid = true
             next
           end
 
-          signal = driver["signal"].to_s
-          relief = driver["relief"]
-          mechanism = driver["mechanism"].to_s.strip
-          valid = Leverage::SIGNALS.include?(signal) &&
-                  relief.is_a?(Numeric) && relief.to_f.finite? && relief.to_f.between?(0.0, 1.0) &&
-                  !mechanism.empty? && !seen[signal]
-          unless valid
-            invalid = true
-            next
-          end
-
-          seen[signal] = true
-          { "signal" => signal, "relief" => relief.to_f, "mechanism" => mechanism }
-        end
-        [ drivers, invalid ]
-      end
-
-      def numeric_signal_hash(value)
-        source = value.is_a?(Hash) ? value : {}
-        source.each_with_object({}) do |(signal, amount), result|
-          next unless Leverage::SIGNALS.include?(signal.to_s) && amount.is_a?(Numeric)
-
-          result[signal.to_s] = amount.to_f
-        end
-      end
-
-      def numeric(value)
-        value.is_a?(Numeric) ? value.to_f : 0.0
+          effect.strip
+        end.uniq.first(8)
+        invalid = true if effects.empty?
+        [ effects, invalid ]
       end
 
       # Plural path aliases are recoverable, but feature-wide hotspot values are
@@ -302,15 +242,6 @@ module Hive
       end
 
       def enforce_admissibility!(hash)
-        measurement_complete = hash.dig("feature_hotspot", "measurement", "status") == "complete"
-        unless measurement_complete
-          hash.fetch("risk").fetch("flags") << "incomplete_leverage_measurement"
-          hash.fetch("risk")["flags"].uniq!
-        end
-        if hash.dig("expected_leverage", "score").to_f < @min_leverage_score
-          hash.fetch("risk").fetch("flags") << "below_min_leverage"
-          hash.fetch("risk")["flags"].uniq!
-        end
         evidence = Array(hash["evidence"])
         verified = evidence.map { |item| coherent_anchor?(item) }
         has_anchor = verified.any?
@@ -319,12 +250,11 @@ module Hive
           hash.fetch("risk").fetch("flags") << "unverified_evidence"
           hash.fetch("risk")["flags"].uniq!
         end
-        has_driver = Array(hash.dig("expected_leverage", "drivers")).any?
-        invalid_driver = Array(hash.dig("risk", "flags")).include?("invalid_leverage_driver")
-        if has_anchor && !has_unverified_evidence && has_driver && !invalid_driver && measurement_complete
+        has_effect = Array(hash["architecture_effects"]).any?
+        invalid_effect = Array(hash.dig("risk", "flags")).include?("invalid_architecture_effect")
+        if has_anchor && !has_unverified_evidence && has_effect && !invalid_effect
           hash["admissible"] = true
-          hash["admissibility_reason"] =
-            "evidence is verified against repository bytes and proposal names measurable leverage drivers"
+          hash["admissibility_reason"] = "evidence is verified against repository bytes"
           return
         end
 
@@ -332,9 +262,8 @@ module Hive
         reasons = []
         reasons << "missing coherent anchored claim" unless has_anchor
         reasons << "unverified evidence anchor" if has_unverified_evidence
-        reasons << "missing valid proposal leverage driver" unless has_driver
-        reasons << "invalid proposal leverage driver" if invalid_driver
-        reasons << "incomplete feature leverage measurement" unless measurement_complete
+        reasons << "missing architecture effect" unless has_effect
+        reasons << "invalid architecture effect" if invalid_effect
         hash["admissibility_reason"] = reasons.join("; ")
         hash["risk"]["flags"] |= [ "inadmissible" ]
 
@@ -344,6 +273,9 @@ module Hive
         # marker so it survives to the report as a flagged inadmissible record.
         if evidence.empty?
           hash["evidence"] = [ { "claim" => "no evidence supplied; retained as inadmissible" } ]
+        end
+        if Array(hash["architecture_effects"]).empty?
+          hash["architecture_effects"] = [ "no architecture effect supplied; retained as inadmissible" ]
         end
       end
 

@@ -8,7 +8,15 @@ module Hive
     OUTCOME_PREFIX = "Outcome: ".freeze
     BLOCKED_REASON = "terminal_outcome_blocked".freeze
     INVALID_REASON = "terminal_outcome_invalid".freeze
-    ERROR_REASONS = [ BLOCKED_REASON, INVALID_REASON ].freeze
+    OUTCOME_EVIDENCE_BLOCK_REASONS = %w[
+      outcome_evidence_capability_blocked
+      outcome_evidence_review_blocked
+      outcome_evidence_recaptures_exhausted
+    ].freeze
+    OUTCOME_EVIDENCE_REASONS = (
+      OUTCOME_EVIDENCE_BLOCK_REASONS + [ "outcome_evidence_recovery_ready" ]
+    ).freeze
+    ERROR_REASONS = ([ BLOCKED_REASON, INVALID_REASON ] + OUTCOME_EVIDENCE_REASONS).freeze
 
     Classification = Data.define(:kind, :outcome)
     Normalization = Data.define(:result, :changed)
@@ -74,7 +82,12 @@ module Hive
     end
 
     def blocked_error?(attrs)
-      error_reason(attrs) == BLOCKED_REASON
+      reason = error_reason(attrs)
+      reason == BLOCKED_REASON || OUTCOME_EVIDENCE_REASONS.include?(reason)
+    end
+
+    def outcome_evidence_blocker?(attrs)
+      OUTCOME_EVIDENCE_BLOCK_REASONS.include?(error_reason(attrs))
     end
 
     def read_first_line(path)

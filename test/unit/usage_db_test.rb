@@ -285,6 +285,36 @@ class UsageDbTest < Minitest::Test
     end
   end
 
+  def test_exact_attempt_scopes_legacy_rows_by_project_and_task
+    with_usage_db do
+      record(project_slug: "alpha", task_slug: "task-a", input: 10)
+      record(project_slug: "alpha", task_slug: "task-b", input: 20)
+      record(project_slug: "beta", task_slug: "task-a", input: 30)
+
+      exact = Hive::UsageDb.exact_attempt(
+        attempt_id: "missing", project_slug: "alpha", task_slug: "task-a"
+      )
+      assert exact.fetch(:available)
+      assert_equal 1, exact.fetch(:unattributed_count)
+      assert_equal "alpha", exact.fetch(:unattributed).first.fetch(:project_slug)
+      assert_equal "task-a", exact.fetch(:unattributed).first.fetch(:task_slug)
+    end
+  end
+
+  def test_exact_attempt_corrupt_store_is_reported_as_unavailable
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = File.join(dir, "usage.db")
+      File.write(Hive::UsageDb.path, "not a sqlite database")
+
+      _out, err = capture_io do
+        exact = Hive::UsageDb.exact_attempt(attempt_id: "attempt-1")
+        refute exact.fetch(:available)
+        assert_equal "read_failed", exact.fetch(:reason)
+      end
+      assert_match(/exact attempt usage failed/, err)
+    end
+  end
+
   def test_aggregate_returns_patrol_bucket_for_patrol_stage_rows
     with_usage_db do
       now = Time.utc(2026, 5, 24, 12)

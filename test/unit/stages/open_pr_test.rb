@@ -922,4 +922,44 @@ class HiveStagesOpenPrTest < Minitest::Test
       refute File.exist?(task.state_file)
     end
   end
+
+  def test_successful_open_pr_spawn_without_custody_is_rejected
+    with_tmp_dir do |root|
+      task = make_task(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      write_pointer(task, worktree)
+
+      with_basic_open_pr_run_stubs do
+        with_replaced_singleton_method(
+          Hive::Stages::OpenPr, :spawn_open_pr_agent, ->(*, **) { { status: :ok } }
+        ) do
+          result = nil
+          capture_io { result = Hive::Stages::OpenPr.run!(task, cfg) }
+          assert_equal({ commit: "open_pr_custody_missing", status: :error }, result)
+          assert_equal "open_pr_custody_missing",
+                       Hive::Markers.current(task.state_file).attrs.fetch("reason")
+        end
+      end
+    end
+  end
+
+  def test_pr_observation_uses_attempt_bound_publication_identity
+    context = Struct.new(:attempt_id).new("attempt-1")
+    records = []
+    with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :record_task_activity,
+        ->(*args, **kwargs) { records << [ args, kwargs ]; true }
+      ) do
+        assert Hive::Stages::OpenPr.record_pr_observation(
+          Object.new, { "number" => 42, "headRefOid" => "a" * 40 }, "open"
+        )
+      end
+    end
+
+    assert_equal "publication:attempt-1:pr_observed:42",
+                 records.first.last.fetch(:operation_id)
+    assert_equal 42, records.first.last.dig(:payload, "pr_number")
+  end
 end

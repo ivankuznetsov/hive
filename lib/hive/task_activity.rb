@@ -320,6 +320,8 @@ module Hive
       reason = bounded_reason(reason)
       evidence = sanitize_evidence(evidence)
       payload = sanitize(payload.to_h)
+      raise InvalidActivity, "activity payload must be an object" unless payload.is_a?(Hash)
+
       activity_payload = payload.merge(
         "activity_kind" => kind,
         "operation_id" => operation_id,
@@ -328,7 +330,7 @@ module Hive
       )
       enforce_size!(activity_payload, evidence)
 
-      @writer.append_idempotent(
+      result = @writer.append_idempotent(
         {
           event_type: "activity_recorded",
           occurred_at: occurred_at,
@@ -347,6 +349,8 @@ module Hive
         },
         idempotency_key: operation_id
       )
+      refresh_projection_checkpoint
+      result
     rescue Hive::TaskJournal::Conflict => e
       raise Conflict, safe_error(e)
     rescue Hive::TaskJournal::Error => e
@@ -358,6 +362,23 @@ module Hive
     end
 
     private
+
+    # The journal remains lifecycle authority; this checkpoint only lets the
+    # bounded Web reader prove that it consumed the complete authoritative
+    # prefix. Refresh it after every successful append so a newly admitted
+    # task does not remain permanently degraded until an unrelated projection
+    # rebuild happens. A checkpoint failure cannot turn an already-durable
+    # activity into a failed mutation acknowledgement.
+    def refresh_projection_checkpoint
+      return unless @writer.respond_to?(:attempt_store) && @writer.attempt_store
+
+      Hive::TaskProjection::Store.new(
+        task_folder: task_folder, attempt_store: @writer.attempt_store
+      ).rebuild!
+    rescue StandardError => e
+      warn "[hive] task workspace checkpoint refresh failed: #{e.class}"
+      nil
+    end
 
     def reconciliation_verdict(value)
       if value.is_a?(Hash)
@@ -428,8 +449,6 @@ module Hive
         Hive::SecretPatterns.redact(value)
       when NilClass, TrueClass, FalseClass, Numeric
         value
-      else
-        raise InvalidActivity, "activity value #{value.class} is unsupported"
       end
     rescue ArgumentError => e
       raise InvalidActivity, safe_error(e)

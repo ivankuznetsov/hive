@@ -37,10 +37,7 @@ module Hive
           "commands" => json_copy(refactor.fetch("commands")),
           "caps" => CAP_BOOLEANS.to_h do |key|
             [ key, refactor.fetch("caps").fetch(key) ]
-          end,
-          "issue_min_leverage_score" => refactor.dig(
-            "issue_filing", "min_leverage_score"
-          ).to_f
+          end
         }
         {
           "discovery" => refactor.fetch("enabled") == true,
@@ -79,10 +76,6 @@ module Hive
         target["min_confidence"] = stricter_confidence(
           action.fetch("min_confidence"), current.fetch("min_confidence")
         )
-        target.fetch("issue_filing")["min_leverage_score"] = [
-          Float(action.fetch("issue_min_leverage_score")),
-          Float(current.dig("issue_filing", "min_leverage_score"))
-        ].max
         intersect_caps!(target.fetch("caps"), action.fetch("caps"), current.fetch("caps"))
 
         commands_match = intersect_commands!(

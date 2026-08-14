@@ -80,4 +80,42 @@ class HiveRecoveryAPITest < Minitest::Test
     refute records.flatten.any? { |value| value == "a" * 64 }
     assert_equal "queued", records.last.last.dig(:payload, "outcome")
   end
+
+  def test_activity_for_builds_from_the_observed_folder
+    observation = Hive::Recovery::API.observation(
+      { "folder" => "/tmp/task", "state_file" => "/tmp/task/task.md", "slug" => "task" }
+    )
+    task = Object.new
+    activity = Object.new
+    seen_clock = nil
+    seen_task = nil
+    with_replaced_singleton_method(Hive::Task, :new, ->(*) { task }) do
+      replacement = lambda do |candidate, clock:|
+        seen_task = candidate
+        seen_clock = clock
+        activity
+      end
+      with_replaced_singleton_method(Hive::TaskActivity, :for_task, replacement) do
+        assert_same activity, Hive::Recovery::API.activity_for(
+          observation, now: Time.utc(2026, 8, 12, 12)
+        )
+      end
+    end
+    assert_same task, seen_task
+    assert_equal Time.utc(2026, 8, 12, 12), seen_clock.call
+  end
+
+  def test_recovery_activity_append_failure_is_non_fatal
+    observation = Hive::Recovery::API.observation(
+      { "folder" => "/tmp/task", "state_file" => "/tmp/task/task.md", "slug" => "task" }
+    )
+    activity = Object.new
+    activity.define_singleton_method(:record) do |**|
+      raise Hive::TaskActivity::AppendFailed, "disk unavailable"
+    end
+
+    refute Hive::Recovery::API.record_recovery_observation(
+      activity, observation, { "status" => "queued" }, now: Time.utc(2026, 8, 12, 12)
+    )
+  end
 end

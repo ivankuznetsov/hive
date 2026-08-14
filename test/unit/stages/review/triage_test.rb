@@ -545,6 +545,22 @@ class TriageTest < Minitest::Test
     end
   end
 
+  def test_successful_triage_spawn_without_custody_is_rejected
+    with_triage_dir do |dir, task_folder|
+      reviews = File.join(task_folder, "reviews")
+      File.write(File.join(reviews, "claude-ce-code-review-01.md"), "## High\n- [ ] fix it\n")
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :spawn_claude!, ->(*, **) { { status: :ok } }
+      ) do
+        result = Hive::Stages::Review::Triage.run!(
+          cfg: default_cfg, ctx: make_ctx(dir, task_folder)
+        )
+        assert_equal :error, result.status
+        assert_equal "triage agent custody was not invoked", result.error_message
+      end
+    end
+  end
+
   # --- discovery -------------------------------------------------------
 
   # --- R1: reviewer-file read failure is tolerated --------------------

@@ -53,4 +53,63 @@ class HiveStagesBaseActivityTest < Minitest::Test
 
     refute Hive::Stages::Base.record_stage_activity(task, "4-execute", "entered")
   end
+
+  def test_waiting_brainstorm_questions_are_recorded_from_a_bounded_read
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "brainstorm.md")
+      File.write(state_file, <<~MARKDOWN)
+        ## Round 1
+        ### Q1. Which direction?
+        ### A1.
+        <!-- WAITING -->
+      MARKDOWN
+      task = Struct.new(:folder, :state_file, :stage_name).new(dir, state_file, "brainstorm")
+      context = Struct.new(:attempt_id).new("attempt-1")
+      records = []
+      marker = Struct.new(:name).new(:waiting)
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :record_task_activity,
+          ->(*args, **kwargs) { records << [ args, kwargs ]; true }
+        ) do
+          assert Hive::Stages::Base.record_waiting_questions(task, "2-brainstorm", marker)
+        end
+      end
+
+      assert_equal 1, records.length
+      assert_equal "question_asked", records.first.last.fetch(:kind)
+      assert_equal "Q1", records.first.last.dig(:payload, "question_id")
+    end
+  end
+
+  def test_waiting_question_read_failure_is_non_fatal
+    with_tmp_dir do |dir|
+      task = Struct.new(:folder, :state_file, :stage_name).new(
+        dir, File.join(dir, "missing.md"), "brainstorm"
+      )
+      context = Struct.new(:attempt_id).new("attempt-1")
+      marker = Struct.new(:name).new(:waiting)
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        refute Hive::Stages::Base.record_waiting_questions(task, "2-brainstorm", marker)
+      end
+    end
+  end
+
+  def test_subscription_profile_uses_a_budget_equivalent_guard
+    profile = Struct.new(:billing_semantics, :budget_flag).new(:subscription_backed, nil)
+    guards = Hive::Stages::Base.runtime_resource_guards(
+      [], profile: profile, max_budget_usd: 10, timeout_sec: 30
+    )
+
+    assert_equal "budget_equivalent_guard", guards.first.fetch("kind")
+    assert_equal "unenforced", guards.first.fetch("enforcement")
+
+    api_profile = Struct.new(:billing_semantics, :budget_flag).new(:api_billed, "--budget")
+    api_guards = Hive::Stages::Base.runtime_resource_guards(
+      [], profile: api_profile, max_budget_usd: 10, timeout_sec: 30
+    )
+    assert_equal "monetary_api_cap", api_guards.first.fetch("kind")
+    assert_equal "provider_cli", api_guards.first.fetch("enforcement")
+  end
 end

@@ -1,0 +1,130 @@
+<% evidence = local_assigns.fetch(:evidence) %>
+<% project = local_assigns.fetch(:project) %>
+<% task = local_assigns.fetch(:task) %>
+
+<% if evidence %>
+  <section class="outcome-evidence" aria-labelledby="outcome-evidence-heading">
+    <div class="outcome-evidence-header">
+      <div>
+        <p class="eyebrow">Independent proof package</p>
+        <h2 id="outcome-evidence-heading">Outcome evidence</h2>
+      </div>
+      <span class="evidence-status evidence-status--<%= evidence.fetch("status") %>">
+        <%= evidence.fetch("status").tr("_", " ") %>
+      </span>
+    </div>
+
+    <% if evidence.fetch("status") == "invalid" %>
+      <div class="evidence-warning" role="alert"><%= evidence.fetch("reason") %></div>
+    <% else %>
+      <p class="evidence-summary">
+        <%= pluralize(evidence.fetch("claims").length, "outcome claim") %> ·
+        <%= pluralize(evidence.fetch("changed_path_count"), "changed path") %> ·
+        <%= pluralize(evidence.fetch("attempts").length, "review attempt") %>
+      </p>
+
+      <div class="evidence-claims" aria-label="Outcome claims and proof">
+        <% evidence.fetch("claims").each_with_index do |claim, index| %>
+          <article class="evidence-claim" aria-labelledby="evidence-claim-<%= index %>">
+            <div class="evidence-claim-heading">
+              <h3 id="evidence-claim-<%= index %>"><%= claim.fetch("statement") %></h3>
+              <span class="proof-kind"><%= claim.fetch("proof_kind") %></span>
+            </div>
+            <% if claim["evidence"].present? %>
+              <% claim.fetch("evidence").each do |proof| %>
+                <p class="evidence-proof-summary"><%= proof.fetch("summary") %></p>
+                <div class="evidence-representations">
+                  <% proof.fetch("representations").each do |representation| %>
+                    <% proof_url = task_evidence_path(
+                         project.name, task["slug"], representation.fetch("attempt_id"),
+                         representation.fetch("sha256"), source: @task_source
+                       ) %>
+                    <% media_type = representation.fetch("media_type") %>
+                    <% if media_type.start_with?("image/") %>
+                      <figure class="evidence-preview">
+                        <img src="<%= proof_url %>"
+                             alt="<%= claim.fetch("statement") %> — <%= representation.fetch("role") %> representation"
+                             loading="lazy">
+                        <figcaption><%= representation.fetch("role") %> · <%= representation.fetch("filename") %></figcaption>
+                      </figure>
+                    <% elsif media_type.start_with?("video/") %>
+                      <figure class="evidence-preview">
+                        <video src="<%= proof_url %>" controls preload="metadata"
+                               aria-label="<%= claim.fetch("statement") %> — temporal evidence"></video>
+                        <figcaption><%= representation.fetch("role") %> · <%= representation.fetch("filename") %></figcaption>
+                      </figure>
+                    <% else %>
+                      <%= link_to "Open #{representation.fetch("role")} #{representation.fetch("filename")}",
+                            proof_url, class: "evidence-file-link" %>
+                    <% end %>
+                  <% end %>
+                </div>
+              <% end %>
+            <% else %>
+              <p class="muted">No proof was admitted before this package blocked.</p>
+            <% end %>
+            <% if claim["verdict"] %>
+              <p class="evidence-verdict evidence-verdict--<%= claim.fetch("verdict") %>">
+                <strong><%= claim.fetch("verdict").capitalize %>:</strong>
+                <%= claim.fetch("verdict_reason") %>
+              </p>
+            <% end %>
+            <details class="evidence-traceability">
+              <summary>Traceability · <%= pluralize(claim.fetch("changed_paths").length, "path") %></summary>
+              <ul>
+                <% claim.fetch("changed_paths").each do |path| %><li><code><%= path %></code></li><% end %>
+              </ul>
+            </details>
+          </article>
+        <% end %>
+      </div>
+
+      <% if evidence.fetch("exclusions").present? %>
+        <details class="evidence-exclusions">
+          <summary>Supported exclusions · <%= evidence.fetch("exclusions").length %></summary>
+          <% evidence.fetch("exclusions").each do |exclusion| %>
+            <div class="evidence-exclusion">
+              <strong><%= exclusion.fetch("statement") %></strong>
+              <p><%= exclusion.fetch("reason") %></p>
+              <% if exclusion["verdict"] %>
+                <p><%= exclusion.fetch("verdict").capitalize %>: <%= exclusion.fetch("verdict_reason") %></p>
+              <% end %>
+            </div>
+          <% end %>
+        </details>
+      <% end %>
+
+      <% if (blocker = evidence["blocker"]) %>
+        <div class="evidence-blocker" role="status">
+          <h3>Operator recovery required</h3>
+          <p><%= blocker.fetch("reason").tr("_", " ") %>.</p>
+          <% blocker.fetch("reviewer_reasons").each do |reason| %><p><%= reason %></p><% end %>
+          <p><code><%= blocker.fetch("command") %></code></p>
+        </div>
+      <% end %>
+
+      <details class="evidence-audit">
+        <summary>Review history and provenance</summary>
+        <ol class="evidence-attempts">
+          <% evidence.fetch("attempts").each do |attempt| %>
+            <li>
+              <strong><%= attempt.fetch("status").capitalize %></strong>
+              <span><%= attempt.fetch("attempt_id") %> · <%= attempt.fetch("recorded_at") %></span>
+              <% if attempt["diagnostic"].present? %><p><%= attempt["diagnostic"] %></p><% end %>
+            </li>
+          <% end %>
+        </ol>
+        <dl class="evidence-actors">
+          <% evidence.fetch("actors").each do |role, actor| %>
+            <% next unless actor %>
+            <div><dt><%= role.capitalize %></dt><dd><%= actor.fetch("agent") %> · <%= actor.fetch("model") %> · <%= actor.fetch("effort") %></dd></div>
+          <% end %>
+          <div>
+            <dt>Reviewer capability</dt>
+            <dd><%= evidence.dig("reviewer_capabilities", "proof_kinds").join(", ") %><%= " · temporal video" if evidence.dig("reviewer_capabilities", "temporal_video") %></dd>
+          </div>
+        </dl>
+      </details>
+    <% end %>
+  </section>
+<% end %>

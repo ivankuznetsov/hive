@@ -175,16 +175,19 @@ These are not gems but the CLI tools the runtime invokes:
 | Tool | Min version | Used by |
 |------|-------------|---------|
 | `claude` | 2.1.118 | every active stage; verified by `Hive::Agent.check_version!` |
+| `codex` | 0.147.0 for managed capture permissions; Hivebox pins exact 0.147.0 | outcome-evidence producers use Codex managed limited networking, local binding, and filesystem permissions; earlier builds do not provide the required one-origin isolation contract |
 | `gh` | (any auth-supporting recent) | `Hive::Gh` (`auth status`, `pr list`, `pr view` for PR state checks, secret-scan, dedupe, status rollups, and babysitter context), `Hive::Web::AgentsAuth` (`gh auth status` plus the PTY relay for `gh auth login --web`), `Stages::OpenPr` (agent invokes `gh pr create` from its prompt), `Stages::Finalize` (runner owns `gh pr ready`; agent does `gh pr edit --body-file`), `Stages::Review::GithubPublisher` (`gh pr comment` for review mirroring). |
 | `git` | 2.40+ (worktree, symbolic-ref, etc.) | `Hive::GitOps`, `Hive::Worktree`, `Init`/`New` commands |
 | `tmux` | 3.0+ (3.6a verified locally) | runtime dependency when `claude.mode: tmux`; also used by TUI/e2e tests on private sockets |
 | GNU `timeout` / `gtimeout` | any recent GNU coreutils | hard execution bounds for managed llm-wiki Git-ref, QMD, and provider subprocesses; Linux coreutils normally supplies `timeout`, while GNU coreutils on macOS supplies `gtimeout` |
 | `qmd` | exact `@tobilu/qmd@2.5.3` plus checked-in sha512 integrity | managed llm-wiki semantic search/index maintenance; its one downloaded tarball is locally integrity-checked, installed and native-health-checked in a staging tree, then activated without sacrificing the previous healthy tree on failure |
 | `npm` | any recent npm with Node.js and local Node development headers | bounded downloader for the integrity-checked QMD tarball and locked dependency closure; lifecycle scripts stay disabled, and Hive builds better-sqlite3 from locked source with the locked node-gyp in offline mode |
-| `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional TUI capture support; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed. Records a `.cast` only — rendering it to a terminal-demo GIF needs `agg` (or `vhs`), which the hivebox image does NOT ship |
-| `ffmpeg` | any recent | media conversion for manual `web/script/record_box_demo.rb` output (webm/mp4). NOT a terminal-GIF encoder: it cannot read an asciinema `.cast`, so it does not turn TUI recordings into GIFs on its own |
-| `agg` / `vhs` | not shipped in the hivebox image | the terminal-GIF encoders for artifacts-stage TUI/CLI demos (`agg` renders an asciinema `.cast`; `vhs` records straight to GIF). Absent in-box, so a TUI/CLI demo degrades to a `failed` capture unless the agent installs one |
-| Playwright | exact npm metadata 1.60.0 in `web/package-lock.json` | supervised Hive web demo recorder; the expected local CLI and Chromium executable are preflighted before required capture |
+| `agent-browser` | exact 0.34.0 native package in `lib/hive/assets/capture-tools/package-lock.json` | the sole web screenshot/video driver for outcome evidence and supervised Hivebox capture; Hive installs a managed Chrome payload and gives producers an exact controller-owned session behind a one-origin proxy |
+| `ffmpeg` / `ffprobe` | any recent | proof media decode/duration checks and manual `web/script/record_box_demo.rb` conversion |
+| Tesseract | any recent | OCR preflight that rejects secret-shaped content in retained screenshots and sampled video frames |
+| `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional legacy/e2e failure capture only; outcome evidence uses Hive's native Ruby PTY recorder under controller process custody and Hivebox no longer installs asciinema |
+| `agg` / `vhs` | not shipped | optional terminal-GIF renderers; outcome evidence retains a `.cast` plus bounded text and does not require GIF conversion |
+| Playwright | exact npm metadata 1.60.0 in `web/package-lock.json` | Rails system tests and manual demo scripts only; it is not an outcome-evidence capture interface |
 
 `HIVE_CLAUDE_BIN` env var overrides the `claude` binary, used by tests with `test/fixtures/fake-claude` and `fake-gh`.
 
@@ -194,9 +197,14 @@ closed (status 125) and retains its queued source for recovery. It deliberately
 has no unbounded fallback: limiting provider and Git execution is part of the
 subscription-safety contract.
 
-Source-worktree web capture also requires `bundle`, Node/npm for installing the
-pinned lock when browser dependencies are absent, Chromium for Playwright, and
-both `ffmpeg` and `ffprobe`. Ruby gems are installed into a private cache keyed
+Source-worktree web capture also requires `bundle`, Node/npm to unpack Hive's
+pinned agent-browser package, managed Chrome, `ffmpeg`/`ffprobe`, and Tesseract.
+The native agent-browser binary runs without Node; npm lifecycle scripts remain
+disabled. Outcome-evidence Web sessions use an exact controller-issued CLI
+prefix and are limited to one random `.invalid` origin and one controller-issued
+loopback application port; named-session close, managed app/proxy cleanup, and
+producer process-group cleanup run before the attempt work root is removed.
+Ruby gems are installed into a private cache keyed
 by both root/web lockfile contents plus Ruby engine/version/platform; neither
 linked-worktree lockfile nor its mode may change. Missing browser/media tooling
 is a truthful required-capture error, never a silent `not_applicable` result.

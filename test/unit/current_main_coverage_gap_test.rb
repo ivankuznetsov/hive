@@ -1228,6 +1228,43 @@ class CurrentMainCoverageGapTest < Minitest::Test
     end
   end
 
+  def test_review_rejects_successful_fix_spawn_without_custody
+    with_tmp_dir do |root|
+      folder = task_folder(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      task = Hive::Task.new(folder)
+      File.write(task.state_file, "---\nslug: #{File.basename(folder)}\n---\n")
+      File.write(task.worktree_yml_path, { "path" => worktree, "branch" => task.slug }.to_yaml)
+      File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] fix\n")
+      Hive::Markers.set(task.state_file, :review_waiting, pass: 1, escalations: 1)
+
+      with_replaced_singleton_method(
+        Hive::Stages::Review, :canonical_worktree_root, ->(*) { root }
+      ) do
+        pointer = ->(*, **) { { "path" => worktree, "branch" => task.slug } }
+        with_replaced_singleton_method(Hive::Worktree, :read_owned_pointer, pointer) do
+          with_replaced_singleton_method(Hive::Worktree, :validate_pointer_path, ->(*) { true }) do
+            with_replaced_singleton_method(Hive::Stages::Review, :reviewer_compare_ref, ->(*) { "main" }) do
+              with_replaced_singleton_method(Hive::Stages::Review, :git_head, ->(*) { "head" }) do
+                with_replaced_singleton_method(Hive::Stages::Review, :worktree_status, ->(*) { :clean }) do
+                  with_replaced_singleton_method(
+                    Hive::Stages::Review, :spawn_fix_agent, ->(*, **) { { status: :ok } }
+                  ) do
+                    result = Hive::Stages::Review.run!(task, { "review" => {} })
+                    assert_equal :review_error, result.fetch(:status)
+                    assert_equal "fix_custody_missing_pass_01", result.fetch(:commit)
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+      assert_equal "fix_custody_missing", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+    end
+  end
+
   def test_tui_view_edge_branches
     artifact_row = row(diagnostic: { "artifact_paths" => %w[a b c d e f] })
     assert_equal 8, Hive::Tui::RedStatusDetailLayout.artifact_row_count(artifact_row)

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-outcome-evidence-current.v1.json",
+  "title": "Hive Outcome Evidence Current Pointer v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "task", "project", "status", "generation",
+    "recovery_epoch", "attempt_id", "requirement_sha256", "attempt_sha256",
+    "attempts", "attempt_count", "reason", "failed_targets", "reviewer_reasons",
+    "recovery_digest", "published_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-outcome-evidence-current" },
+    "schema_version": { "const": 1 },
+    "task": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "status": { "enum": ["accepted", "blocked"] },
+    "generation": { "$ref": "#/$defs/Digest" },
+    "recovery_epoch": { "type": "integer", "minimum": 0 },
+    "attempt_id": {
+      "oneOf": [
+        { "$ref": "#/$defs/SafeId" },
+        { "type": "null" }
+      ]
+    },
+    "requirement_sha256": { "$ref": "#/$defs/Digest" },
+    "attempt_sha256": {
+      "oneOf": [
+        { "$ref": "#/$defs/Digest" },
+        { "type": "null" }
+      ]
+    },
+    "attempts": {
+      "type": "array", "maxItems": 3, "uniqueItems": true,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["attempt_id", "attempt_sha256"],
+        "properties": {
+          "attempt_id": { "$ref": "#/$defs/SafeId" },
+          "attempt_sha256": { "$ref": "#/$defs/Digest" }
+        }
+      }
+    },
+    "attempt_count": { "type": "integer", "minimum": 0, "maximum": 3 },
+    "reason": {
+      "oneOf": [
+        { "enum": ["capability_blocked", "review_blocked", "recaptures_exhausted"] },
+        { "type": "null" }
+      ]
+    },
+    "failed_targets": {
+      "type": "array", "maxItems": 21, "uniqueItems": true,
+      "items": { "$ref": "#/$defs/ClaimId" }
+    },
+    "reviewer_reasons": {
+      "type": "array", "maxItems": 21, "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 1024 }
+    },
+    "recovery_digest": {
+      "oneOf": [
+        { "$ref": "#/$defs/Digest" },
+        { "type": "null" }
+      ]
+    },
+    "published_at": { "type": "string", "format": "date-time", "maxLength": 64 }
+  },
+  "$defs": {
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "SafeId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "ClaimId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
+  }
+}

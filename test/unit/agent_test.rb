@@ -27,13 +27,25 @@ class AgentTest < Minitest::Test
        HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE HIVE_FAKE_CLAUDE_DELAY_AFTER_WRITE_OUTPUT
        HIVE_FAKE_CLAUDE_HANG HIVE_FAKE_CLAUDE_IGNORE_TERM HIVE_FAKE_CLAUDE_LOG_DIR
        HIVE_FAKE_CLAUDE_READY_FILE HIVE_FAKE_CLAUDE_RELEASE_FILE
-       HIVE_SCREENOTE_BASE_URL].each { |k| ENV.delete(k) }
+       HIVE_SCREENOTE_BASE_URL AWS_ACCESS_KEY_ID DATABASE_URL GITHUB_TOKEN DISPLAY].each { |k| ENV.delete(k) }
   end
 
   def make_task(dir, stage = "2-brainstorm", slug = "agent-test-260424-aaaa")
     folder = File.join(dir, ".hive-state", "stages", stage, slug)
     FileUtils.mkdir_p(folder)
     Hive::Task.new(folder)
+  end
+
+  def test_runtime_policy_and_raw_permission_arguments_are_mutually_exclusive
+    Dir.mktmpdir("hive-agent-permission-contract") do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: make_task(dir), prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+          runtime_policy: Object.new, permission_arguments: [ "--unsafe" ]
+        )
+      end
+      assert_match(/cannot be combined/, error.message)
+    end
   end
 
   def run_delta_before_write(dir, max_turns: nil, max_tokens: nil)
@@ -120,6 +132,97 @@ class AgentTest < Minitest::Test
         assert_nil agent.child_environment.fetch(key)
       end
       refute agent.child_environment.key?("GROK_AUTH_PATH")
+    end
+  end
+
+  def test_isolated_child_environment_excludes_ambient_secrets_and_keeps_desktop_context
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      log_dir = File.join(dir, "agent-log")
+      FileUtils.mkdir_p(log_dir)
+      with_env(
+        "AWS_ACCESS_KEY_ID" => "AKIAIOSFODNN7EXAMPLE",
+        "DATABASE_URL" => "postgres://secret@db/app",
+        "GITHUB_TOKEN" => "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        "DISPLAY" => ":77"
+      ) do
+        result = Hive::Agent.new(
+          task: task, prompt: "inspect", max_budget_usd: nil, timeout_sec: 5,
+          status_mode: :exit_code_only, isolate_environment: true,
+          launch_environment: { "HIVE_FAKE_CLAUDE_LOG_DIR" => log_dir }
+        ).run!
+        assert_equal :ok, result.fetch(:status)
+      end
+
+      log = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_includes log, "env_AWS_ACCESS_KEY_ID=__unset__"
+      assert_includes log, "env_DATABASE_URL=__unset__"
+      assert_includes log, "env_GITHUB_TOKEN=__unset__"
+      assert_includes log, "env_DISPLAY=:77"
+    end
+  end
+
+  def test_isolated_child_environment_resolves_tool_manager_launcher_without_session_blobs
+    with_tmp_dir do |dir|
+      launcher_dir = File.join(dir, "launchers")
+      concrete_dir = File.join(dir, "concrete")
+      FileUtils.mkdir_p([ launcher_dir, concrete_dir ])
+      launcher = File.join(launcher_dir, "managed-agent")
+      concrete = File.join(concrete_dir, "managed-agent")
+      File.write(launcher, <<~SH)
+        #!/bin/sh
+        exec mise x managed-agent -- managed-agent "$@"
+      SH
+      File.write(concrete, "#!/bin/sh\nexit 0\n")
+      FileUtils.chmod(0o755, [ launcher, concrete ])
+      profile = Hive::AgentProfile.new(
+        name: :managed, bin_default: "managed-agent", headless_flag: "-p",
+        version_flag: "--version", skill_syntax_format: "/%{skill}",
+        status_detection_mode: :exit_code_only
+      )
+
+      with_env("PATH" => [ launcher_dir, concrete_dir ].join(File::PATH_SEPARATOR)) do
+        agent = Hive::Agent.new(
+          task: make_task(dir), prompt: "inspect", max_budget_usd: nil,
+          timeout_sec: 5, profile: profile, isolate_environment: true
+        )
+
+        assert_equal concrete, agent.send(:build_cmd).first
+        refute agent.child_environment.keys.any? { |key| key.start_with?("__MISE_") }
+      end
+    end
+  end
+
+  def test_isolated_executable_fails_closed_on_unreadable_launcher_candidates
+    with_tmp_dir do |dir|
+      launcher_dir = File.join(dir, "launchers")
+      concrete_dir = File.join(dir, "concrete")
+      FileUtils.mkdir_p([ launcher_dir, concrete_dir ])
+      launcher = File.join(launcher_dir, "managed-agent")
+      concrete = File.join(concrete_dir, "managed-agent")
+      File.write(launcher, "#!/bin/sh\nexec mise x managed-agent -- managed-agent \"$@\"\n")
+      File.write(concrete, "#!/bin/sh\nexit 0\n")
+      FileUtils.chmod(0o755, [ launcher, concrete ])
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "inspect", max_budget_usd: nil,
+        timeout_sec: 5, isolate_environment: true
+      )
+      original = File.method(:realpath)
+
+      with_env("PATH" => [ launcher_dir, concrete_dir ].join(File::PATH_SEPARATOR)) do
+        replacement = ->(path) { path == concrete ? raise(Errno::EIO) : original.call(path) }
+        with_replaced_singleton_method(File, :realpath, replacement) do
+          assert_equal launcher, agent.send(:isolated_executable, "managed-agent")
+        end
+
+        with_replaced_singleton_method(File, :realpath, ->(_path) { raise Errno::EIO }) do
+          assert_equal "managed-agent", agent.send(:isolated_executable, "managed-agent")
+        end
+      end
+
+      link = File.join(dir, "launcher-link")
+      File.symlink(launcher, link)
+      refute agent.send(:tool_manager_launcher?, link)
     end
   end
 
@@ -872,6 +975,27 @@ class AgentTest < Minitest::Test
       assert_equal %w[--sandbox workspace-write], cmd.each_cons(2).find { |flag, _| flag == "--sandbox" }
       assert_includes cmd, "--ignore-user-config"
       assert_includes cmd, "--ignore-rules"
+      refute_includes cmd, "--dangerously-bypass-approvals-and-sandbox"
+    end
+  end
+
+  def test_codex_controller_permission_arguments_replace_the_legacy_sandbox_flags
+    with_tmp_dir do |dir|
+      profile = Hive::AgentProfiles.lookup(:codex)
+      permission_arguments = [
+        "--ephemeral", "-c", 'default_permissions="hive-evidence"'
+      ]
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test", max_budget_usd: nil,
+        timeout_sec: 5, profile: profile,
+        permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE,
+        permission_arguments: permission_arguments
+      )
+
+      cmd = agent.send(:build_cmd)
+
+      permission_arguments.each { |argument| assert_includes cmd, argument }
+      refute_includes cmd, "--sandbox"
       refute_includes cmd, "--dangerously-bypass-approvals-and-sandbox"
     end
   end
@@ -1931,6 +2055,42 @@ class AgentTest < Minitest::Test
       assert_equal :error, result[:status]
       assert_equal :error, marker.name
       assert_equal "no_marker_no_exit_code", marker.attrs["reason"]
+    end
+  end
+
+  def test_state_file_marker_zero_exit_with_agent_working_sets_recoverable_error
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      Hive::Markers.set(task.state_file, :agent_working, pid: 123)
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = { timed_out: false, exit_code: 0 }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, result[:status]
+      assert_equal :error, marker.name
+      assert_equal "agent_exited_without_terminal_marker", marker.attrs["reason"]
+      assert_equal "agent_working", marker.attrs["observed_marker"]
+      assert_equal "claude", marker.attrs["provider"]
+    end
+  end
+
+  def test_state_file_marker_nil_exit_with_agent_working_sets_recoverable_error
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      Hive::Markers.set(task.state_file, :agent_working, pid: 123)
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = { timed_out: false, exit_code: nil }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, result[:status]
+      assert_equal :error, marker.name
+      assert_equal "agent_exited_without_terminal_marker", marker.attrs["reason"]
+      assert_equal "agent_working", marker.attrs["observed_marker"]
+      assert_equal "claude", marker.attrs["provider"]
     end
   end
 

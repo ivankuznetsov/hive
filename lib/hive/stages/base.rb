@@ -27,6 +27,12 @@ module Hive
   module Stages
     module Base
       DEFAULT_GENERIC_STAGE_TIMEOUT_SEC = 1800
+      CONTROLLER_LAUNCH_ENV_KEYS = %w[
+        HIVE_EVIDENCE_WRITE_ROOT HIVE_EVIDENCE_TASK_ROOT
+        HIVE_EVIDENCE_SOURCE_ROOT HIVE_EVIDENCE_SOURCE_SHA
+        HIVE_EVIDENCE_APP_PORT HIVE_EVIDENCE_BROWSER_ORIGIN
+        HIVE_EVIDENCE_WEB_HIVE_HOME HIVE_EVIDENCE_CAPTURE_MAILBOX
+      ].freeze
 
       module_function
 
@@ -803,10 +809,17 @@ module Hive
                       add_dirs: [], cwd: nil, log_label: nil,
                       profile: nil, expected_output: nil, status_mode: nil,
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
+                      permission_arguments: nil,
                       disallowed_tools: nil, cli_flags: nil,
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
                       routing_resolution: nil, routing_arguments: nil,
-                      resource_guards: nil, agent_custody: nil)
+                      resource_guards: nil, agent_custody: nil,
+                      isolate_environment: false, launch_environment: nil)
+        launch_environment = (launch_environment || {}).to_h.transform_keys(&:to_s)
+        unknown_launch_keys = launch_environment.keys - CONTROLLER_LAUNCH_ENV_KEYS
+        unless unknown_launch_keys.empty? && launch_environment.values.all? { |value| value.is_a?(String) }
+          raise ArgumentError, "controller launch environment is invalid"
+        end
         context = Hive::Attempts::Context.current
         launch_binding = nil
         provider_route = nil
@@ -922,6 +935,7 @@ module Hive
               expected_output: expected_output,
               status_mode: effective_status_mode,
               permission_mode: permission_mode,
+              permission_arguments: permission_arguments,
               allowed_tools: allowed_tools,
               disallowed_tools: disallowed_tools,
               cli_flags: cli_flags,
@@ -929,8 +943,9 @@ module Hive
               launch_arguments: launch_arguments,
               runtime_policy: runtime_policy,
               routing_arguments: routing_arguments,
-              launch_environment: launch_binding&.environment || {},
-              provider_route: provider_route
+              launch_environment: (launch_binding&.environment || {}).merge(launch_environment),
+              provider_route: provider_route,
+              isolate_environment: isolate_environment
             ).run!
             if agent_result[:status] == :ok && runtime_policy&.host_outputs?
               begin

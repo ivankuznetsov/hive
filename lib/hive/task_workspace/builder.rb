@@ -255,7 +255,7 @@ module Hive
         if @task.respond_to?(:publication)
           @task.publication(cache: @publication_cache)
         else
-          unavailable_panel("publication")
+          TaskWorkspace.unavailable_panel("publication")
         end
       end
 
@@ -263,12 +263,12 @@ module Hive
         if @task.respond_to?(:artifact_panel)
           @task.artifact_panel
         else
-          unavailable_panel("artifacts")
+          TaskWorkspace.unavailable_panel("artifacts")
         end
       end
 
       def dependency_panel(publication)
-        return unavailable_panel("dependencies") unless @dependency_context
+        return TaskWorkspace.unavailable_panel("dependencies") unless @dependency_context
 
         DependencyComponent.new(
           context: @dependency_context, project: @project,
@@ -341,7 +341,7 @@ module Hive
         diagnostics = Array(read.diagnostics)
         unless @status_availability.empty? || @status_availability == "fresh"
           diagnostics << diagnostic(
-            "status_snapshot", "status_#{@status_availability.empty? ? 'unavailable' : @status_availability}",
+            "status_snapshot", "status_#{@status_availability}",
             status_error_class
           )
         end

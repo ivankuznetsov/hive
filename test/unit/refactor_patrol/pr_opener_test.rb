@@ -1480,8 +1480,7 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       problem: "Checkout mixes concerns", cost: "Changes fan out",
       evidence: [ { "file" => "lib/a.rb", "line" => 4, "claim" => "two responsibilities" } ],
       proposed_refactor: "Extract orchestration", feature_boundary: {},
-      feature_hotspot: { "coupling" => 8 },
-      expected_leverage: { "score" => 64, "mechanism" => "separate change axes" },
+      route: "fix", architecture_effects: [ "separate change axes" ],
       confidence: "medium", risk: { "flags" => [] },
       required_validation: { "commands" => [ "test" ] }, admissible: true,
       admissibility_reason: "", follow_up_approval_state: "pending", fingerprint: "fp"

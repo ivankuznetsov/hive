@@ -1725,6 +1725,33 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_worktree_stage_requires_custody_and_preserves_custodied_agent_failure
+    with_draft_pr_task do |task, _worktree_root|
+      with_fake_github_controller do
+        with_deferred_draft_handoff do
+          with_replaced_singleton_method(
+            Hive::Stages::Base, :spawn_agent, ->(*, **) { { status: :ok } }
+          ) do
+            result = Hive::Stages::AgentWorktree.run!(task, {})
+            assert_equal :error, result.fetch(:status)
+            assert_equal "Hive::StageError", result.fetch(:error)
+            marker = Hive::Markers.current(File.join(task.folder, "fix-report.md"))
+            assert_equal "Hive::StageError", marker.attrs.fetch("exception_class")
+          end
+
+          failed = lambda do |*_args, agent_custody:, **_kwargs|
+            agent_custody.call { { status: :error, error_message: "provider unavailable" } }
+          end
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, failed) do
+            result = Hive::Stages::AgentWorktree.run!(task, {})
+            assert_equal :error, result.fetch(:status)
+            assert_equal "provider unavailable", result.fetch(:error_message)
+          end
+        end
+      end
+    end
+  end
+
   private
 
     # U3-focused tests stop at the validated local boundary. U4 owns the

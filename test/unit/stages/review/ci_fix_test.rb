@@ -671,6 +671,22 @@ class CiFixTest < Minitest::Test
     assert_includes waits, nil
   end
 
+  def test_successful_fix_spawn_without_custody_is_rejected
+    with_ci_dir do |dir, task_folder|
+      ci = write_ci_script(dir, %(echo "tests failed" >&2; exit 1))
+      with_replaced_singleton_method(
+        Hive::Stages::Review::CiFix, :spawn_fix_agent,
+        ->(**) { { status: :ok } }
+      ) do
+        result = Hive::Stages::Review::CiFix.run!(
+          cfg: cfg_with(ci), ctx: make_ctx(dir, task_folder)
+        )
+        assert_equal :error, result.status
+        assert_equal "ci fix agent custody was not invoked", result.error_message
+      end
+    end
+  end
+
   def pipe_double(read_error: nil)
     closed = false
     Object.new.tap do |pipe|

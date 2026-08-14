@@ -140,7 +140,7 @@ class TaskActionGenericTest < Minitest::Test
         "generation" => generation,
         "recovery_digest" => digest,
         "attempt_count" => "3",
-        "failed_claims" => "claim-flow"
+        "failed_targets" => "claim-flow"
       },
       project_name: "demo"
     )

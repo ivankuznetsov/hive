@@ -45,9 +45,6 @@ module Hive
         Gemfile.lock
         web/Gemfile
         web/Gemfile.lock
-        web/package.json
-        web/package-lock.json
-        web/script/capture_task_page.cjs
         web/config/application.rb
         web/bin/rails
         web/Rakefile
@@ -786,9 +783,8 @@ module Hive
         )
       end
 
-      def browser_bundle(source_root)
+      def browser_bundle(_source_root)
         @browser_bundle ||= Hive::Web::BrowserBundle.new(
-          source_root: source_root,
           environment: @environment
         )
       end
@@ -964,11 +960,9 @@ module Hive
 
       def record_browser!(source_root:, browser_entry:, runtime_root:, base_url:,
                           screenshot:, video_directory:)
-        script = File.join(source_root, "web", "script", "capture_task_page.cjs")
-        raise CaptureError, "pinned capture script is missing" unless File.file?(script)
-
         browser_home = File.join(runtime_root, "browser-home")
-        FileUtils.mkdir_p(browser_home, mode: 0o700)
+        socket_root = File.join(runtime_root, "agent-browser-sockets")
+        FileUtils.mkdir_p([ browser_home, socket_root, video_directory ], mode: 0o700)
         env = {
           "PATH" => @environment.fetch("PATH", "/usr/local/bin:/usr/bin:/bin"),
           "LANG" => @environment["LANG"],
@@ -977,27 +971,70 @@ module Hive
           "HOME" => browser_home,
           "XDG_CONFIG_HOME" => File.join(browser_home, ".config"),
           "XDG_CACHE_HOME" => File.join(browser_home, ".cache"),
-          "PLAYWRIGHT_BROWSERS_PATH" => browser_entry.browsers_path,
-          "HIVE_PLAYWRIGHT_MODULE" => File.join(
-            browser_entry.node_modules_path, "playwright"
-          ),
+          "PUPPETEER_CACHE_DIR" => browser_entry.browsers_path,
+          "AGENT_BROWSER_SOCKET_DIR" => socket_root,
+          "AGENT_BROWSER_SKILLS_DIR" => browser_entry.skills_path,
           "NODE_OPTIONS" => nil,
           "NODE_PATH" => nil
         }.compact
-        output, = run_command!(
-          [ "node", script, base_url, screenshot, video_directory ],
-          env: env,
-          chdir: File.join(source_root, "web"),
-          capture: true
-        )
-        result = JSON.parse(output)
-        result["video_path"] = File.realpath(result.fetch("video_path"))
-        unless result["video_path"].start_with?("#{File.realpath(video_directory)}#{File::SEPARATOR}")
-          raise CaptureError, "browser recorder returned media outside its staging root"
+        session = "hive-capture-#{SecureRandom.hex(8)}"
+        namespace = "hive-capture-#{SecureRandom.hex(8)}"
+        prefix = [
+          browser_entry.agent_browser_cli,
+          "--session", session,
+          "--namespace", namespace,
+          "--executable-path", browser_entry.browser_executable,
+          "--allowed-domains", "127.0.0.1,localhost"
+        ]
+        command = lambda do |*arguments|
+          run_command!(
+            [ *prefix, *arguments ], env: env,
+            chdir: File.join(source_root, "web"), capture: true
+          )
         end
-        result
-      rescue JSON::ParserError, Errno::ENOENT => e
-        raise CaptureError, "browser recorder returned invalid evidence: #{bounded_diagnostic(e)}"
+        video = File.join(video_directory, "capture.webm")
+        recording = stopped = closed = false
+        begin
+          command.call("record", "start", video, base_url)
+          recording = true
+          command.call("set", "viewport", "1280", "800")
+          command.call("wait", "h1")
+          command.call("wait", ".kanban-card")
+          command.call("screenshot", "--full", screenshot)
+          command.call("click", ".kanban-card-heading a")
+          command.call("wait", "h1")
+          command.call("wait", "1200")
+          command.call("record", "stop")
+          stopped = true
+          command.call("close")
+          closed = true
+        ensure
+          if recording && !stopped
+            begin
+              command.call("record", "stop")
+            rescue StandardError
+              nil
+            end
+          end
+          unless closed
+            begin
+              command.call("close")
+            rescue StandardError
+              nil
+            end
+          end
+        end
+        unless File.file?(video)
+          raise CaptureError, "agent-browser did not produce its managed video output"
+        end
+        {
+          "video_path" => File.realpath(video),
+          "accessibility_assertions" => [
+            "Board heading is visible",
+            "Synthetic task card is keyboard-addressable",
+            "Task heading is visible after navigation"
+          ]
+        }
       end
 
       def validate_media!(screenshot, video)

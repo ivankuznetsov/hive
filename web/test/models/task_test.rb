@@ -188,7 +188,7 @@ class TaskTest < ActiveSupport::TestCase
     package = task.outcome_evidence
     assert_equal "blocked", package.fetch("status")
     assert_equal "recaptures_exhausted", package.dig("blocker", "reason")
-    assert_equal [ "claim-checkout" ], package.dig("blocker", "failed_claims")
+    assert_equal [ "claim-checkout" ], package.dig("blocker", "failed_targets")
     assert_includes package.dig("blocker", "reviewer_reasons").first,
                     "final confirmation"
     assert_includes package.dig("blocker", "command"), result.dig(:pointer, "generation")

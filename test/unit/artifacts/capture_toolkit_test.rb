@@ -1,0 +1,305 @@
+require "test_helper"
+require "hive/artifacts/capture_toolkit"
+
+class ArtifactsCaptureToolkitTest < Minitest::Test
+  include HiveTestHelper
+
+  FakeBrowser = Data.define(
+    :cache_root, :agent_browser_cli, :browser_executable, :agent_browser_version,
+    :browsers_path, :skills_path, :cache_key
+  )
+
+  def test_document_only_receipt_needs_no_external_capture_tools
+    toolkit = Hive::Artifacts::CaptureToolkit.new(
+      browser_bundle: -> { flunk "document proof must not bootstrap a browser" },
+      tool_resolver: ->(_name) { flunk "document proof must not probe media tools" }
+    )
+
+    receipt = toolkit.prepare!(
+      kinds: [ "document" ], task_root: "/task", source_root: "/source",
+      source_sha: "a" * 40, writable_root: "/task/work"
+    )
+
+    assert_equal [ "document" ], receipt.fetch("required_kinds")
+    assert_nil receipt["web"]
+    assert_equal "hive-native-pty", receipt.dig("terminal", "driver")
+  end
+
+  def test_visual_receipt_uses_only_managed_agent_browser_and_media_preflight
+    Dir.mktmpdir("hive-capture-toolkit-generic") do |root|
+    entry = FakeBrowser.new(
+      cache_root: "/managed/capture-cache",
+      agent_browser_cli: "/managed/agent-browser",
+      browser_executable: "/managed/browsers/chrome",
+      agent_browser_version: "0.34.0",
+      browsers_path: "/managed/browsers", skills_path: "/managed/skills",
+      cache_key: "b" * 64
+    )
+    bundle = Object.new
+    bundle.define_singleton_method(:ensure!) { entry }
+    tools = {
+      "ffmpeg" => "/usr/bin/ffmpeg", "ffprobe" => "/usr/bin/ffprobe",
+      "tesseract" => "/usr/bin/tesseract", "env" => "/usr/bin/env"
+    }
+    browser_commands = []
+    toolkit = Hive::Artifacts::CaptureToolkit.new(
+      browser_bundle: bundle, tool_resolver: ->(name) { tools[name] },
+      hive_executable: "/opt/hive/bin/hive",
+      codex_runtime_resolver: method(:fake_codex_runtime),
+      browser_command_runner: ->(environment, argv) { browser_commands << [ environment, argv ] }
+    )
+
+    receipt = toolkit.prepare!(
+      kinds: %w[screenshot video], task_root: root, source_root: root,
+      source_sha: "a" * 40, writable_root: File.join(root, "work")
+    )
+
+    assert_equal "agent-browser", receipt.dig("web", "driver")
+    assert_equal "cli", receipt.dig("web", "interface")
+    assert_equal "ready", receipt.dig("web", "status")
+    assert_equal File.join(root, "work"), receipt.dig("web", "output_root")
+    command = receipt.dig("web", "argv_prefix")
+    assert_equal [ RbConfig.ruby, "/opt/hive/bin/hive", "evidence", "browser" ], command
+    socket_root = browser_commands.first.first.fetch("AGENT_BROWSER_SOCKET_DIR")
+    assert_operator socket_root.bytesize, :<, 70
+    assert File.directory?(socket_root)
+    gateway_socket = toolkit.launch_environment.fetch("HIVE_EVIDENCE_BROWSER_SOCKET")
+    gateway_root = File.dirname(gateway_socket)
+    assert File.socket?(gateway_socket)
+    assert_equal [ gateway_root ], toolkit.producer_add_dirs
+    refute_equal socket_root, gateway_root
+    permission_arguments = toolkit.producer_permission_arguments
+    assert_includes permission_arguments, 'default_permissions="hive-evidence"'
+    socket_policy = permission_arguments.find { |value| value.include?("unix_sockets") }
+    assert_includes socket_policy, gateway_socket
+    refute_includes socket_policy, socket_root
+    refute permission_arguments.any? { |value| value.include?("domains") }
+    filesystem_policy = permission_arguments.find { |value| value.include?("filesystem=") }
+    assert_includes filesystem_policy, "/managed/capture-cache"
+    assert_includes filesystem_policy, "/managed/codex-runtime"
+    assert_includes filesystem_policy, "/opt/hive/bin/hive"
+    assert_includes filesystem_policy, "/opt/hive/lib"
+    domain = URI.parse(receipt.dig("web", "origin")).host
+    browser_environment, browser_argv = browser_commands.first
+    assert_includes browser_argv, domain
+    assert_equal domain, browser_environment.fetch("AGENT_BROWSER_ALLOWED_DOMAINS")
+    assert_match(%r{\Ahttp://127\.0\.0\.1:\d+\z}, browser_environment.fetch("AGENT_BROWSER_PROXY"))
+    assert_equal File.join(root, "work", ".agent-browser-home", "downloads"),
+                 browser_environment.fetch("AGENT_BROWSER_DOWNLOAD_PATH")
+    assert_match(%r{\Ahttp://127\.0\.0\.1:\d+\z}, receipt.dig("web", "app_endpoint"))
+    refute_includes JSON.generate(receipt), "playwright"
+    refute_includes JSON.generate(receipt), "firefox"
+    assert_equal tools.except("env"), receipt.fetch("media")
+    assert_equal File.join(root, "work"),
+                 toolkit.launch_environment.fetch("HIVE_EVIDENCE_WRITE_ROOT")
+    refute toolkit.launch_environment.key?("HOME")
+    refute toolkit.launch_environment.key?("AGENT_BROWSER_EXECUTABLE_PATH")
+    assert_equal "open", browser_commands.first.last[-2]
+    assert_equal receipt.dig("web", "origin"), browser_commands.first.last.last
+    toolkit.close
+    refute File.exist?(socket_root)
+    refute File.exist?(gateway_root)
+    assert_empty toolkit.producer_add_dirs
+    assert_nil toolkit.producer_permission_arguments
+    assert_equal 2, browser_commands.length
+    assert_equal "/managed/agent-browser", browser_commands.last.last.first
+    assert_equal "close", browser_commands.last.last.last
+    end
+  end
+
+  def test_visual_preflight_fails_before_the_producer_when_media_tools_are_missing
+    entry = FakeBrowser.new(
+      cache_root: "/managed/capture-cache",
+      agent_browser_cli: "/managed/agent-browser",
+      browser_executable: "/managed/chrome",
+      agent_browser_version: "0.34.0",
+      browsers_path: "/managed/browsers", skills_path: "/managed/skills",
+      cache_key: "b" * 64
+    )
+    bundle = Object.new
+    bundle.define_singleton_method(:ensure!) { entry }
+    toolkit = Hive::Artifacts::CaptureToolkit.new(
+      browser_bundle: bundle,
+      codex_runtime_resolver: method(:fake_codex_runtime),
+      tool_resolver: ->(name) { name == "ffmpeg" ? "/usr/bin/ffmpeg" : nil }
+    )
+
+    error = assert_raises(Hive::ConfigError) do
+      toolkit.prepare!(
+        kinds: [ "screenshot" ], task_root: "/task", source_root: "/source",
+        source_sha: "a" * 40, writable_root: "/task/work"
+      )
+    end
+    assert_match(/ffprobe, tesseract/, error.message)
+  end
+
+  def test_hive_web_source_starts_controller_managed_server_for_browser_cli
+    Dir.mktmpdir("hive-capture-toolkit-web") do |root|
+      source = File.join(root, "source")
+      %w[bin web web/bin].each { |path| FileUtils.mkdir_p(File.join(source, path)) }
+      %w[bin/hive web/Gemfile web/bin/rails].each do |path|
+        File.write(File.join(source, path), "fixture")
+      end
+      entry = FakeBrowser.new(
+        cache_root: "/managed/capture-cache",
+        agent_browser_cli: "/managed/agent-browser",
+        browser_executable: "/managed/browsers/chrome", agent_browser_version: "0.34.0",
+        browsers_path: "/managed/browsers", skills_path: "/managed/skills",
+        cache_key: "b" * 64
+      )
+      bundle = Object.new
+      bundle.define_singleton_method(:ensure!) { entry }
+      tools = %w[ffmpeg ffprobe tesseract env].to_h { |name| [ name, "/usr/bin/#{name}" ] }
+      closed = []
+      browser_closes = []
+      factory = lambda do |**attributes|
+        Object.new.tap do |server|
+          server.define_singleton_method(:start!) do
+            {
+              "driver" => "hive-web-capture-runtime", "status" => "ready",
+              "app_port" => 45_679, "app_endpoint" => "http://127.0.0.1:45679",
+              "hive_home" => File.join(attributes.fetch(:writable_root), "hive-home"),
+              "source_sha" => attributes.fetch(:source_sha), "cache_key" => "c" * 64
+            }
+          end
+          server.define_singleton_method(:close) { closed << true }
+        end
+      end
+      toolkit = Hive::Artifacts::CaptureToolkit.new(
+        browser_bundle: bundle, tool_resolver: ->(name) { tools[name] },
+        web_server_factory: factory,
+        codex_runtime_resolver: method(:fake_codex_runtime),
+        browser_command_runner: ->(environment, argv) do
+          browser_closes << [ environment, argv ]
+        end
+      )
+
+      receipt = toolkit.prepare!(
+        kinds: [ "video" ], task_root: root, source_root: source,
+        source_sha: "a" * 40, writable_root: File.join(root, "work")
+      )
+
+      assert_equal "ready", receipt.dig("web", "server", "status")
+      assert_equal "http://127.0.0.1:45679", receipt.dig("web", "app_endpoint")
+      assert_equal receipt.dig("web", "server", "hive_home"),
+                   toolkit.launch_environment.fetch("HIVE_EVIDENCE_WEB_HIVE_HOME")
+      assert_equal "cli", receipt.dig("web", "interface")
+      assert_equal "browser", receipt.dig("web", "argv_prefix").last
+      assert File.directory?(File.join(root, "work", ".agent-browser-home", ".config"))
+      assert File.directory?(File.join(root, "work", ".agent-browser-home", ".cache"))
+
+      toolkit.close
+      assert_equal [ true ], closed
+      assert_equal 2, browser_closes.length
+      assert_equal "open", browser_closes.first.last[-2]
+      assert_equal "close", browser_closes.last.last.last
+    end
+  end
+
+  def test_browser_bootstrap_failure_cleans_the_short_socket_root
+    Dir.mktmpdir("hive-capture-toolkit-bootstrap") do |root|
+      entry = FakeBrowser.new(
+        cache_root: "/managed/capture-cache",
+        agent_browser_cli: "/managed/agent-browser",
+        browser_executable: "/managed/chrome", agent_browser_version: "0.34.0",
+        browsers_path: "/managed/browsers", skills_path: "/managed/skills",
+        cache_key: "b" * 64
+      )
+      bundle = Object.new
+      bundle.define_singleton_method(:ensure!) { entry }
+      tools = %w[ffmpeg ffprobe tesseract env].to_h { |name| [ name, "/usr/bin/#{name}" ] }
+      socket_root = nil
+      runner = lambda do |environment, argv|
+        socket_root = environment.fetch("AGENT_BROWSER_SOCKET_DIR")
+        raise Hive::ConfigError, "bootstrap failed" unless argv.last == "close"
+      end
+      toolkit = Hive::Artifacts::CaptureToolkit.new(
+        browser_bundle: bundle, tool_resolver: ->(name) { tools[name] },
+        codex_runtime_resolver: method(:fake_codex_runtime),
+        browser_command_runner: runner
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        toolkit.prepare!(
+          kinds: [ "screenshot" ], task_root: root, source_root: root,
+          source_sha: "a" * 40, writable_root: File.join(root, "work")
+        )
+      end
+
+      assert_equal "bootstrap failed", error.message
+      refute File.exist?(socket_root)
+    end
+  end
+
+  def test_capture_proxy_maps_only_the_issued_origin_to_the_issued_app_port
+    proxy = Hive::Artifacts::CaptureProxy.new
+    app = TCPServer.new("127.0.0.1", proxy.app_port)
+    request = Queue.new
+    app_thread = Thread.new do
+      socket = app.accept
+      request << socket.readpartial(4096)
+      socket.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+      socket.close
+    end
+
+    response = proxy_request(proxy.proxy_url, "#{proxy.origin}/health")
+    assert_includes response, "200 OK"
+    assert response.end_with?("ok")
+    forwarded = request.pop
+    assert_match %r{\AGET /health HTTP/1\.1\r\n}, forwarded
+    assert_includes forwarded, "Host: 127.0.0.1:#{proxy.app_port}\r\n"
+    assert_includes forwarded, "Connection: close\r\n"
+    refute_includes forwarded, "Host: ignored"
+
+    wrong_port = proxy_request(proxy.proxy_url, "#{proxy.origin}:81/private")
+    assert_includes wrong_port, "403 Forbidden"
+    loopback = proxy_request(proxy.proxy_url, "http://127.0.0.1/private")
+    assert_includes loopback, "403 Forbidden"
+  ensure
+    proxy&.close
+    app&.close
+    app_thread&.join(1)
+  end
+
+  def test_capture_proxy_preserves_a_validated_websocket_upgrade
+    proxy = Hive::Artifacts::CaptureProxy.new
+    app = TCPServer.new("127.0.0.1", proxy.app_port)
+    request = Queue.new
+    app_thread = Thread.new do
+      socket = app.accept
+      request << socket.readpartial(4096)
+      socket.write("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+      socket.close
+    end
+
+    response = proxy_request(
+      proxy.proxy_url, "#{proxy.origin}/cable",
+      headers: "Connection: keep-alive, Upgrade\r\nUpgrade: websocket\r\n"
+    )
+    assert_includes response, "101 Switching Protocols"
+    forwarded = request.pop
+    assert_includes forwarded, "Connection: keep-alive, Upgrade\r\n"
+    assert_includes forwarded, "Upgrade: websocket\r\n"
+    refute_includes forwarded, "Connection: close\r\n"
+  ensure
+    proxy&.close
+    app&.close
+    app_thread&.join(1)
+  end
+
+  private
+
+  def fake_codex_runtime(profile)
+    assert_equal :codex, profile.name
+    [ "/managed/codex-runtime" ]
+  end
+
+  def proxy_request(proxy_url, target, headers: "Connection: close\r\n")
+    proxy_uri = URI.parse(proxy_url)
+    socket = TCPSocket.new(proxy_uri.host, proxy_uri.port)
+    socket.write("GET #{target} HTTP/1.1\r\nHost: ignored\r\n#{headers}\r\n")
+    socket.read
+  ensure
+    socket&.close
+  end
+end

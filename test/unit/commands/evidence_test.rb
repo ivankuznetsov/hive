@@ -53,7 +53,7 @@ class CommandsEvidenceTest < Minitest::Test
       )
       current_path = File.join(task.folder, "outcome-evidence", "current.json")
       tampered = JSON.parse(File.read(current_path))
-      tampered["failed_claims"] = [ "claim-other" ]
+      tampered["failed_targets"] = [ "claim-other" ]
       File.write(current_path, JSON.generate(tampered) << "\n")
       command = Hive::Commands::Evidence.new(
         "recover", task.slug,
@@ -145,6 +145,45 @@ class CommandsEvidenceTest < Minitest::Test
     end
   end
 
+  def test_terminal_capture_is_controller_scoped_and_returns_ready_descriptors
+    with_tmp_dir do |dir|
+      task_root = File.join(dir, "task")
+      source_root = File.join(dir, "source")
+      writable_root = File.join(task_root, "work")
+      FileUtils.mkdir_p([ task_root, source_root, writable_root ])
+      environment = {
+        "PATH" => ENV.fetch("PATH", ""),
+        "HIVE_EVIDENCE_TASK_ROOT" => task_root,
+        "HIVE_EVIDENCE_SOURCE_ROOT" => source_root,
+        "HIVE_EVIDENCE_WRITE_ROOT" => writable_root,
+        "HIVE_EVIDENCE_SOURCE_SHA" => "a" * 40
+      }
+      command = Hive::Commands::Evidence.new(
+        "terminal", "demo", json: true,
+        command: [ RbConfig.ruby, "-e", "puts 'captured'" ],
+        environment: environment
+      )
+
+      out, = capture_io { command.call }
+      payload = JSON.parse(out)
+
+      assert_equal "captured", payload.fetch("status")
+      assert_equal 0, payload.fetch("exit_status")
+      assert_equal %w[original review],
+                   payload.fetch("representations").map { |row| row.fetch("role") }
+      payload.fetch("representations").each do |row|
+        assert_match(/\Awork\/demo\.(?:cast|txt)\z/, row.fetch("path"))
+        assert File.file?(File.join(task_root, row.fetch("path")))
+      end
+
+      outside = Hive::Commands::Evidence.new(
+        "terminal", "demo", command: [ "true" ],
+        environment: environment.merge("HIVE_EVIDENCE_WRITE_ROOT" => dir)
+      )
+      assert_raises(Hive::UsageError) { outside.call }
+    end
+  end
+
   private
 
   def fake_task(dir)
@@ -183,7 +222,7 @@ class CommandsEvidenceTest < Minitest::Test
     )
     store.publish_blocked!(
       generation: requirement.fetch("generation"), reason: "capability_blocked",
-      failed_claims: [ "claim-feature" ],
+      failed_targets: [ "claim-feature" ],
       reviewer_reasons: [ "The configured reviewer cannot inspect the required proof kind." ],
       attempt_ids: []
     )

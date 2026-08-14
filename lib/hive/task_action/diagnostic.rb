@@ -328,7 +328,7 @@ module Hive
 
       def marker_detail
         if Hive::TerminalOutcome.outcome_evidence_blocker?(marker.attrs)
-          failed = marker.attrs["failed_claims"].to_s
+          failed = marker.attrs["failed_targets"].to_s
           attempts = marker.attrs["attempt_count"].to_s
           command = outcome_evidence_recovery_command
           return [

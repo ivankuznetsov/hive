@@ -967,6 +967,27 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_codex_controller_permission_arguments_replace_the_legacy_sandbox_flags
+    with_tmp_dir do |dir|
+      profile = Hive::AgentProfiles.lookup(:codex)
+      permission_arguments = [
+        "--ephemeral", "-c", 'default_permissions="hive-evidence"'
+      ]
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test", max_budget_usd: nil,
+        timeout_sec: 5, profile: profile,
+        permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE,
+        permission_arguments: permission_arguments
+      )
+
+      cmd = agent.send(:build_cmd)
+
+      permission_arguments.each { |argument| assert_includes cmd, argument }
+      refute_includes cmd, "--sandbox"
+      refute_includes cmd, "--dangerously-bypass-approvals-and-sandbox"
+    end
+  end
+
   def test_args_include_dangerous_flag_and_add_dir
     with_tmp_dir do |dir|
       task = make_task(dir)

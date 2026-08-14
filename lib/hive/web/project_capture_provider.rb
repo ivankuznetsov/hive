@@ -50,12 +50,12 @@ module Hive
       # process-tree custody as the configured provider itself. Keep that
       # boundary here so detached helpers cannot outlive either caller.
       def self.capture_command_with_custody(argv:, source_root:, environment:, deadline:,
-                                            stdout_consumer: nil)
+                                            stdout_consumer: nil, request: nil)
         remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
         allocate.send(
           :supervise_provider,
           Array(argv),
-          request: nil,
+          request: request,
           source_root: source_root,
           environment: environment,
           timeout_sec: [ remaining, 0 ].max,

@@ -110,6 +110,43 @@ class OutcomeEvidenceProofTest < Minitest::Test
     end
   end
 
+  def test_controller_derives_the_semantic_review_storyboard_from_retained_video
+    with_tmp_dir do |root|
+      valid_files(root)
+      FileUtils.mkdir_p(File.join(root, "retained"))
+      value = {
+        "kind" => "video",
+        "summary" => "The complete checkout transition reaches confirmation.",
+        "claims" => [ "claim-a" ],
+        "representations" => [
+          {
+            "role" => "original", "media_type" => "video/webm",
+            "path" => "video-original.webm"
+          },
+          {
+            "role" => "review", "media_type" => "video/webm",
+            "path" => "video-review.webm"
+          }
+        ]
+      }
+
+      admitted = Proof.materialize_producer!(
+        value, task_folder: root, expected_head: HEAD,
+        destination_root: "retained/video"
+      )
+
+      storyboard = admitted.fetch("representations").find do |representation|
+        representation.fetch("role") == "storyboard"
+      end
+      assert storyboard
+      assert_equal "image/png", storyboard.fetch("media_type")
+      assert_equal "supplemental", storyboard.fetch("rendering")
+      assert_match(%r{\Aretained/video/controller-storyboard\.png\z}, storyboard.fetch("path"))
+      path = File.join(root, storyboard.fetch("path"))
+      assert_equal Digest::SHA256.file(path).hexdigest, storyboard.fetch("sha256")
+    end
+  end
+
   def test_rejects_traversal_symlink_oversize_hash_mismatch_and_diagnostic_capture
     with_tmp_dir do |root|
       files = valid_files(root)
@@ -226,6 +263,35 @@ class OutcomeEvidenceProofTest < Minitest::Test
       before = File.binread(File.join(root, original_copy.fetch("path")))
       File.write(File.join(root, "report.md"), "producer changed this after returning\n")
       assert_equal before, File.binread(File.join(root, original_copy.fetch("path")))
+    end
+  end
+
+  def test_controller_adds_task_source_hashes_and_sizes_to_minimal_producer_output
+    with_tmp_dir do |root|
+      valid_files(root)
+      FileUtils.mkdir_p(File.join(root, "retained", "attempt-2"))
+      minimal = {
+        "kind" => "document",
+        "summary" => "The review document explains the bounded checkout contract.",
+        "claims" => [ "claim-a" ],
+        "representations" => [
+          { "role" => "original", "media_type" => "text/markdown", "path" => "report.md" },
+          { "role" => "review", "media_type" => "text/plain", "path" => "report.txt" }
+        ]
+      }
+
+      retained = Proof.materialize_producer!(
+        minimal, task_folder: root, expected_head: HEAD,
+        destination_root: "retained/attempt-2/entry-01"
+      )
+
+      assert_equal "task", retained.dig("source", "type")
+      assert_equal "hive-producer", retained.dig("source", "name")
+      assert_equal HEAD, retained.dig("source", "source_sha")
+      retained.fetch("representations").each do |representation|
+        assert_match(/\A[0-9a-f]{64}\z/, representation.fetch("sha256"))
+        assert representation.fetch("bytes").positive?
+      end
     end
   end
 

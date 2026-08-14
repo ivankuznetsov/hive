@@ -441,7 +441,7 @@ class Task
       end,
       "blocker" => if current.fetch("status") == "blocked"
                      current.slice(
-                       "reason", "failed_claims", "reviewer_reasons", "recovery_digest",
+                       "reason", "failed_targets", "reviewer_reasons", "recovery_digest",
                        "recovery_epoch"
                      ).merge(
                        "command" => [

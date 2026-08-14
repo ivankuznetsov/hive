@@ -49,11 +49,11 @@
     },
     "Review": {
       "type": "object", "additionalProperties": false,
-      "required": ["reviewer", "inspected_hashes", "verdicts", "status", "accepted"],
+      "required": ["reviewer", "review_scope_hashes", "verdicts", "status", "accepted"],
       "properties": {
         "reviewer": { "$ref": "#/$defs/Actor" },
-        "inspected_hashes": {
-          "type": "array", "minItems": 1, "maxItems": 8192, "uniqueItems": true,
+        "review_scope_hashes": {
+          "type": "array", "maxItems": 8192, "uniqueItems": true,
           "items": { "$ref": "#/$defs/Digest" }
         },
         "verdicts": {
@@ -81,7 +81,7 @@
         "kind": { "enum": ["screenshot", "video", "terminal", "document"] },
         "summary": { "type": "string", "minLength": 1, "maxLength": 4096 },
         "claims": {
-          "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
+          "type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": true,
           "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
         },
         "source": { "$ref": "#/$defs/Source" },

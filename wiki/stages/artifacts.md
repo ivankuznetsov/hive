@@ -30,36 +30,60 @@ completion authority.
 
 1. Resolve the immutable implementation base/head and the exact sorted changed
    paths. The controller re-resolves this identity after every agent role so a
-   role cannot change the source behind the evidence.
+   role cannot change the source behind the evidence. It also materializes the
+   bounded exact binary diff once under the immutable generation and supplies
+   its path, size, and SHA-256 receipt to both read-only semantic roles; neither
+   role needs shell or Git authority.
 2. Launch a fresh read-only **inference** context. It reads `task.md`, `plan.md`,
    and the exact diff, then returns a bounded set of outcome claims plus justified
    exclusions. Every changed path must trace to at least one claim or exclusion.
-   Each claim chooses exactly one closed proof kind: `screenshot`, `video`,
-   `terminal`, or `document`.
+   Inference prefers one to three grouped outcomes and may return at most five;
+   one proof may establish multiple related claims of the same kind. Each claim
+   chooses exactly one closed proof kind: `screenshot`, `video`, `terminal`, or
+   `document`.
 3. Persist the immutable requirement under the task's outcome-evidence
    generation. The generation binds project/task, durable task generation,
    controller recovery epoch, base, head, and changed-path digest.
 4. Preflight the configured producer and reviewer. A video requirement needs a
-   reviewer that can inspect actual temporal video. Screenshot/video/terminal
+   review pipeline that retains temporal video and exposes controller-derived
+   ordered frames to the semantic reviewer. Screenshot/video/terminal
    production needs a workspace-sandboxed producer; a document-only producer may
    use Hive's controller-scoped Claude edit boundary.
-5. Launch a distinct **producer** context with one writable root under the active
+5. Resolve one controller-owned capture toolkit before production. Web proof
+   receives `hive evidence browser`, a closed gateway to the exact pinned
+   native `agent-browser` and managed Chrome;
+   terminal proof receives Hive's native PTY command; visual proof also requires
+   `ffmpeg`, `ffprobe`, and Tesseract. The browser gets one random `.invalid`
+   origin mapped through a controller-owned proxy to one issued loopback app
+   port, rather than access to every localhost service. Hive opens and verifies
+   that exact session before production. The producer receives only the
+   gateway socket; the raw browser socket and controller-private media staging
+   stay outside its sandbox. The gateway admits one-origin interactions and
+   exclusively publishes basename-only PNG/WebM media into the evidence root.
+   Missing capabilities
+   publish a semantic blocker before the producer starts.
+6. Launch a distinct **producer** context with one writable root under the active
    evidence attempt. Source and controller metadata remain read-only. Every proof
-   carries one retained original and one bounded reviewer representation, exact
-   byte count and SHA-256, implementation-head source identity, and the claims it
-   establishes.
-6. Re-admit every retained representation deterministically: safe containment,
+   names one retained original, one bounded reviewer representation, and the
+   claims it establishes. The controller—not the LLM—adds exact byte counts,
+   SHA-256 digests, rendering, and implementation-head source identity.
+7. Re-admit every retained representation deterministically: safe containment,
    size, hash, declared media type, actual image/video decode, terminal-cast or
    document structure, secret patterns, and provider provenance are checked
    without deciding whether the proof is persuasive.
-7. Launch a third fresh read-only **reviewer** context. It must inspect every
-   retained hash, return exactly one reasoned verdict for every claim and
-   exclusion, and inspect the temporal video itself for video claims. Storyboards
-   are supplemental only; uncertainty cannot be accepted.
-8. `accepted` publishes the append-only attempt and atomic `current.json`, then
+8. Launch a third fresh read-only **reviewer** context. It must inspect every
+   retained representation and return exactly one reasoned verdict for every claim
+   and exclusion. For video, Hive keeps the real temporal representation as the
+   user-facing proof and derives a six-frame ordered contact sheet directly from
+   the admitted video for safe semantic inspection. Uncertainty cannot be accepted.
+   Hive records the exact immutable review scope instead of pretending a copied
+   hash list is a per-tool access log.
+9. `accepted` publishes the append-only attempt and atomic `current.json`, then
    writes `COMPLETE`. `revise` requests only the failed claim proofs, preserves
-   already accepted evidence, reassembles the full package, and sends the whole
-   package through a fresh review. `blocked`, an invalid exclusion, missing
+   already accepted evidence, and permits a bounded attempt to improve any
+   nonempty subset of requested claims. Unaddressed claim evidence is retained;
+   Hive reassembles the full package and sends it through a fresh review.
+   `blocked`, an invalid exclusion, missing
    capability, or exhausted recaptures publishes an operator-visible blocked
    pointer and semantic `ERROR`.
 
@@ -73,7 +97,11 @@ configuration may reduce recaptures to zero or one, but cannot exceed two.
 - Use `video` for a flow, transition, timing, ordering, or behavior across
   states. A pair of screenshots or storyboard does not replace temporal video.
 - Use `terminal` for CLI/TUI behavior. The retained original is an asciinema
-  cast and the reviewer representation is bounded plain text.
+  v2-compatible cast and the reviewer representation is bounded plain text.
+  `hive evidence terminal NAME -- COMMAND...` produces both through a Ruby PTY
+  under Linux subreaper custody, without asciinema, VHS, a shell, or terminal-GIF
+  conversion. Success, nonzero exit, timeout, and output overflow all reap the
+  complete descendant tree; a detached child invalidates the capture.
 - Use `document` for invisible/refactoring outcomes, using safe text, Markdown,
   JSON, or static image material that explains the resulting contract, schema,
   or architecture. Active HTML, SVG, and PDF are not admitted. Static images
@@ -83,6 +111,24 @@ configuration may reduce recaptures to zero or one, but cannot exceed two.
 This semantic selection is intentionally agent-inferred from task intent and the
 exact diff. Controller code validates closed structure, integrity, custody, and
 traceability; it does not guess user meaning from filenames.
+
+Web capture has one producer interface: the controller-issued `hive evidence
+browser` gateway to the pinned native `agent-browser` CLI. Producers do not
+receive the raw daemon socket and do not discover or choose Firefox,
+Playwright, Puppeteer, QML, or ImageMagick. Stable interface state uses a
+screenshot; navigation, ordering, timing, and state transitions use temporal
+video. The gateway accepts only the issued origin, a closed interaction
+vocabulary, and basename PNG/WebM output. It stages media privately and
+publishes it no-follow/exclusive into the writable attempt root. Hive closes
+the named browser session before it cleans the managed app/proxy and producer
+process group. Playwright remains a web-system-test dependency, not an
+outcome-evidence capture interface.
+
+Inside a durable explicitly routed attempt, that admitted provider/model/effort
+is authoritative for all three fresh role processes and is what actor receipts
+report. Per-role agent/model settings remain an unrouted compatibility fallback;
+fresh context identity, read/write scope, and semantic responsibility stay
+distinct even when one admitted provider route executes all roles.
 
 Each evidence role starts with an isolated child environment containing only
 reviewed runtime, locale, provider-session, and desktop-session keys. Arbitrary
@@ -105,9 +151,10 @@ recapture of the real product surface or transition.
 ## Ledger and recovery
 
 The append-only requirement and attempts live under
-`<task>/outcome-evidence/generations/<generation>/`; only
+`<task>/outcome-evidence/generations/<generation>/`; the same generation also
+contains its append-only `implementation.diff`. Only
 `<task>/outcome-evidence/current.json` is replaceable. Hivebox revalidates the
-pointer, every document digest, every retained proof, and the independent review
+pointer, every document digest, every retained proof across all attempts, and the independent review
 before rendering claims or serving a representation.
 
 A semantic blocker suppresses ordinary daemon retry. The task page, status

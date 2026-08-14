@@ -859,7 +859,7 @@ class CommandsRunTest < Minitest::Test
     attrs = {
       "reason" => "outcome_evidence_recaptures_exhausted",
       "generation" => generation, "recovery_digest" => digest,
-      "attempt_count" => "3", "failed_claims" => "claim-flow"
+      "attempt_count" => "3", "failed_targets" => "claim-flow"
     }
     current = marker(:error, attrs)
 

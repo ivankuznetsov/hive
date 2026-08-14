@@ -5,6 +5,7 @@ require "securerandom"
 require "hive/claude_launcher"
 require "hive/artifact_firewall"
 require "hive/artifacts/capture_policy"
+require "hive/artifacts/capture_toolkit"
 require "hive/artifacts/outcome_evidence/contract"
 require "hive/artifacts/outcome_evidence/identity"
 require "hive/artifacts/outcome_evidence/store"
@@ -21,6 +22,7 @@ module Hive
       module_function
 
       EVIDENCE_ROLES = %w[inference producer reviewer].freeze
+      MAX_INFERENCE_ATTEMPTS = 2
       DEFAULT_REVIEW_CAPABILITIES = {
         "proof_kinds" => Hive::Artifacts::OutcomeEvidence::Proof::KINDS,
         "temporal_video" => true
@@ -38,13 +40,15 @@ module Hive
         { commit: "error", status: :error }
       end
 
-      def run_outcome_evidence!(task, cfg, identity_resolver: nil, store: nil)
+      def run_outcome_evidence!(task, cfg, identity_resolver: nil, store: nil,
+                                capture_toolkit: nil)
         project = File.basename(task.project_root)
         identity_resolver ||= Hive::Artifacts::OutcomeEvidence::Identity.new(
           task: task, project: project
         )
         identity = identity_resolver.resolve
         store ||= Hive::Artifacts::OutcomeEvidence::Store.new(task: task, project: project)
+        capture_toolkit ||= Hive::Artifacts::CaptureToolkit.new
         if store.accepted_for_identity?(identity)
           publish_complete_marker!(task, store.current)
           return { commit: action_for(:complete), status: :complete }
@@ -55,21 +59,19 @@ module Hive
         end
 
         requirement = store.requirement_for_identity(identity)
+        review_context = if requirement && store.respond_to?(:review_context_for_identity)
+          store.review_context_for_identity(identity) || {}
+        else
+          {}
+        end
         unless requirement
-          inference_prompt = render_role_prompt(
-            "artifacts_inference_prompt.md.erb", task,
-            identity_json: JSON.pretty_generate(identity)
-          )
-          inference = run_role!(
-            role: "inference", task: task, cfg: cfg, prompt: inference_prompt,
-            identity: identity
-          )
-          proposal = inference.fetch(:output)
-          requirement = store.open_generation!(
+          review_context = store.materialize_review_context!(
             identity: identity,
-            claims: proposal.fetch("claims"), exclusions: proposal.fetch("exclusions"),
-            inference: inference.fetch(:actor),
-            reviewer_capabilities: reviewer_capabilities(cfg)
+            source_root: task.worktree_path || task.project_root
+          ) if store.respond_to?(:materialize_review_context!)
+          requirement = infer_requirement!(
+            task: task, cfg: cfg, identity: identity, store: store,
+            review_context: review_context
           )
         end
         generation = requirement.fetch("generation")
@@ -78,13 +80,14 @@ module Hive
           return { commit: action_for(:complete), status: :complete }
         end
 
+        producer_profile = nil
         begin
           preflight_reviewer!(cfg, requirement.fetch("claims"))
-          preflight_producer!(cfg, requirement.fetch("claims"))
+          producer_profile = preflight_producer!(cfg, requirement.fetch("claims"))
         rescue Hive::ConfigError => e
           pointer = store.publish_blocked!(
             generation: generation, reason: "capability_blocked",
-            failed_claims: requirement.fetch("claims").map { |claim| claim.fetch("id") },
+            failed_targets: requirement.fetch("claims").map { |claim| claim.fetch("id") },
             reviewer_reasons: [ e.message ], attempt_ids: []
           )
           publish_blocked_marker!(task, pointer)
@@ -131,19 +134,43 @@ module Hive
           )
           writable_relative_root = Pathname.new(writable_root)
             .relative_path_from(Pathname.new(task.folder)).to_s
-          producer_prompt = render_role_prompt(
-            "artifacts_producer_prompt.md.erb", task,
-            requirement_json: JSON.pretty_generate(requirement),
-            prior_evidence_json: JSON.pretty_generate(prior ? prior.fetch("evidence") : []),
-            revision_json: JSON.pretty_generate(revision),
-            writable_root: writable_root,
-            writable_relative_root: writable_relative_root
-          )
+          capture_tools = begin
+            capture_toolkit.prepare!(
+              kinds: requirement.fetch("claims").map { |claim| claim.fetch("proof_kind") },
+              task_root: task.folder,
+              source_root: task.worktree_path || task.project_root,
+              source_sha: identity.fetch("implementation_head"),
+              writable_root: writable_root,
+              producer_profile: producer_profile
+            )
+          rescue Hive::ConfigError => e
+            pointer = store.publish_blocked!(
+              generation: generation, reason: "capability_blocked",
+              failed_targets: revision.any? ? revision.map { |item| item.fetch("target_id") } :
+                requirement.fetch("claims").map { |claim| claim.fetch("id") },
+              reviewer_reasons: [ e.message ],
+              attempt_ids: history.map { |item| item.fetch("attempt_id") }
+            )
+            publish_blocked_marker!(task, pointer)
+            return { commit: "error", status: :error }
+          end
           producer = nil
           replacements = begin
+            producer_prompt = render_role_prompt(
+              "artifacts_producer_prompt.md.erb", task,
+              requirement_json: JSON.pretty_generate(requirement),
+              prior_evidence_json: JSON.pretty_generate(prior ? prior.fetch("evidence") : []),
+              revision_json: JSON.pretty_generate(revision),
+              capture_tools_json: JSON.pretty_generate(capture_tools),
+              writable_root: writable_root,
+              writable_relative_root: writable_relative_root
+            )
             producer = run_role!(
               role: "producer", task: task, cfg: cfg, prompt: producer_prompt,
-              identity: identity, writable_root: writable_root
+              identity: identity, writable_root: writable_root,
+              launch_environment: capture_toolkit.launch_environment,
+              producer_add_dirs: capture_toolkit.producer_add_dirs,
+              producer_permission_arguments: capture_toolkit.producer_permission_arguments
             )
             candidate = Array(producer.fetch(:output).fetch("evidence"))
             ensure_producer_paths!(task, writable_root, candidate)
@@ -151,27 +178,40 @@ module Hive
               generation: generation, attempt_id: attempt_id, evidence: candidate
             )
           ensure
-            remove_producer_work!(task, writable_root)
+            begin
+              capture_toolkit.close if capture_toolkit.respond_to?(:close)
+            ensure
+              remove_producer_work!(task, writable_root)
+            end
           end
           evidence = merge_candidate_evidence!(prior, replacements, revision)
 
           reviewer_prompt = render_role_prompt(
             "artifacts_reviewer_prompt.md.erb", task,
             requirement_json: JSON.pretty_generate(requirement),
-            evidence_json: JSON.pretty_generate(evidence)
+            evidence_json: JSON.pretty_generate(evidence),
+            review_context_json: JSON.pretty_generate(review_context)
           )
           reviewer = run_role!(
             role: "reviewer", task: task, cfg: cfg, prompt: reviewer_prompt,
             identity: identity
           )
-          review = reviewer.fetch(:output).merge("reviewer" => reviewer.fetch(:actor))
+          reviewer_output = reviewer.fetch(:output)
+          unless reviewer_output.keys == [ "verdicts" ]
+            raise Hive::Artifacts::OutcomeEvidence::StoreError,
+                  "reviewer output must contain only verdicts"
+          end
+          review = reviewer_output.merge(
+            "reviewer" => reviewer.fetch(:actor),
+            "review_scope_hashes" => representation_hashes(evidence)
+          )
           status = semantic_review_status!(review.fetch("verdicts"))
           diagnostic = if status == "accepted"
             nil
           else
             Array(review.fetch("verdicts")).filter_map do |verdict|
               verdict.fetch("reason") unless verdict.fetch("verdict") == "accepted"
-            end.join("; ").byteslice(0, 16_384)
+            end.join("; ").byteslice(0, 16_384).to_s.scrub
           end
           attempt = store.append_attempt!(
             generation: generation, attempt_id: attempt_id,
@@ -192,7 +232,48 @@ module Hive
         end
       end
 
-      def run_role!(role:, task:, cfg:, prompt:, identity:, writable_root: nil)
+      def infer_requirement!(task:, cfg:, identity:, store:, review_context:)
+        repair = nil
+        MAX_INFERENCE_ATTEMPTS.times do |index|
+          prompt = render_role_prompt(
+            "artifacts_inference_prompt.md.erb", task,
+            identity_json: JSON.pretty_generate(identity),
+            review_context_json: JSON.pretty_generate(review_context),
+            repair_json: JSON.pretty_generate(repair || {})
+          )
+          inference = run_role!(
+            role: "inference", task: task, cfg: cfg, prompt: prompt,
+            identity: identity
+          )
+          proposal = inference.fetch(:output)
+          begin
+            Hive::Artifacts::OutcomeEvidence::Contract.requirement!(
+              implementation: identity, claims: proposal.fetch("claims"),
+              exclusions: proposal.fetch("exclusions"),
+              inference: inference.fetch(:actor)
+            )
+          rescue Hive::Artifacts::OutcomeEvidence::StoreError, KeyError => e
+            raise if index + 1 >= MAX_INFERENCE_ATTEMPTS
+
+            repair = {
+              "validation_error" => e.message.to_s.byteslice(0, 1024).to_s.scrub,
+              "previous_output" => proposal
+            }
+            next
+          end
+
+          return store.open_generation!(
+            identity: identity,
+            claims: proposal.fetch("claims"), exclusions: proposal.fetch("exclusions"),
+            inference: inference.fetch(:actor),
+            reviewer_capabilities: reviewer_capabilities(cfg)
+          )
+        end
+      end
+
+      def run_role!(role:, task:, cfg:, prompt:, identity:, writable_root: nil,
+                    launch_environment: nil, producer_add_dirs: [],
+                    producer_permission_arguments: nil)
         role = role.to_s
         raise Hive::ConfigError, "unknown outcome-evidence role #{role.inspect}" unless EVIDENCE_ROLES.include?(role)
 
@@ -209,16 +290,22 @@ module Hive
           role, task: task, cfg: cfg, profile: profile, actor_cfg: actor_cfg,
           writable_root: writable_root
         )
-        routing = Hive::Stages::Base.model_routing_arguments(
-          cfg, "artifacts", profile,
-          current: Hive::Stages::Base.model_routing_current(actor_cfg)
-        )
+        context = Hive::Attempts::Context.current
+        routing = unless context&.explicit_routing?
+          Hive::Stages::Base.model_routing_arguments(
+            cfg, "artifacts", profile,
+            current: Hive::Stages::Base.model_routing_current(actor_cfg)
+          )
+        end
         launch_dirs = if role == "producer" && profile.workspace_write_supported?
-          [ writable_root ]
+          [ writable_root, *producer_add_dirs ].compact.uniq
         else
           [ task.folder, task.worktree_path ].compact.uniq
         end
         result = nil
+        permission_arguments = if role == "producer" && profile.name == :codex
+          producer_permission_arguments
+        end
         begin
           result = Hive::Stages::Base.spawn_agent(
             task,
@@ -231,13 +318,16 @@ module Hive
             status_mode: :exit_code_only, cfg: cfg,
             model: actor_cfg["model"], effort: actor_cfg["effort"],
             routing_arguments: routing,
+            permission_arguments: permission_arguments,
             isolate_environment: true,
+            launch_environment: launch_environment,
             **security
           )
         rescue Hive::AgentError => e
           raise Hive::Artifacts::OutcomeEvidence::StoreError,
                 "#{role} agent failed before durable output: #{e.message}"
         ensure
+          cleanup_producer_process_group(result) if role == "producer"
           report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
         end
         unless report.valid?
@@ -264,14 +354,40 @@ module Hive
           actor: {
             "context_id" => context_id,
             "agent" => profile.name.to_s,
-            "model" => (routing&.model || actor_cfg["model"] || "provider-default").to_s,
-            "effort" => (routing&.effort || actor_cfg["effort"] || "default").to_s
+            "model" => effective_actor_value(
+              context, routing, actor_cfg, :model, "provider-default"
+            ),
+            "effort" => effective_actor_value(
+              context, routing, actor_cfg, :effort, "default"
+            )
           },
           output: parse_role_output!(result[:final_message], role)
         }
       end
 
-      def role_security_kwargs(role, task:, cfg:, profile:, actor_cfg:, writable_root: nil)
+      def cleanup_producer_process_group(result)
+        pgid = Integer(result&.fetch(:pgid, nil), exception: false)
+        return unless pgid&.positive?
+
+        Process.kill("TERM", -pgid)
+        sleep 0.1
+        Process.kill("KILL", -pgid)
+      rescue Errno::ESRCH
+        nil
+      end
+
+      def effective_actor_value(context, routing, actor_cfg, field, fallback)
+        value = if context&.explicit_routing?
+          context.public_send(field)
+        else
+          routing&.public_send(field) || actor_cfg[field.to_s]
+        end
+        value = value.to_s
+        value.empty? ? fallback : value
+      end
+
+      def role_security_kwargs(role, task:, cfg:, profile:, actor_cfg:,
+                               writable_root: nil)
         if role == "producer"
           unless writable_root
             raise Hive::ConfigError,
@@ -328,7 +444,8 @@ module Hive
         end
         if required.include?("video") && capabilities["temporal_video"] != true
           raise Hive::ConfigError,
-                "artifacts evidence reviewer must inspect actual temporal video, not storyboard frames"
+                "artifacts evidence review must support retained temporal video and " \
+                "controller-derived ordered frames"
         end
         true
       end
@@ -346,12 +463,19 @@ module Hive
         )
         required = Array(claims).map { |claim| claim.fetch("proof_kind") }.uniq
         unsupported = required - [ "document" ]
-        if unsupported.any? && !profile.workspace_write_supported?
+        if unsupported.any? && profile.name != :codex
+          raise Hive::ConfigError,
+                "artifacts evidence producer #{profile.name.inspect} cannot use the managed " \
+                "agent-browser capture boundary; configure the Codex producer"
+        end
+        if unsupported.any? &&
+           (!profile.workspace_write_supported? || !profile.add_dir_flag)
           raise Hive::ConfigError,
                 "artifacts evidence producer #{profile.name.inspect} cannot safely produce " \
-                "#{unsupported.join(', ')} proof; configure a workspace-sandboxed producer"
+                "#{unsupported.join(', ')} proof; configure a workspace-sandboxed producer " \
+                "with per-attempt writable roots"
         end
-        true
+        profile
       end
 
       def semantic_review_status!(verdicts)
@@ -394,15 +518,14 @@ module Hive
           Array(entry.fetch("claims"))
         end.uniq
         unless replacement_claims.any? &&
-               (replacement_claims - target_ids).empty? &&
-               (target_ids - replacement_claims).empty?
+               (replacement_claims - target_ids).empty?
           raise Hive::Artifacts::OutcomeEvidence::StoreError,
-                "targeted recapture must replace exactly the claims requested for revision"
+                "targeted recapture may replace only claims requested for revision"
         end
 
         preserved = Array(prior.fetch("evidence")).filter_map do |entry|
           copy = JSON.parse(JSON.generate(entry))
-          copy["claims"] = Array(copy.fetch("claims")) - target_ids
+          copy["claims"] = Array(copy.fetch("claims")) - replacement_claims
           copy unless copy.fetch("claims").empty?
         end
         preserved + replacements
@@ -412,11 +535,9 @@ module Hive
                              reason: "review_blocked")
         verdicts = attempt.dig("review", "verdicts").to_a
         failed = verdicts.reject { |verdict| verdict.fetch("verdict") == "accepted" }
-        claim_ids = requirement.fetch("claims").map { |claim| claim.fetch("id") }
         pointer = store.publish_blocked!(
           generation: requirement.fetch("generation"), reason: reason,
-          failed_claims: failed.map { |verdict| verdict.fetch("target_id") }
-                                .select { |id| claim_ids.include?(id) },
+          failed_targets: failed.map { |verdict| verdict.fetch("target_id") },
           reviewer_reasons: failed.map { |verdict| verdict.fetch("reason") },
           attempt_ids: history.map { |item| item.fetch("attempt_id") }
         )
@@ -458,6 +579,14 @@ module Hive
             end
           end
         end
+      end
+
+      def representation_hashes(evidence)
+        Array(evidence).flat_map do |entry|
+          Array(entry.fetch("representations")).filter_map do |row|
+            row["sha256"]&.to_s&.downcase
+          end
+        end.uniq.sort
       end
 
       def remove_producer_work!(task, writable_root)
@@ -522,7 +651,7 @@ module Hive
           generation: pointer.fetch("generation"),
           recovery_digest: pointer.fetch("recovery_digest"),
           attempt_count: pointer.fetch("attempt_count"),
-          failed_claims: pointer.fetch("failed_claims").join(",")
+          failed_targets: pointer.fetch("failed_targets").join(",")
         )
       end
 

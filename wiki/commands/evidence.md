@@ -1,15 +1,16 @@
 ---
 title: hive evidence
 type: command
-source: lib/hive/commands/evidence.rb
+source: lib/hive/commands/evidence.rb, lib/hive/artifacts/browser_gateway.rb, lib/hive/artifacts/terminal_recorder.rb
 created: 2026-08-14
 updated: 2026-08-14
 tags: [command, artifacts, evidence, recovery]
 ---
 
-**TLDR**: `hive evidence recover` is the explicit, stale-safe operator
-acknowledgement for a semantically blocked `7-artifacts` outcome-evidence
-package. It never edits the blocked ledger or retries the workflow directly.
+**TLDR**: `hive evidence recover` is the stale-safe operator acknowledgement
+for a semantically blocked package. `hive evidence terminal` and
+`hive evidence browser` are the internal, controller-scoped capture boundaries
+given to an outcome-evidence producer.
 
 ## Usage
 
@@ -18,6 +19,35 @@ hive evidence recover TARGET \
   --generation <sha256> \
   --recovery-digest <sha256>
 ```
+
+Inside a producer context, Hive also issues:
+
+```sh
+hive evidence terminal NAME --json -- COMMAND...
+hive evidence browser snapshot -i
+hive evidence browser screenshot NAME.png --full
+hive evidence browser record start NAME.webm
+hive evidence browser record stop
+```
+
+This form requires controller-issued task/source/write roots and has no
+completion authority by itself.
+It launches one argv command directly, records an asciinema v2-compatible
+`NAME.cast`, writes a bounded ANSI-free `NAME.txt`, and returns
+controller-observed paths, byte sizes, and SHA-256 digests. It does not invoke a
+shell, asciinema, VHS, or a terminal-GIF encoder. A nonzero child exit is
+recorded in both the receipt and text rather than erasing the evidence. On Linux,
+the recorder runs inside Hive's child-subreaper custody boundary; timeout,
+overflow, success, and failure all terminate and reap the complete descendant
+tree, and any detached child makes the capture invalid.
+
+The browser form talks to a controller-owned gateway, not agent-browser's raw
+socket. Hive fixes the session, managed Chrome executable, one `.invalid`
+origin, and loopback proxy. The gateway admits navigation, snapshots,
+interaction, safe basename screenshots, and WebM recording; rejects other
+origins, path syntax, filesystem-export commands, and socket/session overrides;
+and exclusively publishes media from a controller-private staging directory into
+the attempt root. Browser commands have no completion authority by themselves.
 
 Use `--project NAME` or `--stage 7-artifacts` to disambiguate a bare slug. The
 command also accepts the ordinary explicit `PROJECT:SLUG` target. `--json`

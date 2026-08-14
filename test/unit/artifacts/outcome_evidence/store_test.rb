@@ -67,6 +67,109 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     end
   end
 
+  def test_blocked_attempt_can_durably_record_a_producer_with_no_admitted_files
+    with_store do |store, _task, _controller|
+      requirement = store.open_generation!(**requirement_input)
+      verdicts = %w[claim-a claim-b].map do |id|
+        {
+          "target_id" => id, "verdict" => "blocked",
+          "reason" => "The producer returned no admissible representation for this claim."
+        }
+      end
+
+      attempt = store.append_attempt!(
+        generation: requirement.fetch("generation"), attempt_id: "attempt-empty",
+        status: "blocked", evidence: [], producer: actor("producer-empty"),
+        review: {
+          "reviewer" => actor("reviewer-empty"),
+          "review_scope_hashes" => [], "verdicts" => verdicts
+        },
+        diagnostic: "The producer returned no admissible evidence."
+      )
+
+      assert_equal "blocked", attempt.fetch("status")
+      assert_empty attempt.fetch("evidence")
+      assert_empty attempt.dig("review", "review_scope_hashes")
+    end
+  end
+
+  def test_identity_shortcuts_require_the_current_controller_task_generation
+    with_store do |store, task, controller|
+      generation = accepted_generation(store, task, attempt_id: "attempt-current-generation")
+      store.publish_current!(generation: generation, attempt_id: "attempt-current-generation")
+      assert store.accepted_for_identity?(identity)
+
+      controller["task_generation"] = "controller-generation-2"
+      refute store.accepted_for_identity?(identity)
+    end
+
+    with_store do |store, task, controller|
+      requirement = store.open_generation!(**requirement_input)
+      attempt = store.append_attempt!(
+        generation: requirement.fetch("generation"), attempt_id: "attempt-revise-generation",
+        status: "revise", evidence: [ document_evidence(task) ],
+        producer: actor("producer-generation"),
+        review: revising_review(task, actor("reviewer-generation")),
+        diagnostic: "The retained proof needs a clearer user outcome demonstration."
+      )
+      store.publish_blocked!(
+        generation: requirement.fetch("generation"), reason: "review_blocked",
+        failed_targets: [ "claim-a" ],
+        reviewer_reasons: [ "The retained proof needs a clearer user outcome demonstration." ],
+        attempt_ids: [ attempt.fetch("attempt_id") ]
+      )
+      assert store.blocked_for_identity?(identity)
+
+      controller["task_generation"] = "controller-generation-2"
+      refute store.blocked_for_identity?(identity)
+    end
+  end
+
+  def test_materializes_one_append_only_exact_diff_for_read_only_roles
+    with_tmp_dir do |root|
+      repository = File.join(root, "repository")
+      folder = File.join(root, "task")
+      FileUtils.mkdir_p([ repository, folder ])
+      assert system("git", "init", "-q", repository)
+      assert system("git", "-C", repository, "config", "user.email", "hive@example.test")
+      assert system("git", "-C", repository, "config", "user.name", "Hive Test")
+      File.write(File.join(repository, "feature.txt"), ("a" * 300_000) + "\n")
+      assert system("git", "-C", repository, "add", "feature.txt")
+      assert system("git", "-C", repository, "commit", "-qm", "base")
+      base = IO.popen([ "git", "-C", repository, "rev-parse", "HEAD" ], &:read).strip
+      File.write(File.join(repository, "feature.txt"), ("b" * 300_000) + "\n")
+      assert system("git", "-C", repository, "commit", "-qam", "head")
+      head = IO.popen([ "git", "-C", repository, "rev-parse", "HEAD" ], &:read).strip
+      changed = [ "feature.txt" ]
+      frozen_identity = {
+        "repository" => nil, "branch" => "main",
+        "implementation_base" => base, "merge_base" => base,
+        "implementation_head" => head, "changed_paths" => changed,
+        "changed_paths_digest" => Digest::SHA256.hexdigest(changed.join("\0"))
+      }
+      task = FakeTask.new(folder: folder, slug: "demo-task", project_root: root)
+      store = Hive::Artifacts::OutcomeEvidence::Store.new(
+        task: task, project: "demo",
+        controller_binding: -> { { "task_generation" => "1", "recovery_epoch" => 0 } }
+      )
+
+      receipt = store.materialize_review_context!(
+        identity: frozen_identity, source_root: repository
+      )
+      path = File.join(folder, receipt.fetch("path"))
+      assert_operator File.size(path), :>, Hive::Artifacts::OutcomeEvidence::Store::MAX_DOCUMENT_BYTES
+      assert_includes File.read(path), "-#{'a' * 100}"
+      assert_includes File.read(path), "+#{'b' * 100}"
+      assert_equal Digest::SHA256.file(path).hexdigest, receipt.fetch("sha256")
+      assert_equal receipt, store.review_context_for_identity(frozen_identity)
+
+      File.write(path, "tampered\n")
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        store.materialize_review_context!(identity: frozen_identity, source_root: repository)
+      end
+    end
+  end
+
   def test_retain_candidate_moves_producer_files_before_semantic_review
     with_store do |store, task, _controller|
       requirement = store.open_generation!(**requirement_input)
@@ -89,7 +192,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
         generation: requirement.fetch("generation"), attempt_id: "attempt-custody",
         status: "accepted", evidence: retained, producer: actor("producer-custody"),
         review: {
-          "reviewer" => actor("reviewer-custody"), "inspected_hashes" => hashes,
+          "reviewer" => actor("reviewer-custody"), "review_scope_hashes" => hashes,
           "verdicts" => %w[claim-a claim-b].map do |id|
             {
               "target_id" => id, "verdict" => "accepted",
@@ -133,13 +236,13 @@ class OutcomeEvidenceStoreTest < Minitest::Test
 
       pointer = store.publish_blocked!(
         generation: generation, reason: "recaptures_exhausted",
-        failed_claims: [ "claim-a" ],
+        failed_targets: [ "claim-a" ],
         reviewer_reasons: [ "The retained document does not directly demonstrate this bounded outcome." ],
         attempt_ids: [ attempt.fetch("attempt_id") ]
       )
 
       assert_equal "blocked", pointer.fetch("status")
-      assert_equal [ "claim-a" ], pointer.fetch("failed_claims")
+      assert_equal [ "claim-a" ], pointer.fetch("failed_targets")
       assert_equal 1, pointer.fetch("attempt_count")
       assert_match(/\A[0-9a-f]{64}\z/, pointer.fetch("recovery_digest"))
       refute store.accepted?
@@ -149,7 +252,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         store.publish_blocked!(
           generation: generation, reason: "recaptures_exhausted",
-          failed_claims: [ "claim-a" ],
+          failed_targets: [ "claim-a" ],
           reviewer_reasons: [
             "The review exposed api_key=abcdefghijklmnopqrstuvwxyz0123456789 in output."
           ],
@@ -158,6 +261,43 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       end
       assert_match(/secret-shaped/, error.message)
       refute_includes error.message, "abcdefghijklmnopqrstuvwxyz"
+    end
+  end
+
+  def test_exclusion_only_rejection_is_retained_as_a_failed_review_target
+    with_store do |store, task, _controller|
+      input = requirement_input.merge(
+        exclusions: [
+          {
+            "id" => "exclusion-support",
+            "statement" => "The test helper is supporting work without a separate user surface.",
+            "reason" => "It only constructs the fixture used by the claimed behavior.",
+            "changed_paths" => [ "test/feature_test.rb" ]
+          }
+        ]
+      )
+      requirement = store.open_generation!(**input)
+      review = accepted_review(task, actor("reviewer-exclusion"))
+      review.fetch("verdicts") << {
+        "target_id" => "exclusion-support", "verdict" => "blocked",
+        "reason" => "The path changes observable behavior and cannot be excluded as supporting work."
+      }
+      attempt = store.append_attempt!(
+        generation: requirement.fetch("generation"), attempt_id: "attempt-exclusion",
+        status: "blocked", evidence: [ document_evidence(task) ],
+        producer: actor("producer-exclusion"), review: review,
+        diagnostic: "The proposed exclusion changes observable behavior."
+      )
+      pointer = store.publish_blocked!(
+        generation: requirement.fetch("generation"), reason: "review_blocked",
+        failed_targets: [ "exclusion-support" ],
+        reviewer_reasons: [ "The path changes observable behavior and cannot be excluded as supporting work." ],
+        attempt_ids: [ attempt.fetch("attempt_id") ]
+      )
+
+      assert_equal [ "exclusion-support" ], pointer.fetch("failed_targets")
+      assert store.blocked_for_identity?(identity)
+      assert_equal pointer, store.package.fetch("current")
     end
   end
 
@@ -252,15 +392,30 @@ class OutcomeEvidenceStoreTest < Minitest::Test
   end
 
   def test_registered_schemas_are_strict
-    %w[
+    schemas = %w[
       hive-outcome-evidence-requirement
       hive-outcome-evidence-attempt
       hive-outcome-evidence-current
-    ].each do |name|
+    ].to_h do |name|
       assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS.fetch(name)
       schema = JSON.parse(File.read(Hive::Schemas.schema_path(name)))
       assert_equal false, schema.fetch("additionalProperties"), name
+      [ name, schema ]
     end
+
+    requirement = schemas.fetch("hive-outcome-evidence-requirement")
+    assert_equal 5, requirement.dig("properties", "claims", "maxItems")
+    assert_equal 16, requirement.dig("properties", "exclusions", "maxItems")
+    assert_equal 21,
+                 requirement.dig(
+                   "properties", "traceability", "additionalProperties", "maxItems"
+                 )
+    attempt = schemas.fetch("hive-outcome-evidence-attempt")
+    assert_equal 5,
+                 attempt.dig("$defs", "Evidence", "properties", "claims", "maxItems")
+    current = schemas.fetch("hive-outcome-evidence-current")
+    assert_equal 21, current.dig("properties", "failed_targets", "maxItems")
+    assert_equal 21, current.dig("properties", "reviewer_reasons", "maxItems")
   end
 
   def test_generation_and_attempt_admission_rejects_malformed_controller_and_review_state
@@ -362,38 +517,38 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       end
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         store.publish_blocked!(
-          generation: generation, reason: "unknown", failed_claims: [],
+          generation: generation, reason: "unknown", failed_targets: [],
           reviewer_reasons: [], attempt_ids: []
         )
       end
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         store.publish_blocked!(
-          generation: generation, reason: "capability_blocked", failed_claims: [],
+          generation: generation, reason: "capability_blocked", failed_targets: [],
           reviewer_reasons: [], attempt_ids: [ revised.fetch("attempt_id") ] * 2
         )
       end
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         store.publish_blocked!(
           generation: generation, reason: "review_blocked",
-          failed_claims: [ "claim-a" ], reviewer_reasons: [ "Accepted is contradictory." ],
+          failed_targets: [ "claim-a" ], reviewer_reasons: [ "Accepted is contradictory." ],
           attempt_ids: [ accepted.fetch("attempt_id") ]
         )
       end
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         store.publish_blocked!(
           generation: generation, reason: "recaptures_exhausted",
-          failed_claims: [ "claim-a" ], reviewer_reasons: [], attempt_ids: []
+          failed_targets: [ "claim-a" ], reviewer_reasons: [], attempt_ids: []
         )
       end
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         store.publish_blocked!(
           generation: generation, reason: "capability_blocked",
-          failed_claims: [], reviewer_reasons: [ "" ], attempt_ids: []
+          failed_targets: [], reviewer_reasons: [ "" ], attempt_ids: []
         )
       end
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         store.publish_blocked!(
-          generation: generation, reason: "review_blocked", failed_claims: [],
+          generation: generation, reason: "review_blocked", failed_targets: [],
           reviewer_reasons: [ "The reviewer blocked the incomplete outcome package." ],
           attempt_ids: [ revised.fetch("attempt_id") ]
         )
@@ -450,7 +605,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       requirement = store.open_generation!(**requirement_input)
       pointer = store.publish_blocked!(
         generation: requirement.fetch("generation"), reason: "capability_blocked",
-        failed_claims: [], reviewer_reasons: [], attempt_ids: []
+        failed_targets: [], reviewer_reasons: [], attempt_ids: []
       )
       current_path = File.join(task.folder, "outcome-evidence", "current.json")
       pointer = plain_copy(pointer)
@@ -642,7 +797,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       end
 
       noncanonical_review = plain_copy(attempt)
-      noncanonical_review.dig("review", "inspected_hashes").reverse!
+      noncanonical_review.dig("review", "review_scope_hashes").reverse!
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         store.send(:validate_retained_evidence!, requirement, noncanonical_review)
       end
@@ -742,7 +897,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     hashes = document_evidence(task).fetch("representations").map { |item| item.fetch("sha256") }
     {
       "reviewer" => reviewer,
-      "inspected_hashes" => hashes,
+      "review_scope_hashes" => hashes,
       "verdicts" => %w[claim-a claim-b].map do |id|
         {
           "target_id" => id, "verdict" => "accepted",

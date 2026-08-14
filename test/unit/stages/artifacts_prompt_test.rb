@@ -68,32 +68,42 @@ class StagesArtifactsPromptTest < Minitest::Test
       producer = Hive::Stages::Artifacts.render_role_prompt(
         "artifacts_producer_prompt.md.erb", task,
         requirement_json: "{}", prior_evidence_json: "[]", revision_json: "[]",
+        capture_tools_json: '{"web":{"driver":"agent-browser"}}',
         writable_root: File.join(task.folder, "evidence"),
         writable_relative_root: "evidence"
       )
       reviewer = Hive::Stages::Artifacts.render_role_prompt(
         "artifacts_reviewer_prompt.md.erb", task,
-        requirement_json: "{}", evidence_json: "[]"
+        requirement_json: "{}", evidence_json: "[]", review_context_json: "{}"
       )
 
       assert_includes inference, "fresh read-only context"
       assert_includes inference, "not one claim per file"
       assert_includes producer, "evidence-write root"
       assert_includes producer, "Required task-relative representation path prefix: evidence/"
-      assert_includes producer, "not the current working directory"
-      assert_includes producer, "Every entry has this exact minimal shape"
+      assert_match(/not the current\s+working directory/, producer)
+      assert_includes producer, "Every task-produced entry has this exact"
+      assert_includes producer, "agent-browser"
+      assert_includes producer, "web.argv_prefix"
+      assert_includes producer, "raw socket"
+      refute_includes producer, "MCP"
+      refute_includes producer, "Bubblewrap"
+      assert_includes producer, "do not calculate or"
+      assert_includes producer, "terminal.argv_prefix"
       assert_match(/generated\s+slides/i, producer)
       assert_includes producer, "application/x-asciinema+json"
       assert_includes producer, "Video original/review media types"
-      assert_match(/preserves accepted prior\s+artifacts/, producer)
+      assert_match(/any nonempty\s+subset/, producer)
+      assert_match(/preserves the last evidence/, producer)
       assert_match(/Never edit\s+the worktree/, producer)
       assert_includes reviewer, "third fresh"
-      assert_includes reviewer, "actual temporal video"
+      assert_includes reviewer, "video remains the user-facing proof"
       assert_includes reviewer, "`task.md`, `plan.md` when present"
-      assert_includes reviewer, "exact Git diff"
+      assert_includes reviewer, "controller-materialized exact diff"
       assert_includes reviewer, "omit a requested outcome"
       assert_match(/Reject generated\s+slides/, reviewer)
-      assert_includes reviewer, "every representation SHA-256"
+      assert_includes reviewer, "do not echo or calculate"
+      refute_includes reviewer, "`review_scope_hashes`"
       assert_includes reviewer, "accepted`, `revise`, or `blocked"
       [ inference, producer, reviewer ].each { |prompt| assert_includes prompt, "untrusted data" }
     end

@@ -10,7 +10,8 @@ module Hive
       # Semantic admission around the byte-level Proof contract. Agents
       # propose claims and verdicts; controller code decides publication.
       module Contract
-        MAX_ITEMS = 64
+        MAX_CLAIMS = 5
+        MAX_EXCLUSIONS = 16
         MAX_STATEMENT_BYTES = 1024
         VAGUE = %w[
           works-as-expected various-changes updated-files changes-are-correct
@@ -85,17 +86,26 @@ module Hive
             end
           end
           uncovered = claim_by_id.keys.reject { |id| covered[id].positive? }
-          raise StoreError, "every claim needs admitted proof: #{uncovered.join(', ')}" unless uncovered.empty?
 
           output = object!(output, "review output")
-          inspected = Array(output.fetch("inspected_hashes")).map { |value| digest!(value) }.uniq.sort
-          unless inspected == expected_hashes.uniq.sort
-            raise StoreError, "reviewer must name every inspected representation hash"
+          reject_unknown!(output, %w[review_scope_hashes verdicts], "review output")
+          review_scope = Array(output.fetch("review_scope_hashes")).map { |value| digest!(value) }.uniq.sort
+          unless review_scope == expected_hashes.uniq.sort
+            raise StoreError, "controller review scope must name every representation hash"
           end
           target_ids = (claims + requirement.fetch("exclusions")).map { |item| item.fetch("id") }.sort
           verdicts = Array(output.fetch("verdicts")).map { |item| verdict!(item) }
           unless verdicts.map { |item| item.fetch("target_id") }.sort == target_ids
             raise StoreError, "reviewer must return exactly one verdict per claim and exclusion"
+          end
+          verdict_by_target = verdicts.to_h { |item| [ item.fetch("target_id"), item ] }
+          accepted_without_proof = uncovered.select do |claim_id|
+            verdict_by_target.fetch(claim_id).fetch("verdict") == "accepted"
+          end
+          unless accepted_without_proof.empty?
+            raise StoreError,
+                  "reviewer cannot accept a claim without admitted proof: " \
+                  "#{accepted_without_proof.join(', ')}"
           end
 
           status = if verdicts.any? { |item| item.fetch("verdict") == "blocked" }
@@ -108,7 +118,7 @@ module Hive
           {
             "producer" => producer,
             "reviewer" => reviewer,
-            "inspected_hashes" => inspected,
+            "review_scope_hashes" => review_scope,
             "verdicts" => verdicts.sort_by { |item| item.fetch("target_id") },
             "status" => status,
             "accepted" => status == "accepted"
@@ -119,7 +129,10 @@ module Hive
 
         def canonical_targets(value, kind:)
           items = Array(value)
-          raise StoreError, "outcome evidence supports at most #{MAX_ITEMS} #{kind}s" if items.length > MAX_ITEMS
+          limit = kind == :claim ? MAX_CLAIMS : MAX_EXCLUSIONS
+          if items.length > limit
+            raise StoreError, "outcome evidence supports at most #{limit} #{kind}s"
+          end
 
           items.map do |raw|
             item = object!(raw, kind.to_s)
@@ -226,7 +239,7 @@ module Hive
 
         def digest!(value)
           text = value.to_s.downcase
-          raise StoreError, "review inspected hash is invalid" unless text.match?(Proof::DIGEST)
+          raise StoreError, "review scope hash is invalid" unless text.match?(Proof::DIGEST)
           text
         end
         private_class_method :digest!

@@ -144,7 +144,7 @@ module Hive
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
                    profile: nil, expected_output: nil, status_mode: nil,
-                   permission_mode: nil, allowed_tools: nil,
+                   permission_mode: nil, permission_arguments: nil, allowed_tools: nil,
                    disallowed_tools: nil, cli_flags: [], max_tokens: nil,
                    max_turns: nil, identity_arguments: [], runtime_policy: nil,
                    launch_arguments: nil, routing_arguments: nil,
@@ -163,6 +163,12 @@ module Hive
       @profile = profile || Hive::AgentProfiles.lookup(:claude)
       @provider_route = provider_route
       @runtime_policy = runtime_policy
+      if runtime_policy && permission_arguments
+        raise ArgumentError, "permission_arguments cannot be combined with runtime_policy"
+      end
+      @permission_arguments = permission_arguments && Array(permission_arguments).map do |argument|
+        argument.to_s.dup.freeze
+      end.freeze
       @isolate_environment = isolate_environment == true
       @expected_output = expected_output
       # Per-spawn override of the profile's default detection mode. The
@@ -627,7 +633,7 @@ module Hive
           profile: @profile,
           prompt: @prompt,
           permission_mode: @permission_mode,
-          permission_arguments: @runtime_policy&.permission_flags,
+          permission_arguments: @permission_arguments || @runtime_policy&.permission_flags,
           add_dirs: @add_dirs,
           allowed_tools: @allowed_tools,
           disallowed_tools: @disallowed_tools,

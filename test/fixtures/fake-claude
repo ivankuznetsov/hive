@@ -89,10 +89,7 @@ if [[ "$prompt_blob" == *"outcome-evidence inference role"* ||
   fi
 
   if [[ "$prompt_blob" == *"independent outcome-evidence reviewer"* ]]; then
-    original_sha=$(sha256_line 'The frozen implementation adds implementation.txt with the requested demo behavior.')
-    review_sha=$(sha256_line 'Reviewed implementation.txt: it contains the committed demo implementation marker.')
-    printf -v final_message '{"inspected_hashes":["%s","%s"],"verdicts":[{"target_id":"implemented-demo-pipeline","verdict":"accepted","reason":"Both retained representations match the frozen committed implementation and directly support the requested outcome."}]}' \
-      "$original_sha" "$review_sha"
+    printf -v final_message '{"verdicts":[{"target_id":"implemented-demo-pipeline","verdict":"accepted","reason":"Both retained representations match the frozen committed implementation and directly support the requested outcome."}]}'
     emit_final_message "$final_message"
     exit 0
   fi

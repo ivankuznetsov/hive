@@ -3,6 +3,7 @@ require "fileutils"
 require "pathname"
 require "time"
 require "hive/atomic_file"
+require "hive/agent_git_gate"
 require "hive/attempts/context"
 require "hive/attempts/store"
 require "hive/artifacts/outcome_evidence/document"
@@ -21,6 +22,7 @@ module Hive
       class Store
         ROOT = "outcome-evidence".freeze
         MAX_DOCUMENT_BYTES = 256 * 1024
+        MAX_DIFF_BYTES = 16 * 1024 * 1024
         SAFE_ID = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
         DIGEST = Proof::DIGEST
         BLOCK_REASONS = %w[capability_blocked review_blocked recaptures_exhausted].freeze
@@ -125,7 +127,7 @@ module Hive
             requirement: requirement, evidence: entries, producer: producer,
             reviewer: review["reviewer"] || review[:reviewer],
             output: {
-              "inspected_hashes" => review["inspected_hashes"] || review[:inspected_hashes],
+              "review_scope_hashes" => review["review_scope_hashes"] || review[:review_scope_hashes],
               "verdicts" => review["verdicts"] || review[:verdicts]
             }
           )
@@ -179,7 +181,7 @@ module Hive
           relative_attempt_root = Pathname.new(attempt_root)
             .relative_path_from(Pathname.new(@task.folder)).to_s
           entries = Array(evidence).map.with_index do |entry, index|
-            Proof.materialize!(
+            Proof.materialize_producer!(
               entry, task_folder: @task.folder,
               expected_head: requirement.dig("implementation", "implementation_head"),
               destination_root: File.join(
@@ -241,7 +243,7 @@ module Hive
             "attempts" => history,
             "attempt_count" => history.length,
             "reason" => nil,
-            "failed_claims" => [],
+            "failed_targets" => [],
             "reviewer_reasons" => [],
             "recovery_digest" => nil,
             "published_at" => iso_time(@clock.call)
@@ -249,7 +251,7 @@ module Hive
           publish_pointer!(document)
         end
 
-        def publish_blocked!(generation:, reason:, failed_claims:, reviewer_reasons:,
+        def publish_blocked!(generation:, reason:, failed_targets:, reviewer_reasons:,
                              attempt_ids:)
           generation = validate_digest!(generation, "generation")
           reason = reason.to_s
@@ -285,8 +287,8 @@ module Hive
           if reason != "capability_blocked" && attempts.empty?
             raise StoreError, "semantic review blocker requires an admitted attempt"
           end
-          claims = Array(failed_claims).map do |claim_id|
-            validate_claim_id!(claim_id, "failed claim ID")
+          targets = Array(failed_targets).map do |target_id|
+            validate_claim_id!(target_id, "failed review target ID")
           end.uniq.sort
           rationales = Array(reviewer_reasons).map do |value|
             text = value.to_s.strip
@@ -295,12 +297,12 @@ module Hive
             end
             Contract.secret_free!(text, "reviewer blocker reason")
           end.uniq
-          unless reason == "capability_blocked" || claims.any?
-            raise StoreError, "semantic review blocker requires failed claims"
+          unless reason == "capability_blocked" || targets.any?
+            raise StoreError, "semantic review blocker requires failed targets"
           end
           digest = recovery_digest(
             generation: generation, reason: reason, attempts: attempts,
-            failed_claims: claims, reviewer_reasons: rationales
+            failed_targets: targets, reviewer_reasons: rationales
           )
           last = attempts.last
           publish_pointer!(
@@ -319,7 +321,7 @@ module Hive
             "attempts" => attempts,
             "attempt_count" => attempts.length,
             "reason" => reason,
-            "failed_claims" => claims,
+            "failed_targets" => targets,
             "reviewer_reasons" => rationales,
             "recovery_digest" => digest,
             "published_at" => iso_time(@clock.call)
@@ -356,29 +358,36 @@ module Hive
           validate_publication!(
             requirement, attempt, pointer.fetch("generation"), pointer.fetch("attempt_id")
           )
-          validate_retained_evidence!(requirement, attempt)
+          history = attempts(generation: pointer.fetch("generation"))
+          return false unless history.map { |item| item.fetch("attempt_id") } ==
+                              pointer.fetch("attempts").map { |item| item.fetch("attempt_id") }
+          history.each { |item| validate_retained_evidence!(requirement, item) }
           true
-        rescue StoreError, SystemCallError
+        rescue StoreError, SystemCallError, ArgumentError, TypeError
           false
         end
 
         def accepted_for_identity?(identity)
           pointer = read_current!
+          expected_generation = generation_for_identity(identity)
+          return false unless pointer.fetch("generation") == expected_generation
+
           requirement = read_document(
             requirement_path(pointer.fetch("generation")), schema: SCHEMAS.fetch(:requirement),
             label: "outcome-evidence requirement"
           )
           requirement.fetch("implementation") == canonical_identity(identity) &&
             accepted?(generation: pointer.fetch("generation"))
-        rescue StoreError, SystemCallError
+        rescue StoreError, SystemCallError, ArgumentError, TypeError
           false
         end
 
         def blocked_for_identity?(identity)
           pointer = read_current!
           return false unless pointer.fetch("status") == "blocked"
-          binding = controller_binding
-          return false unless pointer.fetch("recovery_epoch") == Integer(binding.fetch("recovery_epoch"))
+          expected_generation = generation_for_identity(identity)
+          return false unless pointer.fetch("generation") == expected_generation
+
           requirement = read_document(
             requirement_path(pointer.fetch("generation")), schema: SCHEMAS.fetch(:requirement),
             label: "outcome-evidence requirement"
@@ -391,16 +400,63 @@ module Hive
 
         def requirement_for_identity(identity)
           canonical = canonical_identity(identity)
-          binding = controller_binding
-          task_generation = binding.fetch("task_generation").to_s
-          epoch = Integer(binding.fetch("recovery_epoch"))
-          generation = generation_for(canonical, task_generation, epoch)
+          generation, task_generation, epoch = current_generation(canonical)
           existing_requirement(
             generation, canonical: canonical, task_generation: task_generation,
             recovery_epoch: epoch
           )
         rescue ArgumentError, TypeError
           raise StoreError, "recovery epoch is invalid"
+        end
+
+        # Materialize the exact frozen diff once so read-only inference and
+        # review roles can inspect it without receiving shell or Git authority.
+        def materialize_review_context!(identity:, source_root:)
+          canonical = canonical_identity(identity)
+          generation, = current_generation(canonical)
+          result = Hive::AgentGitGate.read(
+            source_root, :diff, max_stdout_bytes: MAX_DIFF_BYTES,
+            base_oid: canonical.fetch("implementation_base"),
+            head_oid: canonical.fetch("implementation_head")
+          )
+          unless result.success?
+            raise StoreError, "exact implementation diff is unavailable or oversized"
+          end
+
+          path = File.join(generation_root(generation), "implementation.diff")
+          write_once_bytes(path, result.stdout, generation: generation)
+          {
+            "path" => Pathname.new(path).relative_path_from(Pathname.new(@task.folder)).to_s,
+            "sha256" => secure_file_digest!(
+              path, "exact implementation diff", max_bytes: MAX_DIFF_BYTES
+            ),
+            "bytes" => File.size(path),
+            "implementation_base" => canonical.fetch("implementation_base"),
+            "implementation_head" => canonical.fetch("implementation_head")
+          }
+        rescue Hive::AgentGitGate::Error => e
+          raise StoreError, "exact implementation diff is unavailable: #{e.message}"
+        end
+
+        def review_context_for_identity(identity)
+          canonical = canonical_identity(identity)
+          generation, = current_generation(canonical)
+          path = File.join(generation_root(generation), "implementation.diff")
+          stat = File.lstat(path)
+          unless stat.file? && !stat.symlink?
+            raise StoreError, "exact implementation diff must be a regular file"
+          end
+          {
+            "path" => Pathname.new(path).relative_path_from(Pathname.new(@task.folder)).to_s,
+            "sha256" => secure_file_digest!(
+              path, "exact implementation diff", max_bytes: MAX_DIFF_BYTES
+            ),
+            "bytes" => stat.size,
+            "implementation_base" => canonical.fetch("implementation_base"),
+            "implementation_head" => canonical.fetch("implementation_head")
+          }
+        rescue Errno::ENOENT, Errno::ELOOP
+          nil
         end
 
         def attempts(generation:)
@@ -470,7 +526,7 @@ module Hive
             expected = recovery_digest(
               generation: generation, reason: pointer.fetch("reason"),
               attempts: pointer.fetch("attempts"),
-              failed_claims: pointer.fetch("failed_claims"),
+              failed_targets: pointer.fetch("failed_targets"),
               reviewer_reasons: pointer.fetch("reviewer_reasons")
             )
             unless pointer.fetch("recovery_digest") == expected &&
@@ -540,14 +596,14 @@ module Hive
           read_current!
         end
 
-        def recovery_digest(generation:, reason:, attempts:, failed_claims:,
+        def recovery_digest(generation:, reason:, attempts:, failed_targets:,
                             reviewer_reasons:)
           Digest::SHA256.hexdigest(
             [
               "hive-outcome-evidence-recovery-v1", @project, @task.slug.to_s,
               generation, reason,
               attempts.flat_map { |item| item.values_at("attempt_id", "attempt_sha256") },
-              failed_claims, reviewer_reasons
+              failed_targets, reviewer_reasons
             ].flatten.join("\0")
           )
         end
@@ -672,6 +728,20 @@ module Hive
           )
         end
 
+        def generation_for_identity(identity)
+          current_generation(canonical_identity(identity)).fetch(0)
+        end
+
+        def current_generation(canonical)
+          binding = controller_binding
+          task_generation = binding.fetch("task_generation").to_s
+          epoch = Integer(binding.fetch("recovery_epoch"))
+          raise StoreError, "controller task generation is required" if task_generation.empty?
+          raise StoreError, "recovery epoch must be non-negative" if epoch.negative?
+
+          [ generation_for(canonical, task_generation, epoch), task_generation, epoch ]
+        end
+
         def controller_binding
           return @controller_binding.call if @controller_binding
 
@@ -716,6 +786,26 @@ module Hive
             raise StoreError, "#{label} must be a regular file, not a symlink"
           end
           read_document(path, schema: schema, label: label)
+        end
+
+        def write_once_bytes(path, source, generation:)
+          if source.bytesize > MAX_DIFF_BYTES
+            raise StoreError, "exact implementation diff exceeds #{MAX_DIFF_BYTES} bytes"
+          end
+          ensure_generation_directories!(generation)
+          begin
+            File.open(path, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o600) do |file|
+              file.write(source)
+              file.flush
+              file.fsync
+            end
+            Hive::AtomicFile.fsync_directory(File.dirname(path))
+          rescue Errno::EEXIST
+            existing = File.open(path, File::RDONLY | File::NOFOLLOW, &:read)
+            raise StoreError, "exact implementation diff is append-only and already differs" unless existing == source
+          rescue Errno::ELOOP
+            raise StoreError, "exact implementation diff must be a regular file"
+          end
         end
 
         def read_current!
@@ -770,7 +860,7 @@ module Hive
           canonical_review = Contract.review!(
             requirement: requirement, evidence: canonical_entries,
             producer: attempt.fetch("producer"), reviewer: review.fetch("reviewer"),
-            output: review.slice("inspected_hashes", "verdicts")
+            output: review.slice("review_scope_hashes", "verdicts")
           )
           canonical_producer = canonical_review.delete("producer")
           unless canonical_producer == attempt.fetch("producer")
@@ -781,7 +871,7 @@ module Hive
           end
         end
 
-        def secure_file_digest(path)
+        def secure_file_digest(path, max_bytes: MAX_DOCUMENT_BYTES)
           File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
             raise StoreError, "outcome-evidence document must be regular" unless file.stat.file?
 
@@ -789,7 +879,7 @@ module Hive
             total = 0
             while (chunk = file.read(16 * 1024))
               total += chunk.bytesize
-              raise StoreError, "outcome-evidence document exceeds #{MAX_DOCUMENT_BYTES} bytes" if total > MAX_DOCUMENT_BYTES
+              raise StoreError, "outcome-evidence document exceeds #{max_bytes} bytes" if total > max_bytes
               digest << chunk
             end
             digest.hexdigest
@@ -798,8 +888,9 @@ module Hive
           nil
         end
 
-        def secure_file_digest!(path, label)
-          secure_file_digest(path) || raise(StoreError, "#{label} is unavailable")
+        def secure_file_digest!(path, label, max_bytes: MAX_DOCUMENT_BYTES)
+          secure_file_digest(path, max_bytes: max_bytes) ||
+            raise(StoreError, "#{label} is unavailable")
         end
 
         def reject_symlink!(path, label)

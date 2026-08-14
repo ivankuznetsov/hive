@@ -7,12 +7,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     XDG_STATE_HOME=/data/state \
     XDG_CACHE_HOME=/data/cache \
     HIVEBOX_REPOS_DIR=/data/repos \
+    HIVE_CAPTURE_TOOLS_CACHE=/opt/hive/capture-tools \
     HIVE_WEB_APP_DIR=/app/web \
     HIVEBOX_PRECOMPILED_ASSETS=1 \
     RAILS_ENV=production
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      asciinema build-essential ca-certificates curl ffmpeg git gh jq libffi-dev libyaml-dev nodejs npm tini tmux \
+      build-essential ca-certificates curl ffmpeg git gh jq libffi-dev libyaml-dev nodejs npm tesseract-ocr tini tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # Agent CLIs in their own early layer: they are the largest download and
@@ -30,9 +31,15 @@ RUN useradd --create-home --home-dir /data/home --shell /bin/bash hive \
 
 WORKDIR /app
 COPY --chown=hive:hive . /app
+# Prewarm the exact native agent-browser + Chrome payload in an image path
+# that is not hidden by Hivebox's runtime /data volume.
 RUN bundle install --without development test \
     && gem build hive.gemspec \
-    && gem install hive-cli-*.gem
+    && gem install hive-cli-*.gem \
+    && mkdir -p "$HIVE_CAPTURE_TOOLS_CACHE" \
+    && HIVE_CAPTURE_INSTALL_WITH_DEPS=1 ruby -rhive/web/browser_bundle \
+         -e 'Hive::Web::BrowserBundle.new.ensure!' \
+    && chown -R hive:hive "$HIVE_CAPTURE_TOOLS_CACHE"
 
 # The hivebox web UI: a Rails app with its own bundle, served by `hive web`.
 # Assets precompile at build time (propshaft + importmap — no node build);

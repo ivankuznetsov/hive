@@ -21,18 +21,18 @@
     "requirement": { "const": "outcome_evidence_required" },
     "implementation": { "$ref": "#/$defs/Implementation" },
     "claims": {
-      "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
+      "type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": true,
       "items": { "$ref": "#/$defs/Claim" }
     },
     "exclusions": {
-      "type": "array", "maxItems": 64, "uniqueItems": true,
+      "type": "array", "maxItems": 16, "uniqueItems": true,
       "items": { "$ref": "#/$defs/Exclusion" }
     },
     "traceability": {
       "type": "object", "minProperties": 1, "maxProperties": 10000,
       "propertyNames": { "$ref": "#/$defs/SafePath" },
       "additionalProperties": {
-        "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
+        "type": "array", "minItems": 1, "maxItems": 21, "uniqueItems": true,
         "items": { "$ref": "#/$defs/SafeId" }
       }
     },

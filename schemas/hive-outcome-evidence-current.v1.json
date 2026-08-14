@@ -7,7 +7,7 @@
   "required": [
     "schema", "schema_version", "task", "project", "status", "generation",
     "recovery_epoch", "attempt_id", "requirement_sha256", "attempt_sha256",
-    "attempts", "attempt_count", "reason", "failed_claims", "reviewer_reasons",
+    "attempts", "attempt_count", "reason", "failed_targets", "reviewer_reasons",
     "recovery_digest", "published_at"
   ],
   "properties": {
@@ -49,12 +49,12 @@
         { "type": "null" }
       ]
     },
-    "failed_claims": {
-      "type": "array", "maxItems": 64, "uniqueItems": true,
+    "failed_targets": {
+      "type": "array", "maxItems": 21, "uniqueItems": true,
       "items": { "$ref": "#/$defs/ClaimId" }
     },
     "reviewer_reasons": {
-      "type": "array", "maxItems": 64, "uniqueItems": true,
+      "type": "array", "maxItems": 21, "uniqueItems": true,
       "items": { "type": "string", "minLength": 1, "maxLength": 1024 }
     },
     "recovery_digest": {

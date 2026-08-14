@@ -15,7 +15,7 @@ module OutcomeEvidenceHelper
       producer: fixture.fetch(:actor).call("producer-1"),
       review: {
         "reviewer" => fixture.fetch(:actor).call("reviewer-1"),
-        "inspected_hashes" => hashes,
+        "review_scope_hashes" => hashes,
         "verdicts" => [
           {
             "target_id" => "claim-checkout", "verdict" => "accepted",
@@ -44,7 +44,7 @@ module OutcomeEvidenceHelper
       diagnostic: "The checkout proof does not show the final confirmation state.",
       review: {
         "reviewer" => fixture.fetch(:actor).call("reviewer-blocked"),
-        "inspected_hashes" => hashes,
+        "review_scope_hashes" => hashes,
         "verdicts" => [
           {
             "target_id" => "claim-checkout", "verdict" => "revise",
@@ -55,7 +55,7 @@ module OutcomeEvidenceHelper
     )
     pointer = fixture.fetch(:store).publish_blocked!(
       generation: fixture.dig(:requirement, "generation"),
-      reason: "recaptures_exhausted", failed_claims: [ "claim-checkout" ],
+      reason: "recaptures_exhausted", failed_targets: [ "claim-checkout" ],
       reviewer_reasons: [ "The checkout proof does not show the final confirmation state." ],
       attempt_ids: [ attempt.fetch("attempt_id") ]
     )

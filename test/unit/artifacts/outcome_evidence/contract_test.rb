@@ -22,6 +22,26 @@ class OutcomeEvidenceContractTest < Minitest::Test
     assert_equal paths.sort, requirement.fetch("traceability").keys.sort
   end
 
+  def test_rejects_fragmented_requirements_with_more_than_five_outcome_claims
+    paths = (1..6).map { |number| "app/outcome_#{number}.rb" }
+    claims = paths.each_with_index.map do |path, index|
+      claim(
+        "claim-outcome-#{index + 1}",
+        "The user can observe outcome number #{index + 1} clearly.",
+        "document", [ path ]
+      )
+    end
+
+    error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.requirement!(
+        implementation: { "changed_paths" => paths }, claims: claims,
+        exclusions: [], inference: { "context_id" => "inference-1", "agent" => "claude" }
+      )
+    end
+
+    assert_match(/at most 5 claims/, error.message)
+  end
+
   def test_rejects_missing_coverage_unsupported_exclusions_vague_claims_and_wrong_proof_kinds
     paths = %w[app/checkout.rb test/checkout_test.rb]
     base = {
@@ -47,7 +67,7 @@ class OutcomeEvidenceContractTest < Minitest::Test
     end
   end
 
-  def test_acceptance_requires_distinct_contexts_complete_claim_proof_and_inspected_hashes
+  def test_acceptance_requires_distinct_contexts_complete_claim_proof_and_review_scope_hashes
     requirement = Contract.requirement!(
       implementation: { "changed_paths" => %w[app/checkout.rb] },
       claims: [ claim("claim-flow", "A buyer can finish checkout and see confirmation.", "video", %w[app/checkout.rb]) ],
@@ -65,7 +85,7 @@ class OutcomeEvidenceContractTest < Minitest::Test
     producer = { "context_id" => "producer-1", "agent" => "claude" }
     reviewer = { "context_id" => "reviewer-1", "agent" => "claude" }
     output = {
-      "inspected_hashes" => [ "a" * 64, "b" * 64 ],
+      "review_scope_hashes" => [ "a" * 64, "b" * 64 ],
       "verdicts" => [
         { "target_id" => "claim-flow", "verdict" => "accepted", "reason" => "The temporal recording shows the checkout transition and confirmation." }
       ]
@@ -128,8 +148,57 @@ class OutcomeEvidenceContractTest < Minitest::Test
     end
     assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
       Contract.review!(requirement: requirement, evidence: evidence, producer: producer,
-                       reviewer: reviewer, output: output.merge("inspected_hashes" => [ "a" * 64 ]))
+                       reviewer: reviewer, output: output.merge("review_scope_hashes" => [ "a" * 64 ]))
     end
+  end
+
+  def test_missing_claim_proof_can_be_durably_revised_but_never_accepted
+    paths = %w[app/checkout.rb app/receipt.rb]
+    requirement = Contract.requirement!(
+      implementation: { "changed_paths" => paths },
+      claims: [
+        claim("claim-flow", "A buyer can finish checkout and see confirmation.", "document", [ paths.first ]),
+        claim("claim-receipt", "The completed purchase retains its visible receipt details.", "document", [ paths.last ])
+      ],
+      exclusions: [],
+      inference: { "context_id" => "inference-1", "agent" => "claude" }
+    )
+    evidence = [
+      {
+        "kind" => "document", "claims" => [ "claim-flow" ],
+        "representations" => [ { "sha256" => "a" * 64 }, { "sha256" => "b" * 64 } ]
+      }
+    ]
+    actors = {
+      producer: { "context_id" => "producer-1", "agent" => "claude" },
+      reviewer: { "context_id" => "reviewer-1", "agent" => "claude" }
+    }
+    output = {
+      "review_scope_hashes" => [ "a" * 64, "b" * 64 ],
+      "verdicts" => [
+        {
+          "target_id" => "claim-flow", "verdict" => "accepted",
+          "reason" => "The retained document directly demonstrates the completed checkout state."
+        },
+        {
+          "target_id" => "claim-receipt", "verdict" => "revise",
+          "reason" => "No admitted representation demonstrates the completed receipt details yet."
+        }
+      ]
+    }
+
+    review = Contract.review!(
+      requirement: requirement, evidence: evidence, **actors, output: output
+    )
+    assert_equal "revise", review.fetch("status")
+
+    output.fetch("verdicts").last["verdict"] = "accepted"
+    error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.review!(
+        requirement: requirement, evidence: evidence, **actors, output: output
+      )
+    end
+    assert_match(/cannot accept a claim without admitted proof/, error.message)
   end
 
   def test_rejects_secret_shaped_semantic_claims_exclusions_and_verdicts
@@ -173,7 +242,7 @@ class OutcomeEvidenceContractTest < Minitest::Test
         producer: { "context_id" => "producer-1", "agent" => "claude" },
         reviewer: { "context_id" => "reviewer-1", "agent" => "claude" },
         output: {
-          "inspected_hashes" => [ "a" * 64, "b" * 64 ],
+          "review_scope_hashes" => [ "a" * 64, "b" * 64 ],
           "verdicts" => [
             {
               "target_id" => "claim-flow", "verdict" => "accepted",
@@ -239,7 +308,7 @@ class OutcomeEvidenceContractTest < Minitest::Test
       }
     ]
     output = {
-      "inspected_hashes" => [ "a" * 64, "b" * 64 ],
+      "review_scope_hashes" => [ "a" * 64, "b" * 64 ],
       "verdicts" => [
         {
           "target_id" => "claim-flow", "verdict" => "accepted",
@@ -264,7 +333,7 @@ class OutcomeEvidenceContractTest < Minitest::Test
     assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
       Contract.review!(
         requirement: requirement, evidence: evidence,
-        producer: producer, reviewer: reviewer, output: output.except("inspected_hashes")
+        producer: producer, reviewer: reviewer, output: output.except("review_scope_hashes")
       )
     end
     assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do

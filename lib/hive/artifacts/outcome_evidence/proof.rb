@@ -23,7 +23,7 @@ module Hive
         MAX_ORIGINAL_BYTES = 256 * 1024 * 1024
         MAX_REVIEW_BYTES = 16 * 1024 * 1024
         MAX_REPRESENTATIONS = 8
-        MAX_CLAIMS = 64
+        MAX_CLAIMS = 5
         MAX_TEXT_BYTES = 4 * 1024 * 1024
         MAX_VIDEO_DURATION_SECONDS = 30
         SAFE_NAME = /\A[a-z][a-z0-9_-]{0,63}\z/
@@ -125,6 +125,104 @@ module Hive
           FileUtils.remove_entry_secure(destination) if destination && File.directory?(destination)
           raise
         end
+
+        # Convert the producer's semantic-only task descriptor into the full
+        # byte contract. Hashes, sizes, source identity, and rendering are
+        # controller observations, not values an LLM needs to calculate or
+        # echo. Existing project-provider descriptors retain their separately
+        # authenticated source contract.
+        def materialize_producer!(value, task_folder:, expected_head:, destination_root:)
+          raw = object!(value, "producer outcome evidence")
+          materialized = if raw.key?("source")
+            materialize!(
+              raw, task_folder: task_folder, expected_head: expected_head,
+              destination_root: destination_root
+            )
+          else
+            reject_unknown!(
+              raw, %w[kind summary claims representations], "producer outcome evidence"
+            )
+            representations = Array(raw.fetch("representations")).map do |value|
+              item = object!(value, "producer outcome evidence representation")
+              reject_unknown!(
+                item, %w[role media_type path], "producer outcome evidence representation"
+              )
+              if item.fetch("role").to_s == "storyboard"
+                raise StoreError, "producer must not supply controller review storyboards"
+              end
+              path = Identity.validate_changed_path!(item.fetch("path"))
+              candidate, stat = retained_regular_file!(task_folder, path)
+              {
+                "role" => item.fetch("role").to_s,
+                "media_type" => item.fetch("media_type").to_s,
+                "path" => path,
+                "sha256" => secure_digest(candidate),
+                "bytes" => stat.size
+              }
+            end
+            described = raw.merge(
+              "source" => {
+                "type" => "task", "name" => "hive-producer",
+                "source_sha" => expected_head.to_s
+              },
+              "representations" => representations
+            )
+            materialize!(
+              described, task_folder: task_folder, expected_head: expected_head,
+              destination_root: destination_root
+            )
+          end
+          return materialized unless materialized.fetch("kind") == "video"
+
+          add_controller_storyboard!(
+            materialized, task_folder: task_folder, expected_head: expected_head,
+            destination_root: destination_root
+          )
+        rescue KeyError => e
+          raise StoreError, "producer outcome evidence is missing #{e.key}"
+        end
+
+        def add_controller_storyboard!(entry, task_folder:, expected_head:, destination_root:)
+          relative_root = Identity.validate_changed_path!(destination_root)
+          task_root = File.realpath(task_folder)
+          destination = File.join(task_root, relative_root)
+          prepare_materialization_root!(task_root, destination) unless File.directory?(destination)
+          review = entry.fetch("representations").find { |item| item.fetch("role") == "review" }
+          source, = retained_regular_file!(task_folder, review.fetch("path"))
+          duration = inspect_media!(source, media_type: review.fetch("media_type"))
+          storyboard_relative = File.join(relative_root, "controller-storyboard.png")
+          storyboard = File.join(task_root, storyboard_relative)
+          rate = [ 6.0 / duration, 0.2 ].max
+          ffmpeg = Hive::InvokedBinary.which("ffmpeg")
+          raise StoreError, "ffmpeg is required to derive video review frames" unless ffmpeg
+
+          media_command(
+            [ ffmpeg, "-nostdin", "-v", "error", "-i", source,
+              "-vf", "fps=#{rate},scale=480:-2:flags=lanczos," \
+                     "tile=3x2:nb_frames=6:padding=4:margin=4",
+              "-frames:v", "1", storyboard ],
+            source_root: destination
+          )
+          stat = File.lstat(storyboard)
+          unless stat.file? && !stat.symlink? && stat.size.positive? &&
+                 stat.size <= MAX_REVIEW_BYTES
+            raise StoreError, "controller video storyboard is unavailable"
+          end
+          representations = entry.fetch("representations")
+            .reject { |item| item.fetch("role") == "storyboard" }
+          representations << {
+            "role" => "storyboard", "media_type" => "image/png",
+            "path" => storyboard_relative, "sha256" => secure_digest(storyboard),
+            "bytes" => stat.size
+          }
+          admit!(
+            entry.merge("representations" => representations),
+            task_folder: task_folder, expected_head: expected_head
+          )
+        rescue Errno::ENOENT, Errno::ELOOP
+          raise StoreError, "controller video storyboard is unavailable"
+        end
+        private_class_method :add_controller_storyboard!
 
         def canonical_claims(value)
           claims = Array(value).map(&:to_s)

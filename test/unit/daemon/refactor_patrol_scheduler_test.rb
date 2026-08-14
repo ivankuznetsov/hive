@@ -763,40 +763,43 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_review_runaway_ceiling_uses_the_normal_fixed_retry
-    with_project do |_dir, entry, store|
-      enqueue(store)
-      scheduler = scheduler(entry, store)
-      dispatch = scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
-      scheduler.spawned(dispatch, pid: 1234, process_start_time: "boot", pgid: 1234, now: T0 + 1)
-      error = {
-        "feature_id" => "checkout", "error" => "agent_failed",
-        "message" => "agent exceeded runaway ceiling",
-        "details" => {
-          "resource_exhaustion" => {
-            "reason" => "token_limit", "limit" => 100_000_000,
-            "observed" => 100_000_001
+  def test_review_runaway_ceiling_uses_the_shared_one_hour_retry
+    %w[token_limit turn_limit].each do |reason|
+      with_project do |_dir, entry, store|
+        enqueue(store)
+        scheduler = scheduler(entry, store)
+        dispatch = scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
+        scheduler.spawned(dispatch, pid: 1234, process_start_time: "boot", pgid: 1234, now: T0 + 1)
+        error = {
+          "feature_id" => "checkout", "error" => "agent_failed",
+          "message" => "agent exceeded runaway ceiling",
+          "details" => {
+            "resource_exhaustion" => {
+              "reason" => reason, "limit" => 100_000_000,
+              "observed" => 100_000_001
+            }
           }
         }
-      }
-      partial = complete_zero_envelope(entry).merge(
-        "complete" => false,
-        "review_errors" => [ error ],
-        "feature_results" => [
-          { "feature_id" => "checkout", "complete" => false, "thesis_ids" => [], "errors" => [ error ] }
-        ],
-        "zero_reason" => nil
-      )
+        partial = complete_zero_envelope(entry).merge(
+          "complete" => false,
+          "review_errors" => [ error ],
+          "feature_results" => [
+            { "feature_id" => "checkout", "complete" => false, "thesis_ids" => [], "errors" => [ error ] }
+          ],
+          "zero_reason" => nil
+        )
 
-      result = scheduler.complete(
-        dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 0,
-        envelope: partial, now: T0 + 2
-      )
+        result = scheduler.complete(
+          dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 0,
+          envelope: partial, now: T0 + 2
+        )
 
-      assert_equal :retry, result.fetch(:status)
-      assert_empty scheduler.candidates(now: T0 + 61)
-      assert_equal [ "job-7" ],
-                   scheduler.candidates(now: T0 + 62).map { |item| item.fetch(:job_id) }
+        assert_equal :retry, result.fetch(:status), reason
+        assert_empty scheduler.candidates(now: T0 + 3601), reason
+        assert_equal [ "job-7" ],
+                     scheduler.candidates(now: T0 + 3602).map { |item| item.fetch(:job_id) },
+                     reason
+      end
     end
   end
 

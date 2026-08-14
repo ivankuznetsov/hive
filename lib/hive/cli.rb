@@ -971,9 +971,9 @@ module Hive
       open PRs, or enqueue review tasks.
 
       Scope hints use precedence --feature, then --entrypoint, then --path.
-      With --changed-since alone, changed features are boosted but full
-      discovery still runs; combined with a scope hint, changed files further
-      restrict that scoped set. With --json, emits hive-refactor-patrol.v4.
+      --changed-since is only a filter paired with --feature, --entrypoint, or
+      --path; it cannot be used on its own. With --json, emits
+      hive-refactor-patrol.v4.
 
       Use --pr with a merged PR number or URL to analyze only its immutable
       changed-path manifest from a clean registered default-branch checkout.
@@ -994,7 +994,8 @@ module Hive
     option :feature, type: :string, desc: "only review matching mapped feature id"
     option :entrypoint, type: :string, desc: "only review the feature owning this entrypoint"
     option :path, type: :string, desc: "only review features with owned files under this path"
-    option :changed_since, type: :string, desc: "git ref used for changed-feature ranking/filtering"
+    option :changed_since, type: :string,
+                           desc: "git ref filter paired with --feature/--entrypoint/--path"
     option :pr, type: :string, desc: "analyze one merged PR number or URL with the v4 read-only contract"
     option :job_manifest, type: :string,
                           desc: "analyze one immutable merge-intake manifest (daemon/internal)"

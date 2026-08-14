@@ -470,7 +470,7 @@ class RefactorPatrolReviewerTest < Minitest::Test
     end
   end
 
-  def test_empty_reviews_stop_at_fixed_runaway_slice_bound
+  def test_empty_ordinary_review_processes_all_supplied_features
     with_tmp_dir do |dir|
       reviewed = []
       runner = lambda do |feature:, output_path:, **|
@@ -482,14 +482,14 @@ class RefactorPatrolReviewerTest < Minitest::Test
         dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
         agent_runner: runner
       )
-      features = (Hive::RefactorPatrol::Reviewer::MAX_FEATURES_PER_RUN + 1).times.map do |index|
+      features = 13.times.map do |index|
         Hive::Patrol::Feature.from_h(feature.to_h.merge("id" => "feature-#{index}"))
       end
 
       assert_empty reviewer.call(features)
-      assert_equal Hive::RefactorPatrol::Reviewer::MAX_FEATURES_PER_RUN, reviewed.size
+      assert_equal 13, reviewed.size
       assert_equal reviewed, reviewer.feature_results.map { |result| result.fetch("feature_id") }
-      refute_includes reviewed, features.last.id
+      assert_equal features.map(&:id), reviewed
     end
   end
 

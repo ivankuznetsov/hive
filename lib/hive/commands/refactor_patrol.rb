@@ -39,6 +39,10 @@ module Hive
     class RefactorPatrol
       CLAIM_HEARTBEAT_INTERVAL_SEC = 30
       CLAIM_HEARTBEAT_LEASE_SEC = 7200
+      # Durable discovery checkpoints each completed slice before returning,
+      # so a fixed batch keeps daemon fan-out bounded without truncating an
+      # ordinary on-demand scan.
+      DURABLE_DISCOVERY_FEATURE_SLICE = 12
 
       # Unlike the expired-claim resolver, heartbeat liveness checks are
       # strictly observational: a live worker must never be terminated merely
@@ -198,7 +202,11 @@ module Hive
         existing_suppressions = prior_suppressions
         pending_features = features.reject { |feature| completed.key?(feature.id.to_s) }
         token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
-        review_features = pending_features
+        review_features = if pr_mode? && !@dry_run
+          pending_features.first(DURABLE_DISCOVERY_FEATURE_SLICE)
+        else
+          pending_features
+        end
         reviewer = build_reviewer(analysis_root, cfg, state, token_budget)
         yielded_thesis_ids = {}
         incrementally_suppressed = []
@@ -547,6 +555,11 @@ module Hive
                   "hive refactor-patrol --actions cannot be combined with discovery scope hints"
           end
           return
+        end
+
+        if !pr_mode? && @changed_since && !(@feature_hint || @entrypoint_hint || @path_hint)
+          raise Hive::ConfigError,
+                "hive refactor-patrol --changed-since requires --feature, --entrypoint, or --path"
         end
 
         return unless pr_mode?

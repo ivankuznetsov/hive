@@ -603,12 +603,13 @@ active ids. These files are coordination metadata only:
 The occurrence record admits at most 256 terminal effect cells. This is a
 safety envelope, not a unit-of-work counter: ordinary mapping persists its
 complete feature set as one digest-bound, locally retry-safe batch effect, and
-Architecture Patrol retryable action failures normally wait one hour before
-minting a new claim/release generation. A structured daily resource ceiling
-waits until the next UTC day, and a valid action child that changed no job
-state receives the same one-hour durable cooldown instead of immediate
-redispatch. Existing 192-effect records remain valid and have bounded recovery
-headroom. At the reserved boundary, Architecture Patrol verifies that every
+Architecture Patrol retryable action failures wait one hour before minting a
+new claim/release generation. Ordinary retryable discovery waits 60 seconds;
+a structured discovery `token_limit` or `turn_limit` shares the one-hour
+runaway cooldown. A valid action child that changed no job state receives that
+same durable cooldown instead of immediate redispatch. Existing 192-effect
+records remain valid and have bounded recovery headroom. At the reserved
+boundary, Architecture Patrol verifies that every
 predecessor transition is terminal, reserves the exact next attempt generation,
 finalizes and projects the predecessor capture and receipts, then advances the
 job's current occurrence pointer. The successor starts with an empty effect set

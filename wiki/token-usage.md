@@ -83,8 +83,10 @@ process returns `agent_in_flight`, and a crash releases the kernel lock.
 context larger than the per-agent fuse. Claude's interim usage events can stop
 a runaway process in flight; providers with terminal-only accounting remain
 bounded by the existing wall-clock, turn, process-custody, feature, fix, and PR
-caps. A UsageDb failure warns and releases the lock, but does not become a
-future admission gate.
+caps. Architecture discovery normally retries after 60 seconds, but a
+structured `token_limit` or `turn_limit` result shares the fixed one-hour
+runaway cooldown used by action retries. A UsageDb failure warns and releases
+the lock, but does not become a future admission gate.
 
 ## TUI Surfaces
 

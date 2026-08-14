@@ -447,27 +447,74 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_failed_atomic_config_replacement_preserves_original_and_retry_succeeds
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        File.write(cfg_path, "patrol:\n  mode: off\n  max_tokens_per_day: 2\n")
+        FileUtils.chmod(0o600, cfg_path)
+        original_bytes = File.binread(cfg_path)
+        original_config = YAML.safe_load(original_bytes)
+        original_rename = File.method(:rename)
+        failing_rename = lambda do |source, target|
+          raise Errno::EIO, "injected config replacement failure" if target == cfg_path
+
+          original_rename.call(source, target)
+        end
+        command = migrate_command(dir, daemon_restarter: -> { })
+
+        with_replaced_singleton_method(File, :rename, failing_rename) do
+          assert_raises(Errno::EIO) { capture_io { command.call } }
+        end
+
+        assert_equal original_bytes, File.binread(cfg_path)
+        assert_equal original_config, YAML.safe_load(File.binread(cfg_path))
+
+        capture_io { command.call }
+
+        migrated = YAML.safe_load(File.binread(cfg_path))
+        refute migrated.fetch("patrol").key?("max_tokens_per_day")
+        assert_equal 0o600, File.stat(cfg_path).mode & 0o777
+      end
+    end
+  end
+
   def test_migrate_semantically_rewrites_flow_style_retired_patrol_policy
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
+        before = "# Before Patrol.\nproject_name: preserve-before\n"
+        between = "# Between target sections.\ntimeout_sec: {execute: 321}\n"
+        after = "# After Refactor Patrol.\nreview:\n  require_ci: false\n"
         File.write(
           cfg_path,
-          "patrol: {mode: off, max_tokens_per_day: 2, max_tokens_per_agent: 1000000000}\n" \
+          before +
+          "patrol: {mode: off, max_tokens_per_day: 2, max_tokens_per_agent: 1000000000}\n" +
+          between +
           "refactor_patrol: {enabled: false, min_leverage_score: 0.1, " \
           "issue_filing: {enabled: false, min_leverage_score: 0.25}, " \
-          "leverage: {weights: {churn: 1.0}}}\n"
+          "leverage: {weights: {churn: 1.0}}}\n" +
+          after
         )
+        command = migrate_command(dir, daemon_restarter: -> { })
 
-        capture_io { migrate_command(dir, daemon_restarter: -> { }).call }
+        capture_io { command.call }
 
-        migrated = YAML.safe_load(File.read(cfg_path))
+        migrated_bytes = File.read(cfg_path)
+        migrated = YAML.safe_load(migrated_bytes)
+        assert migrated_bytes.start_with?(before)
+        assert_includes migrated_bytes, between
+        assert migrated_bytes.end_with?(after)
         assert_equal 1_000_000_000, migrated.dig("patrol", "max_tokens_per_agent")
         refute migrated.fetch("patrol").key?("max_tokens_per_day")
         refute migrated.fetch("refactor_patrol").key?("min_leverage_score")
         refute migrated.fetch("refactor_patrol").key?("leverage")
         refute migrated.dig("refactor_patrol", "issue_filing").key?("min_leverage_score")
+
+        capture_io { command.call }
+        assert_equal migrated_bytes, File.read(cfg_path)
       end
     end
   end

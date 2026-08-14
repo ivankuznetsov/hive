@@ -223,7 +223,10 @@ spawning. UsageDb records measured and unmetered work as telemetry only.
 Ordinary review batching is bounded directly by `max_features_per_cycle`, and
 fixes by `max_fix_attempts_per_cycle` and `max_prs_per_cycle`. A structured
 per-agent token-limit result ends the current ordinary cycle; Architecture
-Patrol retains its checkpoint/receipts and uses a fixed one-hour retry. When a later review fails, the SHA-bound cursor
+Patrol retains its checkpoint/receipts and uses a fixed one-hour retry for
+structured `token_limit` or `turn_limit` discovery results. Other retryable
+discovery uses 60 seconds, while actions use the shared one-hour cooldown. When
+a later review fails, the SHA-bound cursor
 advances past only the proven-clean prefix; the failed feature and remaining
 suffix stay pinned for retry.
 

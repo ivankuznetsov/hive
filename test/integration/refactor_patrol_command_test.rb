@@ -1048,6 +1048,47 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_durable_pr_mode_reviews_twelve_features_and_resumes_the_remainder
+    with_refactor_patrol_project do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      features = 13.times.map { |index| feature("slice-#{index}") }
+      manifest = pr_manifest(
+        merge_sha: head, changed_paths: features.flat_map(&:owned_files)
+      )
+      first_reviewer = FakeReviewer.new({})
+
+      first_out, first_err, first_status = with_captured_exit do
+        command_for(
+          pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
+          features: features, reviewer: first_reviewer
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, first_status, "#{first_out}\n#{first_err}"
+      first_payload = JSON.parse(first_out)
+      assert_equal features.first(12).map(&:id), first_reviewer.seen_feature_ids
+      refute first_payload.fetch("complete")
+      assert_equal 12, first_payload.fetch("features_mapped")
+      assert_equal 12, Hive::RefactorPatrol::JobStore.new(repo)
+                                                .read_job(manifest.fetch("job_id"))
+                                                .fetch("feature_results").size
+
+      retry_reviewer = FakeReviewer.new({})
+      retry_out, retry_err, retry_status = with_captured_exit do
+        command_for(
+          pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
+          features: features, reviewer: retry_reviewer
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, retry_status, "#{retry_out}\n#{retry_err}"
+      retry_payload = JSON.parse(retry_out)
+      assert_equal [ features.last.id ], retry_reviewer.seen_feature_ids
+      assert retry_payload.fetch("complete")
+      assert_equal 13, retry_payload.fetch("features_mapped")
+    end
+  end
+
   def test_real_pr_mode_keeps_review_runs_durable_while_explicit_dry_run_stays_ephemeral
     state = Hive::RefactorPatrol::StateStore.new("/repo")
     budget = Object.new
@@ -1310,6 +1351,18 @@ class RefactorPatrolCommandTest < Minitest::Test
       error = assert_raises(Hive::ConfigError) { command.send(:validate_mode!) }
       assert_match message, error.message
     end
+  end
+
+  def test_changed_since_requires_an_explicit_scope_hint
+    command = Hive::Commands::RefactorPatrol.new(
+      "demo", json: true, changed_since: "origin/main"
+    )
+
+    error = assert_raises(Hive::ConfigError) { command.send(:validate_mode!) }
+    assert_equal(
+      "hive refactor-patrol --changed-since requires --feature, --entrypoint, or --path",
+      error.message
+    )
   end
 
   def test_default_manifest_resolver_receives_authoritative_project_context

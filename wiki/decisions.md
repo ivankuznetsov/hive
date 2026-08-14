@@ -776,8 +776,10 @@ retired config keys before starting the current runtime.
 **Consequences:** Existing v3 JobStore bytes remain recoverable as files but
 have no runtime continuity. `discuss` creates an issue action; `fix` is PR-first
 with a dormant deterministic-nonfixable issue fallback; `dismiss` creates no
-action. Wall-clock, turn, feature/fix/PR, process-custody, and daemon concurrency
-bounds remain. This decision supersedes ADR-042.
+action. Ordinary transient discovery retries after 60 seconds; structured
+`token_limit`/`turn_limit` discovery and action retries use one fixed hour.
+Wall-clock, turn, feature/fix/PR, process-custody, and daemon concurrency bounds
+remain. This decision supersedes ADR-042.
 
 ## ADR-032: Per-stage controls overlay the current durable identity
 

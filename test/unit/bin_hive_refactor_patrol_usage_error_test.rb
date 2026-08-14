@@ -7,6 +7,21 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
   ROOT = File.expand_path("../..", __dir__).freeze
   BIN = File.join(ROOT, "bin", "hive").freeze
 
+  def test_help_documents_changed_since_as_a_scoped_filter
+    Dir.mktmpdir("hive-bin-help") do |home|
+      stdout, stderr, status = Open3.capture3(
+        { "HOME" => home, "HIVE_HOME" => home },
+        RbConfig.ruby, BIN, "refactor-patrol", "--help",
+        chdir: ROOT
+      )
+
+      assert status.success?, stderr
+      assert_includes stdout, "--changed-since is only a filter paired with"
+      assert_includes stdout, "git ref filter paired with --feature/--entrypoint/--path"
+      refute_includes stdout, "changed features are boosted"
+    end
+  end
+
   def test_refactor_patrol_usage_error_is_schema_valid_v4
     payload = run_usage_error("refactor-patrol", "demo", "extra", "--json")
 

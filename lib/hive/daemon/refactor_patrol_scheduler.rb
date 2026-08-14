@@ -34,8 +34,9 @@ module Hive
       PATROL_SLUG_PREFIX = "refactor-patrol".freeze
       MODULE_SCHEDULE = "*/10 * * * *".freeze
       RETRY_BACKOFF_SEC = 60
-      ACTION_RETRY_BACKOFF_SEC =
+      RUNAWAY_RETRY_BACKOFF_SEC =
         Hive::RefactorPatrol::ActionClaimTransitions::RETRY_BACKOFF_SEC
+      RUNAWAY_RESOURCE_EXHAUSTION_REASONS = %w[token_limit turn_limit].freeze
       EFFECT_CAPACITY_RESERVE = 1
       SUPPORTED_REPORT_SCHEMA_VERSIONS = [
         Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
@@ -446,7 +447,7 @@ module Hive
         aggregate = checkpoint_discovery_through_gateway!(
           entry, store, dispatch_token,
           envelope: envelope, now: now,
-          backoff_sec: RETRY_BACKOFF_SEC
+          backoff_sec: discovery_retry_backoff_sec(envelope)
         )
         result = completion_result(
           if envelope.fetch("complete")
@@ -838,7 +839,7 @@ module Hive
           aggregate = block_through_gateway!(
             entry, store, aggregate, phase: :action,
             reason: "action_no_progress", evidence: {}, now: now,
-            backoff_sec: ACTION_RETRY_BACKOFF_SEC
+            backoff_sec: RUNAWAY_RETRY_BACKOFF_SEC
           )
           :retry
         else
@@ -847,7 +848,7 @@ module Hive
             reason: action_completion_failure_reason(exit_code, envelope),
             evidence: {},
             now: now,
-            backoff_sec: ACTION_RETRY_BACKOFF_SEC
+            backoff_sec: RUNAWAY_RETRY_BACKOFF_SEC
           )
           :retry
         end
@@ -877,7 +878,15 @@ module Hive
       end
 
       def retry_backoff_sec(phase)
-        phase.to_sym == :action ? ACTION_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
+        phase.to_sym == :action ? RUNAWAY_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
+      end
+
+      def discovery_retry_backoff_sec(envelope)
+        runaway = Array(envelope["review_errors"]).any? do |error|
+          reason = error.dig("details", "resource_exhaustion", "reason")
+          RUNAWAY_RESOURCE_EXHAUSTION_REASONS.include?(reason)
+        end
+        runaway ? RUNAWAY_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
       end
 
       def valid_report_envelope?(envelope)

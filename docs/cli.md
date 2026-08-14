@@ -72,6 +72,13 @@ ignoring the choice during a workflow rebind. Older discovery-only configs do
 not inherit mutation authority; established projects opt in by writing
 `refactor_patrol.auto_fix.enabled: true` explicitly.
 
+On-demand Architecture Patrol can select one scope with `--feature`,
+`--entrypoint`, or `--path`. `--changed-since REF` is only a filter paired with
+one of those selectors; it does not run or boost a standalone full discovery.
+Ordinary incomplete or errored discovery retries after 60 seconds, while a
+structured `token_limit` or `turn_limit` result uses the same fixed one-hour
+runaway cooldown as action retries.
+
 Durable architecture-patrol jobs have a non-mutating inspection surface:
 
 ```bash

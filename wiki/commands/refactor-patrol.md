@@ -78,9 +78,11 @@ refactor_patrol:
 
 ## Discovery modes
 
-The no-PR mode accepts `--feature`, `--entrypoint`, `--path`, and
-`--changed-since` and emits the same v4 route vocabulary without creating a
-durable action job.
+The no-PR mode accepts `--feature`, `--entrypoint`, or `--path` and emits the
+same v4 route vocabulary without creating a durable action job.
+`--changed-since` is only a Git-ref filter paired with one of those scope hints;
+standalone `--changed-since` is rejected instead of boosting changed features
+inside a full discovery run.
 
 `--pr` and `--job-manifest` require JSON, reject on-demand scope hints, and
 select mapped features only from the immutable changed-path/status
@@ -160,18 +162,20 @@ per-feature allowance. The per-feature default is one thesis, explicitly a
 ceiling rather than a quota. `max_review_seconds_per_run` (default 3600) is the
 matching absolute monotonic wall-clock cap: each feature spawn receives only
 the smaller of its configured patrol timeout and the whole-run time remaining.
-One non-configurable 12-slice safety bound also stops a run of empty reviews
-from launching an agent for every mapped feature. Once any bound is exhausted,
-later slices stay incomplete for a future resume instead of multiplying one
-agent timeout by every mapped feature.
+Durable PR and job-manifest discovery processes at most 12 incomplete slices
+per child, checkpoints each completed slice, and resumes the remainder in a
+later child. On-demand discovery processes its complete supplied scope under
+the run-wide thesis and wall-clock bounds; it cannot silently report a partial
+scope as complete.
 Before each ordinary or architecture review/fix spawn, one project-wide lock
 serializes the agent lifetime and one deliberately high
 `patrol.max_tokens_per_agent` fuse bounds the child process. There are no
 cycle, daily, launch-count, multiplier, or Patrol-specific USD allowances.
-UsageDb rows remain telemetry and never deny a launch. A token-limited child is
-a typed runaway result: discovery/action evidence is retained and Architecture
-Patrol retries after the fixed one-hour cooldown instead of waiting for a UTC
-quota reset.
+UsageDb rows remain telemetry and never deny a launch. Ordinary incomplete or
+errored discovery keeps its 60-second retry. A discovery error whose structured
+`resource_exhaustion.reason` is `token_limit` or `turn_limit` is instead a typed
+runaway result: its checkpoint evidence is retained and it shares the fixed
+one-hour cooldown used by actions.
 The read-only runner accepts either bare JSON or exactly one `json` code fence.
 Plain-text rationale may precede or follow that single fence, but another fence
 remains invalid so there is only one canonical structured result. The third
@@ -378,8 +382,8 @@ snapshot; it cannot relax captured contract/dependency guards, lower
 confidence threshold, add a validation command, switch identities, or
 otherwise broaden an old job. A revoked action remains nonterminal so restored
 authority can resume it, but Hive probes that durable hold at most hourly
-instead of launching an action child every daemon minute. Other transient
-action failures retain the ordinary one-minute retry cadence.
+instead of launching an action child every daemon minute. Other retryable
+action failures use the same fixed one-hour cadence.
 
 Fixes inherit the resolved refactor identity by default and may independently
 override `refactor_patrol.auto_fix.agent`, `.model`, and `.effort`. The selected

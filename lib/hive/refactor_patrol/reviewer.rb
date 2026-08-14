@@ -20,10 +20,6 @@ module Hive
       MAX_PROMPT_OWNED_FILES = 4
       MAX_PROMPT_CONTEXT_FILES = 4
       MAX_PROMPT_SOURCE_BYTES = 32 * 1024
-      # A fixed safety bound, not a quota or configuration surface. Empty
-      # reviews must not turn one daemon child into unbounded agent fan-out;
-      # the command checkpoints completed slices and resumes the remainder.
-      MAX_FEATURES_PER_RUN = 12
       TemplateBindings = Struct.new(
         :project_root, :feature, :commands, :output_path,
         :max_theses, :source_pr, :output_mode, :user_supplied_tag,
@@ -67,7 +63,7 @@ module Hive
         remaining = max_theses_per_run
         deadline = monotonic_now + max_review_seconds_per_run
         theses = []
-        features.first(MAX_FEATURES_PER_RUN).each do |feature|
+        features.each do |feature|
           break unless remaining.positive?
 
           remaining_seconds = deadline - monotonic_now

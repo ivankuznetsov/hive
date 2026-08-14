@@ -2,6 +2,7 @@ require "fileutils"
 require "open3"
 require "time"
 require "yaml"
+require "hive/atomic_file"
 require "hive/config"
 require "hive/display_name/generator"
 require "hive/git_ops"
@@ -603,7 +604,11 @@ module Hive
           content, rewritten = rewrite_section_key(content, section, key, dst_key)
           changed ||= rewritten
         end
-        File.write(path, content) if changed
+        if changed
+          mode = File.stat(path).mode & 0o777
+          Hive::AtomicFile.write(path, content, mode: mode)
+          Hive::AtomicFile.fsync_directory(File.dirname(path))
+        end
         changed
       end
 
@@ -650,8 +655,9 @@ module Hive
 
       # Remove retired Patrol allowance/leverage policy without retaining a
       # compatibility reader. Block-style YAML is edited in place to preserve
-      # unrelated comments and formatting. Rare flow-style/quoted layouts fall
-      # back to a semantic YAML rewrite after proving the exact target value.
+      # unrelated comments and formatting. Rare flow-style/quoted layouts
+      # normalize only a target top-level section after proving which section
+      # the block-preserving rewrite could not represent.
       def rewrite_retired_patrol_policy(content, path)
         parsed = YAML.safe_load(content) || {}
         unless parsed.is_a?(Hash)
@@ -659,8 +665,8 @@ module Hive
         end
 
         target = parsed
-        changed = delete_retired_patrol_values!(target)
-        return [ content, false ] unless changed
+        changed_sections = delete_retired_patrol_values!(target)
+        return [ content, false ] if changed_sections.empty?
 
         rewritten = content
         RETIRED_PATROL_CONFIG_KEYS.each do |key|
@@ -675,43 +681,90 @@ module Hive
         rewritten = remove_block_mapping(rewritten, [ "refactor_patrol", "leverage" ])
 
         reparsed = YAML.safe_load(rewritten) || {}
-        rewritten = target.to_yaml unless reparsed == target
+        changed_sections.each do |section|
+          next if reparsed[section] == target[section]
+
+          rewritten = normalize_retired_patrol_section(
+            rewritten, section, target.fetch(section), path
+          )
+          reparsed = YAML.safe_load(rewritten) || {}
+        end
+        unless reparsed == target
+          raise Hive::ConfigError,
+                "cannot automatically migrate retired Patrol policy in #{path} " \
+                "without rewriting unrelated config"
+        end
         [ rewritten, true ]
       rescue Psych::Exception => e
         raise Hive::ConfigError, "config.yml at #{path} is not valid YAML: #{e.message}"
       end
 
       def delete_retired_patrol_values!(config)
-        changed = false
+        changed_sections = []
         patrol = config["patrol"]
         if patrol.is_a?(Hash)
+          patrol_changed = false
           RETIRED_PATROL_CONFIG_KEYS.each do |key|
             next unless patrol.key?(key)
 
             patrol.delete(key)
-            changed = true
+            patrol_changed = true
           end
+          changed_sections << "patrol" if patrol_changed
         end
 
         refactor = config["refactor_patrol"]
-        return changed unless refactor.is_a?(Hash)
+        return changed_sections unless refactor.is_a?(Hash)
 
+        refactor_changed = false
         RETIRED_REFACTOR_PATROL_CONFIG_KEYS.each do |key|
           next unless refactor.key?(key)
 
           refactor.delete(key)
-          changed = true
+          refactor_changed = true
         end
         issue_filing = refactor["issue_filing"]
         if issue_filing.is_a?(Hash) && issue_filing.key?("min_leverage_score")
           issue_filing.delete("min_leverage_score")
-          changed = true
+          refactor_changed = true
         end
         if refactor.key?("leverage")
           refactor.delete("leverage")
-          changed = true
+          refactor_changed = true
         end
-        changed
+        changed_sections << "refactor_patrol" if refactor_changed
+        changed_sections
+      end
+
+      def normalize_retired_patrol_section(content, section, value, path)
+        document = Psych.parse(content)
+        mapping = document&.root
+        unless mapping.is_a?(Psych::Nodes::Mapping)
+          raise Hive::ConfigError, "config.yml at #{path} must be a hash"
+        end
+
+        pair = mapping.children.each_slice(2).find do |key_node, _value_node|
+          key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == section &&
+            key_node.start_column.zero?
+        end
+        unless pair
+          raise Hive::ConfigError,
+                "cannot locate top-level `#{section}` in #{path} for migration"
+        end
+
+        key_node, value_node = pair
+        lines = content.lines
+        end_idx = value_node.end_line
+        end_idx += 1 unless value_node.end_column.zero?
+        end_idx = [ end_idx, key_node.start_line + 1 ].max
+        while end_idx > key_node.start_line + 1 &&
+              lines[end_idx - 1]&.match?(/\A\s*(?:#.*)?(?:\r?\n)?\z/)
+          end_idx -= 1
+        end
+
+        replacement = { section => value }.to_yaml.lines.drop(1)
+        lines[key_node.start_line...end_idx] = replacement
+        lines.join
       end
 
       def remove_block_mapping_key(content, mapping_path, key)

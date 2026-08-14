@@ -50,6 +50,30 @@ class OutcomeEvidenceProofTest < Minitest::Test
     end
   end
 
+  def test_metadata_admission_preserves_structure_without_reopening_media
+    with_tmp_dir do |root|
+      files = valid_files(root)
+      admitted = admit(root, proof(
+        "document", files,
+        original: [ "report.md", "text/markdown" ],
+        review: [ "report.txt", "text/plain" ]
+      ))
+      admitted.fetch("representations").each do |representation|
+        File.unlink(File.join(root, representation.fetch("path")))
+      end
+
+      assert_equal admitted, Proof.admit_metadata!(
+        admitted, task_folder: root, expected_head: HEAD
+      )
+
+      escaped = Marshal.load(Marshal.dump(admitted))
+      escaped.fetch("representations").first["path"] = "../outside.txt"
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.admit_metadata!(escaped, task_folder: root, expected_head: HEAD)
+      end
+    end
+  end
+
   def test_rejects_storyboard_only_video_broken_media_cast_secrets_and_unsafe_documents
     with_tmp_dir do |root|
       files = valid_files(root)

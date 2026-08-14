@@ -175,6 +175,7 @@ module Hive
           attempt_root = File.join(retained_root, attempt_id)
           begin
             Dir.mkdir(attempt_root, 0o700)
+            attempt_root_created = true
           rescue Errno::EEXIST, Errno::ELOOP
             raise StoreError, "outcome-evidence attempt custody root already exists"
           end
@@ -193,7 +194,7 @@ module Hive
           entries
         rescue StoreError, SystemCallError
           FileUtils.remove_entry_secure(attempt_root) if
-            attempt_root && File.directory?(attempt_root)
+            attempt_root_created && attempt_root && File.directory?(attempt_root)
           raise
         end
 
@@ -491,6 +492,22 @@ module Hive
         end
 
         def package
+          build_package(validate_representations: true)
+        end
+
+        # Query projection for Web and structured inspection. Immutable
+        # requirement/attempt documents and their canonical structural contract
+        # are still checked against the current pointer digests, but expensive
+        # media decoding and OCR stay at write admission. Individual media
+        # requests recheck only their selected representation's size and digest
+        # before streaming.
+        def package_metadata
+          build_package(validate_representations: false)
+        end
+
+        private
+
+        def build_package(validate_representations:)
           pointer = read_current!
           generation = pointer.fetch("generation")
           requirement_document = requirement(generation: generation)
@@ -503,8 +520,14 @@ module Hive
           unless attempt_documents.map { |item| item.fetch("attempt_id") } == named_ids
             raise StoreError, "outcome-evidence current pointer omits or reorders attempts"
           end
-          attempt_documents.each do |attempt|
-            validate_retained_evidence!(requirement_document, attempt)
+          if validate_representations
+            attempt_documents.each do |attempt|
+              validate_retained_evidence!(requirement_document, attempt)
+            end
+          else
+            attempt_documents.each do |attempt|
+              validate_retained_metadata!(requirement_document, attempt)
+            end
           end
           case pointer.fetch("status")
           when "accepted"
@@ -542,8 +565,6 @@ module Hive
             "attempts" => attempt_documents
           }
         end
-
-        private
 
         def canonical_reviewer_capabilities(value)
           data = value.to_h.transform_keys(&:to_s)
@@ -870,6 +891,29 @@ module Hive
           end
           unless canonical_review == review
             raise StoreError, "retained outcome-evidence review is not canonical"
+          end
+        end
+
+        def validate_retained_metadata!(requirement, attempt)
+          canonical_entries = attempt.fetch("evidence").map do |entry|
+            canonical = Proof.admit_metadata!(
+              entry, task_folder: @task.folder,
+              expected_head: requirement.dig("implementation", "implementation_head")
+            )
+            unless canonical == entry
+              raise StoreError, "retained outcome evidence metadata is not canonical"
+            end
+            canonical
+          end
+          review = attempt.fetch("review")
+          canonical_review = Contract.review!(
+            requirement: requirement, evidence: canonical_entries,
+            producer: attempt.fetch("producer"), reviewer: review.fetch("reviewer"),
+            output: review.slice("review_scope_hashes", "verdicts")
+          )
+          canonical_producer = canonical_review.delete("producer")
+          unless canonical_producer == attempt.fetch("producer") && canonical_review == review
+            raise StoreError, "retained outcome-evidence review metadata is not canonical"
           end
         end
 

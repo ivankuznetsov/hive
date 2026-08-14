@@ -1,10 +1,19 @@
 require "test_helper"
+require "stringio"
 require_relative "../support/outcome_evidence_helper"
 
 class TaskTest < ActiveSupport::TestCase
   include OutcomeEvidenceHelper
   ProcessStatus = Data.define(:successful) do
     def success? = successful
+  end
+
+  test "verified evidence bodies never stream beyond the admitted byte count" do
+    io = StringIO.new("admitted-extra")
+    body = Task::VerifiedEvidenceBody.new(io, 8)
+
+    assert_equal "admitted", body.to_a.join
+    assert io.closed?
   end
 
   test "finds the task in its project snapshot" do

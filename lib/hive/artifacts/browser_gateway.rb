@@ -1,7 +1,7 @@
 require "fileutils"
+require "digest"
 require "json"
 require "securerandom"
-require "socket"
 require "tempfile"
 require "timeout"
 require "uri"
@@ -29,32 +29,24 @@ module Hive
       ].freeze
       GET_COMMANDS = %w[text html value attr title url count box styles].freeze
 
-      attr_reader :socket_path, :socket_root
-
       class GatewayError < Hive::Error; end
 
       def initialize(environment:, argv_prefix:, writable_root:, origin:,
-                     runner: nil)
+                     runner: nil, on_publish: nil,
+                     max_media_bytes: 256 * 1024 * 1024)
         @environment = environment.to_h
         @argv_prefix = Array(argv_prefix).map(&:to_s).freeze
         @writable_root = File.realpath(writable_root)
         @origin = URI.parse(origin.to_s)
         @runner = runner || method(:run_command)
-        @mutex = Mutex.new
-        @closed = false
+        @on_publish = on_publish
+        @max_media_bytes = Integer(max_media_bytes)
         @pending_record = nil
       end
 
       def start!
-        @socket_root = Dir.mktmpdir("hive-browser-gateway-")
         @private_root = Dir.mktmpdir("hive-browser-output-")
-        File.chmod(0o700, @socket_root)
         File.chmod(0o700, @private_root)
-        @socket_path = File.join(@socket_root, "gateway.sock")
-        @server = UNIXServer.new(@socket_path)
-        File.chmod(0o600, @socket_path)
-        @thread = Thread.new { accept_requests }
-        @thread.report_on_exception = false
         self
       rescue SystemCallError => e
         close
@@ -62,71 +54,31 @@ module Hive
       end
 
       def close
-        @mutex.synchronize do
-          @closed = true
-          @server&.close unless @server&.closed?
-        end
-        @thread&.join(1)
         remove_owned_root(@private_root)
-        remove_owned_root(@socket_root)
         true
-      rescue IOError, SystemCallError
+      rescue SystemCallError
         false
       ensure
-        @server = nil
-        @thread = nil
-        @socket_path = nil
-        @socket_root = nil
         @private_root = nil
       end
 
-      private
-
-      def accept_requests
-        loop do
-          client = @server.accept
-          begin
-            handle(client)
-          ensure
-            client.close
-          end
-        end
-      rescue IOError, Errno::EBADF
-        nil
-      rescue SystemCallError
-        retry unless @closed
-      end
-
-      def handle(client)
-        line = client.gets(MAX_REQUEST_BYTES + 1)
-        raise GatewayError, "browser request is missing" unless line
-        if line.bytesize > MAX_REQUEST_BYTES || !line.end_with?("\n")
-          raise GatewayError, "browser request is oversized"
-        end
-
-        request = JSON.parse(line)
-        argv = validate_argv!(request.fetch("argv"))
+      def call(argv)
+        argv = validate_argv!(argv)
         stdout, stderr, status = execute(argv)
-        respond(client,
+        {
           "ok" => status.zero?, "status" => status,
           "stdout" => bounded(stdout), "stderr" => bounded(stderr)
-        )
-      rescue JSON::ParserError, KeyError, TypeError, GatewayError => e
-        respond(client,
-          "ok" => false, "status" => 64, "stdout" => "", "stderr" => e.message
-        )
+        }
+      rescue TypeError, GatewayError => e
+        { "ok" => false, "status" => 64, "stdout" => "", "stderr" => e.message }
       rescue StandardError
-        respond(client,
+        {
           "ok" => false, "status" => 70, "stdout" => "",
           "stderr" => "browser gateway command failed"
-        )
+        }
       end
 
-      def respond(client, payload)
-        client.write(JSON.generate(payload) << "\n")
-      rescue IOError, SystemCallError
-        nil
-      end
+      private
 
       def validate_argv!(value)
         argv = Array(value)
@@ -241,23 +193,47 @@ module Hive
       end
 
       def publish_media!(source, destination)
+        destination_created = false
         stat = File.lstat(source)
-        unless stat.file? && !stat.symlink? && stat.uid == Process.uid
+        unless stat.file? && !stat.symlink? && stat.uid == Process.uid &&
+               stat.size.between?(1, @max_media_bytes)
           raise GatewayError, "browser did not produce owned regular media"
         end
         flags = File::WRONLY | File::CREAT | File::EXCL
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
         File.open(destination, flags, 0o600) do |output|
+          destination_created = true
+          total = 0
+          digest = Digest::SHA256.new
           File.open(source, File::RDONLY | File::NOFOLLOW) do |input|
-            IO.copy_stream(input, output)
+            while (chunk = input.read(1024 * 1024))
+              total += chunk.bytesize
+              raise GatewayError, "browser media exceeds its byte limit" if total > @max_media_bytes
+
+              digest << chunk
+              output.write(chunk)
+            end
+          end
+          unless total == stat.size
+            raise GatewayError, "browser media changed while it was published"
           end
           output.flush
           output.fsync
+          @on_publish&.call(
+            "path" => destination, "bytes" => total, "sha256" => digest.hexdigest,
+            "media_type" => File.extname(destination) == ".png" ? "image/png" : "video/webm"
+          )
         end
       rescue Errno::EEXIST, Errno::ELOOP
         raise GatewayError, "browser media destination already exists"
       rescue Errno::ENOENT
         raise GatewayError, "browser did not produce media"
+      rescue GatewayError
+        FileUtils.rm_f(destination) if destination_created
+        raise
+      rescue StandardError
+        FileUtils.rm_f(destination) if destination_created
+        raise
       ensure
         begin
           File.unlink(source) if source && File.file?(source) && !File.symlink?(source)

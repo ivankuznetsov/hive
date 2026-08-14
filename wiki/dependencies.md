@@ -175,6 +175,7 @@ These are not gems but the CLI tools the runtime invokes:
 | Tool | Min version | Used by |
 |------|-------------|---------|
 | `claude` | 2.1.118 | every active stage; verified by `Hive::Agent.check_version!` |
+| `codex` | 0.147.0 for managed capture permissions; Hivebox pins exact 0.147.0 | outcome-evidence producers use Codex managed limited networking, local binding, and filesystem permissions; earlier builds do not provide the required one-origin isolation contract |
 | `gh` | (any auth-supporting recent) | `Hive::Gh` (`auth status`, `pr list`, `pr view` for PR state checks, secret-scan, dedupe, status rollups, and babysitter context), `Hive::Web::AgentsAuth` (`gh auth status` plus the PTY relay for `gh auth login --web`), `Stages::OpenPr` (agent invokes `gh pr create` from its prompt), `Stages::Finalize` (runner owns `gh pr ready`; agent does `gh pr edit --body-file`), `Stages::Review::GithubPublisher` (`gh pr comment` for review mirroring). |
 | `git` | 2.40+ (worktree, symbolic-ref, etc.) | `Hive::GitOps`, `Hive::Worktree`, `Init`/`New` commands |
 | `tmux` | 3.0+ (3.6a verified locally) | runtime dependency when `claude.mode: tmux`; also used by TUI/e2e tests on private sockets |

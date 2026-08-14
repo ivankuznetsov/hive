@@ -29,16 +29,21 @@ Hive resolves capture capabilities before starting the producer:
 - Web capture uses Hive's exact pinned native `agent-browser` CLI and managed
   Chrome through `hive evidence browser`. The producer receives one
   controller-issued command prefix rooted in its writable evidence attempt;
-  the raw browser socket is never exposed. It can reach one random `.invalid` origin
-  mapped by Hive to one issued loopback application port. Producers do not
+  the command uses a bounded filesystem mailbox and the raw browser socket is
+  never exposed. Codex managed networking admits local binding but no outbound
+  domains or direct arbitrary-loopback connections. The managed browser can
+  reach one random `.invalid` origin mapped by Hive to one issued loopback
+  application port. Producers do not
   select Firefox, Playwright, Puppeteer, or another browser stack. Hive starts
   and verifies the session before the producer runs. Its gateway admits a
   closed interaction vocabulary, checks navigation origin, captures media to a
   controller-private staging path, and exclusively publishes only safe
   basename `.png`/`.webm` files into the attempt root.
 - Terminal capture uses `hive evidence terminal NAME -- COMMAND...`, Hive's
-  Ruby PTY recorder. It invokes the command without a shell, emits `.cast` and
-  `.txt` files, reaps the descendant process tree, and rejects escaped children.
+  controller-side Ruby PTY recorder. It invokes the command without a shell,
+  emits `.cast` and `.txt` files, reaps the descendant process tree, and rejects
+  escaped children. Browser and terminal files must match controller-recorded
+  path, type, size, and digest receipts before custody transfer.
 - `ffmpeg`, `ffprobe`, and Tesseract decode and inspect retained visual media.
   Hive derives the bounded video storyboard used for semantic review; the
   producer does not fabricate one.

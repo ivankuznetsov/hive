@@ -803,12 +803,15 @@ producer starts. Outcome-evidence browser sessions use `hive evidence browser`,
 a controller-owned gateway to the configured `agent-browser` session, and one
 random `.invalid` origin mapped to one issued loopback application port. Hive
 opens and verifies the named session before the producer starts. The producer
-receives only the gateway socket; the raw browser socket and private media
-staging stay controller-owned. The gateway rejects other origins and path-like
-output names, then exclusively publishes PNG/WebM media into the attempt root.
-Hive closes the gateway and named session, then cleans their short-lived socket
-directories, managed app/proxy, and producer process group. Terminal evidence
-reuses Linux child-subreaper custody and rejects detached descendants.
+receives only the bounded `hive evidence` filesystem mailbox; the raw browser
+socket, browser state, and private media staging stay controller-owned. Codex's
+managed limited network proxy permits local binding without admitting outbound
+domains or arbitrary loopback connections. The gateway rejects other origins
+and path-like output names, then exclusively publishes receipted PNG/WebM media
+into the attempt root. Hive closes the mailbox, gateway, and named session,
+then cleans their private roots, managed app/proxy, and producer process group.
+Terminal evidence runs controller-side, reuses Linux child-subreaper custody,
+and rejects detached descendants.
 The image sets git's system credential helper for `https://github.com`
 to `gh auth git-credential`, so the Agents-page `gh` login also supplies push
 credentials for repos under `/data/repos`. The supervisor still spawns

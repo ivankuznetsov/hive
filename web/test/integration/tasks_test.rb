@@ -493,6 +493,11 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal "text/plain", response.media_type
     assert_equal representation.fetch("bytes").to_s, response.headers.fetch("Content-Length")
     assert_includes response.body, "Checkout outcome"
+
+    rejected_digest = representation.fetch("sha256") == "0" * 64 ? "1" * 64 : "0" * 64
+    get task_evidence_path(@project, @slug, "attempt-01-web", rejected_digest)
+    assert_response :not_found
+    assert_empty response.body
   end
 
   test "task page explains blocked evidence and prints its exact recovery command" do

@@ -11,64 +11,29 @@ class ArtifactsBrowserGatewayCoverageGapsTest < Minitest::Test
     Dir.mktmpdir("hive-browser-gateway-start") do |root|
       gateway = build_gateway(root)
       error = with_replaced_singleton_method(
-        UNIXServer, :new, ->(*) { raise Errno::EACCES, "denied" }
+        Dir, :mktmpdir, ->(*) { raise Errno::EACCES, "denied" }
       ) do
         assert_raises(Gateway::GatewayError) { gateway.start! }
       end
       assert_match(/unavailable/, error.message)
 
       failing = build_gateway(root)
-      failing.instance_variable_set(:@server, Object.new.tap do |server|
-        server.define_singleton_method(:closed?) { false }
-        server.define_singleton_method(:close) { raise IOError, "closed" }
-      end)
-      refute failing.close
+      failing.instance_variable_set(:@private_root, File.join(root, "missing"))
+      assert failing.close
     end
-  end
-
-  def test_accept_loop_retries_transient_system_failure_then_stops
-    gateway = Gateway.allocate
-    gateway.instance_variable_set(:@closed, false)
-    calls = 0
-    server = Object.new
-    server.define_singleton_method(:accept) do
-      calls += 1
-      raise Errno::ECONNABORTED if calls == 1
-
-      raise IOError, "closed"
-    end
-    gateway.instance_variable_set(:@server, server)
-
-    assert_nil gateway.send(:accept_requests)
-    assert_equal 2, calls
   end
 
   def test_request_boundary_returns_bounded_protocol_errors
     Dir.mktmpdir("hive-browser-gateway-protocol") do |root|
       gateway = build_gateway(root)
 
-      missing = protocol_client(nil)
-      gateway.send(:handle, missing)
-      assert_equal 64, JSON.parse(missing.writes.last).fetch("status")
-
-      oversized = protocol_client("x" * (Gateway::MAX_REQUEST_BYTES + 1))
-      gateway.send(:handle, oversized)
-      assert_match(/oversized/, JSON.parse(oversized.writes.last).fetch("stderr"))
-
-      invalid = protocol_client("{\n")
-      gateway.send(:handle, invalid)
-      assert_equal 64, JSON.parse(invalid.writes.last).fetch("status")
+      missing = gateway.call(nil)
+      assert_equal 64, missing.fetch("status")
 
       gateway.define_singleton_method(:execute) { |_| raise RuntimeError, "secret" }
-      failed = protocol_client("{\"argv\":[\"snapshot\"]}\n")
-      gateway.send(:handle, failed)
-      response = JSON.parse(failed.writes.last)
+      response = gateway.call([ "snapshot" ])
       assert_equal 70, response.fetch("status")
       refute_includes response.fetch("stderr"), "secret"
-
-      unwritable = Object.new
-      unwritable.define_singleton_method(:write) { |_| raise Errno::EPIPE }
-      assert_nil gateway.send(:respond, unwritable, {})
     end
   end
 
@@ -139,6 +104,30 @@ class ArtifactsBrowserGatewayCoverageGapsTest < Minitest::Test
       with_replaced_singleton_method(File, :unlink, ->(*) { raise Errno::ENOENT }) do
         gateway.send(:publish_media!, source, File.join(root, "published.png"))
       end
+
+      oversized = File.join(root, "oversized.png")
+      File.binwrite(oversized, "large")
+      bounded = Gateway.new(
+        environment: {}, argv_prefix: [ "agent-browser" ], writable_root: root,
+        origin: "http://capture.invalid", max_media_bytes: 4
+      )
+      assert_raises(Gateway::GatewayError) do
+        bounded.send(:publish_media!, oversized, File.join(root, "bounded.png"))
+      end
+      refute_path_exists File.join(root, "bounded.png")
+
+      callback_source = File.join(root, "callback.png")
+      callback_destination = File.join(root, "callback-published.png")
+      File.binwrite(callback_source, "png")
+      callback = Gateway.new(
+        environment: {}, argv_prefix: [ "agent-browser" ], writable_root: root,
+        origin: "http://capture.invalid",
+        on_publish: ->(*) { raise "receipt failed" }
+      )
+      assert_raises(RuntimeError) do
+        callback.send(:publish_media!, callback_source, callback_destination)
+      end
+      refute_path_exists callback_destination
     end
   end
 
@@ -196,14 +185,5 @@ class ArtifactsBrowserGatewayCoverageGapsTest < Minitest::Test
     private_root = Dir.mktmpdir("hive-browser-private", root)
     gateway.instance_variable_set(:@private_root, private_root)
     gateway
-  end
-
-  def protocol_client(line)
-    writes = []
-    Object.new.tap do |client|
-      client.define_singleton_method(:gets) { |_| line }
-      client.define_singleton_method(:write) { |value| writes << value }
-      client.define_singleton_method(:writes) { writes }
-    end
   end
 end

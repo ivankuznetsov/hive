@@ -41,13 +41,17 @@ the recorder runs inside Hive's child-subreaper custody boundary; timeout,
 overflow, success, and failure all terminate and reap the complete descendant
 tree, and any detached child makes the capture invalid.
 
-The browser form talks to a controller-owned gateway, not agent-browser's raw
-socket. Hive fixes the session, managed Chrome executable, one `.invalid`
-origin, and loopback proxy. The gateway admits navigation, snapshots,
+Both internal forms send bounded JSON through a controller-owned filesystem
+mailbox; the producer does not execute the PTY recorder or browser gateway.
+The browser form therefore never receives agent-browser's raw socket. Hive
+fixes the session, managed Chrome executable, one `.invalid` origin, and
+loopback proxy. The gateway admits navigation, snapshots,
 interaction, safe basename screenshots, and WebM recording; rejects other
 origins, path syntax, filesystem-export commands, and socket/session overrides;
 and exclusively publishes media from a controller-private staging directory into
-the attempt root. Browser commands have no completion authority by themselves.
+the attempt root. Hive records a path/size/digest/media-type receipt for every
+controller-produced terminal or browser representation and rechecks it before
+custody transfer. Browser commands have no completion authority by themselves.
 
 Use `--project NAME` or `--stage 7-artifacts` to disambiguate a bare slug. The
 command also accepts the ordinary explicit `PROJECT:SLUG` target. `--json`

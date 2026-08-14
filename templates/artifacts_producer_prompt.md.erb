@@ -35,15 +35,16 @@ only below the evidence-write root.
 
 Produce the requested proof kinds. Use the exact `web.argv_prefix` for every
 web screenshot or flow and append one admitted browser action at a time. The
-Hive gateway owns the agent-browser session, namespace, executable, domain,
-proxy, raw socket, and media publication; do not search for or connect to them.
+Hive controller owns the filesystem command mailbox, agent-browser session,
+namespace, executable, domain, proxy, raw socket, media publication, and capture
+receipts; do not search for or connect to their private implementation paths.
 Do not search for or invoke Firefox, Playwright, Puppeteer, Chromium, QML,
 ImageMagick, VHS, or another browser/terminal recorder. The controller has
 already opened `web.origin` and proved `web.status` is `ready`; begin with
 `snapshot -i`. Use `open web.origin` only to restore that issued page, then use
 interaction commands, `screenshot NAME.png [--full|--annotate]`, and
 `record start NAME.webm`/`record stop`. Use safe basename-only media names;
-Hive returns the absolute published attempt path.
+Hive returns the published task-relative attempt path.
 Re-snapshot after navigation or dynamic changes. Use the fewest truthful
 artifacts: one representation may establish multiple related claims with the
 same proof kind. Use one stable screenshot for a stable state and temporal
@@ -61,7 +62,8 @@ producer process group, managed Web runtime, proxy, and evidence workspace.
 
 For terminal proof, invoke the exact `terminal.argv_prefix`, replace `<name>`,
 append the command argv, and use the emitted `.cast` original plus `.txt` review.
-Hive launches it without a shell and returns both descriptors. Do not look for
+Hive executes it controller-side without a shell and returns both descriptors.
+Do not look for
 asciinema, VHS, or a terminal GIF encoder.
 The recorder intentionally inherits only locale/terminal variables. If a probe
 needs an issued path or value, pass it explicitly through `/usr/bin/env

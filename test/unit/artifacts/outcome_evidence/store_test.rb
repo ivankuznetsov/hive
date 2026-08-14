@@ -45,6 +45,30 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     end
   end
 
+  def test_metadata_package_avoids_reprocessing_retained_media
+    with_store do |store, task, _controller|
+      generation = accepted_generation(store, task, attempt_id: "attempt-metadata")
+      store.publish_current!(generation: generation, attempt_id: "attempt-metadata")
+      full = store.package
+      full.fetch("attempts").flat_map { |attempt| attempt.fetch("evidence") }
+        .flat_map { |entry| entry.fetch("representations") }
+        .each { |representation| File.unlink(File.join(task.folder, representation.fetch("path"))) }
+      replacement = lambda do |*, **|
+        raise "retained representation admission must not run for metadata queries"
+      end
+
+      with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Proof, :admit!, replacement
+      ) do
+        package = store.package_metadata
+        assert_equal "accepted", package.dig("current", "status")
+        assert_equal [ "attempt-metadata" ],
+                     package.fetch("attempts").map { |attempt| attempt.fetch("attempt_id") }
+        assert_raises(RuntimeError) { store.package }
+      end
+    end
+  end
+
   def test_recovery_epoch_changes_generation_and_attempts_are_write_once
     with_store do |store, task, controller|
       first = store.open_generation!(**requirement_input)

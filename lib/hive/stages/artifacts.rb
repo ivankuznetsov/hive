@@ -32,6 +32,9 @@ module Hive
         FileUtils.touch(task.state_file) unless File.exist?(task.state_file)
         run_outcome_evidence!(task, cfg || {})
       rescue Hive::Artifacts::OutcomeEvidence::Error, Hive::ArtifactFirewall::Error,
+             Hive::Artifacts::BrowserGateway::GatewayError,
+             Hive::Artifacts::CaptureMailbox::MailboxError,
+             Hive::Artifacts::ManagedWebServer::ServerError,
              Hive::AgentError, Hive::ConfigError, KeyError => e
         Hive::Markers.set(
           task.state_file, :error, reason: "outcome_evidence_invalid",
@@ -173,6 +176,7 @@ module Hive
               producer_permission_arguments: capture_toolkit.producer_permission_arguments
             )
             candidate = Array(producer.fetch(:output).fetch("evidence"))
+            capture_toolkit.verify_captures!(candidate)
             ensure_producer_paths!(task, writable_root, candidate)
             store.retain_candidate!(
               generation: generation, attempt_id: attempt_id, evidence: candidate

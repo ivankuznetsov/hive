@@ -56,10 +56,15 @@ completion authority.
    `ffmpeg`, `ffprobe`, and Tesseract. The browser gets one random `.invalid`
    origin mapped through a controller-owned proxy to one issued loopback app
    port, rather than access to every localhost service. Hive opens and verifies
-   that exact session before production. The producer receives only the
-   gateway socket; the raw browser socket and controller-private media staging
-   stay outside its sandbox. The gateway admits one-origin interactions and
-   exclusively publishes basename-only PNG/WebM media into the evidence root.
+   that exact session before production. The producer receives only a bounded
+   filesystem mailbox used by `hive evidence`; the raw browser socket,
+   controller-private browser state, and media staging stay outside its sandbox.
+   Codex's managed network proxy runs in limited mode with no admitted domains
+   and local binding enabled, so a producer may start the issued application
+   port but cannot connect directly to arbitrary loopback services. The
+   controller executes admitted browser/terminal operations, records exact
+   file receipts, and exclusively publishes basename-only PNG/WebM media into
+   the evidence root.
    Missing capabilities
    publish a semantic blocker before the producer starts.
 6. Launch a distinct **producer** context with one writable root under the active
@@ -67,6 +72,8 @@ completion authority.
    names one retained original, one bounded reviewer representation, and the
    claims it establishes. The controller—not the LLM—adds exact byte counts,
    SHA-256 digests, rendering, and implementation-head source identity.
+   Screenshot, video, and terminal representations must match a controller
+   capture receipt at handoff; producer-written lookalike media fails closed.
 7. Re-admit every retained representation deterministically: safe containment,
    size, hash, declared media type, actual image/video decode, terminal-cast or
    document structure, secret patterns, and provider provenance are checked
@@ -153,9 +160,12 @@ recapture of the real product surface or transition.
 The append-only requirement and attempts live under
 `<task>/outcome-evidence/generations/<generation>/`; the same generation also
 contains its append-only `implementation.diff`. Only
-`<task>/outcome-evidence/current.json` is replaceable. Hivebox revalidates the
-pointer, every document digest, every retained proof across all attempts, and the independent review
-before rendering claims or serving a representation.
+`<task>/outcome-evidence/current.json` is replaceable. Hivebox validates the
+pointer and immutable document digests when listing a package without rerunning
+OCR/ffmpeg across every retained representation. A representation request then
+revalidates that selected file's exact size and digest before streaming it.
+Write admission and publication remain responsible for complete media decoding,
+OCR, retained-proof validation, and independent review.
 
 A semantic blocker suppresses ordinary daemon retry. The task page, status
 diagnostic, and run output expose an exact command containing the blocked

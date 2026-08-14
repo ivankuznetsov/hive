@@ -21,7 +21,10 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
       end
       assert_match(/origin is unavailable/, error.message)
 
-      os_error = Toolkit.new(tool_resolver: ->(*) { raise Errno::EIO, "broken" })
+      os_error = Toolkit.new(
+        tool_resolver: ->(*) { raise Errno::EIO, "broken" },
+        codex_runtime_resolver: ->(*) { [ "/managed/codex-runtime" ] }
+      )
       error = assert_raises(Hive::ConfigError) { prepare_visual(os_error, root) }
       assert_match(/could not start/, error.message)
     end
@@ -112,7 +115,9 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
     end
 
     incompatible = fake_profile("codex")
-    compatible = incompatible.with_overrides("min_version" => "0.138.0")
+    compatible = incompatible.with_overrides(
+      "min_version" => Toolkit::MIN_CODEX_PERMISSION_VERSION
+    )
     compatible.define_singleton_method(:check_version!) do
       raise Hive::AgentError, "old"
     end
@@ -120,7 +125,7 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
     error = assert_raises(Hive::ConfigError) do
       toolkit.send(:resolve_codex_runtime, incompatible)
     end
-    assert_match(/0\.138\.0\+/, error.message)
+    assert_includes error.message, "#{Toolkit::MIN_CODEX_PERMISSION_VERSION}+"
   end
 
   def test_native_browser_command_reports_failure_timeout_and_missing_binary

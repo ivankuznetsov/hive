@@ -1112,3 +1112,13 @@ multi-architecture Hivebox image remains a CI merge gate and was not built
 locally. Keep this gap open until a current task publishes a fully accepted
 package from genuine Web/CLI/TUI or document behavior without weakening the
 reviewer contract.
+
+The 2026-08-14 review hardening replaced the producer-visible gateway socket
+with a bounded controller mailbox, enabled Codex's managed limited network proxy
+with local binding but no domains, moved browser state outside the producer
+write root, and requires controller receipts for screenshot/video/terminal
+representations. Media sizes are checked before hashing/copying, and Hivebox
+package listing now validates immutable metadata without rerunning OCR/ffmpeg
+for every retained file; selected downloads still recheck exact size/digest.
+Focused tests pin these boundaries, but a fully accepted live provider package
+through the new mailbox/network configuration remains part of this open gap.

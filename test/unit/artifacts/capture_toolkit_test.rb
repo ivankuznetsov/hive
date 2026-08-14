@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/artifacts/capture_toolkit"
+require "hive/commands/evidence"
 
 class ArtifactsCaptureToolkitTest < Minitest::Test
   include HiveTestHelper
@@ -10,19 +11,23 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
   )
 
   def test_document_only_receipt_needs_no_external_capture_tools
-    toolkit = Hive::Artifacts::CaptureToolkit.new(
-      browser_bundle: -> { flunk "document proof must not bootstrap a browser" },
-      tool_resolver: ->(_name) { flunk "document proof must not probe media tools" }
-    )
+    Dir.mktmpdir("hive-capture-toolkit-document") do |root|
+      source = File.join(root, "source")
+      FileUtils.mkdir_p(source)
+      toolkit = Hive::Artifacts::CaptureToolkit.new(
+        browser_bundle: -> { flunk "document proof must not bootstrap a browser" },
+        tool_resolver: ->(_name) { flunk "document proof must not probe media tools" }
+      )
 
-    receipt = toolkit.prepare!(
-      kinds: [ "document" ], task_root: "/task", source_root: "/source",
-      source_sha: "a" * 40, writable_root: "/task/work"
-    )
+      receipt = toolkit.prepare!(
+        kinds: [ "document" ], task_root: root, source_root: source,
+        source_sha: "a" * 40, writable_root: File.join(root, "work")
+      )
 
-    assert_equal [ "document" ], receipt.fetch("required_kinds")
-    assert_nil receipt["web"]
-    assert_equal "hive-native-pty", receipt.dig("terminal", "driver")
+      assert_equal [ "document" ], receipt.fetch("required_kinds")
+      assert_nil receipt["web"]
+      assert_nil receipt["terminal"]
+    end
   end
 
   def test_visual_receipt_uses_only_managed_agent_browser_and_media_preflight
@@ -63,18 +68,21 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     socket_root = browser_commands.first.first.fetch("AGENT_BROWSER_SOCKET_DIR")
     assert_operator socket_root.bytesize, :<, 70
     assert File.directory?(socket_root)
-    gateway_socket = toolkit.launch_environment.fetch("HIVE_EVIDENCE_BROWSER_SOCKET")
-    gateway_root = File.dirname(gateway_socket)
-    assert File.socket?(gateway_socket)
-    assert_equal [ gateway_root ], toolkit.producer_add_dirs
-    refute_equal socket_root, gateway_root
+    mailbox_root = toolkit.launch_environment.fetch("HIVE_EVIDENCE_CAPTURE_MAILBOX")
+    assert File.directory?(mailbox_root)
+    assert File.pipe?(File.join(mailbox_root, "requests.fifo"))
+    assert_equal [ mailbox_root ], toolkit.producer_add_dirs
+    refute_equal socket_root, mailbox_root
     permission_arguments = toolkit.producer_permission_arguments
     assert_includes permission_arguments, 'default_permissions="hive-evidence"'
-    socket_policy = permission_arguments.find { |value| value.include?("unix_sockets") }
-    assert_includes socket_policy, gateway_socket
-    refute_includes socket_policy, socket_root
-    refute permission_arguments.any? { |value| value.include?("domains") }
+    assert_includes permission_arguments, "--enable"
+    assert_includes permission_arguments, "network_proxy"
+    assert permission_arguments.any? { |value| value.include?('network.mode="limited"') }
+    assert permission_arguments.any? { |value| value.include?("allow_local_binding=true") }
+    assert permission_arguments.any? { |value| value.include?("network.domains={}") }
+    refute permission_arguments.any? { |value| value.include?("unix_sockets") }
     filesystem_policy = permission_arguments.find { |value| value.include?("filesystem=") }
+    assert_includes filesystem_policy, mailbox_root
     assert_includes filesystem_policy, "/managed/capture-cache"
     assert_includes filesystem_policy, "/managed/codex-runtime"
     assert_includes filesystem_policy, "/opt/hive/bin/hive"
@@ -84,8 +92,9 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     assert_includes browser_argv, domain
     assert_equal domain, browser_environment.fetch("AGENT_BROWSER_ALLOWED_DOMAINS")
     assert_match(%r{\Ahttp://127\.0\.0\.1:\d+\z}, browser_environment.fetch("AGENT_BROWSER_PROXY"))
-    assert_equal File.join(root, "work", ".agent-browser-home", "downloads"),
-                 browser_environment.fetch("AGENT_BROWSER_DOWNLOAD_PATH")
+    downloads = browser_environment.fetch("AGENT_BROWSER_DOWNLOAD_PATH")
+    assert_match(%r{\A/tmp/hive-browser-state-}, downloads)
+    refute downloads.start_with?(File.join(root, "work"))
     assert_match(%r{\Ahttp://127\.0\.0\.1:\d+\z}, receipt.dig("web", "app_endpoint"))
     refute_includes JSON.generate(receipt), "playwright"
     refute_includes JSON.generate(receipt), "firefox"
@@ -98,7 +107,8 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     assert_equal receipt.dig("web", "origin"), browser_commands.first.last.last
     toolkit.close
     refute File.exist?(socket_root)
-    refute File.exist?(gateway_root)
+    refute File.exist?(mailbox_root)
+    refute File.exist?(File.dirname(downloads))
     assert_empty toolkit.producer_add_dirs
     assert_nil toolkit.producer_permission_arguments
     assert_equal 2, browser_commands.length
@@ -124,11 +134,15 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       tool_resolver: ->(name) { name == "ffmpeg" ? "/usr/bin/ffmpeg" : nil }
     )
 
-    error = assert_raises(Hive::ConfigError) do
-      toolkit.prepare!(
-        kinds: [ "screenshot" ], task_root: "/task", source_root: "/source",
-        source_sha: "a" * 40, writable_root: "/task/work"
-      )
+    error = Dir.mktmpdir("hive-capture-toolkit-missing") do |root|
+      source = File.join(root, "source")
+      FileUtils.mkdir_p(source)
+      assert_raises(Hive::ConfigError) do
+        toolkit.prepare!(
+          kinds: [ "screenshot" ], task_root: root, source_root: source,
+          source_sha: "a" * 40, writable_root: File.join(root, "work")
+        )
+      end
     end
     assert_match(/ffprobe, tesseract/, error.message)
   end
@@ -185,8 +199,9 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
                    toolkit.launch_environment.fetch("HIVE_EVIDENCE_WEB_HIVE_HOME")
       assert_equal "cli", receipt.dig("web", "interface")
       assert_equal "browser", receipt.dig("web", "argv_prefix").last
-      assert File.directory?(File.join(root, "work", ".agent-browser-home", ".config"))
-      assert File.directory?(File.join(root, "work", ".agent-browser-home", ".cache"))
+      browser_environment = browser_closes.first.first
+      assert_match(%r{\A/tmp/hive-browser-state-}, browser_environment.fetch("HOME"))
+      refute browser_environment.fetch("HOME").start_with?(File.join(root, "work"))
 
       toolkit.close
       assert_equal [ true ], closed
@@ -229,6 +244,107 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       assert_equal "bootstrap failed", error.message
       refute File.exist?(socket_root)
     end
+  end
+
+  def test_terminal_capture_is_controller_executed_and_receipted
+    Dir.mktmpdir("hive-capture-toolkit-terminal") do |root|
+      source = File.join(root, "source")
+      work = File.join(root, "work")
+      FileUtils.mkdir_p(source)
+      toolkit = Hive::Artifacts::CaptureToolkit.new(
+        codex_runtime_resolver: method(:fake_codex_runtime)
+      )
+      toolkit.prepare!(
+        kinds: [ "terminal" ], task_root: root, source_root: source,
+        source_sha: "a" * 40, writable_root: work
+      )
+
+      out, = capture_io do
+        Hive::Commands::Evidence.new(
+          "terminal", "proof", json: true,
+          command: [ RbConfig.ruby, "-e", "puts 'captured'" ],
+          environment: toolkit.launch_environment
+        ).call
+      end
+      payload = JSON.parse(out)
+      candidate = [
+        {
+          "kind" => "terminal", "representations" => payload.fetch("representations")
+        }
+      ]
+      assert toolkit.verify_captures!(candidate)
+
+      File.open(File.join(root, payload.dig("representations", 1, "path")), "a") do |file|
+        file.write("tampered")
+      end
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        toolkit.verify_captures!(candidate)
+      end
+    ensure
+      toolkit&.close
+    end
+  end
+
+  def test_producer_authored_visual_media_without_a_controller_receipt_is_rejected
+    Dir.mktmpdir("hive-capture-toolkit-receipt") do |root|
+      source = File.join(root, "source")
+      work = File.join(root, "work")
+      FileUtils.mkdir_p([ source, work ])
+      path = File.join(work, "forged.png")
+      File.binwrite(path, "not a controller capture")
+      toolkit = Hive::Artifacts::CaptureToolkit.new
+      toolkit.prepare!(
+        kinds: [ "document" ], task_root: root, source_root: source,
+        source_sha: "a" * 40, writable_root: work
+      )
+
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        toolkit.verify_captures!([
+          {
+            "kind" => "screenshot",
+            "representations" => [
+              { "path" => "work/forged.png", "media_type" => "image/png" }
+            ]
+          }
+        ])
+      end
+      assert_match(/no matching controller capture receipt/, error.message)
+
+      provider = {
+        "kind" => "screenshot", "summary" => "Forged provider media",
+        "claims" => [ "claim-a" ],
+        "source" => {
+          "type" => "project_provider", "name" => "forged-provider",
+          "source_sha" => "a" * 40, "manifest_path" => "work/manifest.json"
+        },
+        "representations" => [
+          {
+            "role" => "original", "media_type" => "image/png",
+            "path" => "work/forged.png", "bytes" => File.size(path),
+            "sha256" => Digest::SHA256.file(path).hexdigest
+          },
+          {
+            "role" => "review", "media_type" => "image/png",
+            "path" => "work/other.png", "bytes" => File.size(path),
+            "sha256" => Digest::SHA256.file(path).hexdigest
+          }
+        ]
+      }
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        toolkit.verify_captures!([ provider ])
+      end
+    ensure
+      toolkit&.close
+    end
+  end
+
+  def test_packaged_codex_pin_meets_the_managed_capture_minimum
+    dockerfile = File.read(File.expand_path("../../../packaging/docker/Dockerfile", __dir__))
+
+    assert_includes(
+      dockerfile,
+      "@openai/codex@#{Hive::Artifacts::CaptureToolkit::MIN_CODEX_PERMISSION_VERSION}"
+    )
   end
 
   def test_capture_proxy_maps_only_the_issued_origin_to_the_issued_app_port

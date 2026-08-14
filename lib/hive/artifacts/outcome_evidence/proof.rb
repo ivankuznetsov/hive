@@ -56,6 +56,17 @@ module Hive
         module_function
 
         def admit!(value, task_folder:, expected_head:)
+          admit(value, task_folder: task_folder, expected_head: expected_head, validate_files: true)
+        end
+
+        # Canonicalize immutable ledger metadata without reopening and decoding
+        # every retained media file. Web uses this projection for package lists;
+        # selected downloads still verify their own descriptor and bytes.
+        def admit_metadata!(value, task_folder:, expected_head:)
+          admit(value, task_folder: task_folder, expected_head: expected_head, validate_files: false)
+        end
+
+        def admit(value, task_folder:, expected_head:, validate_files:)
           entry = object!(value, "outcome evidence")
           reject_unknown!(
             entry, %w[kind summary claims source representations], "outcome evidence"
@@ -71,11 +82,12 @@ module Hive
             expected_head: expected_head
           )
           representations = canonical_representations(
-            entry.fetch("representations"), kind: kind, task_folder: task_folder
+            entry.fetch("representations"), kind: kind, task_folder: task_folder,
+            validate_files: validate_files
           )
           validate_provider_originals!(
             source, representations, task_folder: task_folder
-          ) if source.fetch("type") == "project_provider"
+          ) if validate_files && source.fetch("type") == "project_provider"
 
           {
             "kind" => kind,
@@ -89,6 +101,7 @@ module Hive
         rescue ArgumentError, TypeError, ResolutionError => e
           raise StoreError, e.message
         end
+        private_class_method :admit
 
         # Move producer-owned task evidence across a controller custody
         # boundary before the independent reviewer sees it. The copy is read
@@ -106,6 +119,7 @@ module Hive
           task_root = File.realpath(task_folder)
           destination = File.join(task_root, relative_root)
           prepare_materialization_root!(task_root, destination)
+          destination_created = true
           copied = admitted.merge(
             "representations" => admitted.fetch("representations").map.with_index do |representation, index|
               relative = File.join(
@@ -122,7 +136,7 @@ module Hive
           Hive::AtomicFile.fsync_directory(destination)
           canonical
         rescue StoreError, SystemCallError
-          FileUtils.remove_entry_secure(destination) if destination && File.directory?(destination)
+          remove_materialization_root(destination) if destination_created
           raise
         end
 
@@ -152,11 +166,17 @@ module Hive
               end
               path = Identity.validate_changed_path!(item.fetch("path"))
               candidate, stat = retained_regular_file!(task_folder, path)
+              role = item.fetch("role").to_s
+              limit = role == "original" ? MAX_ORIGINAL_BYTES : MAX_REVIEW_BYTES
+              unless stat.size.between?(1, limit)
+                raise StoreError,
+                      "outcome evidence representation #{path.inspect} has an invalid size"
+              end
               {
-                "role" => item.fetch("role").to_s,
+                "role" => role,
                 "media_type" => item.fetch("media_type").to_s,
                 "path" => path,
-                "sha256" => secure_digest(candidate),
+                "sha256" => secure_digest(candidate, max_bytes: limit),
                 "bytes" => stat.size
               }
             end
@@ -211,7 +231,8 @@ module Hive
             .reject { |item| item.fetch("role") == "storyboard" }
           representations << {
             "role" => "storyboard", "media_type" => "image/png",
-            "path" => storyboard_relative, "sha256" => secure_digest(storyboard),
+            "path" => storyboard_relative,
+            "sha256" => secure_digest(storyboard, max_bytes: MAX_REVIEW_BYTES),
             "bytes" => stat.size
           }
           admit!(
@@ -272,7 +293,7 @@ module Hive
         end
         private_class_method :canonical_source
 
-        def canonical_representations(value, kind:, task_folder:)
+        def canonical_representations(value, kind:, task_folder:, validate_files: true)
           representations = Array(value)
           unless representations.length.between?(2, MAX_REPRESENTATIONS)
             raise StoreError,
@@ -289,7 +310,10 @@ module Hive
             end
           end
           canonical = representations.map do |item|
-            canonical_representation(item, kind: kind, task_folder: task_folder)
+            canonical_representation(
+              item, kind: kind, task_folder: task_folder,
+              validate_files: validate_files
+            )
           end
           roles = canonical.map { |item| item.fetch("role") }
           unless roles.count("original") == 1 && roles.count("review") == 1
@@ -302,7 +326,7 @@ module Hive
         end
         private_class_method :canonical_representations
 
-        def canonical_representation(value, kind:, task_folder:)
+        def canonical_representation(value, kind:, task_folder:, validate_files: true)
           item = object!(value, "outcome evidence representation")
           reject_unknown!(
             item, %w[role media_type rendering path sha256 bytes],
@@ -325,21 +349,29 @@ module Hive
           unless allowed_types.include?(media_type)
             raise StoreError, "#{kind} #{role} representation has an unsafe media type"
           end
-          candidate, stat = retained_regular_file!(task_folder, path)
           limit = role == "original" ? MAX_ORIGINAL_BYTES : MAX_REVIEW_BYTES
           bytes = Integer(item.fetch("bytes"))
-          unless bytes.positive? && bytes <= limit && stat.size == bytes
+          unless bytes.positive? && bytes <= limit
             raise StoreError, "outcome evidence representation #{path.inspect} has an invalid size"
           end
           sha256 = item.fetch("sha256").to_s.downcase
-          unless sha256.match?(DIGEST) && secure_digest(candidate) == sha256
+          unless sha256.match?(DIGEST)
             raise StoreError, "outcome evidence representation #{path.inspect} digest does not match"
           end
           rendering = rendering_for(kind, role, media_type)
           if item.key?("rendering") && item.fetch("rendering").to_s != rendering
             raise StoreError, "outcome evidence representation rendering does not match its media type"
           end
-          inspect_representation!(candidate, kind: kind, role: role, media_type: media_type)
+          if validate_files
+            candidate, stat = retained_regular_file!(task_folder, path)
+            unless stat.size == bytes
+              raise StoreError, "outcome evidence representation #{path.inspect} has an invalid size"
+            end
+            unless secure_digest(candidate, max_bytes: limit) == sha256
+              raise StoreError, "outcome evidence representation #{path.inspect} digest does not match"
+            end
+            inspect_representation!(candidate, kind: kind, role: role, media_type: media_type)
+          end
           {
             "role" => role, "media_type" => media_type, "rendering" => rendering,
             "path" => path, "sha256" => sha256, "bytes" => bytes
@@ -364,10 +396,15 @@ module Hive
         end
         private_class_method :retained_regular_file!
 
-        def secure_digest(path)
+        def secure_digest(path, max_bytes: MAX_ORIGINAL_BYTES)
           digest = Digest::SHA256.new
+          total = 0
           File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
             while (chunk = file.read(1024 * 1024))
+              total += chunk.bytesize
+              if total > max_bytes
+                raise StoreError, "outcome evidence representation exceeds its byte limit"
+              end
               digest << chunk
             end
           end
@@ -378,6 +415,7 @@ module Hive
         private_class_method :secure_digest
 
         def prepare_materialization_root!(task_root, destination)
+          created = false
           parent = File.realpath(File.dirname(destination))
           unless parent == task_root || parent.start_with?("#{task_root}#{File::SEPARATOR}")
             raise StoreError, "outcome evidence custody root escapes the task folder"
@@ -389,6 +427,7 @@ module Hive
             nil
           end
           Dir.mkdir(destination, 0o700)
+          created = true
           stat = File.lstat(destination)
           unless stat.directory? && !stat.symlink?
             raise StoreError, "outcome evidence custody root is not a directory"
@@ -396,8 +435,18 @@ module Hive
           Hive::AtomicFile.fsync_directory(parent)
         rescue Errno::EEXIST, Errno::ELOOP
           raise StoreError, "outcome evidence custody root is unavailable"
+        rescue StoreError, SystemCallError
+          remove_materialization_root(destination) if created
+          raise
         end
         private_class_method :prepare_materialization_root!
+
+        def remove_materialization_root(path)
+          FileUtils.remove_entry_secure(path) if path && File.directory?(path)
+        rescue SystemCallError
+          nil
+        end
+        private_class_method :remove_materialization_root
 
         def copy_representation!(task_root, representation, destination)
           source, = retained_regular_file!(task_root, representation.fetch("path"))

@@ -13,16 +13,19 @@ class Task
 
     CHUNK_BYTES = 64 * 1024
 
-    def initialize(io)
+    def initialize(io, bytes)
       @io = io
+      @bytes = bytes
     end
 
     def each
       return enum_for(__method__) unless block_given?
 
       begin
-        while (chunk = @io.read(CHUNK_BYTES))
+        remaining = @bytes
+        while remaining.positive? && (chunk = @io.read([ CHUNK_BYTES, remaining ].min))
           yield chunk
+          remaining -= chunk.bytesize
         end
       ensure
         close
@@ -196,7 +199,7 @@ class Task
     current = File.join(folder, "outcome-evidence", "current.json")
     return nil unless File.file?(current) || File.symlink?(current)
 
-    normalize_outcome_evidence(outcome_evidence_store.package)
+    normalize_outcome_evidence(outcome_evidence_store.package_metadata)
   rescue Hive::Artifacts::OutcomeEvidence::Error, SystemCallError => e
     Rails.logger.warn("outcome evidence unreadable for #{slug}: #{e.class}")
     {
@@ -210,7 +213,7 @@ class Task
     digest = digest.to_s.downcase
     return nil unless attempt_id.match?(EVIDENCE_ATTEMPT_RE) && digest.match?(EVIDENCE_DIGEST_RE)
 
-    package = outcome_evidence_store.package
+    package = outcome_evidence_store.package_metadata
     attempt = package.fetch("attempts").find { |item| item.fetch("attempt_id") == attempt_id }
     return nil unless attempt
 
@@ -230,17 +233,23 @@ class Task
       return nil
     end
     actual_digest = Digest::SHA256.new
+    observed_bytes = 0
     while (chunk = io.read(VerifiedEvidenceBody::CHUNK_BYTES))
+      observed_bytes += chunk.bytesize
+      if observed_bytes > expected_bytes
+        io.close
+        return nil
+      end
       actual_digest << chunk
     end
-    unless actual_digest.hexdigest == digest
+    unless observed_bytes == expected_bytes && actual_digest.hexdigest == digest
       io.close
       return nil
     end
     io.rewind
 
     {
-      "body" => VerifiedEvidenceBody.new(io),
+      "body" => VerifiedEvidenceBody.new(io, expected_bytes),
       "bytes" => expected_bytes,
       "filename" => File.basename(representation.fetch("path")),
       "content_type" => media.first,

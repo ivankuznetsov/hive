@@ -1,7 +1,6 @@
 require "json"
-require "pathname"
-require "socket"
-require "hive/artifacts/terminal_recorder"
+require "securerandom"
+require "hive/artifacts/capture_mailbox"
 require "hive/artifacts/outcome_evidence/recovery"
 require "hive/artifacts/outcome_evidence/store"
 require "hive/config"
@@ -18,7 +17,7 @@ module Hive
     # to the existing status/action boundary.
     class Evidence
       SUBCOMMANDS = %w[browser recover terminal].freeze
-      MAX_BROWSER_RESPONSE_BYTES = 512 * 1024
+      GATEWAY_TIMEOUT_SECONDS = 65
       CAPTURE_NAME = /\A[a-z][a-z0-9_-]{0,63}\z/
 
       def initialize(subcommand, target, project: nil, stage: nil, json: false,
@@ -88,33 +87,10 @@ module Hive
       end
 
       def capture_terminal
-        task_root = required_owned_directory("HIVE_EVIDENCE_TASK_ROOT")
-        source_root = required_owned_directory("HIVE_EVIDENCE_SOURCE_ROOT")
-        writable_root = required_owned_directory("HIVE_EVIDENCE_WRITE_ROOT")
-        task_real = File.realpath(task_root)
-        writable_real = File.realpath(writable_root)
-        unless writable_real.start_with?("#{task_real}#{File::SEPARATOR}")
-          raise Hive::UsageError,
-                "HIVE_EVIDENCE_WRITE_ROOT must be inside HIVE_EVIDENCE_TASK_ROOT"
-        end
-        cast = File.join(writable_real, "#{@target}.cast")
-        review = File.join(writable_real, "#{@target}.txt")
-        if [ cast, review ].any? { |path| File.exist?(path) || File.symlink?(path) }
-          raise Hive::UsageError, "terminal capture NAME already exists in the evidence-write root"
-        end
-        ambient = %w[PATH LANG LC_ALL LC_CTYPE TERM COLORTERM TZ].to_h do |name|
-          [ name, @environment[name] ]
-        end.compact
-        result = Hive::Artifacts::TerminalRecorder.new(
-          argv: @command, cwd: source_root,
-          cast_path: cast, review_path: review,
-          environment: ambient
-        ).record!
-        result.fetch("representations").each do |representation|
-          representation["path"] = Pathname.new(representation.fetch("path"))
-            .relative_path_from(Pathname.new(task_real)).to_s
-        end
-        payload = { "status" => "captured" }.merge(result)
+        response = gateway_request(
+          "operation" => "terminal", "name" => @target, "argv" => @command
+        )
+        payload = response.fetch("payload")
         if @json
           puts JSON.generate(payload)
         else
@@ -123,23 +99,12 @@ module Hive
           puts "  exit: #{payload.fetch('exit_status')}"
         end
         payload
-      rescue Hive::Artifacts::TerminalRecorder::CaptureError => e
-        raise Hive::UsageError, e.message
       end
 
       def run_browser
-        socket_path = @environment["HIVE_EVIDENCE_BROWSER_SOCKET"].to_s
-        stat = File.lstat(socket_path) if File.absolute_path?(socket_path)
-        unless stat&.socket? && !stat.symlink? && stat.uid == Process.uid
-          raise Hive::UsageError, "HIVE_EVIDENCE_BROWSER_SOCKET is unavailable"
-        end
-        socket = UNIXSocket.new(socket_path)
-        socket.write(JSON.generate("argv" => [ @target, *@command ]) << "\n")
-        response = socket.gets(MAX_BROWSER_RESPONSE_BYTES + 1)
-        unless response && response.bytesize <= MAX_BROWSER_RESPONSE_BYTES && response.end_with?("\n")
-          raise Hive::UsageError, "browser gateway returned an invalid response"
-        end
-        payload = JSON.parse(response)
+        payload = gateway_request(
+          "operation" => "browser", "argv" => [ @target, *@command ]
+        )
         $stdout.write(payload.fetch("stdout"))
         $stderr.write(payload.fetch("stderr"))
         unless payload.fetch("ok") && Integer(payload.fetch("status")).zero?
@@ -148,22 +113,89 @@ module Hive
         payload
       rescue JSON::ParserError, KeyError, TypeError, SystemCallError => e
         raise Hive::UsageError, "browser gateway is unavailable: #{e.message}"
-      ensure
-        socket&.close
       end
 
-      def required_owned_directory(name)
-        value = @environment[name].to_s
-        unless File.absolute_path?(value) && File.directory?(value)
-          raise Hive::UsageError, "#{name} must name an existing absolute directory"
+      def gateway_request(payload)
+        root = @environment["HIVE_EVIDENCE_CAPTURE_MAILBOX"].to_s
+        unless File.absolute_path?(root) && File.directory?(root)
+          raise Hive::UsageError, "HIVE_EVIDENCE_CAPTURE_MAILBOX is unavailable"
         end
-        stat = File.lstat(value)
+        stat = File.lstat(root)
         unless stat.directory? && !stat.symlink? && stat.uid == Process.uid
-          raise Hive::UsageError, "#{name} must be an owner-controlled directory"
+          raise Hive::UsageError, "HIVE_EVIDENCE_CAPTURE_MAILBOX is unavailable"
         end
-        value
-      rescue Errno::ENOENT, Errno::ELOOP
-        raise Hive::UsageError, "#{name} is unavailable"
+        request_path = File.join(root, "requests.fifo")
+        request_stat = File.lstat(request_path)
+        unless request_stat.pipe? && !request_stat.symlink? && request_stat.uid == Process.uid
+          raise Hive::UsageError, "capture gateway request boundary is unavailable"
+        end
+        reply_name = "reply-#{SecureRandom.hex(12)}.fifo"
+        reply_path = File.join(root, reply_name)
+        File.mkfifo(reply_path, 0o600)
+        reader = File.open(reply_path, File::RDWR | File::NONBLOCK | File::NOFOLLOW)
+        source = JSON.generate(payload.merge("reply" => reply_name)) << "\n"
+        if source.bytesize > Hive::Artifacts::CaptureMailbox::MAX_REQUEST_BYTES
+          raise Hive::UsageError, "capture gateway request is oversized"
+        end
+        File.open(request_path, File::WRONLY | File::NONBLOCK | File::NOFOLLOW) do |writer|
+          unless writer.stat.pipe? &&
+                 writer.stat.dev == request_stat.dev && writer.stat.ino == request_stat.ino
+            raise Hive::UsageError, "capture gateway request boundary is unavailable"
+          end
+          write_gateway_request(writer, source)
+        end
+        response = read_gateway_response(reader)
+        unless response.fetch("ok")
+          detail = response["error"] || response["stderr"] || "capture gateway command failed"
+          raise Hive::UsageError, detail
+        end
+        response
+      rescue Errno::ENOENT, Errno::ELOOP, Errno::ENXIO, Errno::EPIPE, IOError => e
+        raise Hive::UsageError, "capture gateway is unavailable: #{e.message}"
+      ensure
+        reader&.close unless reader&.closed?
+        begin
+          File.unlink(reply_path) if reply_path
+        rescue Errno::ENOENT
+          nil
+        end
+      end
+
+      def write_gateway_request(writer, source)
+        offset = 0
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+        while offset < source.bytesize
+          begin
+            offset += writer.write_nonblock(source.byteslice(offset, source.bytesize - offset))
+          rescue IO::WaitWritable
+            remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            raise Hive::UsageError, "capture gateway request timed out" unless remaining.positive?
+
+            IO.select(nil, [ writer ], nil, [ remaining, 0.1 ].min)
+          end
+        end
+      end
+
+      def read_gateway_response(reader)
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + GATEWAY_TIMEOUT_SECONDS
+        buffer = +"".b
+        loop do
+          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          raise Hive::UsageError, "capture gateway timed out" unless remaining.positive?
+          next unless IO.select([ reader ], nil, nil, [ remaining, 0.1 ].min)
+
+          begin
+            buffer << reader.read_nonblock(16 * 1024)
+          rescue IO::WaitReadable
+            next
+          end
+          if buffer.bytesize > Hive::Artifacts::CaptureMailbox::MAX_RESPONSE_BYTES
+            raise Hive::UsageError, "capture gateway response is oversized"
+          end
+          next unless (newline = buffer.index("\n"))
+
+          return JSON.parse(buffer.byteslice(0, newline + 1))
+        end
       end
 
       def resolve_task

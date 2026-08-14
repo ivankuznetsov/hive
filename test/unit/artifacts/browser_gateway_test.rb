@@ -1,6 +1,5 @@
 require "test_helper"
 require "hive/artifacts/browser_gateway"
-require "hive/commands/evidence"
 
 class ArtifactsBrowserGatewayTest < Minitest::Test
   def test_closed_gateway_confines_screenshot_and_recording_publication
@@ -26,44 +25,27 @@ class ArtifactsBrowserGatewayTest < Minitest::Test
         environment: {}, argv_prefix: %w[agent-browser --session evidence],
         writable_root: root, origin: "http://capture.invalid", runner: runner
       ).start!
-      environment = { "HIVE_EVIDENCE_BROWSER_SOCKET" => gateway.socket_path }
 
-      out, = capture_io do
-        Hive::Commands::Evidence.new(
-          "browser", "snapshot", command: [ "-i" ], environment: environment
-        ).call
-      end
-      assert_equal "interactive output\n", out
+      response = gateway.call([ "snapshot", "-i" ])
+      assert response.fetch("ok")
+      assert_equal "interactive output\n", response.fetch("stdout")
 
-      out, = capture_io do
-        Hive::Commands::Evidence.new(
-          "browser", "screenshot", command: %w[review.png --full],
-          environment: environment
-        ).call
-      end
+      response = gateway.call([ "screenshot", "review.png", "--full" ])
+      assert response.fetch("ok")
       assert_equal "png-evidence", File.binread(File.join(root, "review.png"))
-      assert_includes out, File.join(root, "review.png")
-      refute_match(/hive-browser-output/, out)
+      assert_includes response.fetch("stdout"), File.join(root, "review.png")
+      refute_match(/hive-browser-output/, response.fetch("stdout"))
 
-      capture_io do
-        Hive::Commands::Evidence.new(
-          "browser", "record", command: %w[start flow.webm],
-          environment: environment
-        ).call
-      end
-      capture_io do
-        Hive::Commands::Evidence.new(
-          "browser", "record", command: %w[stop], environment: environment
-        ).call
-      end
+      assert gateway.call(%w[record start flow.webm]).fetch("ok")
+      assert gateway.call(%w[record stop]).fetch("ok")
       assert_equal "webm-evidence", File.binread(File.join(root, "flow.webm"))
 
       assert calls.any? { |argv| argv.include?("snapshot") }
       assert calls.none? { |argv| argv.any? { |item| item.include?("../") } }
     ensure
-      socket_root = gateway&.socket_root
+      private_root = gateway&.instance_variable_get(:@private_root)
       gateway&.close
-      refute File.exist?(socket_root) if socket_root
+      refute File.exist?(private_root) if private_root
     end
   end
 
@@ -77,7 +59,6 @@ class ArtifactsBrowserGatewayTest < Minitest::Test
           [ "", "", 0 ]
         }
       ).start!
-      environment = { "HIVE_EVIDENCE_BROWSER_SOCKET" => gateway.socket_path }
 
       [
         [ "open", [ "http://127.0.0.1/private" ] ],
@@ -86,13 +67,9 @@ class ArtifactsBrowserGatewayTest < Minitest::Test
         [ "snapshot", [ "--socket", "/tmp/other.sock" ] ],
         [ "get", [ "cdp-url" ] ]
       ].each do |command, arguments|
-        _out, _err = capture_io do
-          assert_raises(Hive::UsageError) do
-            Hive::Commands::Evidence.new(
-              "browser", command, command: arguments, environment: environment
-            ).call
-          end
-        end
+        response = gateway.call([ command, *arguments ])
+        refute response.fetch("ok")
+        assert_equal 64, response.fetch("status")
       end
 
       assert_empty calls

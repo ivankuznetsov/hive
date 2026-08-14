@@ -1515,6 +1515,20 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_controller_launch_environment_rejects_unknown_or_non_string_values
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      [ { "HOME" => "/tmp" }, { "HIVE_EVIDENCE_TASK_ROOT" => 123 } ].each do |environment|
+        assert_raises(ArgumentError) do
+          Hive::Stages::Base.spawn_agent(
+            task, prompt: "prompt", max_budget_usd: nil, timeout_sec: 5,
+            launch_environment: environment
+          )
+        end
+      end
+    end
+  end
+
   def explicit_context(binding: "default", evidence_writer: nil, effort: "high", adapter: "codex")
     provider_scope = {
       "kind" => "provider_account", "provider_account_id" => "account-a", "model" => nil

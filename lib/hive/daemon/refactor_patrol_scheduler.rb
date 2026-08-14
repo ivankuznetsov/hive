@@ -22,7 +22,6 @@ require "hive/refactor_patrol/repository_ownership"
 require "hive/modules/event_publisher"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
-require "hive/patrol/token_budget"
 require "hive/workflow_package/canonical_json"
 require "hive/workflows"
 
@@ -32,12 +31,12 @@ module Hive
     # the discovery claim/fence lifecycle around its child process.
     class RefactorPatrolScheduler
       PATROL_STAGE = "refactor-patrol".freeze
-      REVIEW_STAGE = "refactor-patrol-review".freeze
       PATROL_SLUG_PREFIX = "refactor-patrol".freeze
       MODULE_SCHEDULE = "*/10 * * * *".freeze
       RETRY_BACKOFF_SEC = 60
-      ACTION_RETRY_BACKOFF_SEC =
+      RUNAWAY_RETRY_BACKOFF_SEC =
         Hive::RefactorPatrol::ActionClaimTransitions::RETRY_BACKOFF_SEC
+      RUNAWAY_RESOURCE_EXHAUSTION_REASONS = %w[token_limit turn_limit].freeze
       EFFECT_CAPACITY_RESERVE = 1
       SUPPORTED_REPORT_SCHEMA_VERSIONS = [
         Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
@@ -64,8 +63,7 @@ module Hive
                      lease_sec: 7200, dry_run: false,
                      migration_authority: :legacy, migration_ownership: nil,
                      migration_snapshot: nil, evidence_store_factory: nil,
-                     event_publisher: nil, module_execution: nil,
-                     token_budget_factory: nil)
+                     event_publisher: nil, module_execution: nil)
         @registry = registry
         @config_loader = config_loader
         @job_store_factory = job_store_factory
@@ -108,9 +106,6 @@ module Hive
         end
         @event_publisher = event_publisher || Hive::Modules::EventPublisher.new
         @module_execution = module_execution
-        @token_budget_factory = token_budget_factory || lambda do |project_root, cfg|
-          Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
-        end
         @occurrence_lifecycle =
           Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle.new(
             migration_authority: @migration_authority,
@@ -452,7 +447,7 @@ module Hive
         aggregate = checkpoint_discovery_through_gateway!(
           entry, store, dispatch_token,
           envelope: envelope, now: now,
-          backoff_sec: discovery_backoff_sec(envelope, now)
+          backoff_sec: discovery_retry_backoff_sec(envelope)
         )
         result = completion_result(
           if envelope.fetch("complete")
@@ -609,10 +604,7 @@ module Hive
 
       def discovery_available?(entry)
         cfg = entry.fetch("_refactor_patrol_cfg")
-        return false unless cfg.dig("refactor_patrol", "enabled") == true
-
-        @token_budget_factory.call(entry.fetch("path"), cfg)
-          .remaining_launches(stage: REVIEW_STAGE).positive?
+        cfg.dig("refactor_patrol", "enabled") == true
       end
 
       def result_path_for(entry, job_id, phase)
@@ -828,18 +820,6 @@ module Hive
         "malformed_envelope"
       end
 
-      def discovery_backoff_sec(envelope, now)
-        errors = Array(envelope["review_errors"])
-        reasons = errors.filter_map do |error|
-          error.dig("details", "resource_exhaustion", "reason") if error.is_a?(Hash)
-        end
-        return RETRY_BACKOFF_SEC unless reasons.size == errors.size
-
-        Hive::Patrol::TokenBudget.resource_exhaustion_backoff_sec(
-          reasons, now: now, fallback: RETRY_BACKOFF_SEC
-        )
-      end
-
       def complete_action(token, exit_code, envelope, now)
         entry = entry_for_token(token)
         store = store_for(entry)
@@ -859,7 +839,7 @@ module Hive
           aggregate = block_through_gateway!(
             entry, store, aggregate, phase: :action,
             reason: "action_no_progress", evidence: {}, now: now,
-            backoff_sec: ACTION_RETRY_BACKOFF_SEC
+            backoff_sec: RUNAWAY_RETRY_BACKOFF_SEC
           )
           :retry
         else
@@ -868,7 +848,7 @@ module Hive
             reason: action_completion_failure_reason(exit_code, envelope),
             evidence: {},
             now: now,
-            backoff_sec: ACTION_RETRY_BACKOFF_SEC
+            backoff_sec: RUNAWAY_RETRY_BACKOFF_SEC
           )
           :retry
         end
@@ -898,7 +878,15 @@ module Hive
       end
 
       def retry_backoff_sec(phase)
-        phase.to_sym == :action ? ACTION_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
+        phase.to_sym == :action ? RUNAWAY_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
+      end
+
+      def discovery_retry_backoff_sec(envelope)
+        runaway = Array(envelope["review_errors"]).any? do |error|
+          reason = error.dig("details", "resource_exhaustion", "reason")
+          RUNAWAY_RESOURCE_EXHAUSTION_REASONS.include?(reason)
+        end
+        runaway ? RUNAWAY_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
       end
 
       def valid_report_envelope?(envelope)
@@ -913,9 +901,9 @@ module Hive
         {
           status: status, job_id: token[:job_id],
           pr_number: source && source["number"], pr_url: source && source["url"],
-          accepted_count: use_envelope ? Array(envelope["accepted"]).size : Array(dispositions && dispositions["accepted"]).size,
-          flagged_count: use_envelope ? Array(envelope["flagged"]).size : Array(dispositions && dispositions["flagged"]).size,
-          suppressed_count: use_envelope ? Array(envelope["suppressed"]).size : Array(dispositions && dispositions["suppressed"]).size,
+          fix_count: use_envelope ? Array(envelope["fix"]).size : Array(dispositions && dispositions["fix"]).size,
+          discuss_count: use_envelope ? Array(envelope["discuss"]).size : Array(dispositions && dispositions["discuss"]).size,
+          dismiss_count: use_envelope ? Array(envelope["dismiss"]).size : Array(dispositions && dispositions["dismiss"]).size,
           action_count: actions.size,
           terminal_action_count: actions.count { |action| action["terminal"] == true },
           pending_action_ids: actions.reject { |action| action["terminal"] == true }

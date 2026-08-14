@@ -1,10 +1,41 @@
 require "digest"
 require "json_schemer"
 require "pathname"
+require "shellwords"
 require "hive/web/environment"
+require "hive/artifacts/outcome_evidence/store"
 
 class Task
   include TaskMutations
+
+  class VerifiedEvidenceBody
+    include Enumerable
+
+    CHUNK_BYTES = 64 * 1024
+
+    def initialize(io, bytes)
+      @io = io
+      @bytes = bytes
+    end
+
+    def each
+      return enum_for(__method__) unless block_given?
+
+      begin
+        remaining = @bytes
+        while remaining.positive? && (chunk = @io.read([ CHUNK_BYTES, remaining ].min))
+          yield chunk
+          remaining -= chunk.bytesize
+        end
+      ensure
+        close
+      end
+    end
+
+    def close
+      @io.close unless @io.closed?
+    end
+  end
 
   BoundBrainstormQuestion = Struct.new(
     :round, :n, :text, :binding, :ordinal, keyword_init: true
@@ -12,6 +43,20 @@ class Task
 
   ARTIFACT_ORDER = %w[idea.md brainstorm.md plan.md task.md pr.md summary.md artifact.md].freeze
   MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif|webp|webm|mp4)\z/i
+  EVIDENCE_ATTEMPT_RE = Hive::Artifacts::OutcomeEvidence::Store::SAFE_ID
+  EVIDENCE_DIGEST_RE = Hive::Artifacts::OutcomeEvidence::Store::DIGEST
+  EVIDENCE_MEDIA_TYPES = {
+    "image/png" => [ "image/png", "inline" ],
+    "image/jpeg" => [ "image/jpeg", "inline" ],
+    "image/webp" => [ "image/webp", "inline" ],
+    "video/webm" => [ "video/webm", "inline" ],
+    "video/mp4" => [ "video/mp4", "inline" ],
+    "text/plain" => [ "text/plain; charset=utf-8", "inline" ],
+    "text/markdown" => [ "text/markdown; charset=utf-8", "attachment" ],
+    "application/json" => [ "application/json", "attachment" ],
+    "application/pdf" => [ "application/pdf", "attachment" ],
+    "application/x-asciinema+json" => [ "application/octet-stream", "attachment" ]
+  }.freeze
   CAPTURE_MANIFEST_V2_SCHEMER = JSONSchemer.schema(
     Pathname.new(Hive::Schemas.schema_path("hive-artifact-capture", version: 2))
   )
@@ -148,6 +193,73 @@ class Task
     nil
   end
 
+  def outcome_evidence
+    return nil unless folder
+
+    current = File.join(folder, "outcome-evidence", "current.json")
+    return nil unless File.file?(current) || File.symlink?(current)
+
+    normalize_outcome_evidence(outcome_evidence_store.package_metadata)
+  rescue Hive::Artifacts::OutcomeEvidence::Error, SystemCallError => e
+    Rails.logger.warn("outcome evidence unreadable for #{slug}: #{e.class}")
+    {
+      "status" => "invalid",
+      "reason" => "Outcome evidence failed integrity validation and was not rendered."
+    }
+  end
+
+  def outcome_evidence_file(attempt_id, digest)
+    attempt_id = attempt_id.to_s
+    digest = digest.to_s.downcase
+    return nil unless attempt_id.match?(EVIDENCE_ATTEMPT_RE) && digest.match?(EVIDENCE_DIGEST_RE)
+
+    package = outcome_evidence_store.package_metadata
+    attempt = package.fetch("attempts").find { |item| item.fetch("attempt_id") == attempt_id }
+    return nil unless attempt
+
+    representation = attempt.fetch("evidence").flat_map do |entry|
+      entry.fetch("representations")
+    end.find { |item| item.fetch("sha256") == digest }
+    return nil unless representation
+
+    media = EVIDENCE_MEDIA_TYPES[representation.fetch("media_type")]
+    return nil unless media
+
+    path = File.join(folder, representation.fetch("path"))
+    io = File.open(path, File::RDONLY | File::NOFOLLOW)
+    expected_bytes = representation.fetch("bytes")
+    unless io.stat.file? && io.stat.size == expected_bytes
+      io.close
+      return nil
+    end
+    actual_digest = Digest::SHA256.new
+    observed_bytes = 0
+    while (chunk = io.read(VerifiedEvidenceBody::CHUNK_BYTES))
+      observed_bytes += chunk.bytesize
+      if observed_bytes > expected_bytes
+        io.close
+        return nil
+      end
+      actual_digest << chunk
+    end
+    unless observed_bytes == expected_bytes && actual_digest.hexdigest == digest
+      io.close
+      return nil
+    end
+    io.rewind
+
+    {
+      "body" => VerifiedEvidenceBody.new(io, expected_bytes),
+      "bytes" => expected_bytes,
+      "filename" => File.basename(representation.fetch("path")),
+      "content_type" => media.first,
+      "disposition" => media.last
+    }
+  rescue Hive::Artifacts::OutcomeEvidence::Error, SystemCallError
+    io&.close unless io&.closed?
+    nil
+  end
+
   def open_questions
     return [] unless self["stage"] == "2-brainstorm"
 
@@ -278,6 +390,78 @@ class Task
   end
 
   private
+
+  def outcome_evidence_store
+    Hive::Artifacts::OutcomeEvidence::Store.new(task: self, project: project.name)
+  end
+
+  def normalize_outcome_evidence(package)
+    current = package.fetch("current")
+    requirement = package.fetch("requirement")
+    attempts = package.fetch("attempts")
+    active_attempt = attempts.last
+    verdicts = active_attempt&.dig("review", "verdicts").to_a.to_h do |verdict|
+      [ verdict.fetch("target_id"), verdict ]
+    end
+    evidence = active_attempt&.fetch("evidence").to_a
+    normalize_target = lambda do |target|
+      id = target.fetch("id")
+      {
+        "id" => id,
+        "statement" => target.fetch("statement"),
+        "proof_kind" => target["proof_kind"],
+        "reason" => target["reason"],
+        "changed_paths" => target.fetch("changed_paths"),
+        "verdict" => verdicts[id]&.fetch("verdict", nil),
+        "verdict_reason" => verdicts[id]&.fetch("reason", nil),
+        "evidence" => evidence.select { |entry| entry.fetch("claims").include?(id) }.map do |entry|
+          {
+            "kind" => entry.fetch("kind"),
+            "summary" => entry.fetch("summary"),
+            "representations" => entry.fetch("representations").map do |representation|
+              representation.slice("role", "media_type", "rendering", "sha256", "bytes").merge(
+                "attempt_id" => active_attempt.fetch("attempt_id"),
+                "filename" => File.basename(representation.fetch("path"))
+              )
+            end
+          }
+        end
+      }
+    end
+    {
+      "status" => current.fetch("status"),
+      "generation" => current.fetch("generation"),
+      "claims" => requirement.fetch("claims").map(&normalize_target),
+      "exclusions" => requirement.fetch("exclusions").map(&normalize_target),
+      "changed_path_count" => requirement.dig("implementation", "changed_paths").length,
+      "actors" => {
+        "inference" => requirement.fetch("inference"),
+        "producer" => active_attempt&.fetch("producer", nil),
+        "reviewer" => active_attempt&.dig("review", "reviewer")
+      },
+      "reviewer_capabilities" => requirement.fetch("reviewer_capabilities"),
+      "attempts" => attempts.map do |attempt|
+        {
+          "attempt_id" => attempt.fetch("attempt_id"),
+          "status" => attempt.fetch("status"),
+          "recorded_at" => attempt.fetch("recorded_at"),
+          "diagnostic" => attempt["diagnostic"]
+        }
+      end,
+      "blocker" => if current.fetch("status") == "blocked"
+                     current.slice(
+                       "reason", "failed_targets", "reviewer_reasons", "recovery_digest",
+                       "recovery_epoch"
+                     ).merge(
+                       "command" => [
+                         "hive", "evidence", "recover", "#{project.name}:#{slug}",
+                         "--generation", current.fetch("generation"),
+                         "--recovery-digest", current.fetch("recovery_digest")
+                       ].shelljoin
+                     )
+                   end
+    }
+  end
 
   def recovery_intervention_required?
     Hive::Recovery.intervention_required?(

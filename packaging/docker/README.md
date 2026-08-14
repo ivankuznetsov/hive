@@ -120,13 +120,16 @@ docker exec -it <container> tmux attach -t <name>   # attach; Ctrl-b d to detach
 `tmux ls` reporting "no server running" just means no agent is mid-run and no
 tmux session has been started yet.
 
-## Visual artifact capture
+## Outcome-evidence capture
 
-Artifacts-stage visual demos are best-effort. The image includes `asciinema`
-(records a terminal `.cast`) and `ffmpeg`, but no terminal-GIF encoder —
-turning a `.cast` into a GIF needs `agg` or `vhs`, neither of which is
-installed, so an in-box TUI/CLI demo writes a failed capture unless the agent
-installs one. Browser captures depend on the project and agent environment
-having agent-browser or Playwright available. If a required capture tool is
-missing, the artifacts agent records a failed capture manifest and the
-pipeline continues.
+Hivebox ships the same controller-owned capture stack used by native Hive:
+the exact pinned native `agent-browser` CLI and managed Chrome payload for web
+screenshots/videos, Hive's Ruby PTY
+recorder for terminal `.cast` plus text, and `ffmpeg`/`ffprobe`/Tesseract for
+decode and secret preflight. Producers do not discover Firefox, Playwright,
+asciinema, VHS, or terminal-GIF tooling. A missing or unhealthy required
+capability blocks before the producer starts and is published as a recoverable
+outcome-evidence capability diagnostic. Web capture uses one controller-issued
+`.invalid` origin mapped to one loopback app port; the exact browser command is
+rooted in the writable attempt and Hive explicitly closes its named session.
+Terminal recording uses Linux descendant custody and rejects escaped children.

@@ -41,6 +41,7 @@ Gem::Specification.new do |spec|
     "lib/**/*.rb",
     "lib/hive/scripts/**/*.sh",
     "lib/hive/assets/qmd/*",
+    "lib/hive/assets/capture-tools/*",
     "templates/**/*",
     "templates/builtins/bench/runtime/.dockerignore",
     "schemas/**/*.json",

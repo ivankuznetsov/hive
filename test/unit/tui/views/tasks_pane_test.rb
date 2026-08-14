@@ -89,9 +89,17 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   # Hyperlink/pr_cell is exercised. Swaps in a tty-reporting StringIO and
   # restores the original $stdout afterward.
   def with_tty_stdout
+    with_stdout_tty(true) { yield }
+  end
+
+  def with_non_tty_stdout
+    with_stdout_tty(false) { yield }
+  end
+
+  def with_stdout_tty(value)
     original = $stdout
     io = StringIO.new
-    io.define_singleton_method(:tty?) { true }
+    io.define_singleton_method(:tty?) { value }
     $stdout = io
     yield
   ensure
@@ -177,7 +185,9 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                   pr_url: "https://github.com/example/repo/pull/561")
       ] }
     ])
-    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    out = with_non_tty_stdout do
+      Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    end
     assert_includes out, "   7",             "id column must render"
     assert_match(/\s7\s+#561\s+Readable Task/, out,
                  "PR number must render between id and display name")
@@ -258,13 +268,13 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   # refute_match(/\e\]8;;/) guard): a populated pr_url rendered through
   # pr_cell in a NON-tty must emit zero OSC 8 bytes, so the link is gated on
   # `$stdout.tty?` and never leaks escape sequences into piped/captured
-  # output. The default test $stdout is non-tty, so pr_cell takes the
-  # disabled branch here without any stubbing.
+  # output. Pin the stream explicitly so this contract is independent of
+  # whether the test runner itself was launched from a terminal.
   def test_pr_cell_emits_no_osc8_in_non_tty
     url = "https://github.com/example/repo/pull/561"
     row = Struct.new(:pr_url).new(url)
 
-    out = Hive::Tui::Views::TasksPane.pr_cell(row, 6)
+    out = with_non_tty_stdout { Hive::Tui::Views::TasksPane.pr_cell(row, 6) }
 
     refute_match(/\e\]8;;/, out, "non-tty pr_cell must not emit OSC 8 bytes")
     assert_includes out, "#561", "the plain PR token must still render in non-tty"

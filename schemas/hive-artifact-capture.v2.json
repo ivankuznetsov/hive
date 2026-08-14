@@ -64,6 +64,7 @@
       }
     },
     "diagnostic": { "type": ["string", "null"], "maxLength": 16384 },
+    "evidence_role": { "enum": ["claim_evidence", "diagnostic_only"] },
     "evidence": {
       "oneOf": [
         {
@@ -125,7 +126,10 @@
         "properties": { "recorder": { "properties": { "kind": { "const": "built_in" } } } }
       },
       "then": {
-        "properties": { "evidence": { "properties": { "type": { "const": "hivebox" } } } }
+        "properties": {
+          "evidence": { "properties": { "type": { "const": "hivebox" } } },
+          "evidence_role": { "const": "diagnostic_only" }
+        }
       }
     },
     {
@@ -133,7 +137,10 @@
         "properties": { "recorder": { "properties": { "kind": { "const": "project_provider" } } } }
       },
       "then": {
-        "properties": { "evidence": { "properties": { "type": { "const": "project_provider" } } } }
+        "properties": {
+          "evidence": { "properties": { "type": { "const": "project_provider" } } },
+          "evidence_role": { "const": "claim_evidence" }
+        }
       }
     }
   ]

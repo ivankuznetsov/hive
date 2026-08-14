@@ -3,18 +3,18 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/, packaging/patrol_evidence/, test/e2e/lib/patrol_qualification.rb
 created: 2026-05-28
-updated: 2026-08-09
+updated: 2026-08-14
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
-**TLDR**: `Hive::Patrol::*` is the ordinary repository-patrol engine behind [[commands/patrol]]. It keeps clawpatch-style work units and audit state as plain JSON under `.hive-state/patrol/`, delegates review/fix reasoning to configured Hive agent profiles, records patrol review/fix token usage in `Hive::UsageDb`, validates fixes in isolated worktrees, opens PRs, and by default hands opened PRs into the normal `6-review` flow through `Hive::Patrol::ReviewHandoff`. The separately configured, post-merge architecture patrol lives under `Hive::RefactorPatrol::*`; the two schedulers share the project/day input-plus-output token pool while architecture gets a larger cycle allowance and its own daily review cap instead of consuming the ordinary daily launch count, and they do not share state, mapping, policy, or action ledgers.
+**TLDR**: `Hive::Patrol::*` is the ordinary repository-patrol engine behind [[commands/patrol]]. It keeps clawpatch-style work units and audit state as plain JSON under `.hive-state/patrol/`, delegates review/fix reasoning to configured Hive agent profiles, records Patrol usage in `Hive::UsageDb`, validates fixes in isolated worktrees, opens PRs, and by default hands opened PRs into the normal `6-review` flow. The separately configured, post-merge Architecture Patrol lives under `Hive::RefactorPatrol::*`. They share one project-wide agent lock and one high per-agent runaway fuse, but not state, mapping, policy, or action ledgers; usage totals are telemetry rather than allowance.
 
 ## Module map
 
 | Module | File | Purpose |
 |--------|------|---------|
 | `Hive::Patrol::Mapper` | `lib/hive/patrol/mapper.rb` | Ordinary patrol enables the shared architecture capability: non-overlapping language-neutral source/manifest components with dependency-ranked context and subsystem tests, plus one primary review per command or grouped manifest-script contract. Command paths remain component context, not duplicate evidence anchors. Legacy route/package/monolithic-test slices remain available only to callers that omit that capability. A completed map is handed to `StateStore` as one retry-safe semantic batch instead of consuming one occurrence effect per feature. |
-| `Hive::Patrol::SourceReader` | `lib/hive/patrol/source_reader.rb` | Shared root-confined, regular-file-only, 256 KiB bounded reader used by architecture mapping and leverage measurement. It resolves tracked symlinks beneath the canonical project root and skips external/device targets before reading. |
+| `Hive::Patrol::SourceReader` | `lib/hive/patrol/source_reader.rb` | Shared root-confined, regular-file-only, 256 KiB bounded reader used by architecture mapping and review. It resolves tracked symlinks beneath the canonical project root and skips external/device targets before reading. |
 | `Hive::Patrol::Feature` | `lib/hive/patrol/feature.rb` | Durable feature record: `id`, `kind`, `entrypoints`, `owned_files`, `context_files`, and `tests`. |
 | `Hive::Patrol::FeatureBatch` | `lib/hive/patrol/feature_batch.rb` | Selects the deterministic SHA-bound rotating component batch and returns the next persistent cursor. `Commands::Patrol` strictly fetches the explicit remote head for each new sweep, fails closed rather than scanning stale local main when that fetch fails, and records an explicit active snapshot so an in-progress sweep can finish its pinned SHA even when default advances or the first batch errors at cursor zero. If that commit becomes unmaterializable, the command starts from the current default and `FeatureBatch` resets the cursor. |
 | `Hive::Patrol::Reviewer` | `lib/hive/patrol/reviewer.rb` | Requests zero-to-three evidence-backed production defects per feature from an initial view capped at four owned files and 32 KiB; bounded output must match the exact JSON envelope and is accepted atomically only when every admitted item has complete contract/impact/root-cause/scope/reproduction/validation fields, selects an operator-configured validation key, and its confined evidence line contains the supplied snippet. Finding ids include the unique review-run id so audit records are immutable. |
@@ -28,7 +28,7 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree and observed proof so the standard review daemon can run reviewers/triage/fix/browser flow. Mandatory and optional calls use the same fingerprint-locked exact reconciliation, so a retry after rename/fsync ambiguity reuses the matching task and rejects PR/head identity conflicts. Staging/quarantine renames use the shared best-effort directory-fsync policy. |
 | `Hive::Patrol::AgentLaunch` | `lib/hive/patrol/agent_launch.rb` | Builds the provider-specific patrol launch envelope. Claude reserves 20,000 tokens for provider-owned initial context plus one conservative token per prompt byte, uses a verified minimal review/fix tool set, and caps reviews at four completed turns; the fourth is emergency JSON finalization only. |
 | `Hive::Patrol::ReviewErrorDetails` | `lib/hive/patrol/review_error_details.rb` | Converts an agent resource-exhaustion result into the shared durable review-error detail envelope used by ordinary and architecture patrol. |
-| `Hive::Patrol::TokenBudget` | `lib/hive/patrol/token_budget.rb` | Shares input-plus-output safety ceilings across ordinary review/fix and architecture discovery/action phases and supplies an actual per-launch streamed-token cap to `Hive::Agent`; cached usage remains telemetry only. A launch is refused before spawn when the remaining per-agent/cycle/day token allowance cannot cover `AgentLaunch`'s initial reserve. A project-keyed advisory lock serializes full agent lifetimes so daily headroom cannot be double-spent by concurrent workers. Ordinary fixes default to 2x per-agent headroom for edit/test/proof turns; architecture defaults to a 2x cycle/per-agent envelope and is accounted separately from the ordinary daily launch-count ceiling. Architecture reviews have an independent daily cap of 8 while fixes retain capacity. Both retain the shared native budget guard and durable current-day token ceiling. Missing architecture usage is recorded separately and bounded by `max_architecture_unmetered_spawns_per_day` (default `96`) across fresh budget instances. |
+| `Hive::Patrol::TokenBudget` | `lib/hive/patrol/token_budget.rb` | Owns the project-keyed full-agent-lifetime lock, the single shared `max_tokens_per_agent` emergency fuse, and UsageDb telemetry for ordinary review/fix and architecture review/fix. Prompt plus provider initial context must fit the fuse. Usage recording failures warn and release the lock but never create a later admission quota. |
 | `Hive::Patrol::Dismissals` | `lib/hive/patrol/dismissals.rb` | Reconciles closed-unmerged patrol PRs into `dismissed.json` so the same finding is not immediately re-filed. Retryable publication entries match only their exact receipted PR URL and remain retryable while that PR is open. |
 | `Hive::Patrol::BaseStateStore` | `lib/hive/patrol/base_state_store.rb` | Shared JSON lifecycle for ordinary patrol and architecture patrol's legacy reporting state: directory creation, state/fingerprint/dismissal files, run artifacts, and tolerant reads. It delegates atomic replacement to `Hive::AtomicFile` while preserving the stores' prior no-fsync behavior. |
 | `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Defines the ordinary-patrol collections, is the sole ordinary `EffectGateway` composition root, and exposes the ordinary product recovery API over the shared occurrence journal. Feature maps use one digest-bound batch effect whose local writes can be reconciled or replayed after a partial failure, so repository size does not consume the occurrence effect budget. Fingerprint writes require the configured gateway and persist the exact canonical set/delete operation in the occurrence intent. Before any fingerprint read or suppression decision, recovery walks every recovery-active predecessor capture, reconciles or retry-safely redispatches that exact operation, and rejects multiple nonterminal predecessors for one fingerprint. It also projects typed publication outbox entries into one immutable fingerprint binding, writing the binding before tuple acknowledgement so crash-before-ack replay is an exact no-op. Fingerprints retain PR mapping only; the removed effect-intent maps are not a parallel retry authority. |
@@ -40,10 +40,10 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Patrol::EffectGateway` | `lib/hive/patrol/effect_gateway.rb` | Thin ordinary-patrol product port over `EffectDelivery`. It preserves the ordinary `perform!` and reconcile-only adoption API while authorizing ordinary state, finding, attempt, branch, PR, and review-handoff sinks. |
 | `Hive::RefactorPatrol::EffectGateway` | `lib/hive/refactor_patrol/effect_gateway.rb` | Thin Architecture Patrol product port over `EffectDelivery`. It retains architecture claim and `NotDelivered` policy while action claim generation fences authorization but remains outside semantic remote-effect identity. |
 | `Hive::RefactorPatrol::TransitionGateway` | `lib/hive/refactor_patrol/transition_gateway.rb` | Non-persistent product port that routes architecture `job`, `discovery`, and `action` transitions through the architecture gateway. It writes only by invoking a JobStore transition and replays JobStore after duplicate delivery. |
-| `Hive::RefactorPatrol::ArchitectureOccurrenceStore` | `lib/hive/refactor_patrol/architecture_occurrence_store.rb` | JobStore's product adapter over `OccurrenceJournal`. It resolves the exact current `occurrence_id` held by the v3 job aggregate, validates an exact next-generation successor against its predecessor, and delegates all occurrence/effect state; there is no sidecar binding or fallback index. Recovery takes one validated effect snapshot for the current segment and ignores already-finalized predecessor transitions. |
-| `Hive::RefactorPatrol::JobStore` | `lib/hive/refactor_patrol/job_store.rb` | Architecture Patrol's v3 aggregate and product recovery authority. Each job owns one immutable intake transition and one current occurrence pointer; the pointer can advance only through the fenced rollover write after its predecessor is terminal. Finished claim and diagnostic history retains historical occurrence ids, while active claims must match the current segment. Effect transition capacity is enforced per claim generation so immutable predecessor history does not consume a successor generation's budget. Action scheduling preserves the runner's fix-before-related-issue dependency, so a queued issue cannot bypass its same-family fix cooldown and create a per-tick retry loop. Construction and semantic mutation call sites are statically confined to the declared composition and transition ports. |
+| `Hive::RefactorPatrol::ArchitectureOccurrenceStore` | `lib/hive/refactor_patrol/architecture_occurrence_store.rb` | JobStore's product adapter over `OccurrenceJournal`. It resolves the exact current `occurrence_id` held by the v4 job aggregate, validates an exact next-generation successor against its predecessor, and delegates all occurrence/effect state; there is no sidecar binding or fallback index. Recovery takes one validated effect snapshot for the current segment and ignores already-finalized predecessor transitions. |
+| `Hive::RefactorPatrol::JobStore` | `lib/hive/refactor_patrol/job_store.rb` | Architecture Patrol's current-only v4 aggregate and product recovery authority. V3 bytes remain opaque and the first current mutation starts a fresh v4 store. Each job owns one immutable intake transition and one current occurrence pointer; the pointer can advance only through the fenced rollover write after its predecessor is terminal. Finished claim and diagnostic history retains historical occurrence ids, while active claims must match the current segment. Effect transition capacity is enforced per claim generation so immutable predecessor history does not consume a successor generation's cap. Action scheduling preserves the runner's fix-before-related-issue dependency, so a queued fallback issue cannot bypass its same-family fix cooldown. |
 | `Hive::RefactorPatrol::ArchitectureIntakeTransitions` | `lib/hive/refactor_patrol/architecture_intake_transitions.rb` | Shared command/daemon coordinator for manifest occurrence reservation, exact enqueue reconciliation, and transition identity. A duplicate manifest whose authoritative job already matches returns that aggregate directly, including after occurrence rollover, instead of consuming another transition cell. Callers retain policy and cadence; this collaborator adds no persistence of its own. |
-| `Hive::RefactorPatrol::ActionTransitions` | `lib/hive/refactor_patrol/action_transitions.rb` | Facade used by `ActionRunner`: claim-scoped CAS/reconcile/receipt operations and job-level plan/link/block transitions live in separate coordinators over one immutable transition context. `ActionRunner` retains thesis, policy, fixer, publication, and issue decisions; its action transitions define the shared one-hour cooldown used by both runner and scheduler action failures so a persistent local/provider fault cannot hot-loop claim/release evidence. Structured daily resource exhaustion is preserved by `Fixer` and paces the action to the next UTC day. |
+| `Hive::RefactorPatrol::ActionTransitions` | `lib/hive/refactor_patrol/action_transitions.rb` | Facade used by `ActionRunner`: claim-scoped CAS/reconcile/receipt operations and job-level plan/link/block transitions live in separate coordinators over one immutable transition context. `ActionRunner` retains thesis, policy, fixer, publication, and issue decisions; its action transitions define the shared one-hour cooldown used by both runner and scheduler action failures so a persistent local/provider fault or per-agent token fuse cannot hot-loop claim/release evidence. |
 | `Hive::RefactorPatrol::DiscoveryTransitions` | `lib/hive/refactor_patrol/discovery_transitions.rb` | Facade used by `RefactorPatrolScheduler` and its command child: discovery claim/checkpoint/release and diagnostic block transitions live in separate coordinators. The scheduler claims and attaches the exact child process; `--job-manifest` reconstructs the non-claiming command-side coordinator before incrementally checkpointing through that attached token. `ArchitectureOccurrenceLifecycle` alone reserves/finalizes occurrences and recovers capture/event/receipt projections; the scheduler retains cadence, candidate selection, spawn, and envelope handling. |
 | `Hive::RefactorPatrol::ClaimMaintenanceTransitions` | `lib/hive/refactor_patrol/claim_maintenance_transitions.rb` | Narrow non-outcome port for generation-fenced child-process attachment and discovery/action heartbeat renewal. Command and scheduler roots cannot call those JobStore mutators directly. |
 | `Hive::Modules::Migration::PatrolEvidence` | `lib/hive/modules/migration/patrol_evidence.rb` | Strict immutable ordinary/architecture capture, intent, and receipt values shared only as an observation protocol. `EvidenceStore` appends canonical records, maintains bounded occurrence/intent indices, and repairs them through portable lexicographic pages whose cursors freeze one high-water inventory plus an order-independent filename fingerprint. `ManagedDirectory` rejects linked managed components and descriptor-binds its bounded reads, locks, and atomic writes; evidence remains observation-only and has no mutation or recovery authority. |
@@ -156,10 +156,10 @@ fixes above the alpha gate. Documentation, test-gap, and maintainability
 observations are excluded from its automatic lane. Architecture patrol
 ([[commands/refactor-patrol]]) is triggered by an immutable merged-PR
 occurrence, maps language-neutral feature and documentation slices from that
-merge, and requires every architectural thesis to receive a durable accepted,
-flagged, or suppressed disposition before any separately authorized action.
-Architecture v2 fetches and pins an exact committed default-branch SHA, then
-runs mapper, leverage, and reviewer source reads from an ephemeral detached,
+merge, and requires every architectural thesis to receive a durable `fix`,
+`discuss`, or `dismiss` route before any separately authorized action.
+Architecture Patrol fetches and pins an exact committed default-branch SHA, then
+runs mapper and reviewer source reads from an ephemeral detached,
 clean worktree. Persistent state and collision ledgers remain rooted in the
 registered project, so a developer's active branch or uncommitted files neither
 alter nor block the analysis. A partial retry rematerializes its original
@@ -171,8 +171,7 @@ orphaned Git worktree registration when its directory has disappeared.
 The two mappers retain deliberately different breadth, but both reviewers now
 start from at most four owned files selected with a 32 KiB source budget.
 Ordinary mapping still records four owned plus four context files, while
-architecture keeps six plus six for deterministic hotspot/leverage
-measurement. Context and test paths are not preloaded into the ordinary review
+architecture keeps six plus six for component context. Context and test paths are not preloaded into the ordinary review
 prompt, and an oversized first entrypoint is retained. Both prompts permit
 only one evidence-driven follow-up round and explicitly prefer an empty result
 to speculation. A Claude review receives only `Read`, `Grep`, `Glob`, and
@@ -190,8 +189,8 @@ They deliberately retain separate namespaces:
 `.hive-state/refactor_patrol/v2/` for retained architecture manifests,
 semantic families, runs, logs, and result receipts. Architecture jobs,
 occurrences, and the job-query index live only under
-`.hive-state/refactor_patrol/v3/`; a released-v2 jobs directory blocks runtime
-until an operator explicitly archives it and accepts an empty v3 start.
+`.hive-state/refactor_patrol/v4/`. V3 JobStore bytes remain opaque; the first
+current mutation starts an empty v4 store without a compatibility reader.
 `Hive::Daemon::PatrolArbiter` is the only shared
 orchestration seam: it alternates ready work under the project's
 `daemon.max_concurrent_patrol_scans` capacity. Enabling architecture discovery
@@ -213,27 +212,21 @@ Patrol's read-only `--list` and `--show` queries remain available so prior
 evidence is not hidden, and ordinary recovery can finish projecting an already
 reserved receipt without starting a new repository scan.
 
-Operators normally configure scheduling through `patrol.mode`, which [[modules/config]] resolves into cadence plus token, launch, native budget-equivalent, and per-launch token ceilings before the daemon sees the project config. `ultrapatrol`, `high`, `medium`, and `low` deliberately receive progressively smaller envelopes as cadence falls; `off` resolves to `enabled: false`. Measured input and output from both ordinary and architecture stages share the same project/day total; cached counts remain visible but uncharged. Ordinary fix stages apply `fix_budget_multiplier` (default `2`) only to their streamed per-agent cap so editing and proof do not consume review capacity; ordinary cycle/day token and launch limits remain unchanged. Architecture stages apply `architecture_budget_multiplier` (default `2`) to cycle token/launch limits and the streamed per-agent token cap, not the native budget-equivalent guard. Architecture stages ignore `max_agent_spawns_per_day`; reviews instead stop at `max_architecture_review_spawns_per_day` (default `8`) while architecture fixes remain eligible. The daemon checks that durable allowance before dispatch, leaving queued discovery untouched once the review cap is exhausted instead of launching children that can only repeat the same limit error. Their multiplied per-cycle launch bound, shared daily token pool, per-agent cap, advisory lock, and native guard remain active. The two multipliers do not compound for architecture fixes. Unmetered architecture children also consume the separate `max_architecture_unmetered_spawns_per_day` safety ceiling (default `96`), preventing an accounting failure from bypassing durable limits across scheduler cycles. Explicit granular knobs always win over a set mode and survive the deep-merge even when no `mode:` is set.
+`patrol.mode` controls cadence only; `off` disables scheduling. Every Patrol
+child uses the same deliberately high `max_tokens_per_agent` fuse and one
+project-wide advisory lock. There are no cycle/day token quotas, launch-count
+quotas, multipliers, or Patrol-specific native USD clamp. Each launch still
+requires its prompt plus provider-owned initial context to fit the fuse;
+otherwise `TokenBudget#acquire` returns `insufficient_launch_headroom` without
+spawning. UsageDb records measured and unmetered work as telemetry only.
 
-Each patrol launch also needs enough remaining allowance for its profile's
-provider-owned initial context reserve plus the rendered prompt bytes. If not,
-`TokenBudget#acquire` returns `insufficient_launch_headroom` without spawning
-or consuming another subscription-backed request. It returns the more specific
-`daily_token_headroom` when the shared UTC-day remainder is the binding limit,
-allowing architecture patrol scheduling to sleep until the next UTC window.
-The same next-day pacing applies when the architecture-specific daily review
-launch or unmetered-launch ceiling is exhausted.
-This admission check covers
-ordinary and architecture review/fix launches; neither multiplier can bypass
-the shared daily project cap.
-
-Ordinary review batching also accounts for that shared launch envelope before
-agents start. It selects no more features than the tighter remaining cycle or
-UTC-day quota can launch and, during a shipping run, reserves as many remaining
-launches as possible up to `max_fix_attempts_per_cycle` while still reviewing
-at least one feature. Dry runs may spend the whole envelope on review. A
-structured terminal quota failure stops later fix attempts instead of creating
-several doomed artifacts. When a later review fails, the SHA-bound cursor
+Ordinary review batching is bounded directly by `max_features_per_cycle`, and
+fixes by `max_fix_attempts_per_cycle` and `max_prs_per_cycle`. A structured
+per-agent token-limit result ends the current ordinary cycle; Architecture
+Patrol retains its checkpoint/receipts and uses a fixed one-hour retry for
+structured `token_limit` or `turn_limit` discovery results. Other retryable
+discovery uses 60 seconds, while actions use the shared one-hour cooldown. When
+a later review fails, the SHA-bound cursor
 advances past only the proven-clean prefix; the failed feature and remaining
 suffix stay pinned for retry.
 
@@ -379,19 +372,18 @@ remain unproven.
   transition coordinator before reviewing. It never claims independently; its
   incremental checkpoints and heartbeats use only the exact PID/start-time and
   generation-bound token attached by the scheduler.
-- JobStore runtime and child completion accept v3 only. Construction and
+- JobStore runtime and child completion accept v4 only. Construction and
   read-only queries do not create state; the first mutation lazily creates
-  only v3. Hive has no released-v2 reader, probe, converter, reset command,
-  archive layer, package hook, or retry timer. Arbitrary `v2/jobs` bytes are
-  ignored while every other live v2 owner and the global terminal-proof
-  catalog remain unchanged.
-  Malformed v3 job, occurrence, or query-index evidence fails closed instead
+  only v4. Hive has no v3 reader, probe, converter, reset command, archive
+  layer, package hook, or retry timer. V3 bytes are ignored while every other
+  live reconciler owner and the global terminal-proof catalog remain unchanged.
+  Malformed v4 job, occurrence, or query-index evidence fails closed instead
   of being rewritten.
-- Live v3 jobs, query sidecars, quarantine evidence, and action locks are
+- Live v4 jobs, query sidecars, quarantine evidence, and action locks are
   accessed only through one descriptor-confined `JobStoreFiles` port. A
   store-wide admission lock enforces the 8,192-job bound before any new
   per-job lock or query membership is created.
-- Cutover and rollback quiescence include ordinary active occurrences, architecture active occurrences, and incomplete v3 jobs before advancing an ownership epoch.
+- Cutover and rollback quiescence include ordinary active occurrences, architecture active occurrences, and incomplete v4 jobs before advancing an ownership epoch.
 - Ordinary and architecture projection/recovery failures emit bounded project/occurrence/job diagnostics with retry count and next backoff time; durable outbox or exact-transition recovery remains pending while the scheduler backs off.
 - Closed-unmerged patrol PRs become dismissals and are skipped on future cycles.
 - Agent prompts treat findings and recommendations as data; validation commands come only from project config. Each admitted finding is bound to one configured validation key and the exact reviewed target SHA. Before the fixer agent starts, Hive checks out the fresh current base, runs that command as a clean baseline, and refuses a stale target, failing baseline, or baseline command that mutates the checkout.

@@ -33,6 +33,12 @@ module Hive
       "hive-web-status" => 1,
       "hive-web-install" => 1,
       "hive-capture-requirement" => 1,
+      # Controller-owned, generation-bound outcome-evidence ledger. Legacy
+      # visual capture remains readable through its own v1/v2 contracts but
+      # cannot satisfy these universal coding-task requirements.
+      "hive-outcome-evidence-requirement" => 1,
+      "hive-outcome-evidence-attempt" => 1,
+      "hive-outcome-evidence-current" => 1,
       "hive-web-capture-runtime" => 1,
       "hive-artifact-capture" => 2,
       "hive-doctor" => 2,
@@ -60,9 +66,9 @@ module Hive
       "hive-patrol" => 3,
       "hive-patrol-findings" => 1,
       "hive-patrol-finding" => 3,
-      "hive-refactor-patrol" => 3,
-      "hive-refactor-patrol-jobs" => 1,
-      "hive-refactor-patrol-thesis" => 3,
+      "hive-refactor-patrol" => 4,
+      "hive-refactor-patrol-jobs" => 2,
+      "hive-refactor-patrol-thesis" => 4,
       # Scaffold a blank per-project workflow descriptor (`hive workflow new ID
       # --json`). The error arm routes through Hive::Schemas::ErrorEnvelope so
       # its output carries the same schema/schema_version/error_kind keys as

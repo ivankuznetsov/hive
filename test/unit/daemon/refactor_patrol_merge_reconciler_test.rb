@@ -668,9 +668,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       gh.details = { 2 => details(2, at: T0) }
       cfg = enabled_cfg
       cfg["refactor_patrol"]["auto_fix"].merge!("enabled" => true, "agent" => "codex")
-      cfg["refactor_patrol"]["issue_filing"].merge!(
-        "enabled" => true, "min_leverage_score" => 0.7
-      )
+      cfg["refactor_patrol"]["issue_filing"]["enabled"] = true
       cfg["refactor_patrol"]["commands"]["test"] = "bin/test"
 
       reconciler(dir, gh, cfg: cfg).ingest(
@@ -684,7 +682,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       refute policy.dig("action", "caps").key?("max_files")
       refute policy.dig("action", "caps").key?("max_diff_lines")
       assert_equal "bin/test", policy.dig("action", "commands", "test")
-      assert_equal 0.7, policy.dig("action", "issue_min_leverage_score")
+      refute policy.fetch("action").key?("issue_min_leverage_score")
       assert_match(/\A[a-f0-9]{64}\z/, policy.fetch("epoch"))
     end
   end

@@ -70,6 +70,13 @@ keep. Generated Hive configs use a block-form `review:` mapping; a hand-written
 flow mapping must be converted manually before the comment-preserving rewrite
 can run.
 
+The Patrol-policy cutover removes only the retired mapping entry and its value.
+Blank lines and comments that follow it remain attached to the next surviving
+key or section. The rewrite is committed independently before current config
+loading; a single-project migration requests its best-effort daemon restart at
+that point, so a later project-specific migration failure cannot leave a live
+daemon on the removed policy.
+
 After replacing the installed CLI through its package channel, `hive update`
 runs the new binary's `hive migrate --all`. That can mutate and commit each
 registered project's tracked `.hive-state` exactly as an explicit
@@ -78,10 +85,11 @@ single-project migration would. A failed project is named with its error and
 rolled back.
 
 Each single-project migration still requests a daemon restart when it changes
-stage layout or managed workflow tasks. Fleet mode coalesces those requests and
-restarts once only when every registered project succeeds. A partial fleet
-failure leaves the current daemon stopped from adopting the new state until the
-operator repairs the failed project and reruns `hive migrate --all`.
+stage layout or managed workflow tasks. Fleet mode restarts once after every
+successful all-project pass, including an otherwise no-op retry after a partial
+failure. That makes the successful pass the update cutover without maintaining
+another durable restart marker. A partial fleet failure defers the restart
+until the operator repairs the failed project and reruns `hive migrate --all`.
 
 `Stages::Finalize` likewise reads legacy `budget_usd.pr` /
 `timeout_sec.pr` as fallbacks. `hive migrate` rewrites those keys to

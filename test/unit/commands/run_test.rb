@@ -851,6 +851,30 @@ class CommandsRunTest < Minitest::Test
     end
   end
 
+  def test_outcome_evidence_block_explains_exact_recovery_before_workflow_retry
+    run = command
+    t = task
+    generation = "a" * 64
+    digest = "b" * 64
+    attrs = {
+      "reason" => "outcome_evidence_recaptures_exhausted",
+      "generation" => generation, "recovery_digest" => digest,
+      "attempt_count" => "3", "failed_targets" => "claim-flow"
+    }
+    current = marker(:error, attrs)
+
+    action = run.send(:json_next_action, t, current)
+    assert_includes action.fetch("instructions"),
+                    "hive evidence recover project:some-slug --generation #{generation} --recovery-digest #{digest}"
+
+    _out, err = capture_io do
+      assert_raises(Hive::TaskInErrorState) do
+        run.send(:report_text, t, {}, current)
+      end
+    end
+    assert_includes err, "hive evidence recover project:some-slug"
+  end
+
   def test_report_text_covers_manual_and_stale_guidance
     run = command
     t = task

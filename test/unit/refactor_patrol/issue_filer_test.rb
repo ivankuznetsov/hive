@@ -51,7 +51,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     assert_equal "github.com", created.fetch(:host)
     assert_includes created.fetch(:body), "Source PR: https://github.com/acme/demo/pull/7"
     assert_includes created.fetch(:body), "Problem evidence"
-    assert_includes created.fetch(:body), "Expected leverage score: 0.4"
+    assert_includes created.fetch(:body), "Route: discuss"
     assert_includes created.fetch(:body), "isolate repeated edits"
     assert_includes created.fetch(:body), "Follow-up approval: pending"
     assert_includes created.fetch(:body), marker
@@ -498,9 +498,8 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     cases = [
       thesis(flags: [ "public_api_impact" ], confidence: "low"),
       thesis(flags: [ "public_api_impact" ], admissible: false),
-      thesis(flags: [ "public_api_impact" ], score: 0.1),
       thesis(flags: [ "collision_patrol_pr" ]),
-      thesis(flags: [ "incomplete_leverage_measurement" ], admissible: false)
+      thesis(flags: [ "missing_evidence" ], admissible: false)
     ]
 
     cases.each do |item|
@@ -686,7 +685,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     Hive::RefactorPatrol::IssueFiler.new(Dir.pwd, cfg: cfg, gh: gh)
   end
 
-  def thesis(flags:, confidence: "medium", admissible: true, score: 0.4,
+  def thesis(flags:, confidence: "medium", admissible: true,
              feature_id: "architecture-services-checkout",
              boundary_file: "services/checkout/core.ts", validation_commands: [ "test" ],
              follow_up_approval_state: "pending")
@@ -702,12 +701,8 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
       ],
       proposed_refactor: "Extract a payment-policy boundary",
       feature_boundary: { "owned_files" => [ boundary_file ], "entrypoints" => [] },
-      expected_leverage: {
-        "score" => score, "breakdown" => { "coupling" => score },
-        "drivers" => [
-          { "signal" => "coupling", "relief" => 0.5, "mechanism" => "isolate repeated edits" }
-        ]
-      },
+      route: "discuss",
+      architecture_effects: [ "isolate repeated edits" ],
       confidence: confidence,
       risk: {
         "flags" => flags, "caps" => { "single_feature" => true },

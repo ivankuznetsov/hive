@@ -487,10 +487,7 @@ class RunStageActionTest < Minitest::Test
         FileUtils.mv(inbox, review)
         File.write(File.join(review, "task.md"), "# task\n<!-- REVIEW_COMPLETE pass=1 browser=skipped -->\n")
         artifacts = File.join(dir, ".hive-state", "stages", "7-artifacts", slug)
-        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(artifacts, "artifact.md")
-        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# Artifacts\nNo extra artifacts.\n<!-- COMPLETE -->\n"
-
-        with_not_applicable_capture_policy do
+        with_accepted_outcome_evidence do
           capture_io { Hive::Commands::StageAction.new("artifacts", slug).call }
         end
 
@@ -508,10 +505,7 @@ class RunStageActionTest < Minitest::Test
         artifacts = File.join(dir, ".hive-state", "stages", "7-artifacts", slug)
         FileUtils.mkdir_p(File.dirname(artifacts))
         FileUtils.mv(inbox, artifacts)
-        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(artifacts, "artifact.md")
-        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# Artifacts\nNo extra artifacts.\n<!-- COMPLETE -->\n"
-
-        with_not_applicable_capture_policy do
+        with_accepted_outcome_evidence do
           capture_io { Hive::Commands::StageAction.new("artifacts", slug, from: "7-artifacts").call }
         end
 

@@ -236,7 +236,7 @@ module Hive
       def eligible?(thesis, reasons)
         return false unless thesis.admissible == true
         return false if confidence(thesis.confidence) < minimum_confidence
-        return false if thesis.expected_leverage.to_h.fetch("score", 0).to_f < minimum_leverage_score
+        return true if thesis.effective_route(min_confidence: @cfg.dig("refactor_patrol", "min_confidence") || "medium") == "discuss"
 
         flags = Array(thesis.risk && thesis.risk["flags"]).map(&:to_s)
         strategic = (flags + Array(reasons).map(&:to_s)) & STRATEGIC_REASONS
@@ -249,10 +249,6 @@ module Hive
 
       def minimum_confidence
         confidence(@cfg.dig("refactor_patrol", "min_confidence") || "medium")
-      end
-
-      def minimum_leverage_score
-        @cfg.dig("refactor_patrol", "issue_filing", "min_leverage_score").to_f
       end
 
       def valid_family_id?(family_id)
@@ -357,7 +353,7 @@ module Hive
               "owned_files" => evidence.map { |entry| entry.fetch("file") },
               "entrypoints" => []
             },
-            "expected_leverage" => {}
+            "architecture_effects" => []
           },
           source: source
         )
@@ -507,9 +503,11 @@ module Hive
 
           #{thesis.proposed_refactor}
 
-          ### Expected leverage
+          ### Route and architecture effects
 
-          #{leverage_lines(thesis.expected_leverage)}
+          Route: #{thesis.route}
+
+          #{architecture_effect_lines(thesis.architecture_effects)}
 
           ### Strategic reasons
 
@@ -550,15 +548,9 @@ module Hive
         lines.empty? ? "- no validation supplied" : lines.join("\n")
       end
 
-      def leverage_lines(leverage)
-        leverage ||= {}
-        lines = [ "Expected leverage score: #{leverage.fetch('score', 0).to_f.round(3)}" ]
-        Array(leverage["drivers"]).each do |driver|
-          next unless driver.is_a?(Hash)
-
-          lines << "- #{driver['signal']}: relief #{driver['relief']} — #{driver['mechanism']}"
-        end
-        lines.join("\n")
+      def architecture_effect_lines(effects)
+        lines = Array(effects).map { |effect| "- #{effect}" }
+        lines.empty? ? "- no architecture effect supplied" : lines.join("\n")
       end
 
       def title_for(thesis)

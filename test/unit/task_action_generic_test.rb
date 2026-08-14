@@ -155,6 +155,16 @@ class TaskActionGenericTest < Minitest::Test
       command
     )
     refute_includes command, "workflow.retry"
+
+    without_attempts = action_for(
+      "report", :error,
+      {
+        "reason" => "outcome_evidence_capability_blocked",
+        "generation" => generation, "recovery_digest" => digest
+      },
+      project_name: "demo"
+    )
+    assert_includes without_attempts.diagnostic.fetch("detail"), "0 admitted attempt(s)"
   end
 
   def test_council_marker_to_action_matrix

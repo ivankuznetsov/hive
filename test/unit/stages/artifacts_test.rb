@@ -876,7 +876,456 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_run_touches_state_and_translates_controller_errors_to_a_durable_marker
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      FileUtils.rm_f(task.state_file)
+      replacement = ->(_task, _cfg) { { commit: "done", status: :complete } }
+      result = with_replaced_singleton_method(
+        Hive::Stages::Artifacts, :run_outcome_evidence!, replacement
+      ) do
+        Hive::Stages::Artifacts.run!(task, nil)
+      end
+      assert_equal({ commit: "done", status: :complete }, result)
+      assert File.exist?(task.state_file)
+
+      replacement = lambda do |_task, _cfg|
+        raise Hive::Artifacts::OutcomeEvidence::StoreError, "contradictory evidence"
+      end
+      result = with_replaced_singleton_method(
+        Hive::Stages::Artifacts, :run_outcome_evidence!, replacement
+      ) do
+        Hive::Stages::Artifacts.run!(task, {})
+      end
+      assert_equal({ commit: "error", status: :error }, result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "outcome_evidence_invalid", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_controller_replays_accepted_blocked_capability_and_attempt_terminal_states
+    scenarios = %i[accepted_identity blocked_identity accepted_generation accepted_attempt capability]
+    scenarios.each do |scenario|
+      Dir.mktmpdir("hive-artifacts-stage") do |dir|
+        task = make_artifacts_task(dir)
+        identity = outcome_identity
+        resolver = Struct.new(:value) { def resolve = value }.new(identity)
+        requirement = outcome_requirement(identity)
+        pointer = if scenario == :blocked_identity || scenario == :capability
+          blocked_pointer(requirement.fetch("generation"))
+        else
+          accepted_pointer(requirement.fetch("generation"))
+        end
+        accepted_attempt = {
+          "attempt_id" => "attempt-accepted", "status" => "accepted"
+        }
+        store = Object.new
+        store.define_singleton_method(:accepted_for_identity?) { |_value| scenario == :accepted_identity }
+        store.define_singleton_method(:blocked_for_identity?) { |_value| scenario == :blocked_identity }
+        store.define_singleton_method(:current) { pointer }
+        store.define_singleton_method(:requirement_for_identity) { |_value| requirement }
+        store.define_singleton_method(:accepted?) do |generation:|
+          scenario == :accepted_generation
+        end
+        store.define_singleton_method(:attempts) do |generation:|
+          scenario == :accepted_attempt ? [ accepted_attempt ] : []
+        end
+        store.define_singleton_method(:publish_current!) do |generation:, attempt_id:|
+          pointer
+        end
+        store.define_singleton_method(:publish_blocked!) do |**|
+          pointer
+        end
+        cfg = if scenario == :capability
+          {
+            "artifacts" => {
+              "evidence" => {
+                "reviewer" => {
+                  "capabilities" => {
+                    "proof_kinds" => %w[document], "temporal_video" => true
+                  }
+                }
+              }
+            }
+          }
+        else
+          {}
+        end
+        requirement["claims"].first["proof_kind"] = "screenshot" if scenario == :capability
+
+        result = Hive::Stages::Artifacts.run_outcome_evidence!(
+          task, cfg, identity_resolver: resolver, store: store
+        )
+
+        expected = %i[blocked_identity capability].include?(scenario) ? :error : :complete
+        assert_equal expected, result.fetch(:status), scenario
+        assert_equal(expected == :error ? :error : :complete,
+                     Hive::Markers.current(task.state_file).name, scenario)
+      end
+    end
+  end
+
+  def test_controller_blocks_prior_blocked_unrecapturable_and_exhausted_reviews
+    scenarios = {
+      blocked: {
+        "status" => "blocked",
+        "review" => {
+          "verdicts" => [
+            {
+              "target_id" => "claim-flow", "verdict" => "blocked",
+              "reason" => "The environment cannot render the required state safely."
+            }
+          ]
+        }
+      },
+      unrecapturable: {
+        "status" => "revise",
+        "review" => {
+          "verdicts" => [
+            {
+              "target_id" => "excluded-target", "verdict" => "revise",
+              "reason" => "The exclusion needs semantic clarification before acceptance."
+            }
+          ]
+        }
+      },
+      exhausted: {
+        "status" => "revise",
+        "review" => {
+          "verdicts" => [
+            {
+              "target_id" => "claim-flow", "verdict" => "revise",
+              "reason" => "The document needs one clearer bounded outcome statement."
+            }
+          ]
+        }
+      }
+    }
+    scenarios.each do |name, attempt|
+      Dir.mktmpdir("hive-artifacts-stage") do |dir|
+        task = make_artifacts_task(dir)
+        identity = outcome_identity
+        resolver = Struct.new(:value) { def resolve = value }.new(identity)
+        requirement = outcome_requirement(identity)
+        attempt = plain_hash(attempt).merge("attempt_id" => "attempt-1")
+        published = []
+        store = terminal_store(requirement, [ attempt ], published)
+        cfg = name == :exhausted ? {
+          "artifacts" => { "evidence" => { "max_recaptures" => 0 } }
+        } : {}
+
+        result = Hive::Stages::Artifacts.run_outcome_evidence!(
+          task, cfg, identity_resolver: resolver, store: store
+        )
+
+        assert_equal :error, result.fetch(:status), name
+        assert_equal 1, published.length, name
+        expected_reason = name == :exhausted ? "recaptures_exhausted" : "review_blocked"
+        assert_equal expected_reason, published.first.fetch(:reason), name
+      end
+    end
+  end
+
+  def test_controller_publishes_a_fresh_blocked_review_attempt
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = outcome_identity
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      requirement = outcome_requirement(identity)
+      published = []
+      store = terminal_store(requirement, [], published)
+      store.define_singleton_method(:retain_candidate!) { |evidence:, **| evidence }
+      store.define_singleton_method(:append_attempt!) do |**input|
+        input.transform_keys(&:to_s).merge("attempt_id" => input.fetch(:attempt_id))
+      end
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |role:, task:, writable_root: nil, **|
+        if role == "producer"
+          relative = Pathname.new(writable_root).relative_path_from(Pathname.new(task.folder)).to_s
+          {
+            actor: { "context_id" => "producer-1", "agent" => "claude" },
+            output: {
+              "evidence" => [
+                {
+                  "kind" => "document", "claims" => [ "claim-flow" ],
+                  "representations" => [ { "path" => "#{relative}/proof.md" } ]
+                }
+              ]
+            }
+          }
+        else
+          {
+            actor: { "context_id" => "reviewer-1", "agent" => "claude" },
+            output: {
+              "inspected_hashes" => [],
+              "verdicts" => [
+                {
+                  "target_id" => "claim-flow", "verdict" => "blocked",
+                  "reason" => "The runtime cannot render the required bounded state."
+                }
+              ]
+            }
+          }
+        end
+      end
+
+      result = Hive::Stages::Artifacts.run_outcome_evidence!(
+        task, {}, identity_resolver: resolver, store: store
+      )
+      assert_equal :error, result.fetch(:status)
+      assert_equal "review_blocked", published.first.fetch(:reason)
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
+  def test_role_process_boundary_rejects_agent_firewall_status_and_truncation_failures
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = { "implementation_head" => "a" * 40 }
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Identity, :new, ->(**) { resolver }
+      ) do
+        raising = ->(*) { raise Hive::AgentError, "provider failed" }
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, raising) do
+          assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+            Hive::Stages::Artifacts.run_role!(
+              role: "inference", task: task, cfg: {}, prompt: "infer", identity: identity
+            )
+          end
+        end
+
+        report = Object.new
+        report.define_singleton_method(:valid?) { false }
+        report.define_singleton_method(:diagnostic) { "task.md changed" }
+        spawn = ->(*) { { status: :ok, final_message: '{"claims":[],"exclusions":[]}' } }
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          with_replaced_singleton_method(
+            Hive::ArtifactFirewall, :validate_and_restore, ->(*) { report }
+          ) do
+            assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+              Hive::Stages::Artifacts.run_role!(
+                role: "inference", task: task, cfg: {}, prompt: "infer", identity: identity
+              )
+            end
+          end
+        end
+
+        [
+          { status: :error, final_message: "{}" },
+          {
+            status: :ok, final_message: '{"claims":[],"exclusions":[]}',
+            final_message_truncated: true
+          }
+        ].each do |result|
+          with_replaced_singleton_method(
+            Hive::Stages::Base, :spawn_agent, ->(*) { result }
+          ) do
+            assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+              Hive::Stages::Artifacts.run_role!(
+                role: "inference", task: task, cfg: {}, prompt: "infer", identity: identity
+              )
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_workspace_producer_launches_only_with_its_writable_root
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = { "implementation_head" => "a" * 40 }
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      writable_root = File.join(task.folder, "outcome-evidence", "work", "generation", "attempt")
+      captured = nil
+      spawn = lambda do |_task, **kwargs|
+        captured = kwargs
+        { status: :ok, final_message: '{"evidence":[]}', final_message_truncated: false }
+      end
+      cfg = {
+        "artifacts" => { "evidence" => { "producer" => { "agent" => "codex" } } }
+      }
+
+      with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Identity, :new, ->(**) { resolver }
+      ) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          Hive::Stages::Artifacts.run_role!(
+            role: "producer", task: task, cfg: cfg, prompt: "produce",
+            identity: identity, writable_root: writable_root
+          )
+        end
+      end
+      assert_equal [ writable_root ], captured.fetch(:add_dirs)
+    end
+  end
+
+  def test_role_security_preflight_semantic_and_recapture_contracts_fail_closed
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      claude = Hive::AgentProfiles.lookup(:claude)
+      codex = Hive::AgentProfiles.lookup(:codex)
+      no_scope = Object.new
+      no_scope.define_singleton_method(:name) { :pi }
+      no_scope.define_singleton_method(:workspace_write_supported?) { false }
+      no_scope.define_singleton_method(:read_only_supported?) { false }
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Stages::Artifacts.role_security_kwargs(
+          "producer", task: task, cfg: {}, profile: claude, actor_cfg: {}
+        )
+      end
+      assert_raises(Hive::ConfigError) do
+        Hive::Stages::Artifacts.role_security_kwargs(
+          "producer", task: task, cfg: {}, profile: no_scope, actor_cfg: {},
+          writable_root: File.join(task.folder, "proof")
+        )
+      end
+      assert_raises(Hive::ConfigError) do
+        Hive::Stages::Artifacts.role_security_kwargs(
+          "inference", task: task, cfg: {}, profile: claude,
+          actor_cfg: { "permissions" => "yolo" }
+        )
+      end
+      assert_raises(Hive::ConfigError) do
+        Hive::Stages::Artifacts.role_security_kwargs(
+          "reviewer", task: task, cfg: {}, profile: no_scope, actor_cfg: {}
+        )
+      end
+      assert_equal Hive::AgentProfile::READ_ONLY_PERMISSION_MODE,
+                   Hive::Stages::Artifacts.role_security_kwargs(
+                     "reviewer", task: task, cfg: {}, profile: codex, actor_cfg: {}
+                   ).fetch(:permission_mode)
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Stages::Artifacts.preflight_reviewer!(
+          {
+            "artifacts" => {
+              "evidence" => {
+                "reviewer" => {
+                  "capabilities" => {
+                    "proof_kinds" => %w[document], "temporal_video" => true
+                  }
+                }
+              }
+            }
+          },
+          [ { "proof_kind" => "screenshot" } ]
+        )
+      end
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Hive::Stages::Artifacts.semantic_review_status!([])
+      end
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Hive::Stages::Artifacts.merge_candidate_evidence!(
+          { "evidence" => [] },
+          [ { "claims" => [ "claim-other" ] } ],
+          [ { "target_id" => "claim-flow" } ]
+        )
+      end
+    end
+  end
+
+  def test_role_json_producer_paths_and_cleanup_roots_are_bounded
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Hive::Stages::Artifacts.parse_role_output!("", "inference")
+      end
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Hive::Stages::Artifacts.parse_role_output!("{", "inference")
+      end
+
+      writable_root = File.join(task.folder, "outcome-evidence", "work", "generation", "attempt")
+      FileUtils.mkdir_p(writable_root)
+      evidence = [
+        {
+          "source" => { "type" => "task" },
+          "representations" => [ { "path" => "outside/proof.md" } ]
+        }
+      ]
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Hive::Stages::Artifacts.ensure_producer_paths!(task, writable_root, evidence)
+      end
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Hive::Stages::Artifacts.remove_producer_work!(task, task.folder)
+      end
+
+      outside = File.join(dir, "outside-proof")
+      File.write(outside, "keep")
+      link = File.join(writable_root, "link")
+      File.symlink(outside, link)
+      Hive::Stages::Artifacts.remove_producer_work!(task, link)
+      refute File.exist?(link)
+      assert_equal "keep", File.read(outside)
+    end
+  end
+
   private
+
+  def outcome_identity
+    paths = [ "app/checkout.rb" ]
+    {
+      "repository" => nil, "branch" => "demo",
+      "implementation_base" => "a" * 40, "merge_base" => "a" * 40,
+      "implementation_head" => "b" * 40, "changed_paths" => paths,
+      "changed_paths_digest" => Digest::SHA256.hexdigest(paths.join("\0"))
+    }
+  end
+
+  def outcome_requirement(identity)
+    {
+      "generation" => "c" * 64, "implementation" => identity,
+      "claims" => [
+        {
+          "id" => "claim-flow",
+          "statement" => "A buyer can finish checkout and see confirmation.",
+          "proof_kind" => "document", "changed_paths" => [ "app/checkout.rb" ]
+        }
+      ],
+      "exclusions" => [],
+      "inference" => { "context_id" => "inference-1", "agent" => "claude" }
+    }
+  end
+
+  def accepted_pointer(generation)
+    { "generation" => generation, "attempt_id" => "attempt-accepted" }
+  end
+
+  def blocked_pointer(generation)
+    {
+      "generation" => generation, "reason" => "capability_blocked",
+      "recovery_digest" => "d" * 64, "attempt_count" => 0,
+      "failed_claims" => [ "claim-flow" ]
+    }
+  end
+
+  def terminal_store(requirement, attempts, published)
+    store = Object.new
+    store.define_singleton_method(:accepted_for_identity?) { |_value| false }
+    store.define_singleton_method(:blocked_for_identity?) { |_value| false }
+    store.define_singleton_method(:requirement_for_identity) { |_value| requirement }
+    store.define_singleton_method(:accepted?) { |generation:| false }
+    store.define_singleton_method(:attempts) { |generation:| attempts }
+    store.define_singleton_method(:publish_blocked!) do |**input|
+      published << input
+      blocked_pointer = {
+        "generation" => input.fetch(:generation), "reason" => input.fetch(:reason),
+        "recovery_digest" => "d" * 64,
+        "attempt_count" => input.fetch(:attempt_ids).length,
+        "failed_claims" => input.fetch(:failed_claims)
+      }
+      blocked_pointer
+    end
+    store
+  end
+
+  def plain_hash(value)
+    JSON.parse(JSON.generate(value), object_class: Hash)
+  end
 
   def self.evidence_descriptor(relative, claim_id, digest_char)
     {

@@ -187,6 +187,95 @@ class OutcomeEvidenceContractTest < Minitest::Test
     refute_includes error.message, "abcdefghijklmnopqrstuvwxyz"
   end
 
+  def test_rejects_malformed_requirements_actor_identities_and_review_outputs
+    paths = %w[app/checkout.rb]
+    valid_claim = claim(
+      "claim-flow", "A buyer can finish checkout and see confirmation.",
+      "video", paths
+    )
+    inference = { "context_id" => "inference-1", "agent" => "claude" }
+
+    assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.requirement!(
+        implementation: {}, claims: [ valid_claim ], exclusions: [], inference: inference
+      )
+    end
+    assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.requirement!(
+        implementation: { "changed_paths" => paths },
+        claims: [ valid_claim.except("statement") ], exclusions: [], inference: inference
+      )
+    end
+    assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.requirement!(
+        implementation: { "changed_paths" => paths },
+        claims: [ valid_claim.merge("changed_paths" => paths * 2) ],
+        exclusions: [], inference: inference
+      )
+    end
+    assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.requirement!(
+        implementation: { "changed_paths" => paths }, claims: [ valid_claim ],
+        exclusions: [], inference: { "context_id" => "inference-1" }
+      )
+    end
+    assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.requirement!(
+        implementation: { "changed_paths" => paths }, claims: [ valid_claim ],
+        exclusions: [], inference: inference.merge("model" => "\n")
+      )
+    end
+
+    requirement = Contract.requirement!(
+      implementation: { "changed_paths" => paths }, claims: [ valid_claim ],
+      exclusions: [], inference: inference
+    )
+    producer = { "context_id" => "producer-1", "agent" => "claude" }
+    reviewer = { "context_id" => "reviewer-1", "agent" => "claude" }
+    evidence = [
+      {
+        "kind" => "video", "claims" => [ "claim-flow" ],
+        "representations" => [ { "sha256" => "a" * 64 }, { "sha256" => "b" * 64 } ]
+      }
+    ]
+    output = {
+      "inspected_hashes" => [ "a" * 64, "b" * 64 ],
+      "verdicts" => [
+        {
+          "target_id" => "claim-flow", "verdict" => "accepted",
+          "reason" => "The temporal proof shows checkout reaching confirmation successfully."
+        }
+      ]
+    }
+
+    assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.review!(
+        requirement: requirement,
+        evidence: [ evidence.first.merge("kind" => "screenshot") ],
+        producer: producer, reviewer: reviewer, output: output
+      )
+    end
+    assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.review!(
+        requirement: requirement, evidence: evidence,
+        producer: producer, reviewer: reviewer, output: output.merge("verdicts" => [])
+      )
+    end
+    assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.review!(
+        requirement: requirement, evidence: evidence,
+        producer: producer, reviewer: reviewer, output: output.except("inspected_hashes")
+      )
+    end
+    assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.review!(
+        requirement: requirement, evidence: evidence,
+        producer: producer, reviewer: reviewer,
+        output: output.merge("verdicts" => [ output.fetch("verdicts").first.except("reason") ])
+      )
+    end
+  end
+
   private
 
   def claim(id, statement, proof_kind, paths)

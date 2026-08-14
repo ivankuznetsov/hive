@@ -5,6 +5,11 @@ class OutcomeEvidenceProofTest < Minitest::Test
   include HiveTestHelper
 
   HEAD = "b" * 40
+  Proof = Hive::Artifacts::OutcomeEvidence::Proof
+
+  def run
+    with_fake_proof_media_tools { super }
+  end
 
   def test_admits_the_closed_proof_kinds_with_bounded_review_representations
     with_tmp_dir do |root|
@@ -260,6 +265,367 @@ class OutcomeEvidenceProofTest < Minitest::Test
     end
   end
 
+  def test_rejects_malformed_claim_source_representation_and_rendering_contracts
+    with_tmp_dir do |root|
+      files = valid_files(root)
+      document = proof(
+        "document", files,
+        original: [ "report.md", "text/markdown" ],
+        review: [ "report.txt", "text/plain" ]
+      )
+
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { admit(root, {}) }
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        admit(root, document.merge("claims" => []))
+      end
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        admit(root, document.merge("claims" => %w[claim-a claim-a]))
+      end
+      mismatched = Marshal.load(Marshal.dump(document))
+      mismatched.fetch("source")["source_sha"] = "c" * 40
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { admit(root, mismatched) }
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        admit(root, document.merge("representations" => document.fetch("representations").take(1)))
+      end
+
+      duplicate_role = Marshal.load(Marshal.dump(document))
+      duplicate_role.fetch("representations").last["role"] = "original"
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        admit(root, duplicate_role)
+      end
+
+      rendering = Marshal.load(Marshal.dump(document))
+      rendering.fetch("representations").first["rendering"] = "raster"
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { admit(root, rendering) }
+
+      review = representation("review", "shot-review.png", "image/png")
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(
+          :canonical_representation, review, kind: "video", task_folder: root
+        )
+      end
+
+      unavailable = Marshal.load(Marshal.dump(document))
+      unavailable.fetch("representations").last.merge!(
+        "path" => "missing.txt", "bytes" => 1, "sha256" => "a" * 64
+      )
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        admit(root, unavailable)
+      end
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        admit(root, document.merge("summary" => ""))
+      end
+    end
+  end
+
+  def test_custody_roots_and_secure_reads_reject_escape_symlink_and_races
+    with_tmp_dir do |root|
+      outside = Dir.mktmpdir("hive-proof-outside")
+      File.write(File.join(outside, "proof.txt"), "outside\n")
+      File.symlink(outside, File.join(root, "escape"))
+
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(:retained_regular_file!, root, "escape/proof.txt")
+      end
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(:retained_regular_file!, root, "missing.txt")
+      end
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(:secure_digest, File.join(root, "escape"))
+      end
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(
+          :prepare_materialization_root!, root, File.join(root, "escape", "custody")
+        )
+      end
+
+      existing = File.join(root, "existing")
+      FileUtils.mkdir_p(existing)
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(:prepare_materialization_root!, root, existing)
+      end
+
+      replaced = File.join(root, "replaced")
+      original_lstat = File.method(:lstat)
+      calls = 0
+      fake_stat = Object.new
+      fake_stat.define_singleton_method(:directory?) { false }
+      fake_stat.define_singleton_method(:symlink?) { false }
+      replacement = lambda do |path|
+        if path == replaced
+          calls += 1
+          raise Errno::ENOENT if calls == 1
+          fake_stat
+        else
+          original_lstat.call(path)
+        end
+      end
+      with_replaced_singleton_method(File, :lstat, replacement) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          Proof.send(:prepare_materialization_root!, root, replaced)
+        end
+      end
+
+      raced = File.join(root, "raced")
+      FileUtils.mkdir_p(raced)
+      replacement = ->(path) { path == raced ? raise(Errno::ENOENT) : original_lstat.call(path) }
+      with_replaced_singleton_method(File, :lstat, replacement) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          Proof.send(:prepare_materialization_root!, root, raced)
+        end
+      end
+    ensure
+      FileUtils.remove_entry_secure(outside) if outside && File.directory?(outside)
+    end
+  end
+
+  def test_custody_transfer_detects_growth_metadata_digest_and_destination_races
+    with_tmp_dir do |root|
+      source = File.join(root, "source.txt")
+      File.write(source, "abc")
+      representation = {
+        "path" => "source.txt", "bytes" => 3,
+        "sha256" => Digest::SHA256.hexdigest("abc")
+      }
+
+      too_small = representation.merge("bytes" => 1)
+      destination = File.join(root, "too-small.txt")
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(:copy_representation!, root, too_small, destination)
+      end
+      refute File.exist?(destination)
+
+      wrong_total = representation.merge("bytes" => 4)
+      destination = File.join(root, "wrong-total.txt")
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(:copy_representation!, root, wrong_total, destination)
+      end
+      refute File.exist?(destination)
+
+      destination = File.join(root, "existing.txt")
+      File.write(destination, "keep")
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(:copy_representation!, root, representation, destination)
+      end
+      assert_equal "keep", File.read(destination)
+
+      destination = File.join(root, "metadata-race.txt")
+      reads = [ "abc", nil ]
+      stats = [
+        File.stat(source),
+        Struct.new(:dev, :ino, :size).new(File.stat(source).dev, File.stat(source).ino, 4)
+      ]
+      input = Object.new
+      input.define_singleton_method(:read) { |_size| reads.shift }
+      input.define_singleton_method(:stat) { stats.shift }
+      original_open = File.method(:open)
+      replacement = lambda do |path, *args, **kwargs, &block|
+        if path == source
+          block.call(input)
+        else
+          original_open.call(path, *args, **kwargs, &block)
+        end
+      end
+      with_replaced_singleton_method(File, :open, replacement) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          Proof.send(:copy_representation!, root, representation, destination)
+        end
+      end
+      refute File.exist?(destination)
+    end
+  end
+
+  def test_materialization_removes_partial_custody_after_admission_failure
+    with_tmp_dir do |root|
+      files = valid_files(root)
+      value = proof(
+        "document", files,
+        original: [ "report.md", "text/markdown" ],
+        review: [ "report.txt", "text/plain" ]
+      )
+      FileUtils.mkdir_p(File.join(root, "retained", "attempt-1"))
+      replacement = ->(*) { raise Hive::Artifacts::OutcomeEvidence::StoreError, "copy failed" }
+
+      with_replaced_singleton_method(Proof, :copy_representation!, replacement) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          Proof.materialize!(
+            value, task_folder: root, expected_head: HEAD,
+            destination_root: "retained/attempt-1/entry-01"
+          )
+        end
+      end
+      refute File.exist?(File.join(root, "retained", "attempt-1", "entry-01"))
+    end
+  end
+
+  def test_terminal_and_document_decoders_reject_invalid_structure_and_bytes
+    with_tmp_dir do |root|
+      invalid_header = File.join(root, "invalid-header.cast")
+      File.write(invalid_header, %({"version":1,"width":80,"height":24}\n))
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(:inspect_terminal_cast!, invalid_header)
+      end
+
+      invalid_event = File.join(root, "invalid-event.cast")
+      File.write(
+        invalid_event,
+        %({"version":2,"width":80,"height":24}\n[0.1,"i","input"]\n)
+      )
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(:inspect_terminal_cast!, invalid_event)
+      end
+
+      control = File.join(root, "control.txt")
+      File.binwrite(control, "unsafe\0text")
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(:inspect_safe_text!, control)
+      end
+
+      malformed = File.join(root, "malformed.json")
+      File.write(malformed, "{")
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(:inspect_safe_text!, malformed, json: true)
+      end
+
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(
+          :inspect_representation!, malformed,
+          kind: "document", role: "review", media_type: "application/octet-stream"
+        )
+      end
+    end
+  end
+
+  def test_media_and_ocr_commands_cover_supported_codecs_limits_fallback_and_failures
+    with_tmp_dir do |root|
+      media = File.join(root, "media.bin")
+      File.write(media, "media")
+      seen_roots = []
+      probe = lambda do |codec:, format:, duration: "0"|
+        lambda do |argv, source_root:|
+          seen_roots << source_root
+          if argv.include?("-show_entries")
+            JSON.generate(
+              "streams" => [ { "codec_name" => codec, "codec_type" => "video" } ],
+              "format" => { "format_name" => format, "duration" => duration }
+            )
+          else
+            ""
+          end
+        end
+      end
+
+      {
+        "image/jpeg" => [ "mjpeg", "image2" ],
+        "image/webp" => [ "webp", "webp_pipe" ],
+        "video/mp4" => [ "h264", "mov,mp4,m4a,3gp,3g2,mj2", "0.2" ]
+      }.each do |media_type, (codec, format, duration)|
+        with_replaced_singleton_method(
+          Proof, :media_command,
+          probe.call(codec: codec, format: format, duration: duration || "0")
+        ) do
+          Proof.send(:inspect_media!, media, media_type: media_type)
+        end
+      end
+      assert seen_roots.all? { |source_root| source_root == root }
+
+      with_replaced_singleton_method(
+        Proof, :media_command,
+        probe.call(codec: "vp8", format: "matroska,webm", duration: "31")
+      ) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          Proof.send(:inspect_media!, media, media_type: "video/webm")
+        end
+      end
+      with_replaced_singleton_method(Proof, :media_command, ->(*) { "{" }) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          Proof.send(:inspect_media!, media, media_type: "image/png")
+        end
+      end
+
+      calls = []
+      ocr = lambda do |argv, source_root:, failure:|
+        calls << [ argv, source_root, failure ]
+        ""
+      end
+      with_replaced_singleton_method(Proof, :ocr_command, ocr) do
+        Proof.send(
+          :inspect_visual_secrets!, media, media_type: "video/webm", duration: 0.2
+        )
+      end
+      assert_equal 3, calls.length
+      assert calls[1].first.last.end_with?("frame-001.png")
+
+      failure = {
+        "status" => { "success" => false }, "internal_error" => nil,
+        "timed_out" => false, "cleanup_failed" => false,
+        "stdout_overflow" => false, "stderr_overflow" => false,
+        "leftover_processes" => false, "stdout" => ""
+      }
+      with_replaced_singleton_method(
+        Hive::Web::ProjectCaptureProvider, :capture_command_with_custody,
+        ->(**) { failure }
+      ) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          Proof.send(:ocr_command, [ "/bin/false" ], source_root: root, failure: "ocr failed")
+        end
+      end
+
+      raising = lambda do |**|
+        raise Hive::Web::ProjectCaptureProvider::ProviderError, "runner failed"
+      end
+      with_replaced_singleton_method(
+        Hive::Web::ProjectCaptureProvider, :capture_command_with_custody, raising
+      ) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          Proof.send(:ocr_command, [ "/bin/false" ], source_root: root, failure: "ocr failed")
+        end
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          Proof.send(:media_command, [ "/bin/false" ], source_root: root)
+        end
+      end
+    end
+  end
+
+  def test_project_provider_originals_and_manifest_size_are_fail_closed
+    with_tmp_dir do |root|
+      media = File.join(root, "media")
+      FileUtils.mkdir_p(media)
+      screenshot = File.expand_path("../../../fixtures/composer/screenshot-1.png", __dir__)
+      original = File.join(media, "provider.png")
+      review = File.join(media, "provider-review.png")
+      other = File.join(media, "other.png")
+      [ original, review, other ].each { |path| FileUtils.cp(screenshot, path) }
+      artifact = {
+        "file" => File.basename(other), "bytes" => File.size(other),
+        "sha256" => Digest::SHA256.file(other).hexdigest
+      }
+      File.write(
+        File.join(media, "capture-manifest.json"),
+        JSON.generate(capture_manifest(artifact))
+      )
+      value = {
+        "kind" => "screenshot", "summary" => "Project UI at the implementation head",
+        "claims" => %w[claim-a],
+        "source" => {
+          "type" => "project_provider", "name" => "fixture-provider",
+          "source_sha" => HEAD, "manifest_path" => "media/capture-manifest.json"
+        },
+        "representations" => [
+          { "role" => "original", "media_type" => "image/png" }.merge(file_record(original, root)),
+          { "role" => "review", "media_type" => "image/png" }.merge(file_record(review, root))
+        ]
+      }
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { admit(root, value) }
+
+      oversized = File.join(media, "oversized.json")
+      File.binwrite(oversized, "x" * (Hive::ARTIFACT_CAPTURE_MANIFEST_MAX_BYTES + 1))
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.send(:capture_manifest!, root, "media/oversized.json")
+      end
+    end
+  end
+
   private
 
   def admit(root, value)
@@ -321,11 +687,58 @@ class OutcomeEvidenceProofTest < Minitest::Test
   end
 
   def make_video(path)
-    system(
-      "ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi",
-      "-i", "color=c=black:s=16x16:d=0.2", "-an", "-c:v", "libvpx",
-      "-y", path
-    ) or raise "ffmpeg could not create the test video"
+    File.binwrite(path, [ 0x1A, 0x45, 0xDF, 0xA3 ].pack("C*") + "hive-webm-fixture")
+  end
+
+  def with_fake_proof_media_tools
+    Dir.mktmpdir("hive-test-proof-media-tools") do |root|
+      fake_bin = File.join(root, "bin")
+      FileUtils.mkdir_p(fake_bin)
+      tool = <<~RUBY
+        #!#{RbConfig.ruby}
+        require "json"
+
+        png = [ 137, 80, 78, 71, 13, 10, 26, 10 ].pack("C*")
+        webm = [ 0x1A, 0x45, 0xDF, 0xA3 ].pack("C*")
+        name = File.basename($PROGRAM_NAME)
+        exit 0 if name == "tesseract"
+
+        input = ARGV.fetch(ARGV.index("-i") + 1) if name == "ffmpeg"
+        input ||= ARGV.last
+        signature = File.binread(input, 8)
+        type = if signature.start_with?(png)
+          :png
+        elsif signature.start_with?(webm)
+          :webm
+        end
+        exit 1 unless type
+
+        if name == "ffprobe"
+          puts JSON.generate(
+            "streams" => [
+              {
+                "codec_name" => type == :png ? "png" : "vp8",
+                "codec_type" => "video"
+              }
+            ],
+            "format" => {
+              "format_name" => type == :png ? "png_pipe" : "matroska,webm",
+              "duration" => type == :png ? "0" : "0.2"
+            }
+          )
+        elsif (output = ARGV.last).end_with?(".png")
+          File.binwrite(output.sub("%03d", "001"), png)
+        end
+      RUBY
+      %w[ffprobe ffmpeg tesseract].each do |name|
+        path = File.join(fake_bin, name)
+        File.write(path, tool)
+        FileUtils.chmod(0o755, path)
+      end
+      with_env(
+        "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
+      ) { yield }
+    end
   end
 
   def capture_manifest(artifact)

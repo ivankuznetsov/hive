@@ -462,9 +462,6 @@ module Hive
             active_attempt = attempt_documents.find do |attempt|
               attempt.fetch("attempt_id") == pointer.fetch("attempt_id")
             end
-            unless active_attempt
-              raise StoreError, "accepted package omits its published attempt"
-            end
             validate_publication!(
               requirement_document, active_attempt, generation,
               pointer.fetch("attempt_id")

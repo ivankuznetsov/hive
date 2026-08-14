@@ -181,6 +181,39 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_isolated_executable_fails_closed_on_unreadable_launcher_candidates
+    with_tmp_dir do |dir|
+      launcher_dir = File.join(dir, "launchers")
+      concrete_dir = File.join(dir, "concrete")
+      FileUtils.mkdir_p([ launcher_dir, concrete_dir ])
+      launcher = File.join(launcher_dir, "managed-agent")
+      concrete = File.join(concrete_dir, "managed-agent")
+      File.write(launcher, "#!/bin/sh\nexec mise x managed-agent -- managed-agent \"$@\"\n")
+      File.write(concrete, "#!/bin/sh\nexit 0\n")
+      FileUtils.chmod(0o755, [ launcher, concrete ])
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "inspect", max_budget_usd: nil,
+        timeout_sec: 5, isolate_environment: true
+      )
+      original = File.method(:realpath)
+
+      with_env("PATH" => [ launcher_dir, concrete_dir ].join(File::PATH_SEPARATOR)) do
+        replacement = ->(path) { path == concrete ? raise(Errno::EIO) : original.call(path) }
+        with_replaced_singleton_method(File, :realpath, replacement) do
+          assert_equal launcher, agent.send(:isolated_executable, "managed-agent")
+        end
+
+        with_replaced_singleton_method(File, :realpath, ->(_path) { raise Errno::EIO }) do
+          assert_equal "managed-agent", agent.send(:isolated_executable, "managed-agent")
+        end
+      end
+
+      link = File.join(dir, "launcher-link")
+      File.symlink(launcher, link)
+      refute agent.send(:tool_manager_launcher?, link)
+    end
+  end
+
   def test_writes_marker_and_log_on_success
     with_tmp_dir do |dir|
       task = make_task(dir)

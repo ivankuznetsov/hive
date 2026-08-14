@@ -69,6 +69,82 @@ class CommandsEvidenceTest < Minitest::Test
     end
   end
 
+  def test_recover_validates_arguments_resolves_normally_and_emits_json
+    digest = "a" * 64
+    invalid = [
+      [ "unknown", "demo-task", digest, digest ],
+      [ "recover", nil, digest, digest ],
+      [ "recover", "demo-task", "short", digest ],
+      [ "recover", "demo-task", digest, "short" ]
+    ]
+    invalid.each do |subcommand, target, generation, recovery_digest|
+      command = Hive::Commands::Evidence.new(
+        subcommand, target, generation: generation, recovery_digest: recovery_digest,
+        task_resolver: -> { flunk "invalid arguments must fail before task resolution" }
+      )
+      assert_raises(Hive::UsageError) { command.call }
+    end
+
+    with_tmp_dir do |dir|
+      task = fake_task(dir)
+      pointer = blocked_package(task)
+      Hive::Markers.set(
+        task.state_file, :error,
+        reason: "outcome_evidence_capability_blocked",
+        generation: pointer.fetch("generation"),
+        recovery_digest: pointer.fetch("recovery_digest")
+      )
+      resolver = Object.new
+      resolver.define_singleton_method(:resolve) { task }
+      calls = []
+      factory = lambda do |target, project_filter:, stage_filter:|
+        calls << [ target, project_filter, stage_filter ]
+        resolver
+      end
+      command = Hive::Commands::Evidence.new(
+        "recover", task.slug, project: "demo", stage: "7-artifacts", json: true,
+        generation: pointer.fetch("generation"),
+        recovery_digest: pointer.fetch("recovery_digest")
+      )
+
+      out, = with_replaced_singleton_method(Hive::TaskResolver, :new, factory) do
+        capture_io { command.call }
+      end
+      assert_equal "recovery_ready", JSON.parse(out).fetch("status")
+      assert_equal [ [ task.slug, "demo", "7-artifacts" ] ], calls
+    end
+  end
+
+  def test_recover_rejects_a_nonblocked_current_pointer
+    with_tmp_dir do |dir|
+      task = fake_task(dir)
+      generation = "a" * 64
+      recovery_digest = "b" * 64
+      Hive::Markers.set(
+        task.state_file, :error,
+        reason: "outcome_evidence_capability_blocked",
+        generation: generation, recovery_digest: recovery_digest
+      )
+      package = {
+        "current" => { "status" => "accepted" },
+        "requirement" => { "task_generation" => "1" }
+      }
+      store = Object.new
+      store.define_singleton_method(:package) { package }
+      command = Hive::Commands::Evidence.new(
+        "recover", task.slug, generation: generation, recovery_digest: recovery_digest,
+        task_resolver: -> { task }
+      )
+
+      replacement = ->(**) { store }
+      with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Store, :new, replacement
+      ) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { command.call }
+      end
+    end
+  end
+
   private
 
   def fake_task(dir)

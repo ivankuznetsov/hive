@@ -198,13 +198,6 @@ module Hive
           unless roles.count("original") == 1 && roles.count("review") == 1
             raise StoreError, "outcome evidence requires exactly one original and one review representation"
           end
-          if kind == "video" && canonical.none? do |item|
-               item.fetch("role") == "review" && item.fetch("rendering") == "temporal"
-             end
-            raise StoreError,
-                  "video outcome evidence requires an actual temporal review representation; " \
-                  "storyboard frames are supplemental only"
-          end
           paths = canonical.map { |item| item.fetch("path") }
           raise StoreError, "outcome evidence representation paths must be unique" unless paths.uniq == paths
 

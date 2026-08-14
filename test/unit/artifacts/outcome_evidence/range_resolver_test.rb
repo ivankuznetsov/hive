@@ -107,6 +107,63 @@ class OutcomeEvidenceRangeResolverTest < Minitest::Test
     end
   end
 
+  def test_rejects_an_empty_controller_range_and_fallback_receipt_contradictions
+    with_repository do |task, worktree, base, root|
+      write_pointer(task, worktree, base_oid: base)
+      assert_resolution_error(task, root, /range is empty/)
+
+      commit_path(worktree, "lib/feature.rb", "FEATURE = true\n")
+      write_pointer(task, worktree, repository: "github.com/acme/pointer")
+      Hive::DraftPrReceipt.initialize!(
+        task.folder,
+        expected: {
+          "version" => 1, "phase" => "worktree_created",
+          "repository" => "github.com/acme/receipt", "base_branch" => "master",
+          "base_oid" => base, "task_branch" => task.slug,
+          "worktree_path" => worktree
+        },
+        worktree_root: root
+      )
+      assert_resolution_error(task, root, /repository.*contradicts/)
+    end
+  end
+
+  def test_rejects_truncated_raw_diffs_and_bounded_git_failures
+    with_repository do |task, worktree, base, root|
+      subject = resolver(task, root)
+      raw = ":100644 100644 #{'a' * 40} #{'b' * 40} M\0"
+      subject.define_singleton_method(:git_read!) { |_worktree, _operation, **| raw }
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::ResolutionError) do
+        subject.send(:changed_paths, worktree, base, "b" * 40)
+      end
+      assert_match(/truncated/, error.message)
+
+      failure = Hive::AgentGitGate::ReadResult.new(
+        operation: :head_oid, stdout: "fallback output", stderr: "",
+        exitstatus: 1, overflow: true
+      )
+      with_replaced_singleton_method(Hive::AgentGitGate, :read, ->(*) { failure }) do
+        error = assert_raises(Hive::Artifacts::OutcomeEvidence::ResolutionError) do
+          resolver(task, root).send(:git_read!, worktree, :head_oid)
+        end
+        assert_match(/bounded output exceeded/, error.message)
+      end
+
+      raising = ->(*) { raise Hive::AgentGitGate::Error, "reader unavailable" }
+      with_replaced_singleton_method(Hive::AgentGitGate, :read, raising) do
+        error = assert_raises(Hive::Artifacts::OutcomeEvidence::ResolutionError) do
+          resolver(task, root).send(:ancestor!, worktree, base, "b" * 40)
+        end
+        assert_match(/reader unavailable/, error.message)
+
+        error = assert_raises(Hive::Artifacts::OutcomeEvidence::ResolutionError) do
+          resolver(task, root).send(:git_read!, worktree, :head_oid)
+        end
+        assert_match(/reader unavailable/, error.message)
+      end
+    end
+  end
+
   private
 
   def with_repository

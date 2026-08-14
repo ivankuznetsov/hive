@@ -34,3 +34,6 @@ tags: [artifacts, evidence, review, web, recovery]
   before the implementer starts, then upgraded the real-CLI full-pipeline
   scenario to run inference, scoped production, retained custody, independent
   review, accepted publication, and archive instead of seeding a legacy marker.
+- Made proof-media unit tests hermetic with process-level media-tool stand-ins;
+  coverage runners no longer depend on optional host `ffprobe`, `ffmpeg`, or
+  `tesseract` installations to reach every admission branch.

@@ -98,6 +98,91 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     assert_empty undersized, "named controls must meet the 24 CSS pixel minimum"
   end
 
+  test "large markdown artifacts keep a readable measure and contain wide content" do
+    wide_value = "unbroken-evidence-#{'a' * 180}"
+    @folder.join("idea.md").write(<<~MD)
+      # Long-form operator guide
+
+      This document has enough prose to make line length and vertical rhythm
+      matter. The task workspace should read like a document rather than dense
+      dashboard chrome.
+
+      ## Evidence review
+
+      #{Array.new(12, "Read the evidence carefully, preserve its context, and record the resulting decision.").join("\n\n")}
+
+      | Evidence | Durable value |
+      | --- | --- |
+      | receipt | #{wide_value} |
+
+      ```text
+      #{wide_value}
+      ```
+    MD
+
+    sign_in!
+    page.current_window.resize_to(1280, 900)
+    visit task_path(@project, @slug)
+    assert_selector "#workspace-artifacts .markdown h1", text: "Long-form operator guide", wait: 10
+
+    desktop = page.evaluate_script(<<~JS)
+      (() => {
+        const root = document.documentElement
+        const documentBody = document.querySelector("#workspace-artifacts .markdown")
+        const bodyStyle = getComputedStyle(documentBody)
+        return {
+          viewport: root.clientWidth,
+          documentWidth: root.scrollWidth,
+          readingWidth: documentBody.getBoundingClientRect().width,
+          fontSize: parseFloat(bodyStyle.fontSize),
+          lineHeight: parseFloat(bodyStyle.lineHeight),
+          h1Size: parseFloat(getComputedStyle(documentBody.querySelector("h1")).fontSize),
+          h2Size: parseFloat(getComputedStyle(documentBody.querySelector("h2")).fontSize)
+        }
+      })()
+    JS
+
+    assert_operator desktop.fetch("fontSize"), :>=, 16,
+                    "long-form artifact prose must use a full-size reading font"
+    assert_operator desktop.fetch("lineHeight"), :>=, 27,
+                    "long documents need generous leading for scanability"
+    assert_operator desktop.fetch("h1Size") / desktop.fetch("fontSize"), :>=, 1.7,
+                    "the document title must be visibly distinct from body prose"
+    assert_operator desktop.fetch("h2Size") / desktop.fetch("fontSize"), :>=, 1.3,
+                    "section headings must establish a clear document hierarchy"
+    assert_operator desktop.fetch("readingWidth"), :<=, 900,
+                    "long lines must be capped at a comfortable reading measure"
+    assert_operator desktop.fetch("documentWidth"), :<=, desktop.fetch("viewport") + 1
+
+    page.current_window.resize_to(375, 812)
+    mobile = page.evaluate_script(<<~JS)
+      (() => {
+        const root = document.documentElement
+        const pre = document.querySelector("#workspace-artifacts .markdown pre")
+        const table = document.querySelector("#workspace-artifacts .markdown table")
+        return {
+          viewport: root.clientWidth,
+          documentWidth: root.scrollWidth,
+          preOverflow: getComputedStyle(pre).overflowX,
+          preScrollWidth: pre.scrollWidth,
+          preWidth: pre.clientWidth,
+          tableOverflow: getComputedStyle(table).overflowX,
+          tableScrollWidth: table.scrollWidth,
+          tableWidth: table.clientWidth
+        }
+      })()
+    JS
+
+    assert_operator mobile.fetch("documentWidth"), :<=, mobile.fetch("viewport") + 1,
+                    "wide Markdown content must not widen the task page"
+    assert_includes %w[auto scroll], mobile.fetch("preOverflow")
+    assert_operator mobile.fetch("preScrollWidth"), :>, mobile.fetch("preWidth"),
+                    "long code must scroll inside its own block"
+    assert_includes %w[auto scroll], mobile.fetch("tableOverflow")
+    assert_operator mobile.fetch("tableScrollWidth"), :>, mobile.fetch("tableWidth"),
+                    "wide tables must scroll inside the document"
+  end
+
   test "pushed morphs preserve the exact Q&A selection range" do
     brainstorm = stage_dir(@project, "2-brainstorm").join(@slug)
     FileUtils.mv(@folder, brainstorm)

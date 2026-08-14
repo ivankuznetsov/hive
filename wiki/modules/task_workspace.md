@@ -240,8 +240,12 @@ the local interval and a later GitHub `Retry-After` deadline.
 Artifacts use descriptor-based no-follow reads over known workflow files, with
 per-file and aggregate limits, binary/encoding detection, redaction, and stable
 descriptor checks. Markdown still passes through the existing escape and
-sanitization pipeline. Diff and log keep their existing independent bounded
-readers.
+sanitization pipeline. Rendered Markdown uses a centered 82-character reading
+measure, full-size body type with generous leading, and visibly stepped section
+headings so long plans and reports remain scannable. Code blocks and wide tables
+keep their intrinsic layout but scroll inside the document panel instead of
+widening the task page, including at narrow viewports. Diff and log keep their
+existing independent bounded readers.
 
 ## Default limits
 

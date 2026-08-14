@@ -483,9 +483,12 @@ Honeycomb projections.
   streaming with inline content type. Artifact summaries are UI chrome:
   filename-style tabs in muted monospace, while rendered markdown bodies sit
   in a bordered document panel so the file label and document headings do not
-  visually compete. Open/closed choices survive pushed morphs (a Stimulus
-  controller snapshots/restores them around the morph while content stays
-  live) and artifact order is
+  visually compete. Long documents use a centered 82-character reading measure,
+  full-size body text with 1.75 leading, stronger heading hierarchy and section
+  rhythm, plus contained horizontal scrolling for wide code and tables so they
+  cannot widen the page on mobile. Open/closed choices survive pushed morphs (a
+  Stimulus controller snapshots/restores them around the morph while content
+  stays live) and artifact order is
   stage-aware — chronological (idea first) while working, artifact.md first
   and open from 8-finalize/9-done — and, as the page's appendix after the
   artifacts, a log tail in a turbo-permanent turbo-frame

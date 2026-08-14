@@ -114,6 +114,61 @@ class PlanReviewResultParserTest < Minitest::Test
     end
   end
 
+  def test_parsed_round_trips_to_a_schema_tagged_hash
+    parsed = Hive::PlanReview::ResultParser.parse(JSON.generate(valid_result))
+    round_tripped = parsed.to_h
+
+    assert_equal "hive-plan-review-adapter-result", round_tripped.fetch("schema")
+    assert_equal 1, round_tripped.fetch("schema_version")
+    assert_equal "success", round_tripped.fetch("outcome")
+    assert_equal [ "plan.md" ], round_tripped.fetch("findings").map { |f| f.fetch("evidence").fetch("path") }
+    assert_nil round_tripped.fetch("retry_at")
+  end
+
+  def test_rejects_malformed_envelope_identity_and_scalar_fields
+    {
+      /invalid plan review adapter result envelope/ => { "schema_version" => 2 },
+      /result identity is malformed/ => { "attempt_id" => "pr-#{'a' * 64}" },
+      /diagnostic must be a String or null/ => { "diagnostic" => 42 },
+      /selected_lenses must contain lowercase names/ => { "selected_lenses" => [ "Security" ] },
+      /retry_at must be a timestamp String/ => { "retry_at" => 42 },
+      /invalid plan review coverage entry/ => {
+        "coverage" => [ { "name" => "whole_document", "required" => true, "status" => "invented" } ]
+      }
+    }.each do |message, overrides|
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        Hive::PlanReview::ResultParser.parse(JSON.generate(valid_result.merge(overrides)))
+      end
+      assert_match message, error.message
+    end
+  end
+
+  def test_finding_evidence_must_stay_inside_the_immutable_snapshot
+    snapshot = "one\ntwo\nthree\n"
+    finding = valid_result.fetch("findings").first
+
+    error = assert_raises(Hive::PlanReview::InvalidRecord) do
+      Hive::PlanReview::ResultParser.parse(
+        JSON.generate(
+          valid_result.merge(
+            "findings" => [
+              finding.merge("evidence" => finding.fetch("evidence").merge("path" => "notes.md"))
+            ]
+          )
+        ),
+        snapshot_bytes: snapshot
+      )
+    end
+    assert_match(/must reference the immutable plan snapshot/, error.message)
+
+    error = assert_raises(Hive::PlanReview::InvalidRecord) do
+      Hive::PlanReview::ResultParser.parse(
+        JSON.generate(valid_result), snapshot_bytes: snapshot
+      )
+    end
+    assert_match(/line range is outside the immutable plan snapshot/, error.message)
+  end
+
   private
 
   def valid_result

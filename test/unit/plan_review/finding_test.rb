@@ -42,6 +42,33 @@ class PlanReviewFindingTest < Minitest::Test
     assert_equal "plan.md", value["evidence"].fetch("path")
   end
 
+  def test_symbol_and_array_attributes_are_stringified_not_rejected
+    value = finding(answer: [ :approved, { note: :ok } ])
+
+    assert_equal [ "approved", { "note" => "ok" } ], value["answer"]
+  end
+
+  def test_supplied_fingerprint_must_match_the_semantic_evidence
+    error = assert_raises(Hive::PlanReview::InvalidRecord) do
+      finding("fingerprint" => "prf-#{'0' * 64}")
+    end
+
+    assert_match(/fingerprint does not match/, error.message)
+  end
+
+  def test_rejects_blank_prose_unknown_grades_and_unordered_evidence
+    {
+      /source must be a non-empty string/ => { "source" => "  " },
+      /risk must be one of/ => { "risk" => "extreme" },
+      /lifecycle must be one of/ => { "lifecycle" => "invented" },
+      /display_order must be a positive integer/ => { "display_order" => 0 },
+      /valid line range/ => { "evidence" => evidence.merge("end_line" => 9) }
+    }.each do |message, overrides|
+      error = assert_raises(Hive::PlanReview::InvalidRecord) { finding(overrides) }
+      assert_match message, error.message
+    end
+  end
+
   private
 
   def finding(overrides = {})

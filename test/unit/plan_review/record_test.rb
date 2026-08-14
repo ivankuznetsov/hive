@@ -82,7 +82,100 @@ class PlanReviewRecordTest < Minitest::Test
     end
   end
 
+  def test_rejects_records_that_cannot_round_trip_through_json
+    error = assert_raises(Hive::PlanReview::InvalidRecord) do
+      Hive::PlanReview::Record.new(projection.merge("routes" => [ Float::NAN ]))
+    end
+
+    assert_match(/not JSON-safe/, error.message)
+  end
+
+  def test_rejects_malformed_envelope_and_identity
+    {
+      /invalid plan review schema envelope/ => { "schema" => "hive-plan" },
+      /kind must be one of/ => { "kind" => "invented" },
+      /task_id must be non-empty/ => { "task_id" => "" },
+      /task_generation must be non-empty/ => { "task_generation" => "" },
+      /computed_level/ => { "computed_level" => "invented" },
+      /created_at must be ISO-8601/ => { "created_at" => "whenever" }
+    }.each do |message, overrides|
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        Hive::PlanReview::Record.new(projection.merge(overrides))
+      end
+      assert_match message, error.message
+    end
+  end
+
+  def test_rejects_malformed_projection_version_digest_and_outcome
+    {
+      /projection version must be positive/ => { "version" => 0 },
+      /candidate plan digest must be SHA-256/ => { "candidate_plan_digest" => "later" },
+      /unknown plan review outcome/ => { "outcome" => "invented" },
+      /blockers must be an Array/ => { "blockers" => "none" },
+      /policy_reasons must be an Array/ => { "policy_reasons" => "because" },
+      /level_sources must be a mapping/ => { "level_sources" => [] }
+    }.each do |message, overrides|
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        Hive::PlanReview::Record.new(projection.merge(overrides))
+      end
+      assert_match message, error.message
+    end
+  end
+
+  def test_current_attempt_must_belong_to_the_recorded_attempts
+    error = assert_raises(Hive::PlanReview::InvalidRecord) do
+      Hive::PlanReview::Record.new(
+        projection.merge(
+          "attempt_ids" => [ "pra-#{'e' * 64}" ],
+          "current_attempt_id" => "pra-#{'f' * 64}"
+        )
+      )
+    end
+
+    assert_match(/current attempt must belong to attempt_ids/, error.message)
+  end
+
+  def test_coverage_entries_are_bound_to_their_review_and_waiver_decision
+    assert Hive::PlanReview::Record.new(
+      projection.merge("coverage" => [ coverage_entry("retry_at" => "2026-08-12T13:00:00Z") ])
+    )
+
+    {
+      /invalid plan review coverage entry/ => coverage_entry("status" => "invented"),
+      /coverage retry_at must be ISO-8601/ => coverage_entry("retry_at" => "soon"),
+      /coverage decision id is malformed/ => coverage_entry("decision_id" => "nope"),
+      /waived plan review coverage requires a decision id/ =>
+        coverage_entry("status" => "waived", "decision_id" => nil)
+    }.each do |message, entry|
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        Hive::PlanReview::Record.new(projection.merge("coverage" => [ entry ]))
+      end
+      assert_match message, error.message
+    end
+  end
+
+  def test_rejects_artifact_references_without_a_verifiable_digest
+    error = assert_raises(Hive::PlanReview::InvalidRecord) do
+      Hive::PlanReview::Record.new(
+        projection.merge("artifacts" => { "prompt" => { "path" => "prompt.md" } })
+      )
+    end
+
+    assert_match(/invalid plan review artifact reference/, error.message)
+  end
+
   private
+
+  def coverage_entry(overrides = {})
+    {
+      "name" => "adversarial", "required" => true, "status" => "completed",
+      "fingerprint" => Hive::PlanReview::Identity.coverage(
+        review_id: projection.fetch("review_id"),
+        name: "adversarial",
+        policy_fingerprint: projection.fetch("policy_fingerprint")
+      )
+    }.merge(overrides)
+  end
 
   def projection
     now = "2026-08-12T12:00:00.000000Z"

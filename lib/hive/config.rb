@@ -121,6 +121,20 @@ module Hive
       "open_pr" => {},
       "artifacts" => {
         "agent" => "claude",
+        "evidence" => {
+          "max_recaptures" => 2,
+          "inference" => { "permissions" => "read-only" },
+          # Producer writes are controller-scoped at run time to the active
+          # generation workspace. Projects cannot weaken that boundary.
+          "producer" => { "agent" => "codex" },
+          "reviewer" => {
+            "permissions" => "read-only",
+            "capabilities" => {
+              "proof_kinds" => %w[screenshot video terminal document],
+              "temporal_video" => true
+            }
+          }
+        },
         "capture" => { "provider" => nil }
       },
       "finalize" => { "agent" => "claude" },
@@ -622,6 +636,9 @@ module Hive
       %w[execute agent],
       %w[open_pr agent],
       %w[artifacts agent],
+      %w[artifacts evidence inference agent],
+      %w[artifacts evidence producer agent],
+      %w[artifacts evidence reviewer agent],
       %w[finalize agent],
       %w[review ci agent],
       %w[review triage agent],
@@ -1856,6 +1873,7 @@ module Hive
       validate_reviewers!(cfg, source_path)
       validate_review_adhoc!(cfg, source_path)
       validate_review_fix_auto_commit!(cfg, source_path)
+      validate_artifact_evidence!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
       validate_provider_routing!(cfg, source_path)
       validate_claude_mode!(cfg, source_path)
@@ -2067,8 +2085,16 @@ module Hive
         current: model_routing_current(cfg["open_pr"])
       )
       add_model_routing_call(
-        calls, cfg, "artifacts", cfg.dig("artifacts", "agent"),
-        current: model_routing_current(cfg["artifacts"])
+        calls, cfg, "artifacts", artifacts_evidence_agent(cfg, "inference"),
+        current: model_routing_current(cfg.dig("artifacts", "evidence", "inference"))
+      )
+      add_model_routing_call(
+        calls, cfg, "artifacts", artifacts_evidence_agent(cfg, "producer"),
+        current: model_routing_current(cfg.dig("artifacts", "evidence", "producer"))
+      )
+      add_model_routing_call(
+        calls, cfg, "artifacts", artifacts_evidence_agent(cfg, "reviewer"),
+        current: model_routing_current(cfg.dig("artifacts", "evidence", "reviewer"))
       )
       add_model_routing_call(
         calls, cfg, "finalize", cfg.dig("finalize", "agent"),
@@ -2287,6 +2313,65 @@ module Hive
             "artifacts.capture.provider.timeout_sec in #{describe_source(source_path)} must be an " \
             "integer between 1 and 600"
     end
+
+    def validate_artifact_evidence!(cfg, source_path)
+      evidence = cfg.dig("artifacts", "evidence")
+      unless evidence.is_a?(Hash)
+        raise ConfigError, "artifacts.evidence in #{describe_source(source_path)} must be a Hash"
+      end
+      unknown = evidence.keys - %w[max_recaptures inference producer reviewer]
+      unless unknown.empty?
+        raise ConfigError, "artifacts.evidence has unknown roles: #{unknown.sort.join(', ')}"
+      end
+
+      max_recaptures = evidence["max_recaptures"]
+      unless max_recaptures.is_a?(Integer) && max_recaptures.between?(0, 2)
+        raise ConfigError,
+              "artifacts.evidence.max_recaptures in #{describe_source(source_path)} " \
+              "must be an integer from 0 through 2"
+      end
+
+      %w[inference producer reviewer].each do |role|
+        block = evidence[role]
+        unless block.is_a?(Hash)
+          raise ConfigError, "artifacts.evidence.#{role} in #{describe_source(source_path)} must be a Hash"
+        end
+        allowed = %w[agent model effort]
+        allowed << "permissions" unless role == "producer"
+        allowed << "capabilities" if role == "reviewer"
+        extra = block.keys - allowed
+        unless extra.empty?
+          raise ConfigError, "artifacts.evidence.#{role} has unknown keys: #{extra.sort.join(', ')}"
+        end
+        %w[model effort].each do |field|
+          value = block[field]
+          next if value.nil? || (value.is_a?(String) && !value.strip.empty?)
+
+          raise ConfigError,
+                "artifacts.evidence.#{role}.#{field} in #{describe_source(source_path)} " \
+                "must be a non-empty String when present"
+        end
+      end
+
+      capabilities = evidence.dig("reviewer", "capabilities")
+      unless capabilities.is_a?(Hash) &&
+             (capabilities.keys - %w[proof_kinds temporal_video]).empty?
+        raise ConfigError, "artifacts.evidence.reviewer.capabilities must be a closed Hash"
+      end
+      kinds = capabilities["proof_kinds"]
+      known = %w[screenshot video terminal document]
+      unless kinds.is_a?(Array) && kinds.any? && kinds.uniq == kinds && (kinds - known).empty?
+        raise ConfigError, "artifacts.evidence.reviewer.capabilities.proof_kinds is invalid"
+      end
+      unless [ true, false ].include?(capabilities["temporal_video"])
+        raise ConfigError, "artifacts.evidence.reviewer.capabilities.temporal_video must be boolean"
+      end
+    end
+
+    def artifacts_evidence_agent(cfg, role)
+      cfg.dig("artifacts", "evidence", role, "agent") || cfg.dig("artifacts", "agent")
+    end
+    private_class_method :artifacts_evidence_agent
 
     def validate_stage_skill_by_agent!(cfg, source_path)
       %w[brainstorm plan].each do |stage|
@@ -2688,6 +2773,13 @@ module Hive
         next if key.to_s == "review"
 
         collect.call(key.to_s, value)
+      end
+
+      evidence = cfg.dig("artifacts", "evidence")
+      if evidence.is_a?(Hash)
+        %w[inference producer reviewer].each do |role|
+          collect.call("artifacts.evidence.#{role}", evidence[role])
+        end
       end
 
       review = cfg["review"]

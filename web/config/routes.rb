@@ -56,6 +56,12 @@ Rails.application.routes.draw do
     get  "media/:filename" => "tasks/media#show", as: :task_media,
          format: false,
          constraints: { filename: /[\w.-]+\.(?:png|jpe?g|gif|webp|webm|mp4)/i }
+    get  "evidence/:attempt_id/:digest" => "tasks/evidence#show", as: :task_evidence,
+         format: false,
+         constraints: {
+           attempt_id: /[A-Za-z0-9][A-Za-z0-9._-]{0,127}/,
+           digest: /[0-9a-f]{64}/
+         }
     post "approve" => "tasks/approvals#create", as: :task_approve
     post "reject" => "tasks/rejections#create", as: :task_reject
     post "drop" => "tasks/drops#create", as: :task_drop

@@ -183,6 +183,9 @@ Attempts intentionally remains the guarded reference instead of claiming that
 its full lifecycle is a supported component boundary: the slice does not
 publish raw storage, reconciliation, supervision, capacity, loss-policy,
 cancellation, export, or generic lifecycle operations.
+`OutcomeEvidence::Store` is an authorized read-only `Attempts::Store` consumer
+solely for binding an evidence generation to the owning durable attempt; it does
+not publish or mutate Attempts lifecycle state.
 
 `Workflow Creator Values` is the boundary-ready values-and-projection seam. Its
 singular entry point is

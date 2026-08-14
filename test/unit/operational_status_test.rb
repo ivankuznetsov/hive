@@ -219,7 +219,11 @@ class OperationalStatusTest < Minitest::Test
   end
 
   def test_terminal_outcome_errors_remain_operator_owned_when_auto_retry_is_enabled
-    %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
+    %w[
+      terminal_outcome_blocked terminal_outcome_invalid
+      outcome_evidence_capability_blocked outcome_evidence_review_blocked
+      outcome_evidence_recaptures_exhausted
+    ].each do |reason|
       semantic_error = task(
         action: "error",
         slug: reason,

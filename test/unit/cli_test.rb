@@ -35,9 +35,30 @@ require "hive/commands/bot"
 require "hive/commands/metrics"
 require "hive/commands/setup"
 require "hive/commands/setup_agents"
+require "hive/commands/evidence"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
+
+  def test_evidence_wires_the_exact_recovery_identity
+    with_command_new_stub(Hive::Commands::Evidence) do |calls|
+      Hive::CLI.start([
+        "evidence", "recover", "demo:task", "--project", "demo",
+        "--stage", "7-artifacts", "--generation", "a" * 64,
+        "--recovery-digest", "b" * 64, "--json"
+      ])
+
+      assert_equal [ "recover", "demo:task" ], calls.first.fetch(:args)
+      assert_equal(
+        {
+          project: "demo", stage: "7-artifacts", json: true,
+          generation: "a" * 64, recovery_digest: "b" * 64
+        },
+        calls.first.fetch(:kwargs)
+      )
+      assert_equal :call, calls.last
+    end
+  end
 
   def test_prdigest_delivery_command_is_absent
     refute Hive::CLI.tasks.key?("digest")

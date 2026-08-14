@@ -13,12 +13,17 @@ class HiveStagesExecuteTest < Minitest::Test
       FileUtils.mkdir_p(path)
     end
 
-    def write_pointer!(task_folder, branch_name, execute_base_head: nil)
-      File.write(File.join(task_folder, "worktree.yml"), {
+    def write_pointer!(task_folder, branch_name, execute_base_head: nil,
+                       base_branch: nil, base_oid: nil, repository: nil)
+      data = {
         "path" => path,
         "branch" => branch_name,
         "execute_base_head" => execute_base_head
-      }.to_yaml)
+      }
+      data["base_branch"] = base_branch if base_branch
+      data["base_oid"] = base_oid if base_oid
+      data["repository"] = repository if repository
+      File.write(File.join(task_folder, "worktree.yml"), data.to_yaml)
     end
   end
 
@@ -528,6 +533,10 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal [
         { branch_name: task.slug, default_branch: "master", base_override: "base-task" }
       ], fake_wt.create_calls
+      pointer = YAML.safe_load(File.read(task.worktree_yml_path))
+      assert_equal "base-head", pointer.fetch("execute_base_head")
+      assert_equal "master", pointer.fetch("base_branch")
+      assert_equal "base-head", pointer.fetch("base_oid")
     end
   end
 

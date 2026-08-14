@@ -182,7 +182,14 @@ Template variables include `{sandbox}`, `{run_home}`, `{project}`, `{slug}`, `{r
 
 ### Multi-stage fake-claude dispatch
 
-V1 dispatches per-step via `env:` overrides (`HIVE_FAKE_CLAUDE_WRITE_FILE`, `HIVE_FAKE_CLAUDE_WRITE_CONTENT`). Multi-reviewer-per-invocation queueing is post-v1; see [[gaps]].
+Most V1 stages dispatch per step through `env:` overrides
+(`HIVE_FAKE_CLAUDE_WRITE_FILE`, `HIVE_FAKE_CLAUDE_WRITE_CONTENT`). The
+full-pipeline artifacts step instead exercises the real isolated three-role
+controller: the fixture recognizes inference, producer, and reviewer prompts,
+writes a two-file document package only inside the controller-issued root, and
+returns provider-shaped result events with exact hashes for independent review.
+Multi-reviewer queueing outside this closed role protocol is post-v1; see
+[[gaps]].
 
 ### Scenario statuses
 

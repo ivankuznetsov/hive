@@ -533,12 +533,19 @@ module Hive
           end
 
           if Hive::TerminalOutcome.semantic_error?(marker.attrs)
+            recovery = outcome_evidence_recovery_command(task, marker)
+            instructions = if recovery
+              "run the exact guarded evidence recovery command: #{recovery}; then refresh " \
+                "`hive status --operational --json` and invoke workflow.retry"
+            else
+              "refresh `hive status --operational --json` and invoke this task's " \
+                "guarded workflow.retry action with `hive act`"
+            end
             return {
               "kind" => Hive::Schemas::NextActionKind::NO_OP,
               "reason" => marker.attrs["reason"],
               "error" => marker.attrs,
-              "instructions" => "refresh `hive status --operational --json` and invoke this task's " \
-                                "guarded workflow.retry action with `hive act`"
+              "instructions" => instructions
             }
           end
 
@@ -682,8 +689,13 @@ module Hive
           if marker.name == :error && Hive::TerminalOutcome.semantic_error?(marker.attrs)
             warn "  reason: #{marker.attrs['reason']}"
             warn "  outcome: #{marker.attrs['outcome']}" if marker.attrs["outcome"]
-            warn "  next: refresh `hive status --operational --json` and invoke this task's " \
-                 "guarded workflow.retry action with `hive act`"
+            recovery = outcome_evidence_recovery_command(task, marker)
+            if recovery
+              warn "  next: #{recovery}; then refresh `hive status --operational --json` and invoke workflow.retry"
+            else
+              warn "  next: refresh `hive status --operational --json` and invoke this task's " \
+                   "guarded workflow.retry action with `hive act`"
+            end
           elsif marker.name == :review_error
             phase = marker.attrs["phase"]
             reason = marker.attrs["reason"]
@@ -723,6 +735,16 @@ module Hive
       def project_name_for(task)
         project = Hive::Config.registered_projects.find { |p| p["path"] == task.project_root }
         project ? project["name"] : task.project_name
+      end
+
+      def outcome_evidence_recovery_command(task, marker)
+        return unless Hive::TerminalOutcome.outcome_evidence_blocker?(marker.attrs)
+
+        Hive::TaskAction.for(
+          task, marker,
+          project_name: project_name_for(task),
+          project_count: Hive::Config.registered_projects.size
+        ).diagnostic&.dig("suggested_next_action", "command")
       end
 
       def human_stage?(task)

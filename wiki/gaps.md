@@ -1082,3 +1082,52 @@ one-file shape remains rejected and no compatibility reader exists. No
 provider-backed exact-head run, publication, or release qualification was
 performed here; hostile/property campaigns remain optional and outside the
 normal merge gate.
+
+## Outcome evidence needs one fully accepted live package (2026-08-14)
+
+A read-only retrospective ran the completed conditional-plan-critique task at
+source `48223ab9c2fab1b9c8716d759da6eea968d3fb7e` over its reconstructed exact
+159-path implementation range. Inference produced four outcome claims with the
+appropriate video, screenshot, and terminal proof kinds, plus two supporting
+documentation/test exclusions. Three fresh reviewer passes accepted both
+exclusions but rejected every behavior claim: the producer repeatedly supplied
+fixture-like summaries, selected test output, terminal-styled composites, or
+curated commandless output instead of real product surfaces and transitions.
+The controller exhausted its two recaptures and published a semantic blocked
+package rather than accepting the historical synthetic Hivebox screenshot and
+two-second board-to-task video.
+
+This proves the fail-closed reviewer and bounded-recapture path against the
+historical bad-evidence class.
+
+Latest refresh (2026-08-14): Hive now ships one preflighted capture toolkit:
+pinned native agent-browser plus managed Chrome for Web, a native Ruby PTY
+recorder for terminal/TUI, and ffmpeg/ffprobe/Tesseract admission. Mechanical
+source identity, sizes, hashes, and reviewer hash inventory moved into the
+controller, and missing claim proof can be retained as `revise` instead of
+collapsing into an undurable StoreError. Focused tests, a native terminal CLI
+smoke, and a real 0.34.0 agent-browser bootstrap/managed-Chrome launch produced
+and decoded a PNG/WebM locally. A second exact-range retrospective then inferred
+three grouped claims. Its actual Hive Web coverage-blocked task screenshot was
+independently accepted: it showed review identity, failed/unsupported coverage,
+reviewer routes, audit receipts, state-valid waiver/downgrade controls, and no
+execution action. Both terminal claims remained `revise` because their casts
+summarized probes rather than driving critique, planner revision, verification,
+real cross-surface actions, and stale-token denial. After three attempts Hive
+published `blocked` with those exact reasons; it did not discard the accepted
+Web proof or overstate package completion. The run also exposed and fixed
+keep-alive Host rewriting and raw browser-daemon output custody. The prewarmed
+multi-architecture Hivebox image remains a CI merge gate and was not built
+locally. Keep this gap open until a current task publishes a fully accepted
+package from genuine Web/CLI/TUI or document behavior without weakening the
+reviewer contract.
+
+The 2026-08-14 review hardening replaced the producer-visible gateway socket
+with a bounded controller mailbox, enabled Codex's managed limited network proxy
+with local binding but no domains, moved browser state outside the producer
+write root, and requires controller receipts for screenshot/video/terminal
+representations. Media sizes are checked before hashing/copying, and Hivebox
+package listing now validates immutable metadata without rerunning OCR/ffmpeg
+for every retained file; selected downloads still recheck exact size/digest.
+Focused tests pin these boundaries, but a fully accepted live provider package
+through the new mailbox/network configuration remains part of this open gap.

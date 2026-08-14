@@ -368,6 +368,11 @@ class AgentGitGateTest < Minitest::Test
       assert_equal [ "two.txt" ], Hive::AgentGitGate.read(
         repo, :changed_paths, base_oid: base, head_oid: head
       ).stdout.split("\0")
+      raw = Hive::AgentGitGate.read(
+        repo, :raw_changed_paths, base_oid: base, head_oid: head
+      )
+      assert raw.success?
+      assert_includes raw.stdout, "two.txt"
       assert_includes Hive::AgentGitGate.read(
         repo, :diff, base_oid: base, head_oid: head
       ).stdout, "two.txt"

@@ -231,23 +231,21 @@ module HiveTestHelper
     with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) { yield }
   end
 
-  # Tests whose subject is a surrounding workflow transition can opt out of
-  # visual capture explicitly. CapturePolicy has dedicated unit/integration
-  # coverage; letting an unrelated fixture's intentionally synthetic worktree
-  # fail closed would turn those tests into accidental capture tests.
-  def with_not_applicable_capture_policy
-    require "hive/artifacts/capture_policy"
-    receipt = {
-      "result" => "not_applicable",
-      "rationale" => "The test fixture has deterministic nonvisual scope.",
-      "task_generation" => "test-generation"
-    }
-    policy = Object.new
-    policy.define_singleton_method(:ensure!) { receipt }
-    policy.define_singleton_method(:capture_satisfied?) { true }
-    replacement = ->(_task, project:, **) { policy }
+  # Surrounding workflow tests can replace the independently unit-tested
+  # outcome-evidence controller at its orchestration seam. The replacement
+  # publishes the same controller-owned marker shape as an accepted package;
+  # it never restores the removed agent-authored completion authority.
+  def with_accepted_outcome_evidence
+    require "hive/stages/artifacts"
+    replacement = lambda do |task, _cfg, **|
+      Hive::Stages::Artifacts.publish_complete_marker!(
+        task,
+        { "generation" => "f" * 64, "attempt_id" => "test-accepted-attempt" }
+      )
+      { commit: "artifacts_collected", status: :complete }
+    end
     with_replaced_singleton_method(
-      Hive::Artifacts::CapturePolicy, :for_task, replacement
+      Hive::Stages::Artifacts, :run_outcome_evidence!, replacement
     ) { yield }
   end
 

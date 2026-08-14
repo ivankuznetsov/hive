@@ -33,6 +33,12 @@ module Hive
       "hive-web-status" => 1,
       "hive-web-install" => 1,
       "hive-capture-requirement" => 1,
+      # Controller-owned, generation-bound outcome-evidence ledger. Legacy
+      # visual capture remains readable through its own v1/v2 contracts but
+      # cannot satisfy these universal coding-task requirements.
+      "hive-outcome-evidence-requirement" => 1,
+      "hive-outcome-evidence-attempt" => 1,
+      "hive-outcome-evidence-current" => 1,
       "hive-web-capture-runtime" => 1,
       "hive-artifact-capture" => 2,
       "hive-doctor" => 2,

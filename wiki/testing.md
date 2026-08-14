@@ -106,8 +106,8 @@ installed.
 
 The default suite excludes four expensive outer-proof files and skips the
 single large babysitter command-classification matrix. CI runs all five proofs
-as named gates. Exhaustive coverage is collected by four deterministic,
-source-byte-balanced test-file shards and merged once by the exact coverage
+as named gates. Exhaustive coverage is collected by five deterministic
+test-file shards and merged once by the exact coverage
 gate. CI feeds both results into the already-required `rake test (Ruby 3.4)`
 check. The aggregator uses
 `always()` and fails unless coverage and the complete matrix succeeded,
@@ -412,12 +412,14 @@ bundle exec rake coverage
 
 The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch coverage in the parent test process and prepends `RUBYOPT=-Itest -rhive_coverage_boot` so Ruby subprocess tests dump their own result files under a per-run `coverage/.resultset/<run-id>/` directory. The final merged report is written to `coverage/coverage.json` and prints the lowest-covered source files plus uncovered line numbers.
 
-Hosted CI separates collection from enforcement. Four `coverage:collect`
+Hosted CI separates collection from enforcement. Five `coverage:collect`
 matrix legs run a complete, disjoint partition of the default test-file set and
 upload their raw process results. Shard zero also runs the Agent CLI Runtime
 component suite and loads every source file, which preserves unloaded-file
 detection without repeating that fixed catalog cost in every collector. The
-downstream `coverage:report` job downloads all four artifacts, merges them into
+partition begins with four source-byte-balanced groups, then splits only the
+third group because two hosted measurements identified it as the long pole;
+the other three groups remain stable. The downstream `coverage:report` job downloads all five artifacts, merges them into
 one result set, and applies the same exact 100% gate. A collector never lowers
 the threshold or publishes a partial report as passing; collection mode only
 defers percentage enforcement to the downstream merge.

@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   coverage-shards:
-    name: coverage shard ${{ matrix.label }}/4
+    name: coverage shard ${{ matrix.label }}/5
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -29,6 +29,8 @@ jobs:
             label: 3
           - shard: 3
             label: 4
+          - shard: 4
+            label: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,7 +45,7 @@ jobs:
         env:
           HIVE_COVERAGE_RUN_ID: shard-${{ matrix.shard }}
           HIVE_COVERAGE_SHARD_INDEX: ${{ matrix.shard }}
-          HIVE_COVERAGE_SHARD_COUNT: "4"
+          HIVE_COVERAGE_SHARD_COUNT: "5"
         run: bundle exec rake coverage:collect
       - name: Retain raw coverage results
         if: always()

@@ -9,15 +9,16 @@ tags: [gap, todo, release-proof, agent-skills]
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
-## Parallel Hive web CI needs exact-head hosted timing (2026-08-14)
+## Parallel Hive web CI exact-head evidence (2026-08-14)
 
 The serial Hive web job took 441 seconds in exact-head run `31818138021`, led
 by the 184-second Playwright system-test step and the 149-second Rails
 integration step. CI now schedules integration/lint, system, and golden-path
-cells independently behind the existing aggregate check name. Focused workflow
-contract tests prove the static matrix and fail-closed dependency, but only a
-successful exact-head GitHub Actions run can establish the new wall time and
-prove all three hosted browser/test cells pass concurrently.
+cells independently behind the existing aggregate check name. Exact-head run
+`31819264376` passed all three cells and the aggregate. From the first web-cell
+start through aggregate completion the path took 246 seconds, down from the
+441-second serial job; the system, integration/lint, and golden-path cells took
+220, 115, and 111 seconds. This closes the hosted-concurrency uncertainty.
 
 ## Sharded CI coverage exact-head evidence (2026-08-14)
 
@@ -36,7 +37,11 @@ GitHub Actions run `31818138021` proved artifact upload/download, the exact
 took 300, 284, 430, and 388 seconds, and the merge gate took 44 seconds. This
 closes the missing hosted-proof gap, while confirming that source bytes are
 only an approximate runtime weight: the 146-second fastest-to-slowest spread
-still leaves measured rebalancing or further splitting as optimization work.
+identified the third partition as the long pole. A second hosted run measured
+that same collector at 440 seconds while the others took 244--294 seconds. CI
+therefore splits only that measured hot partition into two source-byte-balanced
+halves. The five-way exact-head timing remains pending; do not assume the two
+halves are runtime-balanced until the hosted result is recorded.
 
 ## Provider-routing trusted captures (updated 2026-08-11)
 

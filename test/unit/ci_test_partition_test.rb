@@ -45,22 +45,28 @@ class CiTestPartitionTest < Minitest::Test
     end
   end
 
-  def test_coverage_shards_are_complete_disjoint_and_size_balanced
+  def test_coverage_shards_are_complete_disjoint_and_split_the_measured_hot_partition
     with_loaded_rakefile do
       files = Object.const_get(:HIVE_DEFAULT_TEST_FILES)
       shard_count = Object.const_get(:HIVE_COVERAGE_SHARD_COUNT)
       shards = Object.const_get(:HIVE_COVERAGE_SHARDS)
 
-      assert_equal 4, shard_count
+      assert_equal 5, shard_count
       assert_equal shard_count, shards.length
       assert_equal files.sort, shards.flatten.sort
       assert_equal files.length, shards.flatten.uniq.length
       assert shards.all?(&:frozen?)
       assert shards.frozen?
 
-      byte_counts = shards.map { |shard| shard.sum { |path| File.size(File.join(ROOT, path)) } }
-      assert_operator byte_counts.max - byte_counts.min, :<, 10_000,
-                      "coverage shard source bytes should remain balanced: #{byte_counts.inspect}"
+      base_shards = size_balanced_shards(files, 4)
+      assert_equal base_shards[0].sort, shards[0].sort
+      assert_equal base_shards[1].sort, shards[1].sort
+      assert_equal base_shards[2].sort, (shards[2] + shards[3]).sort
+      assert_equal base_shards[3].sort, shards[4].sort
+
+      hot_bytes = shards[2, 2].map { |shard| shard.sum { |path| File.size(File.join(ROOT, path)) } }
+      assert_operator hot_bytes.max - hot_bytes.min, :<, 10_000,
+                      "split hot coverage shards should remain source-byte balanced: #{hot_bytes.inspect}"
     end
   end
 
@@ -96,17 +102,18 @@ class CiTestPartitionTest < Minitest::Test
       assert_equal "${{ matrix.task }}", run_step.fetch("env").fetch("HIVE_CI_GATE_TASK")
 
       coverage_shards = workflow.fetch("jobs").fetch("coverage-shards")
-      assert_equal "coverage shard ${{ matrix.label }}/4", coverage_shards.fetch("name")
+      assert_equal "coverage shard ${{ matrix.label }}/5", coverage_shards.fetch("name")
       assert_equal [
         { "shard" => 0, "label" => 1 },
         { "shard" => 1, "label" => 2 },
         { "shard" => 2, "label" => 3 },
-        { "shard" => 3, "label" => 4 }
+        { "shard" => 3, "label" => 4 },
+        { "shard" => 4, "label" => 5 }
       ], coverage_shards.dig("strategy", "matrix", "include")
       collect = coverage_shards.fetch("steps").find { |step| step["name"] == "Collect coverage shard" }
       assert_equal "bundle exec rake coverage:collect", collect.fetch("run")
       assert_equal "${{ matrix.shard }}", collect.fetch("env").fetch("HIVE_COVERAGE_SHARD_INDEX")
-      assert_equal "4", collect.fetch("env").fetch("HIVE_COVERAGE_SHARD_COUNT")
+      assert_equal "5", collect.fetch("env").fetch("HIVE_COVERAGE_SHARD_COUNT")
       assert_equal "shard-${{ matrix.shard }}", collect.fetch("env").fetch("HIVE_COVERAGE_RUN_ID")
 
       upload = coverage_shards.fetch("steps").find { |step| step["name"] == "Retain raw coverage results" }
@@ -307,6 +314,17 @@ class CiTestPartitionTest < Minitest::Test
   end
 
   private
+
+  def size_balanced_shards(files, count)
+    shards = Array.new(count) { [] }
+    byte_counts = Array.new(count, 0)
+    files.sort_by { |path| [ -File.size(File.join(ROOT, path)), path ] }.each do |path|
+      shard = byte_counts.each_index.min_by { |index| [ byte_counts[index], index ] }
+      shards.fetch(shard) << path
+      byte_counts[shard] += File.size(File.join(ROOT, path))
+    end
+    shards
+  end
 
   def with_loaded_rakefile
     previous_application = Rake.application

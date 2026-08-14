@@ -20,17 +20,28 @@ HIVE_CI_GATE_TEST_OPTIONS = {
 HIVE_DEFAULT_TEST_FILES = FileList[
   "test/{unit,integration,babysitter}/**/*_test.rb"
 ].exclude(*HIVE_CI_GATE_TESTS.values).to_a.freeze
-HIVE_COVERAGE_SHARD_COUNT = 4
+HIVE_COVERAGE_SHARD_COUNT = 5
 HIVE_COVERAGE_SHARDS = begin
-  shards = Array.new(HIVE_COVERAGE_SHARD_COUNT) { [] }
-  shard_bytes = Array.new(HIVE_COVERAGE_SHARD_COUNT, 0)
+  partition_by_bytes = lambda do |files, count|
+    shards = Array.new(count) { [] }
+    shard_bytes = Array.new(count, 0)
 
-  HIVE_DEFAULT_TEST_FILES.sort_by { |path| [ -File.size(path), path ] }.each do |path|
-    shard = shard_bytes.each_index.min_by { |index| [ shard_bytes[index], index ] }
-    shards.fetch(shard) << path
-    shard_bytes[shard] += File.size(path)
+    files.sort_by { |path| [ -File.size(path), path ] }.each do |path|
+      shard = shard_bytes.each_index.min_by { |index| [ shard_bytes[index], index ] }
+      shards.fetch(shard) << path
+      shard_bytes[shard] += File.size(path)
+    end
+
+    shards
   end
 
+  # Two hosted runs measured the third source-balanced partition as the long
+  # pole (410s and 440s of collector time). Preserve the three faster
+  # partitions and split only that measured hot partition, adding one runner
+  # instead of reshuffling every file or doubling the whole matrix.
+  base_shards = partition_by_bytes.call(HIVE_DEFAULT_TEST_FILES, 4)
+  hot_shards = partition_by_bytes.call(base_shards.fetch(2), 2)
+  shards = [ base_shards[0], base_shards[1], hot_shards[0], hot_shards[1], base_shards[3] ]
   shards.each(&:freeze)
   shards.freeze
 end

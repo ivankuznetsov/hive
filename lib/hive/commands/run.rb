@@ -727,6 +727,7 @@ module Hive
         Hive::TaskAction.for(
           task,
           marker,
+          config: Hive::Config.load(task.project_root),
           project_name: project_name_for(task),
           project_count: Hive::Config.registered_projects.size
         ).command
@@ -756,7 +757,10 @@ module Hive
       end
 
       def allowed_outcomes(task)
-        Hive::TaskAction.for(task, Hive::Markers.current(task.state_file)).allowed_outcomes
+        Hive::TaskAction.for(
+          task, Hive::Markers.current(task.state_file),
+          config: Hive::Config.load(task.project_root)
+        ).allowed_outcomes
       end
 
       # Map a Hive::Error subclass to a RunErrorKind value. Ordering matters:
@@ -769,6 +773,7 @@ module Hive
       #     more general InvalidTaskPath case (when added) would shadow it.
       def error_kind_for(error)
         case error
+        when Hive::PlanReview::TransitionBlocked then Hive::Schemas::RunErrorKind::PLAN_REVIEW_BLOCKED
         when Hive::WrongStage         then Hive::Schemas::RunErrorKind::WRONG_STAGE
         when Hive::ConcurrentRunError then Hive::Schemas::RunErrorKind::CONCURRENT_RUN
         when Hive::TaskInErrorState   then Hive::Schemas::RunErrorKind::TASK_IN_ERROR

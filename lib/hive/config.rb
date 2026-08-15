@@ -11,6 +11,8 @@ require "hive/permission_scope"
 require "hive/paths"
 require "hive/repository_identity"
 require "hive/model_routing"
+require "hive/plan_review"
+require "hive/plan_review/finding"
 require "hive/provider_routing"
 require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
@@ -112,6 +114,41 @@ module Hive
           "pi" => "/llm-wiki:wiki-plan",
           "default" => "/llm-wiki:wiki-plan"
         }
+      },
+      "plan_review" => {
+        "enabled" => true,
+        "classifier_version" => Hive::PlanReview::CLASSIFIER_VERSION,
+        "minimum_level" => "skip",
+        "coding" => { "minimum_level" => "skip" },
+        "skip" => { "max_files" => 5, "max_bytes" => 262_144 },
+        "protected_paths" => [
+          ".github/workflows/**", "config/**", "db/migrate/**", "packaging/**",
+          "Gemfile", "Gemfile.lock", "hive.gemspec", "install.sh"
+        ],
+        "attempts" => { "max_transient" => 2, "timeout_sec" => 900 },
+        "coverage" => { "required" => %w[whole_document adversarial], "optional" => [] },
+        "adapter" => "ce_doc_review",
+        "reviewers" => {
+          "primary" => "plan_review",
+          "adversarial" => "plan_review_adversarial",
+          "verification" => "plan_review_verification"
+        },
+        "routes" => {
+          "primary" => {
+            "agent" => "codex", "model" => "gpt-5.6-sol", "family" => "openai",
+            "effort" => "high", "route" => "native_codex"
+          },
+          "adversarial" => {
+            "agent" => "grok", "model" => "grok-4.6", "family" => "grok",
+            "effort" => "high", "route" => "native_grok_build"
+          },
+          "verification" => {
+            "agent" => "codex", "model" => "gpt-5.6-sol", "family" => "openai",
+            "effort" => "high", "route" => "native_codex"
+          },
+          "fallbacks" => []
+        },
+        "approval_policies" => []
       },
       "execute" => { "agent" => "claude" },
       "conditions" => {
@@ -1889,6 +1926,7 @@ module Hive
     def validate!(cfg, source_path)
       validate_hash_shaped_keys!(cfg, source_path)
       validate_models!(cfg, source_path)
+      validate_plan_review!(cfg, source_path)
       reject_nested_provider_routing!(cfg, source_path)
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
@@ -1931,6 +1969,7 @@ module Hive
       claude
       models
       plan
+      plan_review
       execute
       conditions
       open_pr
@@ -1972,6 +2011,196 @@ module Hive
         cfg["models"],
         source: describe_source(source_path)
       )
+    end
+
+    PLAN_REVIEW_KEYS = %w[
+      enabled classifier_version minimum_level coding skip protected_paths attempts
+      coverage adapter reviewers routes approval_policies
+    ].freeze
+    PLAN_REVIEW_NESTED_KEYS = {
+      "coding" => %w[minimum_level],
+      "skip" => %w[max_files max_bytes],
+      "attempts" => %w[max_transient timeout_sec],
+      "coverage" => %w[required optional],
+      "reviewers" => %w[primary adversarial verification],
+      "routes" => %w[primary adversarial verification fallbacks]
+    }.freeze
+    PLAN_REVIEW_ADAPTERS = %w[ce_doc_review].freeze
+    PLAN_REVIEW_NAME = /\A[a-z][a-z0-9_]{0,63}\z/
+    PLAN_REVIEW_POLICY_KEYS = %w[
+      id version action risk paths valid_from valid_until revoked
+    ].freeze
+
+    def validate_plan_review!(cfg, source_path)
+      review = cfg.fetch("plan_review")
+      validate_closed_mapping!(review, PLAN_REVIEW_KEYS, "plan_review", source_path)
+      unless review["enabled"] == true
+        raise ConfigError,
+              "plan_review.enabled in #{describe_source(source_path)} must be true; " \
+              "built-in coding review cannot be disabled"
+      end
+
+      validate_bounded_integer!(review["classifier_version"],
+                                "plan_review.classifier_version", 1, 1_000_000, source_path)
+      validate_plan_review_level!(review["minimum_level"], "plan_review.minimum_level", source_path)
+      PLAN_REVIEW_NESTED_KEYS.each do |key, allowed|
+        value = review[key]
+        unless value.is_a?(Hash)
+          raise ConfigError,
+                "plan_review.#{key} in #{describe_source(source_path)} must be a Hash"
+        end
+        validate_closed_mapping!(value, allowed, "plan_review.#{key}", source_path)
+      end
+      validate_plan_review_level!(review.dig("coding", "minimum_level"),
+                                  "plan_review.coding.minimum_level", source_path)
+      validate_bounded_integer!(review.dig("skip", "max_files"),
+                                "plan_review.skip.max_files", 1, 100, source_path)
+      validate_bounded_integer!(review.dig("skip", "max_bytes"),
+                                "plan_review.skip.max_bytes", 1_024, 1_048_576, source_path)
+      validate_path_glob_list!(review["protected_paths"], "plan_review.protected_paths", source_path)
+      validate_bounded_integer!(review.dig("attempts", "max_transient"),
+                                "plan_review.attempts.max_transient", 0, 10, source_path)
+      validate_bounded_integer!(review.dig("attempts", "timeout_sec"),
+                                "plan_review.attempts.timeout_sec", 1, 7_200, source_path)
+
+      unless PLAN_REVIEW_ADAPTERS.include?(review["adapter"])
+        raise ConfigError,
+              "plan_review.adapter in #{describe_source(source_path)} must be one of " \
+              "#{PLAN_REVIEW_ADAPTERS.inspect}; got #{review['adapter'].inspect}"
+      end
+      review.fetch("reviewers").each do |key, route|
+        next if Hive::ModelRouting.known?(route)
+
+        raise ConfigError,
+              "plan_review.reviewers.#{key} in #{describe_source(source_path)} must name a " \
+              "registered model route; got #{route.inspect}"
+      end
+      validate_plan_review_routes!(review.fetch("routes"), source_path)
+      validate_plan_review_coverage!(review.fetch("coverage"), source_path)
+      validate_plan_review_approval_policies!(review.fetch("approval_policies"), source_path)
+    end
+
+    def validate_closed_mapping!(value, allowed, label, source_path)
+      unknown = value.keys.map(&:to_s) - allowed
+      return if unknown.empty?
+
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} has unknown field(s): " \
+            "#{unknown.sort.join(', ')}"
+    end
+
+    def validate_plan_review_level!(value, label, source_path)
+      Hive::PlanReview.level!(value, label: "#{label} in #{describe_source(source_path)}")
+    end
+
+    def validate_bounded_integer!(value, label, min, max, source_path)
+      return if value.is_a?(Integer) && value.between?(min, max)
+
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} must be an Integer at least #{min} " \
+            "and at most #{max}; got #{value.inspect}"
+    end
+
+    def validate_plan_review_coverage!(coverage, source_path)
+      %w[required optional].each do |key|
+        values = coverage[key]
+        unless values.is_a?(Array) &&
+               values.all? { |name| name.is_a?(String) && PLAN_REVIEW_NAME.match?(name) }
+          raise ConfigError,
+                "plan_review.coverage.#{key} in #{describe_source(source_path)} must be an Array " \
+                "of lowercase coverage names"
+        end
+        if values.uniq.length != values.length
+          raise ConfigError,
+                "plan_review.coverage.#{key} in #{describe_source(source_path)} contains duplicates"
+        end
+      end
+      overlap = coverage.fetch("required") & coverage.fetch("optional")
+      return if overlap.empty?
+
+      raise ConfigError,
+            "plan_review coverage in #{describe_source(source_path)} cannot be both required and " \
+            "optional: #{overlap.inspect}"
+    end
+
+    def validate_plan_review_routes!(routes, source_path)
+      route_keys = %w[agent model family effort route]
+      %w[primary adversarial verification].each do |role|
+        row = routes[role]
+        unless row.is_a?(Hash)
+          raise ConfigError, "plan_review.routes.#{role} in #{describe_source(source_path)} must be a Hash"
+        end
+        validate_closed_mapping!(row, route_keys, "plan_review.routes.#{role}", source_path)
+        validate_plan_review_route_row!(row, "plan_review.routes.#{role}", source_path)
+      end
+      fallbacks = routes["fallbacks"]
+      unless fallbacks.is_a?(Array)
+        raise ConfigError, "plan_review.routes.fallbacks in #{describe_source(source_path)} must be an Array"
+      end
+      fallbacks.each_with_index do |row, index|
+        unless row.is_a?(Hash)
+          raise ConfigError,
+                "plan_review.routes.fallbacks[#{index}] in #{describe_source(source_path)} must be a Hash"
+        end
+        validate_closed_mapping!(row, route_keys, "plan_review.routes.fallbacks[#{index}]", source_path)
+        validate_plan_review_route_row!(row, "plan_review.routes.fallbacks[#{index}]", source_path)
+      end
+    end
+
+    def validate_plan_review_route_row!(row, label, source_path)
+      validate_agent_name!(row["agent"], "#{label}.agent", source_path)
+      %w[model family route].each do |key|
+        unless row[key].is_a?(String) && !row[key].strip.empty?
+          raise ConfigError, "#{label}.#{key} in #{describe_source(source_path)} must be non-empty"
+        end
+      end
+      unless Hive::ModelRouting::EFFORT_VALUES.include?(row["effort"])
+        raise ConfigError,
+              "#{label}.effort in #{describe_source(source_path)} must be one of " \
+              "#{Hive::ModelRouting::EFFORT_VALUES.inspect}"
+      end
+    end
+
+    def validate_plan_review_approval_policies!(policies, source_path)
+      unless policies.is_a?(Array)
+        raise ConfigError,
+              "plan_review.approval_policies in #{describe_source(source_path)} must be an Array"
+      end
+      ids = Set.new
+      policies.each_with_index do |policy, index|
+        label = "plan_review.approval_policies[#{index}]"
+        unless policy.is_a?(Hash)
+          raise ConfigError, "#{label} in #{describe_source(source_path)} must be a Hash"
+        end
+        validate_closed_mapping!(policy, PLAN_REVIEW_POLICY_KEYS, label, source_path)
+        id = policy["id"]
+        unless id.is_a?(String) && PLAN_REVIEW_NAME.match?(id) && ids.add?(id)
+          raise ConfigError,
+                "#{label}.id in #{describe_source(source_path)} must be a unique lowercase identifier"
+        end
+        validate_bounded_integer!(policy["version"], "#{label}.version", 1, 1_000_000, source_path)
+        unless policy["action"] == "approve_finding"
+          raise ConfigError,
+                "#{label}.action in #{describe_source(source_path)} must be approve_finding"
+        end
+        unless Hive::PlanReview::Finding::RISKS.include?(policy["risk"])
+          raise ConfigError,
+                "#{label}.risk in #{describe_source(source_path)} must be one of " \
+                "#{Hive::PlanReview::Finding::RISKS.inspect}"
+        end
+        validate_path_glob_list!(policy["paths"], "#{label}.paths", source_path)
+        unless policy["revoked"] == true || policy["revoked"] == false
+          raise ConfigError, "#{label}.revoked in #{describe_source(source_path)} must be true or false"
+        end
+        %w[valid_from valid_until].each do |key|
+          begin
+            Time.iso8601(policy.fetch(key))
+          rescue ArgumentError, TypeError, KeyError
+            raise ConfigError,
+                  "#{label}.#{key} in #{describe_source(source_path)} must be an ISO-8601 timestamp"
+          end
+        end
+      end
     end
 
     def validate_provider_routing!(cfg, source_path)
@@ -2097,6 +2326,14 @@ module Hive
         calls, cfg, "plan", cfg.dig("plan", "agent"),
         current: model_routing_current(cfg["plan"])
       )
+      plan_review = cfg.fetch("plan_review")
+      %w[primary adversarial verification].each do |role|
+        route = plan_review.dig("routes", role)
+        add_model_routing_call(
+          calls, cfg, plan_review.dig("reviewers", role), route.fetch("agent"),
+          current: model_routing_current(route)
+        )
+      end
       add_model_routing_call(
         calls, cfg, "execute_implementation", execute_agent,
         current: model_routing_current(cfg["execute"])

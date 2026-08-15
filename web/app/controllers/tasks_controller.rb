@@ -16,6 +16,7 @@ class TasksController < Tasks::BaseController
         @media = @task.media_manifest
         @outcome_evidence = @task.outcome_evidence
         @log = @task.latest_log
+        @plan_review = @task.plan_review_details
         @daemon_running = Daemon.new.running?
       end
       format.json { render json: @workspace }

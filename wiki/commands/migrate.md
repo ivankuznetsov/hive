@@ -4,7 +4,7 @@ type: command
 source: lib/hive/commands/migrate.rb, lib/hive/commands/migrate_all.rb, lib/hive/workflow_package/task_migrator.rb, lib/hive/stages.rb
 created: 2026-05-21
 updated: 2026-08-13
-tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, update, attempt-storage]
+tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, plan-review, update, attempt-storage]
 ---
 
 **TLDR**: `hive migrate [PROJECT_PATH]` is the explicit, idempotent upgrade
@@ -106,6 +106,14 @@ After any stage-directory movement, or on an otherwise no-op migrated project, `
   complete managed workflow provenance rather than reconstructing `meta.yml`.
 - The global counter is first seeded above the maximum existing id in the scanned project, so cloned or partially migrated state continues from the highest committed sidecar id instead of restarting at 1.
 - Backfill order is deterministic: tasks sort by `idea.md` frontmatter `created_at`, then slug; tasks with no parseable `created_at` sort last by slug.
+
+The same locked pass stamps `plan_review_required: true` on every built-in
+coding task still in stages 1–3. New coding tasks receive the bit at creation.
+Tasks already at `4-execute` or later are deliberately not stamped, allowing
+the execute-entry guard to issue the explicit pre-feature adoption receipt
+without retroactively stranding work. This durable distinction prevents a
+post-feature task from deleting its task-local review root and using a raw
+folder move as a legacy bypass. Non-coding workflows are untouched.
 
 After the locked id/config/stage migration finishes, `hive migrate` also backfills missing/null `display_name` values for every canonical task folder using `Hive::DisplayName::Generator`, the same agent-backed pipeline as `hive generate-name <target>`. Generation runs outside the commit lock because agent naming can take seconds per task; successful names are committed in a separate `.hive-state` commit. Existing display names are skipped, including patrol handoff names such as `Patrol: <finding title>`. A generation failure is fail-soft: that task keeps its null display name and can be retried by rerunning `hive migrate` or `hive generate-name`.
 
@@ -213,7 +221,8 @@ All changes run under the project commit lock. The command stages and commits ch
 - `hive: migrate task ids (N tasks)` for id-only backfills.
 - `hive: migrate recovery markers (N tasks)` for recovery-only identity backfills.
 - `hive: migrate managed workflow tasks (N tasks)` for a managed-generation-only cutover.
-- `hive: migrate project state (N ids, M recovery markers, P managed workflow tasks)` when multiple non-stage upgrades land together; zero-value categories are omitted.
+- `hive: migrate plan review requirements (N tasks)` for a plan-review-requirement-only cutover.
+- `hive: migrate project state (N ids, M recovery markers, P managed workflow tasks, Q plan review requirements)` when multiple non-stage upgrades land together; zero-value categories are omitted.
 - `hive: migrate display names (N tasks)` for display-name-only backfills.
 
 A rerun after successful migration prints that there is nothing to move and keeps the current stage directories in place.
@@ -226,7 +235,8 @@ A rerun after successful migration prints that there is nothing to move and keep
   recovery commands.
 - `test/integration/migrate_test.rb` covers stage-dir moves, the legacy
   reviewers relocation/conflict boundary, other config rewrites, task-id
-  backfill order, display-name backfill, `ERROR` / `REVIEW_ERROR` identity
+  backfill order, plan-review requirement/adoption boundary, display-name
+  backfill, `ERROR` / `REVIEW_ERROR` identity
   backfill, managed semantic-stage generation/configuration migration,
   repository-identity backfill, idempotency, null-id repair, and
   counter seeding.
@@ -241,4 +251,4 @@ A rerun after successful migration prints that there is nothing to move and keep
 
 ## Backlinks
 
-- [[cli]] · [[commands/status]] · [[stages/index]] · [[state-model]]
+- [[cli]] · [[commands/status]] · [[stages/index]] · [[state-model]] · [[modules/plan_review]]

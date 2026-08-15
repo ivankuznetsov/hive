@@ -5,6 +5,13 @@ require "hive/agent_skills"
 class AgentSkillsFacadeTest < Minitest::Test
   include HiveTestHelper
 
+  def test_capability_exposes_runtime_contract_without_internal_manifest_dependency
+    contract = Hive::AgentSkills.capability("ce-doc-review", "codex")
+
+    assert_equal "/ce-doc-review", contract.invocation
+    assert_equal "skills/ce-doc-review/SKILL.md", contract.probe
+  end
+
   def test_render_is_deterministic_for_every_projection_platform
     %w[openclaw claude codex pi].each do |platform|
       first = Hive::AgentSkills.render(platform)

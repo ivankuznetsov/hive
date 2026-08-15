@@ -79,6 +79,33 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_backfills_plan_review_requirement_before_execute_but_grandfathers_execute
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        plan = write_task_folder(stages, "3-plan", "legacy-plan-260812-abcd")
+        execute = write_task_folder(
+          stages, "4-execute", "legacy-execute-260812-abcd", idea: false
+        )
+        Hive::TaskMeta.write(
+          plan, id: 40, slug: File.basename(plan), display_name: "Legacy plan"
+        )
+        Hive::TaskMeta.write(
+          execute, id: 41, slug: File.basename(execute), display_name: "Legacy execute"
+        )
+
+        out, = capture_io do
+          migrate_command(dir, daemon_restarter: -> { }).call
+        end
+
+        assert Hive::TaskMeta.plan_review_required?(plan)
+        refute Hive::TaskMeta.plan_review_required?(execute)
+        assert_includes out, "added 1 plan review requirement"
+      end
+    end
+  end
+
   def test_combined_metadata_only_migration_has_a_project_state_commit_message
     message = migrate_command("/tmp/project").send(
       :migrate_commit_message,
@@ -126,12 +153,14 @@ class MigrateTest < Minitest::Test
       backfilled_count: 2,
       recovery_marker_count: 3,
       workflow_task_count: 4,
-      workflow_moved_count: 2
+      workflow_moved_count: 2,
+      plan_review_requirement_count: 2
     )
 
     assert_equal(
       "hive: migrate complete (2 tasks moved, 2 ids backfilled, " \
-      "3 recovery markers upgraded, 4 managed workflow tasks migrated (2 stages moved))",
+      "3 recovery markers upgraded, 4 managed workflow tasks migrated (2 stages moved), " \
+      "2 plan review requirements added)",
       message
     )
   end
@@ -869,11 +898,14 @@ class MigrateTest < Minitest::Test
         out, _err = capture_io { migrate_command(dir).call }
 
         assert_includes out, "backfilled 3 task ids"
-        assert_equal({ id: 1, slug: "early-task-260603-aaaa", display_name: nil, depends_on: nil, workflow: nil },
+        assert_equal({ id: 1, slug: "early-task-260603-aaaa", display_name: nil, depends_on: nil, workflow: nil,
+                       plan_review_required: true },
                      Hive::TaskMeta.read(earlier))
-        assert_equal({ id: 2, slug: "later-task-260603-bbbb", display_name: nil, depends_on: nil, workflow: nil },
+        assert_equal({ id: 2, slug: "later-task-260603-bbbb", display_name: nil, depends_on: nil, workflow: nil,
+                       plan_review_required: true },
                      Hive::TaskMeta.read(later))
-        assert_equal({ id: 3, slug: "no-idea-260603-cccc", display_name: nil, depends_on: nil, workflow: nil },
+        assert_equal({ id: 3, slug: "no-idea-260603-cccc", display_name: nil, depends_on: nil, workflow: nil,
+                       plan_review_required: true },
                      Hive::TaskMeta.read(no_idea))
         assert_equal 4, Hive::TaskCounter.peek
       end
@@ -1442,6 +1474,27 @@ class MigrateTest < Minitest::Test
       command.send(
         :migration_no_move_message, config_changed: false, backfilled_count: 0,
         workflow_task_count: 1, workflow_moved_count: 0
+      )
+    )
+  end
+
+  def test_complete_message_counts_backfilled_plan_review_requirements
+    command = migrate_command("/tmp/project")
+
+    assert_equal(
+      "hive: migrate complete (0 tasks moved, 1 plan review requirement added)",
+      command.send(
+        :migration_complete_message, [], backfilled_count: 0,
+        recovery_marker_count: 0, workflow_task_count: 0, workflow_moved_count: 0,
+        plan_review_requirement_count: 1
+      )
+    )
+    assert_equal(
+      "hive: migrate complete (0 tasks moved, 2 plan review requirements added)",
+      command.send(
+        :migration_complete_message, [], backfilled_count: 0,
+        recovery_marker_count: 0, workflow_task_count: 0, workflow_moved_count: 0,
+        plan_review_requirement_count: 2
       )
     )
   end

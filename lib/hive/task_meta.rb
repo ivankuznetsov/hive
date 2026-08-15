@@ -12,7 +12,7 @@ module Hive
     WRITABLE_FIELDS = %i[
       id slug display_name depends_on workflow workflow_commit
       workflow_manifest_digest workflow_configuration_digest base_branch
-      idempotency_key input_fingerprint completed_at
+      idempotency_key input_fingerprint completed_at plan_review_required
     ].freeze
 
     class InvalidMetadata < StandardError; end
@@ -65,6 +65,11 @@ module Hive
           fetch(raw, "completed_at"), label: path(task_folder), warn_on_invalid: true
         )
       end
+      if key?(raw, "plan_review_required")
+        data[:plan_review_required] = normalize_plan_review_required(
+          fetch(raw, "plan_review_required"), label: path(task_folder)
+        )
+      end
       data
     rescue Errno::ENOENT
       # No meta.yml (pre-`hive new` / legacy folders) — a normal, expected
@@ -80,13 +85,15 @@ module Hive
       warn "hive: task_meta: failed to read #{path(task_folder)} " \
            "(#{e.class}: #{e.message}); treating meta as empty " \
            "(depends_on, workflow, base_branch dropped; idempotency dropped; " \
-           "managed provenance dropped; completed_at dropped)"
+           "managed provenance dropped; completed_at and plan-review requirement dropped)"
       empty
     end
 
     def read_for_admission(task_folder)
       source = File.read(path(task_folder))
-      %w[depends_on base_branch idempotency_key input_fingerprint].each do |field|
+      %w[
+        depends_on base_branch idempotency_key input_fingerprint plan_review_required
+      ].each do |field|
         if Hive::Dependencies.duplicate_top_level_key?(source, field)
           return AdmissionRead.new(
             status: :invalid,
@@ -107,6 +114,14 @@ module Hive
       end
 
       raw ||= {}
+      if key?(raw, "plan_review_required") && fetch(raw, "plan_review_required") != true
+        return AdmissionRead.new(
+          status: :invalid,
+          data: empty,
+          error: "#{path(task_folder)} plan_review_required must be true when present",
+          reason: :metadata_invalid
+        )
+      end
       data = normalized_data(raw)
       if key?(raw, "depends_on")
         begin
@@ -142,7 +157,8 @@ module Hive
 
     def write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil, base_branch: nil,
               workflow_commit: nil, workflow_manifest_digest: nil, workflow_configuration_digest: nil,
-              idempotency_key: nil, input_fingerprint: nil, completed_at: nil)
+              idempotency_key: nil, input_fingerprint: nil, completed_at: nil,
+              plan_review_required: nil)
       FileUtils.mkdir_p(task_folder)
       normalized_depends_on = normalize_string(depends_on)
       normalized_workflow = normalize_string(workflow)
@@ -153,6 +169,9 @@ module Hive
       normalized_idempotency_key = normalize_string(idempotency_key)
       normalized_input_fingerprint = normalize_string(input_fingerprint)
       normalized_completed_at = normalize_completed_at(completed_at, label: "completed_at", strict: true)
+      normalized_plan_review_required = normalize_plan_review_required(
+        plan_review_required, label: "plan_review_required", allow_nil: true, strict: true
+      )
       if normalized_commit.nil? != normalized_digest.nil?
         raise ArgumentError, "workflow_commit and workflow_manifest_digest must be written together"
       end
@@ -176,6 +195,7 @@ module Hive
       data["idempotency_key"] = normalized_idempotency_key if normalized_idempotency_key
       data["input_fingerprint"] = normalized_input_fingerprint if normalized_input_fingerprint
       data["completed_at"] = normalized_completed_at if normalized_completed_at
+      data["plan_review_required"] = true if normalized_plan_review_required
       tmp = File.join(task_folder, ".#{FILENAME}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
       File.write(tmp, data.to_yaml)
       File.rename(tmp, path(task_folder))
@@ -194,6 +214,7 @@ module Hive
         result[:input_fingerprint] = normalized_input_fingerprint
       end
       result[:completed_at] = normalized_completed_at if normalized_completed_at
+      result[:plan_review_required] = true if normalized_plan_review_required
       result
     ensure
       File.delete(tmp) if tmp && File.exist?(tmp)
@@ -208,6 +229,18 @@ module Hive
     # `hive new` (hand-made folder, `mv`-ed in) whose meta has none.
     def update_id(task_folder, id)
       rewrite(task_folder, id: id)
+    end
+
+    # New coding tasks and pre-execute coding tasks touched by `hive migrate`
+    # carry this bit. Its absence is the explicit pre-feature compatibility
+    # shape used by execute-entry adoption; a malformed value is never treated
+    # as a legacy exemption.
+    def plan_review_required?(task_folder)
+      result = read_for_admission(task_folder)
+      return false if result.status == :absent
+      return result.data[:plan_review_required] == true if result.status == :ok
+
+      raise InvalidMetadata, "invalid plan-review requirement metadata: #{result.error}"
     end
 
     # First-writer-wins completion clock. The stable guard serializes metadata
@@ -258,7 +291,10 @@ module Hive
     end
 
     def empty
-      { id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }
+      {
+        id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil,
+        plan_review_required: nil
+      }
     end
 
     def read_for_update!(task_folder)
@@ -281,7 +317,10 @@ module Hive
         workflow_manifest_digest: normalize_string(fetch(raw, "workflow_manifest_digest")),
         workflow_configuration_digest: normalize_string(fetch(raw, "workflow_configuration_digest")),
         idempotency_key: normalize_string(fetch(raw, "idempotency_key")),
-        input_fingerprint: normalize_string(fetch(raw, "input_fingerprint"))
+        input_fingerprint: normalize_string(fetch(raw, "input_fingerprint")),
+        plan_review_required: normalize_plan_review_required(
+          fetch(raw, "plan_review_required"), label: "plan_review_required", allow_nil: true
+        )
       }
       if key?(raw, "completed_at")
         data[:completed_at] = normalize_completed_at(fetch(raw, "completed_at"), label: "completed_at")
@@ -309,6 +348,16 @@ module Hive
     def normalize_string(value)
       string = value.to_s.strip
       string.empty? ? nil : string
+    end
+
+    def normalize_plan_review_required(value, label:, allow_nil: false, strict: false)
+      return nil if value.nil? && allow_nil
+      return true if value == true
+
+      raise ArgumentError, "#{label} must be true when present" if strict
+
+      warn "hive: task_meta: invalid plan_review_required in #{label}; treating metadata as legacy"
+      nil
     end
 
     def normalize_completed_at(value, label:, strict: false, warn_on_invalid: false)

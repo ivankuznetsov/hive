@@ -434,7 +434,8 @@ module Hive
             workflow_manifest_digest: managed&.fetch("manifest_digest"),
             workflow_configuration_digest: managed&.fetch("configuration_digest"),
             idempotency_key: idempotency_key,
-            input_fingerprint: input_fingerprint
+            input_fingerprint: input_fingerprint,
+            plan_review_required: Hive::Workflows.coding_id?(workflow.id) ? true : nil
           )
         end
         return writer.call(stable_selection) unless stable_selection == :unlocked

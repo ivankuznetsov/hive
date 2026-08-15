@@ -1,4 +1,5 @@
 require "thor"
+require "hive/plan_review"
 require "hive/stages"
 require "hive/workflows/registry"
 require "hive/task_closure_contract"
@@ -34,7 +35,7 @@ module Hive
     end
 
     # `--json` is honoured by `init`, `status`, `run`, `approve`, `findings`,
-    # `accept-finding`, `reject-finding`, `pairing`, and the workflow verbs
+    # `accept-finding`, `reject-finding`, `plan-review`, `pairing`, and the workflow verbs
     # (`brainstorm`, `plan`, `develop`, `pr`, `archive`). `new` accepts
     # the flag silently so an automated caller can pass it uniformly. Most
     # emitting commands produce a typed JSON document on success and a
@@ -811,9 +812,62 @@ module Hive
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :review_level, type: :string, enum: %w[standard mandatory],
+                          desc: "raise this plan's minimum critique level (raise-only)"
     def plan(target)
+      if options[:review_level]
+        require "hive/commands/plan_review"
+        Hive::Commands::PlanReview.persist_raise_for_target!(
+          target, level: options[:review_level], project: options[:project],
+          stage: options[:from], reason: "hive plan --review-level"
+        )
+      end
       run_stage_action("plan", target)
     end
+
+    desc "plan-review TARGET ACTION", "Apply a freshness-bound plan critique action"
+    long_desc <<~DESC
+      Applies one typed action to the current plan critique. Copy the review,
+      generation, policy, target, and observation identities from `hive status
+      --json`; stale or conflicting actions are rejected without mutation.
+
+      Actions: approve-finding, answer-finding, waive-coverage,
+      downgrade-level, raise-level, retry, request-review.
+    DESC
+    option :review_id, type: :string, desc: "current logical review id"
+    option :task_generation, type: :string, desc: "current task/plan generation"
+    option :policy_fingerprint, type: :string, desc: "current policy fingerprint"
+    option :expected_artifact_digest, type: :string,
+                                      desc: "current plan-review observation digest"
+    option :target_fingerprint, type: :string,
+                                desc: "exact finding or coverage fingerprint"
+    option :answer, type: :string, desc: "answer for a manual finding"
+    option :coverage, type: :string, desc: "named coverage item being waived"
+    option :level, type: :string, enum: Hive::PlanReview::LEVELS,
+                   desc: "new level for raise or audited downgrade"
+    option :reason, type: :string, desc: "required reason for waiver or downgrade"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def plan_review(target, action)
+      require "hive/commands/plan_review"
+      Hive::Commands::PlanReview.new(
+        target, action, review_id: options[:review_id],
+        task_generation: options[:task_generation],
+        policy_fingerprint: options[:policy_fingerprint],
+        expected_artifact_digest: options[:expected_artifact_digest],
+        target_fingerprint: options[:target_fingerprint], answer: options[:answer],
+        coverage: options[:coverage], level: options[:level], reason: options[:reason],
+        project: options[:project], json: options[:json]
+      ).call
+    end
+    map "plan-review" => :plan_review
+
+    desc "plan-review-run TARGET", "Start or resume plan critique without operator authority"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def plan_review_run(target)
+      require "hive/commands/plan_review_run"
+      Hive::Commands::PlanReviewRun.new(target, project: options[:project]).call
+    end
+    map "plan-review-run" => :plan_review_run
 
     desc "develop TARGET", "Move a completed plan task into execute, or run an existing execute task"
     option :from, type: :string,

@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-plan-review-action.v1.json",
+  "title": "hive plan-review action (v1)",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "ReviewId": { "type": "string", "pattern": "^pr-[0-9a-f]{64}$" },
+    "DecisionId": { "type": "string", "pattern": "^prd-[0-9a-f]{64}$" },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "applied", "noop", "action",
+        "decision_id", "target_fingerprint", "review_id", "current_review_id",
+        "task_generation", "policy_fingerprint", "state", "outcome",
+        "execution_allowed", "required_action", "observation_digest", "slug",
+        "task_folder"
+      ],
+      "properties": {
+        "schema": { "const": "hive-plan-review-action" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "applied": { "type": "boolean" },
+        "noop": { "type": "boolean" },
+        "action": {
+          "enum": [
+            "approve_finding", "answer_finding", "waive_coverage",
+            "downgrade_level", "raise_level", "retry", "request_review"
+          ]
+        },
+        "decision_id": { "$ref": "#/$defs/DecisionId" },
+        "target_fingerprint": { "type": "string", "minLength": 1 },
+        "review_id": { "$ref": "#/$defs/ReviewId" },
+        "current_review_id": { "$ref": "#/$defs/ReviewId" },
+        "task_generation": { "type": "string", "minLength": 1 },
+        "policy_fingerprint": { "$ref": "#/$defs/Digest" },
+        "state": {
+          "enum": [
+            "uninitialized", "skipped", "reviewing", "retry_scheduled",
+            "awaiting_decision", "revising", "verifying", "cleared",
+            "degraded_cleared", "blocked"
+          ]
+        },
+        "outcome": {
+          "enum": ["skipped", "cleared", "degraded_cleared", "blocked", null]
+        },
+        "execution_allowed": { "type": "boolean" },
+        "required_action": { "type": ["string", "object", "null"] },
+        "observation_digest": { "$ref": "#/$defs/Digest" },
+        "slug": { "type": "string", "minLength": 1 },
+        "task_folder": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind",
+        "exit_code", "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-plan-review-action" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "enum": [
+            "stale_decision", "conflicting_decision", "unauthorized",
+            "invalid_action", "ambiguous_slug", "invalid_task_path",
+            "concurrent_run", "config", "git", "internal", "error"
+          ]
+        },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "candidates": { "type": "array", "items": { "type": "object" } },
+        "holder": { "type": "object" },
+        "lock_path": { "type": "string" }
+      }
+    }
+  }
+}

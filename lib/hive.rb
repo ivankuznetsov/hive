@@ -46,6 +46,10 @@ module Hive
       "hive-run" => 2,
       "hive-approve" => 2,
       "hive-decide" => 1,
+      "hive-plan-review" => 1,
+      "hive-plan-review-action" => 1,
+      "hive-plan-review-level" => 1,
+      "hive-plan-review-adoption" => 1,
       "hive-findings" => 1,
       "hive-stage-action" => 2,
       "hive-metrics-rollback-rate" => 1,
@@ -246,6 +250,12 @@ module Hive
       READY_TO_ARCHIVE    = "ready_to_archive".freeze
       READY_TO_ADVANCE    = "ready_to_advance".freeze
       READY_TO_RUN        = "ready_to_run".freeze
+      PLAN_REVIEWING      = "plan_reviewing".freeze
+      PLAN_REVIEW_RETRY   = "plan_review_retry".freeze
+      PLAN_REVIEW_DECISION = "plan_review_decision".freeze
+      PLAN_REVIEW_DEGRADED = "plan_review_degraded".freeze
+      PLAN_REVIEW_UNSUPPORTED = "plan_review_unsupported".freeze
+      PLAN_REVIEW_BLOCKED = "plan_review_blocked".freeze
       # Explicit operator-only retry for a validated draft-PR handoff. The
       # daemon's Policy does not dispatch this key; status still exposes the
       # exact `hive run` command for a human-controlled retry.
@@ -277,6 +287,7 @@ module Hive
       CONCURRENT_RUN    = "concurrent_run".freeze
       TASK_IN_ERROR     = "task_in_error".freeze
       WRONG_STAGE       = "wrong_stage".freeze
+      PLAN_REVIEW_BLOCKED = "plan_review_blocked".freeze
       STAGE             = "stage".freeze
       CONFIG            = "config".freeze
       AGENT             = "agent".freeze

@@ -154,6 +154,15 @@ class HiveSkillCheckClaudeTest < Minitest::Test
     end
   end
 
+  def test_ce_doc_review_resolves_from_compound_engineering_plugin
+    with_fake_home do |home|
+      write_file("#{home}/.claude/plugins/cache/every-marketplace/compound-engineering/3.0.1/skills/ce-doc-review/SKILL.md")
+      status, message = Hive::SkillCheck::Claude.verify("/ce-doc-review")
+      assert_equal :present, status
+      assert_match(%r{skills/ce-doc-review/SKILL\.md\z}, message)
+    end
+  end
+
   def test_user_level_command_takes_precedence_over_plugin_fallback
     with_fake_home do |home|
       write_file("#{home}/.claude/commands/ce-code-review.md", "user")
@@ -265,6 +274,15 @@ class HiveSkillCheckCodexTest < Minitest::Test
       status, msg = Hive::SkillCheck::Codex.verify("/ce-code-review")
       assert_equal :present, status
       assert_match(%r{compound-engineering/3\.7\.0/skills/ce-code-review/SKILL.md\z}, msg)
+    end
+  end
+
+  def test_codex_ce_doc_review_resolves_from_compound_engineering_plugin
+    with_fake_home do |home|
+      write_file("#{home}/.codex/plugins/cache/some-mp/compound-engineering/3.7.0/skills/ce-doc-review/SKILL.md")
+      status, message = Hive::SkillCheck::Codex.verify("/ce-doc-review")
+      assert_equal :present, status
+      assert_match(%r{skills/ce-doc-review/SKILL\.md\z}, message)
     end
   end
 

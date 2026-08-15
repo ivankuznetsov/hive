@@ -4,6 +4,8 @@ require "hive/commands/new"
 require "hive/commands/status"
 require "hive/events"
 require "hive/task_meta"
+require "hive/plan_review/orchestrator"
+require "hive/tui/snapshot"
 
 class StatusTest < Minitest::Test
   include HiveTestHelper
@@ -72,11 +74,7 @@ class StatusTest < Minitest::Test
     end
   end
 
-  # R10 symmetry: a 3-plan WAITING row must render in text-mode `hive status`
-  # under its own "Review plan draft" group, NOT collapse into the generic
-  # "Needs your input" label. Mirrors the brainstorm/review assertions so the
-  # rendered-text contract is covered for the plan case too.
-  def test_text_mode_groups_plan_waiting_under_review_plan_draft
+  def test_text_mode_routes_a_legacy_plan_wait_to_review_initialization
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
@@ -89,11 +87,55 @@ class StatusTest < Minitest::Test
         out, _err = capture_io { Hive::Commands::Status.new(full: true).call }
 
         assert_includes out, project
-        assert_includes out, "Review plan draft",
-                         "3-plan WAITING must render under the 'Review plan draft' group"
-        assert_includes out, "hive plan"
+        assert_includes out, "Plan review in progress"
+        assert_includes out, "review=pending/uninitialized"
+        assert_includes out, "hive plan-review-run"
         refute_includes out, "Needs your input",
-                         "plan-stage needs-input must not collapse into the generic 'Needs your input' label"
+                         "plan-stage review initialization is not an ordinary edit gate"
+      end
+    end
+  end
+
+  def test_plan_review_projection_is_identical_across_status_operational_and_tui
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        slug = "review-status-260812-abcd"
+        folder = File.join(dir, ".hive-state", "stages", "3-plan", slug)
+        FileUtils.mkdir_p(folder)
+        Hive::TaskMeta.write(folder, id: 42, slug:, display_name: "Review status")
+        File.write(File.join(folder, "plan.md"), low_risk_review_plan)
+        task = Hive::Task.new(folder)
+        Hive::PlanReview::Orchestrator.run!(
+          task:, cfg: Hive::Config.load(dir),
+          planner_identity: {
+            "provider" => "codex", "model" => "gpt-5.6-sol", "family" => "openai",
+            "effort" => "high", "route" => "native_codex"
+          }
+        )
+
+        out, = capture_io { Hive::Commands::Status.new(json: true).call }
+        payload = JSON.parse(out)
+        row = payload.dig("projects", 0, "tasks", 0)
+        review = row.fetch("plan_review")
+
+        assert_equal "skipped", review.fetch("state")
+        assert_equal "skip", review.fetch("effective_level")
+        assert_equal "current", review.dig("freshness", "status")
+        assert_equal true, review.fetch("execution_allowed")
+        assert_equal "ready_to_develop", row.fetch("action")
+        assert_empty JSONSchemer.schema(
+          JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+        ).validate(payload).to_a
+
+        operational = Hive::OperationalStatus.new(
+          status_payload: payload,
+          project_context: { project => { "daemon_enabled" => false } }
+        ).to_h
+        assert_equal review, operational.dig("tasks", 0, "plan_review")
+        snapshot = Hive::Tui::Snapshot.from_payload(payload)
+        assert_equal review, snapshot.rows.first.plan_review
       end
     end
   end
@@ -178,10 +220,29 @@ class StatusTest < Minitest::Test
 
           assert_equal %w[2-research 3-draft], rows.map { |row| row.fetch("stage") }.sort
           assert(rows.all? { |row| row.fetch("workflow") == "content_fixture" })
+          assert(rows.all? { |row| row.fetch("plan_review").nil? })
           refute(rows.any? { |row| row.fetch("stage") == "2-brainstorm" || row.fetch("stage") == "5-open-pr" })
         end
       end
     end
+  end
+
+
+  def low_risk_review_plan
+    <<~MD
+      ---
+      files:
+        - lib/demo.rb
+        - test/demo_test.rb
+      ---
+      # Plan
+      Update one local component.
+      ## Test scenarios
+      - The focused test passes.
+      ## Rollback
+      Revert the local change; it is reversible.
+      <!-- WAITING -->
+    MD
   end
 
   def test_status_json_renders_mixed_coding_and_content_tasks

@@ -4,7 +4,7 @@ type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
 updated: 2026-08-14
-tags: [command, web, rails, turbo, hivebox-container, archive, retention]
+tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention]
 ---
 
 **TLDR**: `hive web` boots the default native Hive browser UI — a vanilla
@@ -718,6 +718,27 @@ tokens). Outside verified local-loopback access every route except `/health`, `/
 `/logout`, `/auth/github*`, and the dev/test-only `/dev_login` is behind the
 owner gate; a verified local loopback request bypasses that gate for the
 complete local UI.
+
+## Plan-review task detail and actions
+
+Applicable coding plan tasks render a dedicated critique panel from the exact
+`tasks[].plan_review` object already produced by status. It shows level/state,
+degradation or mandatory block, coverage counts, typed finding lifecycle,
+planner/reviewer requested and actual identities, independence receipt,
+blocker, one required action, and links to the current safe artifacts. The Web
+model opens artifacts only through the projection's content-addressed
+references and rechecks task confinement, regular-file type, byte count, and
+SHA-256; arbitrary paths and stale/tampered files are not served.
+
+`POST /tasks/:project/:slug/plan-review` delegates approvals, answers, named
+coverage waivers, mandatory downgrade, raises, and retry/request actions to the
+same `PlanReview::DecisionService` as the CLI. Every form posts the full review
+ID, task generation, policy fingerprint, target fingerprint, and observation
+digest. The controller re-resolves the current task and operator authority;
+identical replay is a no-op, while stale/conflicting submissions redirect to
+the refreshed review with no mutation. The generic Force approve form is not
+rendered while a plan review applies, and task mutations independently invoke
+`TransitionGuard` before any plan-to-execute move.
 
 ## Tests
 

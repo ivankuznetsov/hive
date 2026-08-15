@@ -79,6 +79,7 @@ module Hive
                      attempt_dispatcher: nil, attempt_reconciler: nil,
                      lost_outcome_store: nil, lost_outcome_processor: nil,
                      operational_snapshot: nil, recovery_coordinator: nil,
+                     plan_approval: Hive::Daemon::PlanApproval,
                      module_runtime: nil,
                      module_migration_coordinator: nil,
                      runtime_ready_callback: nil)
@@ -109,6 +110,7 @@ module Hive
           attempt_store: @attempt_reconciler&.respond_to?(:store) ?
             @attempt_reconciler.store : nil
         )
+        @plan_approval = plan_approval
 
         # Update-flow collaborators (plan 2026-05-27-002). The check runs
         # only when a state store is injected (the daemon does so); existing
@@ -1259,7 +1261,13 @@ module Hive
           # auto-advance from regular advance-action dispatches. An
           # agent or operator reading daemon.log can then audit WHICH
           # policy branch fired without re-implementing Policy.decide.
-          trigger = Policy.plan_approval?(row.action, row.stage, row.workflow) ? "plan_approval" : "advance"
+          trigger = if Policy.plan_approval?(row.action, row.stage, row.workflow)
+            "plan_approval"
+          elsif Policy.plan_review_automation?(row.action)
+            "plan_review"
+          else
+            "advance"
+          end
           outcome = dispatch_or_block(row, now: now, trigger: trigger)
           observe_dispatch_outcome(row, outcome)
         when :wait_for_debounce
@@ -1477,7 +1485,7 @@ module Hive
         command = row.suggested_command
         if trigger == "plan_approval"
           begin
-            command = PlanApproval.prepare(row.suggested_command, row.state_file)
+            command = @plan_approval.prepare(row.suggested_command, row.state_file)
           rescue PlanApproval::NotApprovable, ArgumentError => e
             @logger.event(:skipped, project: row.project, slug: row.slug,
                                     stage: row.stage, action: row.action,

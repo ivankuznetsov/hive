@@ -114,6 +114,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[modules/metrics]] — `wiki/modules/metrics.md`
 - [[modules/model_routing]] — `wiki/modules/model_routing.md`
 - [[modules/patrol]] — `wiki/modules/patrol.md`
+- [[modules/plan_review]] — `wiki/modules/plan_review.md`
 - [[modules/pr]] — `wiki/modules/pr.md`
 - [[modules/protected_files]] — `wiki/modules/protected_files.md`
 - [[modules/provider_health]] — `wiki/modules/provider_health.md`

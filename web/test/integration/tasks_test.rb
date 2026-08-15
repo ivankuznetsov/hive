@@ -259,6 +259,95 @@ class TasksTest < ActionDispatch::IntegrationTest
                   count: 0
   end
 
+  test "task detail renders one plan review projection with exact decision forms" do
+    move_task_to_plan!
+    details = plan_review_details_fixture
+
+    with_replaced_instance_method(Task, :plan_review_details, -> { details }) do
+      get "/tasks/#{@project}/#{@slug}"
+    end
+
+    assert_response :success
+    assert_select "section.plan-review[data-review-id=?]", "pr-#{'a' * 64}", count: 1
+    assert_select ".plan-review", text: /mandatory.*awaiting decision/m
+    assert_select ".plan-review", text: /2 complete.*1 failed/m
+    assert_select ".plan-review", text: /grok-build.*grok-4.6/m
+    assert_select ".plan-review-findings > li", 2
+    assert_select "form[action=?] input[name=expected_artifact_digest][value=?]",
+                  "/tasks/#{@project}/#{@slug}/plan-review", "e" * 64, minimum: 4
+    assert_select "form[action=?] input[name=review_id][value=?]",
+                  "/tasks/#{@project}/#{@slug}/plan-review", "pr-#{'a' * 64}", minimum: 4
+    assert_select "input[name=review_action][value=approve_finding]", 1
+    assert_select "input[name=review_action][value=answer_finding]", 1
+    assert_select "input[name=review_action][value=waive_coverage]", 1
+    assert_select "input[name=review_action][value=downgrade_level]", 1
+    assert_select ".plan-review-artifact", text: /current critique/
+    assert_select ".advanced form[action=?] button",
+                  "/tasks/#{@project}/#{@slug}/approve", text: "Force approve", count: 0
+  end
+
+  test "verification blockers do not expose futile finding decisions" do
+    move_task_to_plan!
+    details = plan_review_details_fixture
+    details.fetch("summary")["state"] = "blocked"
+    details.fetch("summary")["required_action"] = "start a new linked plan"
+
+    with_replaced_instance_method(Task, :plan_review_details, -> { details }) do
+      get "/tasks/#{@project}/#{@slug}"
+    end
+
+    assert_response :success
+    assert_select "input[name=review_action][value=approve_finding]", 0
+    assert_select "input[name=review_action][value=answer_finding]", 0
+    assert_select ".plan-review-required-action", text: /start a new linked plan/
+  end
+
+  test "plan review action delegates the exact observation to the shared task mutation" do
+    captured = nil
+    projection = Struct.new(:record).new(Struct.new(:state).new("revising"))
+    replacement = proc do |**arguments|
+      captured = arguments
+      { applied: true, decision: Object.new, projection: projection }
+    end
+
+    with_replaced_instance_method(Task, :plan_review_action!, replacement) do
+      post "/tasks/#{@project}/#{@slug}/plan-review", params: {
+        review_action: "answer_finding", review_id: "pr-#{'a' * 64}",
+        task_generation: "generation-1", policy_fingerprint: "b" * 64,
+        expected_artifact_digest: "e" * 64, target_fingerprint: "prf-#{'d' * 64}",
+        answer: "Use the reversible path."
+      }
+    end
+
+    assert_redirected_to "/tasks/#{@project}/#{@slug}"
+    assert_equal "answer_finding", captured.fetch(:action)
+    assert_equal "prf-#{'d' * 64}", captured.fetch(:target_fingerprint)
+    assert_equal "Use the reversible path.", captured.fetch(:answer)
+    assert_equal "alice", captured.fetch(:operator)
+    assert captured.fetch(:authorized)
+  end
+
+  test "stale plan review submission refreshes without applying an action" do
+    calls = 0
+    replacement = proc do |**|
+      calls += 1
+      raise Hive::PlanReview::StaleDecision, "projection changed"
+    end
+
+    with_replaced_instance_method(Task, :plan_review_action!, replacement) do
+      post "/tasks/#{@project}/#{@slug}/plan-review", params: {
+        review_action: "approve_finding", review_id: "pr-#{'a' * 64}",
+        task_generation: "generation-1", policy_fingerprint: "b" * 64,
+        expected_artifact_digest: "e" * 64, target_fingerprint: "prf-#{'d' * 64}"
+      }
+    end
+
+    assert_equal 1, calls
+    assert_redirected_to "/tasks/#{@project}/#{@slug}"
+    assert_equal "Plan review changed. Refreshed the current review; no action was applied.",
+                 flash[:alert]
+  end
+
   test "Advanced offers Drop, and dropping deletes the task for good" do
     get "/tasks/#{@project}/#{@slug}"
     assert_select ".advanced form[action=?] button", "/tasks/#{@project}/#{@slug}/drop",
@@ -1304,6 +1393,114 @@ class TasksTest < ActionDispatch::IntegrationTest
   end
 
   private
+
+  def move_task_to_plan!
+    source = stage_dir(@project, "1-inbox").join(@slug)
+    destination = stage_dir(@project, "3-plan").join(@slug)
+    destination.dirname.mkpath
+    FileUtils.mv(source, destination)
+    destination.join("plan.md").write("# Plan\n\n## Tests\n\nRun focused tests.\n\n<!-- WAITING -->\n")
+  end
+
+  def plan_review_details_fixture
+    summary = {
+      "applicable" => true, "review_id" => "pr-#{'a' * 64}", "version" => 4,
+      "observation_digest" => "e" * 64, "task_generation" => "generation-1",
+      "plan_digest" => "f" * 64, "policy_fingerprint" => "b" * 64,
+      "computed_level" => "mandatory", "effective_level" => "mandatory",
+      "state" => "awaiting_decision", "outcome" => nil, "degraded" => false,
+      "degradation_reason" => nil, "attempt_count" => 2,
+      "current_attempt_id" => "pra-#{'9' * 64}",
+      "coverage_counts" => {
+        "requested" => 0, "completed" => 2, "failed" => 1,
+        "unsupported" => 0, "waived" => 0
+      },
+      "finding_counts" => {
+        "open" => 2, "approved" => 0, "answered" => 0, "incorporated" => 0,
+        "verified" => 0, "resolved" => 0, "waived" => 0, "total" => 2,
+        "open_gated" => 1, "open_manual" => 1, "fyi" => 0
+      },
+      "blockers" => [ { "owner" => "operator", "reason" => "manual finding" } ],
+      "blocker_owner" => "operator", "blocker_reason" => "manual finding",
+      "required_action" => "answer manual plan finding", "retry_at" => nil,
+      "routes" => [], "artifacts" => {},
+      "freshness" => { "status" => "current", "reason" => nil },
+      "execution_allowed" => false
+    }
+    findings = [
+      plan_review_finding("gated_auto", "Approve the compatibility boundary", 1, "1"),
+      plan_review_finding("manual", "Choose the rollback boundary", 2, "2")
+    ]
+    coverage = [
+      plan_review_coverage("whole_document", "completed", "3"),
+      plan_review_coverage("adversarial", "completed", "4"),
+      plan_review_coverage("security", "failed", "5", required: false)
+    ]
+    routes = [
+      {
+        "role" => "adversarial",
+        "requested" => {
+          "provider" => "grok-build", "model" => "grok-4.6", "family" => "grok",
+          "effort" => "high", "route" => "native"
+        },
+        "actual" => {
+          "provider" => "grok-build", "model" => "grok-4.6", "family" => "grok",
+          "effort" => "high", "route" => "native"
+        },
+        "outcome" => "success", "capability_result" => "present",
+        "independence_verified" => true
+      }
+    ]
+    {
+      "summary" => summary.merge("routes" => routes), "coverage" => coverage,
+      "findings" => findings, "routes" => routes,
+      "artifacts" => [
+        {
+          "name" => "primary_result", "path" => "reviews/current/result.json",
+          "sha256" => "6" * 64, "bytes" => 42, "format" => "json",
+          "content" => "{\"summary\":\"current critique\"}\n"
+        }
+      ]
+    }
+  end
+
+  def plan_review_finding(classification, title, order, digest_character)
+    {
+      "fingerprint" => "prf-#{digest_character * 64}", "source" => "whole_document",
+      "classification" => classification, "risk" => "high", "title" => title,
+      "description" => "Resolve this exact finding before execution.",
+      "evidence" => {
+        "path" => "plan.md", "start_line" => order, "end_line" => order,
+        "anchor_digest" => digest_character * 64
+      },
+      "lifecycle" => "open", "display_order" => order
+    }
+  end
+
+  def plan_review_coverage(name, status, digest_character, required: true)
+    {
+      "name" => name, "required" => required, "status" => status,
+      "fingerprint" => "prc-#{digest_character * 64}",
+      "reason" => status == "failed" ? "provider unavailable" : nil
+    }
+  end
+
+  def with_replaced_instance_method(receiver, name, replacement)
+    original = receiver.instance_method(name)
+    visibility = if receiver.private_method_defined?(name)
+      :private
+    elsif receiver.protected_method_defined?(name)
+      :protected
+    else
+      :public
+    end
+    receiver.define_method(name, replacement)
+    receiver.send(visibility, name)
+    yield
+  ensure
+    receiver.define_method(name, original)
+    receiver.send(visibility, name)
+  end
 
   def publication_fixture
     identity = {

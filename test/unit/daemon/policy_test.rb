@@ -121,10 +121,10 @@ class HiveDaemonPolicyTest < Minitest::Test
                 command: "hive develop slug-a --from 3-plan" }
       },
       {
-        name: "plan approval",
+        name: "cleared plan approval",
         expected: :dispatch,
-        args: { action: "needs_input", stage: "3-plan",
-                command: "hive plan slug-a --from 3-plan",
+        args: { action: "ready_to_develop", stage: "3-plan",
+                command: "hive develop slug-a --from 3-plan",
                 state_file_mtime: T0 - 60,
                 last_dispatched_state_file_mtime: nil }
       },
@@ -191,7 +191,7 @@ class HiveDaemonPolicyTest < Minitest::Test
 
   def test_blocked_plan_approval_does_not_dispatch
     assert_equal :blocked_on_dependency,
-                 decide(action: "needs_input",
+                 decide(action: "ready_to_develop",
                         stage: "3-plan",
                         command: "hive develop slug-a --from 3-plan",
                         state_file_mtime: T0 - 600,
@@ -247,14 +247,10 @@ class HiveDaemonPolicyTest < Minitest::Test
                                           last_dispatched_state_file_mtime: nil)
   end
 
-  def test_plan_needs_input_dispatches_without_mtime_edit
-    # Plan-stage WAITING is an approval pause, not a request for fresh
-    # typed answers. In daemon-enabled projects, enabling the daemon is
-    # the approval gesture, so the generated plan should advance to
-    # develop without requiring a user to open and close the file.
-    assert_equal :dispatch, decide(action: "needs_input",
+  def test_plan_review_automation_dispatches_without_mtime_edit
+    assert_equal :dispatch, decide(action: "plan_reviewing",
                                    stage: "3-plan",
-                                   command: "hive develop slug-a --from 3-plan",
+                                   command: "hive plan-review-run slug-a",
                                    state_file_mtime: T0 - 600,
                                    last_dispatched_state_file_mtime: nil)
   end
@@ -463,22 +459,10 @@ class HiveDaemonPolicyTest < Minitest::Test
     # path, NOT auto-dispatch. With `stage: nil` and a non-nil
     # mtime + nil last_dispatched, the brainstorm-shaped behavior
     # is :record_baseline.
-    assert_equal :record_baseline,
-                 decide(action: "needs_input", stage: "1-plan",
-                        command: "hive plan slug-a --from 1-plan",
-                        state_file_mtime: T0 - 60,
-                        last_dispatched_state_file_mtime: nil)
-    assert_equal :record_baseline,
-                 decide(action: "needs_input", stage: "13-plan",
-                        command: "hive plan slug-a --from 13-plan",
-                        state_file_mtime: T0 - 60,
-                        last_dispatched_state_file_mtime: nil)
-    # Positive control: real "3-plan" still auto-dispatches.
-    assert_equal :dispatch,
-                 decide(action: "needs_input", stage: "3-plan",
-                        command: "hive plan slug-a --from 3-plan",
-                        state_file_mtime: T0 - 60,
-                        last_dispatched_state_file_mtime: nil)
+    refute Hive::Daemon::Policy.plan_approval?("ready_to_develop", "1-plan", "coding")
+    refute Hive::Daemon::Policy.plan_approval?("ready_to_develop", "13-plan", "coding")
+    refute Hive::Daemon::Policy.plan_approval?("ready_to_develop", "3-plan", "custom")
+    assert Hive::Daemon::Policy.plan_approval?("ready_to_develop", "3-plan", "coding")
   end
 
   def test_plan_approval_dispatches_on_subsequent_tick_with_unchanged_mtime
@@ -502,8 +486,8 @@ class HiveDaemonPolicyTest < Minitest::Test
     # regardless of mtime state. This is what makes the auto-advance
     # work — the brainstorm rule does not apply.
     assert_equal :dispatch,
-                 decide(action: "needs_input", stage: "3-plan",
-                        command: "hive plan slug-a --from 3-plan",
+                 decide(action: "ready_to_develop", stage: "3-plan",
+                        command: "hive develop slug-a --from 3-plan",
                         state_file_mtime: same_mtime,
                         last_dispatched_state_file_mtime: same_mtime),
                  "plan path: plan_approval? fires before decide_edit; subsequent ticks must still :dispatch"
@@ -516,8 +500,8 @@ class HiveDaemonPolicyTest < Minitest::Test
     # both sets today, but a future refactor extending plan_approval?
     # to a non-edit_resume action would silently lose this coverage
     # and a malformed status row would dispatch a nil command).
-    assert_equal :skip, decide(action: "needs_input", stage: "3-plan", command: nil)
-    assert_equal :skip, decide(action: "needs_input", stage: "3-plan", command: "")
+    assert_equal :skip, decide(action: "ready_to_develop", stage: "3-plan", command: nil)
+    assert_equal :skip, decide(action: "ready_to_develop", stage: "3-plan", command: "")
   end
 
   # ── answers_pending gate (brainstorm Q&A) ──────────────────────────────

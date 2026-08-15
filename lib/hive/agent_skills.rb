@@ -131,6 +131,13 @@ module Hive
       Provisioner.new(**arguments)
     end
 
+    # Runtime consumers ask the public facade for one installed-capability
+    # contract instead of depending on the skillpack manifest internals.
+    def capability(id, agent)
+      require "hive/agent_skills/manifest"
+      Manifest.load.capability(id).agent(agent)
+    end
+
     def same_source?(actual, expected)
       normalize_source(actual) == normalize_source(expected)
     end

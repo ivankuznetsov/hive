@@ -1,4 +1,5 @@
 require "json"
+require "hive/config"
 require "hive/commands/approve"
 require "hive/commands/run"
 require "hive/markers"
@@ -297,7 +298,7 @@ module Hive
       def success_payload(task, phase, noop: false, reason: nil, marker: nil)
         marker ||= Hive::Markers.current(task.state_file)
         config = Hive::Workflows.for_verb(@verb)
-        action = Hive::TaskAction.for(task, marker)
+        action = Hive::TaskAction.for(task, marker, config: Hive::Config.load(task.project_root))
         payload = {
           "schema" => "hive-stage-action",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-stage-action"),

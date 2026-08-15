@@ -20,6 +20,7 @@ require "hive/task_meta"
 require "hive/workflow_package/managed_store"
 require "hive/workflow_package/mutation_lock"
 require "hive/workflow_package/task_migrator"
+require "hive/workflows"
 
 module Hive
   module Commands
@@ -100,6 +101,7 @@ module Hive
         recovery_marker_count = 0
         workflow_task_count = 0
         workflow_moved_count = 0
+        plan_review_requirement_count = 0
         no_move_message = nil
         begin
           plan = build_migration_plan(stages)
@@ -154,25 +156,30 @@ module Hive
                   stages, managed_store: store, cfg: project_config,
                   workflow_generation: workflow_generation
                 )
+                plan_review_requirement_count = backfill_plan_review_requirements(stages)
 
                 if moved.any? || backfilled_count.positive? ||
-                   recovery_marker_count.positive? || workflow_task_count.positive?
+                   recovery_marker_count.positive? || workflow_task_count.positive? ||
+                   plan_review_requirement_count.positive?
                   commit_migration(
                     hive_state, moved, config_only: false,
                     backfilled_count: backfilled_count,
                     recovery_marker_count: recovery_marker_count,
-                    workflow_task_count: workflow_task_count
+                    workflow_task_count: workflow_task_count,
+                    plan_review_requirement_count: plan_review_requirement_count
                   )
                 end
 
                 if moved.empty? && (config_changed || backfilled_count.positive? ||
-                   recovery_marker_count.positive? || workflow_task_count.positive?)
+                   recovery_marker_count.positive? || workflow_task_count.positive? ||
+                   plan_review_requirement_count.positive?)
                   no_move_message = migration_no_move_message(
                     config_changed: config_changed,
                     backfilled_count: backfilled_count,
                     recovery_marker_count: recovery_marker_count,
                     workflow_task_count: workflow_task_count,
-                    workflow_moved_count: workflow_moved_count
+                    workflow_moved_count: workflow_moved_count,
+                    plan_review_requirement_count: plan_review_requirement_count
                   )
                 elsif moved.empty? && already_migrated?(stages)
                   no_move_message = "hive: migrate found nothing to move (target stage directories look already-migrated)"
@@ -204,7 +211,8 @@ module Hive
             backfilled_count: backfilled_count,
             recovery_marker_count: recovery_marker_count,
             workflow_task_count: workflow_task_count,
-            workflow_moved_count: workflow_moved_count
+            workflow_moved_count: workflow_moved_count,
+            plan_review_requirement_count: plan_review_requirement_count
           )
         end
         if display_name_count.positive?
@@ -213,7 +221,8 @@ module Hive
         if repository_identity
           puts "hive: migrate backfilled registered repository identity #{repository_identity}"
         end
-        if !restart_requested && (config_changed || moved.any? || workflow_task_count.positive?)
+        if !restart_requested && (config_changed || moved.any? ||
+           workflow_task_count.positive? || plan_review_requirement_count.positive?)
           (@daemon_restarter || method(:restart_daemon_if_running!)).call
         end
         moved
@@ -333,6 +342,31 @@ module Hive
         targets.size
       end
 
+      # `plan-review/` is task-local, so its absence alone cannot distinguish
+      # a genuine pre-feature execute task from a post-feature task whose
+      # review evidence was removed before a raw folder move. Stamp every
+      # built-in coding task that has not yet entered execute. New tasks receive
+      # the same bit at creation; tasks already at execute or later deliberately
+      # remain eligible for the legacy adoption receipt.
+      def backfill_plan_review_requirements(stages)
+        cfg = @config_loader.call(@project_path)
+        default_workflow = cfg.fetch("default_workflow", "coding").to_s
+        task_folders(stages).count do |folder|
+          stage_index = File.basename(File.dirname(folder)).split("-", 2).first.to_i
+          next false unless stage_index.between?(1, 3)
+
+          metadata = Hive::TaskMeta.read_for_admission(folder)
+          next false unless metadata.ok?
+
+          workflow = metadata.data[:workflow] || default_workflow
+          next false unless Hive::Workflows.coding_id?(workflow)
+          next false if Hive::TaskMeta.plan_review_required?(folder)
+
+          Hive::TaskMeta.rewrite(folder, plan_review_required: true)
+          true
+        end
+      end
+
       # Recovery v2 requires every recoverable marker generation to carry a
       # durable random identity. Older projects may have ERROR/REVIEW_ERROR
       # markers written before marker_id existed. Migrate them once, under the
@@ -443,7 +477,8 @@ module Hive
 
       def commit_migration(hive_state, moved, config_only: false, backfilled_count: 0,
                            recovery_marker_count: 0,
-                           workflow_task_count: 0)
+                           workflow_task_count: 0,
+                           plan_review_requirement_count: 0)
         ops = Hive::GitOps.new(@project_path)
         ops.run_git!("-C", hive_state, "add", "-A")
         _out, _err, status = Open3.capture3("git", "-C", hive_state, "diff", "--cached", "--quiet")
@@ -452,7 +487,8 @@ module Hive
         message = migrate_commit_message(
           moved, config_only: config_only, backfilled_count: backfilled_count,
           recovery_marker_count: recovery_marker_count,
-          workflow_task_count: workflow_task_count
+          workflow_task_count: workflow_task_count,
+          plan_review_requirement_count: plan_review_requirement_count
         )
         ops.run_git!("-C", hive_state, "commit", "-m", message)
       rescue Hive::GitError => e
@@ -470,7 +506,8 @@ module Hive
         message = migrate_commit_message(
           moved, config_only: config_only, backfilled_count: backfilled_count,
           recovery_marker_count: recovery_marker_count,
-          workflow_task_count: workflow_task_count
+          workflow_task_count: workflow_task_count,
+          plan_review_requirement_count: plan_review_requirement_count
         )
         warn "hive: migrate completed the on-disk mv operations but " \
              "could not commit them to the hive-state git history: " \
@@ -512,21 +549,30 @@ module Hive
 
       def migrate_commit_message(moved, config_only:, backfilled_count: 0,
                                  recovery_marker_count: 0,
-                                 workflow_task_count: 0)
+                                 workflow_task_count: 0,
+                                 plan_review_requirement_count: 0)
         if moved.empty? && recovery_marker_count.positive? &&
            backfilled_count.zero? && workflow_task_count.zero? &&
+           plan_review_requirement_count.zero? &&
            !config_only
           "hive: migrate recovery markers (#{recovery_marker_count} task#{recovery_marker_count == 1 ? '' : 's'})"
         elsif moved.empty? && workflow_task_count.positive? &&
               backfilled_count.zero? && recovery_marker_count.zero? &&
+              plan_review_requirement_count.zero? &&
               !config_only
           "hive: migrate managed workflow tasks " \
             "(#{workflow_task_count} task#{workflow_task_count == 1 ? '' : 's'})"
         elsif moved.empty? && backfilled_count.positive? && !config_only &&
-              recovery_marker_count.zero? && workflow_task_count.zero?
+              recovery_marker_count.zero? && workflow_task_count.zero? &&
+              plan_review_requirement_count.zero?
           "hive: migrate task ids (#{backfilled_count} task#{backfilled_count == 1 ? '' : 's'})"
+        elsif moved.empty? && plan_review_requirement_count.positive? &&
+              backfilled_count.zero? && recovery_marker_count.zero? &&
+              workflow_task_count.zero? && !config_only
+          "hive: migrate plan review requirements " \
+            "(#{plan_review_requirement_count} task#{plan_review_requirement_count == 1 ? '' : 's'})"
         elsif config_only && moved.empty? && recovery_marker_count.zero? &&
-              workflow_task_count.zero?
+              workflow_task_count.zero? && plan_review_requirement_count.zero?
           "hive: migrate config keys (no tasks moved)"
         elsif moved.empty?
           parts = []
@@ -534,6 +580,9 @@ module Hive
           parts << "#{recovery_marker_count} recovery markers" if recovery_marker_count.positive?
           if workflow_task_count.positive?
             parts << "#{workflow_task_count} managed workflow tasks"
+          end
+          if plan_review_requirement_count.positive?
+            parts << "#{plan_review_requirement_count} plan review requirements"
           end
           "hive: migrate project state (#{parts.join(', ')})"
         else
@@ -544,7 +593,8 @@ module Hive
       def migration_complete_message(moved, backfilled_count:,
                                      recovery_marker_count:,
                                      workflow_task_count:,
-                                     workflow_moved_count:)
+                                     workflow_moved_count:,
+                                     plan_review_requirement_count: 0)
         parts = [ "#{moved.size} task#{moved.size == 1 ? '' : 's'} moved" ]
         if backfilled_count.positive?
           parts << "#{backfilled_count} id#{backfilled_count == 1 ? '' : 's'} backfilled"
@@ -559,13 +609,18 @@ module Hive
           parts << "#{workflow_task_count} managed workflow task" \
                    "#{workflow_task_count == 1 ? '' : 's'} migrated#{detail}"
         end
+        if plan_review_requirement_count.positive?
+          requirement_label = plan_review_requirement_count == 1 ? "requirement" : "requirements"
+          parts << "#{plan_review_requirement_count} plan review #{requirement_label} added"
+        end
         "hive: migrate complete (#{parts.join(', ')})"
       end
 
       def migration_no_move_message(config_changed:, backfilled_count:,
                                     recovery_marker_count: 0,
                                     workflow_task_count: 0,
-                                    workflow_moved_count: 0)
+                                    workflow_moved_count: 0,
+                                    plan_review_requirement_count: 0)
         actions = []
         actions << "rewrote legacy config keys" if config_changed
         if backfilled_count.positive?
@@ -579,6 +634,10 @@ module Hive
             " (#{workflow_moved_count} stage#{workflow_moved_count == 1 ? '' : 's'} moved)" : ""
           actions << "migrated #{workflow_task_count} managed workflow task" \
                      "#{workflow_task_count == 1 ? '' : 's'}#{detail}"
+        end
+        if plan_review_requirement_count.positive?
+          requirement_label = plan_review_requirement_count == 1 ? "requirement" : "requirements"
+          actions << "added #{plan_review_requirement_count} plan review #{requirement_label}"
         end
         "hive: migrate #{actions.join(' and ')}"
       end

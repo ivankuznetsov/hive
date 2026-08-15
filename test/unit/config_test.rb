@@ -2,6 +2,138 @@ require "test_helper"
 require "hive/config"
 
 class ConfigTest < Minitest::Test
+  def test_plan_review_defaults_are_closed_and_conservative
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+      review = cfg.fetch("plan_review")
+
+      assert_equal true, review.fetch("enabled")
+      assert_equal "skip", review.fetch("minimum_level")
+      assert_equal "skip", review.dig("coding", "minimum_level")
+      assert_equal 5, review.dig("skip", "max_files")
+      assert_equal 2, review.dig("attempts", "max_transient")
+      assert_equal "ce_doc_review", review.fetch("adapter")
+      assert_equal "grok-4.6", review.dig("routes", "adversarial", "model")
+      assert_equal "native_grok_build", review.dig("routes", "adversarial", "route")
+      assert_equal [], review.fetch("approval_policies")
+    end
+  end
+
+  def test_load_validates_plan_review_levels_paths_attempts_and_closed_keys
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        plan_review:
+          minimum_level: standard
+          coding:
+            minimum_level: mandatory
+          protected_paths: ["config/**"]
+          attempts:
+            max_transient: 3
+            timeout_sec: 120
+      YAML
+
+      cfg = Hive::Config.load(dir)
+      assert_equal "standard", cfg.dig("plan_review", "minimum_level")
+      assert_equal "mandatory", cfg.dig("plan_review", "coding", "minimum_level")
+      assert_equal [ "config/**" ], cfg.dig("plan_review", "protected_paths")
+
+      {
+        "minimum_level: lower" => /minimum_level.*one of/i,
+        "protected_paths: ['../secret']" => /protected_paths.*relative path glob/i,
+        "attempts: { max_transient: -1 }" => /max_transient.*at least 0/i,
+        "surprise: true" => /unknown field.*surprise/i
+      }.each do |fragment, pattern|
+        File.write(config_path, "plan_review:\n  #{fragment}\n")
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match pattern, error.message
+      end
+    end
+  end
+
+  def test_load_rejects_unknown_plan_review_approval_action_and_risk
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      policy = <<~YAML
+        plan_review:
+          approval_policies:
+            - id: bounded_policy
+              version: 1
+              action: approve_finding
+              risk: low
+              paths: ["lib/hive/parser.rb"]
+              valid_from: "2026-08-12T00:00:00Z"
+              valid_until: "2026-08-13T00:00:00Z"
+              revoked: false
+      YAML
+      File.write(config_path, policy.sub("approve_finding", "approve_everything"))
+      assert_match(/action.*approve_finding/i,
+                   assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message)
+
+      File.write(config_path, policy.sub("risk: low", "risk: catastrophic"))
+      assert_match(/risk.*low.*critical/i,
+                   assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message)
+    end
+  end
+
+  def test_load_rejects_every_closed_plan_review_configuration_boundary
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      invalid_documents = {
+        "plan_review:\n  enabled: false\n" => /cannot be disabled/i,
+        "plan_review:\n  coding: nope\n" => /coding.*must be a Hash/i,
+        "plan_review:\n  adapter: unknown\n" => /adapter.*must be one of/i,
+        "plan_review:\n  reviewers:\n    primary: unknown_route\n" => /must name a registered model route/i,
+        "plan_review:\n  coverage:\n    required: nope\n" => /required.*must be an Array/i,
+        "plan_review:\n  coverage:\n    required: [correctness, correctness]\n" => /contains duplicates/i,
+        "plan_review:\n  coverage:\n    required: [correctness]\n    optional: [correctness]\n" => /cannot be both required and optional/i,
+        "plan_review:\n  routes:\n    primary: nope\n" => /routes\.primary.*must be a Hash/i,
+        "plan_review:\n  routes:\n    fallbacks: nope\n" => /fallbacks.*must be an Array/i,
+        "plan_review:\n  routes:\n    fallbacks: [nope]\n" => /fallbacks\[0\].*must be a Hash/i,
+        "plan_review:\n  routes:\n    primary:\n      model: ''\n" => /primary\.model.*must be non-empty/i,
+        "plan_review:\n  routes:\n    primary:\n      effort: impossible\n" => /primary\.effort.*must be one of/i,
+        "plan_review:\n  approval_policies: nope\n" => /approval_policies.*must be an Array/i,
+        "plan_review:\n  approval_policies: [nope]\n" => /approval_policies\[0\].*must be a Hash/i
+      }
+      invalid_documents.each do |document, pattern|
+        File.write(config_path, document)
+        assert_match pattern, assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message
+      end
+
+      File.write(config_path, <<~YAML)
+        plan_review:
+          routes:
+            fallbacks:
+              - agent: codex
+                model: gpt-5.6-sol
+                family: openai
+                effort: high
+                route: fallback-codex
+      YAML
+      assert_equal "fallback-codex",
+                   Hive::Config.load(dir).dig("plan_review", "routes", "fallbacks", 0, "route")
+
+      policy = {
+        "id" => "bounded_policy", "version" => 1, "action" => "approve_finding",
+        "risk" => "low", "paths" => [ "lib/**" ],
+        "valid_from" => "2026-08-12T00:00:00Z",
+        "valid_until" => "2026-08-13T00:00:00Z", "revoked" => false
+      }
+      [
+        [ [ policy, JSON.parse(JSON.generate(policy)) ], /unique lowercase identifier/i ],
+        [ [ policy.merge("revoked" => "no") ], /revoked.*true or false/i ],
+        [ [ policy.merge("valid_from" => "yesterday") ], /valid_from.*ISO-8601/i ],
+        [ [ policy.merge("valid_until" => nil) ], /valid_until.*ISO-8601/i ]
+      ].each do |policies, pattern|
+        File.write(config_path, { "plan_review" => { "approval_policies" => policies } }.to_yaml)
+        assert_match pattern, assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message
+      end
+    end
+  end
+
   def test_registry_round_trips_repository_identity
     with_tmp_global_config do
       with_tmp_git_repo do |repo|

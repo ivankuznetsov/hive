@@ -4,7 +4,7 @@ type: module
 source: lib/hive/task_action.rb, lib/hive/task_action/diagnostic.rb, lib/hive/task_workspace/builder.rb, lib/hive/terminal_outcome.rb
 created: 2026-04-26
 updated: 2026-08-13
-tags: [module, status, action, classifier, human-stage, diagnostic, blocked, terminal-outcomes]
+tags: [module, status, action, classifier, human-stage, diagnostic, blocked, plan-review, terminal-outcomes]
 ---
 
 **TLDR**: Classifier that turns a `(Hive::Task, Hive::Markers::State)` pair into a user-facing action with a stable key (per `Hive::Schemas::TaskActionKind`), a human label for `hive status` output, a copy-paste-executable shell command, an optional structured `next_action` for row-specific recovery, and (since 2026-05-16) a bounded `diagnostic` payload for red recovery rows. Used by `hive status` (action grouping + `tasks[].action`/`diagnostic` JSON fields), `hive run` (`next_action.command` / `rerun_with`), `hive approve` (`next_action.command` after a successful advance), `hive accept-finding` / `hive reject-finding` (`next_action.command` after a toggle), and `hive status --diagnose` (`#diagnostic` is the local fallback path when no agent-written artifact is fresh).
@@ -141,6 +141,31 @@ become `ERROR` rather than phantom `NEEDS_INPUT`.
 
 Markerless `6-review` tasks map to `READY_FOR_REVIEW`, not `NEEDS_INPUT`. This matters after a recovery marker is cleared: the next useful action is to run the review stage, while only an explicit `REVIEW_WAITING` marker should open the input-editor path.
 
+## Plan-review action projection
+
+For built-in coding tasks at plan, `TaskAction` loads the one
+`PlanReview::Projection` and checks its plan/generation/config freshness. It
+maps lifecycle state without reimplementing policy:
+
+| Review state | Action | Command/owner |
+|---|---|---|
+| absent/uninitialized/reviewing/revising/verifying | `plan_reviewing` | `hive plan-review-run ...`; agent/scheduler |
+| future transient retry | `plan_review_retry` | no command until `retry_at` |
+| due transient retry | `plan_review_retry` | `hive plan-review-run ...` |
+| open gated/manual decision | `plan_review_decision` | no synthesized authority command; operator |
+| `degraded_cleared` | `plan_review_degraded` | guarded `hive develop ...` with degradation retained |
+| unsupported/configuration block | `plan_review_unsupported` | operator/configuration |
+| mandatory, stale, corrupt, or other block | `plan_review_blocked` | Hive/operator repair |
+| `skipped` or `cleared` | ordinary plan-complete action | guarded `hive develop ...` |
+
+Invalid or digest-mismatched evidence projects a visible inert block. The
+action's label, blocker owner/reason, required action, and shell-escaped command
+therefore correspond to the command `TransitionGuard` will accept.
+`TaskAction::DISPATCH_COMMANDS` extends the ready-action vocabulary with only
+the active and due plan-review actions. Hive Web consumes that shared map, so a
+plan-review row queues `plan-review-run` without plan-stage `--from` arguments
+instead of falling back to `hive plan`.
+
 ## Command emission
 
 Workflow verbs (`brainstorm`/`plan`/`develop`/`open-pr`/`review`/`artifacts`/`finalize`/`archive`) ALWAYS include `--from <stage>`. That's the idempotency lever: a retry after a successful advance fails with `WRONG_STAGE` (4) instead of silently advancing twice.
@@ -217,5 +242,6 @@ Most of the data IS in the `ACTIONS` hash, but `command` needs to compose multip
 - [[modules/markers]] — the marker name space this module switches on
 - [[modules/diagnosis_agent]] — headless agent that writes the artifact this module prefers when fresh
 - [[modules/secret_patterns]] — redaction patterns used by `#diagnostic`'s summary/detail emission
+- [[modules/plan_review]] — critique state and execution authority projected here
 - [[modules/task_workspace]] — read-only decision and sanitized action projection
 - [[decisions]] ADR-025 (required-and-nullable JSON envelopes) and ADR-027 (red-status diagnose-then-act)

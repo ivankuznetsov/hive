@@ -63,9 +63,11 @@ fewer process results than the collectors produced in both sampled six-way
 runs. The branch now preserves one directory per artifact and requires a
 revision/run/Ruby/shard/test-file/result-list manifest before merging. Focused
 tests prove same-basename preservation and rejection of missing, duplicate,
-foreign, empty, corrupt, error-marked, and unlisted inputs. A new exact-head
-hosted run is still required to prove the hardened transport consumes every
-collector result without regressing the six-way critical path.
+foreign, empty, corrupt, error-marked, and unlisted inputs. Rebased exact-head
+run `31861365214` consumed all 1,727 process results across six shards, retained
+100% line coverage, and passed all 23 gates. This closes the artifact-transport
+and source-catalog ownership proof gap.
+
 ## Task workspace forward evidence and live-provider gaps (2026-08-12)
 
 - Tasks admitted before the task-workspace capture seams normally have no

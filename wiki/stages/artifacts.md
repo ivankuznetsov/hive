@@ -76,7 +76,10 @@ completion authority.
    SHA-256 digests, rendering, and implementation-head source identity.
    A managed PNG or WebM may fill both representation roles from one
    controller-issued capture path; custody transfer creates distinct immutable
-   retained copies rather than requiring the producer to duplicate media.
+   retained copies rather than requiring the producer to duplicate media. This
+   is only a task-producer custody-ingress exception: direct ledger admission,
+   project-provider evidence, and non-visual evidence still require distinct
+   role paths.
    Screenshot, video, and terminal representations must match a controller
    capture receipt at handoff; producer-written lookalike media fails closed.
 7. Re-admit every retained representation deterministically: safe containment,

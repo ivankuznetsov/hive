@@ -8,6 +8,9 @@ date: 2026-08-14
   immutable original and reviewer-visible representation.
 - Kept role separation after admission: controller custody materializes two
   distinct retained paths with the same verified digest.
+- Scoped shared source paths to task-producer PNG/WebM custody ingress; direct
+  ledger admission, project-provider evidence, and non-visual evidence retain
+  the distinct-path invariant.
 - Removed the need for an evidence producer to duplicate managed browser media
   merely to satisfy representation metadata.
 - Required inference to inventory all task and plan outcomes before grouping,

@@ -38,7 +38,7 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     script = <<~'RUBY'
       require "agent_cli_runtime"
       abort "loaded Hive unexpectedly" if defined?(Hive)
-      abort "wrong version" unless AgentCliRuntime::VERSION == "0.1.1"
+      abort "wrong version" unless AgentCliRuntime::VERSION == "0.2.0"
       puts AgentCliRuntime::Profiles.names.join(",")
     RUBY
     out, err, status = Bundler.with_unbundled_env do
@@ -323,7 +323,7 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     end
   end
 
-  def test_hive_dependency_stays_on_the_published_line_until_release_authority
+  def test_hive_dependency_accepts_candidate_without_raising_published_floor
     spec = Gem::Specification.load(File.expand_path("../../hive.gemspec", __dir__))
     dependency = spec.runtime_dependencies.find do |candidate|
       candidate.name == "agent-cli-runtime"
@@ -331,7 +331,8 @@ class AgentCliRuntimeComponentTest < Minitest::Test
 
     refute_nil dependency
     assert dependency.requirement.satisfied_by?(Gem::Version.new("0.1.1"))
-    refute dependency.requirement.satisfied_by?(Gem::Version.new("0.2.0"))
+    assert dependency.requirement.satisfied_by?(Gem::Version.new("0.2.0"))
+    refute dependency.requirement.satisfied_by?(Gem::Version.new("0.3.0"))
     assert File.read(File.expand_path("../../lib/hive.rb", __dir__))
                .include?('require "agent_cli_runtime"')
     %i[claude codex pi grok opencode].each do |provider|

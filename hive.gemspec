@@ -59,7 +59,10 @@ Gem::Specification.new do |spec|
 
   # Runtime dependencies. Dev/test dependencies stay in the Gemfile because
   # they have no business being installed for end users.
-  spec.add_dependency "agent-cli-runtime", "~> 0.1.1"
+  # Release-prep commits must load the new local component before those bytes
+  # exist on RubyGems. Keep the published 0.1.1 floor until the separately
+  # verified cutover, while admitting this release line in source checkouts.
+  spec.add_dependency "agent-cli-runtime", ">= 0.1.1", "< 0.3.0"
   spec.add_dependency "base64", ">= 0.2"
   spec.add_dependency "bubbletea", "= 0.1.4"
   # Managed installs isolate GEM_HOME/GEM_PATH from the operator's gems. Keep

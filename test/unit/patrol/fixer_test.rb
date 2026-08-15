@@ -257,6 +257,32 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_stale_target_with_failed_historical_read_fails_closed_before_agent_work
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      File.write(File.join(repo, "app.rb"), "# current\nputs 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "advance main", "--quiet")
+      agent_ran = false
+      failing_git = Object.new
+      failing_git.define_singleton_method(:read_blob_at) { |*, **| raise ArgumentError }
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo), git_ops: failing_git,
+        agent_runner: ->(**) { agent_ran = true }
+      ).attempt(candidate)
+
+      refute patch.passed
+      refute agent_ran
+      assert_equal "stale_evidence", patch.validation.fetch("reason")
+    end
+  end
+
   def test_stale_target_does_not_rebind_to_an_unrelated_unique_snippet
     with_tmp_git_repo do |repo|
       File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")

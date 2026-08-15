@@ -401,6 +401,42 @@ class HiveCommandsApproveTest < Minitest::Test
     assert_equal "same", command.send(:direction_of, current, "3-plan")
   end
 
+  def test_backward_move_records_a_rejection_operation
+    recorded = nil
+    activity = Object.new
+    activity.define_singleton_method(:begin_operation) { |**attributes| recorded = attributes }
+    current = task(stage_index: 4, stage_name: "execute")
+
+    command.send(
+      :begin_approval_operation, activity, current, "3-plan",
+      Struct.new(:name).new(:complete), "backward"
+    )
+
+    assert_equal "rejection_recorded", recorded.fetch(:kind)
+    assert_equal "task stage rejection recorded", recorded.fetch(:reason)
+    assert_match(/\Areject:/, recorded.fetch(:operation_id))
+  end
+
+  def test_approval_reconciliation_selects_both_forward_and_backward_event_kinds
+    selected = []
+    activity = Object.new
+    activity.define_singleton_method(:reconcile_operations!) do |&resolver|
+      %w[approval_recorded rejection_recorded].each do |kind|
+        verdict = resolver.call(
+          "activity_kind" => kind, "source" => "command_service",
+          "expected_postcondition_fingerprint" => "mismatch",
+          "precondition_fingerprint" => "mismatch"
+        )
+        selected << kind unless verdict == :defer
+      end
+    end
+    current = task(stage_index: 3, stage_name: "plan")
+
+    command.send(:reconcile_approval_operations, activity, current)
+
+    assert_equal %w[approval_recorded rejection_recorded], selected
+  end
+
   def test_resolve_destination_uses_task_workflow_sequence
     current = task(stage_index: 2, stage_name: "gather", workflow: research_workflow)
 

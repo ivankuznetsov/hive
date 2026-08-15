@@ -1,4 +1,4 @@
-<%= turbo_frame_tag "task-log" do %>
+<%= turbo_frame_tag stable_dom_id("task-log", project.name, task.slug) do %>
   <div class="log-pane">
     <% if log %>
       <%# data-tail-follow: the poll controller pins this pane to its bottom

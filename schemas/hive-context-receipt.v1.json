@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:context-receipt:v1",
+  "title": "Hive context receipt (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "kind", "binding", "captured_at", "quality",
+    "repository", "wiki", "selection", "diagnostics"
+  ],
+  "properties": {
+    "schema": { "const": "hive-context-receipt" },
+    "schema_version": { "const": 1 },
+    "kind": { "type": "string", "enum": ["controller_launch", "agent_selection"] },
+    "binding": { "$ref": "#/$defs/Binding" },
+    "captured_at": { "type": "string", "format": "date-time" },
+    "quality": { "type": "string", "enum": ["observed_at_launch", "agent_asserted_used"] },
+    "repository": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Repository" }]
+    },
+    "wiki": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Wiki" }]
+    },
+    "selection": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Selection" }]
+    },
+    "diagnostics": {
+      "type": "array", "maxItems": 20,
+      "items": { "$ref": "#/$defs/Diagnostic" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "controller_launch" } } },
+      "then": {
+        "properties": {
+          "quality": { "const": "observed_at_launch" },
+          "repository": { "$ref": "#/$defs/Repository" },
+          "wiki": { "$ref": "#/$defs/Wiki" },
+          "selection": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "agent_selection" } } },
+      "then": {
+        "properties": {
+          "quality": { "const": "agent_asserted_used" },
+          "selection": { "$ref": "#/$defs/Selection" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "Binding": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "project", "task_slug", "task_id", "stage", "attempt_id",
+        "task_generation", "ownership_generation"
+      ],
+      "properties": {
+        "project": { "$ref": "#/$defs/Identifier" },
+        "task_slug": { "$ref": "#/$defs/Identifier" },
+        "task_id": { "type": ["string", "null"], "maxLength": 255 },
+        "stage": { "$ref": "#/$defs/Identifier" },
+        "attempt_id": { "$ref": "#/$defs/Identifier" },
+        "task_generation": { "type": "integer", "minimum": 0 },
+        "ownership_generation": { "type": ["string", "null"], "maxLength": 255 }
+      }
+    },
+    "Repository": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "head_oid", "branch", "repository", "observed_from", "diagnostics"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "head_oid": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40,64}$" },
+        "branch": { "type": ["string", "null"], "maxLength": 255 },
+        "repository": { "type": ["string", "null"], "maxLength": 1024 },
+        "observed_from": { "const": "local_git" },
+        "diagnostics": {
+          "type": "array", "maxItems": 20,
+          "items": { "$ref": "#/$defs/Diagnostic" }
+        }
+      }
+    },
+    "Wiki": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "state", "identity_kind", "identifier", "file_count", "byte_count",
+        "truncated", "diagnostics"
+      ],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "identity_kind": {
+          "type": "string",
+          "enum": ["git_tree", "managed_receipt", "bounded_digest", "missing", "unavailable"]
+        },
+        "identifier": { "type": ["string", "null"], "maxLength": 1024 },
+        "file_count": { "type": ["integer", "null"], "minimum": 0 },
+        "byte_count": { "type": ["integer", "null"], "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "diagnostics": {
+          "type": "array", "maxItems": 20,
+          "items": { "$ref": "#/$defs/Diagnostic" }
+        }
+      }
+    },
+    "Selection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["references", "queries", "rationale"],
+      "properties": {
+        "references": {
+          "type": "array", "maxItems": 20,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["path", "kind", "label"],
+            "properties": {
+              "path": { "$ref": "#/$defs/RelativePath" },
+              "kind": { "$ref": "#/$defs/Identifier" },
+              "label": { "type": "string", "minLength": 1, "maxLength": 512 }
+            }
+          }
+        },
+        "queries": {
+          "type": "array", "maxItems": 20,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["query", "result_labels"],
+            "properties": {
+              "query": { "type": "string", "minLength": 1, "maxLength": 512 },
+              "result_labels": {
+                "type": "array", "maxItems": 20,
+                "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+              }
+            }
+          }
+        },
+        "rationale": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "Diagnostic": {
+      "type": "object", "additionalProperties": false,
+      "required": ["code", "detail"],
+      "properties": {
+        "code": { "$ref": "#/$defs/Identifier" },
+        "detail": { "type": ["string", "null"], "maxLength": 512 }
+      }
+    },
+    "Identifier": {
+      "type": "string", "minLength": 1, "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "RelativePath": {
+      "type": "string", "minLength": 1, "maxLength": 1024,
+      "pattern": "^(?!/)(?!\\\\)(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
+    },
+    "State": {
+      "type": "string", "enum": ["current", "partial", "missing", "unavailable", "conflicting"]
+    }
+  }
+}

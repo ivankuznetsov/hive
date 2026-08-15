@@ -678,6 +678,7 @@ module Hive
     }.freeze
     IMPLEMENTATION_IDENTITY_FIELDS = %w[agent model effort].freeze
     RESOURCE_LIMIT_FIELDS = %w[budget_usd timeout_sec].freeze
+    ResourceLimitResolution = Data.define(:field, :value, :unit, :source, :scope, :stage)
     # Project sections supported by consumers but intentionally absent from
     # DEFAULTS. Keep this list explicit so a newly rendered section cannot
     # silently become an unvalidated extension namespace.
@@ -985,6 +986,14 @@ module Hive
     # hashes used by callers/tests retain the historical "present means
     # explicit" behavior because they carry no provenance marker.
     def stage_resource_limit(cfg, field, stage_name, descriptor_default:, fallback: nil)
+      stage_resource_limit_resolution(
+        cfg, field, stage_name,
+        descriptor_default: descriptor_default, fallback: fallback
+      ).value
+    end
+
+    def stage_resource_limit_resolution(cfg, field, stage_name,
+                                        descriptor_default:, fallback: nil)
       provenance = cfg[EXPLICIT_RESOURCE_LIMITS_KEY]
       explicit =
         if provenance.is_a?(Hash)
@@ -993,10 +1002,22 @@ module Hive
           nested_key?(cfg, field, stage_name)
         end
       project_value = cfg.dig(field, stage_name)
-      return project_value if explicit && project_value
-      return descriptor_default unless descriptor_default.nil?
-
-      project_value || fallback
+      value, source = if explicit && !project_value.nil?
+        [ project_value, "project_config" ]
+      elsif !descriptor_default.nil?
+        [ descriptor_default, "workflow_descriptor" ]
+      elsif !project_value.nil?
+        [ project_value, "merged_default" ]
+      elsif !fallback.nil?
+        [ fallback, "runtime_fallback" ]
+      else
+        [ nil, "unavailable" ]
+      end
+      ResourceLimitResolution.new(
+        field: field.to_s, value: value,
+        unit: field.to_s == "budget_usd" ? "usd" : "seconds",
+        source: source, scope: "stage", stage: stage_name.to_s
+      ).freeze
     end
 
     def explicit_resource_limits(data)

@@ -364,8 +364,10 @@ class TriageTest < Minitest::Test
       captured = {}
       replacement = lambda do |_task, _cfg, **kwargs|
         captured = kwargs
-        File.write(kwargs.fetch(:expected_output), "# Escalations\n")
-        { status: :ok, log_label: "review-triage-pass01" }
+        kwargs.fetch(:agent_custody).call do
+          File.write(kwargs.fetch(:expected_output), "# Escalations\n")
+          { status: :ok, log_label: "review-triage-pass01" }
+        end
       end
 
       with_replaced_singleton_method(Hive::Stages::Base, :spawn_claude!, replacement) do
@@ -400,8 +402,10 @@ class TriageTest < Minitest::Test
         File.join(task_folder, "reviews", "claude-ce-code-review-01.md"),
         "## Nit\n- [ ] x: y\n"
       )
-      successful_spawn = lambda do |_task, _cfg, **_kwargs|
-        { status: :ok, log_label: "review-triage-pass01" }
+      successful_spawn = lambda do |_task, _cfg, **kwargs|
+        kwargs.fetch(:agent_custody).call do
+          { status: :ok, log_label: "review-triage-pass01" }
+        end
       end
 
       with_replaced_singleton_method(
@@ -419,12 +423,14 @@ class TriageTest < Minitest::Test
     with_triage_dir do |dir, task_folder|
       ctx = make_ctx(dir, task_folder)
       File.write(File.join(task_folder, "reviews", "claude-ce-code-review-01.md"), "## Nit\n- [ ] x: y\n")
-      replacement = lambda do |_task, _cfg, **_kwargs|
-        {
-          status: :error,
-          error_message: "limits reached for claude: Claude Code v2.1.170",
-          limit_text: "You've hit your session limit"
-        }
+      replacement = lambda do |_task, _cfg, **kwargs|
+        kwargs.fetch(:agent_custody).call do
+          {
+            status: :error,
+            error_message: "limits reached for claude: Claude Code v2.1.170",
+            limit_text: "You've hit your session limit"
+          }
+        end
       end
 
       with_replaced_singleton_method(Hive::Stages::Base, :spawn_claude!, replacement) do
@@ -535,6 +541,22 @@ class TriageTest < Minitest::Test
         assert_includes block, "prior escalation file unreadable: Permission denied"
         assert_includes block, "current answer"
         refute_includes block, "future answer"
+      end
+    end
+  end
+
+  def test_successful_triage_spawn_without_custody_is_rejected
+    with_triage_dir do |dir, task_folder|
+      reviews = File.join(task_folder, "reviews")
+      File.write(File.join(reviews, "claude-ce-code-review-01.md"), "## High\n- [ ] fix it\n")
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :spawn_claude!, ->(*, **) { { status: :ok } }
+      ) do
+        result = Hive::Stages::Review::Triage.run!(
+          cfg: default_cfg, ctx: make_ctx(dir, task_folder)
+        )
+        assert_equal :error, result.status
+        assert_equal "triage agent custody was not invoked", result.error_message
       end
     end
   end

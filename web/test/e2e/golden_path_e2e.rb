@@ -314,6 +314,10 @@ class GoldenPathE2E < ApplicationSystemTestCase
       "HIVE_SKIP_LLM_WIKI_SCHEDULER" => ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"],
       "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"],
       "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"],
+      # The daemon intentionally preserves an explicit HIVE_BIN for every
+      # status subprocess. Do not inherit an installed release here: this E2E
+      # must exercise the same checkout that created the task journal.
+      "HIVE_BIN" => File.join(REPO_ROOT, "bin", "hive"),
       # Worktrees must live INSIDE the sandbox — the project-config default
       # would land them in the operator's real ~/Dev.
       "HIVE_WORKTREE_BASE" => File.join(ENV["HIVE_TEST_HOME_ROOT"], "worktrees"),

@@ -1145,11 +1145,13 @@ class RunFinalizeTest < Minitest::Test
                     with_stubbed_singleton_method(
                       Hive::Stages::Finalize,
                       :spawn_finalize_agent,
-                      lambda do |spawned_task, *_args|
-                        File.write(
-                          spawned_task.state_file,
-                          ENV.fetch("HIVE_FAKE_CLAUDE_WRITE_CONTENT")
-                        )
+                      lambda do |spawned_task, *_args, **kwargs|
+                        kwargs.fetch(:agent_custody).call do
+                          File.write(
+                            spawned_task.state_file,
+                            ENV.fetch("HIVE_FAKE_CLAUDE_WRITE_CONTENT")
+                          )
+                        end
                       end
                     ) do
                       result = Hive::Stages::Finalize.run!(task, {})
@@ -1180,6 +1182,118 @@ class RunFinalizeTest < Minitest::Test
     with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { raise Hive::GhError, "boom" }) do
       refute Hive::Stages::Finalize.pr_already_merged?("https://github.com/acme/app/pull/9", {}),
              "a GhError on the state lookup must fall through to the normal finalize path"
+    end
+  end
+
+  def test_successful_finalize_spawn_without_custody_is_rejected
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, _pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+        pr_url = "https://github.com/acme/app/pull/9"
+        clean = Hive::Gh::ScanResult.new(hits: [], fetch_failed: false, fetch_error: nil)
+
+        with_stubbed_singleton_method(
+          Hive::Stages::Finalize, :validate_pr_reference!, ->(*) { [ pr_url, nil ] }
+        ) do
+          with_stubbed_singleton_method(Hive::Gh, :scan_pr_for_secrets, ->(**) { clean }) do
+            with_stubbed_singleton_method(Hive::Stages::Finalize, :pr_already_merged?, ->(*) { false }) do
+              with_stubbed_singleton_method(Hive::Gh, :ensure_authenticated!, ->(*) { }) do
+                with_stubbed_singleton_method(Hive::Stages::Finalize, :verify_state!, ->(*) { nil }) do
+                  with_stubbed_singleton_method(
+                    Hive::Stages::Finalize, :refresh_pr_identity!, ->(*) { nil }
+                  ) do
+                    with_stubbed_singleton_method(
+                      Hive::Stages::Finalize, :render_prompt, ->(*) { "prompt" }
+                    ) do
+                      with_stubbed_singleton_method(
+                        Hive::Stages::Base, :stage_profile, ->(*) { :profile }
+                      ) do
+                        with_stubbed_singleton_method(
+                          Hive::Stages::Finalize, :spawn_finalize_agent,
+                          ->(*, **) { { status: :ok } }
+                        ) do
+                          result = Hive::Stages::Finalize.run!(task, {})
+                          assert_equal({ commit: "finalize_custody_missing", status: :error }, result)
+                          assert_equal "finalize_custody_missing",
+                                       Hive::Markers.current(task.state_file).attrs.fetch("reason")
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_successful_finalize_records_attempt_bound_publication_activity
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, _pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+        pr_url = "https://github.com/acme/app/pull/9"
+        clean = Hive::Gh::ScanResult.new(hits: [], fetch_failed: false, fetch_error: nil)
+        context = Struct.new(:attempt_id).new("attempt-1")
+        records = []
+        finalized = <<~MARKDOWN
+          ---
+          pr_url: #{pr_url}
+          pr_number: 9
+          ---
+
+          ## Summary
+          final
+
+          <!-- COMPLETE pr_url=#{pr_url} is_draft=false -->
+        MARKDOWN
+
+        with_stubbed_singleton_method(
+          Hive::Stages::Finalize, :validate_pr_reference!, ->(*) { [ pr_url, nil ] }
+        ) do
+          with_stubbed_singleton_method(Hive::Gh, :scan_pr_for_secrets, ->(**) { clean }) do
+            with_stubbed_singleton_method(Hive::Stages::Finalize, :pr_already_merged?, ->(*) { false }) do
+              with_stubbed_singleton_method(Hive::Gh, :ensure_authenticated!, ->(*) { }) do
+                with_stubbed_singleton_method(Hive::Stages::Finalize, :verify_state!, ->(*) { nil }) do
+                  with_stubbed_singleton_method(Hive::Stages::Finalize, :refresh_pr_identity!, ->(*) { nil }) do
+                    with_stubbed_singleton_method(Hive::Stages::Finalize, :render_prompt, ->(*) { "prompt" }) do
+                      with_stubbed_singleton_method(Hive::Stages::Base, :stage_profile, ->(*) { :profile }) do
+                        spawn = lambda do |spawned_task, *_args, agent_custody:, **_kwargs|
+                          agent_custody.call do
+                            File.write(spawned_task.state_file, finalized)
+                            { status: :ok }
+                          end
+                        end
+                        with_stubbed_singleton_method(Hive::Stages::Finalize, :spawn_finalize_agent, spawn) do
+                          with_stubbed_singleton_method(Hive::Stages::Finalize, :mark_pr_ready, ->(*) { nil }) do
+                            with_stubbed_singleton_method(Hive::Stages::Finalize, :write_summary, ->(*) { true }) do
+                              with_stubbed_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+                                recorder = ->(*args, **kwargs) { records << [ args, kwargs ]; true }
+                                with_stubbed_singleton_method(
+                                  Hive::Stages::Base, :record_task_activity, recorder
+                                ) do
+                                  result = Hive::Stages::Finalize.run!(task, {})
+                                  assert_equal({ commit: "pr_finalized", status: :complete }, result)
+                                end
+                              end
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+
+        assert_equal "publication:attempt-1:ready", records.first.last.fetch(:operation_id)
+        assert_equal "ready", records.first.last.dig(:payload, "pr_state")
+      end
     end
   end
 end

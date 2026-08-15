@@ -156,7 +156,8 @@ module Hive
                 disallowed_tools: nil,
                 permission_mode: nil, mcp_config_path: nil,
                 strict_mcp_config: false, identity_arguments: nil,
-                routing_arguments: nil, runtime_policy: nil)
+                routing_arguments: nil, runtime_policy: nil,
+                resource_guards: nil, agent_custody: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
@@ -193,7 +194,9 @@ module Hive
           cli_flags: headless_flags,
           identity_arguments: identity_arguments,
           routing_arguments: routing_arguments,
-          runtime_policy: runtime_policy
+          runtime_policy: runtime_policy,
+          resource_guards: resource_guards,
+          agent_custody: agent_custody
         )
       end
 

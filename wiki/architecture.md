@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-07-25
+updated: 2026-08-12
 tags: [architecture, overview]
 ---
 
@@ -491,6 +491,20 @@ rejection, drop, run, recovery, answer, and intervention through standard
 chooses the HTTP response. `DaemonRepairsController#create` follows the same
 resource shape. The former `Hive::Web::Dispatcher` indirection has been
 removed.
+
+Task detail also has one Rails-independent read model:
+`Hive::TaskWorkspace::Builder` accepts that already-resolved task and composes
+the separate `hive-task-workspace` v1 contract. Its provenance, attempt,
+resource, timeline, dependency, publication, and artifact panels fail
+independently and share strict byte/count/deadline budgets. HTML and
+authenticated JSON on the existing task route consume the same normalized
+snapshot. This projection does not enter `Commands::Status`, alter strict
+`hive-status` v7, scan the attempt store or project fleet, contact GitHub, or
+own a mutation. `TaskActivity` and attempt-bound context/session receipts add
+forward evidence at lifecycle seams; Web remains an observer. Remote
+publication is an explicit CSRF-protected cached read, while questions and
+every lifecycle action still delegate to the canonical command/recovery
+boundaries. See [[modules/task_workspace]].
 
 ## Dispatch flow (durable generation ownership)
 

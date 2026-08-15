@@ -168,11 +168,12 @@ class RunApproveTest < Minitest::Test
         FileUtils.mv(inbox, execute_dir)
         write_marker(execute_dir, :execute_waiting, findings_count: 3, pass: 1)
 
-        capture_io { Hive::Commands::Approve.new(slug, to: "3-plan").call }
+        out, = capture_io { Hive::Commands::Approve.new(slug, to: "3-plan").call }
 
         assert File.directory?(File.join(dir, ".hive-state", "stages", "3-plan", slug))
+        assert_includes out, "hive: rejected #{slug}"
         log = `git -C #{File.join(dir, ".hive-state")} log --format=%s -1`.strip
-        assert_match(%r{approve 4-execute -> 3-plan}, log)
+        assert_match(%r{reject 4-execute -> 3-plan}, log)
       end
     end
   end

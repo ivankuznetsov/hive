@@ -1,0 +1,49 @@
+<ol class="timeline-list">
+  <% timeline.fetch("records").each do |event| %>
+    <li id="<%= stable_dom_id("timeline-event", event.fetch("event_id")) %>"
+        class="timeline-event">
+      <div class="timeline-marker" aria-hidden="true"></div>
+      <div>
+        <p class="timeline-event-heading">
+          <strong><%= event.fetch("summary") %></strong>
+          <span class="workspace-state-label"><%= event.fetch("source_quality").humanize %></span>
+        </p>
+        <p class="timeline-meta">
+          <time datetime="<%= event.fetch("occurred_at") %>"><%= event.fetch("occurred_at") %></time>
+          · <%= event.fetch("kind").humanize %>
+          <% if event["stage"].present? %>· <%= event["stage"] %><% end %>
+        </p>
+        <% if event["supersedes_event_id"].present? %>
+          <p class="muted">Correction supersedes <code><%= event["supersedes_event_id"] %></code>.</p>
+        <% end %>
+      </div>
+    </li>
+  <% end %>
+</ol>
+
+<% if Array(timeline["noise_groups"]).any? %>
+  <details class="timeline-noise" data-workspace-disclosure-key="timeline-noise">
+    <summary>Grouped operational noise (<%= timeline.fetch("noise_groups").length %> groups)</summary>
+    <ul>
+      <% timeline.fetch("noise_groups").each do |group| %>
+        <li>
+          <strong><%= group.fetch("summary") %></strong>
+          — <%= group.fetch("count") %> observations from
+          <time datetime="<%= group.fetch("first_at") %>"><%= group.fetch("first_at") %></time>
+          to <time datetime="<%= group.fetch("last_at") %>"><%= group.fetch("last_at") %></time>
+          <%= link_to "Inspect bounded raw members",
+                task_timeline_path(@project.name, @task.slug,
+                  raw_cursor: group.fetch("raw_cursor"), source: @task_source),
+                data: { turbo_frame: inspection_frame_id } %>
+        </li>
+      <% end %>
+    </ul>
+  </details>
+<% end %>
+
+<% if timeline["older_cursor"].present? %>
+  <%= link_to "Load older history",
+        task_timeline_path(@project.name, @task.slug,
+          cursor: timeline.fetch("older_cursor"), source: @task_source),
+        class: "btn btn-secondary", data: { turbo_frame: inspection_frame_id } %>
+<% end %>

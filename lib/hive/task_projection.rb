@@ -144,9 +144,10 @@ module Hive
       authoritative = authoritative_records
       last = authoritative.last
       task = last&.fetch("task", nil) || facts.last&.fetch("task", nil)
-      current_attempt = current.reject { |fact| fact["state"] == "pending" }
-                               .max_by { |fact| fact.fetch("journal_index", -1) }
-                               &.fetch("attempt_id", nil)
+      current_attempt = admitted_attempt_for(generation) ||
+        current.reject { |fact| fact["state"] == "pending" }
+               .max_by { |fact| fact.fetch("journal_index", -1) }
+               &.fetch("attempt_id", nil)
       @data = self.class.canonical(
         "schema" => SCHEMA,
         "schema_version" => SCHEMA_VERSION,
@@ -230,6 +231,17 @@ module Hive
       end.uniq { |binding| binding.fetch("attempt_id") }
         .sort_by { |binding| binding.fetch("attempt_id") }
         .map { |binding| Hive::StringifyKeys.call(binding) }
+    end
+
+    def admitted_attempt_for(generation)
+      authoritative_records.reverse_each do |record|
+        next unless record["task_generation"] == generation
+        next unless record["event_type"] == "activity_recorded"
+        next unless record.dig("payload", "activity_kind") == "attempt_admitted"
+
+        return record["attempt_id"]
+      end
+      nil
     end
 
     def condition_facts

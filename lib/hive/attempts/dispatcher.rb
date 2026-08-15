@@ -7,6 +7,7 @@ require "hive/provider_health"
 require "hive/provider_routing"
 require "hive/task_resolver"
 require "hive/workflows"
+require "hive/context_provenance"
 
 module Hive
   module Attempts
@@ -21,7 +22,8 @@ module Hive
                      launch_timeout_sec: 30, routing_policy_resolver: nil,
                      health_store: nil, health_store_factory: nil,
                      router: Hive::ProviderRouting::Router.new,
-                     decision_id_generator: -> { SecureRandom.uuid })
+                     decision_id_generator: -> { SecureRandom.uuid },
+                     context_provenance: Hive::ContextProvenance)
         @store = store
         @launcher = launcher
         @limits = DEFAULT_LIMITS.merge(limits)
@@ -35,6 +37,7 @@ module Hive
         @health_store_factory = health_store_factory || method(:open_health_store)
         @router = router
         @decision_id_generator = decision_id_generator
+        @context_provenance = context_provenance
       end
 
       def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider:,
@@ -68,6 +71,7 @@ module Hive
           # worker to the exact post-recovery-clear task bytes admitted now.
           progress_token: Generation.artifact_token(task),
           task_generation: predecessor.task_generation,
+          task_input_epoch: predecessor.task_input_epoch,
           attempt_store: @store
         )
         inherited = if inherited_outputs.nil? || inherited_outputs.empty?
@@ -333,6 +337,8 @@ module Hive
 
         return result if result
 
+        record_attempt_admission(task, created, now)
+        capture_launch_context(task, created, generation, now)
         handoff = @launcher.launch(created, claim_capability: claim_capability)
         if handoff.is_a?(Hash) && (handoff["claimed"] == true || handoff["state"] == "launching")
           return accepted_result(created, interactive: interactive, decision: route_decision)
@@ -349,6 +355,50 @@ module Hive
         resolve_failed_handoff(
           created, interactive: interactive, error: "#{e.class}: #{e.message}",
           admission_view: view
+        )
+      end
+
+      def capture_launch_context(task, attempt, generation, now)
+        return unless task && task.respond_to?(:folder) && !task.folder.to_s.empty? &&
+                      task.respond_to?(:project_root) && !task.project_root.to_s.empty?
+
+        @context_provenance.capture_launch(
+          task: task, attempt: attempt, generation: generation,
+          attempt_store: @store, clock: -> { now }
+        )
+      rescue StandardError
+        # Context evidence is intentionally advisory. Its own capture result is
+        # partial/unavailable, while the already-durable attempt still proceeds
+        # to the worker handoff.
+        nil
+      end
+
+      def record_attempt_admission(task, attempt, now)
+        return unless task && task.respond_to?(:folder) && !task.folder.to_s.empty?
+
+        workflow = task.respond_to?(:workflow) ? task.workflow : nil
+        workflow = workflow.id if workflow.respond_to?(:id)
+        Hive::TaskActivity.new(
+          task_folder: task.folder,
+          task: { "id" => task.id, "slug" => task.slug },
+          workflow: workflow.to_s.empty? ? "coding" : workflow.to_s,
+          stage: attempt["intended_stage"], attempt_id: attempt.attempt_id,
+          task_generation: attempt.task_input_epoch,
+          ownership_generation: attempt.ownership_generation,
+          attempt_store: @store, clock: -> { now }
+        ).record(
+          kind: "attempt_admitted",
+          operation_id: "attempt-admitted:#{attempt.attempt_id}",
+          reason: "durable attempt admitted",
+          source: "attempt_dispatcher", occurred_at: now, observed_at: now,
+          evidence: [
+            { "kind" => "attempt_record", "reference" => "attempts/#{attempt.attempt_id}" }
+          ],
+          payload: {
+            "provider" => attempt["provider"],
+            "predecessor_attempt_id" => attempt["predecessor_attempt_id"],
+            "state" => attempt.state
+          }
         )
       end
 

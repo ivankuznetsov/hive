@@ -3,6 +3,8 @@ require "json_schemer"
 require "pathname"
 require "shellwords"
 require "hive/web/environment"
+require "hive/task_workspace/artifacts"
+require "hive/task_workspace/publication"
 require "hive/artifacts/outcome_evidence/store"
 
 class Task
@@ -137,12 +139,26 @@ class Task
   end
 
   def artifacts
-    return [] unless folder && File.directory?(folder)
-
-    artifact_order.filter_map do |name|
-      path = File.join(folder, name)
-      [ name, File.read(path) ] if File.file?(path)
+    artifact_panel.fetch("records").filter_map do |record|
+      [ record.fetch("name"), record["content"] ] unless record["binary"]
     end
+  end
+
+  def artifact_panel
+    return Hive::TaskWorkspace.unavailable_panel("artifacts") unless
+      folder && File.directory?(folder)
+
+    Hive::TaskWorkspace::Artifacts.new(
+      task_root: folder, references: artifact_order
+    ).call
+  end
+
+  def publication(cache: nil)
+    Hive::TaskWorkspace::Publication.new(
+      task: self,
+      expected_repository: project["repository_identity"],
+      cache: cache
+    ).call
   end
 
   def media_manifest

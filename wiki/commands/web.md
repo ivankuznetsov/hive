@@ -497,9 +497,13 @@ Honeycomb projections.
   streaming with inline content type. Artifact summaries are UI chrome:
   filename-style tabs in muted monospace, while rendered markdown bodies sit
   in a bordered document panel so the file label and document headings do not
-  visually compete. Open/closed choices survive pushed morphs (a Stimulus
-  controller snapshots/restores them around the morph while content stays
-  live) and artifact order is
+  visually compete. Long documents use a centered 82-character prose measure,
+  full-size body text with 1.75 leading, stronger heading hierarchy and section
+  rhythm, while direct code and table evidence may use the wider document panel
+  before falling back to contained horizontal scrolling. Wide evidence cannot
+  widen the page on mobile. Open/closed choices survive pushed morphs (a
+  Stimulus controller snapshots/restores them around the morph while content
+  stays live) and artifact order is
   stage-aware — chronological (idea first) while working, artifact.md first
   and open from 8-finalize/9-done — and, as the page's appendix after the
   artifacts, a log tail in a turbo-permanent turbo-frame
@@ -533,6 +537,28 @@ Honeycomb projections.
   tasks; terminal directories come from every registered workflow descriptor,
   so content, bench, managed, and project-authored workflows do not inherit the
   coding workflow's `9-done` assumption.
+
+  The same route now composes the `hive-task-workspace` v1 snapshot described
+  in [[modules/task_workspace]]. A decision summary leads with `wait`,
+  `answer`, `approve`, `retry`, or `investigate` and links to its decisive
+  evidence. Attempt/session and typed-resource truth, immutable versus current
+  provenance, the bounded audit timeline, the connected dependency component,
+  local/cached publication state, and bounded artifacts render as semantic
+  panels. Missing legacy evidence stays visibly missing or partial. The
+  dependency forest always has a complete bounded table alternative; field and
+  panel states are written as text rather than encoded by color alone.
+
+  `GET /tasks/:project/:slug.json` returns that exact authenticated normalized
+  document without changing the task route or `hive-status` v7. Signed
+  task-bound timeline cursors are read through the namespaced timeline GET.
+  Diff and publication use lazy permanent Turbo frames, while the log retains
+  its own permanent poll owner. The workspace Stimulus controller preserves
+  disclosure state, non-answer focus/caret, and scroll during pushed morphs;
+  the existing answers controller remains authoritative for typed answer
+  fields. Only a changed decision/status/resource signature is announced in
+  the polite live region. The responsive grid becomes one column at narrow
+  widths, contains tables as independently scrollable named regions, and keeps
+  named controls at least 24 CSS pixels.
 - **Workflows** — a project-scoped view of the real `hive workflow list`
   dimensions: built-in and authored descriptors, managed selected/retained
   generations, integrity, version/provenance, and the configured default.
@@ -887,6 +913,17 @@ share typed `available`, `empty`, `truncated`, and `unavailable` results with
 409/422/503/504 failure mappings. Browser log/resource polling chains one
 abortable timeout at a time, pauses while hidden, backs off failures, and
 ignores late responses after disconnect.
+
+Task detail JSON and HTML share `Hive::TaskWorkspace::Builder`. Its projection
+store reader validates a checkpoint-anchored journal prefix and replays only a
+bounded suffix under the journal lock; HTTP never repairs by replaying an
+unbounded journal. Known artifacts are descriptor-opened without following
+links, and every panel reports the cap plus observed amount when truncated.
+Ordinary page/JSON/publication GET and status broadcasts make no GitHub request
+or Git fetch. Only authenticated, CSRF-protected publication POST refreshes may
+perform one fixed read for the validated registered repository/PR/head, under
+single-flight and minimum-interval limits. Cache and remote failures degrade
+that panel without hiding task controls, artifacts, diff, or log.
 
 ## Supervised worktree capture server
 

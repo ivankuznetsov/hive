@@ -31,7 +31,8 @@ class ClaudeLauncherTest < Minitest::Test
           session_name: "hive-test-session",
           status_mode: :state_file_marker,
           allowed_tools: %w[Read LS],
-          disallowed_tools: %w[Write Bash]
+          disallowed_tools: %w[Write Bash],
+          resource_guards: [ { "field" => "timeout_sec", "value" => 1 } ]
         )
 
         assert_equal({ status: :complete }, result)
@@ -41,6 +42,8 @@ class ClaudeLauncherTest < Minitest::Test
         assert_equal "auto", captured.fetch(1).fetch(:permission_mode)
         assert_equal %w[Read LS], captured.fetch(1).fetch(:allowed_tools)
         assert_equal %w[Write Bash], captured.fetch(1).fetch(:disallowed_tools)
+        assert_equal [ { "field" => "timeout_sec", "value" => 1 } ],
+                     captured.fetch(1).fetch(:resource_guards)
       end
     end
   end

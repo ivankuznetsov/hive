@@ -616,9 +616,10 @@ components:
           - lib/hive/provider_routing/operational_projection.rb
           - lib/hive/daemon/recovery_coordinator.rb
           - lib/hive/recovery/migration.rb
+          - lib/hive/task_activity.rb
           - lib/hive/task_closure.rb
           - lib/hive/task_projection/store.rb
-        reason: "Existing Hive composition, read-only consumers and previews, execution-boundary and outcome-evidence ownership checks, and closure verification share the canonical durable store; they are not alternate admission producers."
+        reason: "Existing Hive composition, the task-activity validation facade, read-only consumers and previews, execution-boundary and outcome-evidence ownership checks, and closure verification share the canonical durable store; they are not alternate admission producers."
       - constant: Hive::Attempts::Supervisor
         files:
           - lib/hive/commands/attempt_supervise.rb

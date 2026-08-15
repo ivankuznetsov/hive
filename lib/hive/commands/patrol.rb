@@ -160,11 +160,12 @@ module Hive
         registry.reconcile!(fingerprints: fingerprints, dismissed: dismissed)
         admission = registry.admit(findings, retry_active: !@dry_run)
         findings = admission.findings
+        fix_pool = findings_for_fix_selection(registry, findings)
         candidates, skipped = Hive::Patrol::CandidateSelector.new(
           cfg: cfg,
           fingerprints: fingerprints,
           dismissed: dismissed
-        ).call(findings)
+        ).call(fix_pool)
         skipped.concat(admission.skipped)
         # Persist only after target binding, semantic deduplication, lifecycle
         # admission, and portfolio scoring. The reviewer itself is a pure
@@ -492,6 +493,17 @@ module Hive
         case reason
         when "stale_evidence", "stale_target_sha"
           registry.transition_current!(finding, state: "superseded", reason: reason)
+        end
+      end
+
+      def findings_for_fix_selection(registry, reviewed_findings)
+        return reviewed_findings if @dry_run
+
+        seen = {}
+        (reviewed_findings + registry.active_findings).select do |finding|
+          next false if seen.key?(finding.id.to_s)
+
+          seen[finding.id.to_s] = true
         end
       end
 

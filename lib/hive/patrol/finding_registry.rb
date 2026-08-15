@@ -81,6 +81,10 @@ module Hive
         transition(finding, state, reason, persist: persist)
       end
 
+      def active_findings
+        @existing.select { |finding| lifecycle(finding) == "active" }
+      end
+
       private
 
       def supersede_active_matches(matches, replacement, persist:)

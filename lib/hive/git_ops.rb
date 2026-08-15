@@ -24,6 +24,33 @@ module Hive
       run_git!("-C", @project_root, "rev-parse", "HEAD").strip
     end
 
+    # Reads one historical repository file without allowing revision syntax,
+    # path traversal, or unbounded output across the Git process boundary.
+    def read_blob_at(revision, path, max_bytes:)
+      revision = revision.to_s
+      path = path.to_s.tr("\\", "/")
+      limit = Integer(max_bytes, exception: false)
+      return unless revision.match?(/\A[0-9a-f]{40,64}\z/i)
+      return unless limit&.positive?
+      return if path.empty? || path.start_with?("/") || path.split("/").include?("..")
+
+      spec = "#{revision}:#{path}"
+      size_out, _size_err, size_status = run_git_quiet(
+        "-C", @project_root, "cat-file", "-s", "--", spec
+      )
+      return unless size_status.success?
+
+      size = Integer(size_out.strip, exception: false)
+      return unless size && size < limit
+
+      bytes, _blob_err, blob_status = run_git_quiet(
+        "-C", @project_root, "cat-file", "blob", "--", spec
+      )
+      return unless blob_status.success? && bytes.bytesize == size
+
+      bytes
+    end
+
     def status_short
       out, err, status = Open3.capture3("git", "-C", @project_root, "status", "--short")
       raise GitError, "git -C #{@project_root} status --short failed: #{err.strip.empty? ? out : err}" unless status.success?

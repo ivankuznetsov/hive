@@ -490,7 +490,7 @@ module Hive
 
       def update_finding_lifecycle(registry, finding, reason)
         case reason
-        when "stale_target_sha"
+        when "stale_evidence", "stale_target_sha"
           registry.transition_current!(finding, state: "superseded", reason: reason)
         end
       end

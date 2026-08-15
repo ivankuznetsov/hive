@@ -102,6 +102,26 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  def test_read_blob_at_returns_bounded_file_from_exact_revision
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      bytes = ops.read_blob_at(ops.head_sha, "README.md", max_bytes: 1024)
+
+      assert_equal File.binread(File.join(dir, "README.md")), bytes
+    end
+  end
+
+  def test_read_blob_at_rejects_untrusted_revision_path_and_oversized_blob
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      revision = ops.head_sha
+
+      assert_nil ops.read_blob_at("HEAD", "README.md", max_bytes: 1024)
+      assert_nil ops.read_blob_at(revision, "../README.md", max_bytes: 1024)
+      assert_nil ops.read_blob_at(revision, "README.md", max_bytes: 1)
+    end
+  end
+
   def test_hive_state_init_creates_orphan_branch_and_worktree
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

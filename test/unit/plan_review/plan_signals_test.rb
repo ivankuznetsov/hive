@@ -242,6 +242,96 @@ class PlanReviewPlanSignalsTest < Minitest::Test
     end
   end
 
+  def test_unreadable_and_absent_plans_are_reported_distinctly
+    Dir.mktmpdir("hive-plan-signals") do |task_folder|
+      absent = Hive::PlanReview::PlanSignals.analyze(
+        plan_path: File.join(task_folder, "never-written.md"), task_folder:
+      )
+
+      refute absent.valid?
+      assert_includes absent.uncertainties, "plan_missing"
+
+      path = File.join(task_folder, "plan.md")
+      File.write(path, "# Plan\n")
+      File.chmod(0o000, path)
+      skip "running as a user that bypasses file permissions" if File.readable?(path)
+
+      unreadable = Hive::PlanReview::PlanSignals.analyze(plan_path: path, task_folder:)
+
+      refute unreadable.valid?
+      assert_includes unreadable.uncertainties, "plan_unreadable"
+    ensure
+      File.chmod(0o600, path) if path && File.exist?(path)
+    end
+  end
+
+  def test_non_numeric_policy_limits_are_rejected_rather_than_raised
+    with_plan("# Plan\n\n## Files\n- `lib/hive/parser.rb`\n") do |path, task_folder|
+      result = Hive::PlanReview::PlanSignals.analyze(
+        plan_path: path, task_folder:, max_files: "many"
+      )
+
+      refute result.valid?
+      assert_includes result.uncertainties, "invalid_policy_limits"
+    end
+  end
+
+  def test_every_unusable_frontmatter_shape_is_flagged_without_raising
+    bodies = {
+      "unterminated" => "---\nfiles:\n  - lib/hive/parser.rb\n\n# Plan\n",
+      "not a mapping" => "---\n- lib/hive/parser.rb\n- test/unit/parser_test.rb\n---\n\n# Plan\n",
+      "unparsable yaml" => "---\nfiles: [unclosed\n---\n\n# Plan\n"
+    }
+    bodies.each do |shape, body|
+      with_plan(body) do |path, task_folder|
+        result = Hive::PlanReview::PlanSignals.analyze(plan_path: path, task_folder:)
+
+        assert result.valid?, "#{shape} frontmatter should still yield a usable result"
+        assert_includes result.uncertainties, "malformed_frontmatter", shape
+      end
+    end
+  end
+
+  def test_traversing_declared_and_protected_paths_are_dropped_as_uncertain
+    body = <<~PLAN
+      # Plan
+
+      ## Files
+      - `../outside/secrets.rb`
+      - `lib/hive/parser.rb`
+    PLAN
+    with_plan(body) do |path, task_folder|
+      result = Hive::PlanReview::PlanSignals.analyze(
+        plan_path: path, task_folder:, protected_paths: [ "../escaping/**", "lib/hive/**" ]
+      )
+
+      assert_equal %w[lib/hive/parser.rb], result.declared_files
+      assert_includes result.uncertainties, "invalid_declared_path"
+      assert_includes result.uncertainties, "invalid_protected_path_glob"
+    end
+  end
+
+  def test_a_literal_credential_escalates_alongside_other_sensitive_categories
+    body = <<~PLAN
+      # Plan
+
+      ## Files
+      - `db/migrate/20260815000000_add_index.rb`
+      - `lib/hive/parser.rb`
+
+      ## Notes
+      Replace the placeholder with aws_secret_access_key = AKIAIOSFODNN7EXAMPLE
+    PLAN
+    with_plan(body) do |path, task_folder|
+      result = Hive::PlanReview::PlanSignals.analyze(plan_path: path, task_folder:)
+      categories = result.mandatory_reasons.map { |reason| reason.fetch("category") }
+
+      assert_includes categories, "auth_secrets_permissions"
+      refute_equal 1, categories.length, "the migration path must also be reported"
+      assert_equal "literal_credential_pattern", result.mandatory_reasons.first.fetch("evidence")
+    end
+  end
+
   private
 
   def with_plan(body)

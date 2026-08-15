@@ -28,10 +28,16 @@ module Hive
         end
 
         def format_usage(usage)
-          input = format_number(usage.fetch(:input, 0))
-          output = format_number(usage.fetch(:output, 0))
-          cached = format_number(usage.fetch(:cached, 0))
+          input = format_metric(usage, :input)
+          output = format_metric(usage, :output)
+          cached = format_metric(usage, :cached)
           "#{input}/#{output}/#{cached}"
+        end
+
+        def format_metric(usage, metric)
+          return "?" if usage[:"#{metric}_available"] == false
+
+          format_number(usage.fetch(metric, 0))
         end
 
         def format_number(value)

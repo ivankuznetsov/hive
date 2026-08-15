@@ -157,6 +157,7 @@ module Hive
                    opencode_invocation_root: nil,
                    opencode_permission_policy: nil,
                    additional_read_roots: [], additional_write_roots: [],
+                   opencode_edit_patterns: [],
                    isolate_environment: false)
       @task = task
       @prompt = prompt
@@ -175,6 +176,7 @@ module Hive
       @opencode_permission_policy = opencode_permission_policy
       @additional_read_roots = Array(additional_read_roots).map(&:to_s).freeze
       @additional_write_roots = Array(additional_write_roots).map(&:to_s).freeze
+      @opencode_edit_patterns = Array(opencode_edit_patterns).map(&:to_s).freeze
       @runtime_policy = runtime_policy
       if runtime_policy && permission_arguments
         raise ArgumentError, "permission_arguments cannot be combined with runtime_policy"
@@ -570,6 +572,7 @@ module Hive
       prepared = nil
       result = nil
       prepared = prepare_opencode_invocation
+      validate_prepared_opencode_skills!(prepared)
       cmd = prepared.invocation.argv
       log_file = log_path
       write_opencode_spawn_log(log_file, prepared, cmd)
@@ -666,9 +669,7 @@ module Hive
         log_file: log_file,
         final_message: outcome.final_message,
         final_message_source: :opencode_terminal_message,
-        final_message_truncated:
-          outcome.final_message&.bytesize ==
-            AgentCliRuntime::OpenCode::ResultParser::MAX_FINAL_MESSAGE_BYTES,
+        final_message_truncated: outcome.final_message_truncated,
         limit_text: nil,
         usage: usage,
         model: outcome.identity.actual&.to_s,
@@ -696,8 +697,17 @@ module Hive
         thread.kill if thread&.alive?
       end
       if prepared
-        prepared.cleanup!
-        result[:cleanup_completed] = true if result
+        begin
+          prepared.cleanup!
+          result[:cleanup_completed] = true if result
+        rescue StandardError => e
+          diagnostic = AgentCliRuntime::Redactor.diagnostic(e)
+          if result
+            result[:cleanup_completed] = false
+            result[:cleanup_error] = diagnostic
+          end
+          warn "[hive] OpenCode cleanup failed: #{diagnostic}"
+        end
       end
     end
 
@@ -729,10 +739,27 @@ module Hive
         permission_policy: @opencode_permission_policy,
         additional_read_roots: @additional_read_roots,
         additional_write_roots: @additional_write_roots,
+        edit_patterns: @opencode_edit_patterns,
         plugins: @profile.opencode_plugins,
         pure: @profile.opencode_pure
       )
       AgentRuntime.prepare!(preparation, env: opencode_preparation_environment)
+    end
+
+    def validate_prepared_opencode_skills!(prepared)
+      invocations = @prompt.scan(%r{/(?:[A-Za-z0-9_.-]+:)?ce-[a-z0-9-]+}).uniq
+      invocations.each do |invocation|
+        resolution = Hive::SkillCheck::OpenCode.resolve(
+          invocation,
+          project_root: @cwd,
+          environment: prepared.environment_for(env: opencode_preparation_environment),
+          configuration_path: prepared.configuration_path
+        )
+        next if resolution.status == :present
+
+        raise Hive::AgentError,
+              "OpenCode prepared skill readiness failed for #{invocation}: #{resolution.message}"
+      end
     end
 
     def validate_opencode_launch_channels!
@@ -756,9 +783,18 @@ module Hive
     end
 
     def opencode_route_and_effort
-      model = @routing_arguments&.model || @launch_arguments&.model
-      effort = @routing_arguments&.effort || @launch_arguments&.effective_effort
+      model = @routing_arguments&.model || @launch_arguments&.model ||
+        opencode_identity_argument("--model")
+      effort = @routing_arguments&.effort || @launch_arguments&.effective_effort ||
+        opencode_identity_argument("--variant")
       [ model, effort ]
+    end
+
+    def opencode_identity_argument(flag)
+      index = @identity_arguments.rindex(flag)
+      return nil unless index && index < @identity_arguments.length - 1
+
+      @identity_arguments[index + 1]
     end
 
     def opencode_preparation_environment
@@ -880,6 +916,11 @@ module Hive
         if Time.now >= deadline
           kill_group(pgid)
           sleep_grace_then_kill(pgid, pid)
+          status = begin
+            Process.wait2(pid).last
+          rescue Errno::ECHILD
+            nil
+          end
           break
         end
         sleep 0.05

@@ -57,6 +57,17 @@ class AgentCliRuntimeReleaseContractTest < Minitest::Test
     refute_includes publish, "build-candidate"
   end
 
+  def test_candidate_requires_the_real_installed_opencode_offline_contract
+    content = File.read(WORKFLOW)
+    candidate = content.split(/^  candidate:\n/, 2).fetch(1)
+                       .split(/^  install:\n/, 2).fetch(0)
+
+    assert_includes candidate, "npm install --global opencode-ai@1.18.16"
+    assert_includes candidate,
+                    'AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_REQUIRED: "1"'
+    assert_includes candidate, "test/opencode_offline_smoke_test.rb"
+  end
+
   def test_every_action_is_pinned_to_a_commit
     uses = File.readlines(WORKFLOW).filter_map do |line|
       line[/uses:\s+([^\s#]+)/, 1]

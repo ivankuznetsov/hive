@@ -72,6 +72,28 @@ class AgentProfileTest < Minitest::Test
     end
   end
 
+  def test_opencode_secret_placeholders_use_the_runtime_grammar
+    profile = make_profile(
+      name: :opencode,
+      opencode_configuration: {
+        "provider" => {
+          "anthropic" => { "options" => { "apiKey" => "{env:ANTHROPIC_API_KEY}" } }
+        }
+      }
+    )
+    assert_equal "{env:ANTHROPIC_API_KEY}",
+                 profile.opencode_configuration.dig("provider", "anthropic", "options", "apiKey")
+
+    assert_raises(ArgumentError) do
+      make_profile(
+        name: :opencode,
+        opencode_configuration: {
+          "provider" => { "anthropic" => { "options" => { "apiKey" => "${ANTHROPIC_API_KEY}" } } }
+        }
+      )
+    end
+  end
+
   def test_configuration_directory_metadata_is_optional_and_validated
     profile = make_profile(
       configuration_environment_key: "CUSTOM_HOME",

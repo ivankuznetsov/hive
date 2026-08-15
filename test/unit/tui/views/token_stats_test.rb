@@ -26,11 +26,27 @@ class HiveTuiViewsTokenStatsTest < Minitest::Test
     assert_includes out, "agent"
     assert_includes out, "claude"
     assert_includes out, "grok"
+    assert_includes out, "opencode"
     assert_includes out, "1.5k/1.2M/400k"
     assert_includes out, "patrol"
     assert_includes out, "2k/300/10"
     assert_includes out, "TOTAL"
     assert_includes out, "drill"
+  end
+
+  def test_renders_unknown_opencode_usage_differently_from_measured_zero
+    data = Hive::UsageDb.zero_aggregate
+    data[:agents][:opencode][:today] = {
+      input: 0, output: 0, cached: 0,
+      input_available: false, cached_available: false
+    }
+    model = Hive::Tui::Model.initial(cols: 100, rows: 24).with(
+      token_stats_state: Hive::Tui::Model::TokenStatsState.new(scope_level: :all)
+    )
+
+    out = Hive::Tui::Views::TokenStats.render(model, aggregate: data)
+
+    assert_match(/opencode\s+\?\/0\/\?/, out)
   end
 
   def test_renders_zeroes_for_empty_project_scope

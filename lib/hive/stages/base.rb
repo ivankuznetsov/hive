@@ -288,6 +288,9 @@ module Hive
               profile, runtime_policy.allowed_tools, runtime_policy.directories,
               host_outputs: runtime_policy.host_outputs?
             )
+            values[:opencode_edit_patterns] = opencode_edit_patterns(
+              profile, runtime_policy.allowed_tools
+            )
           end
           return adapt_opencode_scope!(values, profile, stage_name)
         end
@@ -330,6 +333,9 @@ module Hive
           values[:additional_write_roots] = opencode_write_roots(
             profile, scope.allowed_tools, directories
           )
+          values[:opencode_edit_patterns] = opencode_edit_patterns(
+            profile, scope.allowed_tools
+          )
         end
         adapt_opencode_scope!(values, profile, stage_name)
       end
@@ -364,7 +370,8 @@ module Hive
           allowed_tools: scope.fetch(:allowed_tools),
           disallowed_tools: scope.fetch(:disallowed_tools),
           additional_read_roots: scope.fetch(:additional_read_roots, []),
-          additional_write_roots: scope.fetch(:additional_write_roots, [])
+          additional_write_roots: scope.fetch(:additional_write_roots, []),
+          opencode_edit_patterns: scope.fetch(:opencode_edit_patterns, [])
         }
         kwargs[:runtime_policy] = scope[:runtime_policy] if scope[:runtime_policy]
         kwargs
@@ -481,6 +488,18 @@ module Hive
         end
       end
       private_class_method :opencode_write_roots
+
+      def opencode_edit_patterns(profile, allowed_tools)
+        return [] unless profile.name == :opencode
+
+        Array(allowed_tools).filter_map do |rule|
+          match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s)
+          next unless match && match[:tool] == "Edit" && match[:specifier]
+
+          match[:specifier].sub(%r{\A//}, "/")
+        end.uniq
+      end
+      private_class_method :opencode_edit_patterns
 
       MISSING_EXPLICIT_PERMISSION_SPEC = Object.new.freeze
 
@@ -894,6 +913,7 @@ module Hive
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
                       routing_resolution: nil, routing_arguments: nil,
                       additional_read_roots: [], additional_write_roots: [],
+                      opencode_edit_patterns: [],
                       implementation_stage: nil,
                       defer_implementation_observation: false,
                       resource_guards: nil, agent_custody: nil,
@@ -1030,8 +1050,11 @@ module Hive
               provider_route: provider_route,
               additional_read_roots: additional_read_roots,
               additional_write_roots: additional_write_roots,
+              opencode_edit_patterns: opencode_edit_patterns,
               isolate_environment: isolate_environment
             ).run!
+            agent_result[:hive_observation_id] = observation.session_id if
+              agent_result.is_a?(Hash) && profile.name == :opencode
             if agent_result[:status] == :ok && runtime_policy&.host_outputs?
               begin
                 runtime_policy.materialize_outputs!(agent_result)
@@ -1124,6 +1147,7 @@ module Hive
                          routing_arguments: nil, runtime_policy: nil,
                          implementation_stage: nil,
                          additional_read_roots: [], additional_write_roots: [],
+                         opencode_edit_patterns: [],
                          resource_guards: nil, agent_custody: nil)
         require "hive/claude_launcher"
 
@@ -1150,6 +1174,7 @@ module Hive
             implementation_stage: implementation_stage,
             additional_read_roots: additional_read_roots,
             additional_write_roots: additional_write_roots,
+            opencode_edit_patterns: opencode_edit_patterns,
             resource_guards: resource_guards,
             agent_custody: agent_custody
           )
@@ -1177,6 +1202,7 @@ module Hive
             routing_arguments: routing_arguments, runtime_policy: runtime_policy,
             additional_read_roots: additional_read_roots,
             additional_write_roots: additional_write_roots,
+            opencode_edit_patterns: opencode_edit_patterns,
             resource_guards: resource_guards, agent_custody: agent_custody
           )
         end
@@ -1212,7 +1238,8 @@ module Hive
               identity_arguments: identity_arguments,
               routing_arguments: routing_arguments, runtime_policy: runtime_policy,
               additional_read_roots: additional_read_roots,
-              additional_write_roots: additional_write_roots
+              additional_write_roots: additional_write_roots,
+              opencode_edit_patterns: opencode_edit_patterns
             )
           end
           record_usage(
@@ -1466,7 +1493,8 @@ module Hive
           actual_route: result[:actual_opencode_route],
           resolution_status: result.fetch(:route_resolution_status),
           outcome_kind: result.fetch(:normalized_outcome_kind),
-          usage: normalized_usage
+          usage: normalized_usage,
+          observation_id: result[:hive_observation_id]
         )
       end
 

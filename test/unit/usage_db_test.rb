@@ -129,6 +129,27 @@ class UsageDbTest < Minitest::Test
     end
   end
 
+  def test_aggregate_preserves_unknown_usage_in_agent_and_total_buckets
+    with_usage_db do
+      now = Time.utc(2026, 8, 12, 12)
+      Hive::UsageDb.record!(
+        agent: "opencode", model: "anthropic/model", project_slug: "alpha",
+        task_slug: "task-a", stage: "4-execute", started_at: now - 60,
+        ended_at: now, input: nil, output: 0, cached: nil
+      )
+
+      aggregate = Hive::UsageDb.aggregate(scope: {}, now: now)
+      usage = usage_at(aggregate, :opencode, :all)
+
+      assert_equal 0, usage.fetch(:input)
+      assert_equal false, usage.fetch(:input_available)
+      refute usage.key?(:output_available), "measured zero must remain distinguishable from unknown"
+      assert_equal false, usage.fetch(:cached_available)
+      assert_equal false, aggregate.dig(:total, :all, :input_available)
+      assert_equal false, aggregate.dig(:total, :all, :cached_available)
+    end
+  end
+
   def test_task_scope_excludes_other_tasks
     with_usage_db do
       now = Time.utc(2026, 5, 24, 12)

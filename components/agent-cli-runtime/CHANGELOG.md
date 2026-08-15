@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 - 2026-08-12
+## Unreleased
 
 - Add OpenCode `1.18.16+` as a fifth immutable built-in profile with exact
   `provider/model` routing and faithful model-variant validation.

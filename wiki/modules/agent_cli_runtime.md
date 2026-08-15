@@ -62,6 +62,14 @@ project configuration are disabled. Generic `probe(profile)` and
 the prepared overlay supplies its explicit typed policy and trusted `--auto`
 argument.
 
+Prepared overlays reserve every XDG/config/disable key, remove selected
+per-agent permission blocks, forward credentials only when they match the
+requested provider, and emit worktree-relative edit patterns. Nested read-only
+exceptions are re-applied after writable rules because OpenCode uses the last
+matching permission. Probe children start from an explicitly cleared
+environment, and cleanup refuses a replaced invocation root without masking a
+completed Hive result.
+
 OpenCode also uses the profile's additive strict result-parser hook. A caller
 passes captured stdout/stderr plus typed exit, signal, timeout, or cancellation
 evidence. A successful run must contain one consistent session, a recognized
@@ -72,8 +80,10 @@ assistant record, records requested and actual nested routes separately, and
 uses its token/cache/reasoning/cost fields without converting absence to zero.
 Timeout, cancellation, authentication failure, configuration failure, generic
 CLI failure, malformed output, and completion remain distinct outcomes.
-Unknown additive event payloads are discarded; only bounded, redacted type
-summaries survive. Legacy profile extraction and observation are unchanged.
+Unknown additive event payloads are discarded after binding any supplied
+session identity; only bounded, redacted type summaries survive. Exact
+truncation evidence is carried separately from final-message bytes. Legacy
+profile extraction and observation are unchanged.
 
 The public facade includes `compile`, `prepare!`, `require_capability!`,
 `extract_usage`, `observe`, `probe`, and `probe_all`. It accepts built-in names
@@ -112,10 +122,10 @@ budgets, or contain Hive defaults and skills. It can load and run without
 `hive-cli` or Hive constants. Direct standard-library gem dependencies are
 declared in its gemspec.
 
-Hive source declares `agent-cli-runtime ~> 0.2.0` and resolves the monorepo
-component path so the directly loaded typed runtime ABI remains coherent. This
-is source/package metadata for a reviewable candidate, not authority to publish
-the component or release Hive. `Hive::AgentRuntime` preserves its
+Hive source declares the published `agent-cli-runtime ~> 0.1.1` line and
+resolves the unreleased monorepo component path during development. Version
+selection, component publication, and the later Hive dependency cutover remain
+separately authorized. `Hive::AgentRuntime` preserves its
 public request, probe, error, and result names as a forwarding facade, while
 `Hive::AgentProfile` wraps package profiles with only Hive-owned skill, model
 routing, default-model, status, and policy metadata. The five source-built Hive
@@ -136,9 +146,10 @@ task. Candidate tooling builds one gem, records its source commit and dirty
 state, checksums it, installs it into a private gem home, proves a clean require,
 and exercises the executable. Root parity fixtures cover non-default
 compilation, local probes, named capability evidence, provider usage variants,
-and observable normalization/redaction across all five built-ins. The `0.2.0`
-candidate adds OpenCode without authorizing a tag, publication, mirror release,
-deployment, or Hive release. `bin/release-preflight` remains
+and observable normalization/redaction across all five built-ins. The
+unreleased source candidate adds OpenCode without authorizing a version, tag,
+publication, mirror release, deployment, or Hive release.
+`bin/release-preflight` remains
 tag-bound and is not run against a fabricated tag during candidate work.
 
 Only `components/agent-cli-runtime/vX.Y.Z` tags can trigger the component
@@ -174,13 +185,13 @@ here.
 
 ## Compatibility
 
-The published line remains 0.1.x; the prepared source candidate is 0.2.0 on
-Ruby 3.4 or newer, tested on Linux and macOS. The minor bump covers the
-additive prepared-invocation, route-probe, strict-parser, identity, and usage
-contracts. Removing or changing an existing public field, flag mapping, event
-meaning, or executable contract requires another minor release while pre-1.0.
-A published bad version is fixed forward; yanking or ownership changes are
-separate operator decisions.
+The published line remains 0.1.x; the unreleased source candidate runs on Ruby
+3.4 or newer and is tested on Linux and macOS. An authorized release must pick
+a version that accounts for the additive prepared-invocation, route-probe,
+strict-parser, identity, and usage contracts. Removing or changing an existing
+public field, flag mapping, event meaning, or executable contract requires a
+minor release while pre-1.0. A published bad version is fixed forward; yanking
+or ownership changes are separate operator decisions.
 
 Related context: [[component-boundaries]], [[modules/agent_profile]], and
 ADR-038 in [[decisions]].

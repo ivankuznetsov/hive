@@ -5,6 +5,8 @@ require "hive/implementation_identity/event_builder"
 require "hive/implementation_identity/resolver"
 require "hive/task_journal"
 require "hive/task_projection/store"
+require "digest"
+require "json"
 
 module Hive
   module ImplementationIdentity
@@ -94,7 +96,8 @@ module Hive
       end
 
       def observe_opencode!(stage:, requested_route:, actual_route:,
-                            resolution_status:, outcome_kind:, usage:)
+                            resolution_status:, outcome_kind:, usage:,
+                            observation_id: nil)
         stage = stage.to_s
         unless Resolver::IMPLEMENTATION_STAGES.include?(stage)
           raise ResolutionError,
@@ -143,6 +146,14 @@ module Hive
           "usage" => normalized_usage&.to_h&.transform_keys(&:to_s)
         }
 
+        observation_identity = observation_id.to_s
+        if observation_identity.empty?
+          observation_identity = Digest::SHA256.hexdigest(
+            JSON.generate(observation)
+          ).slice(0, 24)
+        elsif !observation_identity.match?(/\A[A-Za-z0-9._:-]+\z/)
+          raise InvalidIdentity, "invalid OpenCode observation identity"
+        end
         @writer.append_idempotent(
           @event_builder.build(
             context,
@@ -155,7 +166,8 @@ module Hive
             payload: { "observation" => observation }
           ),
           idempotency_key:
-            "#{task_key}/#{context.task_generation}/#{stage}/#{context.attempt_id}/opencode-observation"
+            "#{task_key}/#{context.task_generation}/#{stage}/#{context.attempt_id}/" \
+            "opencode-observation/#{observation_identity}"
         )
         @projection_store.rebuild!
         observation.freeze

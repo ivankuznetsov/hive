@@ -18,12 +18,14 @@ the operational migration as release-proven.
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
-## OpenCode live validation (updated 2026-08-12)
+## OpenCode live validation (updated 2026-08-15)
 
 OpenCode `1.18.16+` now has deterministic fixtures, a guarded installed-CLI
 offline smoke, fake-CLI Hive execute and native Compound Engineering plan
-integration, candidate install proof, and independently reconstructed mirror
-projection proof. The authenticated atomic-edit smoke is intentionally gated
+integration, installed-candidate lifecycle proof, and independently
+reconstructed mirror projection proof. The component release workflow makes
+the real installed-CLI offline smoke mandatory instead of accepting a skip.
+The authenticated atomic-edit smoke is intentionally gated
 on an explicit backend/model, selected config, credential environment key, and
 operator opt-in. Until that gate is supplied, real model transport and live
 provider permission behavior remain unverified; an offline inventory check is

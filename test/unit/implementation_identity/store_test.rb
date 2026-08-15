@@ -143,6 +143,37 @@ class ImplementationIdentityStoreTest < Minitest::Test
     end
   end
 
+  def test_repeated_opencode_stage_observations_use_distinct_session_identities
+    with_identity_attempt do |task, attempt_store, attempt|
+      cfg = execute_config("opencode", "anthropic/claude-sonnet-4-5")
+      store = Hive::ImplementationIdentity::Store.new(
+        task: task, cfg: cfg, attempt_store: attempt_store
+      )
+
+      with_attempt_context(
+        attempt_id: attempt.attempt_id, task_generation: 1,
+        ownership_generation: attempt.ownership_generation
+      ) do
+        store.capture_execute!
+        [ [ "session-fix-1", 10 ], [ "session-fix-2", 20 ] ].each do |session_id, input|
+          store.observe_opencode!(
+            stage: "execute", requested_route: "anthropic/claude-sonnet-4-5",
+            actual_route: "anthropic/claude-sonnet-4-5", resolution_status: :matched,
+            outcome_kind: :completed, usage: { input:, output: 1 },
+            observation_id: session_id
+          )
+        end
+      end
+
+      observations = journal(task).select do |event|
+        event["event_type"] == "implementation_identity_observed"
+      end
+      assert_equal 2, observations.length
+      assert_equal [ 10, 20 ], observations.map { |event| event.dig("payload", "observation", "usage", "input") }
+      assert_equal 2, observations.map { |event| event.dig("payload", "idempotency_key") }.uniq.length
+    end
+  end
+
   def test_downstream_resolution_is_journaled_before_launch_and_matches_native_arguments
     with_identity_attempt(intended_stage: "5-open-pr", attempt_id: "open-pr-attempt") do |task, attempt_store, attempt|
       execute_cfg = execute_config("codex", "gpt-5.6-sol")

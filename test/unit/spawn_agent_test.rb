@@ -1011,6 +1011,32 @@ class SpawnAgentTest < Minitest::Test
       kwargs = Hive::Stages::Base.tool_scope_kwargs(scope)
       assert_equal scope.fetch(:additional_write_roots),
                    kwargs.fetch(:additional_write_roots)
+      assert_empty kwargs.fetch(:opencode_edit_patterns)
+    end
+  end
+
+  def test_stage_permission_scope_preserves_qualified_opencode_edit_subtree
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      docs = File.join(task.folder, "docs")
+      FileUtils.mkdir_p(docs)
+      cfg = {
+        "execute" => {
+          "permissions" => {
+            "preset" => "scoped", "tools" => [ "Read", "Edit(./docs/**)" ],
+            "dirs" => [ task.folder ]
+          }
+        }
+      }
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        cfg, "execute", task, opencode_scope_profile,
+        base_add_dirs: [ task.folder ]
+      )
+
+      assert_equal "workspace-write", scope.fetch(:permission_mode)
+      assert_equal [ "#{docs}/**" ], scope.fetch(:opencode_edit_patterns)
+      assert_equal [ task.folder ], scope.fetch(:additional_write_roots).uniq
     end
   end
 

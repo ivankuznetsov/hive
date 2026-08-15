@@ -1,5 +1,5 @@
 ---
-title: Validate the OpenCode 0.2.0 candidate
+title: Validate the unreleased OpenCode candidate
 date: 2026-08-12
 tags: [agent-cli-runtime, opencode, validation, package, mirror]
 ---

@@ -1,4 +1,11 @@
 module AgentCliRuntime
+  OPENCODE_OVERLAY_ENVIRONMENT_KEYS = %w[
+    XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME TMPDIR
+    OPENCODE_CONFIG OPENCODE_DISABLE_PROJECT_CONFIG
+    OPENCODE_DISABLE_CLAUDE_CODE OPENCODE_DISABLE_MODELS_FETCH
+    OPENCODE_DISABLE_AUTOUPDATE OPENCODE_PURE
+  ].freeze
+
   module Immutable
     module_function
 
@@ -258,13 +265,13 @@ module AgentCliRuntime
     :configuration_path, :configuration,
     :credential_environment_keys, :credential_file,
     :permission_policy, :additional_read_roots,
-    :additional_write_roots, :plugins, :pure
+    :additional_write_roots, :edit_patterns, :plugins, :pure
   ) do
     def initialize(request:, working_directory:, invocation_root:,
                    configuration_path: nil, configuration: nil,
                    credential_environment_keys: [], credential_file: nil,
                    permission_policy: nil, additional_read_roots: [],
-                   additional_write_roots: [], plugins: [], pure: true)
+                   additional_write_roots: [], edit_patterns: [], plugins: [], pure: true)
       unless request.is_a?(Request)
         raise ArgumentError, "request must be an AgentCliRuntime::Request"
       end
@@ -282,6 +289,11 @@ module AgentCliRuntime
       invalid = keys.find { |key| !key.match?(/\A[A-Z][A-Z0-9_]*\z/) }
       raise ArgumentError, "invalid credential environment key" if invalid
       raise ArgumentError, "credential environment keys must be unique" if keys.uniq.length != keys.length
+      reserved = keys & OPENCODE_OVERLAY_ENVIRONMENT_KEYS
+      unless reserved.empty?
+        raise ArgumentError,
+              "credential environment keys cannot override the OpenCode overlay: #{reserved.join(', ')}"
+      end
 
       super(
         request: request,
@@ -297,6 +309,7 @@ module AgentCliRuntime
         permission_policy: permission_policy,
         additional_read_roots: Immutable.strings(additional_read_roots),
         additional_write_roots: Immutable.strings(additional_write_roots),
+        edit_patterns: Immutable.strings(edit_patterns),
         plugins: Immutable.strings(plugins),
         pure: pure != false
       )
@@ -383,7 +396,7 @@ module AgentCliRuntime
         value = env[key]
         values[key] = value.to_s unless value.to_s.empty?
       end
-      environment.merge(selected).freeze
+      selected.merge(environment).freeze
     end
 
     def cleanup!
@@ -496,10 +509,11 @@ module AgentCliRuntime
 
   ParsedRun = Data.define(
     :session_id, :terminal_message_id, :terminal_reason,
-    :final_message, :preliminary_usage, :unknown_events
+    :final_message, :final_message_truncated, :preliminary_usage, :unknown_events
   ) do
     def initialize(session_id:, terminal_message_id:, terminal_reason:,
-                   final_message:, preliminary_usage:, unknown_events: [])
+                   final_message:, preliminary_usage:, unknown_events: [],
+                   final_message_truncated: false)
       unless preliminary_usage.is_a?(NormalizedUsage)
         raise ArgumentError, "preliminary_usage must be NormalizedUsage"
       end
@@ -509,6 +523,7 @@ module AgentCliRuntime
         terminal_message_id: Immutable.string(terminal_message_id),
         terminal_reason: Immutable.string(terminal_reason),
         final_message: Immutable.string(final_message),
+        final_message_truncated: final_message_truncated == true,
         preliminary_usage: preliminary_usage,
         unknown_events: Immutable.strings(unknown_events)
       )
@@ -537,13 +552,13 @@ module AgentCliRuntime
         value = env[key]
         values[key] = value.to_s unless value.to_s.empty?
       end
-      environment.merge(selected).freeze
+      selected.merge(environment).freeze
     end
   end
 
   NormalizedOutcome = Data.define(
     :provider, :launcher_identity, :kind, :termination,
-    :final_message, :identity, :usage, :diagnostic,
+    :final_message, :final_message_truncated, :identity, :usage, :diagnostic,
     :unknown_events, :session_id, :message_id
   ) do
     KINDS = %i[
@@ -553,7 +568,8 @@ module AgentCliRuntime
 
     def initialize(provider:, launcher_identity:, kind:, termination:,
                    final_message: nil, identity:, usage: nil, diagnostic: nil,
-                   unknown_events: [], session_id: nil, message_id: nil)
+                   unknown_events: [], session_id: nil, message_id: nil,
+                   final_message_truncated: false)
       normalized_kind = kind.to_sym
       unless KINDS.include?(normalized_kind)
         raise ArgumentError, "invalid normalized outcome kind"
@@ -575,6 +591,7 @@ module AgentCliRuntime
         termination: termination,
         final_message:
           final_message.nil? ? nil : Immutable.string(final_message),
+        final_message_truncated: final_message_truncated == true,
         identity: identity,
         usage: usage,
         diagnostic: diagnostic.nil? ? nil : Immutable.string(diagnostic),

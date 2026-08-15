@@ -757,7 +757,7 @@ module Hive
         value.each { |child| validate_nonsecret_opencode_configuration!(child, key) }
       when String
         if key.to_s.match?(/(?:api[_-]?key|token|secret|password|credential)/i) &&
-           !value.match?(/\A\$\{[A-Z][A-Z0-9_]*\}\z/)
+           !value.match?(/\A\{env:[A-Z][A-Z0-9_]*\}\z/)
           raise ArgumentError,
                 "OpenCode provider definitions cannot contain credential values"
         end

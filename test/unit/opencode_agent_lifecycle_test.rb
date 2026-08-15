@@ -93,6 +93,64 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_term_cancels_the_hive_lifecycle_without_running_inspection
+    with_fixture(mode: :cancelled) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "cancelled-260812-aaaa")
+      root = File.join(fixture.fetch(:dir), "invocation-cancelled")
+      killer = Thread.new do
+        Timeout.timeout(5) do
+          loop do
+            break if File.exist?(fixture.fetch(:calls)) &&
+              File.readlines(fixture.fetch(:calls)).any? do |line|
+                line.start_with?("run --auto ")
+              end
+
+            sleep 0.02
+          end
+        end
+        sleep 0.1
+        Process.kill("TERM", Process.pid)
+      end
+
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(task, fixture, invocation_root: root).run!
+      end
+      killer.join
+
+      assert_equal :error, result.fetch(:status)
+      assert result.fetch(:cancelled)
+      assert_equal :cancelled, result.fetch(:normalized_outcome_kind)
+      refute File.exist?(root)
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal 0, calls.count { |line| line.start_with?("export ses_") }
+    ensure
+      killer&.kill if killer&.alive?
+    end
+  end
+
+  def test_replaced_root_cleanup_failure_is_reported_without_masking_success
+    with_fixture(mode: :replace_root_during_run) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "cleanup-replaced-260812-aaaa")
+      root = File.join(fixture.fetch(:dir), "invocation-cleanup-replaced")
+      _out, err = capture_io do
+        @cleanup_result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+          build_agent(task, fixture, invocation_root: root).run!
+        end
+      end
+
+      assert_equal :ok, @cleanup_result.fetch(:status)
+      assert_equal false, @cleanup_result.fetch(:cleanup_completed)
+      assert_match(/replaced OpenCode invocation root/,
+                   @cleanup_result.fetch(:cleanup_error))
+      assert_match(/OpenCode cleanup failed/, err)
+    ensure
+      @cleanup_result = nil
+      FileUtils.remove_entry_secure(root) if root && File.directory?(root)
+      original = "#{root}.original" if root
+      FileUtils.remove_entry_secure(original) if original && File.directory?(original)
+    end
+  end
+
   def test_explicit_overlay_default_supplies_the_route_when_role_has_no_model_override
     with_fixture(default_route: ROUTE) do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "default-route-260812-aaaa")
@@ -110,6 +168,52 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_identity_only_downstream_launch_preserves_the_nested_route
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "identity-route-260812-aaaa")
+      root = File.join(fixture.fetch(:dir), "invocation-identity-route")
+      agent = build_agent(
+        task, fixture, invocation_root: root, identity_only: true
+      )
+
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") { agent.run! }
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal ROUTE, result.fetch(:requested_opencode_route)
+      run = File.readlines(fixture.fetch(:calls), chomp: true)
+                .find { |line| line.start_with?("run --auto ") }
+      assert_includes run, "--model #{ROUTE}"
+      assert_includes run, "--variant high"
+    end
+  end
+
+  def test_skill_readiness_is_rechecked_inside_the_prepared_environment
+    with_fixture do |fixture|
+      shadow = File.join(
+        fixture.fetch(:work), ".opencode", "skills", "ce-plan", "SKILL.md"
+      )
+      FileUtils.mkdir_p(File.dirname(shadow))
+      File.write(shadow, "# shadow\n")
+      task = make_task(fixture.fetch(:dir), slug: "prepared-skill-260812-aaaa")
+      root = File.join(fixture.fetch(:dir), "invocation-prepared-skill")
+      agent = build_agent(
+        task, fixture, invocation_root: root,
+        prompt: "Use /ce-plan to produce the plan.",
+        plugins: [ Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN ]
+      )
+
+      error = assert_raises(Hive::AgentError) do
+        with_env("ANTHROPIC_API_KEY" => "secret-canary") { agent.run! }
+      end
+
+      assert_match(/prepared skill readiness failed/, error.message)
+      assert_match(/shadows/, error.message)
+      refute File.exist?(root)
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal 0, calls.count { |line| line.start_with?("run --auto ") }
+    end
+  end
+
   private
 
   def make_task(dir, slug: "opencode-agent-260812-aaaa")
@@ -119,22 +223,29 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
   end
 
   def build_agent(task, fixture, invocation_root:, timeout_sec: 5,
-                  explicit_launch: true)
+                  explicit_launch: true, identity_only: false,
+                  prompt: "make the atomic edit", plugins: [])
     profile = Hive::AgentProfile.new(
       runtime_profile: AgentCliRuntime::Profiles.fetch(:opencode),
       skill_syntax_format: "/%{skill}",
       status_detection_mode: :exit_code_only,
       permission_presets: %w[read-only scoped],
       opencode_configuration_path: fixture.fetch(:configuration),
-      opencode_credential_environment_keys: [ "ANTHROPIC_API_KEY" ]
+      opencode_credential_environment_keys: [ "ANTHROPIC_API_KEY" ],
+      opencode_plugins: plugins
     ).with_overrides("bin" => fixture.fetch(:bin))
     launch = if explicit_launch
       profile.identity_arguments(model: ROUTE, effort: "high")
     end
+    launch_kwargs = if identity_only
+      { identity_arguments: launch.native_arguments }
+    else
+      { launch_arguments: launch }
+    end
     Hive::Agent.new(
-      task:, prompt: "make the atomic edit", max_budget_usd: nil,
+      task:, prompt:, max_budget_usd: nil,
       timeout_sec:, cwd: fixture.fetch(:work), profile:,
-      permission_mode: "read-only", launch_arguments: launch,
+      permission_mode: "read-only", **launch_kwargs,
       opencode_invocation_root: invocation_root,
       additional_read_roots: [ task.folder ],
       additional_write_roots: []
@@ -201,7 +312,12 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
             "selected_credential_present" => !ENV["ANTHROPIC_API_KEY"].to_s.empty?,
             "ambient_credential_present" => !ENV["OPENAI_API_KEY"].to_s.empty?
           }))
-          sleep 10 if #{mode == :timeout}
+          if #{mode == :replace_root_during_run}
+            root = File.dirname(ENV.fetch("XDG_CONFIG_HOME"))
+            File.rename(root, "\#{root}.original")
+            Dir.mkdir(root, 0700)
+          end
+          sleep 10 if #{%i[timeout cancelled].include?(mode)}
           print #{run_output.dump}
           warn "authentication failed" if #{mode == :auth_failure}
           exit(#{mode == :auth_failure ? 1 : 0})

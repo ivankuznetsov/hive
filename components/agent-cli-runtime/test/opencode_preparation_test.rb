@@ -128,14 +128,92 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
         assert_equal "deny", policy.fetch("*")
         assert_equal "deny", policy.fetch("bash")
         assert_equal "deny", policy.dig("edit", "*")
-        assert_equal "allow", policy.dig("edit", work)
-        assert_equal "allow", policy.dig("edit", "#{work}/**")
+        assert_equal "allow", policy.dig("edit", "**")
+        refute policy.fetch("edit").key?(work)
         assert_equal "deny", policy.dig("edit", "#{readable}/**")
         assert_equal "allow", policy.dig("edit", "#{writable}/**")
         assert_equal "allow",
                      policy.dig("external_directory", "#{readable}/**")
         assert_equal "allow",
                      policy.dig("external_directory", "#{writable}/**")
+      ensure
+        prepared&.cleanup!
+      end
+    end
+  end
+
+  def test_workspace_write_reapplies_nested_read_only_exceptions_after_parent_allow
+    with_fixture_cli do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        readable = File.join(work, "reference")
+        FileUtils.mkdir_p(readable)
+        prepared = AgentCliRuntime.prepare!(
+          preparation_request(
+            work:, root: File.join(dir, "invocation"), source: selected_config(dir),
+            permission_mode: "workspace-write", additional_read_roots: [ readable ]
+          ),
+          env: fixture.fetch(:env)
+        )
+        edit = JSON.parse(File.read(prepared.configuration_path)).dig("permission", "edit")
+
+        assert_equal "deny", edit.fetch("*")
+        assert_equal "allow", edit.fetch("**")
+        assert_equal "deny", edit.fetch("reference")
+        assert_equal "deny", edit.fetch("reference/**")
+        assert_operator edit.keys.index("reference/**"), :>, edit.keys.index("**")
+      ensure
+        prepared&.cleanup!
+      end
+    end
+  end
+
+  def test_workspace_write_compiles_declared_edit_patterns_relative_to_worktree
+    with_fixture_cli do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        docs = File.join(work, "docs")
+        FileUtils.mkdir_p(docs)
+        prepared = AgentCliRuntime.prepare!(
+          preparation_request(
+            work:, root: File.join(dir, "invocation"), source: selected_config(dir),
+            permission_mode: "workspace-write", additional_write_roots: [ work ],
+            edit_patterns: [ "#{docs}/**" ]
+          ),
+          env: fixture.fetch(:env)
+        )
+        edit = JSON.parse(File.read(prepared.configuration_path)).dig("permission", "edit")
+
+        assert_equal "deny", edit.fetch("*")
+        assert_equal "allow", edit.fetch("docs/**")
+        refute edit.key?("**")
+        refute edit.key?("#{work}/**")
+      ensure
+        prepared&.cleanup!
+      end
+    end
+  end
+
+  def test_selected_agent_permissions_cannot_override_generated_policy
+    with_fixture_cli do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        FileUtils.mkdir_p(work)
+        prepared = AgentCliRuntime.prepare!(
+          preparation_request(
+            work:, root: File.join(dir, "invocation"), source: nil,
+            configuration: {
+              "provider" => { "anthropic" => { "npm" => "@ai-sdk/anthropic" } },
+              "agent" => { "build" => { "permission" => { "bash" => "allow" }, "mode" => "primary" } }
+            }
+          ),
+          env: fixture.fetch(:env)
+        )
+        config = JSON.parse(File.read(prepared.configuration_path))
+
+        refute config.dig("agent", "build").key?("permission")
+        assert_equal "primary", config.dig("agent", "build", "mode")
+        assert_equal "deny", config.dig("permission", "bash")
       ensure
         prepared&.cleanup!
       end
@@ -155,10 +233,11 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
         credentials = File.join(dir, "auth.json")
         File.write(credentials, JSON.generate("anthropic" => { "type" => "oauth" }))
         File.chmod(0o600, credentials)
+        root = File.join(dir, "invocation")
 
         prepared = AgentCliRuntime.prepare!(
           preparation_request(
-            work:, root: File.join(dir, "invocation"), source:,
+            work:, root:, source:,
             model: nil, credential_environment_keys: [],
             credential_file: credentials
           ),
@@ -173,6 +252,11 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
         assert staged
         assert_equal 0o600, File.stat(staged).mode & 0o777
         assert_equal File.binread(credentials), File.binread(staged)
+        prepared.cleanup!
+        refute File.exist?(root)
+        refute File.exist?(staged)
+        assert File.file?(credentials)
+        prepared = nil
       ensure
         prepared&.cleanup!
       end
@@ -218,6 +302,7 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
     cases = {
       old_version: AgentCliRuntime::VersionError,
       missing_capability: AgentCliRuntime::UnsupportedCapability,
+      missing_export_capability: AgentCliRuntime::UnsupportedCapability,
       missing_auth: AgentCliRuntime::AuthenticationError,
       wrong_route: AgentCliRuntime::RouteUnavailable,
       wrong_variant: AgentCliRuntime::RouteUnavailable
@@ -242,6 +327,79 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
         end
       end
     end
+  end
+
+  def test_probe_rejects_credentials_that_are_not_bound_to_requested_provider
+    with_fixture_cli(mode: :missing_auth) do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        FileUtils.mkdir_p(work)
+        env = fixture.fetch(:env).merge("OPENAI_API_KEY" => "wrong-provider-secret")
+        error = assert_raises(AgentCliRuntime::AuthenticationError) do
+          AgentCliRuntime.prepare!(
+            preparation_request(
+              work:, root: File.join(dir, "invocation"), source: selected_config(dir),
+              credential_environment_keys: [ "OPENAI_API_KEY" ]
+            ),
+            env:
+          )
+        end
+        refute_includes error.message, "wrong-provider-secret"
+        refute File.exist?(File.join(dir, "invocation"))
+      end
+    end
+  end
+
+  def test_probe_rejects_staged_credentials_for_a_different_provider
+    with_fixture_cli(mode: :missing_auth) do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        FileUtils.mkdir_p(work)
+        credentials = File.join(dir, "auth.json")
+        File.write(credentials, JSON.generate("openai" => { "type" => "api" }))
+        error = assert_raises(AgentCliRuntime::AuthenticationError) do
+          AgentCliRuntime.prepare!(
+            preparation_request(
+              work:, root: File.join(dir, "invocation"), source: selected_config(dir),
+              credential_environment_keys: [], credential_file: credentials
+            ),
+            env: fixture.fetch(:env)
+          )
+        end
+        refute_includes error.message, File.binread(credentials)
+        refute File.exist?(File.join(dir, "invocation"))
+      end
+    end
+  end
+
+  def test_probe_environment_explicitly_unsets_ambient_unselected_values
+    profile = AgentCliRuntime::Profiles.fetch(:opencode)
+    request = AgentCliRuntime::ProbeRequest.new(
+      profile:, route: "anthropic/claude-sonnet-4-5", environment: {},
+      credential_environment_keys: []
+    )
+    ENV["UNSELECTED_PROBE_SECRET"] = "secret-canary"
+
+    child = AgentCliRuntime::OpenCode::Probe.send(
+      :child_environment, profile, request, env: { "PATH" => ENV.fetch("PATH") }
+    )
+
+    assert child.key?("UNSELECTED_PROBE_SECRET")
+    assert_nil child.fetch("UNSELECTED_PROBE_SECRET")
+  ensure
+    ENV.delete("UNSELECTED_PROBE_SECRET")
+  end
+
+  def test_credential_environment_keys_cannot_override_overlay_controls
+    error = assert_raises(ArgumentError) do
+      AgentCliRuntime::OpenCodePreparationRequest.new(
+        request: AgentCliRuntime::Request.new(profile: :opencode, prompt: "test"),
+        working_directory: Dir.pwd,
+        invocation_root: File.join(Dir.tmpdir, "unused-opencode-root"),
+        credential_environment_keys: [ "OPENCODE_CONFIG" ]
+      )
+    end
+    assert_match(/cannot override the OpenCode overlay/, error.message)
   end
 
   def test_route_probe_is_fail_soft_when_the_binary_is_missing
@@ -303,13 +461,65 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
     end
   end
 
+  def test_invocation_root_resolves_safe_symlinked_ancestors
+    with_fixture_cli do |fixture|
+      Dir.mktmpdir do |dir|
+        real_parent = File.join(dir, "real-parent")
+        linked_parent = File.join(dir, "linked-parent")
+        work = File.join(dir, "work")
+        FileUtils.mkdir_p([ real_parent, work ])
+        File.symlink(real_parent, linked_parent)
+        prepared = AgentCliRuntime.prepare!(
+          preparation_request(
+            work:, root: File.join(linked_parent, "invocation"), source: selected_config(dir)
+          ),
+          env: fixture.fetch(:env)
+        )
+
+        assert_equal File.join(real_parent, "invocation"), prepared.invocation_root
+        assert File.directory?(prepared.invocation_root)
+      ensure
+        prepared&.cleanup!
+      end
+    end
+  end
+
+  def test_cleanup_refuses_a_replaced_root_without_deleting_either_tree
+    with_fixture_cli do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        root = File.join(dir, "invocation")
+        original = "#{root}.original"
+        FileUtils.mkdir_p(work)
+        prepared = AgentCliRuntime.prepare!(
+          preparation_request(work:, root:, source: selected_config(dir)),
+          env: fixture.fetch(:env)
+        )
+        File.rename(root, original)
+        Dir.mkdir(root, 0o700)
+        File.write(File.join(root, "replacement"), "keep\n")
+
+        error = assert_raises(AgentCliRuntime::UnsafePathError) do
+          prepared.cleanup!
+        end
+        assert_match(/replaced OpenCode invocation root/, error.message)
+        assert File.file?(File.join(root, "replacement"))
+        assert File.file?(File.join(original, "selected-config", "opencode.json"))
+      ensure
+        FileUtils.remove_entry_secure(root) if root && File.directory?(root)
+        FileUtils.remove_entry_secure(original) if original && File.directory?(original)
+      end
+    end
+  end
+
   private
 
   def preparation_request(work:, root:, source:, configuration: nil,
                           credential_environment_keys: [ "ANTHROPIC_API_KEY" ],
                           credential_file: nil, model: "anthropic/claude-sonnet-4-5",
                           permission_mode: "read-only", permission_policy: nil,
-                          additional_read_roots: [], additional_write_roots: [])
+                          additional_read_roots: [], additional_write_roots: [],
+                          edit_patterns: [])
     AgentCliRuntime::OpenCodePreparationRequest.new(
       request: AgentCliRuntime::Request.new(
         profile: :opencode,
@@ -326,7 +536,8 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
       credential_file:,
       permission_policy:,
       additional_read_roots:,
-      additional_write_roots:
+      additional_write_roots:,
+      edit_patterns:
     )
   end
 
@@ -349,6 +560,8 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
       export_help = File.read(File.expand_path(
         "fixtures/opencode/v1.18.16/export-help.txt", __dir__
       ))
+      export_help = export_help.sub(/.*--sanitize.*\n/, "") if
+        mode == :missing_export_capability
       auth = mode == :missing_auth ? "" : "anthropic\n"
       route = mode == :wrong_route ? "anthropic/other-model" :
         "anthropic/claude-sonnet-4-5"

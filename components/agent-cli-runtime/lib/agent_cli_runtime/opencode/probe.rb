@@ -145,10 +145,11 @@ module AgentCliRuntime
       end
 
       def child_environment(profile, request, env:)
-        selected = env.each_with_object({}) do |(key, value), result|
+        selected = (ENV.keys | env.keys).to_h { |key| [ key, nil ] }
+        env.each do |key, value|
           if SAFE_ENVIRONMENT_KEYS.include?(key) || key.start_with?("LC_") ||
              key.start_with?("MISE_")
-            result[key] = value.to_s
+            selected[key] = value.to_s
           end
         end
         %w[

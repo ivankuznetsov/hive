@@ -21,7 +21,7 @@ module AgentCliRuntime
       }.freeze
       AUTH_PATTERN = /auth|credential|api[ _-]?key|unauthorized|forbidden/i
       CONFIGURATION_PATTERN =
-        /config|provider|model|route|variant|not found|unknown model/i
+        /\b(?:Config(?:uration)?Error|UnknownProvider|UnknownModel|ModelNotFound|RouteUnavailable|VariantUnavailable)\b|\b(?:invalid|unknown|unsupported) (?:configuration|provider|model|route|variant)\b|\b(?:provider|model|route|variant)(?: [^\n]+)? (?:not found|unavailable)\b/i
       private_constant :KNOWN_EVENT_TYPES, :EVENT_PART_TYPES,
                        :AUTH_PATTERN, :CONFIGURATION_PATTERN
 
@@ -45,7 +45,8 @@ module AgentCliRuntime
           event = parse_json_line(line, line_number)
           type = required_string(event, "type", "event type")
           unless KNOWN_EVENT_TYPES.include?(type)
-            validate_additive_session!(event, session_id)
+            additive_session = validate_additive_session!(event, session_id)
+            session_id ||= additive_session
             if unknown.length < MAX_UNKNOWN_EVENTS
               unknown << Redactor.diagnostic(
                 "unknown OpenCode event #{type}", bytes: 128
@@ -89,11 +90,13 @@ module AgentCliRuntime
         end.join
         malformed!("OpenCode terminal assistant message is empty") if message.empty?
 
+        final_message_truncated = message.bytesize > MAX_FINAL_MESSAGE_BYTES
         ParsedRun.new(
           session_id: session_id,
           terminal_message_id: terminal.fetch(:message_id),
           terminal_reason: terminal.fetch(:reason),
           final_message: bounded_string(message, MAX_FINAL_MESSAGE_BYTES),
+          final_message_truncated: final_message_truncated,
           preliminary_usage: terminal.fetch(:usage),
           unknown_events: unknown.compact
         )
@@ -136,6 +139,7 @@ module AgentCliRuntime
           kind: :completed,
           termination: termination,
           final_message: parsed.final_message,
+          final_message_truncated: parsed.final_message_truncated,
           identity: RouteIdentity.new(requested: route, actual: actual),
           usage: inspection.fetch(:usage),
           diagnostic: nil,
@@ -254,7 +258,11 @@ module AgentCliRuntime
 
       def validate_additive_session!(event, session_id)
         value = event["sessionID"]
-        return if value.nil? || session_id.nil? || value == session_id
+        return nil if value.nil?
+        unless value.is_a?(String) && !value.empty? && !value.include?("\0")
+          malformed!("OpenCode additive event sessionID must be a non-empty string")
+        end
+        return value if session_id.nil? || value == session_id
 
         malformed!("OpenCode additive event session does not match the run")
       end

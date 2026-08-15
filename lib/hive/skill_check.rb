@@ -8,7 +8,8 @@ module Hive
   # Per-agent verification that a configured native skill
   # invocation actually resolves to a file on disk. `Hive::AgentProfile`
   # delegates to one of `SkillCheck::Claude` / `SkillCheck::Codex` /
-  # `SkillCheck::Pi` so the profile interface stays uniform.
+  # `SkillCheck::Pi` / `SkillCheck::Grok` / `SkillCheck::OpenCode` so the
+  # profile interface stays uniform.
   #
   # Each profile-specific module exposes
   # `verify(invocation, project_root: nil)` returning a 2-element array:
@@ -23,6 +24,10 @@ module Hive
   #   [:not_applicable, "<why>"]
   #     — this invocation form cannot be checked for this agent
   #       (e.g. pi only resolves skills as `/skill:<name>`).
+  #
+  #   [:shadowed, "<conflicting path>"]
+  #     — the requested native package is configured, but a higher-precedence
+  #       project/user skill would win at runtime.
   module SkillCheck
     # Parsed invocation. These forms are accepted:
     #   /name           -> Invocation.new(plugin: nil, name: "name")
@@ -484,6 +489,16 @@ module Hive
           end
           return Resolution.new(
             status: :present, path: path, message: path,
+            candidates: candidates.freeze, parse_errors: parse_errors.freeze
+          )
+        end
+
+        if inv.name.start_with?("ce-") &&
+           selected_plugins.include?(PINNED_COMPOUND_ENGINEERING_PLUGIN)
+          return Resolution.new(
+            status: :present,
+            path: "configured:#{PINNED_COMPOUND_ENGINEERING_PLUGIN}",
+            message: "opencode: /#{inv.name} is provided by the prepared pinned plugin",
             candidates: candidates.freeze, parse_errors: parse_errors.freeze
           )
         end

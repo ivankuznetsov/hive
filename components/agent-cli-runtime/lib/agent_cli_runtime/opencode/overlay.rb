@@ -61,6 +61,10 @@ module AgentCliRuntime
         validate_provider!(source_config, requested_route.provider)
         validate_nonsecret!(source_config)
         roots = resolve_roots(preparation)
+        credential_environment_keys = provider_credential_environment_keys(
+          source_config, requested_route.provider,
+          preparation.credential_environment_keys
+        )
         plugins = selected_plugins(source_config, preparation.plugins)
         permission = permission_rules(preparation, roots, plugins: plugins)
 
@@ -95,9 +99,11 @@ module AgentCliRuntime
             route: requested_route,
             variant: preparation.request.effort,
             environment: environment,
-            credential_environment_keys:
-              preparation.credential_environment_keys,
-            credential_file_staged: !staged_credential.nil?
+            credential_environment_keys: credential_environment_keys,
+            credential_file_staged:
+              staged_credential && credential_file_supports_provider?(
+                staged_credential.last, requested_route.provider
+              )
           )
           probe_result = OpenCode::Probe.call!(probe_request, env: probe_env)
           invocation = compile_invocation(
@@ -109,8 +115,7 @@ module AgentCliRuntime
           PreparedInvocation.new(
             invocation: invocation,
             environment: environment,
-            credential_environment_keys:
-              preparation.credential_environment_keys,
+            credential_environment_keys: credential_environment_keys,
             invocation_root: root,
             generated_paths: generated_paths.uniq,
             configuration_path: configuration_path,
@@ -186,6 +191,43 @@ module AgentCliRuntime
       end
       private_class_method :validate_nonsecret!
 
+      PROVIDER_ENVIRONMENT_KEY_ALIASES = {
+        "anthropic" => %w[ANTHROPIC CLAUDE],
+        "google" => %w[GOOGLE GEMINI],
+        "gemini" => %w[GOOGLE GEMINI],
+        "xai" => %w[XAI GROK],
+        "github-copilot" => %w[COPILOT GITHUB],
+        "opencode" => %w[OPENCODE]
+      }.freeze
+      private_constant :PROVIDER_ENVIRONMENT_KEY_ALIASES
+
+      def provider_credential_environment_keys(config, provider, configured_keys)
+        definition = config.fetch("provider").fetch(provider)
+        referenced = environment_placeholders(definition)
+        aliases = PROVIDER_ENVIRONMENT_KEY_ALIASES.fetch(
+          provider, [ provider.upcase.gsub(/[^A-Z0-9]+/, "_") ]
+        )
+        configured_keys.select do |key|
+          referenced.include?(key) || aliases.any? { |prefix| key.start_with?("#{prefix}_") }
+        end.freeze
+      end
+      private_class_method :provider_credential_environment_keys
+
+      def environment_placeholders(value)
+        case value
+        when Hash
+          value.values.flat_map { |child| environment_placeholders(child) }
+        when Array
+          value.flat_map { |child| environment_placeholders(child) }
+        when String
+          match = /\A\{env:(?<key>[A-Z][A-Z0-9_]*)\}\z/.match(value)
+          match ? [ match[:key] ] : []
+        else
+          []
+        end.uniq
+      end
+      private_class_method :environment_placeholders
+
       def resolve_roots(preparation)
         working = safe_directory!(preparation.working_directory, label: "working directory")
         reads = preparation.additional_read_roots.map do |path|
@@ -253,13 +295,23 @@ module AgentCliRuntime
         # also declared them writable.
         writable_roots = [ roots.fetch(:working), *roots.fetch(:write) ].uniq
         edit = { "*" => "deny" }
-        (roots.fetch(:read) - roots.fetch(:write)).each do |root|
-          edit[root] = "deny"
-          edit["#{root}/**"] = "deny"
+        allows = if preparation.edit_patterns.empty?
+          writable_roots.flat_map do |root|
+            edit_patterns(root, working: roots.fetch(:working))
+          end
+        else
+          normalize_declared_edit_patterns(
+            preparation.edit_patterns, writable_roots,
+            working: roots.fetch(:working)
+          )
         end
-        writable_roots.each do |root|
-          edit[root] = "allow"
-          edit["#{root}/**"] = "allow"
+        allows.each do |pattern|
+            edit[pattern] = "allow"
+        end
+        (roots.fetch(:read) - roots.fetch(:write)).each do |root|
+          edit_patterns(root, working: roots.fetch(:working)).each do |pattern|
+            edit[pattern] = "deny"
+          end
         end
         common.merge(
           "edit" => edit, "bash" => "deny", "task" => "deny",
@@ -269,17 +321,56 @@ module AgentCliRuntime
       end
       private_class_method :permission_rules
 
+      def edit_patterns(root, working:)
+        if root == working
+          [ "**" ]
+        elsif root.start_with?(working + File::SEPARATOR)
+          relative = root.delete_prefix(working + File::SEPARATOR)
+          [ relative, "#{relative}/**" ]
+        else
+          [ root, "#{root}/**" ]
+        end
+      end
+      private_class_method :edit_patterns
+
+      def normalize_declared_edit_patterns(patterns, writable_roots, working:)
+        patterns.map do |value|
+          pattern = value.sub(%r{\A//}, "/")
+          unless File.absolute_path?(pattern) && !pattern.include?("\0")
+            raise ConfigurationError,
+                  "OpenCode edit patterns must be absolute path patterns"
+          end
+          literal_prefix = pattern.split(/[*?]/, 2).first.sub(%r{/+\z}, "")
+          unless writable_roots.any? do |root|
+            literal_prefix == root || literal_prefix.start_with?(root + File::SEPARATOR)
+          end
+            raise ConfigurationError,
+                  "OpenCode edit pattern is outside the declared write roots"
+          end
+          if pattern == working
+            "**"
+          elsif pattern.start_with?(working + File::SEPARATOR)
+            pattern.delete_prefix(working + File::SEPARATOR)
+          else
+            pattern
+          end
+        end.uniq.freeze
+      end
+      private_class_method :normalize_declared_edit_patterns
+
       def create_root!(value)
         path = File.expand_path(value)
         unless File.absolute_path?(value.to_s)
           raise UnsafePathError,
                 "OpenCode invocation root must be absolute"
         end
+        parent = File.realpath(File.dirname(path))
+        path = File.join(parent, File.basename(path))
         if File.exist?(path) || File.symlink?(path)
           raise UnsafePathError,
                 "OpenCode invocation root must not already exist"
         end
-        validate_ancestors!(File.dirname(path))
+        validate_ancestors!(parent)
         Dir.mkdir(path, 0o700)
         path.freeze
       rescue Errno::EEXIST, Errno::ENOENT, Errno::EACCES => e
@@ -332,6 +423,11 @@ module AgentCliRuntime
 
       def generated_configuration(source, plugins, route, permission)
         config = deep_copy(source)
+        if config["agent"].is_a?(Hash)
+          config["agent"].each_value do |agent|
+            agent.delete("permission") if agent.is_a?(Hash)
+          end
+        end
         config["$schema"] ||= "https://opencode.ai/config.json"
         config["model"] = route.to_s
         config["permission"] = permission
@@ -355,6 +451,14 @@ module AgentCliRuntime
         [ directory, destination ]
       end
       private_class_method :stage_credential_file
+
+      def credential_file_supports_provider?(path, provider)
+        value = JSON.parse(File.binread(path))
+        value.is_a?(Hash) && value.key?(provider)
+      rescue JSON::ParserError
+        false
+      end
+      private_class_method :credential_file_supports_provider?
 
       def safe_source_file!(value, label:)
         path = File.expand_path(value)
@@ -398,7 +502,7 @@ module AgentCliRuntime
       private_class_method :write_private_file
 
       def overlay_environment(paths, configuration_path, pure:)
-        {
+        environment = {
           "XDG_CONFIG_HOME" => paths.fetch(:config),
           "XDG_DATA_HOME" => paths.fetch(:data),
           "XDG_CACHE_HOME" => paths.fetch(:cache),
@@ -410,7 +514,11 @@ module AgentCliRuntime
           "OPENCODE_DISABLE_MODELS_FETCH" => "true",
           "OPENCODE_DISABLE_AUTOUPDATE" => "true",
           "OPENCODE_PURE" => pure ? "true" : "false"
-        }.freeze
+        }
+        unless environment.keys.sort == OPENCODE_OVERLAY_ENVIRONMENT_KEYS.sort
+          raise ConfigurationError, "OpenCode overlay environment contract drifted"
+        end
+        environment.freeze
       end
       private_class_method :overlay_environment
 

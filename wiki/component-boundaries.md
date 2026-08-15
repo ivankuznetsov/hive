@@ -405,10 +405,11 @@ RubyGems release in packaged Web installs, and contains no second provider
 runtime implementation. See [[modules/agent_cli_runtime]] for the public
 surface and release boundary.
 
-The monorepo component and Hive source dependency are prepared together at
-`0.2.0` because Hive directly loads the component ABI. Candidate validation
-does not authorize a component tag, RubyGems or mirror publication, deployment,
-or a downstream Hive release.
+The OpenCode source remains unreleased and Hive's package dependency stays on
+the published 0.1.x line. Candidate validation does not authorize a version
+choice, component tag, RubyGems or mirror publication, deployment, or a
+downstream Hive release. After an explicitly authorized component release,
+Hive's dependency advances in a separate compatibility change.
 
 Its public standalone repository is deliberately a one-way distribution
 projection. Scheduled main snapshots and manually requested release snapshots

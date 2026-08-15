@@ -999,6 +999,31 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
     end
   end
 
+  def test_pinned_plugin_constant_matches_the_agent_skills_manifest
+    require "hive/agent_skills/manifest"
+
+    package = Hive::AgentSkills::Manifest.load
+              .package("compound-engineering").native_for("opencode").package
+    assert_equal package,
+                 Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+  end
+
+  def test_prepared_pinned_plugin_is_ready_without_ambient_cache
+    resolution = Hive::SkillCheck::OpenCode.resolve(
+      "/ce-plan",
+      configuration: {
+        "plugin" => [ Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN ]
+      },
+      environment: {
+        "HOME" => "/prepared/home", "XDG_CACHE_HOME" => "/prepared/cache",
+        "XDG_DATA_HOME" => "/prepared/data", "XDG_CONFIG_HOME" => "/prepared/config"
+      }
+    )
+
+    assert_equal :present, resolution.status
+    assert_match(/prepared pinned plugin/, resolution.message)
+  end
+
   def test_malformed_invocation_returns_missing
     status, message = Hive::SkillCheck::OpenCode.verify("garbage")
 

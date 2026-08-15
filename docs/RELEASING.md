@@ -62,11 +62,11 @@ To publish an approved version:
    `components/agent-cli-runtime/lib/agent_cli_runtime/version.rb` and its
    package changelog in a package PR. Run the package tests and exact candidate
    verifier.
-2. Merge the package PR. When Hive directly loads an ABI added by the candidate,
-   its source constraint advances in the same review so the monorepo remains
-   loadable. That source metadata does not publish either package: hold the
-   component tag/publication and any downstream Hive release for their own
-   explicit authorization after the candidate bytes pass verification.
+2. Merge the source feature without selecting a release version. Once a
+   component release is explicitly authorized, update its version and
+   changelog, publish the verified bytes, then advance Hive's dependency in a
+   separate compatibility change. This keeps packaged Web installs resolvable
+   from RubyGems throughout the sequence.
 3. Record the full protected-`main` commit and verify that the version is not
    already present on RubyGems. Confirm the component tag ruleset is active and
    that `agent-cli-runtime-release` still requires the intended reviewers and

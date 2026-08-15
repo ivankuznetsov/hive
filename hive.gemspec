@@ -59,10 +59,7 @@ Gem::Specification.new do |spec|
 
   # Runtime dependencies. Dev/test dependencies stay in the Gemfile because
   # they have no business being installed for end users.
-  # Hive loads the component's typed runtime values directly, so source and
-  # package metadata advance together even though their releases remain
-  # independently authorized.
-  spec.add_dependency "agent-cli-runtime", "~> 0.2.0"
+  spec.add_dependency "agent-cli-runtime", "~> 0.1.1"
   spec.add_dependency "base64", ">= 0.2"
   spec.add_dependency "bubbletea", "= 0.1.4"
   # Managed installs isolate GEM_HOME/GEM_PATH from the operator's gems. Keep

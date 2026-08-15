@@ -7,6 +7,7 @@ class AgentCliRuntimeOpenCodeResultParserTest < Minitest::Test
     assert_equal "ses_contract_one", parsed.session_id
     assert_equal "msg_assistant_final", parsed.terminal_message_id
     assert_equal "Done.", parsed.final_message
+    refute parsed.final_message_truncated
     assert_equal "stop", parsed.terminal_reason
     assert_equal 5, parsed.preliminary_usage.input
     assert_equal 0, parsed.preliminary_usage.cache_write
@@ -19,6 +20,7 @@ class AgentCliRuntimeOpenCodeResultParserTest < Minitest::Test
     assert_equal :completed, outcome.kind
     assert outcome.completed?
     assert_equal "Done.", outcome.final_message
+    refute outcome.final_message_truncated
     assert_equal "anthropic/claude-sonnet-4-5", outcome.identity.requested.to_s
     assert_equal "anthropic/claude-sonnet-4-5", outcome.identity.actual.to_s
     assert_equal :matched, outcome.identity.resolution_status
@@ -101,6 +103,18 @@ class AgentCliRuntimeOpenCodeResultParserTest < Minitest::Test
     assert_equal parsed.unknown_events, outcome.unknown_events
   end
 
+  def test_first_unknown_additive_event_binds_the_run_session
+    unknown = JSON.generate(
+      "type" => "telemetry_hint", "sessionID" => "ses_other", "payload" => {}
+    ) + "\n"
+
+    assert_raises(AgentCliRuntime::MalformedOutput) do
+      AgentCliRuntime.parse_run(
+        :opencode, stdout: unknown + fixture("run-one-step.jsonl")
+      )
+    end
+  end
+
   def test_timeout_and_cancellation_take_precedence_over_incomplete_output
     malformed = fixture("run-malformed-json.jsonl")
 
@@ -144,6 +158,24 @@ class AgentCliRuntimeOpenCodeResultParserTest < Minitest::Test
     assert_equal :cli_failure, cli.kind
     refute_includes auth.diagnostic, "sk-"
     assert_includes auth.diagnostic, "[REDACTED:openai_api_key]"
+
+    operational = normalize(
+      stdout: "", stderr: "provider rate limit reached for model",
+      termination: AgentCliRuntime::TerminationEvidence.new(exit_code: 1)
+    )
+    assert_equal :cli_failure, operational.kind
+  end
+
+  def test_signal_terminated_run_is_a_cli_failure_not_success
+    outcome = normalize(
+      stdout: fixture("run-one-step.jsonl"), stderr: "terminated",
+      termination: AgentCliRuntime::TerminationEvidence.new(
+        exit_code: nil, signal: "TERM"
+      )
+    )
+
+    assert_equal :cli_failure, outcome.kind
+    refute outcome.completed?
   end
 
   def test_zero_exit_rejects_malformed_or_uncorrelated_success_evidence
@@ -191,6 +223,7 @@ class AgentCliRuntimeOpenCodeResultParserTest < Minitest::Test
 
     assert_equal AgentCliRuntime::OpenCode::ResultParser::MAX_FINAL_MESSAGE_BYTES,
                  parsed.final_message.bytesize
+    assert parsed.final_message_truncated
 
     outcome = normalize(
       stdout: "x" * (AgentCliRuntime::OpenCode::ResultParser::MAX_RUN_BYTES + 1)

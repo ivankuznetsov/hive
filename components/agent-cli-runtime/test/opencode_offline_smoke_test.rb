@@ -6,7 +6,13 @@ class AgentCliRuntimeOpenCodeOfflineSmokeTest < Minitest::Test
 
   def test_installed_cli_satisfies_the_offline_preparation_contract_without_a_run
     binary = installed_binary
-    skip "OpenCode is not installed; the 1.18.16+ offline smoke cannot run" unless binary
+    unless binary
+      message = "OpenCode is not installed; the 1.18.16+ offline smoke cannot run"
+      if ENV["AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_REQUIRED"] == "1"
+        flunk message
+      end
+      skip message
+    end
 
     route = ENV.fetch(
       "AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_ROUTE", DEFAULT_ROUTE
@@ -65,8 +71,8 @@ class AgentCliRuntimeOpenCodeOfflineSmokeTest < Minitest::Test
       assert_equal "deny", policy.fetch("*")
       assert_equal "deny", policy.fetch("bash")
       assert_equal "deny", policy.dig("edit", "*")
-      assert_equal "allow", policy.dig("edit", work)
-      assert_equal "allow", policy.dig("edit", "#{work}/**")
+      assert_equal "allow", policy.dig("edit", "**")
+      refute policy.fetch("edit").keys.any? { |pattern| pattern.start_with?(work) }
       assert_equal "deny", policy.dig("external_directory", "*")
 
       observed = File.readlines(calls, chomp: true).map { |line| JSON.parse(line) }

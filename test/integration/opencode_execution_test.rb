@@ -34,10 +34,10 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
     SH
     File.chmod(0o755, @bin)
     @saved_environment = %w[
-      HIVE_OPENCODE_BIN OPENCODE_API_KEY OPENAI_API_KEY
+      HIVE_OPENCODE_BIN ANTHROPIC_API_KEY OPENAI_API_KEY
     ].to_h { |key| [ key, ENV[key] ] }
     ENV["HIVE_OPENCODE_BIN"] = @bin
-    ENV["OPENCODE_API_KEY"] = "integration-secret-canary"
+    ENV["ANTHROPIC_API_KEY"] = "integration-secret-canary"
     ENV["OPENAI_API_KEY"] = "ambient-credential-must-not-cross"
     @worktree_paths = []
     Hive::AgentProfile.reset_version_cache!
@@ -181,7 +181,7 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
     config["agents"] ||= {}
     config["agents"]["opencode"] = {
       "config_path" => @configuration,
-      "credential_env" => [ "OPENCODE_API_KEY" ],
+      "credential_env" => [ "ANTHROPIC_API_KEY" ],
       "plugins" => plugin ? [ "file://#{plugin}" ] : [],
       "isolation" => "hermetic"
     }
@@ -238,11 +238,16 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
     assert_equal "deny", permission.fetch("*")
     assert_equal "deny", permission.fetch("bash")
     assert_equal "deny", permission.dig("edit", "*")
-    assert_equal "allow", permission.dig("edit", working_directory)
-    assert_equal "allow", permission.dig("edit", "#{working_directory}/**")
-    assert_equal "allow", permission.dig("edit", additional_write_root)
-    assert_equal "allow",
-                 permission.dig("edit", "#{additional_write_root}/**")
+    assert_equal "allow", permission.dig("edit", "**")
+    absolute_working_allow = permission.fetch("edit").any? do |pattern, action|
+      action == "allow" && pattern.start_with?(working_directory)
+    end
+    refute absolute_working_allow, permission.fetch("edit").inspect
+    unless additional_write_root == working_directory
+      assert_equal "allow", permission.dig("edit", additional_write_root)
+      assert_equal "allow",
+                   permission.dig("edit", "#{additional_write_root}/**")
+    end
     assert_equal "deny", permission.dig("external_directory", "*")
   end
 
@@ -296,7 +301,7 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
             "invocation_root" => File.dirname(ENV.fetch("XDG_CONFIG_HOME")),
             "permission" => permission,
             "skill_invocation_present" => ARGV.last.include?("/ce-plan"),
-            "selected_credential_present" => !ENV["OPENCODE_API_KEY"].to_s.empty?,
+            "selected_credential_present" => !ENV["ANTHROPIC_API_KEY"].to_s.empty?,
             "ambient_credential_present" => !ENV["OPENAI_API_KEY"].to_s.empty?
           }
           File.open(#{@observations.dump}, "a", 0o600) do |file|

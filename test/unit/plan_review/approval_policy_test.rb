@@ -40,6 +40,21 @@ class PlanReviewApprovalPolicyTest < Minitest::Test
     )
   end
 
+  def test_unparsable_policy_version_filter_denies_instead_of_raising
+    assert_nil Hive::PlanReview::ApprovalPolicy.match(
+      finding:, policies: [ policy ], review_id: review_id,
+      policy_fingerprint: "c" * 64, now: NOW,
+      policy_id: "safe_api_change", policy_version: "not-an-integer"
+    )
+  end
+
+  def test_policy_missing_its_validity_window_is_not_applicable
+    assert_nil Hive::PlanReview::ApprovalPolicy.match(
+      finding:, policies: [ policy.reject { |key, _| key == "valid_from" } ],
+      review_id: review_id, policy_fingerprint: "c" * 64, now: NOW
+    )
+  end
+
   private
 
   def review_id = "pr-#{'a' * 64}"

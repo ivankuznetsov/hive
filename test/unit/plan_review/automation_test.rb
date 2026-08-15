@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/plan_review/automation"
 
 class PlanReviewAutomationTest < Minitest::Test
+  include HiveTestHelper
+
   Workflow = Struct.new(:id, keyword_init: true)
   Task = Struct.new(
     :folder, :project_root, :hive_state_path, :slug, :id, :workflow,
@@ -38,6 +40,27 @@ class PlanReviewAutomationTest < Minitest::Test
           orchestrator: ->(**) { flunk "must not run" }
         )
       end
+    end
+  end
+
+  def test_falls_back_to_the_real_orchestrator_when_none_is_injected
+    with_task do |task|
+      expected = Object.new
+      observed = nil
+      replacement = lambda do |task:, cfg:, planner_identity:|
+        observed = { task:, cfg:, planner_identity: }
+        expected
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::PlanReview::Orchestrator, :run!, replacement
+      ) do
+        Hive::PlanReview::Automation.run!(task:, config: Hive::Config::DEFAULTS)
+      end
+
+      assert_same expected, result
+      assert_same task, observed.fetch(:task)
+      assert_equal "claude", observed.dig(:planner_identity, "provider")
     end
   end
 

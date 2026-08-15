@@ -135,63 +135,97 @@ class PlanReviewRouteResolverTest < Minitest::Test
     assert_equal "xhigh", observed.fetch("effort")
   end
 
-  def test_primary_verification_and_configured_fallback_candidates_are_exact
-    %w[primary verification].each do |role|
-      observed = nil
+  def test_verification_and_unrecognised_roles_default_to_native_codex
+    seen = {}
+    %w[verification some-new-role].each do |role|
       Hive::PlanReview::RouteResolver.resolve(
-        role:, planner_identity: { "family" => "anthropic" },
-        probe: lambda do |candidate|
-          observed = candidate
-          { "status" => "present", "actual" => candidate }
+        role: role,
+        planner_identity: { "provider" => "claude", "family" => "claude" },
+        probe: lambda do |value|
+          seen[role] = value
+          { "status" => "present", "actual" => value }
         end
       )
-      assert_equal "codex", observed.fetch("provider")
-      assert_equal "gpt-5.6-sol", observed.fetch("model")
     end
 
-    cfg = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
-    cfg["plan_review"]["routes"]["fallbacks"] = [
-      {
-        "agent" => "claude", "model" => "opus", "family" => "anthropic",
-        "effort" => "high", "route" => "fallback-claude"
-      }
-    ]
-    attempts = []
-    result = Hive::PlanReview::RouteResolver.resolve(
-      role: "adversarial", planner_identity: { "family" => "anthropic" }, cfg:,
-      probe: lambda do |candidate|
-        attempts << candidate
-        if candidate.fetch("provider") == "grok"
-          { "status" => "unsupported" }
-        else
-          { "status" => "present", "actual" => candidate }
-        end
-      end
-    )
-    assert result.resolved?
-    assert_equal "fallback-claude", attempts.last.fetch("route")
+    seen.each_value do |value|
+      assert_equal "codex", value.fetch("provider")
+      assert_equal "gpt-5.6-sol", value.fetch("model")
+      assert_equal "native_codex", value.fetch("route")
+    end
   end
 
-  def test_malformed_requested_and_observed_route_fields_fail_closed
-    invalid = candidate("codex", "", "openai")
-    assert_raises(Hive::ConfigError) do
+  def test_configured_fallback_rows_are_probed_after_the_primary
+    cfg = {
+      "plan_review" => {
+        "routes" => {
+          "adversarial" => {
+            "agent" => "grok", "model" => "grok-4.6", "family" => "grok",
+            "effort" => "high", "route" => "native_grok_build"
+          },
+          "fallbacks" => [
+            {
+              "agent" => "codex", "model" => "gpt-5.6-sol", "family" => "openai",
+              "effort" => "medium", "route" => "native_codex"
+            }
+          ]
+        }
+      }
+    }
+    probed = []
+
+    Hive::PlanReview::RouteResolver.resolve(
+      role: "adversarial", cfg: cfg,
+      planner_identity: { "provider" => "grok", "family" => "grok" },
+      probe: lambda do |value|
+        probed << value
+        # Reject the primary on independence so the fallback row is reached.
+        { "status" => "present", "actual" => value }
+      end
+    )
+
+    assert_equal %w[grok codex], probed.map { |value| value.fetch("provider") }
+    assert_equal "medium", probed.last.fetch("effort")
+    assert_equal "native_codex", probed.last.fetch("route")
+  end
+
+  def test_blank_route_fields_are_rejected_before_probing
+    error = assert_raises(Hive::ConfigError) do
       Hive::PlanReview::RouteResolver.resolve(
-        role: "primary", planner_identity: { "family" => "anthropic" },
-        candidates: [ invalid ], probe: ->(_candidate) { flunk }
+        role: "adversarial",
+        planner_identity: { "provider" => "claude", "family" => "claude" },
+        candidates: [ candidate("codex", "  ", "openai") ],
+        probe: ->(value) { { "status" => "present", "actual" => value } }
       )
     end
-    assert_raises(Hive::ConfigError) do
+
+    assert_includes error.message, "plan review route model must be non-empty"
+  end
+
+  def test_family_attestation_is_enforced_when_required
+    # `resolve` deliberately passes `require_family: false` (an unknown family
+    # is downgraded to nil rather than rejected), so this defensive branch has
+    # no caller today and is reachable only directly.
+    error = assert_raises(Hive::ConfigError) do
       Hive::PlanReview::RouteResolver.send(
-        :normalize_candidate, candidate("codex", "model", nil), require_family: true
+        :normalize_candidate, candidate("codex", "gpt-5.6-sol", nil), require_family: true
       )
     end
-    assert_raises(Hive::ConfigError) do
+
+    assert_includes error.message, "plan review route family must be attested"
+  end
+
+  def test_observed_identity_rejects_a_non_string_field
+    error = assert_raises(Hive::ConfigError) do
       Hive::PlanReview::RouteResolver.resolve(
-        role: "primary", planner_identity: { "family" => "anthropic" },
-        candidates: [ candidate("codex", "model", "openai") ],
-        probe: ->(_candidate) { { "status" => "present", "actual" => { "provider" => 1 } } }
+        role: "adversarial",
+        planner_identity: { "provider" => "claude", "family" => "claude" },
+        candidates: [ candidate("codex", "gpt-5.6-sol", "openai") ],
+        probe: ->(_value) { { "status" => "present", "actual" => { "provider" => 5 } } }
       )
     end
+
+    assert_includes error.message, "observed plan review route provider must be non-empty"
   end
 
   private

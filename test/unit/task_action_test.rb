@@ -1894,4 +1894,43 @@ class TaskActionTest < Minitest::Test
     File.define_singleton_method(:file?, original_file) if original_file
     File.define_singleton_method(:realpath, original_realpath) if original_realpath
   end
+
+  def test_plan_review_retry_uses_the_default_clock_and_survives_an_invalid_retry_at
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    waiting = marker(:waiting)
+
+    # No `clock:` — exercises the default `-> { Time.now.utc }`.
+    due = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: { "state" => "retry_scheduled", "retry_at" => "2000-01-01T00:00:00Z" }
+    )
+    assert_equal "plan_review_retry", due.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", due.command
+
+    # An unparseable `retry_at` must read as "not due yet" rather than
+    # blowing up the status row.
+    malformed = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: { "state" => "retry_scheduled", "retry_at" => "not-a-timestamp" },
+      clock: -> { Time.utc(2026, 8, 12, 12) }
+    )
+    assert_equal "plan_review_retry", malformed.key
+    assert_nil malformed.command
+  end
+
+  def test_plan_review_unsupported_route_capability_overrides_a_generic_required_action
+    task = fake_task(stage_name: "plan", stage_index: 3)
+
+    unsupported = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked",
+        "required_action" => "resolve verification blockers",
+        "routes" => [ { "capability_result" => "unsupported" } ]
+      }
+    )
+
+    assert_equal "plan_review_unsupported", unsupported.key
+    assert_nil unsupported.command
+  end
 end

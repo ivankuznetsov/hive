@@ -199,6 +199,8 @@ module Hive
         managed_bundle = app_dir == Hive::Web::AppBundle.app_dir
         if managed_bundle
           env["HIVE_CLI_ROOT"] = Hive::Web::AppBundle.hive_cli_root
+          env["HIVE_AGENT_CLI_RUNTIME_ROOT"] =
+            Hive::Web::AppBundle.agent_cli_runtime_root
           env["BUNDLE_PATH"] = Hive::Web::AppBundle.dependency_dir
         end
         rails_argv = if managed_bundle

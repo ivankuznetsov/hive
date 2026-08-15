@@ -77,6 +77,8 @@ class WebAppBundleTest < Minitest::Test
       # bundle-install, so `hive setup`/`hive web install` would fail on
       # every non-source-checkout install.
       assert_equal Hive::Web::AppBundle.hive_cli_root, captured_env["HIVE_CLI_ROOT"]
+      assert_equal Hive::Web::AppBundle.agent_cli_runtime_root,
+                   captured_env["HIVE_AGENT_CLI_RUNTIME_ROOT"]
       assert_nil captured_env["GEM_HOME"]
       assert_nil captured_env["GEM_PATH"]
       assert_equal Hive::Web::AppBundle.dependency_dir, captured_env["BUNDLE_PATH"]
@@ -84,6 +86,10 @@ class WebAppBundleTest < Minitest::Test
              "packaged users must install dependencies beneath their writable data home"
       assert File.file?(File.join(Hive::Web::AppBundle.hive_cli_root, "hive.gemspec")),
              "HIVE_CLI_ROOT must point at the gem root (hive.gemspec present)"
+      assert File.file?(File.join(
+        Hive::Web::AppBundle.agent_cli_runtime_root,
+        "agent-cli-runtime.gemspec"
+      )), "HIVE_AGENT_CLI_RUNTIME_ROOT must point at the component gem root"
       assert Hive::Web::AppBundle.present?
       assert_equal Hive::VERSION, Hive::Web::AppBundle.installed_version
       refute Hive::Web::AppBundle.stale?

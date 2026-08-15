@@ -387,6 +387,8 @@ class WebCommandTest < Minitest::Test
       end
 
       assert_equal Hive::Web::AppBundle.hive_cli_root, caught.env["HIVE_CLI_ROOT"]
+      assert_equal Hive::Web::AppBundle.agent_cli_runtime_root,
+                   caught.env["HIVE_AGENT_CLI_RUNTIME_ROOT"]
       assert_equal Hive::Web::AppBundle.dependency_dir, caught.env["BUNDLE_PATH"]
       assert_equal [ [ dir, [] ] ], rails_argv_calls
       assert_equal [ [ *exact_rails, "db:prepare" ] ], system_calls.map { |call| call.drop(1) },

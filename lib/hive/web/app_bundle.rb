@@ -28,12 +28,15 @@ module Hive
       end
 
       # Root of the hive-cli gem this code is running from. The managed
-      # bundle's Gemfile resolves `gem "hive-cli"` through HIVE_CLI_ROOT
-      # (there is no gem at its `..`, and hive-cli is not on rubygems), so
-      # every bundler/Rails invocation against the managed app must export
-      # this. Works identically for an installed gem and a source checkout.
+      # bundle's Gemfile resolves the two monorepo path gems through explicit
+      # installed roots (neither relative source path exists in the extracted
+      # Web archive), so every managed Bundler/Rails invocation exports both.
       def hive_cli_root
         File.expand_path("../../..", __dir__)
+      end
+
+      def agent_cli_runtime_root
+        Gem.loaded_specs.fetch("agent-cli-runtime").full_gem_path
       end
 
       def present?
@@ -166,6 +169,12 @@ module Hive
                 "hive web: installed hive-cli root #{hive_cli_root} has no hive.gemspec; " \
                 "reinstall the hive-cli package before provisioning Hive web"
         end
+        unless File.file?(File.join(agent_cli_runtime_root, "agent-cli-runtime.gemspec"))
+          raise Hive::Error,
+                "hive web: installed agent-cli-runtime root " \
+                "#{agent_cli_runtime_root} has no agent-cli-runtime.gemspec; " \
+                "reinstall the hive-cli package before provisioning Hive web"
+        end
 
         command = runner ? %w[bundle install] : bundle_install_argv(dir)
         runner ||= default_runner(output)
@@ -183,7 +192,8 @@ module Hive
           "BUNDLE_PATH" => dependency_dir,
           "GEM_HOME" => nil,
           "GEM_PATH" => nil,
-          "HIVE_CLI_ROOT" => hive_cli_root
+          "HIVE_CLI_ROOT" => hive_cli_root,
+          "HIVE_AGENT_CLI_RUNTIME_ROOT" => agent_cli_runtime_root
         }
         ok = Dir.chdir(dir) do
           runner.call(command, env)
@@ -213,6 +223,7 @@ module Hive
           "GEM_HOME" => nil,
           "GEM_PATH" => nil,
           "HIVE_CLI_ROOT" => hive_cli_root,
+          "HIVE_AGENT_CLI_RUNTIME_ROOT" => agent_cli_runtime_root,
           "RAILS_ENV" => "production",
           "SECRET_KEY_BASE" => "hive-managed-web-assets-build",
           "HIVE_WEB_STORAGE_DIR" => asset_storage

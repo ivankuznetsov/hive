@@ -22,3 +22,8 @@ installs OpenCode 1.18.16 and requires the guarded offline smoke, while local
 runs may still skip when OpenCode is absent. Version selection and publication
 remain outside this source-only change, so Hive retains its published 0.1.x
 dependency until a separately authorized component release.
+
+**Web compatibility:** Source Rails resolves the monorepo component directly;
+managed Web bundle/install/server commands export the exact installed component
+gem root. This keeps both source CI and extracted archives on the same ABI
+without requiring an unpublished RubyGems version.

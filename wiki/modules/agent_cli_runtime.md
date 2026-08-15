@@ -132,6 +132,11 @@ routing, default-model, status, and policy metadata. The five source-built Hive
 profiles reference the package's profile objects instead of copying provider
 flags, probes, usage extractors, or configuration metadata.
 
+Source Web declares the component as an explicit path gem so Rails boots
+against the same reviewed ABI. Managed Web provisioning and server launches
+replace that relative source with the installed component gem root through
+`HIVE_AGENT_CLI_RUNTIME_ROOT`, parallel to the existing `HIVE_CLI_ROOT` seam.
+
 The published 0.1.1 candidate was built from canonical commit
 `590fe343f585705651f277ddf198fcf4aa65f135`, published by the protected
 component workflow, and independently fetched from RubyGems with SHA-256

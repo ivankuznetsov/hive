@@ -74,6 +74,10 @@ end
 # In a source checkout the gem lives at the repo root (".."). The MANAGED
 # bundle (the extracted hive-web-<version>.tar.gz release asset) has no gem
 # at ".." — and hive-cli is not on rubygems — so `hive web`/`hive setup`
-# export HIVE_CLI_ROOT pointing at the installed gem's own root before
-# running bundler or the Rails server.
+# export HIVE_CLI_ROOT and HIVE_AGENT_CLI_RUNTIME_ROOT pointing at the
+# installed gems' roots before running bundler or the Rails server.
 gem "hive-cli", path: ENV.fetch("HIVE_CLI_ROOT", "..")
+gem "agent-cli-runtime",
+    path: ENV.fetch(
+      "HIVE_AGENT_CLI_RUNTIME_ROOT", "../components/agent-cli-runtime"
+    )

@@ -226,6 +226,50 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_shipping_cycle_retries_active_feature_limited_finding_without_rediscovery
+    with_patrol_project do |repo|
+      first = sample_finding
+      second = finding_with(id: "finding-2", fingerprint: nil)
+      second.feature_id = first.feature_id
+      first_fixer = FakeFixer.new(
+        Hive::Patrol::Fixer::PatchAttempt.new(
+          id: "patch-stale-#{first.id}",
+          finding: first,
+          branch: "hive-patrol/route-home-stale",
+          worktree_path: nil,
+          validation: { "passed" => false, "reason" => "stale_evidence" },
+          passed: false,
+          diffstat: "",
+          head_sha: nil
+        )
+      )
+
+      first_out, = with_captured_exit do
+        command_for(
+          mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ first, second ]),
+          fixer: first_fixer
+        ).call
+      end
+      second_fixer = FakeFixer.new(failing_patch(second))
+      second_out, = with_captured_exit do
+        command_for(
+          mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([]),
+          fixer: second_fixer
+        ).call
+      end
+
+      assert_equal [ first.id ], first_fixer.attempted
+      assert_equal "feature_limit",
+                   JSON.parse(first_out).fetch("skipped_findings").first.fetch("reason")
+      assert_equal 0, JSON.parse(second_out).fetch("findings")
+      assert_equal 1, JSON.parse(second_out).fetch("fix_candidates")
+      assert_equal [ second.id ], second_fixer.attempted,
+                   "an active finding must remain fixable after its review feature rotates away"
+    end
+  end
+
   def test_patrol_json_reports_review_handoff_failures
     with_patrol_project do |repo|
       feature = sample_feature

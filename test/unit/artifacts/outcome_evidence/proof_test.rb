@@ -359,6 +359,15 @@ class OutcomeEvidenceProofTest < Minitest::Test
       admitted = admit(root, value)
       assert_equal %w[claim-a claim-b], admitted.fetch("claims")
 
+      shared = Marshal.load(Marshal.dump(value))
+      shared.fetch("representations")[1] = shared.fetch("representations")[0].merge("role" => "review")
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.materialize_producer!(
+          shared, task_folder: root, expected_head: HEAD,
+          destination_root: "retained/provider-shared"
+        )
+      end
+
       mismatched = Marshal.load(Marshal.dump(value))
       mismatched.fetch("source")["name"] = "other-provider"
       error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
@@ -399,6 +408,53 @@ class OutcomeEvidenceProofTest < Minitest::Test
         destination_root: "retained/attempt-1/entry-02"
       )
       assert_equal "document", producer_retained.fetch("kind")
+    end
+  end
+
+  def test_materializes_one_managed_visual_capture_for_both_representation_roles
+    with_tmp_dir do |root|
+      valid_files(root)
+      FileUtils.mkdir_p(File.join(root, "retained", "attempt-visual"))
+      value = proof(
+        "screenshot", {},
+        original: [ "shot-original.png", "image/png" ],
+        review: [ "shot-original.png", "image/png" ]
+      )
+
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { admit(root, value) }
+
+      retained = Proof.materialize_producer!(
+        value, task_folder: root, expected_head: HEAD,
+        destination_root: "retained/attempt-visual/entry-01"
+      )
+
+      representations = retained.fetch("representations")
+      assert_equal %w[original review], representations.map { |item| item.fetch("role") }
+      assert_equal 2, representations.map { |item| item.fetch("path") }.uniq.length
+      assert_equal 1, representations.map { |item| item.fetch("sha256") }.uniq.length
+    end
+  end
+
+  def test_shared_producer_path_is_rejected_for_non_visual_evidence
+    with_tmp_dir do |root|
+      valid_files(root)
+      FileUtils.mkdir_p(File.join(root, "retained", "attempt-document"))
+      value = {
+        "kind" => "document",
+        "summary" => "The same document cannot bypass representation separation.",
+        "claims" => [ "claim-a" ],
+        "representations" => [
+          { "role" => "original", "media_type" => "text/plain", "path" => "report.txt" },
+          { "role" => "review", "media_type" => "text/plain", "path" => "report.txt" }
+        ]
+      }
+
+      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Proof.materialize_producer!(
+          value, task_folder: root, expected_head: HEAD,
+          destination_root: "retained/attempt-document/entry-01"
+        )
+      end
     end
   end
 

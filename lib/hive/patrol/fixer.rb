@@ -88,7 +88,7 @@ module Hive
 
       def initialize(project_root, cfg:, state: nil,
                      validator: nil, worktree_factory: nil, agent_runner: nil,
-                     token_budget: nil)
+                     token_budget: nil, git_ops: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state || default_state_store
@@ -99,6 +99,7 @@ module Hive
         @worktree_factory = worktree_factory || method(:build_worktree)
         @agent_runner = agent_runner || method(:run_agent)
         @token_budget = token_budget || TokenBudget.new(@project_root, cfg: cfg)
+        @git_ops = git_ops || Hive::GitOps.new(@project_root)
         @validation_preflights = {}
       end
 
@@ -243,19 +244,10 @@ module Hive
       end
 
       def reviewed_source_lines(revision, path)
-        spec = "#{revision}:#{path}"
-        size_out, _size_err, size_status = Open3.capture3(
-          "git", "-C", @project_root, "cat-file", "-s", spec
+        bytes = @git_ops.read_blob_at(
+          revision, path, max_bytes: SourceReader::MAX_SOURCE_BYTES
         )
-        return unless size_status.success?
-
-        size = Integer(size_out.strip, exception: false)
-        return unless size && size < SourceReader::MAX_SOURCE_BYTES
-
-        bytes, _blob_err, blob_status = Open3.capture3(
-          "git", "-C", @project_root, "cat-file", "blob", spec
-        )
-        return unless blob_status.success? && bytes.bytesize == size
+        return unless bytes
 
         bounded_source_lines(bytes)
       end

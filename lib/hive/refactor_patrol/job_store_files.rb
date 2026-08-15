@@ -11,7 +11,7 @@ module Hive
       MAX_JOB_BYTES = 8 * 1024 * 1024
       MAX_JSON_BYTES = 64 * 1024 * 1024
       MAX_JOB_ENTRIES = 8_192
-      MAX_JOB_FILES = MAX_JOB_ENTRIES * 2
+      MAX_JOB_FILES = MAX_JOB_ENTRIES * 3
       JOB_ID_SOURCE = "[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}".freeze
       JOB_ID = /\A#{JOB_ID_SOURCE}\z/
       JOB_JSON = /\A(#{JOB_ID_SOURCE})\.json\z/
@@ -51,12 +51,14 @@ module Hive
         regular?(job_relative(job_id))
       end
 
-      def with_job_lock(job_id, &block)
+      def with_job_lock(job_id)
         id = validated_job_id(job_id)
         directory.with_lock(
-          File.join("jobs", "#{id}.json.lock"),
-          &block
-        )
+          File.join("jobs", "#{id}.json.lock")
+        ) do
+          remove_job_temporaries(id)
+          yield
+        end
       end
 
       # New authoritative jobs are admitted under one store-wide capacity
@@ -112,6 +114,7 @@ module Hive
           match = JOB_JSON.match(name)
           next match[1] if match
           next if name.match?(JOB_LOCK)
+          next if managed_job_temporary?(name)
 
           corrupt!(
             "refactor patrol job inventory contains an unknown entry",
@@ -163,6 +166,40 @@ module Hive
       end
 
       private
+
+      def managed_job_temporary?(name)
+        target = Hive::ManagedDirectory.atomic_write_temporary_target(name)
+        return false unless target&.match?(JOB_JSON)
+
+        relative = File.join("jobs", name)
+        type = directory.entry_type(relative, missing: true)
+        return true if type.nil? || type == :regular
+
+        corrupt!(
+          "refactor patrol job temporary entry is not a regular file",
+          relative
+        )
+      end
+
+      def remove_job_temporaries(job_id)
+        target = "#{job_id}.json"
+        directory.each_child("jobs", missing: true) do |name|
+          next unless Hive::ManagedDirectory.atomic_write_temporary_target(
+            name
+          ) == target
+
+          relative = File.join("jobs", name)
+          type = directory.entry_type(relative, missing: true)
+          next unless type
+          unless type == :regular
+            corrupt!(
+              "refactor patrol job temporary entry is not a regular file",
+              relative
+            )
+          end
+          directory.unlink(relative, missing: true)
+        end
+      end
 
       def job_relative(job_id)
         File.join("jobs", "#{validated_job_id(job_id)}.json")

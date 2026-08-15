@@ -704,6 +704,16 @@ reserves an immutable monotonic entry/pointer pair before its job write;
 quarantine evidence, and locks. Its store-wide admission lock checks the
 bounded authoritative inventory before creating a per-job lock, so concurrent
 writers cannot persist an 8,193rd job or leave an over-capacity orphan lock.
+The inventory recognizes only ManagedDirectory's exact job-temporary filename
+grammar and verifies that a visible temporary is a regular file; a temporary
+that completes its rename between enumeration and inspection is also benign.
+Non-directory probes use nonblocking descriptor opens, so a temp-shaped FIFO
+or device fails closed instead of hanging inventory. Before a job-lock holder
+writes, it removes exact writer temporaries left by the previous holder; a
+crash can therefore leave at most one temporary per admitted job. The bounded
+directory inventory reserves that slot. All other unknown and non-regular
+entries remain corruption, so an in-flight atomic write cannot masquerade as
+a repository-identity failure without weakening the store boundary.
 An exact retry can adopt the next fully written membership after a crash, while
 a permanent hole keeps later entries invisible until an explicit authoritative
 rebuild. Rebuild scans while holding the writer lock, prepares a complete new

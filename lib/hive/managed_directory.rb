@@ -28,7 +28,16 @@ module Hive
     ACTIVE_SESSIONS_KEY = :hive_managed_directory_sessions
     private_constant :ACTIVE_SESSIONS_KEY
 
+    ATOMIC_WRITE_TEMPORARY =
+      /\A\.(?<target>[^\/]+)\.tmp\.[1-9][0-9]*\.[0-9a-f]{12}\z/
+    private_constant :ATOMIC_WRITE_TEMPORARY
+
     attr_reader :root
+
+    def self.atomic_write_temporary_target(name)
+      match = ATOMIC_WRITE_TEMPORARY.match(name)
+      match && match[:target]
+    end
 
     def initialize(root:, label:, anchor: nil)
       @root = File.expand_path(root).freeze
@@ -76,7 +85,7 @@ module Hive
             :directory
           rescue Errno::ENOTDIR
             file = @native.open_file(
-              parent.directory, name, File::RDONLY
+              parent.directory, name, File::RDONLY | File::NONBLOCK
             )
             validate_regular!(file.stat)
             :regular
@@ -213,8 +222,7 @@ module Hive
             )
           end
 
-          temporary_name =
-            ".#{name}.tmp.#{Process.pid}.#{SecureRandom.hex(6)}"
+          temporary_name = atomic_write_temporary_name(name)
           flags = File::WRONLY | File::CREAT | File::EXCL
           file = @native.open_file(
             parent.directory,
@@ -349,6 +357,10 @@ module Hive
     end
 
     private
+
+    def atomic_write_temporary_name(target)
+      ".#{target}.tmp.#{Process.pid}.#{SecureRandom.hex(6)}"
+    end
 
     DirectoryHandle = Struct.new(
       :directory,

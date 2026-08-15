@@ -382,7 +382,14 @@ remain unproven.
 - Live v4 jobs, query sidecars, quarantine evidence, and action locks are
   accessed only through one descriptor-confined `JobStoreFiles` port. A
   store-wide admission lock enforces the 8,192-job bound before any new
-  per-job lock or query membership is created.
+  per-job lock or query membership is created. Inventory accepts the exact
+  writer-owned `.JOB.json.tmp.PID.HEX` name only while it is a regular file or
+  has vanished during the atomic rename; every other unknown or non-regular
+  entry still fails closed, and special-file probes are nonblocking. The
+  next holder of a job's exclusive lock removes any temporary left by its
+  previous writer, so the bounded inventory can reserve exactly one temporary
+  slot per admitted job. A concurrent job write therefore cannot be
+  misreported as unresolved repository identity, including at store capacity.
 - Cutover and rollback quiescence include ordinary active occurrences, architecture active occurrences, and incomplete v4 jobs before advancing an ownership epoch.
 - Ordinary and architecture projection/recovery failures emit bounded project/occurrence/job diagnostics with retry count and next backoff time; durable outbox or exact-transition recovery remains pending while the scheduler backs off.
 - Closed-unmerged patrol PRs become dismissals and are skipped on future cycles.

@@ -1,0 +1,10 @@
+<% frame_id = stable_dom_id("task-diff", project.name, task.slug) %>
+<%= turbo_frame_tag frame_id,
+      src: task_diff_path(project.name, task.slug, source: task_source),
+      loading: :lazy,
+      data: { turbo_permanent: true } do %>
+  <section id="workspace-diff" class="workspace-panel" aria-labelledby="<%= "#{frame_id}-loading-heading" %>">
+    <h2 id="<%= "#{frame_id}-loading-heading" %>">Changes</h2>
+    <p class="muted">Loading bounded task changes…</p>
+  </section>
+<% end %>

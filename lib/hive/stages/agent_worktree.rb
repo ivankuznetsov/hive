@@ -83,36 +83,40 @@ module Hive
           permitted_writable_roots: [ task.folder, context.worktree_path ],
           required_outputs: { File.basename(report_path) => report_path }
         )
-        custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
+        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
         result = nil
         spawn_error = nil
         begin
-          begin
-            result = Hive::Stages::Base.spawn_agent(
-              task,
-              prompt: prompt,
-              add_dirs: scope.fetch(:add_dirs),
-              cwd: context.worktree_path,
-              **resource_limits,
-              log_label: task.stage_name,
-              profile: profile,
-              model: stage.model,
-              effort: stage.effort,
-              routing_arguments: Hive::Stages::Base.recognized_model_routing_arguments(
-                cfg || {}, stage.name, profile,
-                current: { model: stage.model, effort: stage.effort }.compact
-              ),
-              **Hive::Stages::Base.tool_scope_kwargs(scope),
-              status_mode: :exit_code_only,
-              cfg: cfg || {}
-            )
-          rescue StandardError => e
-            spawn_error = e
-          end
-        ensure
-          custody_report = Hive::ArtifactFirewall.validate_and_restore(
-            custody_manifest, custody_snapshot
+          result = Hive::Stages::Base.spawn_agent(
+            task,
+            prompt: prompt,
+            add_dirs: scope.fetch(:add_dirs),
+            cwd: context.worktree_path,
+            **resource_limits,
+            log_label: task.stage_name,
+            profile: profile,
+            model: stage.model,
+            effort: stage.effort,
+            routing_arguments: Hive::Stages::Base.recognized_model_routing_arguments(
+              cfg || {}, stage.name, profile,
+              current: { model: stage.model, effort: stage.effort }.compact
+            ),
+            agent_custody: agent_custody,
+            **Hive::Stages::Base.tool_scope_kwargs(scope),
+            status_mode: :exit_code_only,
+            cfg: cfg || {}
           )
+        rescue StandardError => e
+          spawn_error = e
+        end
+        custody_report = agent_custody.report
+        return managed_failure_result(task, error: spawn_error, context: context) if spawn_error && !custody_report
+        unless result.is_a?(Hash) && result[:status] == :ok
+          return managed_failure_result(task, result: result, context: context) unless custody_report
+        end
+
+        unless custody_report
+          raise Hive::StageError, "worktree agent custody was not invoked"
         end
         task_tampered = custody_report.tampered_labels & task_control_paths.keys
         unless task_tampered.empty?

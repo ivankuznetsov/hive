@@ -1,7 +1,7 @@
 ---
 title: Hive::TaskAction
 type: module
-source: lib/hive/task_action.rb, lib/hive/task_action/diagnostic.rb, lib/hive/terminal_outcome.rb
+source: lib/hive/task_action.rb, lib/hive/task_action/diagnostic.rb, lib/hive/task_workspace/builder.rb, lib/hive/terminal_outcome.rb
 created: 2026-04-26
 updated: 2026-08-13
 tags: [module, status, action, classifier, human-stage, diagnostic, blocked, plan-review, terminal-outcomes]
@@ -204,6 +204,23 @@ shared gate evaluator, so a superseded compatibility wait cannot override the
 current attempt/HEAD. The projection subsystem is also the sole legacy marker
 adapter before a baseline; downstream consumers do not invent condition state.
 
+## Web decision posture is not an action protocol
+
+The task workspace projects a concise operator posture from canonical facts:
+an unanswered required question is `answer`; otherwise a pending approval is
+`approve`; otherwise an enabled native retry/recovery is `retry`; otherwise a
+healthy live attempt, scheduled retry-after, or authorized hold is `wait`;
+stale, conflicting, unavailable, or unhandled terminal evidence is
+`investigate`. The snapshot exposes only the sanitized action state, label,
+enabled flag, and disabled reason.
+
+This summary never supplies a command or capability. Web keeps rendering the
+existing primary-action forms and freshness gates, and every submitted action
+still resolves and revalidates the canonical task/status observation at the
+mutation boundary. A truncated or stale action-driving panel disables the
+projected control with its exact reason instead of inventing permission. See
+[[modules/task_workspace]].
+
 ## Consumers
 
 | File | Use |
@@ -226,4 +243,5 @@ Most of the data IS in the `ACTIONS` hash, but `command` needs to compose multip
 - [[modules/diagnosis_agent]] — headless agent that writes the artifact this module prefers when fresh
 - [[modules/secret_patterns]] — redaction patterns used by `#diagnostic`'s summary/detail emission
 - [[modules/plan_review]] — critique state and execution authority projected here
+- [[modules/task_workspace]] — read-only decision and sanitized action projection
 - [[decisions]] ADR-025 (required-and-nullable JSON envelopes) and ADR-027 (red-status diagnose-then-act)

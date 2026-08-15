@@ -1,0 +1,49 @@
+<% records = Array(artifact_panel["records"]) %>
+
+<section id="workspace-artifacts" class="workspace-panel workspace-state-<%= artifact_panel.fetch("state") %>"
+         aria-label="Artifacts">
+  <div class="workspace-panel-heading">
+    <div>
+      <h2>Artifacts</h2>
+      <p class="muted"><span class="workspace-state-label"><%= artifact_panel.fetch("state").humanize %></span> · bounded task-local reads</p>
+    </div>
+  </div>
+
+  <% if records.empty? %>
+    <p class="workspace-empty">No workflow artifacts are available yet.</p>
+  <% else %>
+    <%# The existing artifact controller and the workspace controller both key
+        state by the safe task-relative name; content remains live. %>
+    <div data-controller="artifacts">
+      <% records.each_with_index do |record, index| %>
+        <details class="artifact" data-artifact-name="<%= record.fetch("name") %>"
+                 data-workspace-disclosure-key="artifact-<%= record.fetch("name") %>"
+                 <%= "open" if index.zero? %>>
+          <summary>
+            <%= record.fetch("name") %>
+            <% if record["truncated"] %><span class="workspace-state-label">Partial</span><% end %>
+            <% if record["binary"] %><span class="workspace-state-label">Binary</span><% end %>
+          </summary>
+          <div class="artifact-body">
+            <% if record["binary"] %>
+              <p class="workspace-empty">Binary content is not rendered in the task workspace.</p>
+            <% elsif record["content"].nil? %>
+              <p class="workspace-empty">Artifact content is unavailable within the workspace budget.</p>
+            <% elsif record.fetch("name").end_with?(".md") %>
+              <div class="markdown"><%= render_markdown(record.fetch("content")) %></div>
+            <% else %>
+              <pre><%= record.fetch("content") %></pre>
+            <% end %>
+          </div>
+        </details>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% if Array(artifact_panel["diagnostics"]).any? %>
+    <details class="workspace-diagnostics" data-workspace-disclosure-key="artifact-diagnostics">
+      <summary>Artifact diagnostics (<%= artifact_panel.fetch("diagnostics").length %>)</summary>
+      <ul><% artifact_panel.fetch("diagnostics").each do |row| %><li><%= row.fetch("reason").to_s.humanize %></li><% end %></ul>
+    </details>
+  <% end %>
+</section>

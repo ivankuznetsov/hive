@@ -52,6 +52,9 @@ Rails.application.routes.draw do
   scope "tasks/:project/:slug", constraints: { slug: /[a-z][a-z0-9-]{0,62}[a-z0-9]/, project: %r{[^/]+} } do
     get  "" => "tasks#show", as: :task
     get  "diff" => "tasks/diffs#show", as: :task_diff
+    get  "publication" => "tasks/publications#show", as: :task_publication
+    post "publication" => "tasks/publications#create"
+    get  "timeline" => "tasks/timelines#show", as: :task_timeline
     get  "log" => "tasks/logs#show", as: :task_log
     get  "media/:filename" => "tasks/media#show", as: :task_media,
          format: false,

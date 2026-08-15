@@ -94,6 +94,7 @@ module Hive
         end
         @current = nil
         @current_payload = nil
+        @dependency_context_snapshot = nil
         @current_seen_at = nil
         @last_error = nil
         # Separate error channel for the archive refresher thread so the
@@ -170,6 +171,12 @@ module Hive
         raise @last_error if @last_error
 
         @current_payload
+      end
+
+      # Immutable context captured by the same status refresh that produced
+      # the public rows. Detail pages may reuse it, but never trigger a scan.
+      def dependency_context_snapshot
+        @dependency_context_snapshot
       end
 
       # Marks the archived-row cache dirty so the next poll tick spawns a
@@ -259,6 +266,7 @@ module Hive
           # the complete archive; web mode retains only currently visible
           # archived rows because its complete archive route is on demand.
           admission_context = Hive::DependencySnapshot.admission_context(projects)
+          capture_dependency_context(admission_context)
           ordinary_status = Hive::Commands::Status.new
           ordinary_payload = ordinary_status.json_payload(
             projects,
@@ -300,6 +308,7 @@ module Hive
           # visible subset is refreshed synchronously so a later active-only
           # tick cannot resurrect a row this projection just hid.
           admission_context = Hive::DependencySnapshot.admission_context(projects)
+          capture_dependency_context(admission_context)
           ordinary_status = Hive::Commands::Status.new
           ordinary_payload = ordinary_status.json_payload(
             projects,
@@ -342,6 +351,7 @@ module Hive
             exclude_archived: true,
             fallback_context: cache.fetch(:admission_context)
           )
+          capture_dependency_context(admission_context)
           active_payload = Hive::Commands::Status.new.json_payload(
             projects,
             exclude_archived: true,
@@ -572,6 +582,13 @@ module Hive
         @policy_fingerprint = policy_fingerprint_for(snapshot)
         @snapshot_archived_cache = archived_cache
         @last_error = nil
+      end
+
+      def capture_dependency_context(context)
+        @dependency_context_snapshot = {
+          context: context,
+          fingerprint: Hive::DependencySnapshot.semantic_fingerprint(context)
+        }.freeze
       end
 
       def archive_payload_from_cache(ordinary_payload, archived_cache)

@@ -70,13 +70,14 @@ class StagesBaseUsageTest < Minitest::Test
     db&.close
   end
 
-  def spawn(task, profile: nil)
+  def spawn(task, profile: nil, **kwargs)
     Hive::Stages::Base.spawn_agent(
       task,
       prompt: "collect usage",
       max_budget_usd: 1,
       timeout_sec: 5,
-      profile: profile
+      profile: profile,
+      **kwargs
     )
   end
 
@@ -101,6 +102,125 @@ class StagesBaseUsageTest < Minitest::Test
         assert_equal 123, row.fetch("output")
         assert_equal 30, row.fetch("cached")
       end
+    end
+  end
+
+  def test_attempt_bound_spawn_records_one_session_and_exact_usage_attribution
+    with_tmp_dir do |root|
+      task = make_task(root, "2-brainstorm", "usage-task-260524-abcd")
+      context = Hive::Attempts::Context.send(
+        :new, attempt_id: "attempt-1", task_generation: 3,
+        ownership_generation: "owner-3", project: task.project_name,
+        task_slug: task.slug, intended_stage: "2-brainstorm"
+      )
+      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      store.create_launching(
+        attempt_id: "attempt-1", request_id: "request-1",
+        predecessor_attempt_id: nil, task_id: task.id,
+        project: task.project_name, task_slug: task.slug,
+        intended_stage: "2-brainstorm", task_generation: "owner-3",
+        ownership_generation: "owner-3", task_input_epoch: 3,
+        progress_token: "progress-1", provider: "claude",
+        worker_argv: [ "hive", "run", task.slug ],
+        claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
+        starting_revision: "a" * 40, retry_charge: 0,
+        inherited_outputs: [], launch_timeout_sec: 30,
+        now: Time.utc(2026, 8, 12, 10)
+      )
+      with_usage_db(root) do
+        configure_fake_agent(task)
+        journal_activity_kinds = lambda do
+          path = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+          next [] unless File.exist?(path)
+
+          Hive::TaskProjection.read_journal(path).filter_map do |record|
+            record.dig("payload", "activity_kind")
+          end
+        end
+        custody_observations = []
+        agent_custody = lambda do |&agent_run|
+          custody_observations << journal_activity_kinds.call
+          result = agent_run.call
+          custody_observations << journal_activity_kinds.call
+          result
+        end
+        with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+          with_replaced_singleton_method(Hive::Attempts::Store, :new, ->(**) { store }) do
+            result = spawn(task, agent_custody: agent_custody)
+            assert_equal :waiting, result[:status]
+          end
+        end
+
+        events = Hive::TaskProjection.read_journal(
+          File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+        ).select do |record|
+          %w[session_started session_finished].include?(
+            record.dig("payload", "activity_kind")
+          )
+        end
+        assert_equal 2, events.length
+        assert_equal [ [ "session_started" ], [ "session_started" ] ],
+                     custody_observations,
+                     "only the untrusted provider call belongs inside artifact custody"
+        session_ids = events.map { |record| record.dig("payload", "session_id") }.uniq
+        assert_equal 1, session_ids.length
+
+        exact = Hive::UsageDb.exact_attempt(attempt_id: "attempt-1", task_generation: 3)
+        assert exact.fetch(:available)
+        assert_equal session_ids.first, exact.fetch(:sessions).first.fetch(:session_id)
+        assert_equal({ input: 321, output: 123, cached: 30 }, exact.fetch(:totals))
+      end
+    end
+  end
+
+  def test_restore_failure_suppresses_post_spawn_task_local_session_writes
+    with_tmp_dir do |root|
+      task = make_task(root)
+      configure_fake_agent(task, usage: false)
+      observation = Object.new
+      starts = 0
+      finishes = 0
+      observation.define_singleton_method(:session_id) { "session-unsafe" }
+      observation.define_singleton_method(:start!) { starts += 1 }
+      observation.define_singleton_method(:finish!) { |*| finishes += 1 }
+      custody = Object.new
+      custody.define_singleton_method(:call) { |&provider| provider.call }
+      custody.define_singleton_method(:safe_after?) { false }
+
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :session_observation, ->(**) { observation }
+      ) do
+        result = spawn(task, agent_custody: custody)
+
+        assert_equal :waiting, result[:status]
+      end
+
+      assert_equal 1, starts
+      assert_equal 0, finishes,
+                   "a failed restoration must not write through a possibly substituted task path"
+    end
+  end
+
+  def test_preflight_failure_does_not_require_agent_custody
+    with_tmp_dir do |root|
+      task = make_task(root)
+      calls = 0
+      custody = lambda do |&provider|
+        calls += 1
+        provider.call
+      end
+
+      with_replaced_singleton_method(
+        Hive::AgentRuntime, :prepare!,
+        ->(*, **) { raise Hive::AgentError, "profile unavailable" }
+      ) do
+        result = spawn(task, agent_custody: custody)
+
+        assert_equal :error, result[:status]
+        assert_includes result[:error_message], "profile unavailable"
+      end
+
+      assert_equal 0, calls, "no custody window exists before a provider launches"
     end
   end
 

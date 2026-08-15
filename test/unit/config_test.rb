@@ -5272,6 +5272,44 @@ class ConfigTest < Minitest::Test
     Hive::Config.singleton_class.send(:private, :warn_deprecated_bot_dedupe!)
   end
 
+  def test_stage_resource_limit_resolution_retains_value_source_and_scope
+    explicit = {
+      "budget_usd" => { "execute" => 12 },
+      Hive::Config::EXPLICIT_RESOURCE_LIMITS_KEY => { "budget_usd" => [ "execute" ] }
+    }
+    project = Hive::Config.stage_resource_limit_resolution(
+      explicit, "budget_usd", "execute", descriptor_default: 50
+    )
+    assert_equal 12, project.value
+    assert_equal "project_config", project.source
+    assert_equal "stage", project.scope
+
+    descriptor = Hive::Config.stage_resource_limit_resolution(
+      {}, "budget_usd", "execute", descriptor_default: 50
+    )
+    assert_equal 50, descriptor.value
+    assert_equal "workflow_descriptor", descriptor.source
+    assert_equal 50, Hive::Config.stage_resource_limit(
+      {}, "budget_usd", "execute", descriptor_default: 50
+    )
+
+    fallback = Hive::Config.stage_resource_limit_resolution(
+      {}, "timeout_sec", "execute", descriptor_default: nil, fallback: 1_800
+    )
+    assert_equal 1_800, fallback.value
+    assert_equal "runtime_fallback", fallback.source
+
+    merged = Hive::Config.stage_resource_limit_resolution(
+      {
+        "budget_usd" => { "execute" => 42 },
+        Hive::Config::EXPLICIT_RESOURCE_LIMITS_KEY => { "budget_usd" => [] }
+      },
+      "budget_usd", "execute", descriptor_default: nil
+    )
+    assert_equal 42, merged.value
+    assert_equal "merged_default", merged.source
+  end
+
   private
 
   def run_concurrent_global_config_writers(count)

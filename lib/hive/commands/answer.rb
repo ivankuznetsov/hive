@@ -11,6 +11,7 @@ require "hive/config"
 require "hive/lock"
 require "hive/task_meta"
 require "hive/task_resolver"
+require "hive/task_activity"
 require "hive/workflows"
 
 module Hive
@@ -128,6 +129,8 @@ module Hive
         return write_outcome(binding, **observation) unless observation.fetch(:task, nil)
 
         task = observation.fetch(:task)
+        @answer_activity = Hive::TaskActivity.for_task(task)
+        reconcile_answer_operations(@answer_activity, task)
         begin
           Hive::Lock.with_task_lock(
             task.folder,
@@ -173,6 +176,9 @@ module Hive
           )
         end
 
+        @answer_operation = begin_answer_operation(
+          task, binding, resolution.fetch(:ordinal), answer_text
+        )
         result = Hive::Bot::BrainstormAnswerWriter.write_at_ordinal_under_lock!(
           brainstorm_path: task.state_file,
           ordinal: resolution.fetch(:ordinal),
@@ -186,6 +192,9 @@ module Hive
 
         updated = Hive::BrainstormParser.parse_text(read_brainstorm!(task))
         slot = updated.fetch(resolution.fetch(:ordinal) - 1)
+        complete_answer_operation(
+          @answer_operation, task, binding, resolution.fetch(:ordinal), answer_text
+        )
         write_outcome(
           binding,
           outcome: "written",
@@ -200,6 +209,84 @@ module Hive
         )
       rescue Hive::InvalidTaskPath
         write_outcome(binding, outcome: "stale", reason: "task_missing")
+      end
+
+      def begin_answer_operation(task, binding, ordinal, answer_text)
+        return nil unless @answer_activity
+
+        @answer_activity.begin_operation(
+          kind: "answer_recorded",
+          operation_id: "answer:#{binding.fetch('question_fingerprint')}:#{ordinal}",
+          source: "command_service", reason: "brainstorm answer recorded",
+          precondition: answer_precondition(binding),
+          expected_postcondition: answer_postcondition(binding, answer_text)
+        )
+      end
+
+      def complete_answer_operation(operation, task, binding, ordinal, answer_text)
+        return unless operation
+
+        result = answer_postcondition(binding, answer_text)
+        operation.complete!(
+          result: result,
+          payload: {
+            "question_id" => "Q#{ordinal}",
+            "answer_id" => result.fetch("answer_fingerprint")[0, 16]
+          }
+        )
+      end
+
+      def reconcile_answer_operations(activity, task)
+        return unless activity
+
+        questions = Hive::BrainstormParser.parse_text(read_brainstorm!(task))
+        postconditions = questions.filter_map do |question|
+          next unless question.answered?
+
+          value = {
+            "question_fingerprint" => question_fingerprint(question),
+            "answer_fingerprint" => answer_fingerprint(question.answer)
+          }
+          [ Hive::TaskActivity.fingerprint(value), value ]
+        end.to_h
+        preconditions = questions.reject(&:answered?).map do |question|
+          Hive::TaskActivity.fingerprint(
+            "question_fingerprint" => question_fingerprint(question),
+            "answered" => false
+          )
+        end
+        activity.reconcile_operations! do |receipt|
+          next :defer unless receipt["activity_kind"] == "answer_recorded" &&
+            receipt["source"] == "command_service"
+
+          if (value = postconditions[receipt["expected_postcondition_fingerprint"]])
+            { status: :committed, result: value }
+          elsif preconditions.include?(receipt["precondition_fingerprint"])
+            :not_committed
+          else
+            :ambiguous
+          end
+        end
+      rescue Hive::TaskActivity::Error, Hive::InvalidTaskPath, SystemCallError, IOError
+        nil
+      end
+
+      def answer_precondition(binding)
+        {
+          "question_fingerprint" => binding.fetch("question_fingerprint"),
+          "answered" => false
+        }
+      end
+
+      def answer_postcondition(binding, answer_text)
+        {
+          "question_fingerprint" => binding.fetch("question_fingerprint"),
+          "answer_fingerprint" => answer_fingerprint(answer_text)
+        }
+      end
+
+      def answer_fingerprint(answer)
+        Digest::SHA256.hexdigest(canonical_answer(answer))
       end
 
       def resolve_bound_slot(binding, questions, answer_text)

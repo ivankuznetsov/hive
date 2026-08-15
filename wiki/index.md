@@ -127,6 +127,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[modules/task_action]] — `wiki/modules/task_action.md`
 - [[modules/task_dependencies]] — `wiki/modules/task_dependencies.md`
 - [[modules/task_resolver]] — `wiki/modules/task_resolver.md`
+- [[modules/task_workspace]] — `wiki/modules/task_workspace.md`
 - [[modules/user_service]] — `wiki/modules/user_service.md`
 - [[modules/workflows]] — `wiki/modules/workflows.md`
 - [[modules/workflow_package]] — `wiki/modules/workflow_package.md`

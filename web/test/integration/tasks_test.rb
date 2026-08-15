@@ -179,8 +179,10 @@ class TasksTest < ActionDispatch::IntegrationTest
         assert_select ".task-header", text: /#{Regexp.escape(@slug.sub(/-\d{6}-\h{4}\z/, "").tr("-", " "))}/i
         assert_select "img[src*='source=archive']", minimum: 1
         assert_select "form[action*='source=archive']", minimum: 1
+        assert_select "form[action*='source=archive'] button:not([disabled])", count: 0,
+                      message: "archived task mutation controls must fail closed"
         assert_select(
-          "#task-log[data-controller='poll']",
+          "turbo-frame[id^='task-log-'][data-controller='poll']",
           { count: 0 },
           "an archived task log is immutable and must not trigger status work every 3 seconds"
         )
@@ -199,6 +201,38 @@ class TasksTest < ActionDispatch::IntegrationTest
         assert_response :conflict
         assert_match(/worktree unavailable/i, response.body)
       end
+    end
+  end
+
+  test "every archived task mutation endpoint is read-only" do
+    folder = stage_dir(@project, "9-done").join(@slug)
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug), folder)
+    Hive::TaskMeta.rewrite(folder.to_s, completed_at: Time.now.utc - (10 * 86_400))
+
+    mutation_requests = {
+      "approval" => [ task_approve_path(@project, @slug, source: "archive"),
+                      { from: "9-done", force: "1" } ],
+      "rejection" => [ task_reject_path(@project, @slug, source: "archive"),
+                       { from: "9-done" } ],
+      "drop" => [ task_drop_path(@project, @slug, source: "archive"),
+                  { from: "9-done" } ],
+      "run" => [ task_run_path(@project, @slug, source: "archive"),
+                 { action_name: "run", stage: "9-done" } ],
+      "recovery" => [ task_recover_path(@project, @slug, source: "archive"), {} ],
+      "closure" => [ task_closure_path(@project, @slug, source: "archive"),
+                     { reason: "already_delivered" } ],
+      "intervention" => [ task_intervene_path(@project, @slug, source: "archive"),
+                          { message: "No mutation", binding: "slot" } ],
+      "answers" => [ task_answers_path(@project, @slug, source: "archive"),
+                     { answers: { "slot" => "No mutation" } } ],
+      "publication" => [ task_publication_path(@project, @slug, source: "archive"), {} ]
+    }
+
+    mutation_requests.each do |name, (path, params)|
+      post path, params: params
+      assert_response :unprocessable_entity, "#{name} must reject archived tasks"
+      assert_match(/archived tasks are read-only/i, response.body, name)
+      assert folder.directory?, "#{name} must leave the archived task intact"
     end
   end
 
@@ -870,6 +904,10 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     get "/tasks/#{@project}/#{@slug}"
     assert_response :success
+    get "/tasks/#{@project}/#{@slug}.json"
+    assert_response :success
+    get "/tasks/#{@project}/#{@slug}/timeline.json"
+    assert_response :success
     get "/tasks/#{@project}/#{@slug}/log"
     assert_response :success
     get "/tasks/#{@project}/#{@slug}/diff"
@@ -962,13 +1000,19 @@ class TasksTest < ActionDispatch::IntegrationTest
     folder = stage_dir(@project, "2-brainstorm").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n### Q2. Acceptance?\n\n### A2.\n\n")
 
+    get task_path(@project, @slug, format: :json)
+    operator_questions = response.parsed_body.dig("operator", "questions")
+    assert_equal [ "Scope?", "Acceptance?" ], operator_questions.map { |row| row.fetch("text") }
+
     get "/tasks/#{@project}/#{@slug}"
 
     assert_response :success
     assert_select ".qa-item", 2, "each open question must get its own answer field"
-    assert_select "textarea[data-question-number='1']", 1
-    assert_select "textarea[data-question-number='2']", 1
-    assert_match "Scope?", response.body
+    operator_questions.each do |question|
+      assert_select ".qa-question", text: /#{Regexp.escape(question.fetch("text"))}/
+      assert_select "textarea[data-question-number=?][name=?]",
+                    question.fetch("n").to_s, "answers[#{question.fetch('binding')}]", count: 1
+    end
   end
 
   test "submitted answers land under the right question headers" do
@@ -1154,6 +1198,200 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_match "Worktree unavailable", response.body
   end
 
+  test "publication GET is authenticated cache-only HTML and JSON" do
+    api_factory = ->(*) { flunk "ordinary publication GET must not construct a GitHub client" }
+
+    with_replaced_singleton_method(GithubApi, :new, api_factory) do
+      get task_publication_path(@project, @slug)
+      assert_response :success
+      assert_select "turbo-frame[id^='task-publication-']", 1
+      assert_select ".publication-panel", text: /Worktree unavailable/i
+
+      get task_publication_path(@project, @slug, format: :json)
+      assert_response :success
+      assert_equal "application/json", response.media_type
+      assert_equal "worktree_unavailable", response.parsed_body.fetch("publication_state")
+    end
+
+    post "/logout"
+    get task_publication_path(@project, @slug)
+    assert_redirected_to "/login"
+  end
+
+  test "existing task route serves authenticated schema-valid workspace JSON" do
+    get "/tasks/#{@project}/#{@slug}.json"
+
+    assert_response :success
+    assert_equal "application/json", response.media_type
+    document = JSON.parse(response.body)
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace")))
+    )
+    assert_empty schemer.validate(document).to_a
+    assert_equal @project, document.dig("task", "project")
+    assert_equal @slug, document.dig("task", "slug")
+    assert_equal "hive-task-workspace", document.fetch("schema")
+    assert_equal Hive::TaskWorkspace::PANEL_NAMES.sort,
+                 document.fetch("panels").keys.sort
+    refute_includes document.to_s, stage_dir(@project, "1-inbox").to_s
+    refute document.to_s.include?("suggested_command")
+    refute document.to_s.include?("observation_token")
+
+    post "/logout"
+    get "/tasks/#{@project}/#{@slug}.json"
+    assert_redirected_to "/login"
+  end
+
+  test "task HTML composes the same normalized workspace with correctly owned evidence frames" do
+    get task_path(@project, @slug, format: :json)
+    workspace = response.parsed_body
+
+    get task_path(@project, @slug)
+
+    assert_response :success
+    assert_select "#status-stream-owner[data-controller~='task-workspace']", 1
+    assert_select "#workspace-summary-heading",
+                  text: workspace.dig("decision", "posture").humanize
+    %w[attempts provenance timeline dependencies artifacts publication].each do |panel|
+      assert_select "#workspace-#{panel}", 1, "#{panel} must be represented exactly once"
+    end
+    assert_select "turbo-frame[id^='task-diff-'][data-turbo-permanent]", 1
+    assert_select "turbo-frame[id^='task-publication-'][refresh='morph']", 1
+    assert_select "turbo-frame[id^='task-publication-'][data-turbo-permanent]", count: 0
+    assert_select "turbo-frame[id^='task-publication-'][src]", count: 0
+    assert_select "turbo-frame[id^='task-timeline-inspection-'][data-turbo-permanent]", 1
+    assert_select ".workspace-table-scroll[role='region'][tabindex='0']", minimum: 1
+    assert_select "#task-workspace-announcement[role='status'][aria-live='polite']", 1
+    refute_includes response.body, stage_dir(@project, "1-inbox").to_s
+  end
+
+  test "a failed publication source degrades only that panel" do
+    original = Task.instance_method(:publication)
+    Task.define_method(:publication) { |cache: nil| raise Errno::EIO, "publication unavailable" }
+
+    get task_path(@project, @slug)
+
+    assert_response :success
+    assert_select "#workspace-publication.workspace-state-unavailable", text: /Unavailable/i
+    assert_select "#workspace-artifacts details[data-artifact-name='idea.md']", 1
+    assert_select ".advanced form", minimum: 1
+  ensure
+    Task.define_method(:publication, original) if original
+  end
+
+  test "timeline endpoint pages material events and expands bounded noise groups" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    records = 205.times.map do |index|
+      {
+        "event_id" => "material-#{index}", "event_type" => "stage_enter",
+        "ts" => (Time.utc(2026, 8, 12, 12) + index).iso8601,
+        "stage" => "1-inbox", "source" => "controller"
+      }
+    end
+    records.concat(25.times.map do |index|
+      {
+        "event_id" => "noise-#{index}", "event_type" => "heartbeat",
+        "ts" => (Time.utc(2026, 8, 12, 13) + index).iso8601,
+        "stage" => "1-inbox", "source" => "runtime_receipt"
+      }
+    end)
+    folder.join("events.jsonl").write(
+      records.map { |record| JSON.generate(record) }.join("\n") + "\n"
+    )
+
+    get task_path(@project, @slug)
+    assert_response :success
+    assert_select "#workspace-timeline > ol.timeline-list", 1,
+                  "the current timeline must remain outside drill-down navigation"
+    assert_select "#workspace-timeline a[data-turbo-frame^='task-timeline-inspection-']",
+                  minimum: 1
+
+    get "/tasks/#{@project}/#{@slug}/timeline.json"
+    assert_response :success
+    first = JSON.parse(response.body)
+    assert_equal 200, first.fetch("records").length
+    assert first.fetch("truncated")
+    refute_nil first.fetch("older_cursor")
+    assert_equal 25, first.dig("noise_groups", 0, "count")
+
+    get "/tasks/#{@project}/#{@slug}/timeline.json",
+        params: { cursor: first.fetch("older_cursor") }
+    assert_response :success
+    older = JSON.parse(response.body)
+    assert_equal 5, older.fetch("records").length
+    assert_nil older["older_cursor"]
+
+    get "/tasks/#{@project}/#{@slug}/timeline.json",
+        params: { raw_cursor: first.dig("noise_groups", 0, "raw_cursor") }
+    assert_response :success
+    raw = JSON.parse(response.body)
+    assert_equal 20, raw.fetch("records").length
+    assert raw.fetch("truncated")
+
+    get task_timeline_path(@project, @slug), params: { cursor: first.fetch("older_cursor") }
+    assert_response :success
+    assert_select "turbo-frame[id^='task-timeline-inspection-']", 1
+    assert_select ".timeline-inspection", 1
+    assert_select "a[href='#workspace-timeline'][data-turbo-frame='_top']",
+                  text: "Return to current timeline"
+
+    get "/tasks/#{@project}/#{@slug}/timeline.json",
+        params: { cursor: "#{first.fetch('older_cursor')}x" }
+    assert_response :unprocessable_entity
+  end
+
+  test "publication refresh performs at most one fixed remote read" do
+    sign_in!(token: "github-session-token")
+    panel = publication_fixture
+    original_publication = Task.instance_method(:publication)
+    Task.define_method(:publication) { |cache: nil| panel }
+    cache = Object.new
+    refreshes = []
+    cache.define_singleton_method(:refresh) do |identity, &block|
+      refreshes << [ identity, block.call ]
+    end
+    api = Object.new
+    remote_calls = []
+    api.define_singleton_method(:pull_request) do |**kwargs|
+      remote_calls << kwargs
+      panel.dig("remote", "observation")
+    end
+
+    with_replaced_singleton_method(
+      Hive::TaskWorkspace::PublicationCache, :new, ->(**) { cache }
+    ) do
+      with_replaced_singleton_method(GithubApi, :new, ->(*) { api }) do
+        post task_publication_path(@project, @slug)
+      end
+    end
+
+    assert_response :success
+    assert_equal 1, refreshes.length
+    assert_equal 1, remote_calls.length
+    assert_equal "github.com/acme/demo", remote_calls.first.fetch(:repository)
+    assert_select "turbo-frame[id^='task-publication-']", 1
+    assert_select "form[data-turbo-frame^='task-publication-']", 1
+  ensure
+    Task.define_method(:publication, original_publication) if original_publication
+  end
+
+  test "publication refresh is CSRF protected and unavailable for archives" do
+    previous = ActionController::Base.allow_forgery_protection
+    ActionController::Base.allow_forgery_protection = true
+    post task_publication_path(@project, @slug)
+    assert_response :unprocessable_entity
+    ActionController::Base.allow_forgery_protection = previous
+
+    folder = stage_dir(@project, "9-done").join(@slug)
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug), folder)
+    Hive::TaskMeta.rewrite(folder.to_s, completed_at: Time.now.utc)
+    post task_publication_path(@project, @slug, source: "archive")
+    assert_response :unprocessable_entity
+    assert_match(/read-only/, response.body)
+  ensure
+    ActionController::Base.allow_forgery_protection = previous if previous != nil
+  end
+
   private
 
   def move_task_to_plan!
@@ -1262,6 +1500,49 @@ class TasksTest < ActionDispatch::IntegrationTest
   ensure
     receiver.define_method(name, original)
     receiver.send(visibility, name)
+  end
+
+  def publication_fixture
+    identity = {
+      "repository" => "github.com/acme/demo", "number" => 42,
+      "expected_head" => "a" * 40
+    }
+    observation = {
+      "repository" => identity.fetch("repository"), "number" => 42,
+      "url" => "https://github.com/acme/demo/pull/42", "state" => "OPEN",
+      "is_draft" => false, "title" => "Ship", "body" => "Body",
+      "base_branch" => "main", "head_oid" => "a" * 40,
+      "head_matches" => true, "head_branch_present" => true,
+      "checks" => [], "checks_truncated" => false
+    }
+    local = {
+      "state" => "current", "repository" => identity.fetch("repository"),
+      "branch" => @slug, "expected_branch" => @slug, "base_branch" => "main",
+      "base_oid" => "b" * 40, "head_oid" => "a" * 40,
+      "base_state" => "ancestor", "dirty" => false, "commits" => [],
+      "commits_truncated" => false,
+      "push" => { "state" => "pushed", "tracking_oid" => "a" * 40,
+                  "ahead" => 0, "behind" => 0 }
+    }
+    pr = {
+      "state" => "current", "reference" => "pr.md",
+      "url" => observation.fetch("url"), "repository" => identity.fetch("repository"),
+      "number" => 42, "declared_head_oid" => "a" * 40,
+      "title" => "Ship", "body" => "Body", "truncated" => false, "conflicts" => []
+    }
+    remote = {
+      "state" => "current", "cache_state" => "fresh", "refresh_state" => "idle",
+      "observation" => observation, "observed_at" => "2026-08-12T12:00:00Z",
+      "refreshed_at" => "2026-08-12T12:00:00Z", "retry_at" => nil,
+      "diagnostics" => []
+    }
+    {
+      "state" => "current", "records" => [], "local" => local,
+      "pull_request" => pr, "remote" => remote,
+      "publication_state" => "open",
+      "refresh" => { "eligible" => true, "reason" => nil, "identity" => identity },
+      "diagnostics" => [], "truncated" => false
+    }
   end
 
   def media_fixture!(folder)

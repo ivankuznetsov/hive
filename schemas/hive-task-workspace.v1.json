@@ -1,0 +1,718 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:task-workspace:v1",
+  "title": "Hive task workspace snapshot (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "generated_at", "task", "status",
+    "operator", "decision", "panels"
+  ],
+  "properties": {
+    "schema": { "const": "hive-task-workspace" },
+    "schema_version": { "const": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "task": { "$ref": "#/$defs/Task" },
+    "status": { "$ref": "#/$defs/Status" },
+    "operator": { "$ref": "#/$defs/Operator" },
+    "decision": { "$ref": "#/$defs/Decision" },
+    "panels": { "$ref": "#/$defs/Panels" }
+  },
+  "$defs": {
+    "State": {
+      "type": "string",
+      "enum": [
+        "current", "stale", "partial", "missing", "conflicting",
+        "unavailable", "estimated", "exhausted", "retry-after"
+      ]
+    },
+    "Source": {
+      "type": "string",
+      "enum": [
+        "task_projection", "task_journal", "attempt_record",
+        "controller_receipt", "agent_receipt", "runtime_receipt", "usage_db",
+        "dependency_snapshot", "worktree_receipt", "local_git",
+        "publication_cache", "github", "artifact", "event_stream",
+        "current_observation", "legacy", "canonical_action", "status_snapshot",
+        "operator", "bounded_reader", "workspace", "unknown"
+      ]
+    },
+    "SafeString": {
+      "type": "string",
+      "maxLength": 524288,
+      "pattern": "^(?!/)(?!\\\\)(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$))[\\s\\S]*$"
+    },
+    "SafeValue": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "$ref": "#/$defs/SafeString" },
+        { "$ref": "#/$defs/SafeArray" },
+        { "$ref": "#/$defs/SafeObject" }
+      ]
+    },
+    "SafeArray": {
+      "type": "array",
+      "maxItems": 2000,
+      "items": { "$ref": "#/$defs/SafeValue" }
+    },
+    "SafeObject": {
+      "type": "object",
+      "maxProperties": 100,
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "capability", "capability_token", "observation_token", "raw_argv",
+            "argv", "prompt", "prompts", "credential", "credentials",
+            "secret", "secrets"
+          ]
+        }
+      },
+      "additionalProperties": { "$ref": "#/$defs/SafeValue" }
+    },
+    "Field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value", "state", "source", "evidence_ref", "observed_at", "quality",
+        "conflicts", "truncated"
+      ],
+      "properties": {
+        "value": { "$ref": "#/$defs/SafeValue" },
+        "state": { "$ref": "#/$defs/State" },
+        "source": { "$ref": "#/$defs/Source" },
+        "evidence_ref": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "maxLength": 1024,
+              "pattern": "^(?!/)(?!\\\\)(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).*$" }
+          ]
+        },
+        "observed_at": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "format": "date-time" }
+          ]
+        },
+        "quality": { "type": ["string", "null"], "maxLength": 128 },
+        "conflicts": {
+          "type": "array", "maxItems": 20,
+          "items": { "$ref": "#/$defs/SafeObject" }
+        },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "Task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "slug", "id", "stage", "generation"],
+      "properties": {
+        "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "id": { "type": ["integer", "string", "null"] },
+        "stage": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "generation": { "type": ["integer", "string", "null"] }
+      }
+    },
+    "Status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "freshness", "observed_at", "diagnostics"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "freshness": { "type": "string", "enum": ["fresh", "stale", "partial", "unavailable"] },
+        "observed_at": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "format": "date-time" }
+          ]
+        },
+        "diagnostics": {
+          "type": "array", "maxItems": 100,
+          "items": { "$ref": "#/$defs/SafeObject" }
+        }
+      }
+    },
+    "Decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["posture", "reason", "action"],
+      "properties": {
+        "posture": { "type": "string", "enum": ["wait", "answer", "approve", "retry", "investigate"] },
+        "reason": { "type": ["string", "null"], "maxLength": 4096 },
+        "action": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "label", "enabled", "reason"],
+          "properties": {
+            "kind": { "type": ["string", "null"], "maxLength": 128 },
+            "label": { "type": ["string", "null"], "maxLength": 512 },
+            "enabled": { "type": "boolean" },
+            "reason": { "type": ["string", "null"], "maxLength": 4096 }
+          }
+        }
+      }
+    },
+    "OperatorQuestion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["n", "text", "binding", "ordinal"],
+      "properties": {
+        "n": { "type": ["integer", "string"] },
+        "text": { "$ref": "#/$defs/SafeString" },
+        "binding": { "$ref": "#/$defs/SafeString" },
+        "ordinal": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "OperatorRecovery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "primary_label", "context", "action_visible", "action_enabled"],
+      "properties": {
+        "status": { "$ref": "#/$defs/StringOrNull" },
+        "primary_label": { "$ref": "#/$defs/StringOrNull" },
+        "context": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/SafeString" } },
+        "action_visible": { "type": "boolean" },
+        "action_enabled": { "type": "boolean" }
+      }
+    },
+    "Operator": {
+      "type": "object", "additionalProperties": false,
+      "required": ["questions", "recovery", "diagnostic_summary"],
+      "properties": {
+        "questions": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/OperatorQuestion" } },
+        "recovery": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/OperatorRecovery" }] },
+        "diagnostic_summary": { "$ref": "#/$defs/StringOrNull" }
+      }
+    },
+    "StringOrNull": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/SafeString" }]
+    },
+    "IntegerOrNull": { "type": ["integer", "null"] },
+    "DateTimeOrNull": {
+      "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }]
+    },
+    "DiagnosticArray": {
+      "type": "array", "maxItems": 100,
+      "items": { "$ref": "#/$defs/SafeObject" }
+    },
+    "ReceiptSummary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "source", "evidence_ref", "captured_at", "quality"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "source": { "$ref": "#/$defs/Source" },
+        "evidence_ref": { "$ref": "#/$defs/StringOrNull" },
+        "captured_at": { "$ref": "#/$defs/DateTimeOrNull" },
+        "quality": { "$ref": "#/$defs/StringOrNull" }
+      }
+    },
+    "ProvenanceRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["attempt_id", "stage", "task_generation", "current", "state", "repository", "wiki", "selection", "consistency", "receipts"],
+      "properties": {
+        "attempt_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "stage": { "$ref": "#/$defs/StringOrNull" },
+        "task_generation": { "type": ["integer", "string", "null"] },
+        "current": { "type": "boolean" },
+        "state": { "$ref": "#/$defs/State" },
+        "repository": { "$ref": "#/$defs/Field" },
+        "wiki": { "$ref": "#/$defs/Field" },
+        "selection": { "$ref": "#/$defs/Field" },
+        "consistency": {
+          "type": "object", "additionalProperties": false,
+          "required": ["repository", "wiki"],
+          "properties": {
+            "repository": { "$ref": "#/$defs/State" },
+            "wiki": { "$ref": "#/$defs/State" }
+          }
+        },
+        "receipts": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "controller": { "$ref": "#/$defs/ReceiptSummary" },
+            "agent": { "$ref": "#/$defs/ReceiptSummary" }
+          }
+        }
+      }
+    },
+    "SessionRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_id", "role", "provider", "requested_model", "actual_model", "requested_effort", "started_at", "ended_at", "health", "outcome", "live", "timed_out", "timeout_sec", "guards", "resource_observation", "usage"],
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "role": { "$ref": "#/$defs/StringOrNull" },
+        "provider": { "$ref": "#/$defs/StringOrNull" },
+        "requested_model": { "$ref": "#/$defs/Field" },
+        "actual_model": { "$ref": "#/$defs/Field" },
+        "requested_effort": { "$ref": "#/$defs/StringOrNull" },
+        "started_at": { "$ref": "#/$defs/DateTimeOrNull" },
+        "ended_at": { "$ref": "#/$defs/DateTimeOrNull" },
+        "health": { "$ref": "#/$defs/StringOrNull" },
+        "outcome": { "$ref": "#/$defs/StringOrNull" },
+        "live": { "type": "boolean" },
+        "timed_out": { "type": "boolean" },
+        "timeout_sec": { "type": ["number", "null"], "minimum": 0 },
+        "guards": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/SafeObject" } },
+        "resource_observation": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/SafeObject" }] },
+        "usage": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/SafeObject" }] }
+      }
+    },
+    "AttemptRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["attempt_id", "project_slug", "task_slug", "current", "stage", "task_generation", "ownership_generation", "predecessor_attempt_id", "state", "outcome", "accepted_at", "started_at", "ended_at", "requested_provider", "sessions"],
+      "properties": {
+        "attempt_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "project_slug": { "$ref": "#/$defs/StringOrNull" },
+        "task_slug": { "$ref": "#/$defs/StringOrNull" },
+        "current": { "type": "boolean" },
+        "stage": { "type": "string", "maxLength": 256 },
+        "task_generation": { "type": ["integer", "string", "null"] },
+        "ownership_generation": { "$ref": "#/$defs/StringOrNull" },
+        "predecessor_attempt_id": { "$ref": "#/$defs/StringOrNull" },
+        "state": { "$ref": "#/$defs/StringOrNull" },
+        "outcome": { "$ref": "#/$defs/StringOrNull" },
+        "accepted_at": { "$ref": "#/$defs/DateTimeOrNull" },
+        "started_at": { "$ref": "#/$defs/DateTimeOrNull" },
+        "ended_at": { "$ref": "#/$defs/DateTimeOrNull" },
+        "requested_provider": { "$ref": "#/$defs/Field" },
+        "sessions": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/SessionRecord" } }
+      }
+    },
+    "GuardRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["record_kind", "attempt_id", "session_id", "kind", "unit", "scope", "source", "enforcement", "billing_semantics", "configured", "observed", "headroom", "reset_at", "retry_at", "state", "label"],
+      "properties": {
+        "record_kind": { "const": "guard" },
+        "attempt_id": { "$ref": "#/$defs/StringOrNull" },
+        "session_id": { "$ref": "#/$defs/StringOrNull" },
+        "kind": { "$ref": "#/$defs/StringOrNull" },
+        "unit": { "$ref": "#/$defs/StringOrNull" },
+        "scope": { "$ref": "#/$defs/StringOrNull" },
+        "source": { "$ref": "#/$defs/StringOrNull" },
+        "enforcement": { "$ref": "#/$defs/StringOrNull" },
+        "billing_semantics": { "$ref": "#/$defs/StringOrNull" },
+        "configured": { "type": ["number", "null"] },
+        "observed": { "type": ["number", "null"] },
+        "headroom": { "type": ["number", "null"] },
+        "reset_at": { "$ref": "#/$defs/StringOrNull" },
+        "retry_at": { "$ref": "#/$defs/StringOrNull" },
+        "state": { "$ref": "#/$defs/State" },
+        "label": { "type": "string", "maxLength": 512 }
+      }
+    },
+    "UsageSession": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_id", "model", "source", "input", "output", "cached"],
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "model": { "$ref": "#/$defs/StringOrNull" },
+        "source": { "$ref": "#/$defs/StringOrNull" },
+        "input": { "type": "integer", "minimum": 0 },
+        "output": { "type": "integer", "minimum": 0 },
+        "cached": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "UsageRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["record_kind", "attempt_id", "state", "sessions", "totals", "unattributed_count"],
+      "properties": {
+        "record_kind": { "const": "usage" },
+        "attempt_id": { "$ref": "#/$defs/StringOrNull" },
+        "state": { "$ref": "#/$defs/State" },
+        "sessions": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/UsageSession" } },
+        "totals": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/TokenTotals" }] },
+        "unattributed_count": { "$ref": "#/$defs/IntegerOrNull" }
+      }
+    },
+    "TokenTotals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input", "output", "cached", "tokens"],
+      "properties": {
+        "input": { "type": "integer", "minimum": 0 },
+        "output": { "type": "integer", "minimum": 0 },
+        "cached": { "type": "integer", "minimum": 0 },
+        "tokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "TimelineRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["event_id", "kind", "summary", "source", "source_kind", "source_quality", "occurred_at", "ingested_at", "ordering_at", "external_clock_unverified", "task_generation", "attempt_id", "stage", "correlation_id", "operation_id", "supersedes_event_id", "details", "source_refs"],
+      "properties": {
+        "event_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "summary": { "$ref": "#/$defs/SafeString" },
+        "source": { "$ref": "#/$defs/Source" },
+        "source_kind": { "type": "string", "maxLength": 256 },
+        "source_quality": { "type": "string", "maxLength": 128 },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "ingested_at": { "type": "string", "format": "date-time" },
+        "ordering_at": { "type": "string", "format": "date-time" },
+        "external_clock_unverified": { "type": "boolean" },
+        "task_generation": { "type": ["integer", "string", "null"] },
+        "attempt_id": { "$ref": "#/$defs/StringOrNull" },
+        "stage": { "$ref": "#/$defs/StringOrNull" },
+        "correlation_id": { "$ref": "#/$defs/StringOrNull" },
+        "operation_id": { "$ref": "#/$defs/StringOrNull" },
+        "supersedes_event_id": { "$ref": "#/$defs/StringOrNull" },
+        "details": { "$ref": "#/$defs/SafeObject" },
+        "source_refs": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/SafeString" } },
+        "cross_source_duplicate": { "type": "boolean" }
+      }
+    },
+    "DependencyStack": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "divergence"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "repository": { "$ref": "#/$defs/StringOrNull" },
+        "expected_base_branch": { "$ref": "#/$defs/StringOrNull" },
+        "expected_base_oid": { "$ref": "#/$defs/StringOrNull" },
+        "observed_base_oid": { "$ref": "#/$defs/StringOrNull" },
+        "observed_branch": { "$ref": "#/$defs/StringOrNull" },
+        "observed_head_oid": { "$ref": "#/$defs/StringOrNull" },
+        "pr_number": { "$ref": "#/$defs/IntegerOrNull" },
+        "divergence": { "type": "string", "enum": ["aligned", "divergent", "partial", "unavailable"] }
+      }
+    },
+    "DependencyAdmissionError": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reason_code"],
+      "properties": {
+        "reason_code": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "offending_ref": { "$ref": "#/$defs/StringOrNull" }
+      }
+    },
+    "DependencyAdmission": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "blocked_by", "dependency_stage", "error"],
+      "properties": {
+        "state": { "type": "string", "enum": ["clear", "wait", "error", "partial"] },
+        "blocked_by": { "$ref": "#/$defs/StringOrNull" },
+        "dependency_stage": { "$ref": "#/$defs/StringOrNull" },
+        "error": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/DependencyAdmissionError" }] }
+      }
+    },
+    "DependencyReference": {
+      "type": "object", "additionalProperties": false,
+      "required": ["project", "slug"],
+      "properties": {
+        "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 255 }
+      }
+    },
+    "DependencyNode": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "project", "slug", "task_id", "stage", "root", "depends_on", "dependency_gate_stage", "admission", "evidence_state", "stack", "reference"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "kind": { "type": "string", "enum": ["task", "missing", "sentinel"] },
+        "project": { "$ref": "#/$defs/StringOrNull" },
+        "slug": { "$ref": "#/$defs/StringOrNull" },
+        "task_id": { "type": ["integer", "string", "null"] },
+        "stage": { "$ref": "#/$defs/StringOrNull" },
+        "root": { "type": "boolean" },
+        "depends_on": { "$ref": "#/$defs/StringOrNull" },
+        "dependency_gate_stage": { "$ref": "#/$defs/StringOrNull" },
+        "admission": { "$ref": "#/$defs/DependencyAdmission" },
+        "evidence_state": { "$ref": "#/$defs/State" },
+        "stack": { "$ref": "#/$defs/DependencyStack" },
+        "reference": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/DependencyReference" }] },
+        "reasons": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 256 } }
+      }
+    },
+    "CommitRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["oid", "short_oid", "subject", "committed_at"],
+      "properties": {
+        "oid": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+        "short_oid": { "type": "string", "minLength": 1, "maxLength": 16 },
+        "subject": { "$ref": "#/$defs/SafeString" },
+        "committed_at": { "$ref": "#/$defs/DateTimeOrNull" }
+      }
+    },
+    "PushObservation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "tracking_oid", "ahead", "behind"],
+      "properties": {
+        "state": { "type": "string", "enum": ["pushed", "unpushed", "behind", "divergent", "not_observed", "unavailable"] },
+        "tracking_oid": { "$ref": "#/$defs/StringOrNull" },
+        "ahead": { "$ref": "#/$defs/IntegerOrNull" },
+        "behind": { "$ref": "#/$defs/IntegerOrNull" }
+      }
+    },
+    "LocalPublication": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "repository", "branch", "expected_branch", "base_branch", "base_oid", "observed_base_oid", "head_oid", "base_state", "dirty", "commits", "commits_truncated", "push"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "repository": { "$ref": "#/$defs/StringOrNull" },
+        "branch": { "$ref": "#/$defs/StringOrNull" },
+        "expected_branch": { "$ref": "#/$defs/StringOrNull" },
+        "base_branch": { "$ref": "#/$defs/StringOrNull" },
+        "base_oid": { "$ref": "#/$defs/StringOrNull" },
+        "observed_base_oid": { "$ref": "#/$defs/StringOrNull" },
+        "head_oid": { "$ref": "#/$defs/StringOrNull" },
+        "base_state": { "type": "string", "enum": ["ancestor", "divergent", "unavailable"] },
+        "dirty": { "type": ["boolean", "null"] },
+        "commits": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/CommitRecord" } },
+        "commits_truncated": { "type": "boolean" },
+        "push": { "$ref": "#/$defs/PushObservation" }
+      }
+    },
+    "PullRequestPublication": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "reference", "url", "repository", "number", "declared_head_oid", "title", "body", "truncated", "conflicts"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "reference": { "$ref": "#/$defs/SafeString" },
+        "url": { "$ref": "#/$defs/StringOrNull" },
+        "repository": { "$ref": "#/$defs/StringOrNull" },
+        "number": { "$ref": "#/$defs/IntegerOrNull" },
+        "declared_head_oid": { "$ref": "#/$defs/StringOrNull" },
+        "title": { "$ref": "#/$defs/SafeString" },
+        "body": { "$ref": "#/$defs/SafeString" },
+        "truncated": { "type": "boolean" },
+        "conflicts": { "type": "array", "maxItems": 20, "items": { "type": "string", "enum": ["repository", "number", "head"] } }
+      }
+    },
+    "CheckObservation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "status", "conclusion", "url"],
+      "properties": {
+        "name": { "$ref": "#/$defs/SafeString" },
+        "status": { "$ref": "#/$defs/SafeString" },
+        "conclusion": { "$ref": "#/$defs/SafeString" },
+        "url": { "$ref": "#/$defs/StringOrNull" }
+      }
+    },
+    "RemoteObservation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "number", "url", "state", "is_draft", "title", "body", "base_branch", "base_oid", "head_branch", "head_oid", "expected_head", "head_matches", "head_branch_present", "merge_state", "review_decision", "merged_at", "merge_commit_oid", "checks", "checks_truncated"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/SafeString" },
+        "number": { "type": "integer", "minimum": 1 },
+        "url": { "$ref": "#/$defs/SafeString" },
+        "state": { "type": "string", "enum": ["OPEN", "CLOSED", "MERGED", "UNKNOWN"] },
+        "is_draft": { "type": "boolean" },
+        "title": { "$ref": "#/$defs/SafeString" },
+        "body": { "$ref": "#/$defs/SafeString" },
+        "base_branch": { "$ref": "#/$defs/SafeString" },
+        "base_oid": { "$ref": "#/$defs/StringOrNull" },
+        "head_branch": { "$ref": "#/$defs/SafeString" },
+        "head_oid": { "$ref": "#/$defs/StringOrNull" },
+        "expected_head": { "$ref": "#/$defs/SafeString" },
+        "head_matches": { "type": "boolean" },
+        "head_branch_present": { "type": "boolean" },
+        "merge_state": { "$ref": "#/$defs/SafeString" },
+        "review_decision": { "$ref": "#/$defs/SafeString" },
+        "merged_at": { "$ref": "#/$defs/DateTimeOrNull" },
+        "merge_commit_oid": { "$ref": "#/$defs/StringOrNull" },
+        "checks": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/CheckObservation" } },
+        "checks_truncated": { "type": "boolean" }
+      }
+    },
+    "RemotePublication": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "cache_state", "refresh_state", "observation", "observed_at", "refreshed_at", "retry_at", "diagnostics"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "cache_state": { "type": "string", "enum": ["fresh", "stale", "expired", "unavailable"] },
+        "refresh_state": { "type": "string", "enum": ["idle", "busy", "failed", "retry-after"] },
+        "observation": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RemoteObservation" }] },
+        "observed_at": { "$ref": "#/$defs/DateTimeOrNull" },
+        "refreshed_at": { "$ref": "#/$defs/DateTimeOrNull" },
+        "retry_at": { "$ref": "#/$defs/DateTimeOrNull" },
+        "diagnostics": { "$ref": "#/$defs/DiagnosticArray" }
+      }
+    },
+    "PublicationRecord": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "local" }, "value": { "$ref": "#/$defs/LocalPublication" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "pull_request" }, "value": { "$ref": "#/$defs/PullRequestPublication" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "remote" }, "value": { "$ref": "#/$defs/RemotePublication" } } }
+      ]
+    },
+    "AttemptGroup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["stage", "task_generation", "attempt_ids"],
+      "properties": {
+        "stage": { "$ref": "#/$defs/StringOrNull" },
+        "task_generation": { "type": ["integer", "string", "null"] },
+        "attempt_ids": { "type": "array", "maxItems": 2000, "items": { "type": "string", "minLength": 1, "maxLength": 256 } }
+      }
+    },
+    "NoiseGroup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["group_id", "kind", "summary", "source_kind", "count", "first_at", "last_at", "raw_cursor"],
+      "properties": {
+        "group_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "summary": { "$ref": "#/$defs/SafeString" },
+        "source_kind": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "count": { "type": "integer", "minimum": 1 },
+        "first_at": { "type": "string", "format": "date-time" },
+        "last_at": { "type": "string", "format": "date-time" },
+        "raw_cursor": { "$ref": "#/$defs/SafeString" }
+      }
+    },
+    "DependencyEdge": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "from", "to", "direction", "relationship", "reference", "state", "cycle", "blocked_by", "dependency_stage", "stack_divergence"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "from": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "to": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "direction": { "const": "depends_on" },
+        "relationship": { "type": "string", "enum": ["stacked", "scheduling"] },
+        "reference": { "$ref": "#/$defs/StringOrNull" },
+        "state": { "type": "string", "enum": ["clear", "blocking", "missing", "error", "cyclic"] },
+        "cycle": { "type": "boolean" },
+        "blocked_by": { "$ref": "#/$defs/StringOrNull" },
+        "dependency_stage": { "$ref": "#/$defs/StringOrNull" },
+        "stack_divergence": { "type": "string", "enum": ["aligned", "divergent", "partial", "unavailable", "not_applicable"] }
+      }
+    },
+    "ForestCrossReference": {
+      "type": "object", "additionalProperties": false,
+      "required": ["edge_id", "kind"],
+      "properties": {
+        "edge_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "kind": { "type": "string", "enum": ["cycle", "additional"] }
+      }
+    },
+    "DependencyForest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["roots", "node_order", "tree_edges", "cross_references"],
+      "properties": {
+        "roots": { "type": "array", "maxItems": 2000, "items": { "type": "string", "maxLength": 512 } },
+        "node_order": { "type": "array", "maxItems": 2000, "items": { "type": "string", "maxLength": 512 } },
+        "tree_edges": { "type": "array", "maxItems": 2000, "items": { "type": "string", "maxLength": 64 } },
+        "cross_references": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/ForestCrossReference" } }
+      }
+    },
+    "RefreshIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "number", "expected_head"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/SafeString" },
+        "number": { "type": "integer", "minimum": 1 },
+        "expected_head": { "$ref": "#/$defs/SafeString" }
+      }
+    },
+    "PublicationRefresh": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eligible", "reason", "identity"],
+      "properties": {
+        "eligible": { "type": "boolean" },
+        "reason": { "$ref": "#/$defs/StringOrNull" },
+        "identity": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RefreshIdentity" }] }
+      }
+    },
+    "ArtifactRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "reference", "content", "bytes", "truncated", "invalid_encoding", "binary", "diagnostics"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "reference": { "$ref": "#/$defs/SafeString" },
+        "content": { "$ref": "#/$defs/StringOrNull" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "invalid_encoding": { "type": "boolean" },
+        "binary": { "type": "boolean" },
+        "diagnostics": { "$ref": "#/$defs/DiagnosticArray" }
+      }
+    },
+    "ProvenancePanel": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "records", "diagnostics", "truncated"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "records": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/ProvenanceRecord" } },
+        "diagnostics": { "$ref": "#/$defs/DiagnosticArray" }, "truncated": { "type": "boolean" },
+        "current_observation": { "$ref": "#/$defs/SafeObject" }, "observed_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "AttemptsPanel": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "records", "diagnostics", "truncated"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "records": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/AttemptRecord" } },
+        "diagnostics": { "$ref": "#/$defs/DiagnosticArray" }, "truncated": { "type": "boolean" },
+        "groups": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/AttemptGroup" } },
+        "current_attempt_id": { "$ref": "#/$defs/StringOrNull" }, "observed_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ResourcesPanel": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "records", "diagnostics", "truncated"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "records": { "type": "array", "maxItems": 2000, "items": { "oneOf": [{ "$ref": "#/$defs/GuardRecord" }, { "$ref": "#/$defs/UsageRecord" }] } },
+        "diagnostics": { "$ref": "#/$defs/DiagnosticArray" }, "truncated": { "type": "boolean" }
+      }
+    },
+    "TimelinePanel": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "records", "diagnostics", "truncated"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "records": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/TimelineRecord" } },
+        "diagnostics": { "$ref": "#/$defs/DiagnosticArray" }, "truncated": { "type": "boolean" },
+        "noise_groups": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/NoiseGroup" } },
+        "older_cursor": { "$ref": "#/$defs/StringOrNull" }, "observed_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "DependenciesPanel": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "records", "diagnostics", "truncated"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "records": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/DependencyNode" } },
+        "diagnostics": { "$ref": "#/$defs/DiagnosticArray" }, "truncated": { "type": "boolean" },
+        "edges": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/DependencyEdge" } },
+        "forest": { "$ref": "#/$defs/DependencyForest" }, "root_id": { "$ref": "#/$defs/StringOrNull" },
+        "fingerprint": { "$ref": "#/$defs/StringOrNull" }, "observed_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "PublicationPanel": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "records", "diagnostics", "truncated"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "records": { "type": "array", "maxItems": 3, "items": { "$ref": "#/$defs/PublicationRecord" } },
+        "diagnostics": { "$ref": "#/$defs/DiagnosticArray" }, "truncated": { "type": "boolean" },
+        "local": { "$ref": "#/$defs/LocalPublication" }, "pull_request": { "$ref": "#/$defs/PullRequestPublication" },
+        "remote": { "$ref": "#/$defs/RemotePublication" }, "publication_state": { "type": "string", "maxLength": 128 },
+        "refresh": { "$ref": "#/$defs/PublicationRefresh" }
+      }
+    },
+    "ArtifactsPanel": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "records", "diagnostics", "truncated"],
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "records": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/ArtifactRecord" } },
+        "diagnostics": { "$ref": "#/$defs/DiagnosticArray" }, "truncated": { "type": "boolean" },
+        "observed_files": { "type": "integer", "minimum": 0 }, "observed_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "Panels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provenance", "attempts", "resources", "timeline", "dependencies",
+        "publication", "artifacts"
+      ],
+      "properties": {
+        "provenance": { "$ref": "#/$defs/ProvenancePanel" },
+        "attempts": { "$ref": "#/$defs/AttemptsPanel" },
+        "resources": { "$ref": "#/$defs/ResourcesPanel" },
+        "timeline": { "$ref": "#/$defs/TimelinePanel" },
+        "dependencies": { "$ref": "#/$defs/DependenciesPanel" },
+        "publication": { "$ref": "#/$defs/PublicationPanel" },
+        "artifacts": { "$ref": "#/$defs/ArtifactsPanel" }
+      }
+    }
+  }
+}

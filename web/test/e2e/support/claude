@@ -12,8 +12,10 @@ if [[ "${1:-}" == "--version" ]]; then
 fi
 
 cwd="$(pwd)"
+emit_usage=0
 case "$cwd" in
   */stages/2-brainstorm/*)
+    emit_usage=1
     # The stage pre-stamps brainstorm.md with AGENT_WORKING before the
     # agent runs — "round 1" means no questions exist yet, not no file.
     if ! grep -q '^### Q1' brainstorm.md 2>/dev/null; then
@@ -30,9 +32,11 @@ case "$cwd" in
     fi
     ;;
   */stages/3-plan/*)
+    emit_usage=1
     printf '# Plan\n\n1. Implement the sample feature.\n\n<!-- COMPLETE -->\n' > plan.md
     ;;
   *worktrees/*)
+    emit_usage=1
     # Execute runs in the project worktree: commit something real.
     printf 'implemented by golden-path e2e\n' > implementation.txt
     git add implementation.txt
@@ -47,4 +51,11 @@ case "$cwd" in
     printf 'Golden Sample\n'
     ;;
 esac
+
+# Keep the task workspace's resource evidence honest. Real Claude emits
+# structured usage on every stage run; this fake must do the same or the Web
+# mutation controls correctly remain fail-closed on an unavailable usage DB.
+if [[ "$emit_usage" == "1" ]]; then
+  printf '%s\n' '{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":12,"output_tokens":3}}}'
+fi
 exit 0

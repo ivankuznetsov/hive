@@ -261,6 +261,35 @@ condition event must name a durable attempt whose task/stage ownership matches
 the record. Retry and adoption reuse the numeric epoch when accepted inputs
 are unchanged.
 
+## Task workspace attempt/session projection
+
+The task workspace never calls `Store#scan`. Dispatcher admission writes an
+attempt-bound task-journal activity after the durable record exists and before
+worker handoff. Read-time discovery begins with that task-local binding (or the
+legacy `TaskProjection.identity.attempt_id`) and follows only exact predecessor
+IDs through `Store#fetch`, bounded to 100 seed IDs, 32 predecessors, and 512
+KiB. Only the canonical projection binding can mark an attempt current;
+overlapping live but unbound records are conflicting evidence.
+
+Every actual child spawn receives a separate session/correlation ID beneath
+the attempt. Durable start/finish observations preserve role, requested
+provider/model/effort, provider-reported actual model when available, health,
+outcome, timeout, typed guards, resource observations, and usage. Missing
+runtime values remain unavailable and browser/Turbo connection state is never
+used as agent health. This child-session identity is distinct from the POSIX
+session/process-group ownership fields on the supervisor attempt record.
+
+Attempt admission and other `activity_recorded` rows are evidence within the
+numeric input epoch selected before launch; `GenerationTracker` excludes them
+when deciding whether inputs advanced. A retry may reconcile a prior pending
+domain-operation receipt only after revalidating that receipt's historical
+attempt/task/stage/epoch/ownership binding against `Attempts::Store`. Provider
+execution is enclosed by lazy artifact custody after `session_started`; a safe
+validation/restore precedes context promotion and `session_finished`, so
+controller journal appends neither trip nor bypass protected-file custody.
+
+See [[modules/task_workspace]] and [[token-usage]].
+
 ## State protocol
 
 ```text

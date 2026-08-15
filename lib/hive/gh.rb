@@ -815,7 +815,15 @@ module Hive
         # mise-backed gh shims may announce the selected tool on stdout.
         # Every Hive::Gh caller treats stdout as GitHub's machine-readable
         # payload, so keep compatibility chatter on the shim side silent.
-        "MISE_QUIET" => "1"
+        "MISE_QUIET" => "1",
+        # Controller subprocesses must not inherit the parent bundle. Besides
+        # making packaged binaries deterministic, this prevents a helper
+        # implemented in Ruby from trying to materialize Hive's development
+        # Gemfile under a different system Ruby.
+        "RUBYOPT" => nil, "RUBYLIB" => nil, "BUNDLE_GEMFILE" => nil,
+        "BUNDLE_BIN_PATH" => nil, "BUNDLER_SETUP" => nil,
+        "BUNDLER_VERSION" => nil, "RUBYGEMS_GEMDEPS" => nil,
+        "GEM_HOME" => nil, "GEM_PATH" => nil
       }
       # A dedicated process group lets the deadline cover helpers that inherit
       # stdout/stderr after the direct gh process exits. Otherwise waitpid can

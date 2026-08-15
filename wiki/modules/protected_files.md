@@ -162,6 +162,11 @@ Hive keeps stage semantics above the facade:
   task-control anchors; tampering retains `implementer_tampered`.
 - `Stages::OpenPr` and `Stages::Finalize` protect controller task state around
   body-authoring spawns and retain their current error markers.
+- `Stages::Artifacts` gives every outcome-evidence inference, producer, and
+  reviewer role its own `AgentCustody` boundary. Durable session activity,
+  usage, and context receipts are controller bookkeeping outside that
+  boundary; only writes made during the untrusted provider call are judged as
+  agent custody changes.
 - `Stages::Review`, `Review::Triage`, and `Review::CiFix` supply pass-specific
   escalation, suppression, guardrail, error, and success anchors. Triage also
   requires a non-empty regular escalations artifact.

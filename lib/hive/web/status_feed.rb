@@ -39,6 +39,12 @@ module Hive
         @mutex.synchronize { @source.refresh_payload_now }
       end
 
+      def dependency_context_snapshot
+        @mutex.synchronize do
+          @source.dependency_context_snapshot if @source.respond_to?(:dependency_context_snapshot)
+        end
+      end
+
       # Keep the daemon-owned recovery receipt overlay available without
       # paying for another fleet scan. Commands::Status joins the supplied
       # cached payload to the scheduler snapshot in memory.
@@ -181,6 +187,12 @@ module Hive
 
       def scan_count
         @monitor.synchronize { @scan_count }
+      end
+
+      def dependency_context_snapshot
+        return unless @status_command.respond_to?(:dependency_context_snapshot)
+
+        @status_command.dependency_context_snapshot
       end
 
       # Seed the poller from a status page that already rendered a successful

@@ -11,14 +11,14 @@ normalizer while leaving process supervision with the caller.
 ## Install
 
 ```ruby
-gem "agent-cli-runtime", "~> 0.1.1"
+gem "agent-cli-runtime", "~> 0.2.0"
 ```
 
 ```ruby
 require "agent_cli_runtime"
 ```
 
-Ruby 3.4 or newer is required. The 0.1.x line is tested on Linux and macOS.
+Ruby 3.4 or newer is required. The 0.2.x line is tested on Linux and macOS.
 
 ## Compile an invocation
 

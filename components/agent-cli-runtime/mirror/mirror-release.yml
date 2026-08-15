@@ -197,6 +197,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         shell: bash
         run: |
+          set -euo pipefail
           snapshot="$RUNNER_TEMP/release-snapshot"
           mkdir -p "$snapshot"
           git -C mirror archive "$VERSION" | tar -x -C "$snapshot"
@@ -213,6 +214,17 @@ jobs:
             "$RUNNER_TEMP/gem-home/bin/agent-runtime" --version |
             grep -Fx "${{ steps.release.outputs.version }}"
 
+      - name: Prepare snapshot-bound release notes
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby hive/components/agent-cli-runtime/mirror/release-notes.rb \
+            "$VERSION" \
+            "$RUNNER_TEMP/release-snapshot/CHANGELOG.md" \
+            "$RUNNER_TEMP/release-notes.md"
+
       - name: Push the verified release snapshot tag
         env:
           VERSION: ${{ inputs.version }}
@@ -227,23 +239,13 @@ jobs:
           VERSION: ${{ inputs.version }}
         shell: bash
         run: |
+          set -euo pipefail
           if gh release view "$VERSION" \
             --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Mirror release $VERSION already exists."
             exit 0
           fi
           notes="$RUNNER_TEMP/release-notes.md"
-          printf '%s\n' \
-            "Read-only source snapshot of the component release from the Hive monorepo." \
-            "" \
-            "Install from RubyGems:" \
-            "" \
-            '```sh' \
-            "gem install agent-cli-runtime --version ${{ steps.release.outputs.version }}" \
-            '```' \
-            "" \
-            "Canonical development and release authority remain in https://github.com/ivankuznetsov/hive." \
-            > "$notes"
           gh release create "$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \

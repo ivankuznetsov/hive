@@ -3,7 +3,7 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-08-12
+updated: 2026-08-15
 tags: [agent, runtime, component, gem, cli]
 ---
 
@@ -122,10 +122,12 @@ budgets, or contain Hive defaults and skills. It can load and run without
 `hive-cli` or Hive constants. Direct standard-library gem dependencies are
 declared in its gemspec.
 
-Hive source declares the published `agent-cli-runtime ~> 0.1.1` line and
-resolves the unreleased monorepo component path during development. Version
-selection, component publication, and the later Hive dependency cutover remain
-separately authorized. `Hive::AgentRuntime` preserves its
+Hive source admits `agent-cli-runtime >= 0.1.1, < 0.3.0` during release prep and
+resolves the monorepo component path during development. The unchanged 0.1.1
+floor keeps installed Hive resolvable while the authorized 0.2.0 component
+release adds the public OpenCode contract; component publication and the later
+Hive dependency cutover remain separate operations. `Hive::AgentRuntime`
+preserves its
 public request, probe, error, and result names as a forwarding facade, while
 `Hive::AgentProfile` wraps package profiles with only Hive-owned skill, model
 routing, default-model, status, and policy metadata. The five source-built Hive
@@ -152,8 +154,9 @@ state, checksums it, installs it into a private gem home, proves a clean require
 and exercises the executable. Root parity fixtures cover non-default
 compilation, local probes, named capability evidence, provider usage variants,
 and observable normalization/redaction across all five built-ins. The
-unreleased source candidate adds OpenCode without authorizing a version, tag,
-publication, mirror release, deployment, or Hive release.
+0.2.0 release promotes OpenCode to the public compatibility surface without
+changing the component's caller-owned process-supervision boundary or
+authorizing a Hive release.
 `bin/release-preflight` remains
 tag-bound and is not run against a fabricated tag during candidate work.
 
@@ -183,20 +186,23 @@ approved, fully qualified component tag to an orphan `vX.Y.Z` source-snapshot
 tag. It reuses the component release preflight, verifies the exact version is
 already on RubyGems, compares the projected tree with an independently archived
 canonical tree, requires a live immutable `refs/tags/v*` ruleset, verifies the
-local tag as an installable gem, and only then pushes it and creates the focused
-GitHub release. Neither mirror workflow can modify Hive, publish RubyGems
+local tag as an installable gem, and builds the focused GitHub release notes
+from that verified tag's `CHANGELOG.md`. A checked extractor rejects missing or
+whitespace-only version sections before the immutable tag is pushed, and the
+release step consumes that already validated file. This ordering also makes a
+retry with an existing matching tag independent of mutable mirror `main`.
+Neither mirror workflow can modify Hive, publish RubyGems
 bytes, or choose a version; issues, pull requests, and release authority stay
 here.
 
 ## Compatibility
 
-The published line remains 0.1.x; the unreleased source candidate runs on Ruby
-3.4 or newer and is tested on Linux and macOS. An authorized release must pick
-a version that accounts for the additive prepared-invocation, route-probe,
-strict-parser, identity, and usage contracts. Removing or changing an existing
-public field, flag mapping, event meaning, or executable contract requires a
-minor release while pre-1.0. A published bad version is fixed forward; yanking
-or ownership changes are separate operator decisions.
+The 0.2.x line runs on Ruby 3.4 or newer and is tested on Linux and macOS.
+Version 0.2.0 accounts for the additive OpenCode prepared-invocation,
+route-probe, strict-parser, identity, and usage contracts. Removing or changing
+an existing public field, flag mapping, event meaning, or executable contract
+requires a minor release while pre-1.0. A published bad version is fixed
+forward; yanking or ownership changes are separate operator decisions.
 
 Related context: [[component-boundaries]], [[modules/agent_profile]], and
 ADR-038 in [[decisions]].

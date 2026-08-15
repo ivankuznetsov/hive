@@ -9,6 +9,7 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
   SYNC = File.join(MIRROR, "sync.rb")
   WORKFLOW = File.join(MIRROR, "sync-from-hive.yml")
   RELEASE_WORKFLOW = File.join(MIRROR, "mirror-release.yml")
+  RELEASE_NOTES = File.join(MIRROR, "release-notes.rb")
   SOURCE_SHA = "a" * 40
   CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
   RUBY_ACTION = "ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b"
@@ -212,7 +213,7 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
       manifest = JSON.parse(build_out.lines.last)
       refute manifest.fetch("source_dirty")
       gem_path = manifest.fetch("gem_path")
-      assert_equal "agent-cli-runtime-0.1.1.gem", File.basename(gem_path)
+      assert_equal "agent-cli-runtime-0.2.0.gem", File.basename(gem_path)
 
       verify_out, verify_err, verify_status = Open3.capture3(
         unbundled_environment,
@@ -220,8 +221,95 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
         gem_path, manifest.fetch("sha256")
       )
       assert verify_status.success?, "#{verify_out}\n#{verify_err}"
-      assert_equal "0.1.1", JSON.parse(verify_out).fetch("version")
+      assert_equal "0.2.0", JSON.parse(verify_out).fetch("version")
     end
+  end
+
+  def test_release_notes_extract_matching_dated_version
+    changelog = <<~MARKDOWN
+      # Changelog
+
+      ## Unreleased
+
+      - Future work.
+
+      ## 0.2.0 - 2026-08-15
+
+      - Add first-class OpenCode compatibility.
+      - Preserve nullable usage evidence.
+
+      ## 0.1.1 - 2026-08-12
+
+      - Older work.
+    MARKDOWN
+
+    notes, out, err, status = build_release_notes(changelog, "v0.2.0")
+
+    assert status.success?, "#{out}\n#{err}"
+    assert_includes notes, "## Highlights"
+    assert_includes notes, "Add first-class OpenCode compatibility."
+    assert_includes notes, "Preserve nullable usage evidence."
+    assert_includes notes, "gem install agent-cli-runtime --version 0.2.0"
+    refute_includes notes, "Future work."
+    refute_includes notes, "Older work."
+  end
+
+  def test_release_notes_accept_exact_version_heading
+    changelog = <<~MARKDOWN
+      # Changelog
+
+      ## 0.2.0
+
+      - Exact heading notes.
+    MARKDOWN
+
+    notes, out, err, status = build_release_notes(changelog, "v0.2.0")
+
+    assert status.success?, "#{out}\n#{err}"
+    assert_includes notes, "Exact heading notes."
+  end
+
+  def test_release_notes_reject_absent_version
+    notes, _out, err, status = build_release_notes(
+      "## 0.1.1\n\n- Older work.\n",
+      "v0.2.0"
+    )
+
+    refute status.success?
+    assert_nil notes
+    assert_match(/no section for 0\.2\.0/, err)
+  end
+
+  def test_release_notes_reject_whitespace_only_section
+    changelog = "## 0.2.0 - 2026-08-15\n \t \n\n" \
+                "## 0.1.1\n\n- Older work.\n"
+
+    notes, _out, err, status = build_release_notes(changelog, "v0.2.0")
+
+    refute status.success?
+    assert_nil notes
+    assert_match(/section for 0\.2\.0 has no content/, err)
+  end
+
+  def test_release_notes_stop_at_next_version_boundary
+    changelog = <<~MARKDOWN
+      ## 0.2.0 - 2026-08-15
+
+      ### OpenCode
+
+      - Selected work.
+
+      ## 0.1.1 - 2026-08-12
+
+      - Must not cross the version boundary.
+    MARKDOWN
+
+    notes, out, err, status = build_release_notes(changelog, "v0.2.0")
+
+    assert status.success?, "#{out}\n#{err}"
+    assert_includes notes, "### OpenCode"
+    assert_includes notes, "Selected work."
+    refute_includes notes, "Must not cross the version boundary."
   end
 
   def test_workflow_is_one_way_and_repository_scoped
@@ -284,6 +372,15 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
     assert_includes release_workflow, '--notes-file "$notes"'
     assert_includes(
       release_workflow,
+      "hive/components/agent-cli-runtime/mirror/release-notes.rb"
+    )
+    assert_includes(
+      release_workflow,
+      '"$RUNNER_TEMP/release-snapshot/CHANGELOG.md"'
+    )
+    refute_includes release_workflow, "mirror/CHANGELOG.md"
+    assert_includes(
+      release_workflow,
       "https://rubygems.org/api/v1/versions/agent-cli-runtime.json"
     )
     assert_includes release_workflow, "--connect-timeout 5"
@@ -344,9 +441,38 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
       "- name: Verify the release snapshot",
       tag_push
     )
+    assert_before(
+      release_workflow,
+      "Existing mirror tag $VERSION exactly matches the canonical snapshot.",
+      "- name: Prepare snapshot-bound release notes"
+    )
+    assert_before(
+      release_workflow,
+      "- name: Prepare snapshot-bound release notes",
+      tag_push
+    )
+    assert_before release_workflow, tag_push, "gh release create"
   end
 
   private
+
+  def build_release_notes(changelog, version)
+    Dir.mktmpdir("agent-cli-runtime-release-notes") do |dir|
+      changelog_path = File.join(dir, "CHANGELOG.md")
+      output_path = File.join(dir, "release-notes.md")
+      File.write(changelog_path, changelog)
+
+      out, err, status = Open3.capture3(
+        RbConfig.ruby,
+        RELEASE_NOTES,
+        version,
+        changelog_path,
+        output_path
+      )
+      notes = File.read(output_path) if File.file?(output_path)
+      return [ notes, out, err, status ]
+    end
+  end
 
   def expected_projection
     expected = {}

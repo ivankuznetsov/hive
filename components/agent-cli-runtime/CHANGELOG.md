@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-08-15
+
 - Add OpenCode `1.18.16+` as a fifth immutable built-in profile with exact
   `provider/model` routing and faithful model-variant validation.
 - Add route-aware offline probing for the required run/export flags, selected

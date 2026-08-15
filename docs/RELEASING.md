@@ -64,9 +64,12 @@ To publish an approved version:
    verifier.
 2. Merge the source feature without selecting a release version. Once a
    component release is explicitly authorized, update its version and
-   changelog, publish the verified bytes, then advance Hive's dependency in a
-   separate compatibility change. This keeps packaged Web installs resolvable
-   from RubyGems throughout the sequence.
+   changelog. During that release-prep PR, Hive may admit both the currently
+   published line and the candidate line (for example `>= 0.1.1, < 0.3.0`) so
+   the monorepo path gem remains testable without raising the installed floor
+   to an unpublished version. Publish the verified bytes, then narrow Hive's
+   dependency to the new line in a separate compatibility change. This keeps
+   packaged Web installs resolvable from RubyGems throughout the sequence.
 3. Record the full protected-`main` commit and verify that the version is not
    already present on RubyGems. Confirm the component tag ruleset is active and
    that `agent-cli-runtime-release` still requires the intended reviewers and

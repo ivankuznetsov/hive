@@ -1141,6 +1141,31 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_stale_evidence_attempt_transitions_the_finding_out_of_active_work
+    with_patrol_project do |repo|
+      finding = sample_finding
+      patch = Hive::Patrol::Fixer::PatchAttempt.new(
+        id: "patch-stale-evidence", finding: finding, branch: "hive-patrol/stale-evidence",
+        worktree_path: nil,
+        validation: { "passed" => false, "reason" => "stale_evidence" },
+        passed: false, diffstat: "", head_sha: nil
+      )
+
+      out, = with_captured_exit do
+        command_for(
+          mapper: FakeMapper.new([ sample_feature ]), reviewer: FakeReviewer.new([ finding ]),
+          fixer: FakeFixer.new(patch)
+        ).call
+      end
+
+      assert_equal "stale_evidence", JSON.parse(out).dig("fix_results", 0, "reason")
+      record_path = Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].first
+      record = JSON.parse(File.read(record_path))
+      assert_equal "superseded", record.fetch("lifecycle_state")
+      assert_equal "stale_evidence", record.fetch("lifecycle_reason")
+    end
+  end
+
   def test_unknown_fixer_reason_is_reported_as_a_fix_error
     with_patrol_project do |repo|
       finding = sample_finding

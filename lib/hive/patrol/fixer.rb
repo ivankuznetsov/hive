@@ -1,5 +1,6 @@
 require "json"
 require "open3"
+require "pathname"
 require "securerandom"
 require "fileutils"
 require "hive/agent"
@@ -8,6 +9,7 @@ require "hive/git_ops"
 require "hive/patrol/fingerprint"
 require "hive/patrol/runner_task"
 require "hive/patrol/agent_launch"
+require "hive/patrol/source_reader"
 require "hive/patrol/token_budget"
 require "hive/patrol/validator"
 require "hive/stages/base"
@@ -21,13 +23,14 @@ module Hive
       MAX_FIX_PROOF_BYTES = 64 * 1024
       MAX_AUDITED_PATHS = 24
       MAX_REGRESSION_PATHS = 12
+      REVISION = /\A[0-9a-f]{40,64}\z/i
       FixProofReadError = Class.new(StandardError)
       PublicationRecoveryError = Class.new(Hive::ConfigError)
       FAILURE_REASONS = %w[
         fix_agent_failed fix_agent_rejected missing_fix_proof no_validation_commands
         invalid_validation_key missing_regression regression_not_reproduced
         targeted_validation_failed fix_guardrail validation_mutated_worktree fix_error
-        stale_target_sha validation_preflight_failed
+        stale_evidence stale_target_sha validation_preflight_failed
         validation_preflight_mutated_worktree
       ].freeze
       HARD_GUARDRAIL_PATTERNS = {
@@ -85,7 +88,7 @@ module Hive
 
       def initialize(project_root, cfg:, state: nil,
                      validator: nil, worktree_factory: nil, agent_runner: nil,
-                     token_budget: nil)
+                     token_budget: nil, git_ops: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state || default_state_store
@@ -96,6 +99,7 @@ module Hive
         @worktree_factory = worktree_factory || method(:build_worktree)
         @agent_runner = agent_runner || method(:run_agent)
         @token_budget = token_budget || TokenBudget.new(@project_root, cfg: cfg)
+        @git_ops = git_ops || Hive::GitOps.new(@project_root)
         @validation_preflights = {}
       end
 
@@ -114,15 +118,19 @@ module Hive
                 "patrol worktree started at #{actual_base.inspect}, expected #{base_sha.inspect}"
         end
         if !finding.target_sha.to_s.empty? && finding.target_sha.to_s.downcase != base_sha.downcase
-          return failed_attempt_patch(
-            finding, branch, worktree,
-            {
-              "passed" => false,
-              "reason" => "stale_target_sha",
-              "error" => "finding evidence targets #{finding.target_sha}, current default is #{base_sha}"
-            },
-            base_sha: base_sha
-          )
+          current_evidence = revalidated_evidence(finding, worktree.path)
+          unless current_evidence
+            return failed_attempt_patch(
+              finding, branch, worktree,
+              {
+                "passed" => false,
+                "reason" => "stale_evidence",
+                "error" => "finding evidence from #{finding.target_sha} no longer matches current default #{base_sha}"
+              },
+              base_sha: base_sha
+            )
+          end
+          finding.evidence = current_evidence
         end
         if (preflight_failure = validation_preflight_failure(finding, worktree.path, base_sha))
           return failed_attempt_patch(
@@ -180,6 +188,75 @@ module Hive
       end
 
       private
+
+      def revalidated_evidence(finding, worktree_path)
+        evidence = finding.evidence
+        return unless evidence.is_a?(Array) && !evidence.empty?
+        return unless REVISION.match?(finding.target_sha.to_s)
+
+        source_reader = SourceReader.new(worktree_path)
+        current_lines_by_path = {}
+        reviewed_lines_by_path = {}
+        normalized = evidence.map do |item|
+          next unless item.is_a?(Hash)
+
+          entry = item.each_with_object({}) { |(key, value), copy| copy[key.to_s] = value }
+          path = entry["file"].to_s
+          path = entry["path"].to_s if path.empty?
+          path = path.tr("\\", "/")
+          line = entry["line"]
+          snippet = entry["snippet"]
+          next if path.empty? || Pathname.new(path).absolute? || path.split("/").include?("..")
+          next unless line.is_a?(Integer) && line.positive?
+          next unless snippet.is_a?(String) && !snippet.strip.empty?
+
+          snippet = snippet.strip
+          current_lines = current_lines_by_path.fetch(path) do
+            current_lines_by_path[path] = bounded_source_lines(source_reader.read_bytes(path))
+          end
+          reviewed_lines = reviewed_lines_by_path.fetch(path) do
+            reviewed_lines_by_path[path] = reviewed_source_lines(finding.target_sha, path)
+          end
+          next unless current_lines && reviewed_lines
+
+          reviewed_line = reviewed_lines[line - 1]
+          next unless reviewed_line&.include?(snippet)
+
+          current_line = if current_lines[line - 1] == reviewed_line
+            line
+          else
+            matches = current_lines.each_index.select do |index|
+              current_lines[index] == reviewed_line
+            end
+            next unless matches.one?
+
+            matches.first + 1
+          end
+          entry.merge("file" => path, "line" => current_line, "snippet" => snippet).tap do |copy|
+            copy.delete("path")
+          end
+        end
+        return if normalized.any?(&:nil?)
+
+        normalized
+      rescue SystemCallError, ArgumentError
+        nil
+      end
+
+      def reviewed_source_lines(revision, path)
+        bytes = @git_ops.read_blob_at(
+          revision, path, max_bytes: SourceReader::MAX_SOURCE_BYTES
+        )
+        return unless bytes
+
+        bounded_source_lines(bytes)
+      end
+
+      def bounded_source_lines(bytes)
+        return if bytes.bytesize >= SourceReader::MAX_SOURCE_BYTES
+
+        bytes.dup.force_encoding(Encoding::UTF_8).scrub("").lines
+      end
 
       def default_state_store
         require "hive/patrol/state_store"

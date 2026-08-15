@@ -171,14 +171,79 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_stale_evidence_target_is_rejected_before_validation_or_agent_work
+  def test_stale_target_with_current_evidence_continues_on_fresh_default
     with_tmp_git_repo do |repo|
       File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
       run!("git", "-C", repo, "add", ".")
       run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
       candidate = finding
-      candidate.target_sha = "a" * 40
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      reviewed_sha = candidate.target_sha
       candidate.validation_key = "test"
+      File.write(File.join(repo, "README.md"), "unrelated change\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "advance main", "--quiet")
+      agent_ran = false
+      agent = lambda do |output_path:, **|
+        agent_ran = true
+        write_fix_proof(output_path, status: "rejected")
+      end
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["test"] = "ruby -c app.rb"
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: configured,
+        agent_runner: agent
+      ).attempt(candidate)
+
+      refute patch.passed
+      assert agent_ran
+      assert_equal "fix_agent_rejected", patch.validation.fetch("reason")
+      assert_equal run!("git", "-C", repo, "rev-parse", "HEAD").strip, patch.base_sha
+      assert_equal reviewed_sha, patch.finding.target_sha
+    end
+  end
+
+  def test_stale_target_relocates_unique_current_evidence_before_agent_work
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      File.write(File.join(repo, "app.rb"), "# moved down\nputs 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "move evidence", "--quiet")
+      observed_line = nil
+      agent = lambda do |finding:, output_path:, **|
+        observed_line = finding.evidence.first.fetch("line")
+        write_fix_proof(output_path, status: "rejected")
+      end
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["test"] = "ruby -c app.rb"
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: configured, agent_runner: agent
+      ).attempt(candidate)
+
+      refute patch.passed
+      assert_equal "fix_agent_rejected", patch.validation.fetch("reason")
+      assert_equal 2, observed_line
+    end
+  end
+
+  def test_stale_target_with_missing_current_evidence_fails_closed_before_agent_work
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      File.write(File.join(repo, "app.rb"), "warn 'changed'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "remove evidence", "--quiet")
       agent_ran = false
 
       patch = Hive::Patrol::Fixer.new(
@@ -188,7 +253,81 @@ class HivePatrolFixerTest < Minitest::Test
 
       refute patch.passed
       refute agent_ran
-      assert_equal "stale_target_sha", patch.validation.fetch("reason")
+      assert_equal "stale_evidence", patch.validation.fetch("reason")
+    end
+  end
+
+  def test_stale_target_with_failed_historical_read_fails_closed_before_agent_work
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      File.write(File.join(repo, "app.rb"), "# current\nputs 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "advance main", "--quiet")
+      agent_ran = false
+      failing_git = Object.new
+      failing_git.define_singleton_method(:read_blob_at) { |*, **| raise ArgumentError }
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo), git_ops: failing_git,
+        agent_runner: ->(**) { agent_ran = true }
+      ).attempt(candidate)
+
+      refute patch.passed
+      refute agent_ran
+      assert_equal "stale_evidence", patch.validation.fetch("reason")
+    end
+  end
+
+  def test_stale_target_does_not_rebind_to_an_unrelated_unique_snippet
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      File.write(File.join(repo, "app.rb"), "warn 'changed'\nputs 'unrelated'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "replace evidence", "--quiet")
+      agent_ran = false
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo),
+        agent_runner: ->(**) { agent_ran = true }
+      ).attempt(candidate)
+
+      refute patch.passed
+      refute agent_ran
+      assert_equal "stale_evidence", patch.validation.fetch("reason")
+    end
+  end
+
+  def test_stale_target_with_ambiguous_relocated_evidence_fails_closed
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      File.write(File.join(repo, "app.rb"), "warn 'changed'\nputs 'healthy'\nputs 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "duplicate evidence", "--quiet")
+      agent_ran = false
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo),
+        agent_runner: ->(**) { agent_ran = true }
+      ).attempt(candidate)
+
+      refute patch.passed
+      refute agent_ran
+      assert_equal "stale_evidence", patch.validation.fetch("reason")
     end
   end
 

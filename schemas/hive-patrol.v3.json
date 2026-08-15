@@ -100,7 +100,8 @@
                   "validated", "validation_failed", "fix_agent_failed", "fix_agent_rejected",
                   "missing_fix_proof", "no_validation_commands", "invalid_validation_key",
                   "missing_regression", "regression_not_reproduced", "targeted_validation_failed",
-                  "fix_guardrail", "validation_mutated_worktree", "stale_target_sha",
+                  "fix_guardrail", "validation_mutated_worktree", "stale_evidence",
+                  "stale_target_sha",
                   "validation_preflight_failed", "validation_preflight_mutated_worktree",
                   "fix_error"
                 ]

@@ -25,6 +25,7 @@ require "hive/commands/approve"
 require "hive/commands/findings"
 require "hive/commands/finding_toggle"
 require "hive/commands/plan_review"
+require "hive/commands/plan_review_run"
 require "hive/commands/patrol"
 require "hive/commands/refactor_patrol"
 require "hive/commands/pairing"
@@ -1111,5 +1112,14 @@ class HiveCliTest < Minitest::Test
       assert_raises(SystemExit) { Hive::CLI.start([ "bench", "frobnicate" ]) }
     end
     assert_match(/unknown subcommand/, "#{out}#{err}")
+  end
+
+  def test_plan_review_run_starts_critique_without_operator_authority
+    with_command_new_stub(Hive::Commands::PlanReviewRun) do |calls|
+      Hive::CLI.start([ "plan-review-run", "slug", "--project", "demo" ])
+
+      assert_equal [ "slug" ], calls.first.fetch(:args)
+      assert_equal({ project: "demo" }, calls.first.fetch(:kwargs))
+    end
   end
 end

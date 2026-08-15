@@ -1476,6 +1476,27 @@ class MigrateTest < Minitest::Test
     )
   end
 
+  def test_complete_message_counts_backfilled_plan_review_requirements
+    command = migrate_command("/tmp/project")
+
+    assert_equal(
+      "hive: migrate complete (0 tasks moved, 1 plan review requirement added)",
+      command.send(
+        :migration_complete_message, [], backfilled_count: 0,
+        recovery_marker_count: 0, workflow_task_count: 0, workflow_moved_count: 0,
+        plan_review_requirement_count: 1
+      )
+    )
+    assert_equal(
+      "hive: migrate complete (0 tasks moved, 2 plan review requirements added)",
+      command.send(
+        :migration_complete_message, [], backfilled_count: 0,
+        recovery_marker_count: 0, workflow_task_count: 0, workflow_moved_count: 0,
+        plan_review_requirement_count: 2
+      )
+    )
+  end
+
   def test_legacy_reviewer_rewrite_reports_invalid_yaml_as_config_error
     error = assert_raises(Hive::ConfigError) do
       migrate_command("/tmp/project").send(

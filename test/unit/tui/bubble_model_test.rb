@@ -5363,6 +5363,38 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_open_input_editor_plan_advance_rejects_a_rewritten_guarded_command
+    # The guarded approval path is only trustworthy if the command it
+    # hands back is the same `hive develop` we validated. A prepare that
+    # returns anything else must abort the advance with the marker still
+    # :waiting rather than dispatch the substituted command.
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, "# Plan\nUntouched.\n<!-- WAITING -->\n")
+
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        suggested_command: "hive plan some-slug --project demo --from 3-plan"
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+      plan_approval = Object.new
+      plan_approval.define_singleton_method(:prepare) do |_command, _state_file|
+        "hive develop someone-elses-slug"
+      end
+      @model.instance_variable_set(:@plan_approval, plan_approval)
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal :waiting, Hive::Markers.current(plan_md).name,
+                   "marker must stay :waiting when the guarded command was rewritten"
+      assert_nil @messages.find { |m| m.is_a?(Hive::Tui::Messages::DispatchCommand) },
+                 "the substituted develop command must never be dispatched"
+    end
+  end
+
   def test_open_input_editor_plan_advance_leaves_marker_waiting_when_command_is_malformed
     # Post-review P2 #2: if the suggested_command can't be parsed
     # into a `hive develop ...` argv, the marker MUST stay :waiting

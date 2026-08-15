@@ -248,6 +248,18 @@ class RefactorPatrolJobStoreFilesTest < Minitest::Test
     end
   end
 
+  def test_job_lock_rejects_a_nonregular_previous_writer_temporary
+    with_files do |files, root, _outside|
+      temporary = ".job-1.json.tmp.#{Process.pid}.#{'f' * 12}"
+      FileUtils.mkdir_p(File.join(root, "jobs", temporary))
+
+      error = assert_raises(CorruptRecord) do
+        files.with_job_lock("job-1") { flunk }
+      end
+      assert_match(/temporary entry is not a regular file/, error.message)
+    end
+  end
+
   def test_inventory_translates_a_job_that_disappears_after_enumeration
     with_files do |files, _root, _outside|
       files.write_job("job-1", "{}\n")

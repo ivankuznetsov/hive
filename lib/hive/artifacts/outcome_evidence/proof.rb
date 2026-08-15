@@ -66,7 +66,7 @@ module Hive
           admit(value, task_folder: task_folder, expected_head: expected_head, validate_files: false)
         end
 
-        def admit(value, task_folder:, expected_head:, validate_files:)
+        def admit(value, task_folder:, expected_head:, validate_files:, shared_visual_source: false)
           entry = object!(value, "outcome evidence")
           reject_unknown!(
             entry, %w[kind summary claims source representations], "outcome evidence"
@@ -83,7 +83,8 @@ module Hive
           )
           representations = canonical_representations(
             entry.fetch("representations"), kind: kind, task_folder: task_folder,
-            validate_files: validate_files
+            validate_files: validate_files,
+            shared_visual_source: shared_visual_source && source.fetch("type") == "task"
           )
           validate_provider_originals!(
             source, representations, task_folder: task_folder
@@ -110,8 +111,16 @@ module Hive
         # generation/attempt path. Project-provider files already live in the
         # controller-owned media store and remain bound to their manifest.
         def materialize!(value, task_folder:, expected_head:, destination_root:)
-          admitted = admit!(
-            value, task_folder: task_folder, expected_head: expected_head
+          materialize(
+            value, task_folder: task_folder, expected_head: expected_head,
+            destination_root: destination_root, shared_visual_source: false
+          )
+        end
+
+        def materialize(value, task_folder:, expected_head:, destination_root:, shared_visual_source:)
+          admitted = admit(
+            value, task_folder: task_folder, expected_head: expected_head,
+            validate_files: true, shared_visual_source: shared_visual_source
           )
           return admitted if admitted.dig("source", "type") == "project_provider"
 
@@ -139,6 +148,7 @@ module Hive
           remove_materialization_root(destination) if destination_created
           raise
         end
+        private_class_method :materialize
 
         # Convert the producer's semantic-only task descriptor into the full
         # byte contract. Hashes, sizes, source identity, and rendering are
@@ -148,9 +158,9 @@ module Hive
         def materialize_producer!(value, task_folder:, expected_head:, destination_root:)
           raw = object!(value, "producer outcome evidence")
           materialized = if raw.key?("source")
-            materialize!(
+            materialize(
               raw, task_folder: task_folder, expected_head: expected_head,
-              destination_root: destination_root
+              destination_root: destination_root, shared_visual_source: true
             )
           else
             reject_unknown!(
@@ -187,9 +197,9 @@ module Hive
               },
               "representations" => representations
             )
-            materialize!(
+            materialize(
               described, task_folder: task_folder, expected_head: expected_head,
-              destination_root: destination_root
+              destination_root: destination_root, shared_visual_source: true
             )
           end
           return materialized unless materialized.fetch("kind") == "video"
@@ -293,7 +303,8 @@ module Hive
         end
         private_class_method :canonical_source
 
-        def canonical_representations(value, kind:, task_folder:, validate_files: true)
+        def canonical_representations(value, kind:, task_folder:, validate_files: true,
+                                      shared_visual_source: false)
           representations = Array(value)
           unless representations.length.between?(2, MAX_REPRESENTATIONS)
             raise StoreError,
@@ -320,7 +331,14 @@ module Hive
             raise StoreError, "outcome evidence requires exactly one original and one review representation"
           end
           paths = canonical.map { |item| item.fetch("path") }
-          raise StoreError, "outcome evidence representation paths must be unique" unless paths.uniq == paths
+          primary, supplemental = canonical.partition { |item| %w[original review].include?(item.fetch("role")) }
+          extra_paths = supplemental.map { |item| item.fetch("path") }
+          shared_visual = shared_visual_source && %w[screenshot video].include?(kind) &&
+                          primary.map { |item| item.values_at("path", "media_type", "sha256", "bytes") }.uniq.one? &&
+                          extra_paths.uniq == extra_paths && !extra_paths.include?(primary.first.fetch("path"))
+          unless paths.uniq == paths || shared_visual
+            raise StoreError, "outcome evidence representation paths must be unique"
+          end
 
           canonical.sort_by { |item| [ role_order(item.fetch("role")), item.fetch("path") ] }
         end

@@ -282,6 +282,7 @@ class WebTaskDiffTest < Minitest::Test
     diff, = service([])
     ready_reader, ready_writer = IO.pipe
     pid = Process.spawn(
+      Hive::Web::TaskDiff::SUBPROCESS_ENV,
       RbConfig.ruby, "-e", "trap('TERM') {}; STDOUT.sync = true; puts 'ready'; sleep 30",
       pgroup: true, out: ready_writer, err: File::NULL
     )

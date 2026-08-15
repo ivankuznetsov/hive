@@ -13,6 +13,7 @@ module Hive
     PROMPT_STYLES = AgentCliRuntime::Profile::PROMPT_STYLES
     ROUTING_ARGUMENT_PLACEMENTS = %i[global subcommand].freeze
     STRUCTURED_OUTPUT_PROTOCOLS = %i[grok_end].freeze
+    BILLING_SEMANTICS = %i[unknown subscription_backed api_billed].freeze
     WORKSPACE_WRITE_PERMISSION_MODE =
       AgentCliRuntime::Profile::WORKSPACE_WRITE_PERMISSION_MODE
     READ_ONLY_PERMISSION_MODE = AgentCliRuntime::Profile::READ_ONLY_PERMISSION_MODE
@@ -62,7 +63,7 @@ module Hive
                 :default_model_resolver, :policy_capabilities,
                 :routed_effort_values, :routing_argument_placement,
                 :routed_model_argument_builder, :routed_effort_argument_builder,
-                :structured_output_protocol, :cli_capabilities
+                :structured_output_protocol, :cli_capabilities, :billing_semantics
 
     # Existing custom profile registrations remain source compatible. Shipped
     # profiles pass runtime_profile: so their compatibility definition comes
@@ -88,6 +89,7 @@ module Hive
                    tool_scope_flags: TOOL_SCOPE_FLAGS_UNSET,
                    raw_cli_arguments_supported: false,
                    structured_output_protocol: nil,
+                   billing_semantics: :unknown,
                    credential_environment_keys: [],
                    configuration_environment_key: nil,
                    default_configuration_directory: nil)
@@ -161,6 +163,11 @@ module Hive
       @routed_effort_argument_builder =
         routed_effort_argument_builder || @runtime_profile.effort_argument_builder
       @structured_output_protocol = structured_output_protocol&.to_sym
+      @billing_semantics = billing_semantics.to_sym
+      unless BILLING_SEMANTICS.include?(@billing_semantics)
+        raise ArgumentError,
+              "billing_semantics must be one of #{BILLING_SEMANTICS.inspect}"
+      end
       freeze
     end
 
@@ -564,7 +571,8 @@ module Hive
         routing_argument_placement: @routing_argument_placement,
         routed_model_argument_builder: @routed_model_argument_builder,
         routed_effort_argument_builder: @routed_effort_argument_builder,
-        structured_output_protocol: @structured_output_protocol
+        structured_output_protocol: @structured_output_protocol,
+        billing_semantics: @billing_semantics
       }
     end
 

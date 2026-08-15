@@ -3,11 +3,11 @@ title: 4-execute stage
 type: stage
 source: lib/hive/stages/execute.rb, templates/execute_prompt.md.erb
 created: 2026-04-25
-updated: 2026-07-25
-tags: [stage, execute, worktree]
+updated: 2026-08-12
+tags: [stage, execute, worktree, plan-review]
 ---
 
-**TLDR**: Implementation-only since U9 (ADR-014). First entry creates a feature worktree at `<worktree_root>/<slug>`, records its baseline HEAD in `worktree.yml`, spawns the implementation agent, captures its final message into `task.md`, and finalises with `EXECUTE_COMPLETE` only when the worktree stays on the task branch, descends from the baseline, has a new commit, and is clean. Clean no-change exits pause as `EXECUTE_WAITING reason=no_worktree_changes` unless `plan.md` opts into `execution_mode: research` and the agent produced a structured final answer. Provider quota walls write `ERROR reason=limits_reached provider=<execute-agent> retry_after=<iso8601>`; like every persisted execute error, the daemon submits that exact marker generation to `RecoveryCoordinator` after the shared cooldown instead of hot-looping. The user `mv`s completed tasks to `6-review/` to enter the autonomous review loop. No review/iteration logic lives in 4-execute — that all moved to [[stages/review]].
+**TLDR**: Implementation-only since U9 (ADR-014). Entry from built-in coding plan first requires a current [[modules/plan_review]] resolution; raw movement into execute revalidates existing review evidence and writes a compatibility receipt only for a task with no review root. First implementation entry creates a feature worktree at `<worktree_root>/<slug>`, records its baseline HEAD in `worktree.yml`, spawns the implementation agent, captures its final message into `task.md`, and finalises with `EXECUTE_COMPLETE` only when the worktree stays on the task branch, descends from the baseline, has a new commit, and is clean. Clean no-change exits pause as `EXECUTE_WAITING reason=no_worktree_changes` unless `plan.md` opts into `execution_mode: research` and the agent produced a structured final answer. Provider quota walls write `ERROR reason=limits_reached provider=<execute-agent> retry_after=<iso8601>`; like every persisted execute error, the daemon submits that exact marker generation to `RecoveryCoordinator` after the shared cooldown instead of hot-looping. The user `mv`s completed tasks to `6-review/` to enter the autonomous review loop. No PR review/iteration logic lives in 4-execute — that all moved to [[stages/review]].
 
 ## Condition boundary
 
@@ -35,7 +35,7 @@ Crash/provider retries, daemon adoption, restart, and project config edits stay 
 
 - **State file**: `task.md` with frontmatter `slug`, `started_at`. Initial body has `## Implementation` heading plus `<!-- AGENT_WORKING -->`.
 - **Worktree pointer**: `worktree.yml` (created on init pass; gates re-entry).
-- **Plan precondition**: `plan.md` must exist; otherwise stderr `"plan.md missing; this task did not pass through 3-plan"` and exit 1.
+- **Plan precondition**: `plan.md` must exist; otherwise stderr `"plan.md missing; this task did not pass through 3-plan"` and exit 1. For built-in coding tasks, `PlanReview::TransitionGuard.validate_execute_entry!` also requires current `skipped`, `cleared`, or `degraded_cleared` evidence whenever a review root exists. A no-root task already at execute receives `plan-review/legacy-execute-adoption.json` and is not retroactively blocked.
 
 ## Pre-flight state machine (`task_state`)
 
@@ -92,6 +92,6 @@ run, and a successful agent exit with remaining dirt pauses as
 ## Backlinks
 
 - [[stages/plan]] · [[stages/open-pr]] · [[stages/review]]
-- [[modules/worktree]] · [[modules/agent]] · [[modules/markers]] · [[modules/git_ops]] · [[modules/findings]]
+- [[modules/worktree]] · [[modules/agent]] · [[modules/markers]] · [[modules/git_ops]] · [[modules/findings]] · [[modules/plan_review]]
 - [[commands/findings]] — list and toggle the `[x]` accepted-flag on findings this stage produces
 - [[state-model]] · [[decisions]]

@@ -12,6 +12,7 @@ require "hive/git_ops"
 require "hive/markers"
 require "hive/plan_frontmatter"
 require "hive/conditions/execute_boundary"
+require "hive/plan_review/transition_guard"
 
 module Hive
   module Stages
@@ -39,10 +40,13 @@ module Hive
       # so it's deliberately NOT in the SHA-protected set here.
       PROTECTED_FILES = %w[
         plan.md worktree.yml task-journal.jsonl task-projection.json
+        task-projection.checkpoint.json
       ].freeze
+      CONTROLLER_RECEIPT_DIRECTORIES = %w[context-receipts activity-operations].freeze
       UNRESOLVED_IDENTITY = Object.new.freeze
 
       def run!(task, cfg)
+        Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: cfg)
         plan_path = File.join(task.folder, "plan.md")
         unless File.exist?(plan_path)
           warn "hive: plan.md missing; this task did not pass through 3-plan"
@@ -151,27 +155,21 @@ module Hive
 
         custody_manifest = Hive::ArtifactFirewall::Manifest.new(
           root: task.folder,
-          protected_anchors: PROTECTED_FILES,
+          protected_anchors: execute_protected_files(task),
           permitted_writable_roots: [ task.folder, worktree_path ]
         )
-        custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
-        custody_report = nil
+        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
         begin
-          begin
-            impl_result = spawn_implementation(
-              task, cfg, worktree_path, identity: identity
-            )
-          ensure
-            custody_report = Hive::ArtifactFirewall.validate_and_restore(
-              custody_manifest, custody_snapshot
-            )
-          end
+          impl_result = spawn_implementation(
+            task, cfg, worktree_path, identity: identity,
+            agent_custody: agent_custody
+          )
         rescue Hive::ProviderRouteFailed
-          if custody_report&.tampered?
+          if agent_custody.report&.tampered?
             record_tamper(
-              task, custody_report.tampered_labels, who: "implementer",
-              restored: custody_report.restored?,
-              restore_error: custody_report.restore_diagnostic
+              task, agent_custody.report.tampered_labels, who: "implementer",
+              restored: agent_custody.report.restored?,
+              restore_error: agent_custody.report.restore_diagnostic
             )
           else
             mark_provider_route_failure(task)
@@ -180,7 +178,8 @@ module Hive
         end
         append_implementation_output(task, impl_result)
 
-        if custody_report.tampered?
+        custody_report = agent_custody.report
+        if custody_report&.tampered?
           return record_tamper(
             task, custody_report.tampered_labels, who: "implementer",
             restored: custody_report.restored?,
@@ -270,6 +269,28 @@ module Hive
           commit: "execute_complete", status: :execute_complete,
           research: research_mode, research_evidence: final_message_present
         )
+      end
+
+      def execute_protected_files(task)
+        paths = PROTECTED_FILES.dup
+        CONTROLLER_RECEIPT_DIRECTORIES.each do |directory|
+          root = File.join(task.folder, directory)
+          next unless File.directory?(root)
+
+          Dir.children(root).sort.each do |name|
+            next if directory == "context-receipts" && name.end_with?(".json.next")
+
+            reference = File.join(directory, name)
+            stat = File.lstat(File.join(task.folder, reference))
+            paths << reference if stat.file? && !stat.symlink?
+          rescue Errno::ENOENT
+            paths << reference
+          end
+        end
+        if (context = Hive::Attempts::Context.current)
+          paths << Hive::ContextProvenance.promoted_reference(context.attempt_id)
+        end
+        paths.uniq.freeze
       end
 
       def apply_execute_outcome(task, cfg, worktree_path, baseline_head,
@@ -370,7 +391,8 @@ module Hive
         Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).capture_execute!
       end
 
-      def spawn_implementation(task, cfg, worktree_path, identity: nil)
+      def spawn_implementation(task, cfg, worktree_path, identity: nil,
+                               agent_custody: nil)
         plan_text = File.read(File.join(task.folder, "plan.md"))
         prompt = Hive::Stages::Base.render(
           "execute_prompt.md.erb",
@@ -415,6 +437,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
           log_label: "execute-impl",
           profile: profile,
+          agent_custody: agent_custody,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only,
           **Hive::Stages::Base.implementation_launch_arguments(identity, profile)

@@ -2,22 +2,25 @@
     no frame, no polling. The answers controller carries typed-but-unsent
     text and the caret across each morph (forms morph freely; permanence
     would make a new round's form unable to replace the old one). %>
+<% operator = @workspace.fetch("operator") %>
+<% questions = operator.fetch("questions") %>
+<% recovery = operator["recovery"] %>
 <section id="task-state" data-controller="answers">
   <div class="task-header">
     <%= stage_badge(@task["stage"]) %>
     <span class="task-meta"><%= status_dot(@task) %> <%= @task.status_label %></span>
   </div>
 
-  <% if @task.recovery %>
+  <% if recovery %>
     <div class="state-banner recovery-lifecycle"
          role="status"
          aria-live="polite"
-         data-recovery-status="<%= @task.recovery["status"] %>">
+         data-recovery-status="<%= recovery["status"] %>">
       <span class="status-dot"></span>
       <span>
-        <strong><%= @task.recovery_primary_label %></strong>
-        <% if @task.recovery_context.any? %>
-          — <%= @task.recovery_context.join("; ") %>
+        <strong><%= recovery["primary_label"] %></strong>
+        <% if recovery.fetch("context").any? %>
+          — <%= recovery.fetch("context").join("; ") %>
         <% end %>
       </span>
     </div>
@@ -61,10 +64,10 @@
   <%# Only the state-driven primary actions appear (Approve when the gate is
       passable, Run when the operator drives stages manually, Diff when a
       worktree exists). The sharp tools live in the Advanced section. %>
-  <% if @task.recovery_action? %>
+  <% if recovery&.fetch("action_visible", false) %>
     <div class="state-banner state-banner-error">
       <span class="status-dot status-dot-error"></span>
-      <span><%= @task.dig("diagnostic", "summary").presence || "The stage hit an error and needs a retry." %></span>
+      <span><%= operator["diagnostic_summary"].presence || "The stage hit an error and needs a retry." %></span>
     </div>
   <% end %>
 
@@ -82,10 +85,13 @@
   <%# The bot's Autofix, web-shaped, and every other primary task action are
       shared with board cards so both surfaces submit the same native forms. %>
   <%= render "tasks/primary_actions", task: @task, daemon_enabled: @daemon_enabled,
-        mutations_enabled: @status_fresh %>
+        recovery: recovery,
+        mutations_enabled: @status_fresh && @workspace_action_evidence_current %>
 
-  <% if @questions.any? %>
-    <section class="qa">
+  <%= render "tasks/workspace_summary", workspace: @workspace %>
+
+  <% if questions.any? %>
+    <section id="task-questions" class="qa">
       <h2>Questions from the agent</h2>
       <% if (idea_text = @task.original_idea_text) %>
         <details class="idea-context" open>
@@ -100,19 +106,22 @@
     <%= form_with url: task_answers_path(
           @project.name, @task["slug"], source: @task_source
         ),
-            id: "qa-form-#{@questions.map(&:ordinal).join("-")}" do |f| %>
-        <% @questions.each do |question| %>
+            id: "qa-form-#{questions.map { |question| question.fetch("ordinal") }.join("-")}" do |f| %>
+        <% questions.each do |question| %>
           <div class="qa-item">
             <%# Single line: qa-question is pre-wrap, so template indentation
                 would render as a first-line indent. %>
-            <p class="qa-question"><span class="qa-number">Q<%= question.n %></span><%= question.text %></p>
-            <%= text_area_tag "answers[#{question.binding}]", "", placeholder: "Your answer…",
-                  disabled: !@status_fresh,
-                  data: { question_number: question.n },
-                  aria: { label: "Answer to question #{question.n}" } %>
+            <p class="qa-question"><span class="qa-number">Q<%= question.fetch("n") %></span><%= question.fetch("text") %></p>
+            <%= text_area_tag "answers[#{question.fetch("binding")}]", "", placeholder: "Your answer…",
+                  disabled: !@status_fresh || !@workspace_action_evidence_current,
+                  data: {
+                    question_number: question.fetch("n"),
+                    action: "input->answers#recordField select->answers#recordField"
+                  },
+                  aria: { label: "Answer to question #{question.fetch("n")}" } %>
           </div>
         <% end %>
-        <p><%= f.submit "Send answers", disabled: !@status_fresh,
+        <p><%= f.submit "Send answers", disabled: !@status_fresh || !@workspace_action_evidence_current,
               data: { turbo_submits_with: "Sending…" } %></p>
       <% end %>
     </section>
@@ -121,15 +130,17 @@
         question (the bot's free-text parity path) — it does not steer
         arbitrary stages, and without an open question it always fails. %>
     <details class="intervene">
-      <summary class="muted">Reply free-form instead (fills Q<%= @questions.first.n %>)</summary>
+      <summary class="muted">Reply free-form instead (fills Q<%= questions.first.fetch("n") %>)</summary>
       <%= form_with url: task_intervene_path(
             @project.name, @task["slug"], source: @task_source
           ),
             id: "intervene-form" do |f| %>
-        <%= hidden_field_tag :binding, @questions.first.binding %>
-        <%= f.text_area :message, required: true, disabled: !@status_fresh,
-              placeholder: "Written verbatim as the answer to Q#{@questions.first.n}…" %>
-        <p><%= f.submit "Send", disabled: !@status_fresh,
+        <%= hidden_field_tag :binding, questions.first.fetch("binding") %>
+        <%= f.text_area :message, required: true,
+              disabled: !@status_fresh || !@workspace_action_evidence_current,
+              data: { action: "input->answers#recordField select->answers#recordField" },
+              placeholder: "Written verbatim as the answer to Q#{questions.first.fetch("n")}…" %>
+        <p><%= f.submit "Send", disabled: !@status_fresh || !@workspace_action_evidence_current,
               data: { turbo_submits_with: "Sending…" } %></p>
       <% end %>
     </details>

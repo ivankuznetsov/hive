@@ -1,0 +1,104 @@
+require "hive/plan_review"
+
+module Hive
+  module PlanReview
+    module Adapters
+      module Base
+        OUTCOMES = %w[
+          success partial_coverage unsupported provider_limit timeout retryable_failure terminal_failure
+        ].freeze
+        SUCCESS_OUTCOMES = %w[success partial_coverage].freeze
+        TRANSIENT_OUTCOMES = %w[provider_limit timeout retryable_failure].freeze
+        KINDS = %w[primary adversarial verification].freeze
+
+        Request = Data.define(
+          :plan_path, :plan_digest, :document_type, :level, :required_coverage,
+          :policy_fingerprint, :planner_identity, :reviewer, :output_directory,
+          :timeout_sec, :attempt_id, :kind, :project_root, :verification_findings
+        ) do
+          def initialize(plan_path:, plan_digest:, document_type:, level:, required_coverage:,
+                         policy_fingerprint:, planner_identity:, reviewer:, output_directory:,
+                         timeout_sec:, attempt_id:, kind: "primary", project_root: nil,
+                         verification_findings: [])
+            normalized_level = Hive::PlanReview.level!(level)
+            normalized_kind = kind.to_s
+            raise ArgumentError, "unknown plan review adapter kind #{kind.inspect}" unless KINDS.include?(normalized_kind)
+            unless plan_digest.to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                   policy_fingerprint.to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                   attempt_id.to_s.match?(/\Apra-[0-9a-f]{64}\z/)
+              raise ArgumentError, "plan review adapter identity is malformed"
+            end
+            unless timeout_sec.is_a?(Integer) && timeout_sec.positive?
+              raise ArgumentError, "plan review adapter timeout must be positive"
+            end
+            super(
+              plan_path: File.expand_path(plan_path),
+              plan_digest: plan_digest.to_s.freeze,
+              document_type: document_type.to_s.freeze,
+              level: normalized_level.freeze,
+              required_coverage: Array(required_coverage).map(&:to_s).uniq.freeze,
+              policy_fingerprint: policy_fingerprint.to_s.freeze,
+              planner_identity: freeze_hash(planner_identity),
+              reviewer: freeze_hash(reviewer),
+              output_directory: File.expand_path(output_directory),
+              timeout_sec: timeout_sec,
+              attempt_id: attempt_id.to_s.freeze,
+              kind: normalized_kind.freeze,
+              project_root: project_root && File.expand_path(project_root),
+              verification_findings: Hive::PlanReview.deep_freeze(
+                Array(verification_findings).map do |finding|
+                  finding.respond_to?(:to_h) ? finding.to_h : finding
+                end
+              )
+            )
+            freeze
+          end
+
+          private
+
+          def freeze_hash(value)
+            value.to_h { |key, child| [ key.to_s.freeze, child.to_s.freeze ] }.freeze
+          end
+        end
+
+        Result = Data.define(
+          :outcome, :findings, :coverage, :selected_lenses, :residual_evidence,
+          :diagnostic, :retry_at, :route_receipt
+        ) do
+          def initialize(outcome:, findings: [], coverage: [], selected_lenses: [],
+                         residual_evidence: [], diagnostic: nil, retry_at: nil,
+                         route_receipt: {})
+            normalized = outcome.to_s
+            raise ArgumentError, "unknown plan review outcome #{outcome.inspect}" unless OUTCOMES.include?(normalized)
+            super(
+              outcome: normalized.freeze,
+              findings: Hive::PlanReview.deep_freeze(Array(findings).dup),
+              coverage: Hive::PlanReview.deep_freeze(Array(coverage).dup),
+              selected_lenses: Hive::PlanReview.deep_freeze(Array(selected_lenses).dup),
+              residual_evidence: Hive::PlanReview.deep_freeze(Array(residual_evidence).dup),
+              diagnostic: diagnostic&.to_s&.freeze,
+              retry_at: retry_at&.to_s&.freeze,
+              route_receipt: Hive::PlanReview.deep_freeze(route_receipt.to_h.dup)
+            )
+            freeze
+          end
+
+          def successful? = SUCCESS_OUTCOMES.include?(outcome)
+
+          def to_h
+            {
+              "outcome" => outcome,
+              "findings" => findings.map { |finding| finding.respond_to?(:to_h) ? finding.to_h : finding },
+              "coverage" => coverage,
+              "selected_lenses" => selected_lenses,
+              "residual_evidence" => residual_evidence,
+              "diagnostic" => diagnostic,
+              "retry_at" => retry_at,
+              "route_receipt" => route_receipt
+            }
+          end
+        end
+      end
+    end
+  end
+end

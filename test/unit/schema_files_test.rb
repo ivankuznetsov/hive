@@ -10,6 +10,7 @@ require "hive/commands/daemon"
 require "hive/commands/drop"
 require "hive/commands/doctor"
 require "hive/commands/decide"
+require "hive/commands/plan_review"
 require "hive/commands/forget"
 require "hive/commands/init"
 require "hive/commands/patrol"
@@ -17,6 +18,7 @@ require "hive/commands/prune"
 require "hive/commands/run"
 require "hive/commands/stage_action"
 require "hive/commands/status"
+require "hive/plan_review"
 require "hive/agent_skills/inspector"
 require "hive/agent_skills/provisioner"
 require "hive/patrol/candidate_selector"
@@ -38,6 +40,28 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_plan_review_schema_is_registered_closed_and_versioned
+    path = Hive::Schemas.schema_path("hive-plan-review")
+    document = JSON.parse(File.read(path))
+
+    assert_equal "https://json-schema.org/draft/2020-12/schema", document.fetch("$schema")
+    assert_equal 1, document.dig("properties", "schema_version", "const")
+    assert_equal false, document.fetch("additionalProperties")
+    assert_equal Hive::PlanReview::LEVELS.sort,
+                 document.dig("$defs", "Level", "enum").sort
+  end
+
+  def test_plan_review_action_schema_matches_success_payload_contract
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-plan-review-action")))
+    success = document.dig("$defs", "SuccessPayload")
+
+    assert_equal Hive::Commands::PlanReview::SUCCESS_KEYS.sort,
+                 success.fetch("required").sort
+    assert_equal false, success.fetch("additionalProperties")
+    assert_equal Hive::PlanReview::Decision::ACTIONS.sort,
+                 success.dig("properties", "action", "enum").sort
+  end
+
   def test_provider_routing_exclusion_reason_vocabularies_do_not_drift
     expected = Hive::Daemon::DispatchRequestQueue::ADMISSION_EXCLUSIONS.sort
     %w[
@@ -358,7 +382,7 @@ class SchemaFilesTest < Minitest::Test
 
     producer_kinds = %w[
       ambiguous_slug destination_collision final_stage
-      wrong_stage rollback_failed invalid_task_path dependency_wait
+      plan_review_blocked wrong_stage rollback_failed invalid_task_path dependency_wait
       admission_error error
     ].sort
 
@@ -1042,6 +1066,8 @@ class SchemaFilesTest < Minitest::Test
       Hive::Schemas::RunErrorKind::CONCURRENT_RUN    => Hive::ConcurrentRunError.new("lock contention"),
       Hive::Schemas::RunErrorKind::TASK_IN_ERROR     => Hive::TaskInErrorState.new("error marker"),
       Hive::Schemas::RunErrorKind::WRONG_STAGE       => Hive::WrongStage.new("wrong stage"),
+      Hive::Schemas::RunErrorKind::PLAN_REVIEW_BLOCKED =>
+        Hive::PlanReview::TransitionBlocked.new("plan review blocked"),
       Hive::Schemas::RunErrorKind::STAGE             => Hive::StageError.new("stage failed"),
       Hive::Schemas::RunErrorKind::CONFIG            => Hive::ConfigError.new("config bad"),
       Hive::Schemas::RunErrorKind::AGENT             => Hive::AgentError.new("agent died"),

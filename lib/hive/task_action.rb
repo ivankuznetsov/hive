@@ -12,6 +12,8 @@ require "hive/task_projection/store"
 require "hive/markers"
 require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
+require "hive/plan_review/projection"
+require "hive/plan_review/transition_guard"
 
 module Hive
   # Classifier that turns a (Task, Marker) pair into a user-facing
@@ -48,6 +50,41 @@ module Hive
         key: Hive::Schemas::TaskActionKind::READY_TO_DEVELOP,
         label: "Ready to develop",
         command: "develop"
+      },
+      plan_reviewing: {
+        key: Hive::Schemas::TaskActionKind::PLAN_REVIEWING,
+        label: "Plan review in progress",
+        command: "plan-review-run"
+      },
+      plan_review_retry_wait: {
+        key: Hive::Schemas::TaskActionKind::PLAN_REVIEW_RETRY,
+        label: "Plan review retry scheduled",
+        command: nil
+      },
+      plan_review_retry_due: {
+        key: Hive::Schemas::TaskActionKind::PLAN_REVIEW_RETRY,
+        label: "Plan review retry ready",
+        command: "plan-review-run"
+      },
+      plan_review_decision: {
+        key: Hive::Schemas::TaskActionKind::PLAN_REVIEW_DECISION,
+        label: "Plan review needs an operator decision",
+        command: nil
+      },
+      plan_review_degraded: {
+        key: Hive::Schemas::TaskActionKind::PLAN_REVIEW_DEGRADED,
+        label: "Plan review cleared with degraded coverage",
+        command: "develop"
+      },
+      plan_review_unsupported: {
+        key: Hive::Schemas::TaskActionKind::PLAN_REVIEW_UNSUPPORTED,
+        label: "Plan reviewer configuration required",
+        command: nil
+      },
+      plan_review_blocked: {
+        key: Hive::Schemas::TaskActionKind::PLAN_REVIEW_BLOCKED,
+        label: "Plan review blocks execution",
+        command: nil
       },
       execute_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
@@ -208,7 +245,13 @@ module Hive
     READY_COMMANDS = ACTIONS.values.each_with_object({}) do |action, commands|
       key = action.fetch(:key)
       commands[key] = action.fetch(:command) if key.start_with?("ready_")
-    end.freeze
+    end.merge(
+      Hive::Schemas::TaskActionKind::PLAN_REVIEW_DEGRADED => "develop"
+    ).freeze
+    DISPATCH_COMMANDS = READY_COMMANDS.merge(
+      Hive::Schemas::TaskActionKind::PLAN_REVIEWING => "plan-review-run",
+      Hive::Schemas::TaskActionKind::PLAN_REVIEW_RETRY => "plan-review-run"
+    ).freeze
 
     attr_reader :task, :marker, :project_name, :projection
 
@@ -219,11 +262,16 @@ module Hive
     # synthetic classification done here. Configurable per-instance.
     DEFAULT_AGENT_MARKER_GRACE_SEC = 300
 
+    PLAN_REVIEW_UNRESOLVED = Object.new.freeze
+
+    attr_reader :plan_review
+
     def initialize(task, marker = nil, projection: nil, config: nil,
                    project_name: nil, project_count: 1, stage_collision: false,
                    pid_alive: nil, state_file_mtime: nil,
                    agent_marker_grace_sec: DEFAULT_AGENT_MARKER_GRACE_SEC,
-                   live_task_lock: false)
+                   live_task_lock: false, plan_review: PLAN_REVIEW_UNRESOLVED,
+                   clock: -> { Time.now.utc })
       @task = task
       @projection = projection || load_projection(marker)
       @marker = projected_marker(@projection) || marker ||
@@ -236,6 +284,9 @@ module Hive
       @state_file_mtime = state_file_mtime
       @agent_marker_grace_sec = agent_marker_grace_sec
       @live_task_lock = live_task_lock
+      @clock = clock
+      @plan_review = plan_review.equal?(PLAN_REVIEW_UNRESOLVED) ?
+        load_plan_review : plan_review
     end
 
     def self.for(task, marker = nil, **)
@@ -588,7 +639,6 @@ module Hive
     end
 
     def plan_action
-      return ACTIONS.fetch(:plan_complete) if marker.name == :complete
       return ACTIONS.fetch(:error) if incomplete_plan_artifact?
       # Markerless (:none) with no plan run yet is runnable, not an input gate.
       # incomplete_plan_artifact? above already routes a crashed/empty plan run
@@ -601,7 +651,37 @@ module Hive
       # finalize_action's :none handling.
       return ACTIONS.fetch(:generic_ready_to_run) if marker.name == :none
 
+      review_action = plan_review_action
+      return review_action if review_action
+      return ACTIONS.fetch(:plan_complete) if marker.name == :complete
+
       ACTIONS.fetch(:plan_waiting)
+    end
+
+    def plan_review_action
+      return nil unless plan_review
+
+      freshness = plan_review.dig("freshness", "status")
+      return ACTIONS.fetch(:plan_reviewing) if freshness == "stale"
+      return ACTIONS.fetch(:plan_review_blocked) if freshness == "invalid"
+
+      state = plan_review["state"].to_s
+      case state
+      when "skipped", "cleared"
+        ACTIONS.fetch(:plan_complete)
+      when "degraded_cleared"
+        ACTIONS.fetch(:plan_review_degraded)
+      when "awaiting_decision"
+        ACTIONS.fetch(:plan_review_decision)
+      when "retry_scheduled"
+        retry_due?(plan_review["retry_at"]) ?
+          ACTIONS.fetch(:plan_review_retry_due) : ACTIONS.fetch(:plan_review_retry_wait)
+      when "blocked"
+        unsupported_review? ?
+          ACTIONS.fetch(:plan_review_unsupported) : ACTIONS.fetch(:plan_review_blocked)
+      else
+        ACTIONS.fetch(:plan_reviewing)
+      end
     end
 
     def finalize_action
@@ -741,6 +821,54 @@ module Hive
       parts = [ "hive", verb, task.slug ]
       parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
       parts
+    end
+
+    def load_plan_review
+      # Folderless tasks (a bare state file with no task directory) have no
+      # place to keep review evidence, so they can never carry a projection.
+      return nil unless task.folder && File.directory?(task.folder)
+      return nil unless Hive::Workflows.coding_id?(task_workflow.id)
+      review_root = File.join(task.folder, Hive::PlanReview::Store::ROOT_BASENAME)
+      unless File.exist?(review_root)
+        return nil unless task.stage_name == "plan"
+
+        return Hive::PlanReview::Projection.empty_summary(
+          state: "uninitialized", freshness_status: "not_initialized",
+          required_action: "run the plan review", blocker_owner: "agent"
+        )
+      end
+
+      projection = Hive::PlanReview::Projection.load(task_folder: task.folder)
+      freshness = Hive::PlanReview::TransitionGuard.freshness(
+        task:, projection:, config: @config
+      )
+      summary = projection.summary.merge("freshness" => freshness)
+      return summary if freshness.fetch("status") == "current"
+
+      summary.merge(
+        "blocker_owner" => "hive", "blocker_reason" => freshness.fetch("reason"),
+        "required_action" => "start a linked plan review from the current plan",
+        "execution_allowed" => false
+      )
+    rescue Hive::PlanReview::Error, Hive::ConfigError, SystemCallError, IOError
+      Hive::PlanReview::Projection.empty_summary(
+        state: "blocked", freshness_status: "invalid",
+        required_action: "repair invalid plan review evidence",
+        blocker_owner: "hive", blocker_reason: "invalid_plan_review"
+      )
+    end
+
+    def retry_due?(value)
+      value.nil? || Time.iso8601(value) <= @clock.call
+    rescue ArgumentError, TypeError
+      false
+    end
+
+    def unsupported_review?
+      plan_review["required_action"].to_s.match?(/capability|configuration|reviewer/i) ||
+        Array(plan_review["routes"]).any? do |route|
+          route["capability_result"] == "unsupported"
+        end
     end
 
     def legacy_execute_findings?

@@ -26,7 +26,7 @@ module Hive
       ].freeze
 
       ALLOWED_VERBS = %w[
-        run develop brainstorm plan review open-pr artifacts finalize
+        run develop brainstorm plan plan-review-run review open-pr artifacts finalize
         archive markers daemon
       ].freeze
 

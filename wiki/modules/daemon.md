@@ -4,7 +4,7 @@ type: module
 source: lib/hive/daemon/
 created: 2026-05-06
 updated: 2026-08-14
-tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, bounded-storage]
+tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage]
 ---
 
 **TLDR**: Small modules under `Hive::Daemon::*` that together form
@@ -49,7 +49,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
 | `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for marker-bound and explicit-route admission recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v5 request before clearing (or a markerless policy-bound request), and resumes `admitted → cleared → dispatched → terminal` after restart. User-facing adapters only submit observations and render its receipt. |
 | `Hive::Recovery::API` | `lib/hive/recovery/api.rb` | Neutral adapter for CLI/action, TUI, Rails, recorder, Telegram, and healer observations. It normalizes each surface's row shape and derives the freshness token; `RecoveryCoordinator` still owns every policy decision and mutation. |
-| `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Safely turns daemon-enabled `3-plan` approval pauses into `hive develop ... --from 3-plan` dispatches by validating command shape and flipping `WAITING` to `COMPLETE`. |
+| `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Turns an already-cleared coding `3-plan` pause into `hive develop ... --from 3-plan`. It validates command shape, prepares and re-verifies the exact `PlanReview::TransitionGuard` observation under the task lock, and only then flips `WAITING` to `COMPLETE`; uncleared review never mutates the marker. |
 | `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership and is the sole automatic scheduler that submits cooled `ERROR` / `REVIEW_ERROR` observations to `RecoveryCoordinator`. Lease-backed attempt loss is ledger-only and dispatches successors through `Attempts::Dispatcher`; it does not project or clear a compatibility marker. |
 | `Hive::Modules::DaemonRuntime` | `lib/hive/modules/daemon_runtime.rb` | Sole autonomous module hook/schedule drain. It receives the dispatcher's process-lifetime shutdown predicate and rechecks it between projects, retries, setup outboxes, schedules, events, selections, and hooks. An event cursor advances only after every eligible hook finished while admission stayed open; a shutdown-interrupted event therefore replays, and the decision journal suppresses a second Attempt for hooks already admitted. |
 | `Hive::Daemon::DisplayNameBackfiller` | `lib/hive/daemon/display_name_backfiller.rb` | Tick-time self-heal for tasks whose one-shot name generation at `hive new` never landed (agent/codex outage). It skips admission-error rows and uses `TaskMeta.read_for_admission`, so corrupt metadata is never treated as a blank name. For a healthy row whose `display_name` is nil/blank, it re-spawns fire-and-forget `hive generate-name <folder>`, mirroring `Hive::Commands::New#spawn_name_generator` (detached, pgroup, logged to `<state_home>/logs/display-name.log`, fully rescued). Anti-churn: an `@inflight` map stores `{pid, at}` per folder, uses the shared `Hive::ProcessKill.pid_alive?` `kill(0)` probe plus `MAX_INFLIGHT_AGE_SEC = 120` to avoid both double-spawns and reused-pid/EPERM pinning, `max_per_tick` (default 2) bounds spawns, and a set name is a natural fixed point. Unexpected row/reap/spawn errors degrade through `:fatal` logging while preserving the no-raise tick contract. Purely additive — never touches markers or dispatch. Logs `display_name_backfill`. |
@@ -356,6 +356,23 @@ wait context and never spawns for either hold. The coding
 `3-plan` `needs_input` auto-approval shortcut is now gated on
 `workflow == "coding"` (nil workflow remains coding for old test doubles), so a
 generic stage whose dir happens to be `3-plan` uses the normal edit/mtime path.
+
+## Plan-review automation boundary
+
+Coding `3-plan` rows carry the shared [[modules/plan_review]] projection from
+`hive-status.v7`. `plan_reviewing` and a due `plan_review_retry` dispatch the
+non-authority `hive plan-review-run` verb. It may initialize/retry review,
+perform a revision whose decisions already exist, and verify; it cannot approve
+a gated finding, answer a manual finding, waive coverage, or downgrade
+mandatory review. `plan_review_decision`, `plan_review_unsupported`, and
+`plan_review_blocked` therefore remain operator/configuration holds.
+
+Only `ready_to_develop` or `plan_review_degraded` reaches `PlanApproval`, and
+that module rechecks review freshness before its legacy marker flip. Duplicate
+ticks coalesce through the ordinary task/commit locks and immutable review
+identity. A transient provider limit retains its attempt and `retry_at`; stable
+unsupported capability does not consume retries. The daemon does not derive
+coverage or clearance from logs.
 
 ## Trust boundary
 
@@ -1028,6 +1045,7 @@ defect.
 
 - [[commands/daemon]]
 - [[commands/status]]
+- [[modules/plan_review]]
 - [[modules/task_action]]
 - [[decisions]] (ADR-024)
 - [[architecture]]

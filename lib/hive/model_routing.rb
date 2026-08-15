@@ -79,6 +79,9 @@ module Hive
     REGISTRY = [
       RegistryEntry.new(key: "brainstorm"),
       RegistryEntry.new(key: "plan"),
+      RegistryEntry.new(key: "plan_review"),
+      RegistryEntry.new(key: "plan_review_adversarial", parent: "plan_review"),
+      RegistryEntry.new(key: "plan_review_verification", parent: "plan_review"),
       RegistryEntry.new(key: "execute"),
       RegistryEntry.new(key: "execute_implementation", parent: "execute"),
       RegistryEntry.new(key: "rebase", parent: "execute"),

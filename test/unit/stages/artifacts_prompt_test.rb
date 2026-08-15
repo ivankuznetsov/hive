@@ -79,6 +79,9 @@ class StagesArtifactsPromptTest < Minitest::Test
 
       assert_includes inference, "fresh read-only context"
       assert_includes inference, "not one claim per file"
+      assert_includes inference, "inventory every outcome and acceptance criterion"
+      assert_includes inference, "never drop a promised outcome"
+      assert_match(/one truthful\s+artifact/, inference)
       assert_includes producer, "evidence-write root"
       assert_includes producer, "Required task-relative representation path prefix: evidence/"
       assert_match(/not the current\s+working directory/, producer)
@@ -91,10 +94,13 @@ class StagesArtifactsPromptTest < Minitest::Test
       assert_includes producer, "do not calculate or"
       assert_includes producer, "terminal.argv_prefix"
       assert_match(/generated\s+slides/i, producer)
+      assert_includes producer, "shipped public"
+      assert_includes producer, "custom evidence script"
       assert_includes producer, "application/x-asciinema+json"
       assert_includes producer, "Video original/review media types"
       assert_match(/any nonempty\s+subset/, producer)
       assert_match(/preserves the last evidence/, producer)
+      assert_includes producer, "same controller-issued path for both roles"
       assert_match(/Never edit\s+the worktree/, producer)
       assert_includes reviewer, "third fresh"
       assert_includes reviewer, "video remains the user-facing proof"

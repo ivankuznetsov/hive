@@ -1,0 +1,67 @@
+<% provenance = workspace.dig("panels", "provenance") %>
+<% current = provenance.fetch("current_observation", {}) %>
+<% current_repository = current.dig("repository", "value") || {} %>
+<% current_wiki = current.dig("wiki", "value") || {} %>
+
+<section id="workspace-provenance" class="workspace-panel workspace-state-<%= provenance.fetch("state") %>"
+         aria-labelledby="workspace-provenance-heading">
+  <div class="workspace-panel-heading">
+    <div>
+      <h2 id="workspace-provenance-heading">Context provenance</h2>
+      <p class="muted"><span class="workspace-state-label"><%= provenance.fetch("state").humanize %></span> historical evidence</p>
+    </div>
+  </div>
+
+  <h3>Current observation</h3>
+  <dl class="workspace-facts workspace-facts-compact">
+    <div><dt>Repository</dt><dd><%= current_repository["repository"].presence || "Unavailable" %></dd></div>
+    <div><dt>HEAD</dt><dd><code><%= current_repository["head_oid"]&.first(12) || "Unavailable" %></code></dd></div>
+    <div><dt>Wiki identity</dt><dd><code><%= current_wiki["identifier"]&.first(12) || "Unavailable" %></code></dd></div>
+    <div><dt>Observed</dt><dd><%= current["observed_at"].presence || "Unavailable" %></dd></div>
+  </dl>
+
+  <% records = Array(provenance["records"]) %>
+  <% if records.empty? %>
+    <p class="workspace-empty">Historical context was not captured for this legacy attempt. Current files are not used as a backfill.</p>
+  <% else %>
+    <div class="provenance-receipts">
+      <% records.each do |record| %>
+        <% repository = record.dig("repository", "value") || {} %>
+        <% wiki = record.dig("wiki", "value") || {} %>
+        <% selection = record.dig("selection", "value") || {} %>
+        <details data-workspace-disclosure-key="provenance-<%= record.fetch("attempt_id") %>" <%= "open" if record["current"] %>>
+          <summary>
+            <%= record["current"] ? "Current attempt receipt" : "Historical attempt receipt" %>
+            · <span class="workspace-state-label"><%= record.fetch("state").humanize %></span>
+          </summary>
+          <dl class="workspace-facts workspace-facts-compact">
+            <div><dt>Attempt</dt><dd><code><%= record.fetch("attempt_id").first(20) %></code></dd></div>
+            <div><dt>Captured HEAD</dt><dd><code><%= repository["head_oid"]&.first(12) || "Missing" %></code></dd></div>
+            <div><dt>Repository consistency</dt><dd><%= record.dig("consistency", "repository").to_s.humanize.presence || "Unavailable" %></dd></div>
+            <div><dt>Captured wiki</dt><dd><code><%= wiki["identifier"]&.first(12) || "Missing" %></code></dd></div>
+            <div><dt>Wiki consistency</dt><dd><%= record.dig("consistency", "wiki").to_s.humanize.presence || "Unavailable" %></dd></div>
+            <div><dt>Selection quality</dt><dd><%= record.dig("selection", "quality").to_s.humanize.presence || "Unavailable" %></dd></div>
+          </dl>
+          <% if Array(selection["references"]).any? %>
+            <h3>Selected context</h3>
+            <ul>
+              <% Array(selection["references"]).each do |reference| %>
+                <li><code><%= reference["path"] %></code><% if reference["label"].present? %> — <%= reference["label"] %><% end %></li>
+              <% end %>
+            </ul>
+            <% if selection["rationale"].present? %><p><strong>Rationale:</strong> <%= selection["rationale"] %></p><% end %>
+          <% else %>
+            <p class="muted">Selected context is unavailable; no prompt or log inference was used.</p>
+          <% end %>
+        </details>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% if Array(provenance["diagnostics"]).any? %>
+    <details class="workspace-diagnostics" data-workspace-disclosure-key="provenance-diagnostics">
+      <summary>Provenance diagnostics (<%= provenance.fetch("diagnostics").length %>)</summary>
+      <ul><% provenance.fetch("diagnostics").each do |row| %><li><%= row.fetch("reason").to_s.humanize %></li><% end %></ul>
+    </details>
+  <% end %>
+</section>

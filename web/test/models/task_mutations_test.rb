@@ -7,7 +7,7 @@ class TaskMutationsTest < ActiveSupport::TestCase
   teardown { reset_task_mutation_state }
 
   test "derives queueable actions from the canonical task action vocabulary" do
-    expected = Hive::TaskAction::READY_COMMANDS.select do |_action, verb|
+    expected = Hive::TaskAction::DISPATCH_COMMANDS.select do |_action, verb|
       Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS.include?(verb)
     end
 
@@ -26,6 +26,17 @@ class TaskMutationsTest < ActiveSupport::TestCase
 
     assert_equal %w[hive review demo-task --project demo --from 6-review], coding_result[:argv]
     assert_equal %w[hive run generic-task --project demo --stage 2-gather], generic_result[:argv]
+  end
+
+  test "maps projected plan review work to the plan review runner" do
+    subject = task(
+      "stage" => "3-plan", "workflow" => "coding", "action" => "plan_reviewing",
+      "suggested_command" => "hive plan-review-run demo-task"
+    )
+
+    result = subject.run!(expected_action: "plan_reviewing", expected_stage: "3-plan")
+
+    assert_equal %w[hive plan-review-run demo-task --project demo], result[:argv]
   end
 
   test "rejects unknown and non-queueable actions before writing" do
@@ -322,6 +333,73 @@ class TaskMutationsTest < ActiveSupport::TestCase
       assert_match(/awaits a brainstorm/, answers_error.message)
       assert_match(/awaits a brainstorm/, intervention_error.message)
     end
+  end
+
+  test "plan review actions delegate exact web authority and resume once" do
+    _project, subject = seeded_task("mutation-plan-review", stage: "3-plan")
+    projection = Struct.new(:record).new(Struct.new(:state).new("cleared"))
+    decision = Struct.new(:action).new("answer_finding")
+    captured = nil
+    service = Object.new
+    service.define_singleton_method(:apply) do |**arguments|
+      captured = arguments
+      Struct.new(:applied, :decision, :projection).new(true, decision, projection)
+    end
+    resumed = []
+    resumer = lambda do |task, action|
+      resumed << [ task.slug, action ]
+      projection
+    end
+
+    result = with_replaced_singleton_method(
+      Hive::PlanReview::Projection, :load, ->(**) { projection }
+    ) do
+      with_replaced_singleton_method(
+        Hive::PlanReview::TransitionGuard, :freshness,
+        ->(**) { { "status" => "current", "reason" => nil } }
+      ) do
+        subject.plan_review_action!(
+          action: "answer-finding", review_id: "pr-#{'a' * 64}",
+          task_generation: "generation-1", policy_fingerprint: "b" * 64,
+          expected_artifact_digest: "c" * 64, target_fingerprint: "prf-#{'d' * 64}",
+          answer: "Use the reversible path.", operator: "alice", authorized: true,
+          service_factory: ->(_task) { service }, resumer:
+        )
+      end
+    end
+
+    assert result.fetch(:applied)
+    assert_equal "answer_finding", captured.fetch(:action)
+    assert_equal "web", captured.fetch(:origin)
+    assert_equal "alice", captured.fetch(:operator)
+    assert captured.fetch(:authorized)
+    assert_equal({ "answer" => "Use the reversible path." }, captured.fetch(:value))
+    assert_equal [ [ subject.slug, "answer_finding" ] ], resumed
+  end
+
+  test "plan review action rejects a stale canonical plan before the decision service" do
+    _project, subject = seeded_task("mutation-plan-review-stale", stage: "3-plan")
+    projection = Struct.new(:record).new(Struct.new(:state).new("blocked"))
+
+    error = with_replaced_singleton_method(
+      Hive::PlanReview::Projection, :load, ->(**) { projection }
+    ) do
+      with_replaced_singleton_method(
+        Hive::PlanReview::TransitionGuard, :freshness,
+        ->(**) { { "status" => "stale", "reason" => "canonical plan changed" } }
+      ) do
+        assert_raises(Hive::PlanReview::StaleDecision) do
+          subject.plan_review_action!(
+            action: "retry", review_id: "pr-#{'a' * 64}",
+            task_generation: "generation-1", policy_fingerprint: "b" * 64,
+            expected_artifact_digest: "c" * 64, operator: "alice", authorized: true,
+            service_factory: ->(_task) { flunk "stale action reached decision service" }
+          )
+        end
+      end
+    end
+
+    assert_match(/refresh the current observation/, error.message)
   end
 
   private

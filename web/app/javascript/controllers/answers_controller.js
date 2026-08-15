@@ -8,49 +8,80 @@ import { Controller } from "@hotwired/stimulus"
 // controller restores the operator's typed-but-unsent text and caret after
 // each morph, keyed by field NAME. A new round renders different names
 // (each field carries its opaque identity binding), so nothing restores onto
-// a changed slot even when a later round reuses the same question number. Stale drafts die
-// with their round, by construction rather than by timing.
+// a changed slot even when a later round reuses the same question number. Old
+// bindings remain bounded and cannot restore into a different round.
+const drafts = new Map()
+let pendingFocus = null
+
 export default class extends Controller {
   connect() {
     this.snapshot = this.snapshot.bind(this)
     this.restore = this.restore.bind(this)
+    this.trackFocus = this.trackFocus.bind(this)
     document.addEventListener("turbo:before-render", this.snapshot)
     document.addEventListener("turbo:render", this.restore)
+    document.addEventListener("focusin", this.trackFocus)
+    this.restoreFields()
   }
 
   disconnect() {
     document.removeEventListener("turbo:before-render", this.snapshot)
     document.removeEventListener("turbo:render", this.restore)
+    document.removeEventListener("focusin", this.trackFocus)
   }
 
-  snapshot(event) {
-    if (event.detail.renderMethod !== "morph") return
-
-    this.values = {}
+  snapshot() {
     this.element.querySelectorAll("textarea").forEach((field) => {
-      if (field.value) this.values[field.name] = field.value
+      if (field.value) this.remember(field)
     })
     const active = document.activeElement
-    this.focus = active && this.element.contains(active) && active.matches("textarea")
-      ? { name: active.name, start: active.selectionStart, end: active.selectionEnd }
-      : null
+    if (active && this.element.contains(active) && active.matches("textarea")) {
+      pendingFocus = { name: active.name, start: active.selectionStart, end: active.selectionEnd }
+    }
   }
 
-  restore(event) {
-    if (!this.values || event.detail.renderMethod !== "morph") return
+  restore() {
+    this.restoreFields()
+  }
 
-    Object.entries(this.values).forEach(([name, value]) => {
+  restoreFields() {
+    drafts.forEach((value, name) => {
       const field = this.element.querySelector(`textarea[name="${CSS.escape(name)}"]`)
       if (field && !field.value) field.value = value
     })
-    if (this.focus) {
-      const field = this.element.querySelector(`textarea[name="${CSS.escape(this.focus.name)}"]`)
+    if (pendingFocus) {
+      const field = this.element.querySelector(`textarea[name="${CSS.escape(pendingFocus.name)}"]`)
       if (field) {
         field.focus()
-        field.setSelectionRange(this.focus.start, this.focus.end)
+        field.setSelectionRange(pendingFocus.start, pendingFocus.end)
       }
     }
-    this.values = null
-    this.focus = null
+  }
+
+  recordField(event) {
+    const field = event.target
+    if (!field.matches("textarea") || !this.element.contains(field)) return
+
+    this.remember(field)
+    pendingFocus = { name: field.name, start: field.selectionStart, end: field.selectionEnd }
+  }
+
+  trackFocus(event) {
+    const field = event.target
+    pendingFocus = field.matches("textarea") && this.element.contains(field)
+      ? { name: field.name, start: field.selectionStart, end: field.selectionEnd }
+      : null
+  }
+
+  remember(field) {
+    if (!field.name) return
+    if (!field.value) {
+      drafts.delete(field.name)
+      return
+    }
+
+    drafts.delete(field.name)
+    drafts.set(field.name, field.value)
+    if (drafts.size > 100) drafts.delete(drafts.keys().next().value)
   }
 }

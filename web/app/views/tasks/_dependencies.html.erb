@@ -1,0 +1,87 @@
+<% dependencies = workspace.dig("panels", "dependencies") %>
+<% nodes = Array(dependencies["records"]) %>
+<% edges = Array(dependencies["edges"]) %>
+<% node_by_id = nodes.index_by { |node| node["id"] } %>
+
+<section id="workspace-dependencies" class="workspace-panel workspace-wide workspace-state-<%= dependencies.fetch("state") %>"
+         aria-labelledby="workspace-dependencies-heading">
+  <div class="workspace-panel-heading">
+    <div>
+      <h2 id="workspace-dependencies-heading">Dependency component</h2>
+      <p class="muted"><span class="workspace-state-label"><%= dependencies.fetch("state").humanize %></span> · <%= nodes.length %> nodes, <%= edges.length %> edges</p>
+    </div>
+  </div>
+
+  <% if nodes.empty? %>
+    <p class="workspace-empty">The bounded status snapshot cannot establish this task's dependency component.</p>
+  <% else %>
+    <div class="dependency-layout">
+      <div class="dependency-visual" aria-label="Rooted dependency overview">
+        <h3>Connected flow</h3>
+        <ol class="dependency-forest">
+          <% Array(dependencies.dig("forest", "node_order")).each do |node_id| %>
+            <% node = node_by_id[node_id] %>
+            <% next unless node %>
+            <li class="dependency-node dependency-node-<%= node.fetch("kind") %><%= " dependency-root" if node["root"] %>">
+              <span class="dependency-connector" aria-hidden="true"></span>
+              <span>
+                <strong><%= node["root"] ? "Current · " : "" %><%= node.fetch("id") %></strong>
+                <small><%= node["stage"].presence || node.fetch("kind").humanize %> · <%= node.dig("admission", "state").to_s.humanize %></small>
+              </span>
+            </li>
+          <% end %>
+        </ol>
+        <% cross_references = Array(dependencies.dig("forest", "cross_references")) %>
+        <% if cross_references.any? %>
+          <p class="muted"><%= cross_references.length %> additional or cyclic <%= "edge".pluralize(cross_references.length) %> shown in the table.</p>
+        <% end %>
+      </div>
+
+      <div class="workspace-table-scroll" tabindex="0" role="region" aria-label="Complete bounded dependency relationships">
+        <table class="workspace-table dependency-table">
+          <caption>Authoritative bounded node and edge relationships</caption>
+          <thead><tr><th scope="col">Task</th><th scope="col">Stage</th><th scope="col">Depends on</th><th scope="col">Admission</th><th scope="col">Git stack</th></tr></thead>
+          <tbody>
+            <% nodes.each do |node| %>
+              <tr>
+                <th scope="row"><%= node.fetch("id") %><% if node["root"] %> <span class="workspace-chip">Current</span><% end %></th>
+                <td><%= node["stage"].presence || node.fetch("kind").humanize %></td>
+                <td><%= node["depends_on"].presence || "None" %></td>
+                <td><span class="workspace-state-label"><%= node.dig("admission", "state").to_s.humanize.presence || "Unavailable" %></span></td>
+                <td><%= node.dig("stack", "divergence").to_s.humanize.presence || "Unavailable" %></td>
+              </tr>
+            <% end %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <% if edges.any? %>
+      <details data-workspace-disclosure-key="dependency-edges">
+        <summary>All dependency edges (<%= edges.length %>)</summary>
+        <div class="workspace-table-scroll" tabindex="0" role="region" aria-label="Dependency edges">
+          <table class="workspace-table">
+            <thead><tr><th scope="col">Dependent</th><th scope="col">Prerequisite</th><th scope="col">Relationship</th><th scope="col">State</th></tr></thead>
+            <tbody>
+              <% edges.each do |edge| %>
+                <tr>
+                  <td><%= edge.fetch("from") %></td>
+                  <td><%= edge.fetch("to") %></td>
+                  <td><%= edge.fetch("relationship").humanize %><% if edge["cycle"] %> · cycle<% end %></td>
+                  <td><span class="workspace-state-label"><%= edge.fetch("state").humanize %></span></td>
+                </tr>
+              <% end %>
+            </tbody>
+          </table>
+        </div>
+      </details>
+    <% end %>
+  <% end %>
+
+  <% if Array(dependencies["diagnostics"]).any? %>
+    <details class="workspace-diagnostics" data-workspace-disclosure-key="dependency-diagnostics">
+      <summary>Dependency diagnostics (<%= dependencies.fetch("diagnostics").length %>)</summary>
+      <ul><% dependencies.fetch("diagnostics").each do |row| %><li><%= row.fetch("reason").to_s.humanize %></li><% end %></ul>
+    </details>
+  <% end %>
+</section>

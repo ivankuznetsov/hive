@@ -734,11 +734,13 @@ module Hive
         # adjacent provider reset date instead of the formatted one-line error.
         result[:limit_text] = limit_text
         limit_message = Hive::AgentLimit.error_message(limit_text, agent: @profile.name)
+        result[:error_reason] = "limits_reached"
+        result[:retry_at] = Hive::AgentLimit.retry_after(text: limit_text)
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(@task.state_file, :error,
                             reason: "limits_reached",
                             message: limit_message,
-                            retry_after: Hive::AgentLimit.retry_after(text: limit_text))
+                            retry_after: result[:retry_at])
         end
         result[:status] = :error
         result[:error_message] = limit_message

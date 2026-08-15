@@ -29,6 +29,7 @@ class AgentSkillsManifestTest < Minitest::Test
     assert_equal "/ce-brainstorm", manifest.capability("ce-brainstorm").agent("claude").invocation
     assert_equal "/ce-code-review", manifest.capability("ce-code-review").agent("codex").invocation
     assert_equal "/ce-code-review", manifest.capability("ce-code-review").agent("grok").invocation
+    assert_equal "/ce-doc-review", manifest.capability("ce-doc-review").agent("codex").invocation
     assert_equal "/skill:ce-test-browser", manifest.capability("ce-test-browser").agent("pi").invocation
     assert_equal "/pr-review-toolkit:review-pr",
                  manifest.capability("pr-review-toolkit:review-pr").agent("claude").invocation

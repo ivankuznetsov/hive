@@ -12,14 +12,14 @@ require "test_helper"
 # reference these constants — a drift between any of those three surfaces
 # fails this test or the schema-drift test in schema_files_test.rb.
 class SchemasTest < Minitest::Test
-  def test_run_error_kind_all_contains_fourteen_values
-    assert_equal 14, Hive::Schemas::RunErrorKind::ALL.length,
+  def test_run_error_kind_all_contains_fifteen_values
+    assert_equal 15, Hive::Schemas::RunErrorKind::ALL.length,
                  "RunErrorKind::ALL count is locked; adding a kind requires bumping this assertion deliberately"
   end
 
   def test_run_error_kind_all_values_match_known_kinds
     expected = %w[
-      concurrent_run task_in_error wrong_stage stage config agent git
+      concurrent_run task_in_error plan_review_blocked wrong_stage stage config agent git
       worktree ambiguous_slug invalid_task_path internal error dependency_wait
       admission_error
     ].sort

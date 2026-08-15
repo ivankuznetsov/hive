@@ -295,6 +295,44 @@ module Hive
       private_class_method :immutable_value
     end
 
+    # A single-use boundary that keeps controller bookkeeping outside the
+    # protected-file snapshot while still enclosing the untrusted agent call.
+    # Stages pass this callable through Base's spawn helpers and inspect the
+    # resulting report after the provider returns (or raises).
+    class AgentCustody
+      attr_reader :report
+
+      def initialize(manifest)
+        @manifest = manifest
+        @called = false
+        @report = nil
+      end
+
+      def call
+        raise Error, "agent custody requires a block" unless block_given?
+        raise Error, "agent custody is single-use" if @called
+
+        @called = true
+        snapshot = ArtifactFirewall.capture(@manifest)
+        begin
+          yield
+        ensure
+          @report = ArtifactFirewall.validate_and_restore(@manifest, snapshot)
+        end
+      end
+
+      def called? = @called
+
+      # A missing report after invocation means validation itself failed. Do
+      # not let controller task-local writes proceed against an untrusted path
+      # unless custody was clean or restoration completed successfully.
+      def safe_after?
+        return true unless called?
+
+        report && (!report.tampered? || report.restored?)
+      end
+    end
+
     module_function
 
     def capture(manifest)

@@ -4,7 +4,7 @@ type: reference
 source: test/, Rakefile, bin/hive-eval, bin/hive-patrol-installed-live-smoke, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate,patrol_evidence}/, config/brakeman.ignore
 created: 2026-04-25
 updated: 2026-08-14
-tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, terminal-outcomes, release-proof, bounded-storage]
+tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage]
 ---
 
 **TLDR**: Minitest covers unit/integration behavior; opt-in layers cover outer
@@ -547,6 +547,7 @@ cleanup fails, while a cleanup failure still fails an otherwise-green test.
 | Path | Purpose |
 |------|---------|
 | `test/fixtures/fake-claude` | Shell fixture for built-in provider headless argv. It can log/output/write, make one commit, or create a deterministic multi-commit sequence with progress/release sentinels for durable caller-loss scenarios. E2E points `HIVE_CLAUDE_BIN`, `HIVE_CODEX_BIN`, `HIVE_PI_BIN`, and `HIVE_GROK_BIN` at it. |
+| `test/fixtures/plan_review/terminal_outcomes.json` | Deterministic proof snapshot for `skipped`, `cleared`, standard `degraded_cleared`, and mandatory `blocked`, including identities, attempt/coverage/finding counts, route receipts, cross-surface blocker parity, and transition results. |
 | `test/fixtures/fake-gh` | Shell script that handles `gh pr create` / `gh auth status` / `gh pr list`, returns a dummy URL. |
 | `test/fixtures/brainstorm_skill/` | Deterministic partial/multi-round brainstorm documents, missing-answer headers, renumbered and duplicate-fingerprint questions, original/reordered/degraded status snapshots, and sanitized S01–S12 transcript expectations. The fixtures contain no transport-private chat metadata. |
 | `test/fixtures/voice/voice-idea.oga` | Checked-in Ogg/Opus speech sample saying "voice idea" for the Telegram voice-note E2E path. `run_idea_e2e.sh` uses it by default when `TG_IDEA_MODE=voice`; explicit voice mode hard-fails when `HIVE_WHISPER_API_KEY` is unset. Voice mode uses the same fixture for both new audio idea capture and audio brainstorm answers. |
@@ -889,6 +890,41 @@ The live Telegram bot E2E wrapper lives at `test/e2e/tg/run_idea_e2e.sh` and is 
 
 `test/e2e/lib/hive_e2e_binary_test.rb` is the focused contract suite for the executable itself. It pins `list --json`, `clean --json`, leading JSON option normalization including `--json=true`, duplicate JSON boolean handling where a final false flag chooses prose, malformed `--json=1` / `--json=yes` rejection, error-envelope shapes, help/version handling, leading `--json --help run` / `--json -h run` command-help rendering, replay path validation, missing/non-executable/symlinked runs-root and replay artifact errors (`missing_repro` / `unusable_repro`, exit `78`), and the usage exit-code contract: unknown commands and missing required arguments exit `64` in both human and `--json` modes. Human usage errors are expected to print a `hive-e2e:`-prefixed prose message on stderr.
 
+## Plan-review lifecycle and authenticated route smoke
+
+The focused offline contract is:
+
+```bash
+bundle exec ruby -Itest -Ilib test/integration/plan_review_lifecycle_test.rb
+bundle exec ruby -Itest -Ilib test/integration/plan_review_action_test.rb
+bundle exec ruby -Itest -Ilib test/unit/plan_review/policy_test.rb
+bundle exec ruby -Itest -Ilib test/unit/plan_review/orchestrator_test.rb
+```
+
+The lifecycle fixture proves transition denial before authority, exactly one
+move after current degraded clearance, an external-plan-edit linked rollover,
+and an explicit legacy execute adoption receipt. The complete
+`test/unit/plan_review/` set covers classifier categories, immutable/CAS state,
+stable finding fingerprints, exact-scoped decisions, adapter parsing and
+canonical-plan isolation, model-family independence, bounded retries, one
+revision/verification, coverage semantics, and stale transition rejection.
+Status integration plus Rails model/integration/system tests pin the same
+projection and actions through CLI, operational status, daemon/TUI, and Web.
+
+`test/smoke/plan_review_smoke_test.rb` is excluded from the default suite. Run
+it only with explicit paid-provider consent:
+
+```bash
+HIVE_LIVE_PLAN_REVIEW=1 rake smoke
+```
+
+It resolves the production adversarial route, invokes native Grok Build with
+`grok-4.6` against a disposable plan, requires schema-valid completed
+adversarial coverage and a different-family independence receipt, and verifies
+that ambient credential values are absent from retained results. Missing
+opt-in, binary, authentication, or capability skips with a diagnostic and is
+not evidence.
+
 ## Live agent skill resolution smoke
 
 `test/smoke/live_agent_skill_resolution_smoke_test.rb` is excluded from the
@@ -1164,6 +1200,39 @@ proofs: the former archives committed `HEAD:web`, while the latter needs the
 pinned browser binaries and retains task-local media plus its exact-SHA
 manifest.
 
+## Task workspace verification
+
+The read-only task workspace is verified in layers. Root unit coverage under
+`test/unit/task_workspace/` pins field provenance/conflicts, descriptor-safe
+bounded reads, schema validation, attempt/session attribution, typed resources,
+timeline ordering/cursors/noise grouping, connected dependency bounds,
+artifact handling, publication/cache isolation, and the shared builder.
+Context provenance, activity reconciliation, task-journal checkpoints,
+attempt dispatch, UsageDb migration, dependency admission, worktree/Git, and
+status/TUI correspondence tests cover their capture and compatibility seams.
+
+Rails model/integration tests assert authenticated HTML/JSON operator-state
+parity, exact target resolution, every archived mutation route's read-only
+boundary, per-panel degradation, signed
+timeline pagination, canonical action routes, publication refresh auth/CSRF,
+and zero remote reads from ordinary page/JSON/broadcast paths. The Playwright
+`task_workspace_test.rb` plus existing pipeline and kanban suites exercise
+1280x800, 3840x1400, 375x812, and real Chromium 400% device-scale emulation at
+an effective 320-CSS-pixel viewport;
+keyboard traversal, 24-pixel targets, dependency forest/table parity,
+focus/exact-selection/disclosure/scroll preservation, permanent log/diff and
+timeline-inspection frames, morph-owned publication facts, and non-repeating
+material announcements.
+
+During implementation, run the smallest named files first. Before handoff run
+`bundle exec rake test` from the repository root, then the Web application's
+complete Rails and system suites plus its lint/security checks. Tests inject
+GitHub transports and clocks and use disposable Hive/project roots; they must
+not contact a live provider, GitHub account, task store, or usage database.
+The packaged-Web bootstrap archives committed `HEAD:web`, so it is reserved
+for changes to that packaging boundary rather than ordinary view changes. See
+[[modules/task_workspace]].
+
 ## Launch-path fixtures
 
 `test/unit/launch_path_fixture_test.rb` pins the public Build and Content
@@ -1178,5 +1247,6 @@ provider replays and timing remain separate verification gates.
 
 - [[architecture]]
 - [[modules/agent]]
+- [[modules/task_workspace]]
 - [[e2e]]
 - [[gaps]]

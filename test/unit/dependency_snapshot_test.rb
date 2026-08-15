@@ -148,6 +148,40 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_semantic_fingerprint_is_order_independent_and_includes_fallback_layers
+    task = lambda do |slug, depends_on = nil|
+      Hive::DependencyAdmission::TaskSnapshot.new(
+        project: "app", slug: slug, id: nil, stage: "4-execute",
+        workflow_stages: Hive::Stages::DIRS, depends_on: depends_on,
+        metadata_status: :ok, metadata_error: nil, plan_status: :absent,
+        plan_dependency: nil, plan_error: nil, folder: "/private/#{slug}",
+        validation_error: nil
+      )
+    end
+    project = lambda do |tasks|
+      Hive::DependencyAdmission::ProjectSnapshot.new(
+        name: "app", path: "/private/app", repository_identity: "github.com/acme/app",
+        live_repository_identity: "github.com/acme/app", dependency_gate_stage: "8-finalize",
+        tasks: tasks, validation_error: nil
+      )
+    end
+    fallback = Hive::DependencyAdmission::Context.new(projects: [ project.call([ task.call("old") ]) ])
+    first = Hive::DependencyAdmission::Context.new(
+      projects: [ project.call([ task.call("b", "a"), task.call("a") ]) ], fallback: fallback
+    )
+    reordered = Hive::DependencyAdmission::Context.new(
+      projects: [ project.call([ task.call("a"), task.call("b", "a") ]) ], fallback: fallback
+    )
+    no_fallback = Hive::DependencyAdmission::Context.new(
+      projects: [ project.call([ task.call("a"), task.call("b", "a") ]) ]
+    )
+
+    assert_equal Hive::DependencySnapshot.semantic_fingerprint(first),
+                 Hive::DependencySnapshot.semantic_fingerprint(reordered)
+    refute_equal Hive::DependencySnapshot.semantic_fingerprint(first),
+                 Hive::DependencySnapshot.semantic_fingerprint(no_fallback)
+  end
+
   def test_admission_context_preserves_corrupt_metadata_as_an_error
     with_tmp_dir do |root|
       slug = "corrupt-task"

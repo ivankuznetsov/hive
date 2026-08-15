@@ -1,5 +1,9 @@
 require "shellwords"
+require "hive/config"
+require "hive/lock"
 require "hive/markers"
+require "hive/plan_review/transition_guard"
+require "hive/task"
 
 module Hive
   module Daemon
@@ -47,9 +51,38 @@ module Hive
       #   well-formed `hive plan ...` or `hive develop ...` invocation
       # @raise [NotApprovable] when the marker is neither `:waiting`
       #   nor `:complete`
-      def prepare(suggested_command, state_file)
+      def prepare(suggested_command, state_file, clearance_checker: nil)
         develop_command = rewrite_to_develop(suggested_command)
 
+        if clearance_checker
+          unless clearance_checker.call == true
+            raise NotApprovable, "plan review has not authorized execution"
+          end
+          finalize_marker!(state_file)
+          return develop_command
+        end
+
+        task = Hive::Task.new(File.dirname(state_file))
+        Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "plan-review-approval") do
+          locked = Hive::Task.new(task.folder)
+          cfg = Hive::Config.load(locked.project_root)
+          observation = Hive::PlanReview::TransitionGuard.prepare_existing!(
+            task: locked, destination: Hive::PlanReview::TransitionGuard::EXECUTE_STAGE,
+            config: cfg
+          )
+          Hive::PlanReview::TransitionGuard.verify!(
+            task: locked, destination: Hive::PlanReview::TransitionGuard::EXECUTE_STAGE,
+            observation:, config: cfg
+          )
+          finalize_marker!(locked.state_file)
+        end
+
+        develop_command
+      rescue Hive::PlanReview::TransitionBlocked => error
+        raise NotApprovable, error.message
+      end
+
+      def finalize_marker!(state_file)
         marker = Hive::Markers.current(state_file)
         case marker.name
         when :waiting
@@ -62,7 +95,7 @@ module Hive
                 "marker=#{marker.name.inspect}; plan-approval auto-dispatch requires :waiting or :complete"
         end
 
-        develop_command
+        true
       end
 
       # Idempotent for an already-advanced row. The daemon path always passes

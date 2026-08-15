@@ -11,11 +11,20 @@ module Hive
     def with_task_lock(task_folder, payload = nil, create: true, **payload_keywords)
       payload = (payload || {}).merge(payload_keywords)
       lock_data = acquire_task_lock(task_folder, payload, create: create)
+      lock_key = File.expand_path(task_folder)
+      held = (Thread.current[:hive_task_locks] ||= Hash.new(0))
+      held[lock_key] += 1
       begin
         yield
       ensure
+        held[lock_key] -= 1
+        held.delete(lock_key) if held[lock_key].zero?
         release_task_lock(task_folder, lock_id: lock_data.fetch("lock_id"))
       end
+    end
+
+    def task_lock_held?(task_folder)
+      Thread.current[:hive_task_locks].to_h.fetch(File.expand_path(task_folder), 0).positive?
     end
 
     def acquire_task_lock(task_folder, payload = nil, create: true, **payload_keywords)

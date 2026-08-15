@@ -352,7 +352,11 @@ class OperationalActionTest < Minitest::Test
 
         assert File.directory?(plan)
         assert_equal "3-plan", result.fetch("stage")
-        assert_equal "needs_input", result.fetch("task_state")
+        # A coding plan stage now routes through plan review before execute.
+        # With no review capability configured the policy clears degraded, so
+        # the operator-advance pause is reported as `plan_review_degraded`
+        # rather than the pre-review `needs_input`. The marker is unchanged.
+        assert_equal "plan_review_degraded", result.fetch("task_state")
         assert_equal "waiting", result.fetch("marker")
       end
     end

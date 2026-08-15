@@ -20,6 +20,8 @@ require "hive/conditions/transition_guard"
 require "hive/workflow_package/mutation_lock"
 require "hive/task_meta"
 require "hive/completion_time"
+require "hive/plan_review/transition_guard"
+require "hive/task_activity"
 
 module Hive
   module Commands
@@ -51,6 +53,7 @@ module Hive
 
       def self.error_kind_for(error)
         case error
+        when Hive::PlanReview::TransitionBlocked then "plan_review_blocked"
         when Hive::AmbiguousSlug then "ambiguous_slug"
         when Hive::DestinationCollision then "destination_collision"
         when Hive::FinalStageReached then "final_stage"
@@ -108,6 +111,8 @@ module Hive
 
       def do_call
         task = resolve_task
+        activity = Hive::TaskActivity.for_task(task, clock: @clock)
+        reconcile_approval_operations(activity, task)
         validate_stage_refs!
         validate_from!(task) if @from
         next_stage_dir = resolve_destination(task)
@@ -117,13 +122,69 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         validate_move!(task, next_stage_dir, marker)
         direction = direction_of(task, next_stage_dir)
+        operation = begin_approval_operation(
+          activity, task, next_stage_dir, marker, direction
+        )
 
         new_folder, commit_action = perform_move_and_commit(
           task,
           next_stage_dir,
           enforce_admission: direction == "forward"
         )
+        complete_approval_operation(operation, new_folder, next_stage_dir, direction)
         emit_success(task, next_stage_dir, new_folder, marker, commit_action, direction)
+      end
+
+      def begin_approval_operation(activity, task, destination, marker, direction)
+        return nil unless activity
+
+        rejection = direction == "backward"
+        activity.begin_operation(
+          kind: rejection ? "rejection_recorded" : "approval_recorded",
+          operation_id: "#{rejection ? 'reject' : 'approve'}:#{task.stage_index}-#{task.stage_name}:#{destination}:#{direction}",
+          source: "command_service",
+          reason: rejection ? "task stage rejection recorded" : "task stage approval recorded",
+          precondition: {
+            "stage" => "#{task.stage_index}-#{task.stage_name}",
+            "marker" => marker.name.to_s
+          },
+          expected_postcondition: { "stage" => destination }
+        )
+      end
+
+      def complete_approval_operation(operation, new_folder, destination, direction)
+        return unless operation
+
+        operation.complete!(
+          result: { "stage" => destination }, task_folder: new_folder,
+          occurred_at: @clock.call,
+          payload: { "direction" => direction, "to_stage" => destination }
+        )
+      end
+
+      def reconcile_approval_operations(activity, task)
+        return unless activity
+
+        current = { "stage" => "#{task.stage_index}-#{task.stage_name}" }
+        current_fingerprint = Hive::TaskActivity.fingerprint(current)
+        current_precondition = current.merge(
+          "marker" => Hive::Markers.current(task.state_file).name.to_s
+        )
+        current_precondition_fingerprint = Hive::TaskActivity.fingerprint(current_precondition)
+        activity.reconcile_operations! do |receipt|
+          next :defer unless %w[approval_recorded rejection_recorded].include?(receipt["activity_kind"]) &&
+            receipt["source"] == "command_service"
+
+          if receipt["expected_postcondition_fingerprint"] == current_fingerprint
+            { status: :committed, result: current }
+          elsif receipt["precondition_fingerprint"] == current_precondition_fingerprint
+            :not_committed
+          else
+            :ambiguous
+          end
+        end
+      rescue Hive::TaskActivity::Error, SystemCallError, IOError
+        nil
       end
 
       # Reject a clearly-invalid --from/--to stage ref against the union of every
@@ -215,6 +276,10 @@ module Hive
         dest = stage_for_dest!(task, dest_stage)
         return if dest.index <= task.stage_index
         Hive::Conditions::TransitionGuard.validate!(task, force: @force, source: "approve")
+        @plan_review_config = Hive::Config.load(task.project_root)
+        @plan_review_observation = Hive::PlanReview::TransitionGuard.prepare!(
+          task:, destination: dest_stage, config: @plan_review_config
+        )
         return if @force
         return if VALID_TERMINAL_MARKERS.include?(marker.name)
 
@@ -284,6 +349,10 @@ module Hive
               Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
               Hive::Attempts::Context.current&.validate_generation!(task)
               @observation_guard&.call(task)
+              Hive::PlanReview::TransitionGuard.verify!(
+                task:, destination: dest_stage, observation: @plan_review_observation,
+                config: @plan_review_config
+              )
               human_state_snapshot = initialize_human_destination!(task, dest_stage)
               if completion_on_terminal_entry?(task, dest_stage)
                 completion_snapshot = Hive::TaskMeta.snapshot(task.folder)
@@ -292,7 +361,8 @@ module Hive
               new_folder = move_task!(task, dest_stage)
             end
             cleanup_orphan_task_lock(new_folder)
-            commit_action = "approve #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
+            verb = stage_for_dest!(task, dest_stage).index < task.stage_index ? "reject" : "approve"
+            commit_action = "#{verb} #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
             record_commit_or_rollback!(
               task, dest_stage, new_folder, commit_action,
               completion_snapshot: completion_snapshot, completion_time: completion_time
@@ -566,7 +636,8 @@ module Hive
         if @json
           puts JSON.generate(success_payload(task, dest_stage, new_folder, marker, commit_action, direction))
         else
-          puts "hive: approved #{task.slug}"
+          verb = direction == "backward" ? "rejected" : "approved"
+          puts "hive: #{verb} #{task.slug}"
           puts "  from: #{task.folder}"
           puts "  to:   #{new_folder}"
           # Hint goes to stderr so a `| jq` consumer doesn't get prose mixed

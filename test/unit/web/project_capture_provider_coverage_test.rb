@@ -120,6 +120,9 @@ class WebProjectCaptureProviderCoverageTest < Minitest::Test
     subject = provider
     result = base_result
     subject.define_singleton_method(:supervise_provider_in_custody) { |*, **| result }
+    subject.define_singleton_method(:wait_for_supervisor_status!) do |target, **|
+      Process.waitpid2(target.fetch(:pid)).fetch(1)
+    end
     error = with_blocked_result_reader(subject) do
       assert_raises(error_class) do
         subject.send(

@@ -1,7 +1,16 @@
 <% content_for(:title, "#{web_product_name} — #{@task.title}") %>
 
-<div id="status-stream-owner" data-controller="status-refresh"
-     data-status-version="<%= @status_version %>">
+<div id="status-stream-owner" data-controller="status-refresh task-workspace"
+     data-status-version="<%= @status_version %>"
+     data-task-workspace-key-value="<%= stable_dom_id("task-workspace", @project.name, @task["slug"]) %>"
+     data-task-workspace-signature-value="<%= stable_dom_id(
+       "workspace-material",
+       @workspace.dig("decision", "posture"),
+       @workspace.dig("decision", "reason"),
+       @workspace.dig("status", "state"),
+       @workspace.dig("panels", "attempts", "current_attempt_id"),
+       @workspace.dig("panels", "resources", "state")
+     ) %>">
 <div class="task-header">
   <h1><%= @task.title %></h1>
 </div>
@@ -24,6 +33,9 @@
       error: @status_error %>
 <%= render "tasks/state" %>
 
+<%= render "tasks/plan_review", plan_review: @plan_review, task: @task,
+      status_fresh: @status_fresh, task_source: @task_source if @plan_review %>
+
 <% if (closure = @task["closure"]).is_a?(Hash) && closure["schema"] == Hive::TaskClosure::SCHEMA %>
   <section class="task-closure" aria-labelledby="task-closure-title">
     <h2 id="task-closure-title">Closure evidence</h2>
@@ -42,49 +54,48 @@
 <% end %>
 
 <%= render "tasks/outcome_evidence", evidence: @outcome_evidence, project: @project, task: @task %>
-<%= render "tasks/media", media: @media, project: @project, task: @task %>
 
-<% if @files.any? %>
-  <h2>Artifacts</h2>
-  <%# The controller re-applies the operator's open/closed choices after each
-      pushed morph; content stays live (agents keep writing these files). %>
-  <div data-controller="artifacts">
-    <% @files.each_with_index do |(name, content), i| %>
-      <details class="artifact" data-artifact-name="<%= name %>" <%= "open" if i.zero? %>>
-        <summary><%= name %></summary>
-        <div class="artifact-body">
-          <% if name.end_with?(".md") %>
-            <div class="markdown"><%= render_markdown(content) %></div>
-          <% else %>
-            <pre><%= content %></pre>
-          <% end %>
-        </div>
-      </details>
+<div class="task-workspace" aria-label="Task evidence workspace">
+  <div class="task-workspace-grid">
+    <%= render "tasks/attempts", workspace: @workspace %>
+    <%= render "tasks/provenance", workspace: @workspace %>
+    <%= render "tasks/timeline", workspace: @workspace %>
+    <%= render "tasks/dependencies", workspace: @workspace %>
+
+    <div class="workspace-wide workspace-change-grid" aria-label="Change and publication evidence">
+      <%= render "tasks/diff_frame",
+            project: @project, task: @task, task_source: @task_source %>
+      <%= turbo_frame_tag stable_dom_id("task-publication", @project.name, @task.slug),
+            refresh: "morph" do %>
+        <%= render "tasks/publication",
+              publication: @workspace.dig("panels", "publication"),
+              refresh_available: @publication_refresh_available,
+              refresh_notice: nil %>
+      <% end %>
+    </div>
+
+    <div class="workspace-wide">
+      <%= render "tasks/media", media: @media, project: @project, task: @task %>
+      <%= render "tasks/artifacts", artifact_panel: @artifact_panel %>
+    </div>
+
+    <% if @log %>
+      <section class="workspace-panel workspace-wide" aria-label="Log">
+        <h2>Log</h2>
+        <%# data-turbo-permanent: page morphs must never touch the frame — Turbo
+            would otherwise reload the operator-owned tail on every push. %>
+        <%= turbo_frame_tag stable_dom_id("task-log", @project.name, @task.slug),
+              src: task_log_path(@project.name, @task["slug"], source: @task_source),
+              refresh: "morph",
+              data: (@task_source ?
+                { turbo_permanent: true } :
+                { controller: "poll", poll_interval_value: 3000, turbo_permanent: true }) do %>
+          <div class="log-pane"><pre>Loading log…</pre></div>
+        <% end %>
+      </section>
     <% end %>
   </div>
-<% end %>
-
-<% if @log %>
-  <h2>Log</h2>
-  <%# data-turbo-permanent: page morphs must never touch the frame — Turbo
-      would otherwise RELOAD a [src][refresh=morph] frame on every pushed
-      refresh, bypassing the poll controller's human-always-wins gates and
-      yanking content while the operator reads history. Its own gated poll
-      owns freshness. refresh="morph": the poll's reload PATCHES the pane
-      instead of replacing its children, so an unchanged tail repaints
-      nothing (no blink) and a grown tail appends — until the 200-line tail
-      window saturates, after which each reload rewrites the window. The
-      poll follows tail -f semantics (see the poll controller): pinned to
-      the bottom while following, paused while scrolled up to read. %>
-  <%= turbo_frame_tag "task-log",
-        src: task_log_path(@project.name, @task["slug"], source: @task_source),
-        refresh: "morph",
-        data: (@task_source ?
-          { turbo_permanent: true } :
-          { controller: "poll", poll_interval_value: 3000, turbo_permanent: true }) do %>
-    <div class="log-pane"><pre>Loading log…</pre></div>
-  <% end %>
-<% end %>
+</div>
 
 <details class="advanced">
   <summary>Advanced</summary>
@@ -96,10 +107,11 @@
     <%= button_to "Reject",
           task_reject_path(@project.name, @task["slug"], source: @task_source),
           params: { from: @task["stage"] }, class: "btn-danger",
-          disabled: !@status_fresh, aria: { disabled: (!@status_fresh).to_s },
+          disabled: !@status_fresh || !@workspace_action_evidence_current,
+          aria: { disabled: (!@status_fresh || !@workspace_action_evidence_current).to_s },
           data: { turbo_confirm: "Send #{@task["slug"]} back a stage?" } %>
   </div>
-  <% unless @task.passable? %>
+  <% unless @task.passable? || (@task["stage"] == "3-plan" && @task.plan_review) %>
     <div class="advanced-item">
       <div>
         <p class="advanced-title">Force approve</p>
@@ -108,7 +120,8 @@
       <%= button_to "Force approve",
             task_approve_path(@project.name, @task["slug"], source: @task_source),
             params: { from: @task["stage"], force: "1" }, class: "btn-secondary",
-            disabled: !@status_fresh, aria: { disabled: (!@status_fresh).to_s },
+            disabled: !@status_fresh || !@workspace_action_evidence_current,
+            aria: { disabled: (!@status_fresh || !@workspace_action_evidence_current).to_s },
             data: { turbo_confirm: "Advance #{@task["slug"]} even though the stage isn't marked complete?" } %>
     </div>
   <% end %>
@@ -120,8 +133,13 @@
     <%= button_to "Drop",
           task_drop_path(@project.name, @task["slug"], source: @task_source),
           params: { from: @task["stage"] }, class: "btn-danger",
-          disabled: !@status_fresh, aria: { disabled: (!@status_fresh).to_s },
+          disabled: !@status_fresh || !@workspace_action_evidence_current,
+          aria: { disabled: (!@status_fresh || !@workspace_action_evidence_current).to_s },
           data: { turbo_confirm: "Permanently delete #{@task["slug"]}? This cannot be undone." } %>
   </div>
 </details>
+
+<p id="task-workspace-announcement" class="visually-hidden" role="status"
+   aria-live="polite" aria-atomic="true"
+   data-task-workspace-target="announcement"></p>
 </div>

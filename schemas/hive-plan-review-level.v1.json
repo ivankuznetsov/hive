@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-plan-review-level.v1.json",
+  "title": "Hive plan review level receipt (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "task_id", "level", "operator", "reason", "raised_at"],
+  "properties": {
+    "schema": {"const": "hive-plan-review-level"},
+    "schema_version": {"const": 1},
+    "task_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "level": {"enum": ["standard", "mandatory"]},
+    "operator": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "reason": {"type": "string", "maxLength": 16384},
+    "raised_at": {"type": "string", "format": "date-time"}
+  }
+}

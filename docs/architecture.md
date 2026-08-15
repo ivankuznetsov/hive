@@ -319,7 +319,8 @@ models:
 ```
 
 `execute_implementation` inherits `execute.effort`; `review_fix` inherits
-`review.effort`. The project keys are `brainstorm`, `plan`, `execute`,
+`review.effort`. The project keys are `brainstorm`, `plan`, `plan_review`,
+`plan_review_adversarial`, `plan_review_verification`, `execute`,
 `execute_implementation`, `rebase`, `diagnose`, `babysitter`, `review`,
 `review_ci`, `review_reviewers`, `review_triage`, `review_fix`,
 `review_browser`, `patrol`, `patrol_review`, `patrol_fix`, `open_pr`,

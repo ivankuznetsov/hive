@@ -1,0 +1,235 @@
+<% summary = plan_review.fetch("summary") %>
+<% current = summary.dig("freshness", "status") == "current" %>
+<% mutations_enabled = status_fresh && current && summary["observation_digest"].present? &&
+     task["stage"] == "3-plan" %>
+<% decision_mutations_enabled = mutations_enabled && summary["state"] == "awaiting_decision" %>
+<% identity = {
+     review_id: summary["review_id"], task_generation: summary["task_generation"],
+     policy_fingerprint: summary["policy_fingerprint"],
+     expected_artifact_digest: summary["observation_digest"]
+   } %>
+
+<section class="plan-review" aria-labelledby="plan-review-title"
+         data-review-id="<%= summary["review_id"] %>"
+         data-review-state="<%= summary["state"] %>">
+  <div class="plan-review-heading">
+    <div>
+      <h2 id="plan-review-title">Plan critique</h2>
+      <p class="muted">
+        <strong><%= summary["effective_level"] || "pending" %></strong>
+        · <%= summary["state"].to_s.tr("_", " ") %>
+        <% if summary["degraded"] %>
+          · degraded: <%= summary["degradation_reason"].to_s.tr("_", " ") %>
+        <% end %>
+      </p>
+    </div>
+    <span class="plan-review-clearance <%= "is-allowed" if summary["execution_allowed"] %>">
+      <%= summary["execution_allowed"] ? "Execution allowed" : "Execution blocked" %>
+    </span>
+  </div>
+
+  <% unless current %>
+    <div class="state-banner state-banner-error" role="alert">
+      Review evidence is <%= summary.dig("freshness", "status").to_s.tr("_", " ") %>.
+      <%= summary.dig("freshness", "reason") || "Reload before taking an action." %>
+    </div>
+  <% end %>
+
+  <% if summary["required_action"].present? %>
+    <div class="state-banner plan-review-required-action" role="status">
+      <strong>Required action</strong>
+      <span><%= summary["required_action"].is_a?(Hash) ? summary["required_action"].to_json : summary["required_action"] %></span>
+    </div>
+  <% elsif summary["degraded"] %>
+    <div class="state-banner plan-review-required-action" role="status">
+      <strong>Coverage degraded</strong>
+      <span>The audited exception remains attached to this task.</span>
+    </div>
+  <% end %>
+
+  <dl class="plan-review-summary">
+    <div><dt>Review</dt><dd><code><%= summary["review_id"] || "not initialized" %></code></dd></div>
+    <div><dt>Policy</dt><dd><%= summary["computed_level"] || "—" %> computed / <%= summary["effective_level"] || "—" %> effective</dd></div>
+    <div><dt>Coverage</dt><dd><%= summary.dig("coverage_counts", "completed") %> complete · <%= summary.dig("coverage_counts", "failed") %> failed · <%= summary.dig("coverage_counts", "unsupported") %> unsupported · <%= summary.dig("coverage_counts", "waived") %> waived</dd></div>
+    <div><dt>Findings</dt><dd><%= summary.dig("finding_counts", "total") %> total · <%= summary.dig("finding_counts", "open_gated") %> gated · <%= summary.dig("finding_counts", "open_manual") %> manual</dd></div>
+    <div><dt>Blocker</dt><dd><%= summary["blocker_owner"] %><%= ": #{summary['blocker_reason']}" if summary["blocker_reason"].present? %></dd></div>
+    <div><dt>Attempts</dt><dd><%= summary["attempt_count"] %><%= " · retry #{summary['retry_at']}" if summary["retry_at"].present? %></dd></div>
+  </dl>
+
+  <% if plan_review.fetch("coverage").any? %>
+    <h3>Coverage</h3>
+    <div class="plan-review-table-wrap">
+      <table class="plan-review-table">
+        <thead><tr><th>Item</th><th>Requirement</th><th>Status</th><th>Evidence</th></tr></thead>
+        <tbody>
+          <% plan_review.fetch("coverage").each do |coverage| %>
+            <tr>
+              <td><%= coverage.fetch("name").tr("_", " ") %></td>
+              <td><%= coverage.fetch("required") ? "required" : "optional" %></td>
+              <td><%= coverage.fetch("status").tr("_", " ") %></td>
+              <td><%= coverage["reason"].presence || "—" %></td>
+            </tr>
+            <% if summary["effective_level"] == "mandatory" &&
+                  %w[failed unsupported].include?(coverage.fetch("status")) %>
+              <tr class="plan-review-action-row">
+                <td colspan="4">
+                  <%= form_with url: task_plan_review_action_path(
+                        task.project.name, task.slug, source: task_source
+                      ), class: "plan-review-inline-form" do |form| %>
+                    <% identity.each do |name, value| %><%= hidden_field_tag name, value %><% end %>
+                    <%= hidden_field_tag :review_action, "waive_coverage" %>
+                    <%= hidden_field_tag :target_fingerprint, coverage.fetch("fingerprint") %>
+                    <%= hidden_field_tag :coverage, coverage.fetch("name") %>
+                    <% reason_id = "waiver-reason-#{coverage.fetch('fingerprint')}" %>
+                    <%= label_tag reason_id, "Reason to waive #{coverage.fetch('name').tr('_', ' ')}" %>
+                    <%= text_field_tag :reason, nil, id: reason_id, required: true,
+                          disabled: !mutations_enabled %>
+                    <%= form.submit "Waive named coverage", class: "btn-danger",
+                          disabled: !mutations_enabled,
+                          data: { turbo_confirm: "Waive required #{coverage.fetch('name')} coverage for this exact review?" } %>
+                  <% end %>
+                </td>
+              </tr>
+            <% end %>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  <% end %>
+
+  <% if plan_review.fetch("findings").any? %>
+    <h3>Findings</h3>
+    <ol class="plan-review-findings">
+      <% plan_review.fetch("findings").each do |finding| %>
+        <% finding_blocks = Hive::PlanReview::Finding.blocking?(
+             classification: finding["classification"], lifecycle: finding["lifecycle"]
+           ) %>
+        <li id="plan-review-finding-<%= finding.fetch("fingerprint") %>">
+          <div class="plan-review-finding-heading">
+            <strong><%= finding.fetch("title") %></strong>
+            <span><%= finding.fetch("classification").tr("_", " ") %> · <%= finding.fetch("risk") %> · <%= finding.fetch("lifecycle") %></span>
+          </div>
+          <p><%= finding.fetch("description") %></p>
+          <p class="muted"><%= finding.dig("evidence", "path") %>:<%= finding.dig("evidence", "start_line") %>–<%= finding.dig("evidence", "end_line") %></p>
+          <% if finding.dig("evidence", "excerpt").present? %>
+            <pre><%= finding.dig("evidence", "excerpt") %></pre>
+          <% end %>
+
+          <% if decision_mutations_enabled && finding_blocks &&
+                finding["classification"] == "gated_auto" %>
+            <%= form_with url: task_plan_review_action_path(
+                  task.project.name, task.slug, source: task_source
+                ), class: "plan-review-inline-form" do |form| %>
+              <% identity.each do |name, value| %><%= hidden_field_tag name, value %><% end %>
+              <%= hidden_field_tag :review_action, "approve_finding" %>
+              <%= hidden_field_tag :target_fingerprint, finding.fetch("fingerprint") %>
+              <%= form.submit "Approve exact finding", disabled: !mutations_enabled,
+                    data: { turbo_confirm: "Approve this gated finding for the current review?" } %>
+            <% end %>
+          <% elsif decision_mutations_enabled && finding_blocks &&
+                   finding["classification"] == "manual" %>
+            <%= form_with url: task_plan_review_action_path(
+                  task.project.name, task.slug, source: task_source
+                ), class: "plan-review-inline-form" do |form| %>
+              <% identity.each do |name, value| %><%= hidden_field_tag name, value %><% end %>
+              <%= hidden_field_tag :review_action, "answer_finding" %>
+              <%= hidden_field_tag :target_fingerprint, finding.fetch("fingerprint") %>
+              <% answer_id = "finding-answer-#{finding.fetch('fingerprint')}" %>
+              <%= label_tag answer_id, "Answer this finding" %>
+              <%= text_area_tag :answer, nil, id: answer_id, required: true,
+                    disabled: !mutations_enabled %>
+              <%= form.submit "Record answer", disabled: !mutations_enabled %>
+            <% end %>
+          <% end %>
+        </li>
+      <% end %>
+    </ol>
+  <% end %>
+
+  <% if plan_review.fetch("routes").any? %>
+    <h3>Reviewer routes</h3>
+    <div class="plan-review-table-wrap">
+      <table class="plan-review-table">
+        <thead><tr><th>Leg</th><th>Requested</th><th>Actual</th><th>Result</th><th>Independent</th></tr></thead>
+        <tbody>
+          <% plan_review.fetch("routes").each do |route| %>
+            <% requested = route["requested"] || {} %>
+            <% actual = route["actual"] || {} %>
+            <tr>
+              <td><%= route["role"] %></td>
+              <td><%= [requested["provider"], requested["model"], requested["family"], requested["effort"]].compact.join(" / ").presence || "—" %></td>
+              <td><%= [actual["provider"], actual["model"], actual["family"], actual["effort"]].compact.join(" / ").presence || "—" %></td>
+              <td><%= route["outcome"] || route["capability_result"] || "—" %></td>
+              <td><%= route["independence_verified"] ? "verified" : (route["independence_reason"] || "no") %></td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  <% end %>
+
+  <% if mutations_enabled %>
+    <div class="plan-review-global-actions">
+      <% transient_route = plan_review.fetch("routes").reverse.find { |route| %w[primary adversarial verification].include?(route["role"]) } %>
+      <% if summary["state"] == "retry_scheduled" && transient_route &&
+            %w[provider_limit timeout retryable_failure].include?(transient_route["outcome"]) %>
+        <%= form_with url: task_plan_review_action_path(
+              task.project.name, task.slug, source: task_source
+            ), class: "plan-review-inline-form" do |form| %>
+          <% identity.each do |name, value| %><%= hidden_field_tag name, value %><% end %>
+          <%= hidden_field_tag :review_action, "retry" %>
+          <%= hidden_field_tag :target_fingerprint, transient_route["attempt_id"] %>
+          <%= form.submit "Retry review" %>
+        <% end %>
+      <% end %>
+
+      <% if summary["effective_level"] == "mandatory" %>
+        <%= form_with url: task_plan_review_action_path(
+              task.project.name, task.slug, source: task_source
+            ), class: "plan-review-inline-form" do |form| %>
+          <% identity.each do |name, value| %><%= hidden_field_tag name, value %><% end %>
+          <%= hidden_field_tag :review_action, "downgrade_level" %>
+          <%= hidden_field_tag :level, "standard" %>
+          <%= label_tag :mandatory_downgrade_reason, "Reason to downgrade this mandatory review" %>
+          <%= text_field_tag :reason, nil, id: :mandatory_downgrade_reason, required: true %>
+          <%= form.submit "Downgrade to standard", class: "btn-danger",
+                data: { turbo_confirm: "Downgrade this exact mandatory review to standard?" } %>
+        <% end %>
+      <% elsif summary["effective_level"].present? %>
+        <%= form_with url: task_plan_review_action_path(
+              task.project.name, task.slug, source: task_source
+            ), class: "plan-review-inline-form" do |form| %>
+          <% identity.each do |name, value| %><%= hidden_field_tag name, value %><% end %>
+          <%= hidden_field_tag :review_action, "raise_level" %>
+          <%= label_tag :raised_review_level, "Raise review level" %>
+          <%= select_tag :level, options_for_select(
+                Hive::PlanReview::LEVELS.select { |level| Hive::PlanReview::LEVEL_RANK.fetch(level) > Hive::PlanReview::LEVEL_RANK.fetch(summary["effective_level"]) }
+              ), id: :raised_review_level %>
+          <%= form.submit "Raise review level", class: "btn-secondary" %>
+        <% end %>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% if plan_review.fetch("artifacts").any? %>
+    <h3>Current audit artifacts</h3>
+    <nav class="plan-review-artifact-links" aria-label="Plan review artifacts">
+      <% plan_review.fetch("artifacts").each do |artifact| %>
+        <%= link_to artifact.fetch("name").tr("_", " "), "#plan-review-artifact-#{artifact.fetch('name')}" %>
+      <% end %>
+    </nav>
+    <% plan_review.fetch("artifacts").each do |artifact| %>
+      <details class="artifact plan-review-artifact" id="plan-review-artifact-<%= artifact.fetch("name") %>">
+        <summary><%= artifact.fetch("name").tr("_", " ") %> · <%= artifact.fetch("bytes") %> bytes · <%= artifact.fetch("sha256")[0, 12] %>…</summary>
+        <p class="muted"><code><%= artifact.fetch("path") %></code></p>
+        <div class="artifact-body">
+          <% if artifact.fetch("format") == "markdown" %>
+            <div class="markdown"><%= render_markdown(artifact.fetch("content")) %></div>
+          <% else %>
+            <pre><%= artifact.fetch("content") %></pre>
+          <% end %>
+        </div>
+      </details>
+    <% end %>
+  <% end %>
+</section>

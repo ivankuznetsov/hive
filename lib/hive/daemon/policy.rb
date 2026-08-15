@@ -22,21 +22,14 @@ module Hive
     #                            baseline without dispatching
     #   :skip                  — do nothing this tick
     #
-    # The daemon adds NO new approval logic. Forward-advance safety is
-    # delegated to `Hive::Commands::Approve::VALID_TERMINAL_MARKERS`
-    # (the closed terminal-marker set already enforced by `hive approve`
-    # and the workflow verbs the daemon dispatches). That check refuses
-    # to advance on `:waiting` / `:execute_waiting` / `:review_waiting`
-    # / `:execute_stale` / `:review_*_stale` / `:review_error` / `:error`,
-    # so the daemon can dispatch confidently knowing a misclassified row
-    # will fail loudly with `Hive::WrongStage` (exit 4) at the workflow-
-    # verb level rather than silently advancing past a human gate.
+    # The daemon adds no operator authority. Forward-advance safety is
+    # delegated to the workflow verb's terminal-marker checks and, for
+    # coding plan transitions, `PlanReview::TransitionGuard` immediately
+    # before marker mutation and folder movement.
     #
     # The only non-marker-driven decisions are:
-    # - plan approval rows (`3-plan` + `needs_input`) are auto-dispatched
-    #   for daemon-enabled projects. The durable consent is enabling the
-    #   daemon; a generated plan should not sit forever waiting for an
-    #   editor open/close gesture.
+    # - coding plan rows dispatch review automation while review is active;
+    #   only a current cleared resolution can become a plan-approval row.
     # - true edit waits dispatch only if the state-file mtime is strictly
     #   newer than the last observed mtime AND `now - mtime >=
     #   edit_debounce_sec` (so a partial mid-save draft doesn't trigger
@@ -70,6 +63,11 @@ module Hive
         ready_to_artifacts
         ready_to_finalize
         ready_to_advance
+        plan_review_degraded
+      ].freeze
+
+      PLAN_REVIEW_AUTOMATION_ACTIONS = %w[
+        plan_reviewing plan_review_retry
       ].freeze
 
       # `ready_to_run` is the generic-stage "run the agent" action. Unlike
@@ -165,21 +163,17 @@ module Hive
                  admission_error: false)
         return :admission_error if admission_error || action == "admission_error"
         return :skip if action.nil?
-        # Three branches dispatch the row's command verbatim (advance,
-        # plan_approval) or via the edit-resume path (edit_resume).
-        # All three need nil/empty-command protection. The guard
-        # lists plan_approval? explicitly even though today's
-        # plan_approval? rows are always edit_resume? rows too
-        # (`needs_input`); a future refactor extending plan_approval?
-        # to a non-edit_resume action would otherwise silently lose
-        # this coverage. PR #83 code review finding #3.
+        # Advance, cleared-plan approval, review automation, and edit-resume
+        # rows all require an explicit command.
         if (advance?(action) || edit_resume?(action) || run?(action) ||
+            plan_review_automation?(action) ||
             plan_approval?(action, stage, workflow)) &&
            (command.nil? || command.empty?)
           return :skip
         end
 
-        if advance?(action) || plan_approval?(action, stage, workflow)
+        if advance?(action) || plan_approval?(action, stage, workflow) ||
+           plan_review_automation?(action)
           blocked ? :blocked_on_dependency : :dispatch
         elsif action == MERGE_WAIT_ACTION
           blocked ? :blocked_on_dependency : :poll_for_merge
@@ -249,6 +243,10 @@ module Hive
         action == RUN_ACTION
       end
 
+      def plan_review_automation?(action)
+        PLAN_REVIEW_AUTOMATION_ACTIONS.include?(action)
+      end
+
       # Literal `"3-plan"` equality matches every other stage-identity # coding-scoped: plan auto-approval is a coding workflow rule
       # check in the codebase (e.g., `BubbleModel#stage_extra_for`'s `when "3-plan"` # coding-scoped: historical coding TUI reference
       # and `Hive::Stages::DIRS` membership). Earlier drafts used
@@ -260,7 +258,8 @@ module Hive
       # (cross-corroborated by reliability + testing + maintainability +
       # project-standards reviewers).
       def plan_approval?(action, stage, workflow)
-        action == "needs_input" && Hive::Workflows.coding_id?(workflow) && stage == "3-plan" # coding-scoped: daemon auto-approval only applies to coding plan pauses
+        %w[ready_to_develop plan_review_degraded].include?(action) &&
+          Hive::Workflows.coding_id?(workflow) && stage == "3-plan" # coding-scoped: plan auto-approval is a coding workflow rule
       end
 
       # Generic-stage run decision. First sight (no prior dispatch) runs the

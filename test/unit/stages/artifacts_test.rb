@@ -735,8 +735,10 @@ class StagesArtifactsTest < Minitest::Test
       isolated = nil
       spawn = lambda do |_task, **kwargs|
         isolated = kwargs[:isolate_environment]
-        File.write(File.join(source, "app.rb"), "mutated\n")
-        { status: :ok, final_message: '{"evidence":[]}' }
+        kwargs.fetch(:agent_custody).call do
+          File.write(File.join(source, "app.rb"), "mutated\n")
+          { status: :ok, final_message: '{"evidence":[]}' }
+        end
       end
 
       with_replaced_singleton_method(
@@ -762,11 +764,13 @@ class StagesArtifactsTest < Minitest::Test
       task = make_artifacts_task(dir)
       identity = { "implementation_head" => "a" * 40 }
       resolver = Struct.new(:value) { def resolve = value }.new(identity)
-      spawn = lambda do |_task, **|
-        {
-          status: :ok, final_message: '{"claims":[],"exclusions":[]}',
-          final_message_truncated: false
-        }
+      spawn = lambda do |_task, agent_custody:, **|
+        agent_custody.call do
+          {
+            status: :ok, final_message: '{"claims":[],"exclusions":[]}',
+            final_message_truncated: false
+          }
+        end
       end
 
       with_replaced_singleton_method(
@@ -781,6 +785,43 @@ class StagesArtifactsTest < Minitest::Test
 
           assert_equal "provider-default", result.dig(:actor, "model")
           assert_equal "default", result.dig(:actor, "effort")
+        end
+      end
+    end
+  end
+
+  def test_role_custody_excludes_controller_session_activity_from_the_agent_interval
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = { "implementation_head" => "a" * 40 }
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      journal = File.join(task.folder, "task-journal.jsonl")
+      projection = File.join(task.folder, "task-projection.json")
+      spawn = lambda do |_task, agent_custody:, **|
+        File.write(journal, "controller session start\n")
+        File.write(projection, "controller session start\n")
+        result = agent_custody.call do
+          { status: :ok, final_message: '{"claims":[],"exclusions":[]}' }
+        end
+        File.open(journal, "ab") { |file| file.write("controller session finish\n") }
+        File.write(projection, "controller session finish\n")
+        result
+      end
+
+      with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Identity, :new,
+        ->(**_kwargs) { resolver }
+      ) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          result = Hive::Stages::Artifacts.run_role!(
+            role: "inference", task: task, cfg: {}, prompt: "infer",
+            identity: identity
+          )
+
+          assert_equal [], result.dig(:output, "claims")
+          assert_equal "controller session start\ncontroller session finish\n",
+                       File.binread(journal)
+          assert_equal "controller session finish\n", File.binread(projection)
         end
       end
     end
@@ -807,7 +848,9 @@ class StagesArtifactsTest < Minitest::Test
       captured = nil
       spawn = lambda do |_task, **kwargs|
         captured = kwargs
-        { status: :ok, final_message: '{"claims":[],"exclusions":[]}' }
+        kwargs.fetch(:agent_custody).call do
+          { status: :ok, final_message: '{"claims":[],"exclusions":[]}' }
+        end
       end
       cfg = {
         "artifacts" => {
@@ -1349,10 +1392,26 @@ class StagesArtifactsTest < Minitest::Test
           end
         end
 
+        custody_missing = lambda do |_task, **|
+          { status: :ok, final_message: '{"claims":[],"exclusions":[]}' }
+        end
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, custody_missing) do
+          error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+            Hive::Stages::Artifacts.run_role!(
+              role: "inference", task: task, cfg: {}, prompt: "infer", identity: identity
+            )
+          end
+          assert_includes error.message, "agent custody was not invoked"
+        end
+
         report = Object.new
         report.define_singleton_method(:valid?) { false }
         report.define_singleton_method(:diagnostic) { "task.md changed" }
-        spawn = ->(*) { { status: :ok, final_message: '{"claims":[],"exclusions":[]}' } }
+        spawn = lambda do |_task, agent_custody:, **|
+          agent_custody.call do
+            { status: :ok, final_message: '{"claims":[],"exclusions":[]}' }
+          end
+        end
         with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
           with_replaced_singleton_method(
             Hive::ArtifactFirewall, :validate_and_restore, ->(*) { report }
@@ -1365,6 +1424,23 @@ class StagesArtifactsTest < Minitest::Test
           end
         end
 
+        failing_spawn = lambda do |_task, agent_custody:, **|
+          agent_custody.call { raise Hive::AgentError, "provider failed after tamper" }
+        end
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, failing_spawn) do
+          with_replaced_singleton_method(
+            Hive::ArtifactFirewall, :validate_and_restore, ->(*) { report }
+          ) do
+            error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+              Hive::Stages::Artifacts.run_role!(
+                role: "inference", task: task, cfg: {}, prompt: "infer", identity: identity
+              )
+            end
+            assert_includes error.message, "inference modified protected task state"
+            assert_includes error.message, "task.md changed"
+          end
+        end
+
         [
           { status: :error, final_message: "{}" },
           {
@@ -1373,7 +1449,9 @@ class StagesArtifactsTest < Minitest::Test
           }
         ].each do |result|
           with_replaced_singleton_method(
-            Hive::Stages::Base, :spawn_agent, ->(*) { result }
+            Hive::Stages::Base, :spawn_agent, lambda { |_task, agent_custody:, **|
+              agent_custody.call { result }
+            }
           ) do
             assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
               Hive::Stages::Artifacts.run_role!(
@@ -1395,7 +1473,9 @@ class StagesArtifactsTest < Minitest::Test
       captured = nil
       spawn = lambda do |_task, **kwargs|
         captured = kwargs
-        { status: :ok, final_message: '{"evidence":[]}', final_message_truncated: false }
+        kwargs.fetch(:agent_custody).call do
+          { status: :ok, final_message: '{"evidence":[]}', final_message_truncated: false }
+        end
       end
       cfg = {
         "artifacts" => { "evidence" => { "producer" => { "agent" => "codex" } } }

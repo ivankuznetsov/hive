@@ -71,6 +71,21 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     def stop = nil
   end
 
+  class DependencyFeed < CurrentStateFeed
+    attr_reader :context_reads
+
+    def initialize(state, dependency_snapshot)
+      super(state)
+      @dependency_snapshot = dependency_snapshot
+      @context_reads = 0
+    end
+
+    def dependency_context_snapshot
+      @context_reads += 1
+      @dependency_snapshot
+    end
+  end
+
   class ColdStateFeed
     attr_reader :stops
 
@@ -149,6 +164,28 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
 
     assert_same payload, page_snapshot.payload
     assert_equal "cached-token", page_snapshot.version
+    assert_equal 0, feed.snapshot_state_calls
+  end
+
+  test "dependency detail reuses the fingerprinted status context without scanning" do
+    payload = { "projects" => [] }
+    state = Hive::Web::StatusFeed::State.new(
+      payload:, token: "cached-token", availability: "fresh",
+      last_success_at: "2026-08-12T12:00:00Z", error: nil,
+      scan_count: 1, generation: 1
+    )
+    context = Object.new
+    feed = DependencyFeed.new(
+      state, { context: context, fingerprint: "dependency-fingerprint" }
+    )
+    StatusBroadcaster.feed = feed
+
+    first = StatusBroadcaster.dependency_context_snapshot
+    second = StatusBroadcaster.dependency_context_snapshot
+
+    assert_same context, first.fetch(:context)
+    assert_equal "dependency-fingerprint", second.fetch(:fingerprint)
+    assert_equal 2, feed.context_reads
     assert_equal 0, feed.snapshot_state_calls
   end
 

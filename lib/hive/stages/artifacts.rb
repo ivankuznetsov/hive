@@ -289,7 +289,7 @@ module Hive
         prompt = "Context identity: #{context_id}\n\n#{prompt}"
         FileUtils.mkdir_p(writable_root, mode: 0o700) if writable_root
         manifest = role_firewall_manifest(task, writable_root)
-        snapshot = Hive::ArtifactFirewall.capture(manifest)
+        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(manifest)
         security = role_security_kwargs(
           role, task: task, cfg: cfg, profile: profile, actor_cfg: actor_cfg,
           writable_root: writable_root
@@ -325,16 +325,27 @@ module Hive
             permission_arguments: permission_arguments,
             isolate_environment: true,
             launch_environment: launch_environment,
+            agent_custody: agent_custody,
             **security
           )
         rescue Hive::AgentError => e
+          report = agent_custody.report
+          if report && !report.valid?
+            raise Hive::Artifacts::OutcomeEvidence::StoreError,
+                  "#{role} modified protected task state: #{report.diagnostic}"
+          end
+
           raise Hive::Artifacts::OutcomeEvidence::StoreError,
                 "#{role} agent failed before durable output: #{e.message}"
         ensure
           cleanup_producer_process_group(result) if role == "producer"
-          report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
         end
-        unless report.valid?
+        report = agent_custody.report
+        if !report && result.is_a?(Hash) && result[:status] == :ok
+          raise Hive::Artifacts::OutcomeEvidence::StoreError,
+                "#{role} agent custody was not invoked"
+        end
+        if report && !report.valid?
           raise Hive::Artifacts::OutcomeEvidence::StoreError,
                 "#{role} modified protected task state: #{report.diagnostic}"
         end

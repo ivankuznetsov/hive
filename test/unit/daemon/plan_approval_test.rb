@@ -2,6 +2,9 @@ require "test_helper"
 require "tmpdir"
 require "hive/markers"
 require "hive/daemon/plan_approval"
+require "hive/plan_review/policy"
+require "hive/plan_review/store"
+require "hive/task_meta"
 
 # Unit coverage for the shared helper that the dispatcher's
 # plan-approval auto-dispatch path relies on. The dispatcher tests
@@ -65,7 +68,9 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
 
   def test_prepare_flips_waiting_marker_to_complete_and_returns_develop_command
     with_state_file("<!-- WAITING -->") do |path|
-      cmd = PA.prepare("hive plan slug --from 3-plan", path)
+      cmd = PA.prepare(
+        "hive plan slug --from 3-plan", path, clearance_checker: -> { true }
+      )
       assert_equal "hive develop slug --from 3-plan", cmd
       assert_equal :complete, Hive::Markers.current(path).name
     end
@@ -77,7 +82,9 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
     # and dispatch. The dispatch is still valid; we just don't
     # re-flip.
     with_state_file("<!-- COMPLETE -->") do |path|
-      cmd = PA.prepare("hive plan slug --from 3-plan", path)
+      cmd = PA.prepare(
+        "hive plan slug --from 3-plan", path, clearance_checker: -> { true }
+      )
       assert_equal "hive develop slug --from 3-plan", cmd
       assert_equal :complete, Hive::Markers.current(path).name
     end
@@ -89,7 +96,10 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
     # return that develop command (no-op on the marker), making the :complete
     # branch reachable instead of raising on the develop verb.
     with_state_file("<!-- COMPLETE -->") do |path|
-      cmd = PA.prepare("hive develop slug --from 3-plan --project hive", path)
+      cmd = PA.prepare(
+        "hive develop slug --from 3-plan --project hive", path,
+        clearance_checker: -> { true }
+      )
       assert_equal "hive develop slug --from 3-plan --project hive", cmd
       assert_equal :complete, Hive::Markers.current(path).name
     end
@@ -98,7 +108,9 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
   def test_prepare_raises_not_approvable_for_error_marker
     with_state_file("<!-- ERROR reason=plan_failed -->") do |path|
       err = assert_raises(PA::NotApprovable) do
-        PA.prepare("hive plan slug --from 3-plan", path)
+        PA.prepare(
+          "hive plan slug --from 3-plan", path, clearance_checker: -> { true }
+        )
       end
       assert_match(/marker=:error/, err.message)
       # Marker NOT touched.
@@ -109,7 +121,9 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
   def test_prepare_raises_not_approvable_for_agent_working_marker
     with_state_file("<!-- AGENT_WORKING pid=12345 -->") do |path|
       assert_raises(PA::NotApprovable) do
-        PA.prepare("hive plan slug --from 3-plan", path)
+        PA.prepare(
+          "hive plan slug --from 3-plan", path, clearance_checker: -> { true }
+        )
       end
     end
   end
@@ -128,5 +142,90 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
       assert_equal :waiting, Hive::Markers.current(path).name,
                    "command validation must happen before marker flip"
     end
+  end
+
+  def test_prepare_checks_clearance_before_flipping_marker
+    with_state_file("<!-- WAITING -->") do |path|
+      error = assert_raises(PA::NotApprovable) do
+        PA.prepare(
+          "hive plan slug --from 3-plan", path, clearance_checker: -> { false }
+        )
+      end
+
+      assert_includes error.message, "has not authorized execution"
+      assert_equal :waiting, Hive::Markers.current(path).name
+    end
+  end
+
+  def test_prepare_production_path_uses_current_clearance_without_launching_review
+    with_reviewed_task("cleared") do |task, cfg|
+      command = PA.prepare("hive plan #{task.slug} --from 3-plan", task.state_file)
+
+      assert_equal "hive develop #{task.slug} --from 3-plan", command
+      assert_equal :complete, Hive::Markers.current(task.state_file).name
+      assert_equal "cleared", Hive::PlanReview::Store.new(task_folder: task.folder).current.state
+    end
+
+    with_reviewed_task("blocked") do |task, _cfg|
+      error = assert_raises(PA::NotApprovable) do
+        PA.prepare("hive plan #{task.slug} --from 3-plan", task.state_file)
+      end
+      assert_includes error.message, "does not authorize execution"
+      assert_equal :waiting, Hive::Markers.current(task.state_file).name
+    end
+  end
+
+  def with_reviewed_task(state)
+    Dir.mktmpdir("plan-approval-production") do |root|
+      folder = File.join(root, ".hive-state", "stages", "3-plan", "reviewed-task")
+      FileUtils.mkdir_p(folder)
+      Hive::TaskMeta.write(
+        folder, id: 42, slug: "reviewed-task", display_name: nil,
+        workflow: "coding", plan_review_required: true
+      )
+      File.write(File.join(folder, "plan.md"), "# reviewed plan\n<!-- WAITING -->\n")
+      task = Hive::Task.new(folder)
+      cfg = Hive::Config.load(root)
+      publish_clearance(task, cfg, state)
+      yield task, cfg
+    end
+  end
+
+  def publish_clearance(task, cfg, state)
+    store = Hive::PlanReview::Store.new(task_folder: task.folder)
+    plan_digest = Digest::SHA256.file(task.state_file).hexdigest
+    generation = Hive::PlanReview::Identity.task_generation(task)
+    review_id = Hive::PlanReview::Identity.logical(
+      task_id: task.id, plan_generation: "#{generation}:#{plan_digest}",
+      policy_fingerprint: "c" * 64
+    )
+    common = {
+      "schema" => "hive-plan-review", "schema_version" => 1,
+      "review_id" => review_id, "prior_review_id" => nil,
+      "task_id" => task.id.to_s, "task_generation" => generation,
+      "plan_digest" => plan_digest, "policy_fingerprint" => "c" * 64,
+      "computed_level" => "standard", "effective_level" => "standard",
+      "created_at" => "2026-08-12T12:00:00Z"
+    }
+    store.create_review!(Hive::PlanReview::Record.new(common.merge("kind" => "manifest")))
+    policy = store.write_review_artifact!(
+      review_id:, basename: "policy.json", json: true,
+      content: {
+        "configuration_fingerprint" => Hive::PlanReview::Policy.configuration_fingerprint(cfg)
+      }
+    )
+    executable = state == "cleared"
+    store.publish_current!(Hive::PlanReview::Record.new(common.merge(
+      "kind" => "projection", "version" => 1, "candidate_plan_digest" => nil,
+      "state" => state, "outcome" => state, "attempt_ids" => [],
+      "current_attempt_id" => nil, "coverage" => [], "findings" => [],
+      "decisions" => [], "routes" => [], "artifacts" => { "policy" => policy },
+      "blockers" => executable ? [] : [ { "owner" => "hive", "reason" => "blocked" } ],
+      "required_action" => executable ? nil : "repair review",
+      "degradation_reason" => nil, "execution_allowed" => executable,
+      "policy_reasons" => [],
+      "level_sources" => { "computed" => "standard", "project" => "skip", "workflow" => "skip", "run" => nil },
+      "retry_at" => nil, "updated_at" => "2026-08-12T12:00:00Z"
+    )), expected_version: nil)
   end
 end

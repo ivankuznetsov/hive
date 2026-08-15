@@ -15,6 +15,21 @@ module Hive
       DIAGNOSTIC_MAX_BYTES = 16 * 1024
       UNTRACKED_MAX_PATHS = 500
       POLL_INTERVAL_SEC = 0.02
+      SUBPROCESS_ENV = {
+        "GIT_TERMINAL_PROMPT" => "0",
+        "GIT_CONFIG_NOSYSTEM" => "1",
+        "GIT_CONFIG_GLOBAL" => File::NULL,
+        "GIT_SSH_COMMAND" => "ssh -oBatchMode=yes",
+        "RUBYOPT" => nil,
+        "RUBYLIB" => nil,
+        "BUNDLE_GEMFILE" => nil,
+        "BUNDLE_BIN_PATH" => nil,
+        "BUNDLER_SETUP" => nil,
+        "BUNDLER_VERSION" => nil,
+        "RUBYGEMS_GEMDEPS" => nil,
+        "GEM_HOME" => nil,
+        "GEM_PATH" => nil
+      }.freeze
 
       class MissingBinary < Hive::Error; end
       class CommandTimeout < Hive::Error; end
@@ -232,11 +247,7 @@ module Hive
         stdout_r, stdout_w = IO.pipe
         stderr_r, stderr_w = IO.pipe
         pid = Process.spawn(
-          {
-            "GIT_TERMINAL_PROMPT" => "0",
-            "GIT_CONFIG_NOSYSTEM" => "1",
-            "GIT_SSH_COMMAND" => "ssh -oBatchMode=yes"
-          },
+          SUBPROCESS_ENV,
           *argv,
           pgroup: true,
           in: File::NULL,

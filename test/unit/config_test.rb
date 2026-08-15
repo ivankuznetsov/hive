@@ -5367,6 +5367,24 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_agent_override_validation_rejects_unknown_profiles_and_non_hash_values
+    unknown = assert_raises(Hive::ConfigError) do
+      Hive::Config.send(
+        :validate_agent_overrides!,
+        { "agents" => { "future-agent" => {} } }, "/tmp/config.yml"
+      )
+    end
+    assert_match(/is not a registered AgentProfile/, unknown.message)
+
+    malformed = assert_raises(Hive::ConfigError) do
+      Hive::Config.send(
+        :validate_agent_overrides!,
+        { "agents" => { "opencode" => [] } }, "/tmp/config.yml"
+      )
+    end
+    assert_match(/agents\.opencode.*must be a Hash/, malformed.message)
+  end
+
   def test_opencode_plan_uses_native_compound_engineering_skill
     assert_equal "/ce-plan",
                  Hive::Config.stage_skill(

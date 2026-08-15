@@ -174,6 +174,127 @@ class ImplementationIdentityStoreTest < Minitest::Test
     end
   end
 
+  def test_opencode_observation_validation_covers_stage_identity_route_and_usage_contracts
+    with_identity_attempt do |task, attempt_store, attempt|
+      cfg = execute_config("opencode", "anthropic/claude-sonnet-4-5")
+      store = Hive::ImplementationIdentity::Store.new(
+        task: task, cfg: cfg, attempt_store: attempt_store
+      )
+      context = {
+        attempt_id: attempt.attempt_id, task_generation: 1,
+        ownership_generation: attempt.ownership_generation
+      }
+
+      with_attempt_context(**context) do
+        assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+          store.observe_opencode!(
+            stage: "plan", requested_route: "anthropic/claude-sonnet-4-5",
+            actual_route: nil, resolution_status: :unobserved,
+            outcome_kind: :configuration_failure, usage: nil
+          )
+        end
+        assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+          store.observe_opencode!(
+            stage: "execute", requested_route: "anthropic/claude-sonnet-4-5",
+            actual_route: nil, resolution_status: :unobserved,
+            outcome_kind: :configuration_failure, usage: nil
+          )
+        end
+
+        store.capture_execute!
+        observation = store.observe_opencode!(
+          stage: "execute", requested_route: "anthropic/claude-sonnet-4-5",
+          actual_route: nil, resolution_status: :unobserved,
+          outcome_kind: :configuration_failure, usage: nil,
+          observation_id: "unobserved"
+        )
+        assert_nil observation.fetch("actual_model")
+
+        [
+          {
+            outcome_kind: :invented, observation_id: "bad-kind",
+            error: /invalid OpenCode outcome kind/
+          },
+          {
+            outcome_kind: :completed, observation_id: "contains space",
+            error: /invalid OpenCode observation identity/
+          },
+          {
+            outcome_kind: :completed, observation_id: "bad-resolution",
+            actual_route: nil, resolution_status: :matched,
+            error: /contradicts observed route evidence/
+          },
+          {
+            outcome_kind: :completed, observation_id: "bad-usage",
+            usage: { invented: 1 }, error: /unknown OpenCode usage fields/
+          },
+          {
+            outcome_kind: :completed, observation_id: "bad-route",
+            actual_route: "not-a-route", resolution_status: :matched,
+            error: /invalid OpenCode observation/
+          }
+        ].each do |values|
+          raised = assert_raises(Hive::ImplementationIdentity::InvalidIdentity) do
+            store.observe_opencode!(
+              stage: "execute",
+              requested_route: "anthropic/claude-sonnet-4-5",
+              actual_route: values.fetch(:actual_route, "anthropic/claude-sonnet-4-5"),
+              resolution_status: values.fetch(:resolution_status, :matched),
+              outcome_kind: values.fetch(:outcome_kind),
+              usage: values.fetch(:usage, nil),
+              observation_id: values.fetch(:observation_id)
+            )
+          end
+          assert_match values.fetch(:error), raised.message
+        end
+      end
+    end
+
+    with_identity_attempt do |task, attempt_store, attempt|
+      store = Hive::ImplementationIdentity::Store.new(
+        task: task, cfg: execute_config("codex", "gpt-5.6-sol"),
+        attempt_store: attempt_store
+      )
+      with_attempt_context(
+        attempt_id: attempt.attempt_id, task_generation: 1,
+        ownership_generation: attempt.ownership_generation
+      ) do
+        store.capture_execute!
+        assert_raises(Hive::ImplementationIdentity::InvalidIdentity) do
+          store.observe_opencode!(
+            stage: "execute", requested_route: "openai/gpt-5.6-sol",
+            actual_route: nil, resolution_status: :unobserved,
+            outcome_kind: :configuration_failure, usage: nil
+          )
+        end
+      end
+    end
+  end
+
+  def test_opencode_observation_uses_the_persisted_downstream_stage_identity
+    with_identity_attempt(
+      intended_stage: "6-review", attempt_id: "review-opencode-observation"
+    ) do |task, attempt_store, attempt|
+      cfg = execute_config("opencode", "anthropic/claude-sonnet-4-5")
+      seed_execute_identity(task, attempt_store, cfg)
+      store = Hive::ImplementationIdentity::Store.new(
+        task: task, cfg: cfg, attempt_store: attempt_store
+      )
+      with_attempt_context(
+        attempt_id: attempt.attempt_id, task_generation: 1,
+        ownership_generation: attempt.ownership_generation
+      ) do
+        selected = store.resolve_stage!("review.fix")
+        observation = store.observe_opencode!(
+          stage: "review.fix", requested_route: selected.model,
+          actual_route: nil, resolution_status: :unobserved,
+          outcome_kind: :configuration_failure, usage: nil
+        )
+        assert_equal "review.fix", observation.fetch("stage")
+      end
+    end
+  end
+
   def test_downstream_resolution_is_journaled_before_launch_and_matches_native_arguments
     with_identity_attempt(intended_stage: "5-open-pr", attempt_id: "open-pr-attempt") do |task, attempt_store, attempt|
       execute_cfg = execute_config("codex", "gpt-5.6-sol")

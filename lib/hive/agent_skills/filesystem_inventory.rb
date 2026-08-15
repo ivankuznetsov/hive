@@ -197,13 +197,13 @@ module Hive
         install_path = roots.find { |path| File.directory?(path) }
         version = native_spec.package[/#compound-engineering-v([0-9.]+)\z/, 1]
         {
-          "package" => configured && {
+          "package" => configured ? {
             "id" => native_spec.package,
             "version" => version,
             "enabled" => true,
             "install_path" => install_path,
             "source" => native_spec.source
-          }.freeze,
+          }.freeze : nil,
           "marketplace" => nil
         }.freeze
       end

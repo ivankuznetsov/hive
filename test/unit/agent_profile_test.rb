@@ -94,6 +94,54 @@ class AgentProfileTest < Minitest::Test
     end
   end
 
+  def test_opencode_contract_fields_fail_closed_and_deep_freeze_json_values
+    assert_raises(ArgumentError) do
+      make_profile(name: :opencode, permission_presets: [ "unconfined" ])
+    end
+    assert_raises(ArgumentError) do
+      make_profile(name: :opencode, opencode_plugins: "compound-engineering")
+    end
+    assert_raises(ArgumentError) do
+      make_profile(name: :opencode, opencode_plugins: [ "" ])
+    end
+    assert_raises(ArgumentError) do
+      make_profile(name: :opencode, opencode_plugins: %w[plugin plugin])
+    end
+    assert_raises(ArgumentError) do
+      make_profile(name: :opencode, opencode_configuration: [])
+    end
+    assert_raises(ArgumentError) do
+      make_profile(
+        name: :opencode,
+        opencode_configuration: { "temperature" => Float::NAN }
+      )
+    end
+    assert_raises(ArgumentError) do
+      make_profile(
+        name: :opencode,
+        opencode_configuration: {
+          "providers" => [ { "api_key" => "literal-secret" } ]
+        }
+      )
+    end
+
+    profile = make_profile(
+      name: :opencode,
+      opencode_configuration: {
+        "providers" => [ { "name" => "anthropic" } ]
+      }
+    )
+    providers = profile.opencode_configuration.fetch("providers")
+    assert_predicate providers, :frozen?
+    assert_predicate providers.first, :frozen?
+    assert_predicate providers.first.fetch("name"), :frozen?
+
+    error = assert_raises(Hive::ConfigError) do
+      profile.with_overrides("isolation" => "best-effort")
+    end
+    assert_match(/must be hermetic/, error.message)
+  end
+
   def test_configuration_directory_metadata_is_optional_and_validated
     profile = make_profile(
       configuration_environment_key: "CUSTOM_HOME",

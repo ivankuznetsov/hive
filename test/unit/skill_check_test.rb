@@ -1024,6 +1024,54 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
     assert_match(/prepared pinned plugin/, resolution.message)
   end
 
+  def test_opencode_resolution_fails_closed_for_unowned_and_malformed_plugin_sources
+    with_tmp_dir do |home|
+      project = File.join(home, "project")
+      unowned = File.join(
+        project, ".opencode", "skills", "ce-plan", "SKILL.md"
+      )
+      write_file(unowned, "# unowned\n")
+      resolution = Hive::SkillCheck::OpenCode.resolve(
+        "/ce-plan", project_root: project, plugins: [],
+        configuration: {}, environment: { "HOME" => home }
+      )
+      assert_equal :missing, resolution.status
+      assert_match(/not found/, resolution.message)
+
+      config_dir = File.join(home, "config")
+      config = File.join(config_dir, "opencode.json")
+      [ "[]", JSON.generate("plugin" => [ 42 ]) ].each do |content|
+        write_file(config, content)
+        malformed = Hive::SkillCheck::OpenCode.resolve(
+          "/ce-plan", configuration_path: config,
+          environment: { "HOME" => home, "OPENCODE_CONFIG_DIR" => config_dir }
+        )
+        assert_equal :missing, malformed.status
+        assert_equal 1, malformed.parse_errors.length
+      end
+
+      plugin_root = File.join(home, "plugin")
+      skill = File.join(plugin_root, "skills", "custom", "SKILL.md")
+      write_file(skill, "# custom\n")
+      relative = Hive::SkillCheck::OpenCode.resolve(
+        "/custom", configuration: { "plugin" => [ "../plugin" ] },
+        environment: { "HOME" => home, "OPENCODE_CONFIG_DIR" => config_dir }
+      )
+      assert_equal :present, relative.status
+      assert_equal skill, relative.path
+
+      right = File.join(home, "right")
+      write_file(right)
+      refute Hive::SkillCheck::OpenCode.send(
+        :same_file?, File.join(home, "missing"), right
+      )
+      roots = Hive::SkillCheck::OpenCode.plugin_roots(
+        "file://%", config_dir: config_dir, environment: { "HOME" => home }
+      )
+      assert_equal 3, roots.length
+    end
+  end
+
   def test_malformed_invocation_returns_missing
     status, message = Hive::SkillCheck::OpenCode.verify("garbage")
 

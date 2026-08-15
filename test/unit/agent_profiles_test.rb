@@ -194,6 +194,45 @@ class AgentProfilesTest < Minitest::Test
     end
   end
 
+  def test_opencode_default_model_resolution_rejects_ambiguous_or_malformed_sources
+    inline_error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      Hive::AgentProfiles::OpenCodeDefaults.resolve(
+        cfg: { "agents" => { "opencode" => { "config" => [] } } }
+      )
+    end
+    assert_match(/must be a JSON object/, inline_error.message)
+
+    missing_error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      Hive::AgentProfiles::OpenCodeDefaults.resolve(cfg: {})
+    end
+    assert_match(/explicit agents\.opencode\.config_path/, missing_error.message)
+
+    with_tmp_dir do |project|
+      config_path = File.join(project, "opencode.json")
+      File.write(config_path, "[]")
+      object_error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+        Hive::AgentProfiles::OpenCodeDefaults.resolve(
+          cfg: {
+            "project_root" => project,
+            "agents" => { "opencode" => { "config_path" => "opencode.json" } }
+          }
+        )
+      end
+      assert_match(/must be a JSON object/, object_error.message)
+
+      File.write(config_path, "{")
+      parse_error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+        Hive::AgentProfiles::OpenCodeDefaults.resolve(
+          cfg: {
+            "project_root" => project,
+            "agents" => { "opencode" => { "config_path" => "opencode.json" } }
+          }
+        )
+      end
+      assert_match(/could not inspect explicit OpenCode default model/, parse_error.message)
+    end
+  end
+
   def test_opencode_overrides_reject_secret_or_untyped_escape_channels
     %w[credential_value environment argv raw_cli_arguments].each do |key|
       error = assert_raises(Hive::ConfigError) do

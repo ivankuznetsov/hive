@@ -455,6 +455,24 @@ class WebAppBundleTest < Minitest::Test
     end
   end
 
+  def test_bundle_install_rejects_runtime_component_root_without_gemspec
+    Dir.mktmpdir("hive-web-app") do |app|
+      Dir.mktmpdir("agent-cli-runtime-root") do |root|
+        File.write(File.join(app, "Gemfile"), "source 'https://rubygems.org'\n")
+        with_replaced_singleton_method(
+          Hive::Web::AppBundle, :agent_cli_runtime_root, -> { root }
+        ) do
+          error = assert_raises(Hive::Error) do
+            Hive::Web::AppBundle.bundle_install!(
+              dir: app, output: nil, runner: ->(*) { flunk }
+            )
+          end
+          assert_match(/has no agent-cli-runtime\.gemspec/, error.message)
+        end
+      end
+    end
+  end
+
   def test_bundle_install_restores_authenticated_lockfile_bytes_and_mode
     Dir.mktmpdir("hive-web-app") do |app|
       lockfile = File.join(app, "Gemfile.lock")

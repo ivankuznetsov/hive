@@ -214,6 +214,183 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_launch_channels_reject_untyped_arguments_tools_and_undeclared_directories
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "invalid-launch-260812-aaaa")
+      cases = [
+        { cli_flags: [ "--raw" ] },
+        { allowed_tools: [ "Read" ] },
+        { add_dirs: [ File.join(fixture.fetch(:dir), "undeclared") ] }
+      ]
+
+      cases.each_with_index do |options, index|
+        agent = build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invalid-#{index}"),
+          **options
+        )
+        assert_raises(Hive::ConfigError) do
+          with_env("ANTHROPIC_API_KEY" => "secret-canary") { agent.run! }
+        end
+      end
+    end
+  end
+
+  def test_process_group_lookup_races_fall_back_to_the_spawned_pid
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "pgid-race-260812-aaaa")
+      agent = build_agent(
+        task, fixture,
+        invocation_root: File.join(fixture.fetch(:dir), "invocation-pgid-race")
+      )
+      replacement = ->(_pid) { raise Errno::ESRCH }
+
+      result = with_replaced_singleton_method(Process, :getpgid, replacement) do
+        with_env("ANTHROPIC_API_KEY" => "secret-canary") { agent.run! }
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal result.fetch(:pid), result.fetch(:pgid)
+    end
+  end
+
+  def test_selected_environment_prefers_explicit_values_and_falls_back_to_host_values
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "environment-260812-aaaa")
+      agent = build_agent(
+        task, fixture,
+        invocation_root: File.join(fixture.fetch(:dir), "invocation-environment"),
+        launch_environment: { "LANG" => "C.explicit" }
+      )
+
+      selected = with_env("PATH" => "/host/path") do
+        agent.send(:selected_base_environment)
+      end
+      assert_equal "C.explicit", selected.fetch("LANG")
+      assert_equal "/host/path", selected.fetch("PATH")
+    end
+  end
+
+  def test_capture_thread_shutdown_bounds_hung_and_defensive_io_paths
+    with_fixture do |fixture|
+      agent = build_agent(
+        make_task(fixture.fetch(:dir), slug: "capture-thread-260812-aaaa"),
+        fixture,
+        invocation_root: File.join(fixture.fetch(:dir), "invocation-capture-thread")
+      )
+      joins = []
+      killed = false
+      thread = Object.new
+      thread.define_singleton_method(:join) { |seconds| joins << seconds }
+      thread.define_singleton_method(:alive?) { true }
+      thread.define_singleton_method(:kill) { killed = true }
+      io = StringIO.new
+
+      agent.send(:finish_capture_thread, thread, io)
+
+      assert_equal [ 2, 0.2 ], joins
+      assert_predicate io, :closed?
+      assert killed
+
+      rescue_killed = false
+      failing_thread = Object.new
+      failing_thread.define_singleton_method(:join) { |_seconds| nil }
+      failing_thread.define_singleton_method(:alive?) { true }
+      failing_thread.define_singleton_method(:kill) { rescue_killed = true }
+      failing_io = Object.new
+      failing_io.define_singleton_method(:closed?) { false }
+      failing_io.define_singleton_method(:close) { raise IOError, "synthetic" }
+
+      agent.send(:finish_capture_thread, failing_thread, failing_io)
+      assert rescue_killed
+
+      cancellation = { cancelled: false }
+      killed_group = nil
+      agent.define_singleton_method(:kill_group) { |pgid| killed_group = pgid }
+      agent.send(:cancel_opencode!, cancellation, 42)
+      assert cancellation.fetch(:cancelled)
+      assert_equal 42, killed_group
+
+      agent.send(:close_opencode_ios, nil, failing_io)
+    end
+  end
+
+  def test_inspection_timeout_reaps_the_export_and_reports_empty_stderr
+    with_fixture(mode: :inspection_timeout) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-timeout-260812-aaaa")
+      agent = build_agent(
+        task, fixture,
+        invocation_root: File.join(fixture.fetch(:dir), "invocation-inspection-timeout")
+      )
+      result = with_agent_constant(:OPENCODE_INSPECTION_TIMEOUT_SECONDS, 0.05) do
+        with_env("ANTHROPIC_API_KEY" => "secret-canary") { agent.run! }
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_match(/sanitized export inspection failed/,
+                   result.fetch(:inspection_diagnostic))
+    end
+
+    with_fixture(mode: :inspection_empty_failure) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-empty-260812-aaaa")
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invocation-inspection-empty")
+        ).run!
+      end
+      assert_match(/sanitized export inspection failed/,
+                   result.fetch(:inspection_diagnostic))
+    end
+  end
+
+  def test_process_status_fallbacks_and_marker_failure_diagnostic
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "status-fallback-260812-aaaa")
+      agent = build_agent(
+        task, fixture,
+        invocation_root: File.join(fixture.fetch(:dir), "invocation-status-fallback"),
+        profile_status: :state_file_marker
+      )
+      neutral = Object.new
+      neutral.define_singleton_method(:exited?) { false }
+      neutral.define_singleton_method(:signaled?) { false }
+      assert_nil agent.send(:process_exit_code, neutral)
+
+      signaled = Object.new
+      signaled.define_singleton_method(:signaled?) { true }
+      signaled.define_singleton_method(:termsig) { 15 }
+      signal = with_replaced_singleton_method(
+        Signal, :signame, ->(_value) { raise ArgumentError, "unknown signal" }
+      ) { agent.send(:process_signal, signaled) }
+      assert_equal "15", signal
+
+      termination = Hive::AgentRuntime::TerminationEvidence.new(exit_code: 1)
+      route = Hive::AgentRuntime::Route.parse(ROUTE)
+      outcome = Hive::AgentRuntime::NormalizedOutcome.new(
+        provider: :opencode, launcher_identity: "opencode-cli/v1",
+        kind: :configuration_failure, termination: termination,
+        identity: Hive::AgentRuntime::RouteIdentity.new(
+          requested: route, actual: nil, resolution_status: :unobserved
+        ),
+        diagnostic: "invalid selected configuration"
+      )
+      result = {
+        provider_signal: nil, output_completed: false,
+        failure_origin: nil, resource_exhaustion: nil, limit_text: nil,
+        timed_out: false, normalized_outcome: outcome
+      }
+
+      agent.send(:handle_exit, result)
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "configuration_failure", result.fetch(:error_reason)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "configuration_failure", marker.attrs.fetch("reason")
+    end
+  end
+
   private
 
   def make_task(dir, slug: "opencode-agent-260812-aaaa")
@@ -224,11 +401,13 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
 
   def build_agent(task, fixture, invocation_root:, timeout_sec: 5,
                   explicit_launch: true, identity_only: false,
-                  prompt: "make the atomic edit", plugins: [])
+                  prompt: "make the atomic edit", plugins: [],
+                  profile_status: :exit_code_only, launch_environment: {},
+                  **agent_options)
     profile = Hive::AgentProfile.new(
       runtime_profile: AgentCliRuntime::Profiles.fetch(:opencode),
       skill_syntax_format: "/%{skill}",
-      status_detection_mode: :exit_code_only,
+      status_detection_mode: profile_status,
       permission_presets: %w[read-only scoped],
       opencode_configuration_path: fixture.fetch(:configuration),
       opencode_credential_environment_keys: [ "ANTHROPIC_API_KEY" ],
@@ -242,13 +421,16 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     else
       { launch_arguments: launch }
     end
+    options = {
+      opencode_invocation_root: invocation_root,
+      additional_read_roots: [ task.folder ],
+      additional_write_roots: []
+    }.merge(agent_options)
     Hive::Agent.new(
       task:, prompt:, max_budget_usd: nil,
       timeout_sec:, cwd: fixture.fetch(:work), profile:,
       permission_mode: "read-only", **launch_kwargs,
-      opencode_invocation_root: invocation_root,
-      additional_read_roots: [ task.folder ],
-      additional_write_roots: []
+      launch_environment:, **options
     )
   end
 
@@ -322,6 +504,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
           warn "authentication failed" if #{mode == :auth_failure}
           exit(#{mode == :auth_failure ? 1 : 0})
         elsif ARGV.first == "export"
+          sleep 10 if #{mode == :inspection_timeout}
+          exit 1 if #{mode == :inspection_empty_failure}
           if #{mode == :inspection_failure}
             warn "export unavailable"
             exit 1
@@ -340,5 +524,16 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       "../../components/agent-cli-runtime/test/fixtures/opencode/v1.18.16",
       __dir__
     )
+  end
+
+  def with_agent_constant(name, replacement)
+    original = Hive::Agent.const_get(name)
+    Hive::Agent.send(:remove_const, name)
+    Hive::Agent.const_set(name, replacement)
+    yield
+  ensure
+    Hive::Agent.send(:remove_const, name) if
+      Hive::Agent.const_defined?(name, false)
+    Hive::Agent.const_set(name, original)
   end
 end

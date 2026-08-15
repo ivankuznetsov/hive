@@ -905,6 +905,39 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_stage_permission_scope_compiles_managed_opencode_roots_and_edit_patterns
+    with_tmp_dir do |dir|
+      task_folder = File.join(dir, "task")
+      package_root = File.join(
+        dir, ".hive-state", "workflows", "demo", "versions", "a" * 40
+      )
+      FileUtils.mkdir_p([ task_folder, package_root ])
+      task = Object.new
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:folder) { task_folder }
+      task.define_singleton_method(:managed_runtime_context) do |_slot_id|
+        { package_root: package_root, environment: {} }
+      end
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        {}, "work", task, opencode_scope_profile,
+        explicit_permission_spec: {
+          "preset" => "scoped",
+          "tools" => [ "Read", "Edit(./reviews/**)" ]
+        }
+      )
+
+      assert_equal "workspace-write", scope.fetch(:permission_mode)
+      assert_equal scope.fetch(:runtime_policy).directories,
+                   scope.fetch(:additional_read_roots)
+      assert_equal [ File.join(task_folder, "reviews", "**") ],
+                   scope.fetch(:opencode_edit_patterns)
+      assert_includes scope.fetch(:additional_write_roots), task_folder
+    ensure
+      scope&.fetch(:runtime_policy)&.cleanup!
+    end
+  end
+
   def test_managed_permission_scope_requires_an_exact_actor_policy
     task = Object.new
     task.define_singleton_method(:managed_workflow?) { true }

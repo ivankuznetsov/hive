@@ -605,15 +605,10 @@ module Hive
         "claude_pid_start_time" => Hive::Lock.process_start_time(pid)
       )
 
-      cancelled = false
-      old_int = trap("INT") do
-        cancelled = true
-        kill_group(pgid)
-      end
-      old_term = trap("TERM") do
-        cancelled = true
-        kill_group(pgid)
-      end
+      cancellation = { cancelled: false }
+      cancellation_handler = ->(*) { cancel_opencode!(cancellation, pgid) }
+      old_int = trap("INT", &cancellation_handler)
+      old_term = trap("TERM", &cancellation_handler)
       begin
         timed_out, status = wait_for_opencode_process(pid, pgid)
       ensure
@@ -629,7 +624,7 @@ module Hive
       termination = AgentRuntime::TerminationEvidence.new(
         exit_code: process_exit_code(status),
         timed_out: timed_out,
-        cancelled: cancelled,
+        cancelled: cancellation.fetch(:cancelled),
         signal: process_signal(status)
       )
       inspection_output = nil
@@ -688,11 +683,9 @@ module Hive
       }
       result
     ensure
-      [ stdout_writer, stderr_writer, stdout_reader, stderr_reader ].each do |io|
-        io.close if io && !io.closed?
-      rescue IOError
-        nil
-      end
+      close_opencode_ios(
+        stdout_writer, stderr_writer, stdout_reader, stderr_reader
+      )
       [ stdout_thread, stderr_thread ].each do |thread|
         thread.kill if thread&.alive?
       end
@@ -860,6 +853,19 @@ module Hive
       thread.kill if thread&.alive?
     end
 
+    def cancel_opencode!(state, pgid)
+      state[:cancelled] = true
+      kill_group(pgid)
+    end
+
+    def close_opencode_ios(*ios)
+      ios.each do |io|
+        io.close if io && !io.closed?
+      rescue IOError
+        nil
+      end
+    end
+
     def wait_for_opencode_process(pid, pgid)
       deadline = Time.now + @timeout_sec
       loop do
@@ -941,11 +947,9 @@ module Hive
         diagnostic: diagnostic
       }
     ensure
-      [ stdout_writer, stderr_writer, stdout_reader, stderr_reader ].each do |io|
-        io.close if io && !io.closed?
-      rescue IOError
-        nil
-      end
+      close_opencode_ios(
+        stdout_writer, stderr_writer, stdout_reader, stderr_reader
+      )
       [ stdout_thread, stderr_thread ].each do |thread|
         thread.kill if thread&.alive?
       end

@@ -442,6 +442,78 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
+  def test_opencode_inventory_reads_the_pinned_plugin_for_live_and_filesystem_modes
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "opencode")
+      executable(bin)
+      config_root = File.join(dir, ".config", "opencode")
+      config_path = File.join(config_root, "opencode.json")
+      package = Hive::AgentSkills::Manifest.load.package("compound-engineering")
+      native = package.native_for("opencode")
+      install = File.join(config_root, "node_modules", "compound-engineering")
+      write(File.join(install, "skills", "ce-brainstorm", "SKILL.md"))
+      write(config_path, JSON.generate("plugin" => [ native.package ]))
+      cfg = config(agent: "opencode", bin: bin)
+      cfg["project_root"] = dir
+      cfg["agents"]["opencode"]["config_path"] = config_path
+      profile = Hive::AgentProfiles.lookup(:opencode, cfg: cfg)
+      runner = FakeRunner.new(
+        [ bin, "--version" ] => result(stdout: "opencode 1.18.16\n")
+      )
+      inspector = Hive::AgentSkills::Inspector.new(
+        config: cfg, project_root: dir, runner: runner,
+        environment: {
+          "HOME" => dir, "PATH" => "", "OPENCODE_CONFIG_DIR" => config_root
+        }
+      )
+
+      live = inspector.send(
+        :inspect_native, profile: profile, bin: bin, native_spec: native
+      )
+      assert_equal native.package, live.dig("package", "id")
+      assert_equal install, live.dig("package", "install_path")
+      assert_equal "1.18.16", live.fetch("cli_version")
+      assert_same Hive::SkillCheck::OpenCode,
+                  inspector.send(:skill_module, "opencode")
+      assert_equal config_path,
+                   inspector.send(:skill_environment, "opencode")
+                     .fetch("OPENCODE_CONFIG")
+
+      filesystem = Hive::AgentSkills::FilesystemInventory.new.inspect(
+        profile: profile, bin: bin, native_spec: native, root: config_root
+      )
+      assert_equal "filesystem", filesystem.fetch("inventory_source")
+      assert_equal native.package, filesystem.dig("package", "id")
+      assert_equal "3.21.4", filesystem.dig("package", "version")
+
+      File.write(config_path, JSON.generate("plugin" => []))
+      absent = Hive::AgentSkills::FilesystemInventory.new.inspect(
+        profile: profile, bin: bin, native_spec: native, root: config_root
+      )
+      assert_nil absent.fetch("package")
+    end
+  end
+
+  def test_opencode_filesystem_inventory_rejects_non_object_or_non_string_plugins
+    with_tmp_dir do |dir|
+      profile = Hive::AgentProfiles.lookup(:opencode)
+      native = Hive::AgentSkills::Manifest.load
+               .package("compound-engineering").native_for("opencode")
+      config_path = File.join(dir, "opencode.json")
+
+      [ "[]", JSON.generate("plugin" => [ 42 ]) ].each do |content|
+        File.write(config_path, content)
+        evidence = Hive::AgentSkills::FilesystemInventory.new.inspect(
+          profile: profile, bin: "/fake/opencode", native_spec: native,
+          root: dir
+        )
+        assert_nil evidence.fetch("package")
+        assert_match(/filesystem inventory is malformed/,
+                     evidence.fetch("issues").first.last)
+      end
+    end
+  end
+
   def test_command_runner_timeout_terminates_and_reaps_the_process_group
     with_tmp_dir do |dir|
       script = File.join(dir, "hang")

@@ -248,6 +248,72 @@ class AgentSkillAdaptersTest < Minitest::Test
     end
   end
 
+  def test_opencode_setup_rejects_malformed_configuration_at_preview_and_execution
+    with_tmp_dir do |dir|
+      config_home = File.join(dir, ".config", "opencode")
+      config_path = File.join(config_home, "opencode.json")
+      FileUtils.mkdir_p(config_home)
+      row = inspection(
+        agent: "opencode", capability: "ce-plan",
+        package: "compound-engineering", health: "missing",
+        bin: "/fake/opencode"
+      )
+      instance = adapter(Hive::AgentSkills::Adapters::OpenCode, dir: dir)
+
+      File.write(config_path, "{")
+      preview = instance.plan([ row ])
+      assert_empty preview.operations
+      assert_match(/invalid JSON/, preview.conflicts.first)
+
+      {
+        "[]" => /must contain a JSON object/,
+        JSON.generate("plugin" => {}) => /plugin must be an array of strings/,
+        "{" => /invalid JSON/
+      }.each do |content, message|
+        File.write(config_path, content)
+        snapshot = instance.send(:file_snapshot, config_path)
+        operation = Hive::AgentSkills::Adapters::Operation.new(
+          id: "opencode:compound-engineering:plugin_configure",
+          agent: "opencode", package_id: "compound-engineering",
+          capabilities: [ "ce-plan" ], kind: "plugin_configure", argv: [],
+          files: [ config_path ], depends_on: [], preconditions: {},
+          metadata: {
+            "config_path" => config_path,
+            "snapshot" => snapshot,
+            "plugin" => Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+          }
+        )
+
+        outcome = instance.execute(operation)
+        assert_equal "failed", outcome.status
+        assert_match message, outcome.message
+      end
+    end
+  end
+
+  def test_opencode_setup_uses_default_config_root_and_skips_current_pin
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".config", "opencode", "opencode.json")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(
+        config_path,
+        JSON.generate(
+          "plugin" => [
+            Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+          ]
+        )
+      )
+      row = inspection(
+        agent: "opencode", capability: "ce-plan",
+        package: "compound-engineering", health: "missing",
+        bin: "/fake/opencode"
+      )
+      instance = adapter(Hive::AgentSkills::Adapters::OpenCode, dir: dir)
+
+      assert_empty instance.plan([ row ]).operations
+    end
+  end
+
   def test_registry_exposes_opencode_adapter
     with_tmp_dir do |dir|
       registry = Hive::AgentSkills::Adapters::Registry.new(

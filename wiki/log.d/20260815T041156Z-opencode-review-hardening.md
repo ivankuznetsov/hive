@@ -27,3 +27,12 @@ dependency until a separately authorized component release.
 managed Web bundle/install/server commands export the exact installed component
 gem root. This keeps both source CI and extracted archives on the same ABI
 without requiring an unpublished RubyGems version.
+
+**Coverage hardening:** Added fail-closed regression coverage for profile,
+configuration, plugin inventory, prepared-skill, implementation-observation,
+managed-permission, Web package-root, signal, inspection-timeout, and defensive
+cleanup paths. OpenCode filesystem inventory now reports an absent package as
+`nil`, matching the other provider inventories instead of leaking `false` into
+the inspection contract. The final exhaustive checkpoint completed 13,534
+runs and 192,185 assertions with no failures or errors, and the exact line
+coverage gate passed at 100.00% (94,724/94,724).

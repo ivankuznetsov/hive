@@ -268,7 +268,10 @@ class WorkflowCreatorProcessSupervisorTest < Minitest::Test
 
   def build_supervisor(**options)
     Supervisor.new(
-      correlation_id: "creator-run", timeout: 1, term_grace: 0.05, kill_grace: 0.2,
+      # Coverage-instrumented custody children flush before exit!, so ordinary
+      # success-path tests need room for full-suite host contention. Tests of
+      # timeout behavior pass their own short deadlines above.
+      correlation_id: "creator-run", timeout: 5, term_grace: 0.05, kill_grace: 0.2,
       **options
     )
   end

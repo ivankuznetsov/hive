@@ -4,7 +4,15 @@ require_relative "../support/coverage"
 class HiveTestCoverageTest < Minitest::Test
   include HiveTestHelper
 
-  COVERAGE_STATE_IVARS = %i[@root @lib_dir @coverage_dir @resultset_dir @result_errors].freeze
+  COVERAGE_STATE_IVARS = %i[
+    @root
+    @lib_dir
+    @coverage_dir
+    @resultset_dir
+    @result_errors
+    @startup_errors
+    @verified_marshal_paths
+  ].freeze
 
   def test_unloaded_source_file_counts_executable_lines_as_uncovered
     with_tmp_dir do |dir|
@@ -140,6 +148,186 @@ class HiveTestCoverageTest < Minitest::Test
     assert HiveTestCoverage.coverage_ok?(report)
   end
 
+  def test_collect_only_mode_is_explicit_and_does_not_change_the_percentage_threshold
+    with_env("HIVE_COVERAGE_COLLECT_ONLY" => "1") do
+      assert HiveTestCoverage.collect_only?
+      assert_equal 100.0, HiveTestCoverage.minimum_line_percent
+    end
+
+    with_env("HIVE_COVERAGE_COLLECT_ONLY" => nil) do
+      refute HiveTestCoverage.collect_only?
+    end
+  end
+
+  def test_shard_manifest_merge_preserves_identical_result_basenames
+    with_tmp_dir do |dir|
+      source = File.join(dir, "lib", "demo.rb")
+      FileUtils.mkdir_p(File.dirname(source))
+      File.write(source, "VALUE = 1\nOTHER = 2\n")
+
+      with_env("HIVE_COVERAGE_RUN_ID" => "merged") do
+        with_coverage_config(root: dir) do
+          write_shard_bundle(
+            root: dir,
+            index: 0,
+            test_files: [ "test/a_test.rb" ],
+            result: { source => { lines: [ 1, 0 ], branches: {} } }
+          )
+          write_shard_bundle(
+            root: dir,
+            index: 1,
+            test_files: [ "test/b_test.rb" ],
+            result: { source => { lines: [ 0, 1 ], branches: {} } }
+          )
+
+          paths = HiveTestCoverage.verify_shard_manifests!(
+            expected_shards: 2,
+            revision: "reviewed-head",
+            workflow_run_id: "1234",
+            test_files_by_shard: [ [ "test/a_test.rb" ], [ "test/b_test.rb" ] ]
+          )
+          merged = HiveTestCoverage.merged_results
+          report = HiveTestCoverage.build_report(merged)
+
+          assert_equal 2, paths.length
+          assert_equal [ 1, 1 ], merged.fetch(source).fetch(:lines)
+          assert_equal 2, report.fetch(:process_results)
+        end
+      end
+    end
+  end
+
+  def test_shard_manifest_gate_rejects_missing_foreign_empty_and_unlisted_inputs
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "lib"))
+
+      with_env("HIVE_COVERAGE_RUN_ID" => "merged") do
+        with_coverage_config(root: dir) do
+          write_shard_bundle(root: dir, index: 0, test_files: [ "test/a_test.rb" ])
+          error = assert_raises(HiveTestCoverage::ShardManifestError) do
+            HiveTestCoverage.verify_shard_manifests!(
+              expected_shards: 2,
+              revision: "reviewed-head",
+              workflow_run_id: "1234",
+              test_files_by_shard: [ [ "test/a_test.rb" ], [ "test/b_test.rb" ] ]
+            )
+          end
+          assert_includes error.message, "expected 2 coverage shard manifests"
+
+          manifest = shard_manifest_path(dir, 0)
+          payload = JSON.parse(File.read(manifest))
+          File.write(
+            manifest,
+            JSON.pretty_generate(payload.merge("revision" => "foreign-head", "shard_count" => 1))
+          )
+          error = assert_raises(HiveTestCoverage::ShardManifestError) do
+            HiveTestCoverage.verify_shard_manifests!(
+              expected_shards: 1,
+              revision: "reviewed-head",
+              workflow_run_id: "1234",
+              test_files_by_shard: [ [ "test/a_test.rb" ] ]
+            )
+          end
+          assert_includes error.message, "revision"
+
+          File.write(
+            manifest,
+            JSON.pretty_generate(payload.merge("shard_count" => 1, "process_results" => []))
+          )
+          error = assert_raises(HiveTestCoverage::ShardManifestError) do
+            HiveTestCoverage.verify_shard_manifests!(
+              expected_shards: 1,
+              revision: "reviewed-head",
+              workflow_run_id: "1234",
+              test_files_by_shard: [ [ "test/a_test.rb" ] ]
+            )
+          end
+          assert_includes error.message, "invalid process result names"
+
+          File.write(manifest, JSON.pretty_generate(payload.merge("shard_count" => 1)))
+          File.binwrite(File.join(File.dirname(manifest), "unlisted.marshal"), Marshal.dump({}))
+          error = assert_raises(HiveTestCoverage::ShardManifestError) do
+            HiveTestCoverage.verify_shard_manifests!(
+              expected_shards: 1,
+              revision: "reviewed-head",
+              workflow_run_id: "1234",
+              test_files_by_shard: [ [ "test/a_test.rb" ] ]
+            )
+          end
+          assert_includes error.message, "does not match its process results"
+        end
+      end
+    end
+  end
+
+  def test_shard_manifest_gate_rejects_duplicate_and_corrupt_manifests
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "lib"))
+
+      with_env("HIVE_COVERAGE_RUN_ID" => "merged") do
+        with_coverage_config(root: dir) do
+          write_shard_bundle(root: dir, index: 0, test_files: [ "test/a_test.rb" ])
+          write_shard_bundle(root: dir, index: 1, test_files: [ "test/b_test.rb" ])
+          second = shard_manifest_path(dir, 1)
+          payload = JSON.parse(File.read(second)).merge(
+            "shard_index" => 0,
+            "run_id" => "shard-0"
+          )
+          File.write(second, JSON.pretty_generate(payload))
+
+          error = assert_raises(HiveTestCoverage::ShardManifestError) do
+            HiveTestCoverage.verify_shard_manifests!(
+              expected_shards: 2,
+              revision: "reviewed-head",
+              workflow_run_id: "1234",
+              test_files_by_shard: [ [ "test/a_test.rb" ], [ "test/b_test.rb" ] ]
+            )
+          end
+          assert_includes error.message, "must be stored under coverage-shard-0"
+
+          File.write(second, "not-json")
+          error = assert_raises(HiveTestCoverage::ShardManifestError) do
+            HiveTestCoverage.verify_shard_manifests!(
+              expected_shards: 2,
+              revision: "reviewed-head",
+              workflow_run_id: "1234",
+              test_files_by_shard: [ [ "test/a_test.rb" ], [ "test/b_test.rb" ] ]
+            )
+          end
+          assert_includes error.message, "unreadable coverage shard manifest"
+        end
+      end
+    end
+  end
+
+  def test_collect_only_catalog_load_persists_startup_errors_for_the_merge_process
+    with_tmp_dir do |dir|
+      lib = File.join(dir, "lib")
+      FileUtils.mkdir_p(lib)
+      File.write(File.join(lib, "broken.rb"), "raise 'catalog boom'\n")
+      $LOAD_PATH.unshift(lib)
+
+      with_env(
+        "HIVE_COVERAGE_COLLECT_ONLY" => "1",
+        "HIVE_COVERAGE_RUN_ID" => "shard-0"
+      ) do
+        with_coverage_config(root: dir) do
+          _out, err = capture_io { HiveTestCoverage.load_all_sources! }
+          markers = Dir.glob(File.join(dir, "coverage", ".resultset", "shard-0", "*.error.json"))
+          payload = JSON.parse(File.read(markers.fetch(0)))
+
+          assert_equal 1, markers.length
+          assert_equal "lib/broken.rb", payload.fetch("file")
+          assert_equal "RuntimeError", payload.fetch("error_class")
+          assert_includes payload.fetch("message"), "catalog boom"
+          assert_includes err, "failed to require broken"
+        end
+      end
+    ensure
+      $LOAD_PATH.delete(lib) if lib
+    end
+  end
+
   def test_coverage_gate_keeps_non_percentage_failures_at_full_line_coverage
     report = {
       "line_total" => 3,
@@ -201,6 +389,41 @@ class HiveTestCoverageTest < Minitest::Test
   end
 
   private
+
+  def write_shard_bundle(root:, index:, test_files:, result: {})
+    directory = File.join(
+      root,
+      "coverage",
+      ".resultset",
+      "merged",
+      "coverage-shard-#{index}"
+    )
+    FileUtils.mkdir_p(directory)
+    File.binwrite(File.join(directory, "123-8.marshal"), Marshal.dump(result))
+    payload = {
+      schema: HiveTestCoverage::SHARD_MANIFEST_SCHEMA,
+      revision: "reviewed-head",
+      workflow_run_id: "1234",
+      ruby_version: RUBY_VERSION,
+      shard_index: index,
+      shard_count: 2,
+      run_id: "shard-#{index}",
+      test_files: test_files,
+      process_results: [ "123-8.marshal" ]
+    }
+    File.write(File.join(directory, "manifest.json"), JSON.pretty_generate(payload))
+  end
+
+  def shard_manifest_path(root, index)
+    File.join(
+      root,
+      "coverage",
+      ".resultset",
+      "merged",
+      "coverage-shard-#{index}",
+      "manifest.json"
+    )
+  end
 
   def with_coverage_config(root:)
     sentinel = Object.new

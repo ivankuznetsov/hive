@@ -18,6 +18,56 @@ the operational migration as release-proven.
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
+## Parallel Hive web CI exact-head evidence (2026-08-14)
+
+The serial Hive web job took 441 seconds in exact-head run `31818138021`, led
+by the 184-second Playwright system-test step and the 149-second Rails
+integration step. CI now schedules integration/lint, system, and golden-path
+cells independently behind the existing aggregate check name. Exact-head run
+`31819264376` passed all three cells and the aggregate. From the first web-cell
+start through aggregate completion the path took 246 seconds, down from the
+441-second serial job; the system, integration/lint, and golden-path cells took
+220, 115, and 111 seconds. This closes the hosted-concurrency uncertainty.
+
+## Sharded CI coverage exact-head evidence (2026-08-14)
+
+The four-way coverage collector and downstream exact merge are locally pinned
+at the harness level: all four disjoint file partitions ran, and their 1,546
+raw process results merged to 84,609/84,609 covered executable lines with no
+unloaded files or result errors. Three collectors were green. The fourth
+completed in 560 seconds but one 0.5-second subprocess-start assertion lost a
+race while another repository-wide test process saturated the host; that test
+passed immediately in an isolated coverage reproduction. The source-byte
+heuristic is intentionally only an initial partition, and local green shard
+wall times ranged from 187 to 486 seconds. Exact-head GitHub Actions run
+`31818138021` then proved artifact upload/download, the exact
+100% merge, and the unchanged protected aggregate. The workflow completed in
+484 seconds versus the 1,592-second four-run `main` median; hosted shard jobs
+took 300, 284, 430, and 388 seconds, and the merge gate took 44 seconds. This
+closes the missing hosted-proof gap, while confirming that source bytes are
+only an approximate runtime weight: the 146-second fastest-to-slowest spread
+identified the third partition as the long pole. A second hosted run measured
+that same collector at 440 seconds while the others took 244--294 seconds. CI
+therefore split that measured hot partition into two source-byte-balanced
+halves. Five-way exact-head run `31821818842` passed at 469 seconds overall;
+the two halves took 219 and 280 collector seconds. The unchanged fourth
+original partition then became the 370-second long pole, consistent with its
+368- and 294-second samples in the prior runs. Six-way exact-head run
+`31823734367` passed all 23 jobs at 394 seconds overall. The new pair took 154
+collector seconds each (172- and 176-second jobs), reducing the prior
+long-pole step by 58.4% while exact 100% coverage and the protected aggregate
+remained green. This closes the final hosted-timing gap for the six-way design.
+
+Post-review accounting found that flattened artifact download consumed four
+fewer process results than the collectors produced in both sampled six-way
+runs. The branch now preserves one directory per artifact and requires a
+revision/run/Ruby/shard/test-file/result-list manifest before merging. Focused
+tests prove same-basename preservation and rejection of missing, duplicate,
+foreign, empty, corrupt, error-marked, and unlisted inputs. Rebased exact-head
+run `31861365214` consumed all 1,727 process results across six shards, retained
+100% line coverage, and passed all 23 gates. This closes the artifact-transport
+and source-catalog ownership proof gap.
+
 ## Task workspace forward evidence and live-provider gaps (2026-08-12)
 
 - Tasks admitted before the task-workspace capture seams normally have no

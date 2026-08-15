@@ -5,6 +5,9 @@ require "time"
 
 module HiveTestCoverage
   DEFAULT_MIN_LINE_PERCENT = 100.0
+  SHARD_MANIFEST_SCHEMA = "hive-coverage-shard.v1"
+
+  class ShardManifestError < StandardError; end
 
   module_function
 
@@ -23,6 +26,8 @@ module HiveTestCoverage
     @coverage_dir = File.join(@root, "coverage")
     run_id = ENV.fetch("HIVE_COVERAGE_RUN_ID", "default")
     @resultset_dir = File.join(@coverage_dir, ".resultset", run_id)
+    @startup_errors = []
+    @verified_marshal_paths = nil
   end
 
   # Guard against stale marshal files merging into the unmanaged "default"
@@ -34,7 +39,7 @@ module HiveTestCoverage
     return if ENV.key?("HIVE_COVERAGE_RUN_ID")
     return unless File.directory?(@resultset_dir)
 
-    stale = Dir.glob(File.join(@resultset_dir, "*.{marshal,error.json}"))
+    stale = Dir.glob(File.join(@resultset_dir, "**", "*.{marshal,error.json}"))
     return if stale.empty?
 
     raise "HIVE_COVERAGE_RUN_ID is unset and the default resultset directory " \
@@ -48,9 +53,13 @@ module HiveTestCoverage
 
     Minitest.after_run do
       dump_process_result!
-      report!
+      report! unless collect_only?
     end
     @reporter_installed = true
+  end
+
+  def collect_only?
+    ENV["HIVE_COVERAGE_COLLECT_ONLY"] == "1"
   end
 
   def load_all_sources!
@@ -61,11 +70,13 @@ module HiveTestCoverage
       begin
         require feature
       rescue LoadError, StandardError => e
-        @startup_errors << {
+        error = {
           file: path.delete_prefix("#{@root}/"),
           error_class: e.class.name,
           message: "require failed: #{e.message}"
         }
+        @startup_errors << error
+        record_startup_error!(error) if collect_only?
         warn "hive coverage: failed to require #{feature}: #{e.class}: #{e.message}"
       end
     end
@@ -159,6 +170,153 @@ module HiveTestCoverage
     # last line of defense; do not crash the at_exit hook.
   end
 
+  def record_startup_error!(error)
+    FileUtils.mkdir_p(@resultset_dir)
+    marker = File.join(
+      @resultset_dir,
+      "#{Process.pid}-#{object_id}-startup-#{@startup_errors.length}.error.json"
+    )
+    payload = error.merge(pid: Process.pid, script: $PROGRAM_NAME)
+    File.write(marker, JSON.dump(payload))
+  rescue StandardError => e
+    warn "hive coverage: failed to persist startup error: #{e.class}: #{e.message}"
+  end
+
+  def write_shard_manifest!(shard_index:, shard_count:, revision:, workflow_run_id:, test_files:)
+    result_paths = Dir.glob(File.join(@resultset_dir, "*.marshal")).sort
+    error_paths = Dir.glob(File.join(@resultset_dir, "*.error.json")).sort
+    raise ShardManifestError, "coverage shard wrote no process results" if result_paths.empty?
+    raise ShardManifestError, "coverage shard recorded dump errors" if error_paths.any?
+
+    manifest = {
+      schema: SHARD_MANIFEST_SCHEMA,
+      revision: revision,
+      workflow_run_id: workflow_run_id,
+      ruby_version: RUBY_VERSION,
+      shard_index: shard_index,
+      shard_count: shard_count,
+      run_id: "shard-#{shard_index}",
+      test_files: test_files.sort,
+      process_results: result_paths.map { |path| File.basename(path) }
+    }
+    path = File.join(@resultset_dir, "manifest.json")
+    tmp_path = "#{path}.tmp"
+    File.write(tmp_path, JSON.pretty_generate(manifest))
+    File.rename(tmp_path, path)
+    manifest
+  rescue ShardManifestError
+    raise
+  rescue StandardError => e
+    raise ShardManifestError, "could not write coverage shard manifest: #{e.message}"
+  end
+
+  def verify_shard_manifests!(expected_shards:, revision:, workflow_run_id:, test_files_by_shard:)
+    unless expected_shards.positive? && test_files_by_shard.length == expected_shards
+      raise ShardManifestError, "coverage shard manifest expectations are inconsistent"
+    end
+    manifests = Dir.glob(File.join(@resultset_dir, "**", "manifest.json")).sort
+    unless manifests.length == expected_shards
+      raise ShardManifestError,
+            "expected #{expected_shards} coverage shard manifests, found #{manifests.length}"
+    end
+
+    verified = manifests.to_h do |path|
+      data = read_shard_manifest(path)
+      index = Integer(data.fetch("shard_index"))
+      validate_shard_manifest!(
+        data,
+        path: path,
+        index: index,
+        expected_shards: expected_shards,
+        revision: revision,
+        workflow_run_id: workflow_run_id,
+        test_files: test_files_by_shard.fetch(index)
+      )
+      [ index, shard_result_paths(data, path) ]
+    rescue ArgumentError, IndexError, KeyError => e
+      raise ShardManifestError, "invalid coverage shard manifest #{path}: #{e.message}"
+    end
+
+    expected_indexes = (0...expected_shards).to_a
+    unless verified.keys.sort == expected_indexes
+      raise ShardManifestError,
+            "coverage shard indexes must be exactly #{expected_indexes.inspect}, " \
+            "found #{verified.keys.sort.inspect}"
+    end
+
+    listed_paths = verified.values.flatten.sort
+    actual_paths = Dir.glob(File.join(@resultset_dir, "**", "*.marshal")).sort
+    unless listed_paths == actual_paths
+      raise ShardManifestError, "coverage shard manifests do not match downloaded process results"
+    end
+
+    error_paths = Dir.glob(File.join(@resultset_dir, "**", "*.error.json")).sort
+    raise ShardManifestError, "downloaded coverage shards contain error markers" if error_paths.any?
+
+    @verified_marshal_paths = listed_paths
+    puts "Verified #{listed_paths.length} coverage process result(s) across #{expected_shards} shard(s)"
+    listed_paths
+  end
+
+  def read_shard_manifest(path)
+    data = JSON.parse(File.read(path))
+    raise ShardManifestError, "coverage shard manifest must be a JSON object: #{path}" unless data.is_a?(Hash)
+
+    data
+  rescue ShardManifestError
+    raise
+  rescue StandardError => e
+    raise ShardManifestError, "unreadable coverage shard manifest #{path}: #{e.message}"
+  end
+
+  def validate_shard_manifest!(data, path:, index:, expected_shards:, revision:, workflow_run_id:, test_files:)
+    expected_parent = "coverage-shard-#{index}"
+    checks = {
+      "schema" => SHARD_MANIFEST_SCHEMA,
+      "revision" => revision,
+      "workflow_run_id" => workflow_run_id,
+      "ruby_version" => RUBY_VERSION,
+      "shard_count" => expected_shards,
+      "run_id" => "shard-#{index}"
+    }
+    unless data.fetch("shard_index") == index
+      raise ShardManifestError, "coverage shard index must be an integer"
+    end
+    checks.each do |key, expected|
+      actual = data.fetch(key)
+      next if actual == expected
+
+      raise ShardManifestError,
+            "coverage shard #{index} #{key} must be #{expected.inspect}, found #{actual.inspect}"
+    end
+    unless File.basename(File.dirname(path)) == expected_parent
+      raise ShardManifestError, "coverage shard #{index} must be stored under #{expected_parent}"
+    end
+    unless data.fetch("test_files") == test_files.sort
+      raise ShardManifestError, "coverage shard #{index} test-file identity does not match the partition"
+    end
+  end
+
+  def shard_result_paths(data, manifest_path)
+    names = data.fetch("process_results")
+    unless names.is_a?(Array) && names.any? && names.all? { |name|
+      name.is_a?(String) && File.basename(name) == name && name.end_with?(".marshal")
+    }
+      raise ShardManifestError, "coverage shard manifest has invalid process result names"
+    end
+    raise ShardManifestError, "coverage shard manifest repeats process result names" unless names.uniq.length == names.length
+
+    parent = File.dirname(manifest_path)
+    paths = names.sort.map { |name| File.join(parent, name) }
+    missing = paths.reject { |path| File.file?(path) }
+    raise ShardManifestError, "coverage shard manifest references missing process results" if missing.any?
+
+    actual = Dir.glob(File.join(parent, "*.marshal")).sort
+    raise ShardManifestError, "coverage shard manifest does not match its process results" unless actual == paths
+
+    paths
+  end
+
   def report!
     result = merged_results
     report = build_report(result, result_errors: @result_errors || [])
@@ -174,7 +332,7 @@ module HiveTestCoverage
     @result_errors = (@startup_errors || []).dup
     collect_dump_errors!
     merged = {}
-    marshal_paths = Dir.glob(File.join(@resultset_dir, "*.marshal")).sort
+    marshal_paths = process_result_paths
     marshal_paths.each do |path|
       raw = read_marshal_file(path)
       next unless raw
@@ -183,6 +341,11 @@ module HiveTestCoverage
     end
     detect_config_mismatch!(merged, marshal_paths)
     merged
+  end
+
+  def process_result_paths
+    @verified_marshal_paths ||
+      Dir.glob(File.join(@resultset_dir, "**", "*.marshal")).sort
   end
 
   # Surface a clear configuration error when every entry across every
@@ -204,7 +367,7 @@ module HiveTestCoverage
   end
 
   def collect_dump_errors!
-    Dir.glob(File.join(@resultset_dir, "*.error.json")).sort.each do |path|
+    Dir.glob(File.join(@resultset_dir, "**", "*.error.json")).sort.each do |path|
       data = begin
         JSON.parse(File.read(path))
       rescue StandardError => e
@@ -217,7 +380,7 @@ module HiveTestCoverage
       end
 
       @result_errors << {
-        file: "process #{data['pid']}",
+        file: data["file"] || "process #{data['pid']}",
         error_class: data["error_class"],
         message: data["message"]
       }
@@ -311,7 +474,7 @@ module HiveTestCoverage
 
     report = {
       generated_at: Time.now.utc.iso8601,
-      process_results: Dir.glob(File.join(@resultset_dir, "*.marshal")).size,
+      process_results: process_result_paths.size,
       line_total: line_total,
       line_covered: line_covered,
       line_percent: percent(line_covered, line_total),

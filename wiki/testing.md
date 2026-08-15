@@ -106,8 +106,12 @@ installed.
 
 The default suite excludes four expensive outer-proof files and skips the
 single large babysitter command-classification matrix. CI runs all five proofs
-as named gates and feeds their matrix result, together with exhaustive coverage,
-into the already-required `rake test (Ruby 3.4)` check. The aggregator uses
+as named gates. Exhaustive coverage is collected by six deterministic
+test-file shards and merged once by the exact coverage gate. The first shard
+preloads the complete `lib/` catalog so never-required source files remain
+visible as unloaded, while the other five stay lazy to avoid redundant
+coverage state in forked subprocesses. CI feeds both results into the
+already-required `rake test (Ruby 3.4)` check. The aggregator uses
 `always()` and fails unless coverage and the complete matrix succeeded,
 preserving one fail-closed merge contract for branches created before and after
 this workflow change. The remaining babysitter dry-run tests stay in the normal
@@ -410,8 +414,38 @@ bundle exec rake coverage
 
 The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch coverage in the parent test process and prepends `RUBYOPT=-Itest -rhive_coverage_boot` so Ruby subprocess tests dump their own result files under a per-run `coverage/.resultset/<run-id>/` directory. The final merged report is written to `coverage/coverage.json` and prints the lowest-covered source files plus uncovered line numbers.
 
-`bundle exec rake coverage` is the exhaustive CI coverage-report path, not an
-after-every-commit agent loop. It instruments the default suite; three
+Hosted CI separates collection from enforcement. Six `coverage:collect`
+matrix legs run a complete, disjoint partition of the default test-file set and
+upload their raw process results plus a `hive-coverage-shard.v1` manifest.
+Each manifest binds the artifact to the checked-out revision, workflow run,
+Ruby version, shard index/count, exact test-file partition, and complete list
+of process-result files. Shard zero also runs the Agent CLI Runtime
+component suite and loads every source file, which preserves unloaded-file
+detection without repeating that fixed catalog cost in every collector. The
+partition begins with four source-byte-balanced groups, then splits the third
+and fourth groups after hosted measurements identified them as the two long
+poles; the first two groups remain stable. The downstream `coverage:report`
+job retains each artifact in its own `coverage-shard-N` directory, rejects
+missing, duplicate, foreign, empty, corrupt, or unlisted inputs, merges only
+the manifest-listed results, and applies the same exact 100% gate. The
+per-artifact directories are required because independent runners can emit
+identical PID/object-ID result basenames. Collector uploads use overwrite
+semantics so a failed-job rerun replaces the earlier immutable artifact for
+that shard. A collector never lowers
+the threshold or publishes a partial report as passing; collection mode only
+defers percentage enforcement to the downstream merge.
+
+Catalog-load failures are persisted as `.error.json` markers in collection
+mode so they survive the collector/aggregate process boundary. Every collector
+must select at least one test file and produce at least one process result.
+The named coverage aggregate runs under `always()` and first rejects any
+failed, skipped, or cancelled collector before downloading artifacts; the
+outer protected `rake test (Ruby 3.4)` aggregate remains the final fail-closed
+branch-protection contract.
+
+`bundle exec rake coverage` remains the exhaustive single-process local
+coverage-report path, not an after-every-commit agent loop. Hosted CI uses the
+equivalent split `coverage:collect` / `coverage:report` path. Both instrument the default suite; three
 outer-proof files and the large babysitter command-classification matrix run in
 their dedicated CI jobs instead. Coverage fails when an executable source file
 was never loaded, when a subprocess result file cannot be read, or when line
@@ -427,6 +461,13 @@ transport, manifest upload exceptions, missing media directories, screenote
 config type errors, and dry-run digest completion failures.
 
 Coverage-included tests that only need a generic stdout/stderr subprocess should avoid `RbConfig.ruby` children unless they are explicitly testing Ruby coverage propagation. Those nested Ruby processes inherit the coverage `RUBYOPT`, which can make startup latency part of otherwise unrelated timeout assertions; use a tiny executable fixture script for generic capture/timeout seams.
+
+Hosted coverage collectors load sources lazily through their assigned tests.
+Forked custody children inherit the parent process coverage catalog, so a full
+collector preload makes even sparse `exit!` flushes expensive enough to lose
+subprocess results under six-runner contention. The downstream aggregate still
+enumerates every `lib/` source, treats absent entries as unloaded, and enforces
+the same exact line threshold; lazy collection does not weaken the final gate.
 
 In CI (`CI=true`), tests that exercise backgrounding commands must force a foreground path (for example `foreground: true`) or stub daemonization. Otherwise the test process can daemonize before Minitest `after_run` writes `coverage/coverage.json`, leaving the parent coverage task with a missing report while child output keeps streaming. Bundler evaluates the gemspec before coverage starts, so the bootstrap reloads the preloaded `lib/hive/version.rb`, `lib/hive/errors.rb`, and `lib/hive.rb` files in dependency order. Reloaded code must therefore be idempotent; for example, self-derived enum constants must exclude `:ALL` to stay reload-safe.
 
@@ -770,7 +811,7 @@ installed/enabled service, and separately verifies the plist and live
 accepts a nonzero command only when the same envelope reports `inactive` or
 `active_not_ready`; a genuinely ready service must still exit zero.
 
-The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, Board/Grid route and preference rendering, linked archive-retention summaries, lossless project-scoped Archive rendering and expired-task lookup, plain `/health` versus daemon-backed `/health?deep=1`, ideas with bounded uploads, Puma pre-Rack body rejection, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, bounded oversized task diff rendering, media route streaming/refusal plus captured/skipped/failed Demo gallery rendering, repos questionnaire, Repos SSH-origin normalization, non-directory clone-target refusal, Agents-page binary PTY rendering plus operator-ward login polling, favicon/icon serving, Telegram setup/pairing, and workflow lifecycle preview/receipt/consent flows) and `web/test/system/*` (Capybara + Playwright: Board/Grid switching and saved preference, kanban cards and mobile containment, real Board-to-Archive-to-expired-task navigation, login gate, composer image attach both paths, eight-image/10 MB client bounds, hard-capped batch inspection, batched multipart transport, constant-memory non-decoding attachment chips, staged-File cleanup across true versus Turbo-permanent disconnects, successful response cleanup before permanent-node rendering, failed-submit retention, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, non-overlapping busy-frame polling, log-tail follow/pause/resume, node-preserving log-frame morph reloads, artifact open-state preservation across broadcast-triggered morphs with live content refresh, real workflow scaffolding, exact-permission managed install review, visible Demo media, and failed-capture banners). Focused model coverage also drives Board workflow grouping, Repository clone, and Task diff subprocesses through nonzero and timed-out outcomes, pinning unknown-stage visibility, negative-PID process-group termination, reaping, operator errors, partial-target removal, and tempfile cleanup. Integration assertions keep Status, Workflows, and Telegram navigation active when the response is rendered by a namespaced resource controller. CI runs these tests in the `web` job, installs the root bundle into `vendor/root-bundle`, passes that path as `GOLDEN_E2E_BUNDLE_PATH`, and explicitly runs `web/test/e2e/golden_path_e2e.rb`. The golden-path E2E pins `BUNDLE_GEMFILE`, points `BUNDLE_PATH` at the supplied root bundle, deletes inherited web-bundle deployment/config keys, and preflights the daemon spawn environment with `bundle exec ruby -Ilib bin/hive --version` before starting the foreground daemon, so a broken Bundler/Ruby env fails with the real stderr/stdout instead of a later browser timeout.
+The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, Board/Grid route and preference rendering, linked archive-retention summaries, lossless project-scoped Archive rendering and expired-task lookup, plain `/health` versus daemon-backed `/health?deep=1`, ideas with bounded uploads, Puma pre-Rack body rejection, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, bounded oversized task diff rendering, media route streaming/refusal plus captured/skipped/failed Demo gallery rendering, repos questionnaire, Repos SSH-origin normalization, non-directory clone-target refusal, Agents-page binary PTY rendering plus operator-ward login polling, favicon/icon serving, Telegram setup/pairing, and workflow lifecycle preview/receipt/consent flows) and `web/test/system/*` (Capybara + Playwright: Board/Grid switching and saved preference, kanban cards and mobile containment, real Board-to-Archive-to-expired-task navigation, login gate, composer image attach both paths, eight-image/10 MB client bounds, hard-capped batch inspection, batched multipart transport, constant-memory non-decoding attachment chips, staged-File cleanup across true versus Turbo-permanent disconnects, successful response cleanup before permanent-node rendering, failed-submit retention, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, non-overlapping busy-frame polling, log-tail follow/pause/resume, node-preserving log-frame morph reloads, artifact open-state preservation across broadcast-triggered morphs with live content refresh, real workflow scaffolding, exact-permission managed install review, visible Demo media, and failed-capture banners). Focused model coverage also drives Board workflow grouping, Repository clone, and Task diff subprocesses through nonzero and timed-out outcomes, pinning unknown-stage visibility, negative-PID process-group termination, reaping, operator errors, partial-target removal, and tempfile cleanup. Integration assertions keep Status, Workflows, and Telegram navigation active when the response is rendered by a namespaced resource controller. CI runs the Rails integration/lint, Playwright system, and Playwright golden-path suites as three independent `web-tests` matrix actions. The unchanged `Hive web (Rails tests + system)` job is now a fail-closed aggregate over that matrix. Only the browser cells install Playwright; only the golden-path cell installs the root bundle into `vendor/root-bundle`, passes that path as `GOLDEN_E2E_BUNDLE_PATH`, and explicitly runs `web/test/e2e/golden_path_e2e.rb`. The golden-path E2E pins `BUNDLE_GEMFILE`, points `BUNDLE_PATH` at the supplied root bundle, deletes inherited web-bundle deployment/config keys, and preflights the daemon spawn environment with `bundle exec ruby -Ilib bin/hive --version` before starting the foreground daemon, so a broken Bundler/Ruby env fails with the real stderr/stdout instead of a later browser timeout.
 The golden path's final browser assertion follows the durable `5-open-pr`
 stage badge rather than the transient "Ready to open PR" action label, which
 an enrolled daemon may replace immediately when it dispatches that stage.

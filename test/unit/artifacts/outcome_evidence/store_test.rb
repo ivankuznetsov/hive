@@ -502,7 +502,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
 
       replacement = ->(*) { raise Hive::Artifacts::OutcomeEvidence::StoreError, "copy failed" }
       with_replaced_singleton_method(
-        Hive::Artifacts::OutcomeEvidence::Proof, :materialize!, replacement
+        Hive::Artifacts::OutcomeEvidence::Proof, :materialize, replacement
       ) do
         assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
           store.retain_candidate!(

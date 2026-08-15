@@ -35,12 +35,14 @@ completion authority.
    its path, size, and SHA-256 receipt to both read-only semantic roles; neither
    role needs shell or Git authority.
 2. Launch a fresh read-only **inference** context. It reads `task.md`, `plan.md`,
-   and the exact diff, then returns a bounded set of outcome claims plus justified
-   exclusions. Every changed path must trace to at least one claim or exclusion.
-   Inference prefers one to three grouped outcomes and may return at most five;
-   one proof may establish multiple related claims of the same kind. Each claim
-   chooses exactly one closed proof kind: `screenshot`, `video`, `terminal`, or
-   `document`.
+   and the exact diff, inventories every promised outcome and acceptance
+   criterion, then returns a bounded set of outcome claims plus justified
+   exclusions. Every changed path and promised outcome must trace to at least
+   one claim or exclusion. Inference prefers one to three grouped outcomes and
+   may return at most five, but grouping cannot omit an outcome and each claim
+   must remain narrow enough for one truthful artifact of its selected proof
+   kind to demonstrate completely. Each claim chooses exactly one closed proof
+   kind: `screenshot`, `video`, `terminal`, or `document`.
 3. Persist the immutable requirement under the task's outcome-evidence
    generation. The generation binds project/task, durable task generation,
    controller recovery epoch, base, head, and changed-path digest.
@@ -72,6 +74,12 @@ completion authority.
    names one retained original, one bounded reviewer representation, and the
    claims it establishes. The controller—not the LLM—adds exact byte counts,
    SHA-256 digests, rendering, and implementation-head source identity.
+   A managed PNG or WebM may fill both representation roles from one
+   controller-issued capture path; custody transfer creates distinct immutable
+   retained copies rather than requiring the producer to duplicate media. This
+   is only a task-producer custody-ingress exception: direct ledger admission,
+   project-provider evidence, and non-visual evidence still require distinct
+   role paths.
    Screenshot, video, and terminal representations must match a controller
    capture receipt at handoff; producer-written lookalike media fails closed.
 7. Re-admit every retained representation deterministically: safe containment,
@@ -152,6 +160,10 @@ The producer contract names the exact representation shape and media types, but
 it does not lower the semantic bar to whatever can be rendered. Generated
 slides, terminal-styled composites, narrated summaries, diagrams, and pictures
 of test output do not establish actual screenshot, flow, or terminal behavior.
+Public CLI/TUI claims must record the shipped entrypoint itself; custom evidence
+scripts, simulations, and test runners remain supporting diagnostics rather
+than substitutes for the user-visible command. Focused tests may prove an
+internal claim only when the claim is bounded to the behavior they exercise.
 The independent reviewer must reject those substitutes and request a targeted
 recapture of the real product surface or transition.
 

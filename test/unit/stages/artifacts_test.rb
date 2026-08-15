@@ -1424,6 +1424,23 @@ class StagesArtifactsTest < Minitest::Test
           end
         end
 
+        failing_spawn = lambda do |_task, agent_custody:, **|
+          agent_custody.call { raise Hive::AgentError, "provider failed after tamper" }
+        end
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, failing_spawn) do
+          with_replaced_singleton_method(
+            Hive::ArtifactFirewall, :validate_and_restore, ->(*) { report }
+          ) do
+            error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+              Hive::Stages::Artifacts.run_role!(
+                role: "inference", task: task, cfg: {}, prompt: "infer", identity: identity
+              )
+            end
+            assert_includes error.message, "inference modified protected task state"
+            assert_includes error.message, "task.md changed"
+          end
+        end
+
         [
           { status: :error, final_message: "{}" },
           {

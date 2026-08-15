@@ -212,6 +212,9 @@ class CurrentMainCoverageGapTest < Minitest::Test
         "review-triage-pass01",
         "review-ci-fix-attempt01"
       ], calls.map { |_task, kwargs| kwargs[:log_label] }
+      assert_equal "review.ci", calls.last.last[:implementation_stage]
+      assert_same cfg, calls.last.last[:cfg]
+      assert calls.last.last[:defer_implementation_observation]
     end
   end
 
@@ -233,6 +236,8 @@ class CurrentMainCoverageGapTest < Minitest::Test
         end
       end
       assert_equal "review-fix-pass01", calls.last.last[:log_label]
+      assert_equal "review.fix", calls.last.last[:implementation_stage]
+      assert calls.last.last[:defer_implementation_observation]
 
       spec = {
         "name" => "codex-ce-code-review",

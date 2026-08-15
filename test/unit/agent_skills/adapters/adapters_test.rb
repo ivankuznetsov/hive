@@ -170,6 +170,162 @@ class AgentSkillAdaptersTest < Minitest::Test
     end
   end
 
+  def test_opencode_setup_previews_and_atomically_configures_the_pinned_plugin
+    with_tmp_dir do |dir|
+      config_home = File.join(dir, "opencode")
+      config_path = File.join(config_home, "opencode.json")
+      FileUtils.mkdir_p(config_home)
+      File.write(config_path, JSON.pretty_generate("theme" => "system") + "\n")
+      File.chmod(0o600, config_path)
+      row = inspection(
+        agent: "opencode", capability: "ce-plan",
+        package: "compound-engineering", health: "missing",
+        bin: "/fake/opencode"
+      )
+      instance = adapter(
+        Hive::AgentSkills::Adapters::OpenCode, dir: dir,
+        environment: { "OPENCODE_CONFIG_DIR" => config_home }
+      )
+
+      operation = instance.plan([ row ]).operations.fetch(0)
+
+      assert_equal "plugin_configure", operation.kind
+      assert_empty operation.argv
+      assert_equal [ config_path ], operation.files
+      refute operation.to_h.fetch("preconditions").fetch("config").key?("content")
+
+      outcome = instance.execute(operation)
+      document = JSON.parse(File.read(config_path))
+
+      assert_equal "succeeded", outcome.status
+      assert_equal "system", document.fetch("theme")
+      assert_equal [
+        Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+      ], document.fetch("plugin")
+      assert_equal 0o600, File.stat(config_path).mode & 0o777
+    end
+  end
+
+  def test_opencode_setup_refuses_foreign_pin_and_snapshot_drift
+    with_tmp_dir do |dir|
+      config_home = File.join(dir, "opencode")
+      config_path = File.join(config_home, "opencode.json")
+      FileUtils.mkdir_p(config_home)
+      File.write(
+        config_path,
+        JSON.generate(
+          "plugin" => [
+            "compound-engineering@git+https://github.com/example/fork.git#main"
+          ]
+        )
+      )
+      row = inspection(
+        agent: "opencode", capability: "ce-plan",
+        package: "compound-engineering", health: "missing",
+        bin: "/fake/opencode"
+      )
+      conflicting = adapter(
+        Hive::AgentSkills::Adapters::OpenCode, dir: dir,
+        environment: { "OPENCODE_CONFIG_DIR" => config_home }
+      ).plan([ row ])
+
+      assert_empty conflicting.operations
+      assert_match(/will not replace/, conflicting.conflicts.first)
+
+      File.write(config_path, "{}\n")
+      instance = adapter(
+        Hive::AgentSkills::Adapters::OpenCode, dir: dir,
+        environment: { "OPENCODE_CONFIG_DIR" => config_home }
+      )
+      operation = instance.plan([ row ]).operations.fetch(0)
+      File.write(config_path, JSON.generate("theme" => "changed"))
+
+      outcome = instance.execute(operation)
+
+      assert_equal "failed", outcome.status
+      assert_match(/changed since preview/, outcome.message)
+      assert_equal({ "theme" => "changed" }, JSON.parse(File.read(config_path)))
+    end
+  end
+
+  def test_opencode_setup_rejects_malformed_configuration_at_preview_and_execution
+    with_tmp_dir do |dir|
+      config_home = File.join(dir, ".config", "opencode")
+      config_path = File.join(config_home, "opencode.json")
+      FileUtils.mkdir_p(config_home)
+      row = inspection(
+        agent: "opencode", capability: "ce-plan",
+        package: "compound-engineering", health: "missing",
+        bin: "/fake/opencode"
+      )
+      instance = adapter(Hive::AgentSkills::Adapters::OpenCode, dir: dir)
+
+      File.write(config_path, "{")
+      preview = instance.plan([ row ])
+      assert_empty preview.operations
+      assert_match(/invalid JSON/, preview.conflicts.first)
+
+      {
+        "[]" => /must contain a JSON object/,
+        JSON.generate("plugin" => {}) => /plugin must be an array of strings/,
+        "{" => /invalid JSON/
+      }.each do |content, message|
+        File.write(config_path, content)
+        snapshot = instance.send(:file_snapshot, config_path)
+        operation = Hive::AgentSkills::Adapters::Operation.new(
+          id: "opencode:compound-engineering:plugin_configure",
+          agent: "opencode", package_id: "compound-engineering",
+          capabilities: [ "ce-plan" ], kind: "plugin_configure", argv: [],
+          files: [ config_path ], depends_on: [], preconditions: {},
+          metadata: {
+            "config_path" => config_path,
+            "snapshot" => snapshot,
+            "plugin" => Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+          }
+        )
+
+        outcome = instance.execute(operation)
+        assert_equal "failed", outcome.status
+        assert_match message, outcome.message
+      end
+    end
+  end
+
+  def test_opencode_setup_uses_default_config_root_and_skips_current_pin
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".config", "opencode", "opencode.json")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(
+        config_path,
+        JSON.generate(
+          "plugin" => [
+            Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+          ]
+        )
+      )
+      row = inspection(
+        agent: "opencode", capability: "ce-plan",
+        package: "compound-engineering", health: "missing",
+        bin: "/fake/opencode"
+      )
+      instance = adapter(Hive::AgentSkills::Adapters::OpenCode, dir: dir)
+
+      assert_empty instance.plan([ row ]).operations
+    end
+  end
+
+  def test_registry_exposes_opencode_adapter
+    with_tmp_dir do |dir|
+      registry = Hive::AgentSkills::Adapters::Registry.new(
+        config: Hive::Config::DEFAULTS, project_root: dir,
+        environment: { "HOME" => dir }
+      )
+
+      assert_instance_of Hive::AgentSkills::Adapters::OpenCode,
+                         registry.fetch("opencode")
+    end
+  end
+
   def test_claude_plan_alias_is_atomic_and_depends_on_plugin_install
     with_tmp_dir do |dir|
       row = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",

@@ -53,6 +53,8 @@ class SetupAgentsIntegrationTest < Minitest::Test
       when "pi"
         uri = selector.sub(%r{\Ahttps://}, "")
         File.join(ENV.fetch("PI_CODING_AGENT_DIR"), "git", uri)
+      when "opencode"
+        File.join(ENV.fetch("XDG_CACHE_HOME"), "opencode", "node_modules", package)
       end
       FileUtils.mkdir_p(root)
       if package == "compound-engineering"
@@ -96,7 +98,10 @@ class SetupAgentsIntegrationTest < Minitest::Test
     end
 
     if args == ["--version"]
-      puts({ "claude" => "2.1.179", "codex" => "codex-cli 0.144.0", "pi" => "0.80.6" }.fetch(agent))
+      puts({
+        "claude" => "2.1.179", "codex" => "codex-cli 0.144.0",
+        "pi" => "0.80.6", "opencode" => "1.18.16"
+      }.fetch(agent))
     elsif agent == "claude" && args == ["plugin", "list", "--json"]
       puts JSON.generate(state["packages"].map do |id, row|
         { "id" => id, "version" => row["version"], "enabled" => true, "installPath" => row["root"] }
@@ -161,7 +166,7 @@ class SetupAgentsIntegrationTest < Minitest::Test
   def install_fake_clis(dir)
     bin_dir = File.join(dir, "bin")
     FileUtils.mkdir_p(bin_dir)
-    %w[claude codex pi].to_h do |agent|
+    %w[claude codex pi opencode].to_h do |agent|
       path = File.join(bin_dir, "fake-#{agent}")
       File.write(path, FAKE_AGENT)
       FileUtils.chmod(0o755, path)
@@ -194,9 +199,12 @@ class SetupAgentsIntegrationTest < Minitest::Test
         "CLAUDE_CONFIG_DIR" => File.join(dir, "claude"),
         "CODEX_HOME" => File.join(dir, "codex"),
         "PI_CODING_AGENT_DIR" => File.join(dir, "pi"),
+        "OPENCODE_CONFIG_DIR" => File.join(dir, "opencode"),
+        "XDG_CACHE_HOME" => File.join(dir, "cache"),
         "HIVE_CLAUDE_BIN" => nil,
         "HIVE_CODEX_BIN" => nil,
-        "HIVE_PI_BIN" => nil
+        "HIVE_PI_BIN" => nil,
+        "HIVE_OPENCODE_BIN" => nil
       }
       with_env(env) { yield dir, config_for(bins) }
     end

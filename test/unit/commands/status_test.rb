@@ -140,6 +140,53 @@ class CommandsStatusTest < Minitest::Test
                  command.send(:implementation_preview_source, cfg, "review.ci", execute)
   end
 
+  def test_implementation_identity_status_exposes_observed_opencode_route_and_usage
+    execute = {
+      "stage" => "execute", "provider" => "opencode",
+      "model" => "anthropic/claude-sonnet-4-5",
+      "profile_name" => "opencode", "launcher_identity" => "opencode-cli/v1",
+      "source" => "persisted_execute", "generation" => 2,
+      "originating_attempt" => "execute-2", "resolved_attempt" => "execute-2",
+      "requested_effort" => "high", "effective_effort" => "high",
+      "effort_supported" => true, "model_pinned" => true,
+      "requested_backend" => "anthropic",
+      "requested_model" => "claude-sonnet-4-5",
+      "actual_backend" => "anthropic",
+      "actual_model" => "claude-sonnet-4-5-20250929",
+      "route_resolution_status" => "resolved_differently",
+      "outcome_kind" => "completed",
+      "usage" => {
+        "input" => nil, "output" => 0,
+        "cache_read" => 0, "cache_write" => nil,
+        "reasoning" => nil, "cost" => 0.0
+      }
+    }
+    cfg = {
+      "project_root" => "/tmp/project",
+      "agents" => {
+        "opencode" => {
+          "config_path" => "/tmp/opencode.json",
+          "credential_env" => [], "plugins" => [], "isolation" => "hermetic"
+        }
+      },
+      "execute" => { "agent" => "opencode", "model" => execute.fetch("model") },
+      Hive::Config::IMPLEMENTATION_IDENTITY_PROVENANCE_KEY => {
+        "execute" => {}, "open_pr" => {}, "review.fix" => {}, "review.ci" => {}
+      }.freeze
+    }
+
+    status = Hive::Commands::Status.new.implementation_identity_status(
+      { "generation" => 2, "execute" => execute, "stages" => {} }, cfg
+    )
+    public_execute = status.dig("stages", "execute")
+
+    assert_equal "anthropic/claude-sonnet-4-5", public_execute.fetch("model")
+    assert_equal "claude-sonnet-4-5-20250929",
+                 public_execute.fetch("actual_model")
+    assert_nil public_execute.dig("usage", "input")
+    assert_equal 0, public_execute.dig("usage", "output")
+  end
+
   def test_implementation_owner_token_bounds_long_model_names
     row = {
       implementation_identity: {

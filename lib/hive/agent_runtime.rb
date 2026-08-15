@@ -25,6 +25,17 @@ module Hive
     CapabilityEvidence = AgentCliRuntime::CapabilityEvidence
     CompiledInvocation = AgentCliRuntime::CompiledInvocation
     ObservableResult = AgentCliRuntime::ObservableResult
+    Route = AgentCliRuntime::Route
+    OpenCodePermissionPolicy = AgentCliRuntime::OpenCodePermissionPolicy
+    OpenCodePreparationRequest = AgentCliRuntime::OpenCodePreparationRequest
+    PreparedInvocation = AgentCliRuntime::PreparedInvocation
+    TerminationEvidence = AgentCliRuntime::TerminationEvidence
+    CapturedResult = AgentCliRuntime::CapturedResult
+    ParsedRun = AgentCliRuntime::ParsedRun
+    NormalizedUsage = AgentCliRuntime::NormalizedUsage
+    RouteIdentity = AgentCliRuntime::RouteIdentity
+    InspectionCommand = AgentCliRuntime::InspectionCommand
+    NormalizedOutcome = AgentCliRuntime::NormalizedOutcome
 
     Request = Data.define(
       :profile, :prompt, :permission_mode, :permission_arguments,
@@ -171,7 +182,12 @@ module Hive
       compilation_error!(profile, e)
     end
 
-    def prepare!(profile, launch_binding: nil)
+    def prepare!(profile, launch_binding: nil, env: ENV)
+      if profile.is_a?(OpenCodePreparationRequest)
+        runtime = runtime_profile(profile.request.profile) || profile.request.profile
+        return AgentCliRuntime.prepare!(profile, env: env)
+      end
+
       public_profile = runtime_profile(profile)
       version = nil
       if public_profile
@@ -209,7 +225,9 @@ module Hive
     rescue Error
       raise
     rescue AgentCliRuntime::Error => e
-      raise_runtime_error!(ProbeError, profile, e, capability: :probe)
+      raise_runtime_error!(
+        ProbeError, runtime || profile, e, capability: :probe
+      )
     rescue StandardError => e
       raise_runtime_error!(ProbeError, profile, e, capability: :probe)
     end
@@ -237,6 +255,11 @@ module Hive
     end
 
     def observe(profile, result)
+      if result.is_a?(Hash) &&
+         result[:normalized_outcome].is_a?(NormalizedOutcome)
+        return result.fetch(:normalized_outcome)
+      end
+
       public_profile = runtime_profile(profile)
       return AgentCliRuntime.observe(public_profile, result) if public_profile
 
@@ -251,6 +274,22 @@ module Hive
         final_message: raw[:final_message],
         diagnostic: safe_diagnostic(raw[:error_message] || raw[:limit_text]),
         provider_signal: raw[:provider_signal]
+      )
+    end
+
+    def parse_run(profile, stdout:)
+      public_profile = runtime_profile(profile) || profile
+      AgentCliRuntime.parse_run(public_profile, stdout:)
+    end
+
+    def prepare_inspection(prepared, parsed_run)
+      AgentCliRuntime.prepare_inspection(prepared, parsed_run)
+    end
+
+    def normalize(profile, captured, requested_route:)
+      public_profile = runtime_profile(profile) || profile
+      AgentCliRuntime.normalize(
+        public_profile, captured, requested_route:
       )
     end
 

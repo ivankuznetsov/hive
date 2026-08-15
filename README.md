@@ -9,7 +9,7 @@
 Community: [join the Hive Discord](https://discord.gg/Qg5E7rMt) for questions,
 feedback, and release discussions.
 
-Hive is a durable, local-first workflow engine for AI agents. It orchestrates Claude, Codex, Grok, and Pi to run multi-step work as a *folder-as-agent pipeline*. Its flagship **`coding`** workflow turns a rough software idea into a merge-ready pull request: you sketch an idea in a few sentences, open the `hive tui` dashboard or native local web UI, and watch the work move forward — brainstorm pins down what you actually want, plan fixes the approach, execute writes the code, review hardens it, and finalize ships the PR. You can step in at any stage with a normal editor — every artefact is a markdown file in a stage folder, inspectable and editable by you or by another agent. Software delivery is the flagship proof, not the product boundary: Hive also ships `content` and `bench` workflows, installs reviewed Honeycombs, and runs the ones you author yourself for writing, research, triage, audits, and operations (see [Custom Workflows](#custom-workflows)).
+Hive is a durable, local-first workflow engine for AI agents. It orchestrates Claude, Codex, Grok, Pi, and opt-in OpenCode to run multi-step work as a *folder-as-agent pipeline*. Its flagship **`coding`** workflow turns a rough software idea into a merge-ready pull request: you sketch an idea in a few sentences, open the `hive tui` dashboard or native local web UI, and watch the work move forward — brainstorm pins down what you actually want, plan fixes the approach, execute writes the code, review hardens it, and finalize ships the PR. You can step in at any stage with a normal editor — every artefact is a markdown file in a stage folder, inspectable and editable by you or by another agent. Software delivery is the flagship proof, not the product boundary: Hive also ships `content` and `bench` workflows, installs reviewed Honeycombs, and runs the ones you author yourself for writing, research, triage, audits, and operations (see [Custom Workflows](#custom-workflows)).
 
 The mental model is folders. Every task is a directory; the folder's location is the task state. Moving a task from `2-brainstorm/` to `3-plan/` is the approval gesture, and every stage writes a durable artefact the next stage can trust. That practice — making each step's output strong enough for the next one to run autonomously — is called *compound engineering*. It's how Hive carries work from rough idea to merged PR while letting humans drop in on their own terms instead of a chat thread's.
 
@@ -45,7 +45,14 @@ Hive ships as a rubygem (`hive-cli`) plus a managed Hive web bundle attached to 
 | Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.7.2/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
 | Arch Linux x86_64/aarch64 | [`yay -S hive-bin`](https://aur.archlinux.org/packages/hive-bin) |
 
-Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, `grok` ≥ 0.2.90 when selected, authenticated `gh`, `tmux` ≥ 3.0 when the project uses the default `claude.mode: tmux`, `cosign` for release identity verification, and Node.js/npm for managed QMD install/repair. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `cosign`, `gem`, checksum tool) on first run; if npm is missing, Hive still installs and `hive doctor` reports the QMD gap non-fatally.
+Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, `grok` ≥ 0.2.90 when selected, `opencode` ≥ 1.18.16 when explicitly selected, authenticated `gh`, `tmux` ≥ 3.0 when the project uses the default `claude.mode: tmux`, `cosign` for release identity verification, and Node.js/npm for managed QMD install/repair. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `cosign`, `gem`, checksum tool) on first run; if npm is missing, Hive still installs and `hive doctor` reports the QMD gap non-fatally.
+
+OpenCode is a fifth built-in profile but is selected nowhere by default. Its
+operator contract requires an exact nested `provider/model`, an explicit
+non-secret config and named credential source, `read-only` or scoped
+permissions, and native skill readiness for skill-bearing roles. See the
+[opt-in OpenCode setup](docs/getting-started.md#optional-opencode-profile) and
+[permission mapping](docs/permissions.md#opencode-enforcement).
 
 The vendored gems land under `${XDG_DATA_HOME:-~/.local/share}/hive/gems/` so the install is self-contained and uninstall is a clean `rm -rf`. Full install matrix, XDG paths, Apache Hive collision behavior (`hv` shim), update, uninstall, and autostart details live in [wiki/operating.md#install](wiki/operating.md#install) and [wiki/operating.md#autostart](wiki/operating.md#autostart).
 
@@ -73,7 +80,7 @@ hive setup
 
 `hive setup` checks Ruby 3.4, git, tmux, `gh`, Claude, Codex, Node/npm,
 QMD, SQLite, and the Rails bundle. Before other mutations it previews and
-provisions Hive's operating skill for Claude, Codex, and Pi. It then installs
+provisions Hive's operating skill for Claude, Codex, Pi, and OpenCode. It then installs
 the Hive-owned pieces it can manage, installs the daemon, PR babysitter, and Hive web services,
 enrolls the current project, and reports the effective URL plus installed,
 enabled, running, and readiness state. Interactive setup confirms once; JSON
@@ -160,7 +167,8 @@ The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is 
 
    Interactive init offers to provision any unresolved built-in agent skills,
    including Hive's own operating skill. The same skill has native invocation
-   `/hive` in Claude, `$hive` in Codex, and `/skill:hive` in Pi.
+   `/hive` in Claude, `$hive` in Codex, `/skill:hive` in Pi, and `/hive` in
+   OpenCode.
    You can also inspect and provision them explicitly:
 
    ```bash
@@ -173,7 +181,8 @@ The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is 
    a typed refusal before diagnostics or native agent discovery, so even an
    upstream CLI's nominally read-only bootstrap cannot alter the user's home.
    Doctor is always read-only and derives agent/ClawHub health from durable
-   filesystem evidence without launching Claude, Codex, Pi, or OpenClaw.
+   filesystem evidence without launching Claude, Codex, Pi, OpenCode, or
+   OpenClaw.
 
    During `hive init`, choose the Claude launch mode and permission mode for the project. `tmux` is the default: Claude-backed stages run in attachable tmux sessions using your logged-in Claude session. With the upcoming Anthropic pricing changes this is the mode we now suggest for most users, but treat it as an **experimental workflow** for now — expect some rough edges. The recommended permission default is `bypassPermissions` so local dogfood runs do not pause on file-operation approvals; choose `auto` when you want Claude Code auto-mode rules. Pick `headless` for service-only hosts or CI-style runs that should use normal non-interactive CLI spawns.
 

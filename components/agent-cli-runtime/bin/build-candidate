@@ -17,12 +17,12 @@ gem_path = File.join(output_dir, gem_name)
 abort "candidate already exists: #{gem_path}" if File.exist?(gem_path)
 
 source_commit, git_error, git_status = Open3.capture3(
-  "git", "-C", File.expand_path("../..", ROOT), "rev-parse", "HEAD"
+  "git", "-C", ROOT, "rev-parse", "HEAD"
 )
 abort git_error unless git_status.success?
 source_commit = source_commit.strip
 source_dirty, git_error, git_status = Open3.capture3(
-  "git", "-C", File.expand_path("../..", ROOT), "status", "--porcelain"
+  "git", "-C", ROOT, "status", "--porcelain", "--", "."
 )
 abort git_error unless git_status.success?
 

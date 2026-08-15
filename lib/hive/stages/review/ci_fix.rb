@@ -154,6 +154,10 @@ module Hive
               )
             end
 
+            Hive::Stages::Base.record_deferred_opencode_observation(
+              synthetic_task(ctx), cfg, "review.ci", spawn_result
+            )
+
             if spawn_result[:status] != :ok
               return Result.new(
                 status: :error,
@@ -388,6 +392,7 @@ module Hive
             timeout_sec: cfg.dig("timeout_sec", "review_ci") || 600,
             log_label: "review-ci-fix-attempt#{format('%02d', attempt)}",
             profile: profile,
+            implementation_stage: "review.ci",
             agent_custody: agent_custody,
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :exit_code_only,
@@ -401,7 +406,10 @@ module Hive
               session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-ci-fix-attempt#{attempt}", task)
             )
           else
-            Hive::Stages::Base.spawn_agent(task, **kwargs)
+            Hive::Stages::Base.spawn_agent(
+              task, **kwargs, cfg: cfg,
+              defer_implementation_observation: true
+            )
           end
         end
 

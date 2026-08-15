@@ -164,6 +164,10 @@ module Hive
         end
 
         if stage == "open_pr"
+          if profile.name == :opencode && !provider_changed
+            return [ identity_value(execute_identity, :model), true ]
+          end
+
           policy = UtilityModels.resolve(profile.name)
           model = policy.fetch(:model) || profile.concrete_default_model(
             cfg: @cfg, project_root: @cfg["project_root"]

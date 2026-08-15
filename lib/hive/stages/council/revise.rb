@@ -104,7 +104,10 @@ module Hive
         end
 
         def prompt(profile)
-          skill_invocation = @revise.skill && profile.format_skill_invocation(@revise.skill)
+          skill_invocation = @revise.skill &&
+            Hive::Stages::Base.format_verified_skill_invocation(
+              profile, @revise.skill, project_root: @task.project_root
+            )
           instruction_body = @revise.instruction && File.read(@revise.instruction)
           Hive::Stages::Base.render(
             "council_revise_prompt.md.erb",

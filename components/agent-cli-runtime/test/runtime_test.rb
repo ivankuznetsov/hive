@@ -2,7 +2,7 @@ require_relative "test_helper"
 
 class AgentCliRuntimeRuntimeTest < Minitest::Test
   def test_builtin_provider_order_and_profiles_are_immutable
-    assert_equal %i[claude codex pi grok], AgentCliRuntime::Profiles.names
+    assert_equal %i[claude codex pi grok opencode], AgentCliRuntime::Profiles.names
     assert_predicate AgentCliRuntime::Profiles.names, :frozen?
     assert AgentCliRuntime::Profiles.names.all? do |name|
       AgentCliRuntime::Profiles.fetch(name).frozen?
@@ -14,7 +14,8 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
       claude: %w[ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY],
       codex: %w[OPENAI_API_KEY],
       pi: AgentCliRuntime::Profiles::PI_CREDENTIAL_ENVIRONMENT_KEYS,
-      grok: %w[GROK_AUTH_PATH XAI_API_KEY GROK_CODE_XAI_API_KEY]
+      grok: %w[GROK_AUTH_PATH XAI_API_KEY GROK_CODE_XAI_API_KEY],
+      opencode: AgentCliRuntime::Profiles::PI_CREDENTIAL_ENVIRONMENT_KEYS
     }
 
     expected.each do |provider, keys|
@@ -29,7 +30,8 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
       claude: [ "CLAUDE_CONFIG_DIR", ".claude" ],
       codex: [ "CODEX_HOME", ".codex" ],
       pi: [ "PI_CODING_AGENT_DIR", ".pi/agent" ],
-      grok: [ "GROK_HOME", ".grok" ]
+      grok: [ "GROK_HOME", ".grok" ],
+      opencode: [ "OPENCODE_CONFIG_DIR", ".config/opencode" ]
     }
 
     expected.each do |provider, (key, relative)|

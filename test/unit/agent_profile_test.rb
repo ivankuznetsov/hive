@@ -72,6 +72,76 @@ class AgentProfileTest < Minitest::Test
     end
   end
 
+  def test_opencode_secret_placeholders_use_the_runtime_grammar
+    profile = make_profile(
+      name: :opencode,
+      opencode_configuration: {
+        "provider" => {
+          "anthropic" => { "options" => { "apiKey" => "{env:ANTHROPIC_API_KEY}" } }
+        }
+      }
+    )
+    assert_equal "{env:ANTHROPIC_API_KEY}",
+                 profile.opencode_configuration.dig("provider", "anthropic", "options", "apiKey")
+
+    assert_raises(ArgumentError) do
+      make_profile(
+        name: :opencode,
+        opencode_configuration: {
+          "provider" => { "anthropic" => { "options" => { "apiKey" => "${ANTHROPIC_API_KEY}" } } }
+        }
+      )
+    end
+  end
+
+  def test_opencode_contract_fields_fail_closed_and_deep_freeze_json_values
+    assert_raises(ArgumentError) do
+      make_profile(name: :opencode, permission_presets: [ "unconfined" ])
+    end
+    assert_raises(ArgumentError) do
+      make_profile(name: :opencode, opencode_plugins: "compound-engineering")
+    end
+    assert_raises(ArgumentError) do
+      make_profile(name: :opencode, opencode_plugins: [ "" ])
+    end
+    assert_raises(ArgumentError) do
+      make_profile(name: :opencode, opencode_plugins: %w[plugin plugin])
+    end
+    assert_raises(ArgumentError) do
+      make_profile(name: :opencode, opencode_configuration: [])
+    end
+    assert_raises(ArgumentError) do
+      make_profile(
+        name: :opencode,
+        opencode_configuration: { "temperature" => Float::NAN }
+      )
+    end
+    assert_raises(ArgumentError) do
+      make_profile(
+        name: :opencode,
+        opencode_configuration: {
+          "providers" => [ { "api_key" => "literal-secret" } ]
+        }
+      )
+    end
+
+    profile = make_profile(
+      name: :opencode,
+      opencode_configuration: {
+        "providers" => [ { "name" => "anthropic" } ]
+      }
+    )
+    providers = profile.opencode_configuration.fetch("providers")
+    assert_predicate providers, :frozen?
+    assert_predicate providers.first, :frozen?
+    assert_predicate providers.first.fetch("name"), :frozen?
+
+    error = assert_raises(Hive::ConfigError) do
+      profile.with_overrides("isolation" => "best-effort")
+    end
+    assert_match(/must be hermetic/, error.message)
+  end
+
   def test_configuration_directory_metadata_is_optional_and_validated
     profile = make_profile(
       configuration_environment_key: "CUSTOM_HOME",
@@ -311,6 +381,14 @@ class AgentProfileTest < Minitest::Test
         effort: nil,
         global: [],
         subcommand: [ "--model", "openai/gpt-5.6-sol" ]
+      },
+      opencode: {
+        model: "anthropic/claude-sonnet-4-5",
+        effort: "high",
+        global: [],
+        subcommand: [
+          "--model", "anthropic/claude-sonnet-4-5", "--variant", "high"
+        ]
       }
     }
 
@@ -339,6 +417,23 @@ class AgentProfileTest < Minitest::Test
       %w[default inherit none minimal low medium high xhigh max],
       Hive::AgentProfiles.lookup(:grok).routed_effort_values
     )
+    assert_equal %w[minimal low medium high xhigh max],
+                 Hive::AgentProfiles.lookup(:opencode).routed_effort_values
+  end
+
+  def test_opencode_routed_model_requires_an_exact_nested_route
+    profile = Hive::AgentProfiles.lookup(:opencode)
+    resolution = Hive::ModelRouting.resolve(
+      models: { "plan" => { "model" => "claude-sonnet-4-5" } },
+      stage: "plan",
+      provider: :opencode
+    )
+
+    error = assert_raises(Hive::ConfigError) do
+      profile.routing_arguments(resolution)
+    end
+
+    assert_match(/exact OpenCode provider\/model route/, error.message)
   end
 
   def test_codex_routed_model_and_effort_can_be_rendered_independently
@@ -905,6 +1000,8 @@ class AgentProfileTest < Minitest::Test
     profile = make_profile(env_bin_override_key: "HIVE_CLAUDE_BIN")
     overridden = profile.with_overrides("env_override" => "MY_CUSTOM_BIN")
     assert_equal "MY_CUSTOM_BIN", overridden.env_bin_override_key
+    assert_equal %w[MY_CUSTOM_BIN HIVE_CLAUDE_BIN],
+                 overridden.runtime_profile.env_bin_override_keys
   end
 
   def test_with_overrides_preserves_prompt_style

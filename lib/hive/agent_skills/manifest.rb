@@ -11,14 +11,17 @@ module Hive
     # data-only: adapters map its closed action names to argv arrays.
     class Manifest
       SUPPORTED_SCHEMA_VERSION = 1
-      AGENTS = %w[claude codex pi grok].freeze
+      AGENTS = %w[claude codex pi grok opencode].freeze
       ACTIONS = %w[
         marketplace_add plugin_install plugin_enable plugin_update package_install package_update
       ].freeze
-      CONFIG_HOMES = %w[CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME].freeze
+      CONFIG_HOMES = %w[
+        CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME
+        OPENCODE_CONFIG_DIR
+      ].freeze
       SAFE_ID = /\A[a-z0-9][a-z0-9._:-]*\z/
       SAFE_SOURCE = %r{\A(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?)\z}
-      SAFE_PACKAGE = %r{\A(?:[A-Za-z0-9][A-Za-z0-9_.-]*|[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?)\z}
+      SAFE_PACKAGE = %r{\A(?:[A-Za-z0-9][A-Za-z0-9_.-]*|[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?|[A-Za-z0-9_.-]+@git\+https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git#[A-Za-z0-9_.-]+)\z}
       SAFE_RELATIVE_PATH = %r{\A(?!/)(?!.*(?:\A|/)\.\.(?:/|\z))[A-Za-z0-9._/-]+\z}
       CLAUDE_ALIAS_ROOT = ".claude/commands/"
 

@@ -44,6 +44,7 @@ module Hive
         HIVE_CODEX_BIN
         HIVE_GROK_BIN
         HIVE_PI_BIN
+        HIVE_OPENCODE_BIN
         HIVE_BIN
         HIVE_INVOKED_BIN
         HIVE_GH_BIN
@@ -102,6 +103,7 @@ module Hive
           "HIVE_CODEX_BIN" => File.expand_path(fake_claude_path),
           "HIVE_GROK_BIN" => File.expand_path(fake_claude_path),
           "HIVE_PI_BIN" => File.expand_path(fake_claude_path),
+          "HIVE_OPENCODE_BIN" => File.expand_path(fake_claude_path),
           "HIVE_BIN" => Paths.hive_bin,
           "HIVE_INVOKED_BIN" => Paths.hive_bin,
           "HIVE_GH_BIN" => Paths.gh_shim,

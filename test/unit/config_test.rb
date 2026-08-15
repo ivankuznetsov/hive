@@ -5328,6 +5328,70 @@ class ConfigTest < Minitest::Test
     Hive::Config.singleton_class.send(:private, :warn_deprecated_bot_dedupe!)
   end
 
+  def test_opencode_is_reachable_on_every_registered_role_without_changing_defaults
+    assert_equal %w[claude codex], Hive::Config::DEFAULT_GLOBAL_AGENTS
+    assert_equal "claude", Hive::Config::DEFAULTS.dig("execute", "agent")
+    assert_equal "claude", Hive::Config::DEFAULTS.dig("plan", "agent")
+
+    Hive::Config::ROLE_AGENT_PATHS.each do |path|
+      with_tmp_dir do |project|
+        state = File.join(project, ".hive-state")
+        FileUtils.mkdir_p(state)
+        File.write(
+          File.join(project, "opencode.json"),
+          JSON.generate(
+            "model" => "anthropic/claude-sonnet-4-5",
+            "provider" => { "anthropic" => { "npm" => "@ai-sdk/anthropic" } }
+          )
+        )
+        role = path.reverse.reduce("opencode") { |value, key| { key => value } }
+        config = role.merge(
+          "permissions" => "read-only",
+          "agents" => {
+            "opencode" => {
+              "config_path" => "opencode.json",
+              "credential_env" => [ "ANTHROPIC_API_KEY" ],
+              "isolation" => "hermetic"
+            }
+          }
+        )
+        File.write(File.join(state, "config.yml"), config.to_yaml)
+
+        loaded = Hive::Config.load(project)
+
+        assert_equal "opencode", loaded.dig(*path), path.join(".")
+        assert_equal File.join(project, "opencode.json"),
+                     Hive::AgentProfiles.lookup(:opencode, cfg: loaded)
+                       .opencode_configuration_path
+      end
+    end
+  end
+
+  def test_agent_override_validation_rejects_unknown_profiles_and_non_hash_values
+    unknown = assert_raises(Hive::ConfigError) do
+      Hive::Config.send(
+        :validate_agent_overrides!,
+        { "agents" => { "future-agent" => {} } }, "/tmp/config.yml"
+      )
+    end
+    assert_match(/is not a registered AgentProfile/, unknown.message)
+
+    malformed = assert_raises(Hive::ConfigError) do
+      Hive::Config.send(
+        :validate_agent_overrides!,
+        { "agents" => { "opencode" => [] } }, "/tmp/config.yml"
+      )
+    end
+    assert_match(/agents\.opencode.*must be a Hash/, malformed.message)
+  end
+
+  def test_opencode_plan_uses_native_compound_engineering_skill
+    assert_equal "/ce-plan",
+                 Hive::Config.stage_skill(
+                   { "plan" => { "agent" => "opencode" } }, "plan"
+                 )
+  end
+
   def test_stage_resource_limit_resolution_retains_value_source_and_scope
     explicit = {
       "budget_usd" => { "execute" => 12 },

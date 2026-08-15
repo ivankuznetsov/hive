@@ -42,16 +42,31 @@ long-lived RubyGems API key to GitHub. Before accepting the first component
 release as ready, verify the component tag ruleset and environment protection
 in repository settings; a protected `main` branch alone is insufficient.
 
+Candidate validation is intentionally available before release authority. From
+the component directory, run `bin/build-candidate <output-directory>`, retain
+the emitted SHA-256, and run `bin/verify-candidate <exact-gem> <sha256>`. The
+verifier installs those exact bytes into a fresh gem home and exercises the
+standalone require, profile inventory, executable version, and JSON probe.
+Package tests and mirror projection/install smokes may run at this stage.
+
+`bin/release-preflight` is not a candidate-build command: it requires a real
+`components/agent-cli-runtime/vX.Y.Z` tag, an exact full commit, a clean
+checkout, and protected-main reachability. Do not fabricate or create a tag
+merely to run it during implementation. A candidate-only task stops before tag
+creation, RubyGems publication, mirror release, deployment, or downstream
+Hive release.
+
 To publish an approved version:
 
 1. Update
    `components/agent-cli-runtime/lib/agent_cli_runtime/version.rb` and its
    package changelog in a package PR. Run the package tests and exact candidate
    verifier.
-2. Merge the package PR. Hive consumes the compatible 0.1.x line directly, so
-   ordinary patch releases require no second implementation or dependency
-   cutover. A future incompatible release needs a separate Hive adapter change,
-   held until the new package bytes pass remote verification.
+2. Merge the source feature without selecting a release version. Once a
+   component release is explicitly authorized, update its version and
+   changelog, publish the verified bytes, then advance Hive's dependency in a
+   separate compatibility change. This keeps packaged Web installs resolvable
+   from RubyGems throughout the sequence.
 3. Record the full protected-`main` commit and verify that the version is not
    already present on RubyGems. Confirm the component tag ruleset is active and
    that `agent-cli-runtime-release` still requires the intended reviewers and

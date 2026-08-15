@@ -30,6 +30,7 @@ That placement deliberately excludes sessions launched outside Hive and avoids s
 | `codex` | accepts known final result / turn-completed JSON shapes and zero-fills when a usage payload is absent. |
 | `pi` | accepts known final result / completion JSON shapes and zero-fills when a usage payload is absent. |
 | `grok` | accepts a real usage object if a future streaming event supplies one; current `end` events contain no counts, so the extractor returns nil rather than fabricating zero usage. |
+| `opencode` | uses the strict run/export normalizer. Sanitized export supplies authoritative input, output, cache-read, cache-write, reasoning, and cost values; unavailable fields remain nil and numeric zero remains zero. |
 
 Codex and Pi payload shapes still need refinement from captured real streams; the zero-fill path keeps one row per Hive spawn without pretending unknown usage is known. The follow-up is tracked in [[gaps]].
 
@@ -48,8 +49,10 @@ Schema:
 | Column | Meaning |
 |--------|---------|
 | `id` | UUID primary key. |
-| `agent` | Profile name, for example `claude`, `codex`, `pi`, or `grok`. |
-| `model` | Best-effort model name from the usage event. |
+| `agent` | Profile name, for example `claude`, `codex`, `pi`, `grok`, or `opencode`. |
+| `model` | Best-effort model name from the usage event; OpenCode uses its observed actual route when export proved it. |
+| `requested_backend` / `requested_model` | OpenCode's requested nested route, stored separately from actual identity. |
+| `actual_backend` / `actual_model` | Sanitized-export-observed OpenCode route, or nil when unavailable. |
 | `project_slug` | `task.project_name`, intentionally path-independent so multiple checkouts collapse. |
 | `task_slug` | Hive task slug. |
 | `stage` | Stage name at spawn time, for example `4-execute`. |
@@ -57,7 +60,9 @@ Schema:
 | `task_generation` | Nullable task generation bound to that attempt/session observation. |
 | `source` | Nullable symbolic producer of the attributed observation. |
 | `started_at` / `ended_at` | UTC ISO8601 timestamps. |
-| `input` / `output` / `cached` | Token counters. Claude cached tokens are cache-read plus cache-creation input tokens. |
+| `input` / `output` / `cached` | Backward-compatible aggregate counters. Claude cached tokens are cache-read plus cache-creation input tokens. Unknown detailed values store numeric zero here only for legacy aggregation and have a false availability flag. |
+| `cache_read` / `cache_write` / `reasoning` / `cost` | Nullable OpenCode details; cache directions are never collapsed when only one is available. |
+| `*_available` | Per-field evidence flags preserving unavailable separately from numeric zero. Existing databases gain these additive columns in place; legacy input/output/cached rows are marked available and newly introduced details unavailable. |
 
 Indexes cover `started_at`, `(project_slug, started_at)`, and `(task_slug,
 started_at)`. Schema v2 evolves the existing database transactionally through
@@ -93,7 +98,7 @@ attempt. See [[modules/task_workspace]].
 
 The scope hash accepts `project_slug:` and `task_slug:` filters. `task_slug` is normally paired with `project_slug` by the TUI so same-named tasks in different projects stay distinguishable.
 
-The aggregate also returns `:patrol` buckets by summing rows whose `stage` starts with `patrol` **or** `refactor-patrol`, honoring the same scope and time-window filters. This is a cross-cutting attribution bucket: patrol tokens still belong to their actual agent rows (`claude`, `codex`, `pi`, or `grok`) and still contribute to `TOTAL`; the patrol bucket is not added into `TOTAL` a second time.
+The aggregate also returns `:patrol` buckets by summing rows whose `stage` starts with `patrol` **or** `refactor-patrol`, honoring the same scope and time-window filters. This is a cross-cutting attribution bucket: patrol tokens still belong to their actual agent rows (`claude`, `codex`, `pi`, `grok`, or `opencode`) and still contribute to `TOTAL`; the patrol bucket is not added into `TOTAL` a second time.
 
 `Hive::UsageDb.patrol_activity` remains a current-day telemetry view. It returns
 input/output/cached counts, aggregate Patrol launches, ordinary/architecture
@@ -126,7 +131,7 @@ The tuple is `input/output/cached`. Units use `k` and `M` with compact one-decim
 - project when the left pane is focused on a project,
 - task when the right pane has a focused row.
 
-Press `T` in grid mode to open the full-screen token matrix. It renders `claude`, `codex`, `pi`, `grok`, `patrol`, and `TOTAL` rows across `today`, `7d`, `30d`, and `all`. The `patrol` row is the attribution lens described above, not an extra summand. In the stats mode:
+Press `T` in grid mode to open the full-screen token matrix. It renders `claude`, `codex`, `pi`, `grok`, `opencode`, `patrol`, and `TOTAL` rows across `today`, `7d`, `30d`, and `all`. The `patrol` row is the attribution lens described above, not an extra summand. In the stats mode:
 
 - `Left` / `Right` or `h` / `l` drill between all, project, and task scope.
 - `Up` / `Down` or `k` / `j` select the project or task at the current drill level.

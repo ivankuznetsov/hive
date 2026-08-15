@@ -33,7 +33,7 @@ class AgentCliRuntimeCliTest < Minitest::Test
 
     assert_includes [ 0, 1 ], status.exitstatus
     payload = JSON.parse(out)
-    assert_equal %w[claude codex pi grok],
+    assert_equal %w[claude codex pi grok opencode],
                  payload.fetch("probes").map { |probe| probe.fetch("provider") }
   end
 
@@ -52,7 +52,7 @@ class AgentCliRuntimeCliTest < Minitest::Test
 
     assert_equal 64, status.exitstatus
     assert_match(/unknown provider/, err)
-    assert_match(/claude, codex, pi, grok/, err)
+    assert_match(/claude, codex, pi, grok, opencode/, err)
     assert_match(/Usage:/, err)
   end
 

@@ -7,7 +7,8 @@ module Hive
         claude: { model: "sonnet", pin_model: true }.freeze,
         codex: { model: "gpt-5.6-terra", pin_model: true }.freeze,
         pi: { model: nil, pin_model: false }.freeze,
-        grok: { model: nil, pin_model: false }.freeze
+        grok: { model: nil, pin_model: false }.freeze,
+        opencode: { model: nil, pin_model: true }.freeze
       }.freeze
 
       module_function

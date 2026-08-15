@@ -108,7 +108,8 @@ not warn.
 
 ## Agents
 
-Hive has built-in agent profiles for `claude`, `codex`, `pi`, and `grok`. The
+Hive has built-in agent profiles for `claude`, `codex`, `pi`, `grok`, and
+`opencode`. The
 published `agent-cli-runtime` gem owns each CLI's compatibility facts; Hive's
 profile wrapper adds workflow policy such as skills, routing, and status
 detection. Stage runners use CLI-managed subscription/session state and scrub
@@ -116,6 +117,15 @@ ambient provider API credentials before spawning. Grok runs headlessly with
 `grok -p <prompt> --always-approve --output-format streaming-json`, honors an
 absolute `GROK_HOME`, and lets an absolute `GROK_AUTH_PATH` select the session
 file directly with higher precedence.
+
+OpenCode is selected nowhere by default. When opted in, Hive requires
+OpenCode 1.18.16 or newer, an exact nested `provider/model`, an explicit
+non-secret config and named credential source, and a non-yolo permission
+scope. The runtime prepares private config/data/cache/state homes, performs a
+local route-aware probe with remote model refresh disabled, runs one main
+process, correlates its terminal message with one sanitized session export,
+and removes the invocation-owned overlay in the process owner's `ensure` path.
+Requested and observed OpenCode routes remain separate durable evidence.
 
 Default new-project setup uses `claude` for planning, `codex` for execute, a normal reviewer set that can include Claude, Codex, and PR review toolkit agents, and a narrower patrol PR reviewer set that defaults to Codex only. The profile details live in [wiki/modules/agent_profile.md](../wiki/modules/agent_profile.md).
 
@@ -128,7 +138,7 @@ The initial managed set is:
 
 | Package | Capabilities | Agents |
 |---|---|---|
-| `compound-engineering@compound-engineering-plugin` | `ce-brainstorm`, `ce-code-review`, `ce-test-browser` | Claude, Codex, Pi |
+| `compound-engineering@compound-engineering-plugin` | `ce-brainstorm`, `ce-plan`, `ce-code-review`, `ce-test-browser` | Claude, Codex, Pi, Grok, OpenCode |
 | `llm-wiki` | `wiki-plan` | Claude, Codex, Pi |
 | `pr-review-toolkit@claude-plugins-official` | `pr-review-toolkit:review-pr` | Claude |
 

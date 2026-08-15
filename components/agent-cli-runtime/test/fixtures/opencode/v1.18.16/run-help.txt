@@ -1,0 +1,16 @@
+opencode run [message..]
+
+run opencode with a message
+
+Positionals:
+  message  message to send  [array] [default: []]
+
+Options:
+  -h, --help         show help
+      --pure         run without external plugins
+  -m, --model        model to use in the format of provider/model
+      --format       format: default (formatted) or json (raw JSON events)
+  -f, --file         file(s) to attach to message
+      --dir          directory to run in
+      --variant      model variant (provider-specific reasoning effort)
+      --auto         auto-approve permissions that are not explicitly denied (dangerous!)

@@ -1,0 +1,3 @@
+{"type":"step_start","timestamp":1786500000000,"sessionID":"ses_contract_one","part":{"id":"prt_start_one","sessionID":"ses_contract_one","messageID":"msg_assistant_final","type":"step-start"}}
+{"type":"text","timestamp":1786500000001,"sessionID":"ses_contract_one","part":{"id":"prt_text_one","sessionID":"ses_contract_one","messageID":"msg_assistant_final","type":"text","text":"Done.","time":{"start":1786500000000,"end":1786500000001}}}
+{"type":"step_finish","timestamp":1786500000002,"sessionID":"ses_contract_one","part":{"id":"prt_finish_one","sessionID":"ses_contract_one","messageID":"msg_assistant_final","type":"step-finish","reason":"stop","cost":0.0,"tokens":{"total":7,"input":5,"output":2,"reasoning":0,"cache":{"read":2,"write":0}}}}

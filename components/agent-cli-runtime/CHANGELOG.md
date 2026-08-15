@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Add OpenCode `1.18.16+` as a fifth immutable built-in profile with exact
+  `provider/model` routing and faithful model-variant validation.
+- Add route-aware offline probing for the required run/export flags, selected
+  authentication source, cached model inventory, and exact requested route.
+- Add invocation-owned OpenCode config/data/cache/state overlays with
+  deny-first `read-only` and `workspace-write` policies, explicit credential
+  forwarding, owner-private resources, and idempotent cleanup.
+- Add strict run/export correlation and typed outcomes for completion,
+  authentication/configuration/CLI failure, malformed output, cancellation,
+  and timeout while preserving requested versus actual route identity.
+- Preserve unavailable separately from numeric zero for input, output,
+  cache-read, cache-write, reasoning, and cost evidence.
+- Keep process spawning, streaming, timeout/cancellation supervision,
+  process-tree cleanup, retries, and post-run inspection execution with the
+  caller; the component returns commands and normalizes captured evidence.
+
 ## 0.1.1 - 2026-08-11
 
 - Expose each profile's immutable credential-environment key inventory so

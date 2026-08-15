@@ -1,0 +1,2 @@
+{"type":"text","timestamp":1786500000500,"sessionID":"ses_contract_bad_terminal","part":{"id":"prt_text_bad","sessionID":"ses_contract_bad_terminal","messageID":"msg_assistant_final","type":"text","text":"Looks valid until the terminal event.","time":{"start":1786500000499,"end":1786500000500}}}
+{"type":"step_finish","timestamp":1786500000501,"sessionID":"ses_contract_bad_terminal","part":{"id":"prt_finish_bad","sessionID":"ses_contract_bad_terminal","messageID":"msg_assistant_final","type":"step-finish","reason":"stop","cost":0.0}}

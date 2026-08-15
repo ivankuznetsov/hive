@@ -13,6 +13,10 @@ module Hive
       POLL_INTERVAL_SEC = 0.01
       TERM_GRACE_SEC = 0.5
       REAP_GRACE_SEC = 0.2
+      RUBY_TOOLCHAIN_ENVIRONMENT = %w[
+        BUNDLE_BIN_PATH BUNDLE_GEMFILE BUNDLE_PATH BUNDLER_SETUP BUNDLER_VERSION
+        GEM_HOME GEM_PATH RUBYLIB RUBYOPT
+      ].freeze
 
       def call(argv, env: {}, timeout: 10, chdir: nil)
         timeout = Float(timeout)
@@ -20,7 +24,8 @@ module Hive
 
         options = { pgroup: true }
         options[:chdir] = chdir if chdir
-        stdin, stdout, stderr, waiter = Open3.popen3(env, *argv, **options)
+        child_env = RUBY_TOOLCHAIN_ENVIRONMENT.to_h { |key| [ key, nil ] }.merge(env)
+        stdin, stdout, stderr, waiter = Open3.popen3(child_env, *argv, **options)
         stdin.close
         readers = [ capture_reader(stdout), capture_reader(stderr) ]
         deadline = monotonic_now + timeout

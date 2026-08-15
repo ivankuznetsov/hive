@@ -112,6 +112,7 @@ module Hive
           "claude" => "/plan",
           "codex" => "/llm-wiki:wiki-plan",
           "pi" => "/llm-wiki:wiki-plan",
+          "opencode" => "/ce-plan",
           "default" => "/llm-wiki:wiki-plan"
         }
       },
@@ -199,6 +200,14 @@ module Hive
           "bin" => "grok",
           "env_override" => "HIVE_GROK_BIN",
           "min_version" => "0.2.90"
+        },
+        "opencode" => {
+          "bin" => "opencode",
+          "env_override" => "HIVE_OPENCODE_BIN",
+          "min_version" => "1.18.16",
+          "credential_env" => [],
+          "plugins" => [],
+          "isolation" => "hermetic"
         }
       },
       # Configuration for the 6-review stage's autonomous loop. Each role
@@ -697,6 +706,24 @@ module Hive
     # config-load time but rejected at dispatch with a pointer to
     # review.ci.command (Hive::Reviewers.dispatch).
     REVIEWER_KINDS = %w[agent codex_review linter].freeze
+    # The agent backends `hive setup` can persist globally, in canonical
+    # listing/storage order. Every method that filters or reorders a
+    # selection iterates this list so the on-disk order is stable
+    # regardless of the order the operator typed. The names are frozen so
+    # callers that receive them back from `normalize_global_agents` cannot
+    # mutate the shared constant in place.
+    GLOBAL_AGENT_BACKENDS = %w[claude codex pi grok opencode].map(&:freeze).freeze
+    # Recommended default selection when the operator accepts the prompt
+    # default or runs non-interactively — Claude + Codex; Pi is opt-in.
+    DEFAULT_GLOBAL_AGENTS = %w[claude codex].map(&:freeze).freeze
+    # Boot-time parity guard, the analogue of Init::Prompts' CHOICES/MODES
+    # check (init/prompts.rb): a recommended default that isn't also a
+    # known backend would let `default_global_agents` emit a value that
+    # `normalize_global_agents`/`write_global_agents!` then reject. Enforce
+    # the subset here rather than letting it surface only as a runtime
+    # ConfigError. Single-line modifier (like the sibling guard) so the
+    # never-taken raise stays on the evaluated line for the coverage gate.
+    raise "DEFAULT_GLOBAL_AGENTS must be a subset of GLOBAL_AGENT_BACKENDS: #{(DEFAULT_GLOBAL_AGENTS - GLOBAL_AGENT_BACKENDS).inspect} not in #{GLOBAL_AGENT_BACKENDS.inspect}" unless (DEFAULT_GLOBAL_AGENTS - GLOBAL_AGENT_BACKENDS).empty?
     # The last two stages of `Hive::Stages::DIRS` (lib/hive/stages.rb).
     # Kept as an explicit policy literal rather than derived via
     # `Hive::Stages::DIRS.last(2)` so a stage rename/addition is a
@@ -1934,6 +1961,7 @@ module Hive
       validate_review_fix_auto_commit!(cfg, source_path)
       validate_artifact_evidence!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
+      validate_agent_overrides!(cfg, source_path)
       validate_provider_routing!(cfg, source_path)
       validate_claude_mode!(cfg, source_path)
       validate_claude_permission_mode!(cfg, source_path)
@@ -2958,6 +2986,25 @@ module Hive
       ROLE_AGENT_PATHS.each do |path|
         agent = cfg.dig(*path)
         validate_agent_name!(agent, path.join("."), source_path)
+      end
+    end
+
+    def validate_agent_overrides!(cfg, source_path)
+      agents = cfg["agents"]
+      return unless agents.is_a?(Hash)
+
+      agents.each do |name, overrides|
+        unless Hive::AgentProfiles.registered?(name)
+          raise ConfigError,
+                "agents.#{name} in #{describe_source(source_path)} is not a " \
+                "registered AgentProfile"
+        end
+        unless overrides.is_a?(Hash)
+          raise ConfigError,
+                "agents.#{name} in #{describe_source(source_path)} must be a Hash"
+        end
+
+        Hive::AgentProfiles.lookup(name, cfg: cfg)
       end
     end
 

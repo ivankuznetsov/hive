@@ -1,0 +1,1 @@
+{"type":"error","timestamp":1786500000300,"sessionID":"ses_contract_auth_error","error":{"name":"ProviderAuthError","data":{"providerID":"anthropic","message":"Authentication is not configured for the selected provider"}}}

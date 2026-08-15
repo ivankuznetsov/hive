@@ -51,7 +51,7 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     end
 
     assert status.success?, err
-    assert_equal "claude,codex,pi,grok\n", out
+    assert_equal "claude,codex,pi,grok,opencode\n", out
   end
 
   def test_non_default_builtin_compile_transport_matches_hive_boundary
@@ -323,7 +323,7 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     end
   end
 
-  def test_hive_cutover_uses_the_released_dependency_and_package_profiles
+  def test_hive_dependency_stays_on_the_published_line_until_release_authority
     spec = Gem::Specification.load(File.expand_path("../../hive.gemspec", __dir__))
     dependency = spec.runtime_dependencies.find do |candidate|
       candidate.name == "agent-cli-runtime"
@@ -331,11 +331,53 @@ class AgentCliRuntimeComponentTest < Minitest::Test
 
     refute_nil dependency
     assert dependency.requirement.satisfied_by?(Gem::Version.new("0.1.1"))
+    refute dependency.requirement.satisfied_by?(Gem::Version.new("0.2.0"))
     assert File.read(File.expand_path("../../lib/hive.rb", __dir__))
                .include?('require "agent_cli_runtime"')
-    %i[claude codex pi grok].each do |provider|
+    %i[claude codex pi grok opencode].each do |provider|
       assert_same AgentCliRuntime::Profiles.fetch(provider),
                   Hive::AgentProfiles.lookup(provider).runtime_profile
     end
+  end
+
+  def test_opencode_typed_result_abi_and_normalization_match_hive_boundary
+    {
+      Route: AgentCliRuntime::Route,
+      OpenCodePreparationRequest: AgentCliRuntime::OpenCodePreparationRequest,
+      PreparedInvocation: AgentCliRuntime::PreparedInvocation,
+      TerminationEvidence: AgentCliRuntime::TerminationEvidence,
+      CapturedResult: AgentCliRuntime::CapturedResult,
+      ParsedRun: AgentCliRuntime::ParsedRun,
+      NormalizedUsage: AgentCliRuntime::NormalizedUsage,
+      RouteIdentity: AgentCliRuntime::RouteIdentity,
+      InspectionCommand: AgentCliRuntime::InspectionCommand,
+      NormalizedOutcome: AgentCliRuntime::NormalizedOutcome
+    }.each do |hive_name, component_value|
+      assert_same component_value,
+                  Hive::AgentRuntime.const_get(hive_name), hive_name
+    end
+
+    fixture_root = File.join(
+      COMPONENT_ROOT, "test", "fixtures", "opencode", "v1.18.16"
+    )
+    stdout = File.read(File.join(fixture_root, "run-one-step.jsonl"))
+    export = File.read(File.join(
+      fixture_root, "session-export-matching.json"
+    ))
+    termination = AgentCliRuntime::TerminationEvidence.new(exit_code: 0)
+    captured = AgentCliRuntime::CapturedResult.new(
+      stdout:, stderr: "", termination:, inspection_output: export
+    )
+
+    public_parsed = AgentCliRuntime.parse_run(:opencode, stdout:)
+    hive_parsed = Hive::AgentRuntime.parse_run(:opencode, stdout:)
+    assert_equal public_parsed.to_h, hive_parsed.to_h
+    public_outcome = AgentCliRuntime.normalize(
+      :opencode, captured, requested_route: "anthropic/claude-sonnet-4-5"
+    )
+    hive_outcome = Hive::AgentRuntime.normalize(
+      :opencode, captured, requested_route: "anthropic/claude-sonnet-4-5"
+    )
+    assert_equal public_outcome.to_h, hive_outcome.to_h
   end
 end

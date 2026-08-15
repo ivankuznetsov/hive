@@ -187,6 +187,10 @@ module Hive
           )
         end
 
+        Hive::Stages::Base.record_deferred_opencode_observation(
+          task, cfg, "execute", impl_result
+        )
+
         if agent_failed?(impl_result)
           return mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
         end
@@ -414,6 +418,20 @@ module Hive
           cfg, "execute", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
         )
+        launch_arguments = Hive::Stages::Base.implementation_launch_arguments(
+          identity, profile
+        )
+        # Direct/manual stage runs can legitimately lack an Attempts::Context,
+        # so there is no durable Selection to carry models.execute_implementation
+        # into the spawn. Resolve that same closed routing cell here instead of
+        # leaving route-required profiles such as OpenCode with a nil model.
+        if identity.nil?
+          launch_arguments[:routing_arguments] =
+            Hive::Stages::Base.model_routing_arguments(
+              cfg, "execute_implementation", profile,
+              current: Hive::Stages::Base.model_routing_current(cfg["execute"])
+            )
+        end
         # 4-execute's lifecycle contract is "stage runner writes
         # EXECUTE_COMPLETE after a clean spawn" (see run_pass below),
         # not "the agent writes its own marker" — `templates/
@@ -437,10 +455,11 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
           log_label: "execute-impl",
           profile: profile,
+          implementation_stage: "execute",
           agent_custody: agent_custody,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only,
-          **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
+          **launch_arguments
         }
         result = if profile.name == :claude
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(
@@ -450,9 +469,13 @@ module Hive
             session_name: Hive::ClaudeLauncher.tmux_session_name("4-execute", task) # coding-scoped: coding execute stage tmux session
           )
         else
-          Hive::Stages::Base.spawn_agent(task, **kwargs)
+          Hive::Stages::Base.spawn_agent(
+            task, **kwargs, cfg: cfg,
+            defer_implementation_observation: true
+          )
         end
-        result&.merge(implementation_provider: profile.name.to_s)
+        merged = result&.merge(implementation_provider: profile.name.to_s)
+        merged
       end
 
       def record_tamper(task, tampered, who:, restored: false, restore_error: nil)

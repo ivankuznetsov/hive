@@ -103,6 +103,37 @@ module AgentCliRuntime
       home_path(home, ".grok", "auth.json")
     end
 
+    def opencode_auth_path(home:, env:)
+      data_home = env["XDG_DATA_HOME"]
+      if !data_home.to_s.empty?
+        unless File.absolute_path?(data_home)
+          raise ArgumentError, "XDG_DATA_HOME must be absolute"
+        end
+
+        return File.join(data_home, "opencode", "auth.json")
+      end
+
+      home_path(home, ".local", "share", "opencode", "auth.json")
+    end
+
+    def opencode_model_arguments(model)
+      route = Route.parse(model)
+      [ "--model", route.to_s ]
+    end
+
+    OPENCODE_VARIANTS = %w[minimal low medium high xhigh max].freeze
+
+    def opencode_variant_arguments(variant)
+      normalized = variant.to_s
+      unless OPENCODE_VARIANTS.include?(normalized)
+        raise ArgumentError,
+              "unsupported OpenCode variant #{variant.inspect}; expected one of " \
+              "#{OPENCODE_VARIANTS.join(', ')}"
+      end
+
+      [ "--variant", normalized ]
+    end
+
     CLAUDE = Profile.new(
       name: :claude,
       bin_default: "claude",
@@ -242,7 +273,45 @@ module AgentCliRuntime
       end
     )
 
-    PROFILES = [ CLAUDE, CODEX, PI, GROK ].to_h do |profile|
+    OPENCODE = Profile.new(
+      name: :opencode,
+      bin_default: "opencode",
+      env_bin_override_keys: %w[
+        AGENT_CLI_RUNTIME_OPENCODE_BIN HIVE_OPENCODE_BIN
+      ],
+      headless_flag: "run",
+      output_format_flags: [ "--format", "json" ],
+      version_flag: "--version",
+      min_version: "1.18.16",
+      model_argument_builder: ->(model) { opencode_model_arguments(model) },
+      effort_argument_builder:
+        ->(variant) { opencode_variant_arguments(variant) },
+      launcher_identity: "opencode-cli/v1",
+      credential_environment_keys: PI_CREDENTIAL_ENVIRONMENT_KEYS,
+      configuration_environment_key: "OPENCODE_CONFIG_DIR",
+      default_configuration_directory: ".config/opencode",
+      permission_policy_required: true,
+      result_parser: OpenCode::ResultParser,
+      cli_capabilities: {
+        json_events: [ "run", "--format" ],
+        working_directory: [ "run", "--dir" ],
+        model_variant: [ "run", "--variant" ],
+        pure: [ "run", "--pure" ],
+        sanitized_export: [ "export", "--sanitize" ]
+      },
+      auth_configuration_probe: lambda do |home:, env:|
+        if env_configured?(env, *PI_CREDENTIAL_ENVIRONMENT_KEYS)
+          AuthConfiguration.new(status: :configured, source: "environment")
+        else
+          auth_from_file(
+            opencode_auth_path(home:, env:),
+            source: "opencode auth.json"
+          )
+        end
+      end
+    )
+
+    PROFILES = [ CLAUDE, CODEX, PI, GROK, OPENCODE ].to_h do |profile|
       [ profile.name, profile ]
     end.freeze
     PROVIDER_ORDER = PROFILES.keys.freeze

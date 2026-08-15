@@ -27,7 +27,8 @@ module AgentCliRuntime
                 :effort_argument_builder, :launcher_identity,
                 :cli_capabilities, :declared_capability_support,
                 :credential_environment_keys, :configuration_environment_key,
-                :default_configuration_directory
+                :default_configuration_directory,
+                :permission_policy_required, :result_parser
 
     def initialize(name:, bin_default:, headless_flag:, version_flag:,
                    env_bin_override_keys: [], permission_skip_flag: nil,
@@ -39,7 +40,8 @@ module AgentCliRuntime
                    usage_extractor: nil, auth_configuration_probe: nil,
                    cli_capabilities: {}, raw_cli_arguments_supported: false,
                    credential_environment_keys: [], configuration_environment_key: nil,
-                   default_configuration_directory: nil)
+                   default_configuration_directory: nil,
+                   permission_policy_required: false, result_parser: nil)
       normalized_prompt_style = prompt_style.to_sym
       unless PROMPT_STYLES.include?(normalized_prompt_style)
         raise ArgumentError,
@@ -78,6 +80,8 @@ module AgentCliRuntime
       @default_configuration_directory = optional_relative_directory(
         default_configuration_directory
       )
+      @permission_policy_required = permission_policy_required == true
+      @result_parser = result_parser
       @declared_capability_support = build_declared_capability_support
       freeze
     end
@@ -101,6 +105,10 @@ module AgentCliRuntime
 
         raise ArgumentError,
               "agent profile #{@name.inspect} cannot enforce read-only sandboxing"
+      end
+      if permission_mode.nil? && @permission_policy_required
+        raise ConfigurationError,
+              "agent profile #{@name.inspect} requires an explicit OpenCode permission policy"
       end
       return [] unless @permission_skip_flag
       return [ @permission_skip_flag ] unless @name == :claude && permission_mode
@@ -213,6 +221,26 @@ module AgentCliRuntime
       nil
     end
 
+    def parse_run(stdout)
+      unless @result_parser
+        raise UnsupportedCapability,
+              "agent profile #{@name.inspect} has no strict result parser"
+      end
+
+      @result_parser.parse_run(stdout)
+    end
+
+    def normalize_captured_result(captured, requested_route:)
+      unless @result_parser
+        raise UnsupportedCapability,
+              "agent profile #{@name.inspect} has no strict result parser"
+      end
+
+      @result_parser.normalize(
+        captured, requested_route: requested_route, profile: self
+      )
+    end
+
     def configuration_directory(home: nil, env: ENV)
       if @configuration_environment_key
         configured = env[@configuration_environment_key].to_s
@@ -248,6 +276,12 @@ module AgentCliRuntime
               "(missing #{missing.join(', ')})"
       end
       flags.dup
+    end
+
+    def capture_local(*arguments, env: ENV, timeout_sec: CAPTURE_TIMEOUT_SECONDS)
+      bounded_capture3(
+        bin(env:), *arguments, timeout_sec: timeout_sec, env: env
+      )
     end
 
     private

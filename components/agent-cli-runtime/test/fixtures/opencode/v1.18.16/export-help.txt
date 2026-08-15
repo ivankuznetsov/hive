@@ -1,0 +1,11 @@
+opencode export [sessionID]
+
+export session data as JSON
+
+Positionals:
+  sessionID  session id to export
+
+Options:
+  -h, --help        show help
+      --pure        run without external plugins
+      --sanitize    redact sensitive transcript and file data

@@ -953,6 +953,35 @@ class SchemaFilesTest < Minitest::Test
                  "Hive::Schemas::DIAGNOSTIC_GENERATORS"
   end
 
+  def test_hive_status_accepts_observed_opencode_identity_with_nullable_usage
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    schemer = JSONSchemer.schema(doc.dig("$defs", "ImplementationIdentityStage"))
+    identity = {
+      "provider" => "opencode",
+      "model" => "anthropic/claude-sonnet-4-5",
+      "requested_effort" => "high",
+      "effective_effort" => "high",
+      "effort_supported" => true,
+      "source" => "persisted_execute",
+      "originating_attempt" => "attempt-1",
+      "resolved_attempt" => "attempt-1",
+      "observed_attempt" => "attempt-1",
+      "requested_backend" => "anthropic",
+      "requested_model" => "claude-sonnet-4-5",
+      "actual_backend" => "anthropic",
+      "actual_model" => "claude-sonnet-4-5-20250929",
+      "route_resolution_status" => "resolved_differently",
+      "outcome_kind" => "completed",
+      "usage" => {
+        "input" => nil, "output" => 0, "cache_read" => 0,
+        "cache_write" => nil, "reasoning" => nil, "cost" => 0.0
+      },
+      "status" => "resolved"
+    }
+
+    assert_empty schemer.validate(identity).to_a
+  end
+
   def test_hive_status_diagnose_generated_by_enum_matches_schema_constant
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
     schema_enum = doc.dig("$defs", "Diagnostic", "properties", "generated_by", "enum").sort

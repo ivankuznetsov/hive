@@ -32,6 +32,17 @@ class HiveTuiViewsUsageFooterTest < Minitest::Test
     assert_includes text, "1.5k/1.2M/400k"
   end
 
+  def test_formats_unavailable_metrics_as_unknown_not_zero
+    text = Hive::Tui::Views::UsageFooter.text(
+      aggregate({
+        input: 0, output: 0, cached: 0,
+        input_available: false, cached_available: false
+      })
+    )
+
+    assert_includes text, "?/0/?"
+  end
+
   def test_render_truncates_to_width
     out = Hive::Tui::Views::UsageFooter.render(
       aggregate: aggregate({ input: 1_500, output: 1_234_000, cached: 400_000 }),

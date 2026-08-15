@@ -1,7 +1,7 @@
 ---
 title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
-source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
+source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
 updated: 2026-08-12
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
@@ -12,7 +12,7 @@ tags: [agent, profile, registry, architecture, skills, provisioning, permissions
 CLI prerequisites, verifies capabilities, extracts usage, and normalizes
 results. `Hive::AgentProfile` adds only Hive policy and preserves its
 optional-keyword custom extension contract. `Hive::AgentProfiles` remains the
-registry; its Claude, Codex, Pi, and Grok adapters reference the package's
+registry; its Claude, Codex, Pi, Grok, and OpenCode adapters reference the package's
 built-in profiles. Process lifetime, workflow selection, model routing,
 subscription binding, retries, artifact acceptance, and stage success remain
 in Hive.
@@ -60,6 +60,31 @@ Legacy callers still receive the existing mutable result Hash from
 the corresponding immutable observation without changing that return
 contract.
 
+### OpenCode process ownership
+
+OpenCode uses the component's additive prepared-invocation ABI while keeping
+process supervision in Hive. `Hive::Agent` prepares a private overlay, starts
+exactly one `opencode run` process with a selected child environment, captures
+bounded stdout and stderr, and records timeout or cancellation before parsing.
+After a zero exit it may start one non-model `opencode export --sanitize`
+inspection to correlate the terminal message with observed provider/model and
+usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that
+inspection as appropriate.
+
+Cleanup runs from the process owner's `ensure` path after preparation, spawn,
+inspection, or normalization failures. Only the prepared invocation's owned
+paths are eligible for removal; worktrees, task folders, selected config, and
+credential sources remain caller-owned. The legacy Claude, Codex, Pi, and Grok
+spawn path and mutable result shape are unchanged.
+
+Implementation-owning stages journal OpenCode's observed route and nullable
+usage only after their artifact-firewall snapshot validates. This keeps
+`task-journal.jsonl` and `task-projection.json` controller-owned: the agent
+cannot modify them, while Hive's own post-spawn observation append is not
+mistaken for agent tampering. Direct/manual execute runs without a durable
+attempt context still resolve `models.execute_implementation` for launch, but
+do not claim durable observed identity without an admitted attempt.
+
 ## `Hive::AgentProfile` — value object
 
 Shipped profiles pass `runtime_profile:` and only their Hive-owned policy.
@@ -68,11 +93,11 @@ constructs a package profile from them. Every profile freezes after init.
 
 | Kwarg | Purpose |
 |-------|---------|
-| `runtime_profile:` | Optional `AgentCliRuntime::Profile`. The four shipped profiles use the package registry directly; custom profiles may omit it and use the compatibility kwargs below. |
+| `runtime_profile:` | Optional `AgentCliRuntime::Profile`. The five shipped profiles use the package registry directly; custom profiles may omit it and use the compatibility kwargs below. |
 | `auth_configuration_required:` | Hive preflight policy. The shipped Pi and Grok adapters require a CLI subscription/session artifact; custom profiles default false. |
 | `subscription_environment(unset_value: nil)` | Builds the Hive-only child environment scrub from the package credential-name inventory while preserving explicit session-file selectors such as `GROK_AUTH_PATH`. |
 | `name:` | Symbol used by the registry. |
-| `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`). |
+| `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`, `"opencode"`). |
 | `env_bin_override_key:` | Env var name (`"HIVE_CLAUDE_BIN"` etc.) that overrides `bin_default` when set non-empty. |
 | `headless_flag:` | The `-p` / `--prompt` style flag. |
 | `prompt_style:` | `:positional`, `:headless_flag_value`, or `:stdin`; controls where the rendered prompt is delivered. Defaults to `:stdin` for a profile named `codex` (backward compatibility), otherwise `:positional`. |
@@ -124,8 +149,11 @@ constructs a package profile from them. Every profile freezes after init.
 | `raw_cli_arguments_supported?` | True only for a profile that explicitly accepts the legacy raw argv escape hatch. |
 
 The public routed capability matrix is mirrored in
-`docs/notes/headless-agent-cli-matrix.md`: Claude and Codex support model plus
-effort, Grok supports model plus effort, and Pi supports routed model only. Codex places routed
+`docs/notes/headless-agent-cli-matrix.md`: Claude, Codex, Grok, and OpenCode
+support model plus effort, while Pi supports routed model only. OpenCode model
+values are exact nested `provider/model` routes and faithful efforts render as
+`--variant`; a selected overlay config may supply the exact route when the
+stage omits it. Codex places routed
 controls before `exec`/`review`; Claude uses the same rendered flags in
 headless and tmux launches. Unsupported effective controls raise before the
 launcher performs work instead of being dropped.
@@ -201,6 +229,28 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   provisioned with Grok's own plugin install/enable/update commands. Native
   inspection runs from the target project and verifies the exact runtime skill
   source against the realpath-jailed installed plugin.
+- `opencode` — opt-in headless execution through `opencode run --format json`
+  with minimum version `1.18.16`. Every selected model is an exact nested
+  `provider/model` route; supported effort values render as `--variant` only
+  after route-aware capability validation. Hive prepares private XDG/config
+  homes, forwards only configured credential names, and maps read-only/scoped
+  stage permissions to deny-first OpenCode rules. A successful run is complete
+  only after its terminal message correlates with sanitized session export.
+  `Hive::SkillCheck::OpenCode` resolves project/user skills and explicitly
+  configured plugin roots. Setup can atomically add the pinned Compound
+  Engineering `3.21.4` plugin entry. Skill-bearing roles verify the selected
+  native source before spawn and reject a higher-precedence project/user CE
+  skill that shadows it, while normal execution never mutates the selected
+  source config. `:output_file_exists` remains the generic profile default;
+  individual Hive stages continue to select their existing status mode.
+
+For OpenCode execute, open-PR, review-fix, and review-CI attempts,
+`ImplementationIdentity::Store` appends an
+`implementation_identity_observed` event after the requested identity is
+durable. Projection and status retain the requested `model` unchanged while
+adding requested/actual backend/model, resolution status, outcome kind, and
+nullable usage from the normalized result. Actual identity is absent unless
+sanitized export supplied it.
 
 ## Used by
 
@@ -225,9 +275,11 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   mappings use a generated named filesystem permission profile with no shell
   network, MCP servers, apps, plugins, memory, hooks, or subagents. Bounded Grok
   mappings run the static CLI inside bubblewrap with only the task, package,
-  and descriptor-declared extra read roots mounted. Caller context does not
+  and descriptor-declared extra read roots mounted. Bounded OpenCode actors use
+  the same portable output-materialization boundary with an invocation-owned
+  deny-first overlay and no unrestricted shell. Caller context does not
   widen a bounded actor; only explicit `yolo` inherits the owning project root.
-  For both portable runners, Hive asks
+  For all portable runners, Hive asks
   for schema-constrained file content under a read-only policy and atomically
   writes only descriptor-authorized output paths after validating the complete
   response. Managed launches isolate the environment and inject only values
@@ -244,7 +296,7 @@ generation/selection policy and `Reconstructor` retains recovery policy.
 config)`, so project `agents.<name>.bin` overrides and profile minimum versions
 match actual stage spawns. It then pairs each profile's native inventory with
 `Hive::SkillCheck` resolution under `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
-`PI_CODING_AGENT_DIR`, or `GROK_HOME`.
+`PI_CODING_AGENT_DIR`, `GROK_HOME`, or `OPENCODE_CONFIG_DIR`.
 
 The profile is the runtime contract; `config/agent-skills.yml` is the package
 contract. Adapters use the profile's binary/version gate plus manifest-declared
@@ -258,6 +310,11 @@ deadlines own and reap a process group so timed-out descendants cannot keep
 installing in the background. Adapters do not alter the profile registry or
 make arbitrary custom profiles provisionable. See
 [[commands/doctor]] and [[commands/setup-agents]].
+
+Agent-skill subprocesses receive only the selected agent configuration homes
+and have Hive's Ruby/Bundler toolchain variables removed. This prevents a
+Ruby-scripted CLI shim from loading Hive's bundle under the selected agent
+home and matches the isolated child-environment contract used for real CLIs.
 
 ## Explicit provider-account execution and evidence
 
@@ -310,7 +367,7 @@ the attempt evidence channel.
 ## Tests
 
 - `test/unit/agent_runtime_test.rb` — immutable request/invocation/evidence
-  contracts, exact four-provider prompt transport, fail-closed unsupported
+  contracts, exact five-provider prompt transport, fail-closed unsupported
   capabilities, bounded redacted failures, and observation/usage
   normalization.
 - `test/unit/agent_profile_test.rb` — version/capability caches, env override, preflight, process-group timeout cleanup for version/help probes and stdout-inheriting descendants, workspace-write flags, and headless gate.

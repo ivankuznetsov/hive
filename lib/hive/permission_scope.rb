@@ -179,10 +179,22 @@ module Hive
     def resolve(spec, task_folder:, profile:, stage: nil)
       parsed = parse_spec(spec, stage: stage)
       profile_name = profile && profile.name
-      if parsed.fetch("preset") != YOLO && profile_name != :claude
+      preset = parsed.fetch("preset")
+      supported = if profile.respond_to?(:permission_preset_supported?)
+        profile.permission_preset_supported?(preset)
+      else
+        # Preserve the pre-capability-contract boundary for narrow legacy
+        # profile doubles and third-party Claude launch bindings. Real built-in
+        # profiles implement permission_preset_supported?, so Pi/Grok and any
+        # future profile still fail closed unless they explicitly advertise a
+        # preset.
+        profile_name == :claude
+      end
+      if preset != YOLO && !supported
         raise Hive::ConfigError,
-              "stage #{stage || '(unknown)'} requests permissions #{parsed.fetch('preset').inspect} " \
-              "but runner #{profile_name.inspect} cannot enforce tool scoping (claude only)"
+              "stage #{stage || '(unknown)'} requests permissions #{preset.inspect} " \
+              "but runner #{profile_name.inspect} cannot enforce tool scoping; " \
+              "it does not declare enforcement for that preset"
       end
 
       resolve_parsed(parsed, task_folder: task_folder, stage: stage)

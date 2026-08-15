@@ -4,7 +4,7 @@ type: module
 source: lib/hive/config.rb
 created: 2026-04-25
 updated: 2026-08-14
-tags: [config, yaml, validation, plan-review]
+tags: [config, yaml, validation, plan-review, opencode]
 ---
 
 **TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, an optional project-owned artifact capture provider, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
@@ -640,6 +640,22 @@ the argv fragment used by both the tmux wrapper and headless `Hive::Agent`.
 ## `agents.*` overrides are plumbed at spawn time
 
 `agents.<name>.{bin, env_override, min_version}` in per-project config now actually take effect (LFG-5). `Hive::AgentProfiles.lookup(name, cfg: cfg)` overlays `cfg.dig("agents", name)` onto the registry profile via `AgentProfile#with_overrides`, returning a new frozen profile. Unknown override keys raise `Hive::ConfigError`. Every spawn site in `lib/hive/stages/review.rb`, `review/ci_fix.rb`, `review/triage.rb`, `review/browser_test.rb`, and `reviewers/agent.rb` threads `cfg` into the lookup. Legacy callers passing `cfg: nil` get the registry profile unchanged.
+
+OpenCode adds only typed, non-secret overrides under `agents.opencode`:
+`config_path`, an inline non-secret `config` object, `credential_env` names,
+an optional `credential_file`, explicit `plugins`, and `isolation: hermetic`.
+Relative source paths resolve against `project_root`. Credential values, raw
+argv, raw environment maps, unknown agent blocks, and unknown override keys
+are rejected during config validation. The selected config remains read-only;
+Hive prepares and later removes a private per-invocation overlay.
+
+Every `ROLE_AGENT_PATHS` entry accepts `agent: opencode`, but none of
+`DEFAULT_GLOBAL_AGENTS`, stage defaults, reviewer councils, or fallback lists
+select it. Routed OpenCode roles normally require an exact
+`models.<role>.model: provider/model`; when that field is absent, only an
+explicit selected OpenCode config whose top-level `model` is exact may supply
+the default. Skill-bearing OpenCode plan roles use `/ce-plan` by default and
+must pass native skill/plugin readiness before spawn.
 
 `timeout_sec.review_ci` (default 3600) is enforced as a hard per-process kill in `Review::CiFix#run_ci_once` — TERM the pgid on expiry, 3s grace, then KILL — not just as an outer-loop budget check.
 

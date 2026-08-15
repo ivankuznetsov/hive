@@ -379,7 +379,7 @@ class PermissionScopeTest < Minitest::Test
     end
   end
 
-  def test_non_yolo_requires_claude_profile
+  def test_non_yolo_requires_a_profile_declared_enforcement_capability
     with_tmp_dir do |dir|
       [ codex_profile, pi_profile ].each do |profile|
         error = assert_raises(Hive::ConfigError) do
@@ -387,8 +387,40 @@ class PermissionScopeTest < Minitest::Test
         end
         assert_match(/stage execute requests permissions/, error.message)
         assert_match(/runner #{profile.name.inspect}/, error.message)
-        assert_match(/claude only/, error.message)
+        assert_match(/does not declare enforcement/, error.message)
       end
+    end
+  end
+
+  def test_declared_non_claude_permission_enforcement_passes_the_runner_gate
+    profile = Hive::AgentProfile.new(
+      name: :opencode,
+      bin_default: "opencode",
+      headless_flag: "run",
+      version_flag: "--version",
+      skill_syntax_format: "/%{skill}",
+      permission_presets: %w[read-only scoped]
+    )
+
+    with_tmp_dir do |dir|
+      scope = Hive::PermissionScope.resolve(
+        "read-only", task_folder: dir, profile:, stage: "execute"
+      )
+
+      assert_equal "read-only", scope.preset
+    end
+  end
+
+  def test_legacy_claude_profile_without_capability_api_keeps_safe_scope_support
+    profile = Struct.new(:name).new(:claude)
+
+    with_tmp_dir do |dir|
+      scope = Hive::PermissionScope.resolve(
+        "read-only", task_folder: dir, profile:, stage: "plan"
+      )
+
+      assert_equal "read-only", scope.preset
+      assert_equal "default", scope.permission_mode
     end
   end
 

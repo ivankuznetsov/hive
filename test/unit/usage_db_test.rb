@@ -88,6 +88,68 @@ class UsageDbTest < Minitest::Test
     end
   end
 
+  def test_opencode_persists_nested_route_and_nil_versus_zero_usage
+    with_usage_db do
+      Hive::UsageDb.record!(
+        agent: "opencode",
+        model: "anthropic/claude-sonnet-4-5-20250929",
+        requested_route: "anthropic/claude-sonnet-4-5",
+        actual_route: "anthropic/claude-sonnet-4-5-20250929",
+        project_slug: "alpha",
+        task_slug: "task-a",
+        stage: "4-execute",
+        started_at: Time.utc(2026, 8, 12, 12),
+        ended_at: Time.utc(2026, 8, 12, 12, 1),
+        input: nil,
+        output: 0,
+        cached: nil,
+        cache_read: nil,
+        cache_write: 0,
+        reasoning: nil,
+        cost: 0.0
+      )
+
+      db = SQLite3::Database.new(Hive::UsageDb.path)
+      db.results_as_hash = true
+      row = db.get_first_row("SELECT * FROM token_usage WHERE agent = 'opencode'")
+
+      assert_equal "anthropic", row.fetch("requested_backend")
+      assert_equal "claude-sonnet-4-5", row.fetch("requested_model")
+      assert_equal "anthropic", row.fetch("actual_backend")
+      assert_equal "claude-sonnet-4-5-20250929", row.fetch("actual_model")
+      assert_equal 0, row.fetch("input_available")
+      assert_equal 1, row.fetch("output_available")
+      assert_equal 0, row.fetch("cache_read_available")
+      assert_equal 1, row.fetch("cache_write_available")
+      assert_equal 0, row.fetch("reasoning_available")
+      assert_equal 1, row.fetch("cost_available")
+      assert_equal 0.0, row.fetch("cost")
+    ensure
+      db&.close
+    end
+  end
+
+  def test_aggregate_preserves_unknown_usage_in_agent_and_total_buckets
+    with_usage_db do
+      now = Time.utc(2026, 8, 12, 12)
+      Hive::UsageDb.record!(
+        agent: "opencode", model: "anthropic/model", project_slug: "alpha",
+        task_slug: "task-a", stage: "4-execute", started_at: now - 60,
+        ended_at: now, input: nil, output: 0, cached: nil
+      )
+
+      aggregate = Hive::UsageDb.aggregate(scope: {}, now: now)
+      usage = usage_at(aggregate, :opencode, :all)
+
+      assert_equal 0, usage.fetch(:input)
+      assert_equal false, usage.fetch(:input_available)
+      refute usage.key?(:output_available), "measured zero must remain distinguishable from unknown"
+      assert_equal false, usage.fetch(:cached_available)
+      assert_equal false, aggregate.dig(:total, :all, :input_available)
+      assert_equal false, aggregate.dig(:total, :all, :cached_available)
+    end
+  end
+
   def test_task_scope_excludes_other_tasks
     with_usage_db do
       now = Time.utc(2026, 5, 24, 12)
@@ -159,6 +221,40 @@ class UsageDbTest < Minitest::Test
       aggregate = Hive::UsageDb.aggregate(scope: {}, now: Time.utc(2026, 5, 24, 12))
 
       assert_equal({ input: 3, output: 3, cached: 3 }, usage_at(aggregate, :claude, :all))
+    end
+  end
+
+  def test_existing_usage_schema_is_migrated_without_losing_legacy_rows
+    with_usage_db do
+      db = SQLite3::Database.new(Hive::UsageDb.path)
+      db.execute_batch(<<~SQL)
+        CREATE TABLE token_usage (
+          id TEXT PRIMARY KEY, agent TEXT NOT NULL, model TEXT,
+          project_slug TEXT, task_slug TEXT, stage TEXT,
+          started_at TEXT NOT NULL, ended_at TEXT,
+          input INTEGER NOT NULL DEFAULT 0,
+          output INTEGER NOT NULL DEFAULT 0,
+          cached INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO token_usage (
+          id, agent, started_at, input, output, cached
+        ) VALUES ('legacy', 'codex', '2026-08-12T00:00:00Z', 1, 2, 3);
+      SQL
+      db.close
+      db = nil
+
+      record(agent: "opencode", input: 4, output: 5, cached: 6)
+
+      db = SQLite3::Database.new(Hive::UsageDb.path)
+      db.results_as_hash = true
+      legacy = db.get_first_row("SELECT * FROM token_usage WHERE id = 'legacy'")
+      current = db.get_first_row("SELECT * FROM token_usage WHERE agent = 'opencode'")
+      assert_equal 1, legacy.fetch("input_available")
+      assert_equal 0, legacy.fetch("cache_read_available")
+      assert_equal 4, current.fetch("input")
+      assert current.key?("requested_backend")
+    ensure
+      db&.close
     end
   end
 

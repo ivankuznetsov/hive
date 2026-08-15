@@ -127,7 +127,10 @@ module Hive
         end
 
         def prompt(profile)
-          skill_invocation = @reviewer.skill && profile.format_skill_invocation(@reviewer.skill)
+          skill_invocation = @reviewer.skill &&
+            Hive::Stages::Base.format_verified_skill_invocation(
+              profile, @reviewer.skill, project_root: @task.project_root
+            )
           instruction_body = @reviewer.instruction && File.read(@reviewer.instruction)
           Hive::Stages::Base.render(
             "council_reviewer_prompt.md.erb",

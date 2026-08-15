@@ -63,9 +63,13 @@ module AgentCliRuntime
       compilation_error!(profile, e)
     end
 
-    def prepare!(profile)
+    def prepare!(profile, env: ENV)
+      if profile.is_a?(OpenCodePreparationRequest)
+        return OpenCode::Overlay.prepare!(profile, env:)
+      end
+
       resolved = Profiles.resolve(profile)
-      result = Probe.call(resolved)
+      result = Probe.call(resolved, env:)
       return result if result.ready
 
       evidence = unsupported_evidence(
@@ -118,6 +122,16 @@ module AgentCliRuntime
           raw[:error_message] || raw[:limit_text]
         ),
         provider_signal: raw[:provider_signal]
+      )
+    end
+
+    def parse_run(profile, stdout:)
+      Profiles.resolve(profile).parse_run(stdout)
+    end
+
+    def normalize(profile, captured, requested_route:)
+      Profiles.resolve(profile).normalize_captured_result(
+        captured, requested_route:
       )
     end
 

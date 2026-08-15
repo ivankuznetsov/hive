@@ -64,6 +64,14 @@ class SpawnAgentTest < Minitest::Test
     )
   end
 
+  def opencode_scope_profile
+    Hive::AgentProfile.new(
+      runtime_profile: AgentCliRuntime::Profiles.fetch(:opencode),
+      skill_syntax_format: "/%{skill}",
+      permission_presets: %w[read-only scoped]
+    )
+  end
+
   def managed_output_policy(task, binary, output)
     Hive::WorkflowPackage::RuntimePolicy::Policy.new(
       permission_mode: nil,
@@ -897,6 +905,39 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_stage_permission_scope_compiles_managed_opencode_roots_and_edit_patterns
+    with_tmp_dir do |dir|
+      task_folder = File.join(dir, "task")
+      package_root = File.join(
+        dir, ".hive-state", "workflows", "demo", "versions", "a" * 40
+      )
+      FileUtils.mkdir_p([ task_folder, package_root ])
+      task = Object.new
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:folder) { task_folder }
+      task.define_singleton_method(:managed_runtime_context) do |_slot_id|
+        { package_root: package_root, environment: {} }
+      end
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        {}, "work", task, opencode_scope_profile,
+        explicit_permission_spec: {
+          "preset" => "scoped",
+          "tools" => [ "Read", "Edit(./reviews/**)" ]
+        }
+      )
+
+      assert_equal "workspace-write", scope.fetch(:permission_mode)
+      assert_equal scope.fetch(:runtime_policy).directories,
+                   scope.fetch(:additional_read_roots)
+      assert_equal [ File.join(task_folder, "reviews", "**") ],
+                   scope.fetch(:opencode_edit_patterns)
+      assert_includes scope.fetch(:additional_write_roots), task_folder
+    ensure
+      scope&.fetch(:runtime_policy)&.cleanup!
+    end
+  end
+
   def test_managed_permission_scope_requires_an_exact_actor_policy
     task = Object.new
     task.define_singleton_method(:managed_workflow?) { true }
@@ -971,6 +1012,89 @@ class SpawnAgentTest < Minitest::Test
       assert_equal [ task.folder, File.join(task.folder, "drafts"), absolute ], scope.fetch(:add_dirs)
       assert_equal %w[Read Write Edit], scope.fetch(:allowed_tools)
       assert_equal "dontAsk", scope.fetch(:permission_mode)
+    end
+  end
+
+  def test_stage_permission_scope_maps_declared_opencode_modes_and_roots
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      writable = File.join(task.folder, "artifacts")
+      cfg = {
+        "execute" => {
+          "permissions" => {
+            "preset" => "scoped",
+            "tools" => %w[Read Edit],
+            "dirs" => [ writable ]
+          }
+        }
+      }
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        cfg, "execute", task, opencode_scope_profile,
+        base_add_dirs: [ task.folder ]
+      )
+
+      assert_equal "workspace-write", scope.fetch(:permission_mode)
+      assert_nil scope.fetch(:allowed_tools)
+      assert_nil scope.fetch(:disallowed_tools)
+      assert_equal [ task.folder, writable ],
+                   scope.fetch(:additional_read_roots)
+      assert_equal [ task.folder, writable ],
+                   scope.fetch(:additional_write_roots)
+      kwargs = Hive::Stages::Base.tool_scope_kwargs(scope)
+      assert_equal scope.fetch(:additional_write_roots),
+                   kwargs.fetch(:additional_write_roots)
+      assert_empty kwargs.fetch(:opencode_edit_patterns)
+    end
+  end
+
+  def test_stage_permission_scope_preserves_qualified_opencode_edit_subtree
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      docs = File.join(task.folder, "docs")
+      FileUtils.mkdir_p(docs)
+      cfg = {
+        "execute" => {
+          "permissions" => {
+            "preset" => "scoped", "tools" => [ "Read", "Edit(./docs/**)" ],
+            "dirs" => [ task.folder ]
+          }
+        }
+      }
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        cfg, "execute", task, opencode_scope_profile,
+        base_add_dirs: [ task.folder ]
+      )
+
+      assert_equal "workspace-write", scope.fetch(:permission_mode)
+      assert_equal [ "#{docs}/**" ], scope.fetch(:opencode_edit_patterns)
+      assert_equal [ task.folder ], scope.fetch(:additional_write_roots).uniq
+    end
+  end
+
+  def test_stage_permission_scope_fails_closed_for_opencode_yolo_and_bash
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      yolo = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Base.stage_permission_scope(
+          { "permissions" => "yolo" },
+          "execute", task, opencode_scope_profile
+        )
+      end
+      assert_match(/must select read-only or scoped/, yolo.message)
+
+      bash = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Base.stage_permission_scope(
+          {
+            "execute" => {
+              "permissions" => { "preset" => "scoped", "bash" => true }
+            }
+          },
+          "execute", task, opencode_scope_profile
+        )
+      end
+      assert_match(/cannot grant unrestricted Bash/, bash.message)
     end
   end
 
@@ -1298,7 +1422,7 @@ class SpawnAgentTest < Minitest::Test
         marker = Hive::Markers.current(task.state_file)
         assert_equal :error, marker.name, "#{runner} must leave an attributed :error marker"
         assert_equal "permission_config_error", marker.attrs["reason"]
-        assert_match(/claude only/, marker.attrs["message"].to_s)
+        assert_match(/does not declare enforcement/, marker.attrs["message"].to_s)
       end
     end
   end
@@ -1515,6 +1639,67 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_opencode_implementation_spawn_records_the_typed_observation
+    with_tmp_dir do |dir|
+      task = make_task(dir, "6-review")
+      cfg = { "agents" => { "opencode" => {} } }
+      typed_usage = Hive::AgentRuntime::NormalizedUsage.new(
+        input: nil, output: 0, cache_read: 0, cache_write: nil,
+        reasoning: nil, cost: 0.0
+      )
+      outcome = {
+        status: :error,
+        requested_opencode_route: "anthropic/claude-sonnet-4-5",
+        actual_opencode_route: nil,
+        route_resolution_status: :unobserved,
+        normalized_outcome_kind: :configuration_failure,
+        normalized_outcome: Struct.new(:usage).new(typed_usage),
+        usage: { cached: 0, model: "anthropic/claude-sonnet-4-5" }
+      }
+      agent = Object.new
+      agent.define_singleton_method(:run!) { outcome }
+      observation = nil
+      store = Object.new
+      store.define_singleton_method(:observe_opencode!) do |**values|
+        observation = values
+      end
+      with_attempt_context(
+        attempt_id: "opencode-attempt", task_generation: 1,
+        ownership_generation: "generation-1"
+      ) do
+        with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+          with_replaced_singleton_method(Hive::Agent, :new, ->(**) { agent }) do
+            with_replaced_singleton_method(
+              Hive::ImplementationIdentity::Store, :new,
+              ->(**) { store }
+            ) do
+              result = Hive::Stages::Base.spawn_agent(
+                task,
+                prompt: "prompt",
+                max_budget_usd: nil,
+                timeout_sec: 5,
+                profile: opencode_scope_profile,
+                cfg: cfg,
+                implementation_stage: "review.fix",
+                status_mode: :exit_code_only
+              )
+
+              assert_same outcome, result
+            end
+          end
+        end
+      end
+
+      assert_equal "review.fix", observation.fetch(:stage)
+      assert_equal outcome.fetch(:requested_opencode_route),
+                   observation.fetch(:requested_route)
+      assert_nil observation.fetch(:actual_route)
+      assert_equal :unobserved, observation.fetch(:resolution_status)
+      assert_equal :configuration_failure, observation.fetch(:outcome_kind)
+      assert_same typed_usage, observation.fetch(:usage)
+    end
+  end
+
   def test_controller_launch_environment_rejects_unknown_or_non_string_values
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -1525,7 +1710,7 @@ class SpawnAgentTest < Minitest::Test
             launch_environment: environment
           )
         end
-      end
+        end
     end
   end
 

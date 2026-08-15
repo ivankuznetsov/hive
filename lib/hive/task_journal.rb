@@ -51,6 +51,7 @@ module Hive
       implementation_identity_captured
       implementation_identity_backfilled
       implementation_identity_fallback
+      implementation_identity_observed
       implementation_stage_resolved
       activity_recorded
     ].freeze

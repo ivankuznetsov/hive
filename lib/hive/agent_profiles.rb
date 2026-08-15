@@ -42,7 +42,10 @@ module Hive
         overrides = cfg.dig("agents", name.to_s)
         return entry if overrides.nil? || overrides.empty?
 
-        entry.with_overrides(overrides)
+        entry.with_overrides(resolve_project_paths(name, overrides, cfg))
+      rescue ArgumentError => e
+        raise Hive::ConfigError,
+              "agents.#{name} configuration is invalid: #{e.message}", cause: e
       end
 
       def registered?(name)
@@ -72,6 +75,12 @@ module Hive
           credential_present?(File.join(home || Dir.home, ".pi", "agent", "auth.json"))
         when :grok
           credential_present?(grok_auth_path(home:))
+        when :opencode
+          credential_present?(
+            AgentCliRuntime::Profiles.opencode_auth_path(
+              home: home || Dir.home, env: ENV
+            )
+          )
         else
           false
         end
@@ -90,6 +99,23 @@ module Hive
       def reset_for_tests!
         @mutex.synchronize { @profiles.clear }
       end
+
+      private
+
+      def resolve_project_paths(name, overrides, cfg)
+        return overrides unless name.to_sym == :opencode
+        return overrides unless overrides.is_a?(Hash)
+
+        root = cfg["project_root"].to_s
+        overrides.to_h do |key, value|
+          if %w[config_path credential_file].include?(key.to_s) &&
+             !value.to_s.empty? && !File.absolute_path?(value.to_s) && !root.empty?
+            [ key, File.expand_path(value.to_s, root) ]
+          else
+            [ key, value ]
+          end
+        end
+      end
     end
   end
 end
@@ -102,5 +128,6 @@ require "hive/agent_profiles/claude"
 require "hive/agent_profiles/codex"
 require "hive/agent_profiles/pi"
 require "hive/agent_profiles/grok"
+require "hive/agent_profiles/opencode"
 require "hive/agent_profiles/error_normalizers"
 require "hive/agent_profiles/launch_bindings"

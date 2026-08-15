@@ -41,7 +41,8 @@ class AgentsAuthTest < Minitest::Test
       with_env("HOME" => home) do
         statuses = Hive::Web::AgentsAuth.new.statuses
 
-        assert_equal %w[claude codex gh grok pi].sort, statuses.keys.sort,
+        assert_equal %w[claude codex gh grok opencode pi].sort,
+                     statuses.keys.sort,
                      "statuses must cover every supported agent"
         statuses.each_value do |s|
           assert_includes [ true, false ], s["logged_in"], "each status carries a boolean logged_in"

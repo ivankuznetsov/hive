@@ -1,4 +1,5 @@
 require_relative "test_helper"
+require "find"
 require "rbconfig"
 require "yaml"
 
@@ -171,6 +172,58 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
     refute spec.files.any? { |path| path.start_with?("mirror/") }
   end
 
+  def test_actual_projection_matches_an_independently_reconstructed_tree
+    Dir.mktmpdir("agent-cli-runtime-mirror") do |dir|
+      destination = File.join(dir, "destination")
+      FileUtils.mkdir_p(File.join(destination, ".git"))
+
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, SYNC, ROOT, destination, SOURCE_SHA
+      )
+
+      assert status.success?, "#{out}\n#{err}"
+      assert_equal expected_projection, tree_snapshot(destination)
+    end
+  end
+
+  def test_actual_projection_builds_and_installs_as_a_standalone_package
+    Dir.mktmpdir("agent-cli-runtime-mirror") do |dir|
+      destination = File.join(dir, "destination")
+      dist = File.join(dir, "dist")
+      git!(dir, "init", "--quiet", destination)
+
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, SYNC, ROOT, destination, SOURCE_SHA
+      )
+      assert status.success?, "#{out}\n#{err}"
+      git!(destination, "add", ".")
+      git!(
+        destination,
+        "-c", "user.name=Agent CLI Runtime Test",
+        "-c", "user.email=agent-cli-runtime@example.invalid",
+        "commit", "--quiet", "-m", "projected package"
+      )
+
+      build_out, build_err, build_status = Open3.capture3(
+        unbundled_environment,
+        RbConfig.ruby, File.join(destination, "bin", "build-candidate"), dist
+      )
+      assert build_status.success?, "#{build_out}\n#{build_err}"
+      manifest = JSON.parse(build_out.lines.last)
+      refute manifest.fetch("source_dirty")
+      gem_path = manifest.fetch("gem_path")
+      assert_equal "agent-cli-runtime-0.1.1.gem", File.basename(gem_path)
+
+      verify_out, verify_err, verify_status = Open3.capture3(
+        unbundled_environment,
+        RbConfig.ruby, File.join(destination, "bin", "verify-candidate"),
+        gem_path, manifest.fetch("sha256")
+      )
+      assert verify_status.success?, "#{verify_out}\n#{verify_err}"
+      assert_equal "0.1.1", JSON.parse(verify_out).fetch("version")
+    end
+  end
+
   def test_workflow_is_one_way_and_repository_scoped
     assert_instance_of Psych::Nodes::Document, YAML.parse_file(WORKFLOW)
     assert_instance_of(
@@ -294,6 +347,77 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
   end
 
   private
+
+  def expected_projection
+    expected = {}
+    Find.find(ROOT) do |path|
+      relative = path.delete_prefix("#{ROOT}/")
+      next if path == ROOT
+      if relative == "mirror"
+        Find.prune
+        next
+      end
+      next unless File.file?(path)
+
+      expected[relative] = file_identity(path)
+    end
+    {
+      "sync-from-hive.yml" => ".github/workflows/sync-from-hive.yml",
+      "mirror-release.yml" => ".github/workflows/mirror-release.yml",
+      "CONTRIBUTING.md" => "CONTRIBUTING.md",
+      "SECURITY.md" => "SECURITY.md"
+    }.each do |source, target|
+      expected[target] = file_identity(File.join(MIRROR, source))
+    end
+    manifest = JSON.pretty_generate(
+      repository: "ivankuznetsov/hive",
+      component_path: "components/agent-cli-runtime",
+      source_commit: SOURCE_SHA
+    ) + "\n"
+    expected[".mirror-source.json"] = [
+      Digest::SHA256.hexdigest(manifest), "100644"
+    ]
+    expected.sort.to_h
+  end
+
+  def tree_snapshot(root)
+    snapshot = {}
+    Find.find(root) do |path|
+      relative = path.delete_prefix("#{root}/")
+      next if path == root
+      if relative == ".git"
+        Find.prune
+        next
+      end
+      next unless File.file?(path)
+
+      snapshot[relative] = file_identity(path)
+    end
+    snapshot.sort.to_h
+  end
+
+  def file_identity(path)
+    executable = (File.stat(path).mode & 0o111).zero? ? "100644" : "100755"
+    [ Digest::SHA256.file(path).hexdigest, executable ]
+  end
+
+  def git!(directory, *arguments)
+    out, err, status = Open3.capture3("git", "-C", directory, *arguments)
+    assert status.success?, err
+    out
+  end
+
+  def unbundled_environment
+    ENV.keys.grep(/\A(?:BUNDLE|BUNDLER_)/).to_h do |key|
+      [ key, nil ]
+    end.merge(
+      "GEM_HOME" => nil,
+      "GEM_PATH" => nil,
+      "RUBYGEMS_GEMDEPS" => nil,
+      "RUBYLIB" => nil,
+      "RUBYOPT" => nil
+    )
+  end
 
   def assert_actions_are_pinned(content)
     action_refs = content.scan(/^\s*uses:\s+([^\s#]+)/).flatten

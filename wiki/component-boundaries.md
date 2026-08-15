@@ -405,6 +405,18 @@ RubyGems release in packaged Web installs, and contains no second provider
 runtime implementation. See [[modules/agent_cli_runtime]] for the public
 surface and release boundary.
 
+The OpenCode source remains unreleased and Hive's package dependency stays on
+the published 0.1.x line. Candidate validation does not authorize a version
+choice, component tag, RubyGems or mirror publication, deployment, or a
+downstream Hive release. After an explicitly authorized component release,
+Hive's dependency advances in a separate compatibility change.
+
+The Web bundle resolves both monorepo gems by path. Source checkouts default to
+`..` for Hive and `../components/agent-cli-runtime` for the component; managed
+archives export the installed roots through `HIVE_CLI_ROOT` and
+`HIVE_AGENT_CLI_RUNTIME_ROOT`. This keeps source Web on the reviewed component
+ABI without making the extracted Web archive depend on a missing checkout.
+
 Its public standalone repository is deliberately a one-way distribution
 projection. Scheduled main snapshots and manually requested release snapshots
 record the exact Hive component commit. The canonical checkout owns projection

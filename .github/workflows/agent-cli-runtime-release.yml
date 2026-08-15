@@ -22,6 +22,9 @@ jobs:
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # pinned 2026-07-26
         with:
           ruby-version: "3.4"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
       - name: Verify protected-main tag identity
         env:
           GH_TOKEN: ${{ github.token }}
@@ -40,6 +43,14 @@ jobs:
           gem_file="$(find dist -maxdepth 1 -name 'agent-cli-runtime-*.gem' -print -quit)"
           expected_sha="$(awk '{print $1}' dist/SHA256SUMS)"
           components/agent-cli-runtime/bin/verify-candidate "$gem_file" "$expected_sha"
+      - name: Require the installed OpenCode offline contract
+        env:
+          AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_REQUIRED: "1"
+        run: |
+          set -euo pipefail
+          npm install --global opencode-ai@1.18.16
+          ruby -Icomponents/agent-cli-runtime/test \
+            components/agent-cli-runtime/test/opencode_offline_smoke_test.rb
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: agent-cli-runtime-candidate

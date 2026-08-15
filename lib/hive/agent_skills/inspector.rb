@@ -272,7 +272,8 @@ module Hive
 
       def inspect_bundled_resolution(target, contract, destination)
         resolved = skill_module(target.agent).resolve(
-          contract.invocation, project_root: @project_root, environment: @environment
+          contract.invocation, project_root: @project_root,
+          environment: skill_environment(target.agent)
         )
         expected_path = File.join(destination, "SKILL.md")
         issues = []
@@ -326,7 +327,8 @@ module Hive
             )
           end
           resolved = resolver.resolve(
-            target.invocation, project_root: @project_root, environment: @environment
+            target.invocation, project_root: @project_root,
+            environment: skill_environment(target.agent)
           )
           health = resolved.status == :present ? "healthy" : "missing"
           issue = health == "healthy" ? [] : [ [ "missing", resolved.message ] ]
@@ -377,6 +379,17 @@ module Hive
         when "codex" then codex_inventory(bin, native_spec, commands, issues)
         when "pi" then pi_inventory(bin, native_spec, commands, issues)
         when "grok" then grok_inventory(bin, native_spec, commands, issues)
+        when "opencode"
+          FilesystemInventory.new.inspect(
+            profile: profile, bin: bin, native_spec: native_spec,
+            root: config_root_for(native_spec)
+          ).then do |evidence|
+            issues.concat(evidence.fetch("issues"))
+            {
+              "package" => evidence.fetch("package"),
+              "marketplace" => evidence.fetch("marketplace")
+            }
+          end
         else
           issues << [ "incompatible", "unsupported provider #{native_spec.provider.inspect}" ]
           { "package" => nil, "marketplace" => nil }
@@ -546,7 +559,8 @@ module Hive
         end
 
         resolved = skill_module(target.agent).resolve(
-          invocation, project_root: @project_root, environment: @environment
+          invocation, project_root: @project_root,
+          environment: skill_environment(target.agent)
         )
         path = resolved.path
         if path && !expected_resolution_path?(path, target, native)
@@ -733,7 +747,10 @@ module Hive
       end
 
       def runner_environment
-        %w[HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME].each_with_object({}) do |key, out|
+        %w[
+          HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME
+          OPENCODE_CONFIG OPENCODE_CONFIG_DIR XDG_CACHE_HOME XDG_DATA_HOME
+        ].each_with_object({}) do |key, out|
           out[key] = @environment[key] if @environment.key?(key)
         end
       end
@@ -744,8 +761,19 @@ module Hive
         when "codex" then Hive::SkillCheck::Codex
         when "pi" then Hive::SkillCheck::Pi
         when "grok" then Hive::SkillCheck::Grok
+        when "opencode" then Hive::SkillCheck::OpenCode
         else raise Hive::ConfigError, "unsupported skill resolver for #{agent.inspect}"
         end
+      end
+
+      def skill_environment(agent)
+        return @environment unless agent.to_s == "opencode"
+
+        profile = Hive::AgentProfiles.lookup(:opencode, cfg: @config)
+        path = profile.opencode_configuration_path
+        return @environment unless path
+
+        @environment.merge("OPENCODE_CONFIG" => path)
       end
 
       def parse_version(output)
@@ -758,6 +786,7 @@ module Hive
           File.join(root, ".claude-plugin", "plugin.json"),
           File.join(root, ".codex-plugin", "plugin.json"),
           File.join(root, ".grok-plugin", "plugin.json"),
+          File.join(root, ".opencode", "plugin.json"),
           File.join(root, "package.json")
         ]
         candidates.each do |path|
@@ -783,6 +812,7 @@ module Hive
         when "codex" then File.join(home, ".codex")
         when "pi" then File.join(home, ".pi", "agent")
         when "grok" then File.join(home, ".grok")
+        when "opencode" then File.join(home, ".config", "opencode")
         end
       end
 

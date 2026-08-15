@@ -10,16 +10,17 @@ tags: [agent, runtime, component, gem, cli]
 **TLDR**: `agent-cli-runtime` is the first independently versioned gem kept in
 the Hive monorepo. It exposes provider-neutral profiles, invocation
 compilation, local prerequisite evidence, usage extraction, and normalized
-results for Claude Code, Codex CLI, Pi, and Grok CLI. Hive remains the primary
-consumer; the gem does not own orchestration or Hive policy.
+results for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. Hive remains
+the primary consumer; the gem does not own orchestration or Hive policy.
 
 ## Public surface
 
 The package lives at `components/agent-cli-runtime/`, loads with
 `require "agent_cli_runtime"`, and exposes the `AgentCliRuntime` namespace.
-Its built-in profiles are ordered `claude`, `codex`, `pi`, `grok`. Callers
-construct immutable requests and receive immutable compiled invocations,
-capability evidence, probe results, and observable results.
+Its built-in profiles are ordered `claude`, `codex`, `pi`, `grok`, `opencode`.
+The appended profile leaves the order and behavior of the four legacy profiles
+unchanged. Callers construct immutable requests and receive immutable compiled
+invocations, capability evidence, probe results, and observable results.
 Each profile also exposes an immutable `credential_environment_keys`
 inventory. This is compatibility metadata for an orchestrator that needs to
 remove ambient credentials when selecting a named subscription/session; it
@@ -39,6 +40,51 @@ cannot represent them. Provider profiles and extractors are public,
 SemVer-governed behavior; orchestration policy stays injectable or outside the
 package.
 
+OpenCode adds a stricter, additive preparation surface because its safe
+headless contract depends on an invocation-owned configuration overlay. An
+`OpenCodePreparationRequest` identifies an exact `provider/model`, a selected
+configuration source, named credential environment keys, a working directory,
+declared extra roots, and a fresh absolute invocation root. `prepare!` performs
+only bounded local version/help/auth/model-inventory inspections, writes
+owner-private XDG config/data/cache/state homes, compiles deny-first permission
+rules, and returns a `PreparedInvocation`. The value exposes discrete argv,
+non-secret child-environment overrides, requested-route evidence, generated
+paths, and idempotent `cleanup!`; it never starts `opencode run`. The process
+owner forwards only the named credential keys and must invoke cleanup from its
+own lifecycle `ensure`.
+
+The OpenCode route-aware probe requires `1.18.16+`, all pinned run/export
+flags, a selected authentication source, and the exact cached
+`provider/model` plus requested variant while remote model fetching and ambient
+project configuration are disabled. Generic `probe(profile)` and
+`prepare!(profile)` remain compatible for legacy profiles. OpenCode's ordinary
+`nil`, `read-only`, and `workspace-write` compilation paths fail closed unless
+the prepared overlay supplies its explicit typed policy and trusted `--auto`
+argument.
+
+Prepared overlays reserve every XDG/config/disable key, remove selected
+per-agent permission blocks, forward credentials only when they match the
+requested provider, and emit worktree-relative edit patterns. Nested read-only
+exceptions are re-applied after writable rules because OpenCode uses the last
+matching permission. Probe children start from an explicitly cleared
+environment, and cleanup refuses a replaced invocation root without masking a
+completed Hive result.
+
+OpenCode also uses the profile's additive strict result-parser hook. A caller
+passes captured stdout/stderr plus typed exit, signal, timeout, or cancellation
+evidence. A successful run must contain one consistent session, a recognized
+terminal `step_finish`, and text for that terminal message identity. The caller
+then executes the separately compiled non-model `export SESSION --sanitize`
+inspection under the same overlay. Normalization correlates the exported
+assistant record, records requested and actual nested routes separately, and
+uses its token/cache/reasoning/cost fields without converting absence to zero.
+Timeout, cancellation, authentication failure, configuration failure, generic
+CLI failure, malformed output, and completion remain distinct outcomes.
+Unknown additive event payloads are discarded after binding any supplied
+session identity; only bounded, redacted type summaries survive. Exact
+truncation evidence is carried separately from final-message bytes. Legacy
+profile extraction and observation are unchanged.
+
 The public facade includes `compile`, `prepare!`, `require_capability!`,
 `extract_usage`, `observe`, `probe`, and `probe_all`. It accepts built-in names
 or custom `Profile` objects, preserves `UnknownProvider` as a typed caller
@@ -49,8 +95,9 @@ zero-token events. Observable results also carry an optional immutable
 `provider_signal` supplied by a trusted caller. The component does not classify
 that signal or own provider-health policy.
 
-For compatibility with Hive's trusted headless launches,
-`permission_mode: nil` still selects a provider's bypass flag. Independent
+For compatibility with Hive's trusted legacy headless launches,
+`permission_mode: nil` still selects a legacy provider's bypass flag. OpenCode
+requires a prepared explicit policy. Independent
 consumers should pass `read-only` or `workspace-write` when they require those
 restrictions; unsupported enforcement fails closed. Version probes execute
 with their supplied environment, reject output containing multiple distinct
@@ -75,14 +122,20 @@ budgets, or contain Hive defaults and skills. It can load and run without
 `hive-cli` or Hive constants. Direct standard-library gem dependencies are
 declared in its gemspec.
 
-Hive consumes `agent-cli-runtime ~> 0.1.1` directly. Source development resolves
-the monorepo component path; installed Hive and the packaged Web lock resolve
-the same compatible release from RubyGems. `Hive::AgentRuntime` preserves its
+Hive source declares the published `agent-cli-runtime ~> 0.1.1` line and
+resolves the unreleased monorepo component path during development. Version
+selection, component publication, and the later Hive dependency cutover remain
+separately authorized. `Hive::AgentRuntime` preserves its
 public request, probe, error, and result names as a forwarding facade, while
 `Hive::AgentProfile` wraps package profiles with only Hive-owned skill, model
-routing, default-model, status, and policy metadata. The four built-in Hive
+routing, default-model, status, and policy metadata. The five source-built Hive
 profiles reference the package's profile objects instead of copying provider
 flags, probes, usage extractors, or configuration metadata.
+
+Source Web declares the component as an explicit path gem so Rails boots
+against the same reviewed ABI. Managed Web provisioning and server launches
+replace that relative source with the installed component gem root through
+`HIVE_AGENT_CLI_RUNTIME_ROOT`, parallel to the existing `HIVE_CLI_ROOT` seam.
 
 The published 0.1.1 candidate was built from canonical commit
 `590fe343f585705651f277ddf198fcf4aa65f135`, published by the protected
@@ -98,7 +151,11 @@ task. Candidate tooling builds one gem, records its source commit and dirty
 state, checksums it, installs it into a private gem home, proves a clean require,
 and exercises the executable. Root parity fixtures cover non-default
 compilation, local probes, named capability evidence, provider usage variants,
-and observable normalization/redaction across all four built-ins.
+and observable normalization/redaction across all five built-ins. The
+unreleased source candidate adds OpenCode without authorizing a version, tag,
+publication, mirror release, deployment, or Hive release.
+`bin/release-preflight` remains
+tag-bound and is not run against a fabricated tag during candidate work.
 
 Only `components/agent-cli-runtime/vX.Y.Z` tags can trigger the component
 workflow. The tag, package version, exact main commit, and clean checkout must
@@ -133,11 +190,13 @@ here.
 
 ## Compatibility
 
-The public line is 0.1.x on Ruby 3.4 or newer, tested on Linux and
-macOS. Additive fields are compatible within 0.1.x. Removing or changing an
-existing public field, flag mapping, event meaning, or executable contract
-requires a new minor release while pre-1.0. A published bad version is fixed
-forward; yanking or ownership changes are separate operator decisions.
+The published line remains 0.1.x; the unreleased source candidate runs on Ruby
+3.4 or newer and is tested on Linux and macOS. An authorized release must pick
+a version that accounts for the additive prepared-invocation, route-probe,
+strict-parser, identity, and usage contracts. Removing or changing an existing
+public field, flag mapping, event meaning, or executable contract requires a
+minor release while pre-1.0. A published bad version is fixed forward; yanking
+or ownership changes are separate operator decisions.
 
 Related context: [[component-boundaries]], [[modules/agent_profile]], and
 ADR-038 in [[decisions]].

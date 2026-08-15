@@ -1,0 +1,44 @@
+{
+  "info": {
+    "id": "ses_contract_one",
+    "title": "[redacted:session-title:ses_contract_one]",
+    "directory": "[redacted:session-directory:ses_contract_one]",
+    "version": "1.18.16",
+    "time": {"created": 1786500000000, "updated": 1786500000002}
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg_user_one",
+        "sessionID": "ses_contract_one",
+        "role": "user",
+        "time": {"created": 1786500000000},
+        "agent": "build",
+        "model": {"providerID": "requested-alias", "modelID": "sonnet"}
+      },
+      "parts": []
+    },
+    {
+      "info": {
+        "id": "msg_assistant_final",
+        "sessionID": "ses_contract_one",
+        "role": "assistant",
+        "time": {"created": 1786500000000, "completed": 1786500000002},
+        "parentID": "msg_user_one",
+        "providerID": "openrouter",
+        "modelID": "anthropic/claude-sonnet-4",
+        "mode": "build",
+        "agent": "build",
+        "path": {"cwd": "[redacted:cwd:msg_assistant_final]", "root": "[redacted:root:msg_assistant_final]"},
+        "cost": 0.003,
+        "tokens": {"input": 9, "output": 3, "reasoning": 1, "cache": {"read": 0, "write": 0}},
+        "finish": "stop"
+      },
+      "parts": [
+        {"id": "prt_start_fallback", "sessionID": "ses_contract_one", "messageID": "msg_assistant_final", "type": "step-start"},
+        {"id": "prt_text_fallback", "sessionID": "ses_contract_one", "messageID": "msg_assistant_final", "type": "text", "text": "[redacted:text:prt_text_fallback]", "time": {"start": 1786500000000, "end": 1786500000001}},
+        {"id": "prt_finish_fallback", "sessionID": "ses_contract_one", "messageID": "msg_assistant_final", "type": "step-finish", "reason": "stop", "cost": 0.003, "tokens": {"input": 9, "output": 3, "reasoning": 1, "cache": {"read": 0, "write": 0}}}
+      ]
+    }
+  ]
+}

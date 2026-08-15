@@ -99,3 +99,18 @@ It validates only routed effective fields after exact/coarse shadowing.
 Runtime helpers repeat validation at the launch boundary as defense in depth
 for callers that construct config hashes without `Config.load`; both layers
 use the same immutable resolution and profile-native renderer.
+
+## OpenCode nested routes
+
+OpenCode remains one Hive profile/provider; its backend is not promoted into
+the provider registry. An effective OpenCode model must be a complete
+`provider/model` route, and a different configured backend never satisfies the
+request. Faithful effort values are validated against the OpenCode variant
+allowlist before rendering `--variant`. A missing routed value may resolve
+only from the explicitly selected overlay config's top-level exact `model`.
+
+The durable implementation selection stores that requested route as `model`.
+After execution, a separate journal observation may add requested and actual
+backend/model values, route-resolution status, outcome kind, and usage. It
+never overwrites the generation-scoped requested identity, and it never copies
+the requested alias into actual identity without sanitized-export evidence.

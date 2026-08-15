@@ -83,6 +83,7 @@ class AgentProfilesTest < Minitest::Test
     Hive::AgentProfiles.register(:codex, Hive::AgentProfiles::CODEX)
     Hive::AgentProfiles.register(:pi, Hive::AgentProfiles::PI)
     Hive::AgentProfiles.register(:grok, Hive::AgentProfiles::GROK)
+    Hive::AgentProfiles.register(:opencode, Hive::AgentProfiles::OPENCODE)
   end
 
   def test_lookup_returns_v1_built_in_profiles
@@ -90,6 +91,7 @@ class AgentProfilesTest < Minitest::Test
     assert_kind_of Hive::AgentProfile, Hive::AgentProfiles.lookup(:codex)
     assert_kind_of Hive::AgentProfile, Hive::AgentProfiles.lookup(:pi)
     assert_kind_of Hive::AgentProfile, Hive::AgentProfiles.lookup(:grok)
+    assert_kind_of Hive::AgentProfile, Hive::AgentProfiles.lookup(:opencode)
   end
 
   def test_lookup_accepts_string_or_symbol
@@ -125,6 +127,9 @@ class AgentProfilesTest < Minitest::Test
     grok = Hive::AgentProfiles.lookup(:grok).identity_arguments(
       model: "grok-4.5", effort: "high"
     )
+    opencode = Hive::AgentProfiles.lookup(:opencode).identity_arguments(
+      model: "anthropic/claude-sonnet-4-5", effort: "high"
+    )
 
     assert_equal %w[--model sonnet --effort medium], claude.native_arguments
     assert_equal [ "--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=high" ],
@@ -136,6 +141,188 @@ class AgentProfilesTest < Minitest::Test
                  grok.native_arguments
     assert grok.effort_supported
     assert_equal "high", grok.effective_effort
+    assert_equal [
+      "--model", "anthropic/claude-sonnet-4-5", "--variant", "high"
+    ], opencode.native_arguments
+    assert opencode.effort_supported
+  end
+
+  def test_opencode_profile_is_opt_in_route_strict_and_uses_explicit_sources
+    with_tmp_dir do |project|
+      config_path = File.join(project, "opencode.json")
+      credential_path = File.join(project, "auth.json")
+      File.write(
+        config_path,
+        JSON.generate(
+          "model" => "anthropic/claude-sonnet-4-5",
+          "provider" => { "anthropic" => { "npm" => "@ai-sdk/anthropic" } }
+        )
+      )
+      File.write(credential_path, "{}")
+      cfg = {
+        "project_root" => project,
+        "agents" => {
+          "opencode" => {
+            "bin" => "opencode",
+            "env_override" => "HIVE_OPENCODE_BIN",
+            "min_version" => "1.18.16",
+            "config_path" => "opencode.json",
+            "credential_env" => %w[ANTHROPIC_API_KEY],
+            "credential_file" => "auth.json",
+            "plugins" => [ Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN ],
+            "isolation" => "hermetic"
+          }
+        }
+      }
+
+      profile = Hive::AgentProfiles.lookup(:opencode, cfg: cfg)
+
+      assert_equal config_path, profile.opencode_configuration_path
+      assert_equal credential_path, profile.opencode_credential_file
+      assert_equal %w[ANTHROPIC_API_KEY],
+                   profile.opencode_credential_environment_keys
+      assert_equal [ Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN ],
+                   profile.opencode_plugins
+      assert profile.opencode_pure
+      assert_equal "anthropic/claude-sonnet-4-5",
+                   profile.concrete_default_model(cfg: cfg, project_root: project)
+
+      error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+        profile.identity_arguments(model: "claude-sonnet-4-5", effort: nil)
+      end
+      assert_match(/provider\/model/, error.message)
+    end
+  end
+
+  def test_opencode_default_model_resolution_rejects_ambiguous_or_malformed_sources
+    inline_error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      Hive::AgentProfiles::OpenCodeDefaults.resolve(
+        cfg: { "agents" => { "opencode" => { "config" => [] } } }
+      )
+    end
+    assert_match(/must be a JSON object/, inline_error.message)
+
+    missing_error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      Hive::AgentProfiles::OpenCodeDefaults.resolve(cfg: {})
+    end
+    assert_match(/explicit agents\.opencode\.config_path/, missing_error.message)
+
+    with_tmp_dir do |project|
+      config_path = File.join(project, "opencode.json")
+      File.write(config_path, "[]")
+      object_error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+        Hive::AgentProfiles::OpenCodeDefaults.resolve(
+          cfg: {
+            "project_root" => project,
+            "agents" => { "opencode" => { "config_path" => "opencode.json" } }
+          }
+        )
+      end
+      assert_match(/must be a JSON object/, object_error.message)
+
+      File.write(config_path, "{")
+      parse_error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+        Hive::AgentProfiles::OpenCodeDefaults.resolve(
+          cfg: {
+            "project_root" => project,
+            "agents" => { "opencode" => { "config_path" => "opencode.json" } }
+          }
+        )
+      end
+      assert_match(/could not inspect explicit OpenCode default model/, parse_error.message)
+    end
+  end
+
+  def test_opencode_overrides_reject_secret_or_untyped_escape_channels
+    %w[credential_value environment argv raw_cli_arguments].each do |key|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::AgentProfiles.lookup(
+          :opencode,
+          cfg: { "agents" => { "opencode" => { key => "secret" } } }
+        )
+      end
+
+      assert_match(/not a recognized override key/, error.message)
+    end
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::AgentProfiles.lookup(
+        :opencode,
+        cfg: {
+          "agents" => {
+            "opencode" => {
+              "credential_env" => [ "ANTHROPIC_API_KEY=secret" ]
+            }
+          }
+        }
+      )
+    end
+    assert_match(/credential environment key/, error.message)
+  end
+
+  def test_opencode_accepts_typed_inline_nonsecret_configuration
+    cfg = {
+      "agents" => {
+        "opencode" => {
+          "config" => {
+            "model" => "anthropic/claude-sonnet-4-5",
+            "provider" => { "anthropic" => { "npm" => "@ai-sdk/anthropic" } }
+          }
+        }
+      }
+    }
+
+    profile = Hive::AgentProfiles.lookup(:opencode, cfg: cfg)
+
+    assert_equal "anthropic/claude-sonnet-4-5",
+                 profile.opencode_configuration.fetch("model")
+    assert_equal "anthropic/claude-sonnet-4-5",
+                 profile.concrete_default_model(cfg: cfg)
+    error = assert_raises(Hive::ConfigError) do
+      Hive::AgentProfiles.lookup(
+        :opencode,
+        cfg: {
+          "agents" => {
+            "opencode" => cfg.dig("agents", "opencode").merge(
+              "config_path" => "/tmp/opencode.json"
+            )
+          }
+        }
+      )
+    end
+    assert_match(/choose opencode_configuration_path or opencode_configuration/,
+                 error.message)
+
+    secret = assert_raises(Hive::ConfigError) do
+      Hive::AgentProfiles.lookup(
+        :opencode,
+        cfg: {
+          "agents" => {
+            "opencode" => {
+              "config" => {
+                "model" => "anthropic/claude-sonnet-4-5",
+                "provider" => {
+                  "anthropic" => { "options" => { "api_key" => "secret" } }
+                }
+              }
+            }
+          }
+        }
+      )
+    end
+    assert_match(/cannot contain credential values/, secret.message)
+  end
+
+  def test_opencode_logged_in_probes_xdg_data_auth_file
+    with_tmp_dir do |home|
+      auth = File.join(home, ".local", "share", "opencode", "auth.json")
+      FileUtils.mkdir_p(File.dirname(auth))
+      File.write(auth, "{}")
+      refute Hive::AgentProfiles.logged_in?(:opencode, home: home)
+
+      File.write(auth, JSON.generate("anthropic" => { "type" => "oauth" }))
+      assert Hive::AgentProfiles.logged_in?(:opencode, home: home)
+    end
   end
 
   def test_utility_model_registry_never_crosses_providers
@@ -147,6 +334,8 @@ class AgentProfilesTest < Minitest::Test
                  Hive::ImplementationIdentity::UtilityModels.resolve(:pi))
     assert_equal({ model: nil, pin_model: false },
                  Hive::ImplementationIdentity::UtilityModels.resolve(:grok))
+    assert_equal({ model: nil, pin_model: true },
+                 Hive::ImplementationIdentity::UtilityModels.resolve(:opencode))
     assert_raises(Hive::ImplementationIdentity::ResolutionError) do
       Hive::ImplementationIdentity::UtilityModels.resolve(:unknown)
     end
@@ -190,6 +379,7 @@ class AgentProfilesTest < Minitest::Test
     assert_includes names, :codex
     assert_includes names, :pi
     assert_includes names, :grok
+    assert_includes names, :opencode
   end
 
   def test_grok_prompt_rides_the_headless_flag_value

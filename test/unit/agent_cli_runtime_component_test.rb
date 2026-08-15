@@ -323,15 +323,16 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     end
   end
 
-  def test_hive_dependency_accepts_candidate_without_raising_published_floor
+  def test_hive_dependency_requires_the_published_opencode_line
     spec = Gem::Specification.load(File.expand_path("../../hive.gemspec", __dir__))
     dependency = spec.runtime_dependencies.find do |candidate|
       candidate.name == "agent-cli-runtime"
     end
 
     refute_nil dependency
-    assert dependency.requirement.satisfied_by?(Gem::Version.new("0.1.1"))
+    refute dependency.requirement.satisfied_by?(Gem::Version.new("0.1.1"))
     assert dependency.requirement.satisfied_by?(Gem::Version.new("0.2.0"))
+    assert dependency.requirement.satisfied_by?(Gem::Version.new("0.2.99"))
     refute dependency.requirement.satisfied_by?(Gem::Version.new("0.3.0"))
     assert File.read(File.expand_path("../../lib/hive.rb", __dir__))
                .include?('require "agent_cli_runtime"')

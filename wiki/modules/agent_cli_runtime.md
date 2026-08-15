@@ -122,11 +122,11 @@ budgets, or contain Hive defaults and skills. It can load and run without
 `hive-cli` or Hive constants. Direct standard-library gem dependencies are
 declared in its gemspec.
 
-Hive source admits `agent-cli-runtime >= 0.1.1, < 0.3.0` during release prep and
-resolves the monorepo component path during development. The unchanged 0.1.1
-floor keeps installed Hive resolvable while the authorized 0.2.0 component
-release adds the public OpenCode contract; component publication and the later
-Hive dependency cutover remain separate operations. `Hive::AgentRuntime`
+Hive requires `agent-cli-runtime ~> 0.2.0` and resolves the monorepo component
+path during development. This keeps installed Hive on the independently
+published OpenCode-capable line while allowing compatible 0.2.x patches;
+component publication and Hive dependency cutover remain separate operations.
+`Hive::AgentRuntime`
 preserves its
 public request, probe, error, and result names as a forwarding facade, while
 `Hive::AgentProfile` wraps package profiles with only Hive-owned skill, model
@@ -139,12 +139,12 @@ against the same reviewed ABI. Managed Web provisioning and server launches
 replace that relative source with the installed component gem root through
 `HIVE_AGENT_CLI_RUNTIME_ROOT`, parallel to the existing `HIVE_CLI_ROOT` seam.
 
-The published 0.1.1 candidate was built from canonical commit
-`590fe343f585705651f277ddf198fcf4aa65f135`, published by the protected
+The published 0.2.0 candidate was built from canonical commit
+`c8f62cacefb9d5982ab0e8d2328071763b3736c4`, published by the protected
 component workflow, and independently fetched from RubyGems with SHA-256
-`f1b833320397e63268ebc9c739f790b42e2f767d6d0e69bed728f220913da5a2`.
-Fresh isolated installation, require, executable-version, and JSON probe
-checks matched the retained workflow artifact before Hive's cutover.
+`b813b54d0dded7ecab2a7aa569d997c7d4c24666b76ba675196cb30e10e08320`.
+Fresh isolated installation, require, executable-version, and ready OpenCode
+JSON probe checks matched the retained workflow artifact before Hive's cutover.
 
 ## Development and release
 

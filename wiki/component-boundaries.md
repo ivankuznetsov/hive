@@ -399,17 +399,17 @@ package-owned redactor.
 
 The canonical package source lives at `components/agent-cli-runtime/` and
 publishes the neutral `AgentCliRuntime` namespace plus the bounded
-`agent-runtime` diagnostic executable. Hive declares the compatible 0.1.1
+`agent-runtime` diagnostic executable. Hive declares the compatible 0.2.x
 dependency, resolves the component path in monorepo development, resolves the
 RubyGems release in packaged Web installs, and contains no second provider
 runtime implementation. See [[modules/agent_cli_runtime]] for the public
 surface and release boundary.
 
-The OpenCode source remains unreleased and Hive's package dependency stays on
-the published 0.1.x line. Candidate validation does not authorize a version
+OpenCode support is published in `agent-cli-runtime` 0.2.0 and Hive requires
+that 0.2.x line. Candidate validation alone does not authorize a version
 choice, component tag, RubyGems or mirror publication, deployment, or a
-downstream Hive release. After an explicitly authorized component release,
-Hive's dependency advances in a separate compatibility change.
+downstream Hive release; this dependency advanced only after independent
+registry, checksum, install, probe, and mirror verification.
 
 The Web bundle resolves both monorepo gems by path. Source checkouts default to
 `..` for Hive and `../components/agent-cli-runtime` for the component; managed

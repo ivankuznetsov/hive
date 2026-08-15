@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, install.sh, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-08-13
+updated: 2026-08-15
 tags: [dependencies, gems, runtime]
 ---
 
@@ -65,6 +65,7 @@ as of this refresh.
 
 | Gem | Version | Purpose |
 |-----|---------|---------|
+| `agent-cli-runtime` | `~> 0.2.0` (locked 0.2.0) | Published compatibility layer for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. Hive source resolves the component path, while installed Hive requires the independently published OpenCode-capable 0.2.x line. |
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
 | `base64` | `>= 0.2` | Explicit runtime dependency for framed durable-attempt output and other binary-safe payloads; Ruby is unbundling it from the default gems. |
 | `bundler` | `= 2.7.2` | Exact installer for the authenticated managed web lock. Hive package managers vendor it into Hive's isolated `GEM_HOME`, and `AppBundle` invokes its absolute executable through the current Ruby without consulting `PATH`. |

@@ -78,6 +78,62 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_rejects_every_closed_plan_review_configuration_boundary
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      invalid_documents = {
+        "plan_review:\n  enabled: false\n" => /cannot be disabled/i,
+        "plan_review:\n  coding: nope\n" => /coding.*must be a Hash/i,
+        "plan_review:\n  adapter: unknown\n" => /adapter.*must be one of/i,
+        "plan_review:\n  reviewers:\n    primary: unknown_route\n" => /must name a registered model route/i,
+        "plan_review:\n  coverage:\n    required: nope\n" => /required.*must be an Array/i,
+        "plan_review:\n  coverage:\n    required: [correctness, correctness]\n" => /contains duplicates/i,
+        "plan_review:\n  coverage:\n    required: [correctness]\n    optional: [correctness]\n" => /cannot be both required and optional/i,
+        "plan_review:\n  routes:\n    primary: nope\n" => /routes\.primary.*must be a Hash/i,
+        "plan_review:\n  routes:\n    fallbacks: nope\n" => /fallbacks.*must be an Array/i,
+        "plan_review:\n  routes:\n    fallbacks: [nope]\n" => /fallbacks\[0\].*must be a Hash/i,
+        "plan_review:\n  routes:\n    primary:\n      model: ''\n" => /primary\.model.*must be non-empty/i,
+        "plan_review:\n  routes:\n    primary:\n      effort: impossible\n" => /primary\.effort.*must be one of/i,
+        "plan_review:\n  approval_policies: nope\n" => /approval_policies.*must be an Array/i,
+        "plan_review:\n  approval_policies: [nope]\n" => /approval_policies\[0\].*must be a Hash/i
+      }
+      invalid_documents.each do |document, pattern|
+        File.write(config_path, document)
+        assert_match pattern, assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message
+      end
+
+      File.write(config_path, <<~YAML)
+        plan_review:
+          routes:
+            fallbacks:
+              - agent: codex
+                model: gpt-5.6-sol
+                family: openai
+                effort: high
+                route: fallback-codex
+      YAML
+      assert_equal "fallback-codex",
+                   Hive::Config.load(dir).dig("plan_review", "routes", "fallbacks", 0, "route")
+
+      policy = {
+        "id" => "bounded_policy", "version" => 1, "action" => "approve_finding",
+        "risk" => "low", "paths" => [ "lib/**" ],
+        "valid_from" => "2026-08-12T00:00:00Z",
+        "valid_until" => "2026-08-13T00:00:00Z", "revoked" => false
+      }
+      [
+        [ [ policy, JSON.parse(JSON.generate(policy)) ], /unique lowercase identifier/i ],
+        [ [ policy.merge("revoked" => "no") ], /revoked.*true or false/i ],
+        [ [ policy.merge("valid_from" => "yesterday") ], /valid_from.*ISO-8601/i ],
+        [ [ policy.merge("valid_until" => nil) ], /valid_until.*ISO-8601/i ]
+      ].each do |policies, pattern|
+        File.write(config_path, { "plan_review" => { "approval_policies" => policies } }.to_yaml)
+        assert_match pattern, assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message
+      end
+    end
+  end
+
   def test_registry_round_trips_repository_identity
     with_tmp_global_config do
       with_tmp_git_repo do |repo|

@@ -3,6 +3,8 @@ require "hive/config"
 require "hive/plan_review/transition_guard"
 
 class PlanReviewTransitionGuardTest < Minitest::Test
+  include HiveTestHelper
+
   Workflow = Struct.new(:id, keyword_init: true)
   Task = Struct.new(
     :folder, :project_root, :slug, :id, :workflow, :meta_yml_path,
@@ -154,6 +156,89 @@ class PlanReviewTransitionGuardTest < Minitest::Test
       refute File.exist?(
         File.join(task.folder, "plan-review", "legacy-execute-adoption.json")
       )
+    end
+  end
+
+  def test_invalid_review_inputs_are_normalized_to_blocked_or_invalid_results
+    with_task do |task, cfg|
+      error = assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.prepare!(
+          task:, destination: "4-execute", config: cfg,
+          orchestrator: ->(**) { raise Hive::ConfigError, "broken config" }
+        )
+      end
+      assert_includes error.message, "unavailable or invalid"
+
+      FileUtils.mkdir_p(File.join(task.folder, "plan-review"))
+      File.write(File.join(task.folder, "plan-review", "current.json"), "not json")
+      assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.prepare_existing!(
+          task:, destination: "4-execute", config: cfg
+        )
+      end
+      assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.verify!(
+          task:, destination: "4-execute", observation: Object.new, config: cfg
+        )
+      end
+    end
+
+    with_task do |task, cfg|
+      projection = publish_projection(task, cfg, state: "cleared")
+      File.unlink(File.join(task.folder, "plan.md"))
+      result = Hive::PlanReview::TransitionGuard.freshness(
+        task:, projection:, config: cfg
+      )
+      assert_equal "invalid", result.fetch("status")
+      assert_includes result.fetch("reason"), "unavailable"
+    end
+  end
+
+  def test_policy_adoption_and_run_level_parse_failures_are_fail_closed
+    with_task do |task, cfg|
+      projection = publish_projection(task, cfg, state: "cleared")
+      store = Hive::PlanReview::Store.new(task_folder: task.folder)
+      bad_policy = store.write_review_artifact!(
+        review_id: projection.record.review_id, basename: "bad-policy.json",
+        content: "not json"
+      )
+      bad_record = Hive::PlanReview::Record.new(
+        projection.record.to_h.merge(
+          "artifacts" => projection.record["artifacts"].merge("policy" => bad_policy)
+        )
+      )
+      refute Hive::PlanReview::TransitionGuard.send(
+        :policy_configuration_matches?, bad_record, task, cfg
+      )
+    end
+
+    with_task do |task, cfg|
+      projection = publish_projection(task, cfg, state: "cleared")
+      store = Hive::PlanReview::Store.new(task_folder: task.folder)
+      File.write(File.join(store.root, "level.json"), "not json")
+      assert Hive::PlanReview::TransitionGuard.send(
+        :policy_configuration_matches?, projection.record, task, cfg
+      )
+    end
+
+    with_task(stage_index: 4, stage_name: "execute") do |task, cfg|
+      replacement = ->(*) { raise Errno::EACCES, "denied" }
+      with_replaced_singleton_method(Hive::AtomicFile, :write, replacement) do
+        error = assert_raises(Hive::PlanReview::TransitionBlocked) do
+          Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: cfg)
+        end
+        assert_includes error.message, "adoption could not be recorded"
+      end
+    end
+
+    with_task(stage_index: 4, stage_name: "execute") do |task, cfg|
+      root = File.join(task.folder, "plan-review")
+      FileUtils.mkdir_p(root)
+      File.write(File.join(root, "legacy-execute-adoption.json"), "not json")
+      error = assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: cfg)
+      end
+      assert_includes error.message, "invalid JSON"
     end
   end
 

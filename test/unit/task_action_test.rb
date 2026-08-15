@@ -117,6 +117,19 @@ class TaskActionTest < Minitest::Test
     assert_equal "plan_review_retry", retry_due.key
     assert_equal "hive plan-review-run demo-260426-aaaa", retry_due.command
 
+    default_clock_due = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: { "state" => "retry_scheduled", "retry_at" => "2000-01-01T00:00:00Z" }
+    )
+    assert_equal "hive plan-review-run demo-260426-aaaa", default_clock_due.command
+
+    malformed_retry = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: { "state" => "retry_scheduled", "retry_at" => "not-a-time" }
+    )
+    assert_equal "plan_review_retry", malformed_retry.key
+    assert_nil malformed_retry.command
+
     decision = Hive::TaskAction.for(
       task, waiting, plan_review: { "state" => "awaiting_decision" }
     )
@@ -131,6 +144,15 @@ class TaskActionTest < Minitest::Test
     )
     assert_equal "plan_review_unsupported", unsupported.key
     assert_nil unsupported.command
+
+    unsupported_route = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: {
+        "state" => "blocked", "required_action" => "inspect route",
+        "routes" => [ { "capability_result" => "unsupported" } ]
+      }
+    )
+    assert_equal "plan_review_unsupported", unsupported_route.key
 
     blocked = Hive::TaskAction.for(
       task, waiting,

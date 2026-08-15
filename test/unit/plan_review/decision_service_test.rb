@@ -206,6 +206,83 @@ class PlanReviewDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_invalid_decision_branches_remain_typed_and_fail_closed
+    with_service(finding: finding("safe_auto")) do |service, _store, record|
+      assert_raises(Hive::PlanReview::ConflictingDecision) do
+        service.apply(**decision_arguments(
+          record, action: "approve_finding", target: record["findings"].first.fetch("fingerprint")
+        ))
+      end
+    end
+    with_service(finding: finding("gated_auto")) do |service, _store, record|
+      target = record["findings"].first.fetch("fingerprint")
+      assert_raises(Hive::PlanReview::ConflictingDecision) do
+        service.apply(**decision_arguments(
+          record, action: "answer_finding", target:, value: { "answer" => "no" }
+        ))
+      end
+      assert_raises(Hive::PlanReview::InvalidAction) do
+        service.apply(**decision_arguments(record, action: "answer_finding"))
+      end
+    end
+    with_service do |service, _store, record|
+      assert_raises(Hive::PlanReview::InvalidAction) do
+        service.apply(**decision_arguments(
+          record, action: "waive_coverage", target: "coverage", value: {}
+        ))
+      end
+      assert_raises(Hive::PlanReview::InvalidAction) do
+        service.apply(**decision_arguments(record, action: "unknown", target: "unknown-target"))
+      end
+      assert_raises(Hive::PlanReview::InvalidAction) do
+        service.apply(**decision_arguments(record, action: "approve_finding"))
+      end
+      assert_raises(Hive::PlanReview::InvalidAction) do
+        service.apply(**decision_arguments(
+          record, action: "downgrade_level", value: { "level" => "skip" },
+          reason: "not mandatory"
+        ))
+      end
+      service.instance_variable_set(
+        :@freshness_checker, ->(_current) { raise Hive::PlanReview::StaleObservation, "stale" }
+      )
+      assert_raises(Hive::PlanReview::StaleDecision) do
+        service.apply(**decision_arguments(record, action: "request_review"))
+      end
+    end
+    with_service(level: "mandatory") do |service, _store, record|
+      assert_raises(Hive::PlanReview::InvalidAction) do
+        service.apply(**decision_arguments(
+          record, action: "raise_level", value: { "level" => "mandatory" }
+        ))
+      end
+    end
+    with_service(routes: [ route("timeout") ]) do |service, _store, record|
+      assert_raises(Hive::PlanReview::StaleDecision) do
+        service.apply(**decision_arguments(
+          record, action: "retry", target: "pra-#{'0' * 64}", authorized: false
+        ))
+      end
+    end
+  end
+
+  def test_persisted_raise_rejects_skip_and_recovers_from_corrupt_prior_receipt
+    with_task do |task|
+      assert_raises(Hive::PlanReview::InvalidAction) do
+        Hive::PlanReview::DecisionService.persist_raise!(
+          task:, level: "skip", operator: "alice"
+        )
+      end
+      root = Hive::PlanReview::Store.new(task_folder: task.folder).root
+      FileUtils.mkdir_p(root)
+      File.write(File.join(root, "level.json"), "not json")
+      result = Hive::PlanReview::DecisionService.persist_raise!(
+        task:, level: "standard", operator: "alice"
+      )
+      assert result.fetch("applied")
+    end
+  end
+
   private
 
   def with_service(level: "standard", finding: nil, routes: [], blockers: [], real_task_lock: false)

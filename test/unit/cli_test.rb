@@ -25,6 +25,7 @@ require "hive/commands/approve"
 require "hive/commands/findings"
 require "hive/commands/finding_toggle"
 require "hive/commands/plan_review"
+require "hive/commands/plan_review_run"
 require "hive/commands/patrol"
 require "hive/commands/refactor_patrol"
 require "hive/commands/pairing"
@@ -40,6 +41,16 @@ require "hive/commands/evidence"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
+
+  def test_plan_review_run_wires_target_and_project_without_operator_authority
+    with_command_new_stub(Hive::Commands::PlanReviewRun) do |calls|
+      Hive::CLI.start([ "plan-review-run", "demo:task", "--project", "demo" ])
+
+      assert_equal [ "demo:task" ], calls.first.fetch(:args)
+      assert_equal({ project: "demo" }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+  end
 
   def test_evidence_wires_the_exact_recovery_identity
     with_command_new_stub(Hive::Commands::Evidence) do |calls|

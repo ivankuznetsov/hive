@@ -523,6 +523,181 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_reentry_stale_publish_and_terminal_revision_paths_are_durable
+    with_task(standard_plan) do |task, cfg|
+      revised = standard_plan.sub("# Plan", "# Revised")
+      runner = orchestrator(
+        task, cfg,
+        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+        planner_revision: FakeRevision.new(revised)
+      )
+      first = runner.advance!
+      store = runner.instance_variable_get(:@store)
+      suspended = Hive::PlanReview::Record.new(
+        first.record.to_h.merge(
+          "version" => first.record.version + 1, "state" => "reviewing",
+          "outcome" => nil, "execution_allowed" => false,
+          "updated_at" => "2026-08-12T12:01:00.000000Z"
+        )
+      )
+      store.publish_current!(suspended, expected_version: first.record.version)
+      resumed = runner.advance!
+      assert_equal "cleared", resumed.record.state
+      second = runner.advance!
+      assert_equal first.record.review_id, second.record.review_id
+
+      store.define_singleton_method(:current_validated) do |**|
+        raise Hive::PlanReview::StaleObservation, "lost publication race"
+      end
+      assert_equal first.record.review_id, runner.advance!.record.review_id
+    end
+
+    with_task(standard_plan) do |task, cfg|
+      failed_revision = Object.new
+      failed_revision.define_singleton_method(:call) do |**|
+        Hive::PlanReview::PlannerRevision::Result.new(
+          outcome: "terminal_failure", candidate_bytes: nil, candidate_digest: nil,
+          route_receipt: {}, diagnostic: "planner failed"
+        )
+      end
+      projection = orchestrator(
+        task, cfg,
+        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+        planner_revision: failed_revision
+      ).advance!
+      assert_equal "blocked", projection.record.state
+      assert_equal "planner_revision_terminal_failure", projection.record["blockers"].first.fetch("reason")
+    end
+
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      revision = TransientRevision.new(standard_plan.sub("# Plan", "# Revised"))
+      runner = orchestrator(
+        task, cfg,
+        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+        planner_revision: revision
+      )
+      assert_equal "blocked", runner.advance!.record.state
+      assert_equal "blocked", runner.advance!.record.state
+      assert_equal 1, revision.calls.length
+    end
+  end
+
+  def test_failed_candidate_verification_adds_a_reviewer_blocker
+    revised = standard_plan.sub("# Plan", "# Revised")
+    with_task(standard_plan) do |task, cfg|
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "verification"
+          Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "terminal_failure", findings: [], coverage: [], residual_evidence: [],
+            route_receipt: {
+              "role" => request.kind, "requested" => request.reviewer,
+              "actual" => request.reviewer, "capability_result" => "present",
+              "independence_verified" => true
+            }, diagnostic: "verification failed"
+          )
+        else
+          successful_result(
+            request,
+            findings: request.kind == "primary" ? [ finding("safe_auto", "Clarify tests") ] : []
+          )
+        end
+      end
+      projection = orchestrator(
+        task, cfg, adapter:, planner_revision: FakeRevision.new(revised)
+      ).advance!
+      assert_equal "blocked", projection.record.state
+      assert projection.record["blockers"].any? { |row|
+        row.fetch("reason") == "candidate_verification_terminal_failure"
+      }
+    end
+  end
+
+  def test_private_integrity_helpers_cover_corrupt_and_mismatched_inputs
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["coverage"]["required"] = [ "adversarial" ]
+      cfg["plan_review"]["coverage"]["optional"] = []
+      runner = orchestrator(task, cfg, adapter: success_adapter)
+      projection = runner.advance!
+      record = projection.record
+      store = runner.instance_variable_get(:@store)
+
+      primary = runner.send(:coverage_for, "primary", record.review_id, record.policy_fingerprint)
+      assert_equal "whole_document", primary.first.fetch("name")
+
+      incorporated = finding("safe_auto", "Disposition").to_h.merge("lifecycle" => "incorporated")
+      unchanged, blockers = runner.send(
+        :apply_verification, [ incorporated ], [], "success", []
+      )
+      assert_equal "incorporated", unchanged.first.fetch("lifecycle")
+      assert_equal "disposition_verification_missing", blockers.first.fetch("reason")
+      _unchanged, failed_blockers = runner.send(
+        :apply_verification, [ incorporated ], [], "terminal_failure", []
+      )
+      assert_empty failed_blockers
+
+      bad_result = store.write_review_artifact!(
+        review_id: record.review_id, basename: "bad-verification-result.json",
+        content: "not json"
+      )
+      bad_record = Hive::PlanReview::Record.new(
+        record.to_h.merge(
+          "artifacts" => record["artifacts"].merge("verification_result" => bad_result)
+        )
+      )
+      assert_raises(Hive::PlanReview::InvalidRecord) do
+        runner.send(:persisted_result, bad_record, "verification")
+      end
+
+      original_plan = File.binread(File.join(task.folder, "plan.md"))
+      File.write(File.join(task.folder, "plan.md"), "# external edit\n")
+      assert_raises(Hive::PlanReview::StaleObservation) do
+        runner.send(:promote_candidate!, record, "candidate")
+      end
+      File.binwrite(File.join(task.folder, "plan.md"), original_plan)
+      current = original_plan
+      digest_record = Hive::PlanReview::Record.new(
+        record.to_h.merge(
+          "plan_digest" => Digest::SHA256.hexdigest(current),
+          "candidate_plan_digest" => "0" * 64
+        )
+      )
+      assert_raises(Hive::PlanReview::InvalidRecord) do
+        runner.send(:promote_candidate!, digest_record, current)
+      end
+
+      File.write(File.join(store.root, "level.json"), "not json")
+      assert_nil runner.send(:persisted_run_level)
+      no_policy = Hive::PlanReview::Record.new(
+        record.to_h.merge("artifacts" => record["artifacts"].reject { |key, _| key == "policy" })
+      )
+      refute runner.send(:policy_configuration_fresh?, no_policy)
+      bad_policy = store.write_review_artifact!(
+        review_id: record.review_id, basename: "bad-policy.json", content: "not json"
+      )
+      invalid_policy = Hive::PlanReview::Record.new(
+        record.to_h.merge(
+          "artifacts" => record["artifacts"].merge("policy" => bad_policy)
+        )
+      )
+      refute runner.send(:policy_configuration_fresh?, invalid_policy)
+      refute runner.send(:retry_in_future?, "not-a-time")
+      assert_nil runner.send(:safe_plan_digest, File.join(task.folder, "missing-plan.md"))
+      assert_equal "symbol", runner.send(:stringify, :symbol)
+    end
+  end
+
+  def test_review_requirement_metadata_errors_are_typed
+    with_task(standard_plan) do |task, cfg|
+      runner = orchestrator(task, cfg, adapter: success_adapter)
+      task.meta_yml_path && File.write(task.meta_yml_path, "plan_review_required: false\n")
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        runner.send(:ensure_review_requirement!)
+      end
+      assert_includes error.message, "could not be persisted"
+    end
+  end
+
   private
 
   def orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(standard_plan),

@@ -6820,6 +6820,21 @@ class HiveTuiBubbleModelTest < Minitest::Test
       end
     end
 
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# Plan\n<!-- WAITING -->\n")
+      row = make_task_row(
+        slug: "guarded-plan", state_file: state_file,
+        suggested_command: "hive plan guarded-plan --from 3-plan"
+      )
+      approval = Object.new
+      approval.define_singleton_method(:prepare) { |_command, _path| "hive develop another-task" }
+      previous = @model.instance_variable_get(:@plan_approval)
+      @model.instance_variable_set(:@plan_approval, approval)
+      assert_raises(ArgumentError) { @model.send(:finalize_plan_marker, row) }
+      @model.instance_variable_set(:@plan_approval, previous)
+    end
+
     with_singleton_method_stub(Hive::Markers, :current, ->(_path) { raise Errno::EACCES, "denied" }) do
       refute @model.send(:marker_still_open_for_input?, "/tmp/state.md")
     end

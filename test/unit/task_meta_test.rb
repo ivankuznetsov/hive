@@ -446,6 +446,9 @@ class TaskMetaTest < Minitest::Test
         Hive::TaskMeta.plan_review_required?(dir)
       end
       assert_includes error.message, "must be true"
+
+      _out, err = capture_io { assert_nil Hive::TaskMeta.read(dir)[:plan_review_required] }
+      assert_includes err, "treating metadata as legacy"
     end
   end
 

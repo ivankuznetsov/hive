@@ -135,6 +135,65 @@ class PlanReviewRouteResolverTest < Minitest::Test
     assert_equal "xhigh", observed.fetch("effort")
   end
 
+  def test_primary_verification_and_configured_fallback_candidates_are_exact
+    %w[primary verification].each do |role|
+      observed = nil
+      Hive::PlanReview::RouteResolver.resolve(
+        role:, planner_identity: { "family" => "anthropic" },
+        probe: lambda do |candidate|
+          observed = candidate
+          { "status" => "present", "actual" => candidate }
+        end
+      )
+      assert_equal "codex", observed.fetch("provider")
+      assert_equal "gpt-5.6-sol", observed.fetch("model")
+    end
+
+    cfg = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
+    cfg["plan_review"]["routes"]["fallbacks"] = [
+      {
+        "agent" => "claude", "model" => "opus", "family" => "anthropic",
+        "effort" => "high", "route" => "fallback-claude"
+      }
+    ]
+    attempts = []
+    result = Hive::PlanReview::RouteResolver.resolve(
+      role: "adversarial", planner_identity: { "family" => "anthropic" }, cfg:,
+      probe: lambda do |candidate|
+        attempts << candidate
+        if candidate.fetch("provider") == "grok"
+          { "status" => "unsupported" }
+        else
+          { "status" => "present", "actual" => candidate }
+        end
+      end
+    )
+    assert result.resolved?
+    assert_equal "fallback-claude", attempts.last.fetch("route")
+  end
+
+  def test_malformed_requested_and_observed_route_fields_fail_closed
+    invalid = candidate("codex", "", "openai")
+    assert_raises(Hive::ConfigError) do
+      Hive::PlanReview::RouteResolver.resolve(
+        role: "primary", planner_identity: { "family" => "anthropic" },
+        candidates: [ invalid ], probe: ->(_candidate) { flunk }
+      )
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::PlanReview::RouteResolver.send(
+        :normalize_candidate, candidate("codex", "model", nil), require_family: true
+      )
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::PlanReview::RouteResolver.resolve(
+        role: "primary", planner_identity: { "family" => "anthropic" },
+        candidates: [ candidate("codex", "model", "openai") ],
+        probe: ->(_candidate) { { "status" => "present", "actual" => { "provider" => 1 } } }
+      )
+    end
+  end
+
   private
 
   def candidate(provider, model, family)

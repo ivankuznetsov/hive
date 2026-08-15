@@ -153,12 +153,14 @@ class MigrateTest < Minitest::Test
       backfilled_count: 2,
       recovery_marker_count: 3,
       workflow_task_count: 4,
-      workflow_moved_count: 2
+      workflow_moved_count: 2,
+      plan_review_requirement_count: 2
     )
 
     assert_equal(
       "hive: migrate complete (2 tasks moved, 2 ids backfilled, " \
-      "3 recovery markers upgraded, 4 managed workflow tasks migrated (2 stages moved))",
+      "3 recovery markers upgraded, 4 managed workflow tasks migrated (2 stages moved), " \
+      "2 plan review requirements added)",
       message
     )
   end

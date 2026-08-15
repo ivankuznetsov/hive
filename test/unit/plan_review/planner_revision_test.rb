@@ -111,6 +111,105 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
     end
   end
 
+  def test_production_runner_reports_tampering_missing_output_success_and_firewall_errors
+    Dir.mktmpdir("hive-plan-revision-runner-branches") do |root|
+      meta = File.join(root, "meta.yml")
+      File.write(meta, "id: demo\n")
+      workspace = File.join(root, "workspace")
+      FileUtils.mkdir_p(workspace)
+      File.write(File.join(workspace, "input-plan.md"), "# Plan\n")
+      output = File.join(workspace, "candidate-output.md")
+      task = RunnerTask.new(folder: root, meta_yml_path: meta)
+      runner = Hive::PlanReview::PlannerRevision::HiveRunner.new(
+        task:, cfg: Hive::Config::DEFAULTS
+      )
+
+      tamper = lambda do |_task, **kwargs|
+        File.write(meta, "changed: true\n")
+        File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
+        { status: :ok, usage: { model: "served-model" } }
+      end
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, tamper) do
+        result = runner.call(
+          prompt: "revise", workspace:, output_path: output,
+          planner_identity:, timeout_sec: 60
+        )
+        assert_equal "terminal_failure", result.fetch("status")
+        assert_includes result.fetch("diagnostic"), "protected artifacts"
+      end
+
+      missing = ->(_task, **) { { status: :failed, error_message: "no candidate" } }
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, missing) do
+        result = runner.call(
+          prompt: "revise", workspace:, output_path: output,
+          planner_identity:, timeout_sec: 60
+        )
+        assert_equal "retryable_failure", result.fetch("status")
+        assert_equal "no candidate", result.fetch("diagnostic")
+      end
+
+      success = lambda do |_task, **kwargs|
+        File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
+        { status: :ok, usage: { model: "served-model" } }
+      end
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, success) do
+        result = runner.call(
+          prompt: "revise", workspace:, output_path: output,
+          planner_identity:, timeout_sec: 60
+        )
+        assert_equal "success", result.fetch("status")
+        assert_equal "served-model", result.dig("actual_route", "model")
+      end
+
+      capture_error = ->(_manifest) { raise Hive::ArtifactFirewall::Error, "capture failed" }
+      with_replaced_singleton_method(Hive::ArtifactFirewall, :capture, capture_error) do
+        result = runner.call(
+          prompt: "revise", workspace:, output_path: output,
+          planner_identity:, timeout_sec: 60
+        )
+        assert_equal "terminal_failure", result.fetch("status")
+        assert_equal "capture failed", result.fetch("diagnostic")
+      end
+    end
+  end
+
+  def test_revision_normalizes_failed_runner_object_findings_and_candidate_path_errors
+    task = Task.new(folder: Dir.mktmpdir("hive-plan-revision-branches"))
+    failed = Hive::PlanReview::PlannerRevision.new(
+      task:, cfg: {}, runner: ->(**) { { "status" => "timeout", "diagnostic" => "slow" } }
+    ).call(
+      review_id: "pr-#{'d' * 64}", plan_bytes: "# Plan\n", findings: [],
+      planner_identity:, timeout_sec: 60
+    )
+    assert_equal "timeout", failed.outcome
+    assert_equal "slow", failed.diagnostic
+
+    finding = Struct.new(:title) { def to_h = { "title" => title } }.new("Review me")
+    service = Hive::PlanReview::PlannerRevision.new(
+      task:, cfg: {}, runner: lambda do |prompt:, output_path:, **|
+        assert_includes prompt, "Review me"
+        File.write(output_path, "# Revised\n<!-- COMPLETE -->\n")
+        { "status" => "success" }
+      end
+    )
+    assert service.call(
+      review_id: "pr-#{'e' * 64}", plan_bytes: "# Plan\n", findings: [ finding ],
+      planner_identity:, timeout_sec: 60
+    ).success?
+
+    workspace = Dir.mktmpdir("hive-plan-revision-paths")
+    assert_raises(Hive::PlanReview::InvalidRecord) do
+      service.send(:read_candidate!, File.join(File.dirname(workspace), "escape.md"), workspace)
+    end
+    error = assert_raises(Hive::PlanReview::InvalidRecord) do
+      service.send(:read_candidate!, File.join(workspace, "missing.md"), workspace)
+    end
+    assert_includes error.message, "did not publish"
+  ensure
+    FileUtils.remove_entry(task.folder) if task&.folder && File.exist?(task.folder)
+    FileUtils.remove_entry(workspace) if workspace && File.exist?(workspace)
+  end
+
   private
 
   def planner_identity

@@ -24,9 +24,21 @@ proper:
   the marker still `:waiting`; the raise is caught by the `ArgumentError`
   rescue in the advance path.
 
-Remaining uncovered after this pass (99 lines): `commands/plan_review.rb`,
+`route_resolver.rb` followed in the same pass: the `verification` and
+`else` arms of `default_candidates`, the `fallbacks` row mapping in
+`configured_candidates`, and three validation raises.
+
+One finding worth carrying forward: `normalize_candidate`'s
+`require_family: true` branch (`"plan review route family must be attested"`)
+has **no production caller** — `resolve` is the only caller and always passes
+`require_family: false`, downgrading an unknown family to `nil` instead of
+rejecting it. The parameter is vestigial; the branch is covered by calling the
+method directly. Either drop the parameter or route a caller through it.
+Likewise `normalize_observed_identity`'s per-key raise is only reachable for a
+*non-String* value — blank strings are filtered out by the preceding `reject`.
+
+Remaining uncovered after this pass (93 lines): `commands/plan_review.rb`,
 `config.rb` plan-review validation, `plan_review/decision_service.rb`,
-`orchestrator.rb`, `planner_revision.rb`, `route_resolver.rb`,
-`transition_guard.rb`.
+`orchestrator.rb`, `planner_revision.rb`, `transition_guard.rb`.
 
 See [[modules/plan_review]], [[modules/task_action]] and [[testing]].

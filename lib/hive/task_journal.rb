@@ -12,6 +12,34 @@ module Hive
     class AttemptMismatch < Error; end
     class Conflict < Error; end
 
+    ACTIVITY_KINDS = %w[
+      attempt_admitted
+      context_launch_captured
+      context_selection_reported
+      session_started
+      session_finished
+      usage_observed
+      resource_limit_observed
+      stage_transition
+      question_asked
+      answer_recorded
+      approval_recorded
+      rejection_recorded
+      decision_recorded
+      retry_requested
+      recovery_recorded
+      hold_recorded
+      context_revision
+      commit_observed
+      push_observed
+      pr_observed
+      check_observed
+      merge_observed
+      operator_action
+      correction
+      activity_gap
+    ].freeze
+
     AUTHORITATIVE_EVENT_TYPES = %w[
       condition_observed
       generation_advanced
@@ -25,6 +53,7 @@ module Hive
       implementation_identity_fallback
       implementation_identity_observed
       implementation_stage_resolved
+      activity_recorded
     ].freeze
     LEGACY_ATTEMPT_ID = "legacy".freeze
     JOURNAL_BASENAME = "task-journal.jsonl".freeze
@@ -71,8 +100,23 @@ module Hive
             raise InvalidRecord, e.message
           end
         end
+        validate_activity!(record) if record["event_type"] == "activity_recorded"
         validate_attempt!(record)
         true
+      end
+
+      def validate_binding!(task:, stage:, attempt_id:, task_generation:,
+                            ownership_generation: nil)
+        validate_attempt!(
+          "task" => Hive::StringifyKeys.call(task),
+          "stage" => stage.to_s,
+          "attempt_id" => attempt_id.to_s,
+          "task_generation" => Integer(task_generation),
+          "ownership_generation" => ownership_generation
+        )
+        true
+      rescue ArgumentError, TypeError => e
+        raise AttemptMismatch, e.message
       end
 
       def attempt_for(attempt_id)
@@ -84,6 +128,27 @@ module Hive
       end
 
       private
+
+      def validate_activity!(record)
+        payload = record.fetch("payload")
+        kind = payload["activity_kind"]
+        unless ACTIVITY_KINDS.include?(kind)
+          raise InvalidRecord, "authoritative activity has invalid activity_kind"
+        end
+        require_identifier!(payload["operation_id"], "operation_id")
+        require_identifier!(payload["correlation_id"], "correlation_id") if payload["correlation_id"]
+        if payload["supersedes_event_id"]
+          require_identifier!(payload["supersedes_event_id"], "supersedes_event_id")
+        end
+        source = record.dig("provenance", "source")
+        require_identifier!(source, "provenance.source")
+      end
+
+      def require_identifier!(value, label)
+        unless value.is_a?(String) && value.match?(/\A[A-Za-z0-9][A-Za-z0-9._:\/-]{0,255}\z/)
+          raise InvalidRecord, "authoritative activity #{label} is invalid"
+        end
+      end
 
       def validate_attempt!(record)
         if record["attempt_id"] == LEGACY_ATTEMPT_ID

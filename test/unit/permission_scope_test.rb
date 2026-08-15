@@ -54,9 +54,9 @@ class PermissionScopeTest < Minitest::Test
     end
   end
 
-  def test_managed_resolution_returns_the_scope_without_the_legacy_claude_gate
+  def test_managed_spec_resolution_returns_the_scope_without_the_legacy_claude_gate
     with_tmp_dir do |dir|
-      scope = Hive::PermissionScope.resolve_managed(
+      scope, parsed = Hive::PermissionScope.resolve_managed_spec(
         {
           "preset" => "scoped",
           "tools" => [ "Read", "Edit(./article.md)" ]
@@ -70,6 +70,7 @@ class PermissionScopeTest < Minitest::Test
         "Read",
         "Edit(//#{File.expand_path("article.md", dir).delete_prefix("/")})"
       ], scope.allowed_tools
+      assert_equal "scoped", parsed.fetch("preset")
     end
   end
 

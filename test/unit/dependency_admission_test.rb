@@ -158,6 +158,20 @@ class DependencyAdmissionTest < Minitest::Test
     assert active.verdict(project: "app", slug: "dependent").clear?
   end
 
+  def test_context_exposes_immutable_active_first_snapshot_layers
+    archived = context(project(tasks: [ task("app", "archived") ]))
+    active_project = project(tasks: [ task("app", "active") ])
+    indexed = D::Context.new(projects: [ active_project ], fallback: archived)
+
+    layer_slugs = indexed.project_snapshot_layers.map do |layer|
+      layer.flat_map(&:tasks).map(&:slug)
+    end
+    assert_equal [ [ "active" ], [ "archived" ] ], layer_slugs
+    assert_equal %w[active archived], indexed.project_snapshots.flat_map(&:tasks).map(&:slug)
+    assert_predicate indexed.project_snapshot_layers, :frozen?
+    assert_predicate indexed.project_snapshots, :frozen?
+  end
+
   def test_immutable_context_memoizes_shared_dependency_tails
     indexed = context(project(tasks: [
       task("app", "a", depends_on: "b"),

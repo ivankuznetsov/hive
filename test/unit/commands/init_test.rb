@@ -154,13 +154,15 @@ class HiveCommandsInitTest < Minitest::Test
 
   def test_run_init_preflight_warns_when_inspector_reports_config_error
     error = StringIO.new
-    cmd = Hive::Commands::Init.new("/tmp/project", provisioning_error: error)
     fake_inspector = Object.new
     fake_inspector.define_singleton_method(:inspect) { raise Hive::ConfigError, "broken config" }
+    cmd = Hive::Commands::Init.new(
+      "/tmp/project",
+      provisioning_error: error,
+      preflight_inspector: fake_inspector
+    )
     original_load = Hive::Config.singleton_class.instance_method(:load)
-    original_inspector_new = Hive::AgentSkills::Inspector.singleton_class.instance_method(:new)
     Hive::Config.define_singleton_method(:load) { |_path| {} }
-    Hive::AgentSkills::Inspector.define_singleton_method(:new) { |**_kwargs| fake_inspector }
 
     cmd.send(:run_init_preflight!)
 
@@ -168,7 +170,6 @@ class HiveCommandsInitTest < Minitest::Test
     assert_match(/run `hive doctor` for details/, error.string)
   ensure
     Hive::Config.singleton_class.define_method(:load, original_load) if original_load
-    Hive::AgentSkills::Inspector.singleton_class.define_method(:new, original_inspector_new) if original_inspector_new
   end
 
   def test_write_warn_swallows_epipe

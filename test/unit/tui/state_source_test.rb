@@ -214,6 +214,9 @@ class TuiStateSourceTest < Minitest::Test
       assert_equal project, payload.fetch("projects").first.fetch("name")
       assert_equal source.current.rows.first.slug,
                    payload.fetch("projects").first.fetch("tasks").first.fetch("slug")
+      dependency_snapshot = source.dependency_context_snapshot
+      assert_instance_of Hive::DependencyAdmission::Context, dependency_snapshot.fetch(:context)
+      assert_match(/\A[0-9a-f]{64}\z/, dependency_snapshot.fetch(:fingerprint))
       assert_nil source.instance_variable_get(:@thread),
                  "synchronous web refreshes must not start the TUI poll thread"
     ensure

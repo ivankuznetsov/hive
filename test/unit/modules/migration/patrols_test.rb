@@ -991,7 +991,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
         architecture = Hive::RefactorPatrol::JobStore.new(
           root, hive_state_path: configured
         )
-        assert_equal File.join(state_path, "refactor_patrol", "v3"), architecture.root
+        assert_equal File.join(state_path, "refactor_patrol", "v4"), architecture.root
 
         supervisor = FakeSupervisor.new
         supervisor.live = false
@@ -1060,14 +1060,14 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
-  def test_default_coordinator_probe_ignores_v2_jobs
+  def test_default_coordinator_probe_ignores_v3_jobs
     with_project do |project|
       released = File.join(
-        project.fetch("hive_state_path"), "refactor_patrol", "v2", "jobs"
+        project.fetch("hive_state_path"), "refactor_patrol", "v3", "jobs"
       )
       FileUtils.mkdir_p(released)
       opaque = File.join(released, "opaque-job.bytes")
-      bytes = "\x00unread-v2-job\xff".b
+      bytes = "\x00unread-v3-job\xff".b
       File.binwrite(opaque, bytes)
 
       result = default_coordinator(project).tick(now: NOW).fetch(0)
@@ -1936,9 +1936,9 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       "state" => "complete",
       "complete" => true,
       "dispositions" => {
-        "accepted" => [],
-        "flagged" => [],
-        "suppressed" => []
+        "fix" => [],
+        "discuss" => [],
+        "dismiss" => []
       },
       "feature_results" => [],
       "review_errors" => [],

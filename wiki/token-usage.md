@@ -1,13 +1,13 @@
 ---
 title: Token Usage Stats
 type: observability
-source: lib/hive/agent.rb, lib/hive/usage_db.rb, lib/hive/patrol/token_budget.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
+source: lib/hive/agent.rb, lib/hive/usage_db.rb, lib/hive/task_workspace/resources.rb, lib/hive/patrol/token_budget.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-24
-updated: 2026-08-12
+updated: 2026-08-14
 tags: [observability, tui, sqlite, agent]
 ---
 
-**TLDR**: Hive records token usage only for hive-driven agent spawns. `Hive::Agent#spawn_and_wait` captures the last structured usage event seen in the child stream, `Hive::Stages::Base.spawn_agent` writes one SQLite row after normal stage spawns, and ordinary plus architecture patrol wrappers write project-scoped rows after every default agent launch. Patrol launches without trustworthy positive counts use an `-unmetered` stage suffix and still consume provider-independent launch quota. `hive tui` surfaces scoped aggregates in the footer plus a full-screen `T` matrix with a patrol attribution row. There is no historical log backfill and no ingestion of ad-hoc agent sessions.
+**TLDR**: Hive records token usage only for hive-driven agent spawns. `Hive::Agent#spawn_and_wait` captures the last structured usage event seen in the child stream, `Hive::Stages::Base.spawn_agent` writes one SQLite row after normal stage spawns, and ordinary plus architecture patrol wrappers write project-scoped rows after every default agent launch. Patrol launches without trustworthy positive counts use an `-unmetered` stage suffix. Usage is telemetry, never a daily/cycle allowance. `hive tui` surfaces scoped aggregates in the footer plus a full-screen `T` matrix with a patrol attribution row. There is no historical log backfill and no ingestion of ad-hoc agent sessions.
 
 ## Capture Boundary
 
@@ -56,12 +56,36 @@ Schema:
 | `project_slug` | `task.project_name`, intentionally path-independent so multiple checkouts collapse. |
 | `task_slug` | Hive task slug. |
 | `stage` | Stage name at spawn time, for example `4-execute`. |
+| `attempt_id` / `session_id` | Nullable exact durable attribution for workspace-aware launches. A partial unique index makes a non-null session idempotent. |
+| `task_generation` | Nullable task generation bound to that attempt/session observation. |
+| `source` | Nullable symbolic producer of the attributed observation. |
 | `started_at` / `ended_at` | UTC ISO8601 timestamps. |
 | `input` / `output` / `cached` | Backward-compatible aggregate counters. Claude cached tokens are cache-read plus cache-creation input tokens. Unknown detailed values store numeric zero here only for legacy aggregation and have a false availability flag. |
 | `cache_read` / `cache_write` / `reasoning` / `cost` | Nullable OpenCode details; cache directions are never collapsed when only one is available. |
 | `*_available` | Per-field evidence flags preserving unavailable separately from numeric zero. Existing databases gain these additive columns in place; legacy input/output/cached rows are marked available and newly introduced details unavailable. |
 
-Indexes cover `started_at`, `(project_slug, started_at)`, and `(task_slug, started_at)`.
+Indexes cover `started_at`, `(project_slug, started_at)`, and `(task_slug,
+started_at)`. Schema v2 evolves the existing database transactionally through
+`PRAGMA user_version`, retains every legacy row, and uses a busy timeout plus
+bounded retry for concurrent migration/writes. Legacy rows remain explicitly
+unattributed: Hive never joins them to an attempt from similar timestamps.
+Session writes are idempotent upserts, and an exact attributed read failure is
+`available: false`, not zero usage.
+
+## Task workspace resource truth
+
+The task workspace keeps configured guards and observed use separate. Each
+resource identifies its kind, unit, scope, configuration source, enforcement
+state, configured value, observed value, and reset/retry timing. Monetary API
+caps, subscription-backed budget-equivalent guards, token ceilings, launch
+quotas, and wall-clock timeouts never collapse into one budget. In particular,
+a subscription-backed `budget_usd` guard is not described as billed spend.
+
+Remaining headroom is computed only when configured and observed values have
+the same trustworthy unit and scope. Unknown persistence, live usage that has
+not yet landed, and unattributed legacy rows remain unavailable rather than
+zero. Aggregation deduplicates by exact session ID before rolling up to the
+attempt. See [[modules/task_workspace]].
 
 ## Aggregates
 
@@ -76,7 +100,22 @@ The scope hash accepts `project_slug:` and `task_slug:` filters. `task_slug` is 
 
 The aggregate also returns `:patrol` buckets by summing rows whose `stage` starts with `patrol` **or** `refactor-patrol`, honoring the same scope and time-window filters. This is a cross-cutting attribution bucket: patrol tokens still belong to their actual agent rows (`claude`, `codex`, `pi`, `grok`, or `opencode`) and still contribute to `TOTAL`; the patrol bucket is not added into `TOTAL` a second time.
 
-`Hive::UsageDb.patrol_activity` is the runtime enforcement view for the current UTC day. It returns input/output/cached telemetry plus the charged input-plus-output total, aggregate patrol launches, separate ordinary/architecture launch counts, architecture-review count, and separate unmetered counts. A cached-only row is still metered, so it never masquerades as missing provider accounting, but it adds zero charged tokens. `Hive::Patrol::TokenBudget` checks that durable project-wide view before each default ordinary or architecture patrol spawn, while also retaining an in-process cycle counter if SQLite recording fails. Architecture launches do not consume ordinary `max_agent_spawns_per_day` headroom; architecture reviews instead use `max_architecture_review_spawns_per_day` (default `8`), architecture fixes retain capacity after that review cap, and unmetered architecture work has its own daily backstop (default `96`). A project-keyed `flock` is acquired before that check and held until usage is recorded, serializing all ordinary and architecture agent lifetimes for the project; a competing process cannot reserve the same daily remainder and fails closed as `agent_in_flight`, while a crash releases the kernel lock automatically. Before spawning, `Hive::Patrol::AgentLaunch` requires enough remaining per-agent/cycle/day allowance for the profile's `initial_context_tokens` plus one token per rendered prompt byte. Claude reserves 20,000 initial-context tokens, covering the provider context sent before its first measurable stream event; insufficient headroom returns `insufficient_launch_headroom` without a child or usage row, or `daily_token_headroom` when the shared UTC-day remainder is specifically the constraining allowance. Hive then passes the smallest of the applicable per-agent limit and the remaining cycle/day allowances into each running agent: low/medium/high/ultrapatrol reviews use at most 40k/50k/75k/100k, ordinary fixes default to 2x that per-agent headroom, and architecture uses its configured multiplier (2x by default) without compounding the fix multiplier. The shared cycle/day totals and native dollar-equivalent guard are not multiplied by the ordinary fix setting. Claude's interim events make that an actual in-flight stop, subject to the granularity of provider events. Providers that expose usage only in their terminal event can be marked over-limit then, but cannot be interrupted early from token data; provider-independent launch caps and wall-clock timeouts remain the fallback. The CLI calls the native guard a USD budget; on subscription-backed providers it does not mean Hive makes an additional payment.
+`Hive::UsageDb.patrol_activity` remains a current-day telemetry view. It returns
+input/output/cached counts, aggregate Patrol launches, ordinary/architecture
+attribution, and unmetered counts, but none of those totals admits or denies a
+launch. `Hive::Patrol::TokenBudget` now owns only the project-wide `flock`, the
+single `patrol.max_tokens_per_agent` emergency ceiling, and usage recording.
+The same high ceiling applies to ordinary review/fix and architecture
+review/fix. The lock is held for the complete agent lifetime; a competing
+process returns `agent_in_flight`, and a crash releases the kernel lock.
+`Hive::Patrol::AgentLaunch` still refuses a prompt plus provider-owned initial
+context larger than the per-agent fuse. Claude's interim usage events can stop
+a runaway process in flight; providers with terminal-only accounting remain
+bounded by the existing wall-clock, turn, process-custody, feature, fix, and PR
+caps. Architecture discovery normally retries after 60 seconds, but a
+structured `token_limit` or `turn_limit` result shares the fixed one-hour
+runaway cooldown used by action retries. A UsageDb failure warns and releases
+the lock, but does not become a future admission gate.
 
 ## TUI Surfaces
 
@@ -116,5 +155,6 @@ See [[commands/tui]] for the broader TUI mode and keybinding contract.
 - [[commands/tui]]
 - [[modules/agent]]
 - [[modules/agent_profile]]
+- [[modules/task_workspace]]
 - [[stages/index]]
 - [[gaps]]

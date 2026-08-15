@@ -238,7 +238,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       {
         status: completion_status, job_id: dispatch_token.fetch(:job_id), pr_number: 7,
         pr_url: "https://github.com/acme/demo/pull/7",
-        accepted_count: 0, flagged_count: 0, suppressed_count: 0
+        fix_count: 0, discuss_count: 0, dismiss_count: 0
       }
     end
   end
@@ -424,6 +424,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       operational_snapshot: nil, module_runtime: nil,
                       module_migration_coordinator: nil,
                       recovery_coordinator: nil,
+                      plan_approval: Hive::Daemon::PlanApproval,
                       runtime_ready_callback: nil)
     config = {
       "daemon" => {
@@ -477,6 +478,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       module_runtime: module_runtime,
       module_migration_coordinator: module_migration_coordinator,
       recovery_coordinator: recovery_coordinator,
+      plan_approval: plan_approval,
       runtime_ready_callback: runtime_ready_callback
     )
     # Generic dispatcher tests exercise routing, not the detached production
@@ -943,7 +945,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     dispatcher.tick(now: T0)
 
-    refute controller.project_dropped?("p1")
+    refute_includes controller.dropped_projects, "p1"
     refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "p1" }
     assert_equal(
       [
@@ -2196,7 +2198,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     dispatcher.tick(now: T0)
 
-    refute ctrl.project_dropped?("answer_digest")
+    refute_includes ctrl.dropped_projects, "answer_digest"
     refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "answer_digest" }
     assert_equal [ { date: "2026-06-13", exit_code: Hive::ExitCodes::CONFIG, now: T0 } ],
                  answer_digest.completed
@@ -2978,16 +2980,23 @@ class HiveDaemonDispatcherTest < Minitest::Test
       state_file = File.join(dir, "plan.md")
       File.write(state_file, "# plan\n\n<!-- WAITING -->\n")
 
-      rows = [ row(stage: "3-plan", action: "needs_input", marker: "waiting",
-                   command: "hive plan s1 --from 3-plan",
+      rows = [ row(stage: "3-plan", action: "ready_to_develop", marker: "waiting",
+                   command: "hive develop s1 --from 3-plan",
                    mtime: T0 - 600, state_file: state_file) ]
-      dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+      plan_approval = Object.new
+      plan_approval.define_singleton_method(:prepare) do |command, path|
+        Hive::Daemon::PlanApproval.prepare(
+          command, path, clearance_checker: -> { true }
+        )
+      end
+      dispatcher, sup, ctrl, logger, _mw = make_dispatcher(
+        rows: rows, plan_approval: plan_approval
+      )
       dispatcher.tick(now: T0)
 
       # Dispatched the rewritten command (develop, not plan).
       assert_equal 1, sup.spawned.size
-      assert_equal "hive develop s1 --from 3-plan", sup.spawned.first[:command],
-                   "PlanApproval must rewrite `hive plan ...` to `hive develop ...`"
+      assert_equal "hive develop s1 --from 3-plan", sup.spawned.first[:command]
 
       # Marker flipped to :complete on disk so `hive develop --from
       # 3-plan` will be accepted by VALID_TERMINAL_MARKERS on the
@@ -3021,10 +3030,18 @@ class HiveDaemonDispatcherTest < Minitest::Test
       state_file = File.join(dir, "plan.md")
       File.write(state_file, "# plan\n\n<!-- ERROR reason=plan_failed -->\n")
 
-      rows = [ row(stage: "3-plan", action: "needs_input", marker: "waiting",
-                   command: "hive plan s1 --from 3-plan",
+      rows = [ row(stage: "3-plan", action: "ready_to_develop", marker: "waiting",
+                   command: "hive develop s1 --from 3-plan",
                    mtime: T0 - 600, state_file: state_file) ]
-      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+      plan_approval = Object.new
+      plan_approval.define_singleton_method(:prepare) do |command, path|
+        Hive::Daemon::PlanApproval.prepare(
+          command, path, clearance_checker: -> { true }
+        )
+      end
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: rows, plan_approval: plan_approval
+      )
       dispatcher.tick(now: T0)
 
       assert_equal 0, sup.spawned.size, "must not spawn when marker isn't :waiting/:complete"
@@ -3046,10 +3063,18 @@ class HiveDaemonDispatcherTest < Minitest::Test
       state_file = File.join(dir, "plan.md")
       File.write(state_file, "# plan\n\n<!-- WAITING -->\n")
 
-      rows = [ row(stage: "3-plan", action: "needs_input", marker: "waiting",
+      rows = [ row(stage: "3-plan", action: "ready_to_develop", marker: "waiting",
                    command: "hive review s1 --from 3-plan",
                    mtime: T0 - 600, state_file: state_file) ]
-      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+      plan_approval = Object.new
+      plan_approval.define_singleton_method(:prepare) do |command, path|
+        Hive::Daemon::PlanApproval.prepare(
+          command, path, clearance_checker: -> { true }
+        )
+      end
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: rows, plan_approval: plan_approval
+      )
       dispatcher.tick(now: T0)
 
       assert_equal 0, sup.spawned.size
@@ -3062,6 +3087,25 @@ class HiveDaemonDispatcherTest < Minitest::Test
       assert_equal :waiting, Hive::Markers.current(state_file).name,
                    "malformed command must not flip the marker"
     end
+  end
+
+  def test_plan_review_automation_dispatches_without_marker_approval
+    rows = [ row(
+      stage: "3-plan", action: "plan_reviewing", marker: "waiting",
+      command: "hive plan-review-run s1", mtime: T0 - 600
+    ) ]
+    plan_approval = Object.new
+    plan_approval.define_singleton_method(:prepare) { |*| flunk "must not approve" }
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+      rows: rows, plan_approval: plan_approval
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, sup.spawned.length
+    assert_equal "hive plan-review-run s1", sup.spawned.first.fetch(:command)
+    event = logger.events.find { |name, _attrs| name == :dispatched }
+    assert_equal "plan_review", event.last.fetch(:trigger)
   end
 
   def test_edit_action_after_baseline_user_edit_dispatches
@@ -3319,7 +3363,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       status_consumer: status, logger: logger
     )
     dispatcher.tick(now: T0)
-    assert controller.project_dropped?("p1")
+    assert_includes controller.dropped_projects, "p1"
     assert events_include?(logger, :project_dropped)
   end
 
@@ -3339,7 +3383,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     dispatcher.tick(now: T0)
 
-    refute controller.project_dropped?("p1")
+    refute_includes controller.dropped_projects, "p1"
     refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "p1" }
   end
 
@@ -6247,6 +6291,81 @@ end
       assert_empty Q.pending(state_home: state_home)
       assert_empty Dir.glob(File.join(state_home, "dispatch_requests", "*"))
     end
+  end
+
+  def test_bound_dispatch_request_rejects_a_changed_task_generation
+    dispatcher, = make_dispatcher(rows: [])
+    task = Struct.new(:id, :stage_index, :stage_name, :slug).new(42, 4, "execute", "demo-task")
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { task }
+    request = Q::Request.new(
+      project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+      task_id: 42, expected_stage: "4-execute", task_generation: "old-generation"
+    )
+    generation = Struct.new(:task_generation).new("current-generation")
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, ->(**) { generation }) do
+        refute dispatcher.send(:bound_task_request_current?, request)
+        request.task_generation = "current-generation"
+        assert dispatcher.send(:bound_task_request_current?, request)
+        request.expected_stage = "3-plan"
+        refute dispatcher.send(:bound_task_request_current?, request)
+      end
+    end
+  end
+
+  def test_dispatcher_removes_a_durable_request_with_stale_task_identity
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      Q.write_request!(
+        project: "p1", slug: "s1", argv: %w[hive run s1 --json],
+        requestor: "bot", request_id: "STALE", task_id: 42,
+        expected_stage: "4-execute", task_generation: "old-generation",
+        state_home: state_home, now: T0
+      )
+      dispatcher.define_singleton_method(:bound_task_request_current?) { |_request| false }
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      rejected = logger.events.find do |name, attrs|
+        name == :dispatch_request_rejected && attrs[:request_id] == "STALE"
+      end
+      refute_nil rejected
+      assert_equal "stale_task_identity", rejected.last.fetch(:reason)
+      assert_empty sup.spawned
+      assert_nil Q.fetch("STALE", state_home: state_home)
+    end
+  end
+
+  def test_bound_identity_fails_closed_when_task_resolution_errors
+    dispatcher, = make_dispatcher(rows: [])
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { raise Hive::ConfigError, "migration owns task" }
+    request = Q::Request.new(
+      project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+      task_id: 42, expected_stage: "4-execute", task_generation: "generation"
+    )
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      refute dispatcher.send(:bound_task_request_current?, request)
+    end
+  end
+
+  def test_request_intended_stage_uses_current_workflow_mapping_and_safe_fallback
+    dispatcher, = make_dispatcher(rows: [])
+    task = Struct.new(:stage_index, :stage_name).new(4, "execute")
+
+    assert_equal "6-review",
+                 dispatcher.send(:request_intended_stage, %w[hive review task], task)
+    assert_equal "4-execute",
+                 dispatcher.send(:request_intended_stage, %w[hive unknown task], task)
   end
 
   def test_dispatch_request_rejected_when_argv_not_allowlisted

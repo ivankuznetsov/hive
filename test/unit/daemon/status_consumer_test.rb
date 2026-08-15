@@ -66,6 +66,10 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
   # ── happy path ────────────────────────────────────────────────────────
 
   def test_parses_envelope_into_rows
+    plan_review = {
+      "review_id" => "pr-#{'a' * 64}", "state" => "cleared",
+      "effective_level" => "standard", "execution_allowed" => true
+    }
     payload = make_envelope(projects: [ {
       "name" => "writero",
       "path" => "/tmp/writero",
@@ -73,7 +77,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "hidden_archived_task_count" => 3,
       "tasks" => [
         task_row(slug: "fix-bug").merge(
-          "pr_url" => "https://github.com/acme/writero/pull/42"
+          "pr_url" => "https://github.com/acme/writero/pull/42",
+          "plan_review" => plan_review
         )
       ]
     } ])
@@ -88,6 +93,7 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_equal "ready_to_brainstorm", row.action
       assert_equal "hive brainstorm slug", row.suggested_command
       assert_equal "https://github.com/acme/writero/pull/42", row.pr_url
+      assert_equal plan_review, row.plan_review
       assert_equal 3, result.hidden_archived_task_count
       assert_equal 3, result.projects.first.hidden_archived_task_count
     end

@@ -2,7 +2,6 @@
 
 require "digest"
 require "fileutils"
-require "pathname"
 require_relative "paths"
 
 module HiveReleaseCandidate
@@ -80,18 +79,6 @@ module HiveReleaseCandidate
         "size" => stat.size,
         "sha256" => digest
       }
-    end
-
-    def validate_archive_entries!(names)
-      names.each do |name|
-        path = Pathname.new(name.to_s)
-        normalized = path.cleanpath.to_s
-        if name.to_s.empty? || path.absolute? || normalized == ".." ||
-           normalized.start_with?("../") || name.to_s.include?("\\")
-          raise Error, "unsafe archive entry #{name.inspect}"
-        end
-      end
-      true
     end
 
     def verify_authenticated_package!(package, signature_verifier:)

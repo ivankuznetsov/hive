@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-plan-review-adoption.v1.json",
+  "title": "Hive legacy execute plan review adoption receipt (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "task_id", "task_generation", "stage", "reason", "adopted_at"],
+  "properties": {
+    "schema": {"const": "hive-plan-review-adoption"},
+    "schema_version": {"const": 1},
+    "task_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "task_generation": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "stage": {"const": "4-execute"},
+    "reason": {"const": "pre_feature_execute_task"},
+    "adopted_at": {"type": "string", "format": "date-time"}
+  }
+}

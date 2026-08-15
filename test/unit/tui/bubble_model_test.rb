@@ -352,7 +352,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       scopes << scope
       Hive::UsageDb.zero_aggregate
     }) do
-      @model.send(:usage_footer_line, 120)
+      @model.send(:default_footer, 120)
     end
 
     assert_equal [ { project_slug: "demo", task_slug: "task-one" } ], scopes
@@ -375,7 +375,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       scopes << scope
       Hive::UsageDb.zero_aggregate
     }) do
-      @model.send(:usage_footer_line, 120)
+      @model.send(:default_footer, 120)
     end
 
     assert_equal [ { project_slug: "demo" } ], scopes
@@ -407,7 +407,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       scopes << scope
       Hive::UsageDb.zero_aggregate
     }) do
-      @model.send(:usage_footer_line, 120)
+      @model.send(:default_footer, 120)
     end
 
     assert_equal [ {} ], scopes
@@ -5165,6 +5165,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
       # Editor is a no-op: opens, returns 0, file untouched (real
       # File.mtime / File.read drive the comparison).
       @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+      plan_approval = Object.new
+      plan_approval.define_singleton_method(:prepare) do |_command, _state_file|
+        "hive develop some-slug --from 3-plan"
+      end
+      @model.instance_variable_set(:@plan_approval, plan_approval)
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
       cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
@@ -5347,6 +5352,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
       )
       @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
       @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+      plan_approval = Object.new
+      plan_approval.define_singleton_method(:prepare) do |command, state_file|
+        Hive::Daemon::PlanApproval.prepare(
+          command, state_file, clearance_checker: -> { true }
+        )
+      end
+      @model.instance_variable_set(:@plan_approval, plan_approval)
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
       cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
@@ -5363,6 +5375,38 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_equal "develop", dispatch.verb
       assert_includes dispatch.argv, "develop"
       assert_includes dispatch.argv, "some-slug"
+    end
+  end
+
+  def test_open_input_editor_plan_advance_rejects_a_rewritten_guarded_command
+    # The guarded approval path is only trustworthy if the command it
+    # hands back is the same `hive develop` we validated. A prepare that
+    # returns anything else must abort the advance with the marker still
+    # :waiting rather than dispatch the substituted command.
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, "# Plan\nUntouched.\n<!-- WAITING -->\n")
+
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        suggested_command: "hive plan some-slug --project demo --from 3-plan"
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+      plan_approval = Object.new
+      plan_approval.define_singleton_method(:prepare) do |_command, _state_file|
+        "hive develop someone-elses-slug"
+      end
+      @model.instance_variable_set(:@plan_approval, plan_approval)
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal :waiting, Hive::Markers.current(plan_md).name,
+                   "marker must stay :waiting when the guarded command was rewritten"
+      assert_nil @messages.find { |m| m.is_a?(Hive::Tui::Messages::DispatchCommand) },
+                 "the substituted develop command must never be dispatched"
     end
   end
 
@@ -6821,6 +6865,21 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_raises(Hive::Tui::BubbleModel::MarkerRaceError) do
         @model.send(:finalize_plan_marker, row)
       end
+    end
+
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# Plan\n<!-- WAITING -->\n")
+      row = make_task_row(
+        slug: "guarded-plan", state_file: state_file,
+        suggested_command: "hive plan guarded-plan --from 3-plan"
+      )
+      approval = Object.new
+      approval.define_singleton_method(:prepare) { |_command, _path| "hive develop another-task" }
+      previous = @model.instance_variable_get(:@plan_approval)
+      @model.instance_variable_set(:@plan_approval, approval)
+      assert_raises(ArgumentError) { @model.send(:finalize_plan_marker, row) }
+      @model.instance_variable_set(:@plan_approval, previous)
     end
 
     with_singleton_method_stub(Hive::Markers, :current, ->(_path) { raise Errno::EACCES, "denied" }) do

@@ -124,6 +124,39 @@ module Hive
         }
       end
 
+      # Read-only newest-first page for current-health consumers. It reads at
+      # most +limit+ immutable memberships and never scans authoritative jobs.
+      def recent_page(limit:)
+        page_limit = Integer(limit)
+        raise ArgumentError, "job query page limit must be positive" unless page_limit.positive?
+
+        state = load_state
+        return empty_page if state.nil? && !jobs_exist?
+        corrupt!("job query index is missing", state_path) unless state
+
+        through = state.fetch("high_water")
+        sequences = through.downto([ through - page_limit + 1, 1 ].max)
+        memberships = sequences.map do |sequence|
+          entry = read_json(entry_path(state.fetch("generation"), sequence))
+          validate_entry!(entry, sequence, state.fetch("generation"))
+          unless @files.job_exists?(entry.fetch("job_id"))
+            inconsistent!("job query index references a missing job", job_path(entry.fetch("job_id")))
+          end
+          entry
+        end
+        {
+          "generation" => state.fetch("generation"),
+          "after_sequence" => 0,
+          "through_sequence" => through,
+          "next_after_sequence" => 0,
+          "total" => through,
+          "has_more" => through > page_limit,
+          "job_ids" => memberships.map { |entry| entry.fetch("job_id") }
+        }
+      rescue ArgumentError, TypeError
+        raise ArgumentError, "job query page limit must be positive"
+      end
+
       private
 
       def rebuild_locked!(job_ids)

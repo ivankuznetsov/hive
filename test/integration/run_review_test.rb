@@ -14,6 +14,10 @@ require "hive/stages/review"
 class RunReviewTest < Minitest::Test
   include HiveTestHelper
 
+  INVOKE_AGENT_CUSTODY = lambda do |agent_custody, &block|
+    agent_custody ? agent_custody.call(&block) : block.call
+  end
+
   def setup
     @prev_bin = ENV["HIVE_CLAUDE_BIN"]
     @driver_dir = Dir.mktmpdir("review-driver")
@@ -1480,7 +1484,7 @@ class RunReviewTest < Minitest::Test
               status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
             )
           }) do
-            with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
+            with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil, agent_custody: nil|
               flunk "ad-hoc review should not run fix by default with accepted=#{accepted.inspect}"
             }) do
               capture_io { Hive::Commands::Run.new(folder).call }
@@ -1511,9 +1515,9 @@ class RunReviewTest < Minitest::Test
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         accepted_seen = nil
-        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil, agent_custody: nil|
           accepted_seen = accepted
-          { status: :ok }
+          INVOKE_AGENT_CUSTODY.call(agent_custody) { { status: :ok } }
         }) do
           capture_io { Hive::Commands::Run.new(folder).call }
         end
@@ -2510,10 +2514,12 @@ class RunReviewTest < Minitest::Test
           Hive::Stages::Base, :implementation_stage_identity,
           ->(*_args) { resolved_identity }
         ) do
-          with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
+          with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil, agent_custody: nil|
             accepted_seen = accepted
             identity_seen = identity
-            { status: :error, error_message: "fix failed" }
+            INVOKE_AGENT_CUSTODY.call(agent_custody) do
+              { status: :error, error_message: "fix failed" }
+            end
           }) do
             _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
             assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
@@ -2543,27 +2549,29 @@ class RunReviewTest < Minitest::Test
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         accepted_seen = nil
-        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil, agent_custody: nil|
           accepted_seen = accepted
-          File.write(File.join(worktree_path, "fix.txt"), "fixed\n")
-          system("git", "-C", worktree_path, "add", "fix.txt") || raise("git add failed")
-          system("git", "-C", worktree_path, "commit", "-m", "fix review finding", "--quiet") ||
-            raise("git commit failed")
-          {
-            status: :timeout,
-            error_message: "claude stop hook did not signal completion",
-            completion_evidence: {
-              pane_idle: true,
-              process_exited: nil,
-              exit_code: nil,
-              tmux_readable: true,
-              session_alive: true,
-              reason: "turn_ended_without_stop_hook",
-              expected_done_path: File.join(folder, ".done"),
-              expected_result_path: File.join(folder, "result.json"),
-              pid: 12_345
+          INVOKE_AGENT_CUSTODY.call(agent_custody) do
+            File.write(File.join(worktree_path, "fix.txt"), "fixed\n")
+            system("git", "-C", worktree_path, "add", "fix.txt") || raise("git add failed")
+            system("git", "-C", worktree_path, "commit", "-m", "fix review finding", "--quiet") ||
+              raise("git commit failed")
+            {
+              status: :timeout,
+              error_message: "claude stop hook did not signal completion",
+              completion_evidence: {
+                pane_idle: true,
+                process_exited: nil,
+                exit_code: nil,
+                tmux_readable: true,
+                session_alive: true,
+                reason: "turn_ended_without_stop_hook",
+                expected_done_path: File.join(folder, ".done"),
+                expected_result_path: File.join(folder, "result.json"),
+                pid: 12_345
+              }
             }
-          }
+          end
         }) do
           capture_io { Hive::Commands::Run.new(folder).call }
         end
@@ -2595,28 +2603,30 @@ class RunReviewTest < Minitest::Test
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         accepted_seen = nil
-        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil, agent_custody: nil|
           accepted_seen = accepted
-          # Whole-pass no-change: the fix agent investigated the finding,
-          # found the code already correct, and dispositioned it
-          # RESOLVED/NO-FIX — leaving NO unapplied AUTO-FIX work and no
-          # commit. (A do-nothing agent that left `- [x] apply a fix`
-          # unapplied is exercised by the review_errors test below.)
-          File.write(reviewer_file, "## High\n- [x] RESOLVED/NO-FIX: lib/foo.rb already handles the case\n")
-          {
-            status: :timeout,
-            error_message: "claude stop hook did not signal completion",
-            completion_evidence: {
-              pane_idle: true,
-              process_exited: nil,
-              exit_code: nil,
-              tmux_readable: true,
-              session_alive: true,
-              reason: "turn_ended_without_stop_hook",
-              expected_done_path: File.join(folder, ".done"),
-              expected_result_path: File.join(folder, "result.json")
+          INVOKE_AGENT_CUSTODY.call(agent_custody) do
+            # Whole-pass no-change: the fix agent investigated the finding,
+            # found the code already correct, and dispositioned it
+            # RESOLVED/NO-FIX — leaving NO unapplied AUTO-FIX work and no
+            # commit. (A do-nothing agent that left `- [x] apply a fix`
+            # unapplied is exercised by the review_errors test below.)
+            File.write(reviewer_file, "## High\n- [x] RESOLVED/NO-FIX: lib/foo.rb already handles the case\n")
+            {
+              status: :timeout,
+              error_message: "claude stop hook did not signal completion",
+              completion_evidence: {
+                pane_idle: true,
+                process_exited: nil,
+                exit_code: nil,
+                tmux_readable: true,
+                session_alive: true,
+                reason: "turn_ended_without_stop_hook",
+                expected_done_path: File.join(folder, ".done"),
+                expected_result_path: File.join(folder, "result.json")
+              }
             }
-          }
+          end
         }) do
           capture_io { Hive::Commands::Run.new(folder).call }
         end
@@ -2645,22 +2655,24 @@ class RunReviewTest < Minitest::Test
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         accepted_seen = nil
-        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil, agent_custody: nil|
           accepted_seen = accepted
-          {
-            status: :timeout,
-            error_message: "claude stop hook did not signal completion",
-            completion_evidence: {
-              pane_idle: true,
-              process_exited: nil,
-              exit_code: nil,
-              tmux_readable: true,
-              session_alive: true,
-              reason: "turn_ended_without_stop_hook",
-              expected_done_path: File.join(folder, ".done"),
-              expected_result_path: File.join(folder, "result.json")
+          INVOKE_AGENT_CUSTODY.call(agent_custody) do
+            {
+              status: :timeout,
+              error_message: "claude stop hook did not signal completion",
+              completion_evidence: {
+                pane_idle: true,
+                process_exited: nil,
+                exit_code: nil,
+                tmux_readable: true,
+                session_alive: true,
+                reason: "turn_ended_without_stop_hook",
+                expected_done_path: File.join(folder, ".done"),
+                expected_result_path: File.join(folder, "result.json")
+              }
             }
-          }
+          end
         }) do
           _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
           assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
@@ -2687,13 +2699,15 @@ class RunReviewTest < Minitest::Test
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         accepted_seen = nil
-        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil, agent_custody: nil|
           accepted_seen = accepted
-          {
-            status: :error,
-            error_message: "limits reached for claude: Claude Code v2.1.170",
-            limit_text: "You've hit your session limit"
-          }
+          INVOKE_AGENT_CUSTODY.call(agent_custody) do
+            {
+              status: :error,
+              error_message: "limits reached for claude: Claude Code v2.1.170",
+              limit_text: "You've hit your session limit"
+            }
+          end
         }) do
           _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
           assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
@@ -2729,25 +2743,27 @@ class RunReviewTest < Minitest::Test
                    "# Escalations for pass 01\n\n- [ ] needs human review\n")
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
-        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
-          File.write(File.join(worktree_path, "fix.txt"), "fixed\n")
-          system("git", "-C", worktree_path, "add", "fix.txt") || raise("git add failed")
-          system("git", "-C", worktree_path, "commit", "-m", "fix review finding", "--quiet") ||
-            raise("git commit failed")
-          {
-            status: :timeout,
-            error_message: "claude stop hook did not signal completion",
-            completion_evidence: {
-              pane_idle: true,
-              process_exited: nil,
-              exit_code: nil,
-              tmux_readable: true,
-              session_alive: true,
-              reason: "turn_ended_without_stop_hook",
-              expected_done_path: File.join(folder, ".done"),
-              expected_result_path: File.join(folder, "result.json")
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil, agent_custody: nil|
+          INVOKE_AGENT_CUSTODY.call(agent_custody) do
+            File.write(File.join(worktree_path, "fix.txt"), "fixed\n")
+            system("git", "-C", worktree_path, "add", "fix.txt") || raise("git add failed")
+            system("git", "-C", worktree_path, "commit", "-m", "fix review finding", "--quiet") ||
+              raise("git commit failed")
+            {
+              status: :timeout,
+              error_message: "claude stop hook did not signal completion",
+              completion_evidence: {
+                pane_idle: true,
+                process_exited: nil,
+                exit_code: nil,
+                tmux_readable: true,
+                session_alive: true,
+                reason: "turn_ended_without_stop_hook",
+                expected_done_path: File.join(folder, ".done"),
+                expected_result_path: File.join(folder, "result.json")
+              }
             }
-          }
+          end
         }) do
           _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
           assert_equal Hive::ExitCodes::TASK_IN_ERROR, status

@@ -122,11 +122,13 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/commands/daemon.rb",
           "lib/hive/commands/module/dry_run.rb",
           "lib/hive/conditions/execute_boundary.rb",
+          "lib/hive/artifacts/outcome_evidence/store.rb",
           "lib/hive/implementation_identity/store.rb",
           "lib/hive/modules/inspector.rb",
           "lib/hive/provider_routing/operational_projection.rb",
           "lib/hive/daemon/recovery_coordinator.rb",
           "lib/hive/recovery/migration.rb",
+          "lib/hive/task_activity.rb",
           "lib/hive/task_closure.rb",
           "lib/hive/task_projection/store.rb"
         ],

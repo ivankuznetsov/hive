@@ -29,6 +29,7 @@ require "hive/operational_status"
 require "hive/daemon/operational_snapshot"
 require "hive/terminal_text"
 require "hive/tui/views/hyperlink"
+require "hive/events"
 
 module Hive
   module Commands
@@ -305,7 +306,21 @@ module Hive
         else
           ""
         end
-        "  #{target} · #{stage}/#{marker}#{route} · #{owner} — #{reason}"
+        review = operational_plan_review_token(row["plan_review"])
+        "  #{target} · #{stage}/#{marker}#{route}#{review} · #{owner} — #{reason}"
+      end
+
+      def operational_plan_review_token(review)
+        return "" unless review.is_a?(Hash)
+
+        level = terminal_safe(review["effective_level"] || review["computed_level"] || "pending")
+        state = terminal_safe(review["state"] || "unknown")
+        coverage = review.fetch("coverage_counts", {})
+        findings = review.fetch("finding_counts", {})
+        open = findings.fetch("open_gated", 0).to_i + findings.fetch("open_manual", 0).to_i
+        completed = coverage.fetch("completed", 0).to_i
+        total = coverage.values.sum { |value| value.to_i }
+        " · review #{level}/#{state} coverage=#{completed}/#{total} open=#{open}"
       end
 
       def terminal_safe(value)
@@ -495,6 +510,12 @@ module Hive
                 projection.ordinary_rows
               end
             out = base.merge("tasks" => rows.map { |r| task_payload(r, now: now) })
+            out["config_summary"] = {
+              "stages" => {
+                "ensure_clean_on_exit" =>
+                  !config.is_a?(Hash) || config.dig("stages", "ensure_clean_on_exit") != false
+              }
+            }
             out["hidden_archived_task_count"] = projection.hidden_count unless @archive
             if include_archive_index
               # Internal cache handoff only. StateSource removes this key
@@ -558,7 +579,7 @@ module Hive
           task_count = Dir.children(dir).count do |child|
             folder = File.join(dir, child)
             Hive::Stages.task_slug?(child) && File.directory?(folder) &&
-              !managed_historical_task?(folder, workflow_generation: workflow_generation)
+              !managed_current_task?(folder, workflow_generation: workflow_generation)
           end
           next if task_count.zero?
 
@@ -566,14 +587,10 @@ module Hive
         end.sort_by { |entry| entry["stage_dir"] }
       end
 
-      # Managed tasks are immutable pins to the exact workflow generation that
-      # created them. A package update may rename its stages while the retained
-      # generation still makes an older task fully loadable. Such a directory
-      # is historical workflow state, not a core layout rename for `hive
-      # migrate` to move. Require complete provenance and a successful Task
-      # load so corrupt or missing retained generations continue to fail closed
-      # as legacy blockers.
-      def managed_historical_task?(folder, workflow_generation: nil)
+      # Ignore an out-of-union managed task only when it already resolves
+      # against the selected generation. Stale pins fail Task construction and
+      # remain visible as migration blockers.
+      def managed_current_task?(folder, workflow_generation: nil)
         meta = Hive::TaskMeta.read(folder)
         return false unless meta[:workflow] && meta[:workflow_commit] &&
                             meta[:workflow_manifest_digest]
@@ -631,7 +648,9 @@ module Hive
           "shadow_audit" => row.dig(:projection_data, "shadow_audit") || {},
           "closure" => row.dig(:projection_data, "closure"),
           "condition_warning" => row[:condition_warning],
+          "plan_review" => row[:plan_review],
           "implementation_identity" => row[:implementation_identity],
+          "auto_residue" => Hive::Events.clean_exit_summary(row[:folder]),
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
           # 0 for every non-brainstorm / non-needs_input row. Lets an agent
           # or operator tell "the daemon is holding this brainstorm because
@@ -909,7 +928,10 @@ module Hive
           puts "  #{label}"
           stage_rows.sort_by { |r| -r[:mtime].to_i }.each do |r|
             command = r[:suggested_command] || "-"
-            state = [ r[:state_label], dependency_indicator(r), implementation_owner_token(r) ].compact.join(" ")
+            state = [
+              r[:state_label], plan_review_status_token(r[:plan_review]),
+              dependency_indicator(r), implementation_owner_token(r)
+            ].compact.join(" ")
             puts "    #{r[:icon]} #{display_identity_with_pr(r, TEXT_IDENTITY_WIDTH)} " \
                  "#{state.ljust(24)} #{command} #{r[:age]}"
           end
@@ -927,10 +949,24 @@ module Hive
         puts "  Archived"
         rows.sort_by { |row| -row[:mtime].to_i }.each do |row|
           command = row[:suggested_command] || "-"
-          state = [ row[:state_label], dependency_indicator(row), implementation_owner_token(row) ].compact.join(" ")
+          state = [
+            row[:state_label], plan_review_status_token(row[:plan_review]),
+            dependency_indicator(row), implementation_owner_token(row)
+          ].compact.join(" ")
           puts "    #{row[:icon]} #{display_identity_with_pr(row, TEXT_IDENTITY_WIDTH)} " \
                "#{state.ljust(24)} #{command} #{row[:age]}"
         end
+      end
+
+      def plan_review_status_token(review)
+        return nil unless review.is_a?(Hash)
+
+        level = review["effective_level"] || review["computed_level"] || "pending"
+        coverage = review.fetch("coverage_counts", {})
+        findings = review.fetch("finding_counts", {})
+        total = coverage.values.sum { |value| value.to_i }
+        open = findings.fetch("open_gated", 0).to_i + findings.fetch("open_manual", 0).to_i
+        "review=#{level}/#{review['state']} cov=#{coverage.fetch('completed', 0)}/#{total} open=#{open}"
       end
 
       def archive_rows(rows)
@@ -1522,6 +1558,13 @@ module Hive
         "Needs review decision",
         "Confirm finalize",
         "Ready to plan",
+        "Plan review in progress",
+        "Plan review retry ready",
+        "Plan review retry scheduled",
+        "Plan review needs an operator decision",
+        "Plan review cleared with degraded coverage",
+        "Plan reviewer configuration required",
+        "Plan review blocks execution",
         "Ready to develop",
         "Needs recovery",
         "Retry draft PR handoff manually",
@@ -1596,7 +1639,8 @@ module Hive
           projection_data: Hive::TaskProjection.project(records: []).to_h,
           condition_gate: nil,
           condition_migration: nil,
-          condition_warning: nil
+          condition_warning: nil,
+          plan_review: nil
         }
       end
 
@@ -1608,7 +1652,8 @@ module Hive
           action_label: "Error",
           suggested_command: nil,
           next_action: nil,
-          diagnostic: nil
+          diagnostic: nil,
+          plan_review: nil
         )
       end
 
@@ -1641,6 +1686,7 @@ module Hive
             condition_gate: action.condition_gate&.to_h,
             condition_migration: action.migration_selection.to_h,
             condition_warning: action.condition_warning,
+            plan_review: action.plan_review,
             state_label: condition_state_label(row, action)
           )
         end

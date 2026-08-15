@@ -1,9 +1,9 @@
 ---
 title: Hive::Events
 type: module
-source: lib/hive/events.rb
+source: lib/hive/events.rb, lib/hive/task_activity.rb, lib/hive/task_workspace/timeline.rb
 created: 2026-05-23
-updated: 2026-07-31
+updated: 2026-08-13
 tags: [module, events, observability, status, append-only]
 ---
 
@@ -93,6 +93,42 @@ contracts also use separate files: fail-soft operational telemetry stays in
 - **Append**: single `File.write` of `JSON.generate(record) + "\n"` opened `O_WRONLY | O_APPEND | O_CREAT`. Records stay well under `PIPE_BUF` (~4 KiB), so POSIX append-atomicity holds across concurrent emitters; the single-write contract is load-bearing and must not be split into "write JSON then write newline."
 - **Failure mode**: `SystemCallError` during emit is caught and warned to stderr (`[hive.events] failed to emit ...`). The producing stage / agent control flow is not interrupted — observability must never mask the underlying run result.
 
+`clean_exit_auto_committed` records additionally carry a bounded `data`
+object: `head`, `reason`, up to 20 paths (128 bytes each), and the original
+path count. `clean_exit_summary(task_folder)` reads the 200-event walk window,
+starts at the latest `stage_enter`, and returns the current invocation's commit
+count, path summary, latest head/reason/time, or `nil`. Message-only records
+from older Hive versions remain readable through a best-effort parser.
+
+## Material activity and workspace timeline
+
+`Hive::TaskActivity` is the sole append/idempotency facade for material task
+audit facts. It binds a closed activity kind to task, workflow, stage, durable
+attempt, task generation, stable operation ID, optional correlation ID,
+controller occurrence/ingestion times, safe evidence references, and symbolic
+source. The vocabulary covers admission, context capture/selection,
+session/usage/resource observations, stage transitions, questions/answers,
+approval/rejection/decision, retry/recovery/hold, context revision,
+commit/push/PR/check/merge observations, operator actions, corrections, and
+explicit activity gaps.
+
+Mutations that can commit before their event append use owner-private
+`activity-operations` receipts. The receipt stores only precondition and
+expected-result fingerprints. After the domain mutation commits, the result
+fingerprint completes the receipt and appends the activity idempotently. A
+bounded reconciliation may prove and append a missing result once; an
+ambiguous crash appends an `activity_gap` rather than inventing success.
+
+`Hive::TaskWorkspace::Timeline` merges this authoritative journal with a
+bounded suffix of fail-soft `events.jsonl`. Task-journal occurrence time wins.
+Provider/GitHub clocks order only inside the five-minute skew bound; otherwise
+ingestion time orders and the external clock remains display-only. Stable
+correlation identity deduplicates presentation while retaining every source
+reference. Material and noise budgets are separate, identical noise groups
+only within 60 seconds, signed task-bound cursors page older material and at
+most 20 raw group members, and corrections append supersession links without
+rewriting older records. See [[modules/task_workspace]].
+
 ## Derived `status.md`
 
 After every successful append, `render_status!` rewrites `<task>/status.md` to a fixed layout:
@@ -149,3 +185,4 @@ Per-reviewer spawns inside Phase 2 emit their own `agent_start` / `agent_end` vi
 - [[modules/agent]] · [[modules/stages]] · [[modules/markers]]
 - [[stages/brainstorm]] · [[stages/plan]] · [[stages/review]]
 - [[commands/run]] · [[commands/status]]
+- [[modules/task_workspace]]

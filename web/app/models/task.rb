@@ -1,10 +1,45 @@
 require "digest"
 require "json_schemer"
 require "pathname"
+require "shellwords"
+require "hive/plan_review/projection"
+require "hive/plan_review/store"
 require "hive/web/environment"
+require "hive/task_workspace/artifacts"
+require "hive/task_workspace/publication"
+require "hive/artifacts/outcome_evidence/store"
 
 class Task
   include TaskMutations
+
+  class VerifiedEvidenceBody
+    include Enumerable
+
+    CHUNK_BYTES = 64 * 1024
+
+    def initialize(io, bytes)
+      @io = io
+      @bytes = bytes
+    end
+
+    def each
+      return enum_for(__method__) unless block_given?
+
+      begin
+        remaining = @bytes
+        while remaining.positive? && (chunk = @io.read([ CHUNK_BYTES, remaining ].min))
+          yield chunk
+          remaining -= chunk.bytesize
+        end
+      ensure
+        close
+      end
+    end
+
+    def close
+      @io.close unless @io.closed?
+    end
+  end
 
   BoundBrainstormQuestion = Struct.new(
     :round, :n, :text, :binding, :ordinal, keyword_init: true
@@ -12,6 +47,20 @@ class Task
 
   ARTIFACT_ORDER = %w[idea.md brainstorm.md plan.md task.md pr.md summary.md artifact.md].freeze
   MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif|webp|webm|mp4)\z/i
+  EVIDENCE_ATTEMPT_RE = Hive::Artifacts::OutcomeEvidence::Store::SAFE_ID
+  EVIDENCE_DIGEST_RE = Hive::Artifacts::OutcomeEvidence::Store::DIGEST
+  EVIDENCE_MEDIA_TYPES = {
+    "image/png" => [ "image/png", "inline" ],
+    "image/jpeg" => [ "image/jpeg", "inline" ],
+    "image/webp" => [ "image/webp", "inline" ],
+    "video/webm" => [ "video/webm", "inline" ],
+    "video/mp4" => [ "video/mp4", "inline" ],
+    "text/plain" => [ "text/plain; charset=utf-8", "inline" ],
+    "text/markdown" => [ "text/markdown; charset=utf-8", "attachment" ],
+    "application/json" => [ "application/json", "attachment" ],
+    "application/pdf" => [ "application/pdf", "attachment" ],
+    "application/x-asciinema+json" => [ "application/octet-stream", "attachment" ]
+  }.freeze
   CAPTURE_MANIFEST_V2_SCHEMER = JSONSchemer.schema(
     Pathname.new(Hive::Schemas.schema_path("hive-artifact-capture", version: 2))
   )
@@ -35,6 +84,7 @@ class Task
     "8" => "ready_to_finalize"
   }.freeze
   PASSABLE_MARKERS = Hive::Commands::Approve::VALID_TERMINAL_MARKERS.map(&:to_s).freeze
+  PLAN_REVIEW_ARTIFACT_KEYS = /\A(?:policy|candidate_plan|resolution|(?:primary|adversarial|verification)_(?:result|coverage|route)|planner_revision_(?:input|result|coverage|route)|decision_prd-[0-9a-f]{64})\z/
 
   attr_reader :project
 
@@ -92,12 +142,78 @@ class Task
   end
 
   def artifacts
-    return [] unless folder && File.directory?(folder)
-
-    artifact_order.filter_map do |name|
-      path = File.join(folder, name)
-      [ name, File.read(path) ] if File.file?(path)
+    artifact_panel.fetch("records").filter_map do |record|
+      [ record.fetch("name"), record["content"] ] unless record["binary"]
     end
+  end
+
+  def plan_review
+    value = self["plan_review"]
+    value.is_a?(Hash) && value["applicable"] == true ? value : nil
+  end
+
+  # Status owns the summary. The task-local store owns detailed evidence, and
+  # this accessor will read only the content-addressed artifacts selected by
+  # the exact status observation. There is deliberately no caller-supplied
+  # path, so Web cannot become an arbitrary task-folder file reader.
+  def plan_review_details
+    summary = plan_review
+    return nil unless summary
+
+    details = {
+      "summary" => summary, "coverage" => [], "findings" => [],
+      "routes" => Array(summary["routes"]), "artifacts" => []
+    }
+    return details unless folder && summary["review_id"]
+
+    review_root = File.join(folder, Hive::PlanReview::Store::ROOT_BASENAME)
+    root_status = File.lstat(review_root)
+    unless root_status.directory? && !root_status.symlink?
+      raise Hive::PlanReview::InvalidRecord, "plan review root is not a plain directory"
+    end
+    store = Hive::PlanReview::Store.new(task_folder: folder)
+    current = store.current_validated
+    projection = Hive::PlanReview::Projection.new(current)
+    unless current.review_id == summary["review_id"] && current.version == summary["version"] &&
+           projection.observation_digest == summary["observation_digest"]
+      raise Hive::PlanReview::StaleObservation,
+            "task status and plan review evidence identify different observations"
+    end
+
+    details.merge(
+      "coverage" => current["coverage"],
+      "findings" => current["findings"].sort_by { |finding| finding["display_order"] },
+      "routes" => current["routes"],
+      "artifacts" => safe_plan_review_artifacts(store, current["artifacts"])
+    )
+  rescue Hive::PlanReview::Error, JSON::ParserError, SystemCallError, IOError => error
+    Rails.logger.warn("plan review evidence unreadable for #{slug}: #{error.class}: #{error.message}")
+    {
+      "summary" => summary.merge(
+        "freshness" => { "status" => "invalid", "reason" => "plan review evidence changed" },
+        "blocker_owner" => "hive", "blocker_reason" => "invalid_plan_review",
+        "required_action" => "refresh plan review state and retry",
+        "execution_allowed" => false
+      ),
+      "coverage" => [], "findings" => [], "routes" => [], "artifacts" => []
+    }
+  end
+
+  def artifact_panel
+    return Hive::TaskWorkspace.unavailable_panel("artifacts") unless
+      folder && File.directory?(folder)
+
+    Hive::TaskWorkspace::Artifacts.new(
+      task_root: folder, references: artifact_order
+    ).call
+  end
+
+  def publication(cache: nil)
+    Hive::TaskWorkspace::Publication.new(
+      task: self,
+      expected_repository: project["repository_identity"],
+      cache: cache
+    ).call
   end
 
   def media_manifest
@@ -145,6 +261,73 @@ class Task
 
     real
   rescue SystemCallError
+    nil
+  end
+
+  def outcome_evidence
+    return nil unless folder
+
+    current = File.join(folder, "outcome-evidence", "current.json")
+    return nil unless File.file?(current) || File.symlink?(current)
+
+    normalize_outcome_evidence(outcome_evidence_store.package_metadata)
+  rescue Hive::Artifacts::OutcomeEvidence::Error, SystemCallError => e
+    Rails.logger.warn("outcome evidence unreadable for #{slug}: #{e.class}")
+    {
+      "status" => "invalid",
+      "reason" => "Outcome evidence failed integrity validation and was not rendered."
+    }
+  end
+
+  def outcome_evidence_file(attempt_id, digest)
+    attempt_id = attempt_id.to_s
+    digest = digest.to_s.downcase
+    return nil unless attempt_id.match?(EVIDENCE_ATTEMPT_RE) && digest.match?(EVIDENCE_DIGEST_RE)
+
+    package = outcome_evidence_store.package_metadata
+    attempt = package.fetch("attempts").find { |item| item.fetch("attempt_id") == attempt_id }
+    return nil unless attempt
+
+    representation = attempt.fetch("evidence").flat_map do |entry|
+      entry.fetch("representations")
+    end.find { |item| item.fetch("sha256") == digest }
+    return nil unless representation
+
+    media = EVIDENCE_MEDIA_TYPES[representation.fetch("media_type")]
+    return nil unless media
+
+    path = File.join(folder, representation.fetch("path"))
+    io = File.open(path, File::RDONLY | File::NOFOLLOW)
+    expected_bytes = representation.fetch("bytes")
+    unless io.stat.file? && io.stat.size == expected_bytes
+      io.close
+      return nil
+    end
+    actual_digest = Digest::SHA256.new
+    observed_bytes = 0
+    while (chunk = io.read(VerifiedEvidenceBody::CHUNK_BYTES))
+      observed_bytes += chunk.bytesize
+      if observed_bytes > expected_bytes
+        io.close
+        return nil
+      end
+      actual_digest << chunk
+    end
+    unless observed_bytes == expected_bytes && actual_digest.hexdigest == digest
+      io.close
+      return nil
+    end
+    io.rewind
+
+    {
+      "body" => VerifiedEvidenceBody.new(io, expected_bytes),
+      "bytes" => expected_bytes,
+      "filename" => File.basename(representation.fetch("path")),
+      "content_type" => media.first,
+      "disposition" => media.last
+    }
+  rescue Hive::Artifacts::OutcomeEvidence::Error, SystemCallError
+    io&.close unless io&.closed?
     nil
   end
 
@@ -242,6 +425,13 @@ class Task
       return self["action"].to_s == "ready_to_run" ? "ready_to_run" : nil
     end
 
+    projected = self["action"].to_s
+    if projected == Hive::Schemas::TaskActionKind::PLAN_REVIEWING ||
+       projected == Hive::Schemas::TaskActionKind::PLAN_REVIEW_RETRY &&
+         self["suggested_command"].to_s.start_with?("hive plan-review-run ")
+      return projected
+    end
+
     STAGE_DISPATCH_ACTIONS[self["stage"].to_s.split("-", 2).first]
   end
 
@@ -249,7 +439,7 @@ class Task
     action = dispatch_action
     return unless action
 
-    command = Hive::TaskAction::READY_COMMANDS.fetch(action)
+    command = Hive::TaskAction::DISPATCH_COMMANDS.fetch(action)
     command == "run" ? "stage" : command
   end
 
@@ -278,6 +468,92 @@ class Task
   end
 
   private
+
+  def safe_plan_review_artifacts(store, references)
+    references.sort.filter_map do |name, reference|
+      next unless name.match?(PLAN_REVIEW_ARTIFACT_KEYS)
+
+      content = store.read_reference(reference)
+      {
+        "name" => name, "path" => reference.fetch("path"),
+        "sha256" => reference.fetch("sha256"), "bytes" => reference.fetch("bytes"),
+        "format" => name == "candidate_plan" ? "markdown" : "json",
+        "content" => content.force_encoding(Encoding::UTF_8).scrub("?")
+      }
+    end
+  end
+
+  def outcome_evidence_store
+    Hive::Artifacts::OutcomeEvidence::Store.new(task: self, project: project.name)
+  end
+
+  def normalize_outcome_evidence(package)
+    current = package.fetch("current")
+    requirement = package.fetch("requirement")
+    attempts = package.fetch("attempts")
+    active_attempt = attempts.last
+    verdicts = active_attempt&.dig("review", "verdicts").to_a.to_h do |verdict|
+      [ verdict.fetch("target_id"), verdict ]
+    end
+    evidence = active_attempt&.fetch("evidence").to_a
+    normalize_target = lambda do |target|
+      id = target.fetch("id")
+      {
+        "id" => id,
+        "statement" => target.fetch("statement"),
+        "proof_kind" => target["proof_kind"],
+        "reason" => target["reason"],
+        "changed_paths" => target.fetch("changed_paths"),
+        "verdict" => verdicts[id]&.fetch("verdict", nil),
+        "verdict_reason" => verdicts[id]&.fetch("reason", nil),
+        "evidence" => evidence.select { |entry| entry.fetch("claims").include?(id) }.map do |entry|
+          {
+            "kind" => entry.fetch("kind"),
+            "summary" => entry.fetch("summary"),
+            "representations" => entry.fetch("representations").map do |representation|
+              representation.slice("role", "media_type", "rendering", "sha256", "bytes").merge(
+                "attempt_id" => active_attempt.fetch("attempt_id"),
+                "filename" => File.basename(representation.fetch("path"))
+              )
+            end
+          }
+        end
+      }
+    end
+    {
+      "status" => current.fetch("status"),
+      "generation" => current.fetch("generation"),
+      "claims" => requirement.fetch("claims").map(&normalize_target),
+      "exclusions" => requirement.fetch("exclusions").map(&normalize_target),
+      "changed_path_count" => requirement.dig("implementation", "changed_paths").length,
+      "actors" => {
+        "inference" => requirement.fetch("inference"),
+        "producer" => active_attempt&.fetch("producer", nil),
+        "reviewer" => active_attempt&.dig("review", "reviewer")
+      },
+      "reviewer_capabilities" => requirement.fetch("reviewer_capabilities"),
+      "attempts" => attempts.map do |attempt|
+        {
+          "attempt_id" => attempt.fetch("attempt_id"),
+          "status" => attempt.fetch("status"),
+          "recorded_at" => attempt.fetch("recorded_at"),
+          "diagnostic" => attempt["diagnostic"]
+        }
+      end,
+      "blocker" => if current.fetch("status") == "blocked"
+                     current.slice(
+                       "reason", "failed_targets", "reviewer_reasons", "recovery_digest",
+                       "recovery_epoch"
+                     ).merge(
+                       "command" => [
+                         "hive", "evidence", "recover", "#{project.name}:#{slug}",
+                         "--generation", current.fetch("generation"),
+                         "--recovery-digest", current.fetch("recovery_digest")
+                       ].shelljoin
+                     )
+                   end
+    }
+  end
 
   def recovery_intervention_required?
     Hive::Recovery.intervention_required?(

@@ -9,7 +9,7 @@ module Hive
     # never enqueues, claims, replays, or resumes a job.
     class JobQuery
       SCHEMA = "hive-refactor-patrol-jobs".freeze
-      SCHEMA_VERSION = 1
+      SCHEMA_VERSION = 2
       DEFAULT_LIMIT = 100
       MAX_LIMIT = 100
       PUBLICATION_ATTEMPTS_KEY = "publication_attempts".freeze
@@ -99,6 +99,22 @@ module Hive
         )
       rescue Hive::RefactorPatrol::JobQueryIndex::CursorError
         raise UsageError, "refactor patrol query --cursor is invalid"
+      end
+
+      # Internal newest-first snapshot for Hive Web. This is deliberately not
+      # a public jobs-v2 envelope: it has no resumable cursor and therefore
+      # must not advertise the list/show schema contract.
+      def recent_projection(project:, project_root:, limit: nil)
+        page_limit = self.class.normalize_limit(limit)
+        indexed = @store.recent_job_query_page(limit: page_limit)
+        jobs = indexed.fetch("jobs")
+        {
+          "project" => project,
+          "project_root" => project_root,
+          "count" => indexed.fetch("total"),
+          "truncated" => indexed.fetch("has_more"),
+          "jobs" => jobs.map { |job| summary(job) }
+        }
       end
 
       def show_envelope(project:, project_root:, job_id:, limit: nil, full: false)
@@ -300,9 +316,9 @@ module Hive
         actions = job.fetch("actions")
         {
           "features" => job.fetch("feature_results").size,
-          "accepted" => job.dig("dispositions", "accepted").size,
-          "flagged" => job.dig("dispositions", "flagged").size,
-          "suppressed" => job.dig("dispositions", "suppressed").size,
+          "fix" => job.dig("dispositions", "fix").size,
+          "discuss" => job.dig("dispositions", "discuss").size,
+          "dismiss" => job.dig("dispositions", "dismiss").size,
           "review_errors" => job.fetch("review_errors").size,
           "actions" => actions.size,
           "pending_actions" => actions.count { |action| action.fetch("terminal") == false }

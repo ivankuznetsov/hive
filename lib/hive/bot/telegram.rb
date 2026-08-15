@@ -24,10 +24,6 @@ module Hive
           super
         end
 
-        def message?
-          callback_data.nil? && !text.to_s.empty?
-        end
-
         def text?
           # Callback updates intentionally do not inherit source-message text.
           !text.to_s.empty?

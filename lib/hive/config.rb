@@ -11,6 +11,8 @@ require "hive/permission_scope"
 require "hive/paths"
 require "hive/repository_identity"
 require "hive/model_routing"
+require "hive/plan_review"
+require "hive/plan_review/finding"
 require "hive/provider_routing"
 require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
@@ -114,6 +116,41 @@ module Hive
           "default" => "/llm-wiki:wiki-plan"
         }
       },
+      "plan_review" => {
+        "enabled" => true,
+        "classifier_version" => Hive::PlanReview::CLASSIFIER_VERSION,
+        "minimum_level" => "skip",
+        "coding" => { "minimum_level" => "skip" },
+        "skip" => { "max_files" => 5, "max_bytes" => 262_144 },
+        "protected_paths" => [
+          ".github/workflows/**", "config/**", "db/migrate/**", "packaging/**",
+          "Gemfile", "Gemfile.lock", "hive.gemspec", "install.sh"
+        ],
+        "attempts" => { "max_transient" => 2, "timeout_sec" => 900 },
+        "coverage" => { "required" => %w[whole_document adversarial], "optional" => [] },
+        "adapter" => "ce_doc_review",
+        "reviewers" => {
+          "primary" => "plan_review",
+          "adversarial" => "plan_review_adversarial",
+          "verification" => "plan_review_verification"
+        },
+        "routes" => {
+          "primary" => {
+            "agent" => "codex", "model" => "gpt-5.6-sol", "family" => "openai",
+            "effort" => "high", "route" => "native_codex"
+          },
+          "adversarial" => {
+            "agent" => "grok", "model" => "grok-4.6", "family" => "grok",
+            "effort" => "high", "route" => "native_grok_build"
+          },
+          "verification" => {
+            "agent" => "codex", "model" => "gpt-5.6-sol", "family" => "openai",
+            "effort" => "high", "route" => "native_codex"
+          },
+          "fallbacks" => []
+        },
+        "approval_policies" => []
+      },
       "execute" => { "agent" => "claude" },
       "conditions" => {
         "authority" => "markers",
@@ -122,6 +159,20 @@ module Hive
       "open_pr" => {},
       "artifacts" => {
         "agent" => "claude",
+        "evidence" => {
+          "max_recaptures" => 2,
+          "inference" => { "permissions" => "read-only" },
+          # Producer writes are controller-scoped at run time to the active
+          # generation workspace. Projects cannot weaken that boundary.
+          "producer" => { "agent" => "codex" },
+          "reviewer" => {
+            "permissions" => "read-only",
+            "capabilities" => {
+              "proof_kinds" => %w[screenshot video terminal document],
+              "temporal_video" => true
+            }
+          }
+        },
         "capture" => { "provider" => nil }
       },
       "finalize" => { "agent" => "claude" },
@@ -450,28 +501,11 @@ module Hive
         "max_fixes_per_feature_per_cycle" => 1,
         "max_fix_attempts_per_cycle" => 6,
         "max_prs_per_cycle" => 3,
-        # Patrol tiers bound both input-plus-output tokens and agent launches. The
-        # launch ceilings are the provider-independent fail-safe when a CLI
-        # omits usable token accounting. Cached tokens remain visible in usage
-        # telemetry but do not consume Hive's input-plus-output ceilings.
-        "max_tokens_per_cycle" => 200_000,
-        "max_tokens_per_day" => 600_000,
-        "max_tokens_per_agent" => 50_000,
-        "max_agent_spawns_per_cycle" => 3,
-        "max_agent_spawns_per_day" => 8,
-        "max_architecture_review_spawns_per_day" => 8,
-        # Metered architecture launches follow merge demand and do not consume
-        # the ordinary daily count. Keep a separate durable backstop for a
-        # provider that repeatedly returns no usable token totals.
-        "max_architecture_unmetered_spawns_per_day" => 96,
-        "max_budget_usd_per_agent" => 25,
-        # Architecture discovery/fixing may use a wider per-cycle and
-        # per-agent envelope, but still shares the mode's daily token ceiling.
-        "architecture_budget_multiplier" => 2,
-        # Ordinary fix agents need edit/test/proof turns after inspection;
-        # widen only their per-agent stream cap while preserving cycle/day
-        # token and launch ceilings.
-        "fix_budget_multiplier" => 2,
+        # One deliberately high per-agent fuse stops a genuinely runaway child
+        # without turning normal Patrol work into daily/cycle allowance math.
+        # Provider quotas and the existing wall-clock/process-custody bounds
+        # remain independent safety fences.
+        "max_tokens_per_agent" => 100_000_000,
         # Open ready (non-draft) PRs by default so the babysitter — which
         # skips draft PRs — picks them up. Set `draft_prs: true` per project
         # to revert to draft PRs that need a manual "ready" toggle first.
@@ -525,14 +559,9 @@ module Hive
           # advertises workspace-write enforcement.
         },
         "issue_filing" => {
-          "enabled" => false,
-          # Avoid turning every cap warning into tracker noise. Issue filing
-          # is reserved for proposals with material, proposal-specific
-          # leverage in addition to a strategic routing reason.
-          "min_leverage_score" => 0.25
+          "enabled" => false
         },
         "min_confidence" => "medium",
-        "min_leverage_score" => 0.10,
         "max_theses_per_feature" => 1,
         "max_theses_per_run" => 10,
         # One architecture-discovery child must never multiply the per-agent
@@ -561,16 +590,6 @@ module Hive
           "allow_dependency_bumps" => false,
           "allow_public_api_changes" => false,
           "allow_cross_feature" => true
-        },
-        "leverage" => {
-          "weights" => {
-            "churn" => 0.3,
-            "fan_in" => 0.25,
-            "complexity" => 0.25,
-            "coupling" => 0.2,
-            "bug_density" => 0.0,
-            "coverage_gap" => 0.0
-          }
         },
         "review" => {
           "max_context_files" => 6,
@@ -663,6 +682,9 @@ module Hive
       %w[execute agent],
       %w[open_pr agent],
       %w[artifacts agent],
+      %w[artifacts evidence inference agent],
+      %w[artifacts evidence producer agent],
+      %w[artifacts evidence reviewer agent],
       %w[finalize agent],
       %w[review ci agent],
       %w[review triage agent],
@@ -720,6 +742,7 @@ module Hive
     }.freeze
     IMPLEMENTATION_IDENTITY_FIELDS = %w[agent model effort].freeze
     RESOURCE_LIMIT_FIELDS = %w[budget_usd timeout_sec].freeze
+    ResourceLimitResolution = Data.define(:field, :value, :unit, :source, :scope, :stage)
     # Project sections supported by consumers but intentionally absent from
     # DEFAULTS. Keep this list explicit so a newly rendered section cannot
     # silently become an unvalidated extension namespace.
@@ -738,39 +761,10 @@ module Hive
     end
 
     # Single source of the registry's string representation. The agent
-    # registry keys on symbols, but every backend-selection path (the
-    # defaults, normalize, the setup prompt) compares against backend-name
-    # *strings*, so the symbol→string projection lives here — the
-    # registry-representation coupling is then a one-line edit rather than
-    # several drifting copies.
+    # registry keys on symbols, but setup prompts compare against backend-name
+    # strings.
     def registered_agent_names
       AgentProfiles.registered_names.map(&:to_s)
-    end
-
-    # The default selection filtered down to the backends actually
-    # registered on this machine, in canonical order. Returns a frozen
-    # array of frozen strings with at least one entry — the same return
-    # contract as `normalize_global_agents` on BOTH mutability and
-    # cardinality, so a consumer never sees a mutable result on one path and
-    # a frozen one on the other (a latent FrozenError trap), nor an empty
-    # selection the prompt boundary can never produce. Raises ConfigError
-    # when no default backend is registered — unreachable while claude/codex
-    # auto-register on `require "hive/config"`, but the guarantee is enforced
-    # here rather than merely asserted in this comment.
-    def default_global_agents
-      registered = registered_agent_names
-      # Derive order from the canonical GLOBAL_AGENT_BACKENDS rather than
-      # iterating the DEFAULT_* literal, so reordering the default literal
-      # can't make this producer disagree with `normalize_global_agents`,
-      # and the result is guaranteed ⊆ GLOBAL_AGENT_BACKENDS (a value
-      # normalize/write would accept). Left-ordered `&` dedups too.
-      selected = GLOBAL_AGENT_BACKENDS & DEFAULT_GLOBAL_AGENTS & registered
-      if selected.empty?
-        raise ConfigError,
-              "no default agent backend is registered (expected one of #{DEFAULT_GLOBAL_AGENTS.inspect})"
-      end
-
-      selected.freeze
     end
 
     def hive_state_dir(project_root, hive_state_name = ".hive-state")
@@ -1056,6 +1050,14 @@ module Hive
     # hashes used by callers/tests retain the historical "present means
     # explicit" behavior because they carry no provenance marker.
     def stage_resource_limit(cfg, field, stage_name, descriptor_default:, fallback: nil)
+      stage_resource_limit_resolution(
+        cfg, field, stage_name,
+        descriptor_default: descriptor_default, fallback: fallback
+      ).value
+    end
+
+    def stage_resource_limit_resolution(cfg, field, stage_name,
+                                        descriptor_default:, fallback: nil)
       provenance = cfg[EXPLICIT_RESOURCE_LIMITS_KEY]
       explicit =
         if provenance.is_a?(Hash)
@@ -1064,10 +1066,22 @@ module Hive
           nested_key?(cfg, field, stage_name)
         end
       project_value = cfg.dig(field, stage_name)
-      return project_value if explicit && project_value
-      return descriptor_default unless descriptor_default.nil?
-
-      project_value || fallback
+      value, source = if explicit && !project_value.nil?
+        [ project_value, "project_config" ]
+      elsif !descriptor_default.nil?
+        [ descriptor_default, "workflow_descriptor" ]
+      elsif !project_value.nil?
+        [ project_value, "merged_default" ]
+      elsif !fallback.nil?
+        [ fallback, "runtime_fallback" ]
+      else
+        [ nil, "unavailable" ]
+      end
+      ResourceLimitResolution.new(
+        field: field.to_s, value: value,
+        unit: field.to_s == "budget_usd" ? "usd" : "seconds",
+        source: source, scope: "stage", stage: stage_name.to_s
+      ).freeze
     end
 
     def explicit_resource_limits(data)
@@ -1177,22 +1191,10 @@ module Hive
       registered_project_entries(preserve_invalid: false)
     end
 
-    # Observation-only registry reader for status surfaces. When only the
-    # legacy registry exists, read it in place rather than invoking the normal
-    # one-off move into XDG config storage.
-    def registered_projects_read_only
-      registered_project_entries(
-        preserve_invalid: false,
-        migrate_legacy: false
-      )
-    end
-
-    def registered_project_entries(preserve_invalid:, migrate_legacy: true)
-      Hive::Paths.ensure_migrated! if migrate_legacy
+    def registered_project_entries(preserve_invalid:)
+      Hive::Paths.ensure_migrated!
       validate_hive_home!
-      path = registry_path_for_read(
-        migrate_legacy: migrate_legacy
-      )
+      path = global_config_path
       return [] unless File.exist?(path)
 
       data = load_global_config(path)
@@ -1225,14 +1227,6 @@ module Hive
         project["hive_state_path"] = project_hive_state_path(project)
         out << project
       end
-    end
-
-    def registry_path_for_read(migrate_legacy:)
-      current = global_config_path
-      return current if migrate_legacy || File.exist?(current)
-      return current if Hive::Paths.hive_home_override
-
-      Hive::Paths.legacy_registry_path || current
     end
 
     # One-time, locked registry migration. It deliberately emits no module
@@ -1270,37 +1264,6 @@ module Hive
       changed
     end
 
-    # The operator's persisted backend selection from the global config,
-    # or `default_global_agents` when nothing is stored yet. Three "unset"
-    # shapes all fall through to the defaults: an absent `agents:` block, an
-    # absent `agents.selected` key, and a present-but-null `selected:` (a
-    # bare `selected:` with no value). A present-but-malformed block
-    # (non-Hash `agents:`, non-Array `selected`) is a hand-edit error and
-    # raises ConfigError. Note the deliberate asymmetry against an empty
-    # `selected: []`: a null `selected:` is treated as "unset" and yields
-    # the defaults, whereas an explicit empty list raises via
-    # `normalize_global_agents` — an empty array is a hand-edit mistake the
-    # prompt can never produce, a null value is just "nothing stored yet".
-    def load_global_agents
-      Hive::Paths.ensure_migrated!
-      validate_hive_home!
-      path = global_config_path
-      data = File.exist?(path) ? load_global_config(path) : {}
-      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
-
-      agents = data["agents"]
-      return default_global_agents if agents.nil?
-
-      unless agents.is_a?(Hash)
-        raise ConfigError, "agents in #{describe_source(path)} must be a Hash; got #{agents.class}"
-      end
-
-      selected = agents["selected"]
-      return default_global_agents if selected.nil?
-
-      normalize_global_agents(selected, source: describe_source(path))
-    end
-
     # Provider accounts are global because their external credential/config
     # contexts and concurrency are shared across projects. This reader is
     # intentionally called only after a project declares routing.pool; a
@@ -1319,87 +1282,6 @@ module Hive
         raw,
         source: describe_source(path)
       )
-    end
-
-    # Persist a backend selection, writing the normalized (validated,
-    # canonical-order) list to `agents.selected` and returning it. Merging
-    # into `(existing || {})` preserves any operator-owned sibling keys
-    # under `agents:` (e.g. per-agent override blocks, freeform notes) —
-    # only `selected` is rewritten. A pre-existing non-Hash `agents:` value
-    # is a hand-edit error and raises rather than being clobbered.
-    def write_global_agents!(agents)
-      normalized = normalize_global_agents(agents, source: "the write_global_agents! argument")
-      update_global_config! do |data|
-        existing = data["agents"]
-        unless existing.nil? || existing.is_a?(Hash)
-          raise ConfigError, "agents in #{describe_source(global_config_path)} must be a Hash; got #{existing.class}"
-        end
-
-        data["agents"] = (existing || {}).merge("selected" => normalized)
-        normalized
-      end
-    end
-
-    # Validate and canonicalize a raw selection (from disk or a caller)
-    # into the persisted contract: a frozen array of frozen backend names
-    # in `GLOBAL_AGENT_BACKENDS` order, deduped, with at least one entry.
-    # Enforcing "≥1 backend" here mirrors the prompt boundary
-    # (BackendPrompt) so neither a hand-edited `selected: []` nor a
-    # `write_global_agents!([])` can persist a zero-backend state the
-    # prompt can never produce. Each name must be a non-empty String that
-    # resolves to a registered backend; anything else is a hand-edit error
-    # and raises ConfigError.
-    def normalize_global_agents(agents, source:)
-      unless agents.is_a?(Array)
-        raise ConfigError,
-              "agents.selected in #{source} must be an Array of agent names; got #{agents.class}"
-      end
-
-      if agents.empty?
-        raise ConfigError,
-              "agents.selected in #{source} must list at least one backend " \
-              "(omit or null out the `selected:` key to fall back to the " \
-              "defaults #{DEFAULT_GLOBAL_AGENTS.inspect})"
-      end
-
-      registered = registered_agent_names
-      allowed = GLOBAL_AGENT_BACKENDS & registered
-      selected = []
-      agents.each do |agent|
-        unless agent.is_a?(String) && !agent.strip.empty?
-          raise ConfigError,
-                "agents.selected in #{source} must contain non-empty strings"
-        end
-
-        # Downcase before the allowed-list check so a hand-edited
-        # `selected: [Claude]` — the exact capitalization the setup prompt
-        # displays — loads, matching the prompt's case-insensitive name
-        # resolution (BackendPrompt#resolve_token).
-        name = agent.strip.downcase
-        unless allowed.include?(name)
-          if GLOBAL_AGENT_BACKENDS.include?(name)
-            # Valid backend name, just not installed/registered on THIS
-            # machine — the synced-dotfiles case. Distinct from a typo so
-            # the operator knows to install it / re-run `hive setup`, not
-            # to hunt for a misspelling.
-            raise ConfigError,
-                  "agents.selected in #{source} names backend #{name.inspect}, which is valid but " \
-                  "not installed or registered on this machine; install it or re-run `hive setup` " \
-                  "(registered here: #{allowed.inspect})"
-          end
-
-          raise ConfigError,
-                "agents.selected in #{source} contains unknown backend #{name.inspect}; " \
-                "expected one of #{GLOBAL_AGENT_BACKENDS.inspect}"
-        end
-
-        selected << name
-      end
-
-      # Reorder to canonical order and dedupe in a single intersection over
-      # the canonical constant (iterating the unique constant means a
-      # repeated name collapses to a single entry).
-      (GLOBAL_AGENT_BACKENDS & selected).freeze
     end
 
     # Shape gate shared by the loader and `prune`'s predicate so the
@@ -2071,11 +1953,13 @@ module Hive
     def validate!(cfg, source_path)
       validate_hash_shaped_keys!(cfg, source_path)
       validate_models!(cfg, source_path)
+      validate_plan_review!(cfg, source_path)
       reject_nested_provider_routing!(cfg, source_path)
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_review_adhoc!(cfg, source_path)
       validate_review_fix_auto_commit!(cfg, source_path)
+      validate_artifact_evidence!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
       validate_agent_overrides!(cfg, source_path)
       validate_provider_routing!(cfg, source_path)
@@ -2113,6 +1997,7 @@ module Hive
       claude
       models
       plan
+      plan_review
       execute
       conditions
       open_pr
@@ -2154,6 +2039,196 @@ module Hive
         cfg["models"],
         source: describe_source(source_path)
       )
+    end
+
+    PLAN_REVIEW_KEYS = %w[
+      enabled classifier_version minimum_level coding skip protected_paths attempts
+      coverage adapter reviewers routes approval_policies
+    ].freeze
+    PLAN_REVIEW_NESTED_KEYS = {
+      "coding" => %w[minimum_level],
+      "skip" => %w[max_files max_bytes],
+      "attempts" => %w[max_transient timeout_sec],
+      "coverage" => %w[required optional],
+      "reviewers" => %w[primary adversarial verification],
+      "routes" => %w[primary adversarial verification fallbacks]
+    }.freeze
+    PLAN_REVIEW_ADAPTERS = %w[ce_doc_review].freeze
+    PLAN_REVIEW_NAME = /\A[a-z][a-z0-9_]{0,63}\z/
+    PLAN_REVIEW_POLICY_KEYS = %w[
+      id version action risk paths valid_from valid_until revoked
+    ].freeze
+
+    def validate_plan_review!(cfg, source_path)
+      review = cfg.fetch("plan_review")
+      validate_closed_mapping!(review, PLAN_REVIEW_KEYS, "plan_review", source_path)
+      unless review["enabled"] == true
+        raise ConfigError,
+              "plan_review.enabled in #{describe_source(source_path)} must be true; " \
+              "built-in coding review cannot be disabled"
+      end
+
+      validate_bounded_integer!(review["classifier_version"],
+                                "plan_review.classifier_version", 1, 1_000_000, source_path)
+      validate_plan_review_level!(review["minimum_level"], "plan_review.minimum_level", source_path)
+      PLAN_REVIEW_NESTED_KEYS.each do |key, allowed|
+        value = review[key]
+        unless value.is_a?(Hash)
+          raise ConfigError,
+                "plan_review.#{key} in #{describe_source(source_path)} must be a Hash"
+        end
+        validate_closed_mapping!(value, allowed, "plan_review.#{key}", source_path)
+      end
+      validate_plan_review_level!(review.dig("coding", "minimum_level"),
+                                  "plan_review.coding.minimum_level", source_path)
+      validate_bounded_integer!(review.dig("skip", "max_files"),
+                                "plan_review.skip.max_files", 1, 100, source_path)
+      validate_bounded_integer!(review.dig("skip", "max_bytes"),
+                                "plan_review.skip.max_bytes", 1_024, 1_048_576, source_path)
+      validate_path_glob_list!(review["protected_paths"], "plan_review.protected_paths", source_path)
+      validate_bounded_integer!(review.dig("attempts", "max_transient"),
+                                "plan_review.attempts.max_transient", 0, 10, source_path)
+      validate_bounded_integer!(review.dig("attempts", "timeout_sec"),
+                                "plan_review.attempts.timeout_sec", 1, 7_200, source_path)
+
+      unless PLAN_REVIEW_ADAPTERS.include?(review["adapter"])
+        raise ConfigError,
+              "plan_review.adapter in #{describe_source(source_path)} must be one of " \
+              "#{PLAN_REVIEW_ADAPTERS.inspect}; got #{review['adapter'].inspect}"
+      end
+      review.fetch("reviewers").each do |key, route|
+        next if Hive::ModelRouting.known?(route)
+
+        raise ConfigError,
+              "plan_review.reviewers.#{key} in #{describe_source(source_path)} must name a " \
+              "registered model route; got #{route.inspect}"
+      end
+      validate_plan_review_routes!(review.fetch("routes"), source_path)
+      validate_plan_review_coverage!(review.fetch("coverage"), source_path)
+      validate_plan_review_approval_policies!(review.fetch("approval_policies"), source_path)
+    end
+
+    def validate_closed_mapping!(value, allowed, label, source_path)
+      unknown = value.keys.map(&:to_s) - allowed
+      return if unknown.empty?
+
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} has unknown field(s): " \
+            "#{unknown.sort.join(', ')}"
+    end
+
+    def validate_plan_review_level!(value, label, source_path)
+      Hive::PlanReview.level!(value, label: "#{label} in #{describe_source(source_path)}")
+    end
+
+    def validate_bounded_integer!(value, label, min, max, source_path)
+      return if value.is_a?(Integer) && value.between?(min, max)
+
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} must be an Integer at least #{min} " \
+            "and at most #{max}; got #{value.inspect}"
+    end
+
+    def validate_plan_review_coverage!(coverage, source_path)
+      %w[required optional].each do |key|
+        values = coverage[key]
+        unless values.is_a?(Array) &&
+               values.all? { |name| name.is_a?(String) && PLAN_REVIEW_NAME.match?(name) }
+          raise ConfigError,
+                "plan_review.coverage.#{key} in #{describe_source(source_path)} must be an Array " \
+                "of lowercase coverage names"
+        end
+        if values.uniq.length != values.length
+          raise ConfigError,
+                "plan_review.coverage.#{key} in #{describe_source(source_path)} contains duplicates"
+        end
+      end
+      overlap = coverage.fetch("required") & coverage.fetch("optional")
+      return if overlap.empty?
+
+      raise ConfigError,
+            "plan_review coverage in #{describe_source(source_path)} cannot be both required and " \
+            "optional: #{overlap.inspect}"
+    end
+
+    def validate_plan_review_routes!(routes, source_path)
+      route_keys = %w[agent model family effort route]
+      %w[primary adversarial verification].each do |role|
+        row = routes[role]
+        unless row.is_a?(Hash)
+          raise ConfigError, "plan_review.routes.#{role} in #{describe_source(source_path)} must be a Hash"
+        end
+        validate_closed_mapping!(row, route_keys, "plan_review.routes.#{role}", source_path)
+        validate_plan_review_route_row!(row, "plan_review.routes.#{role}", source_path)
+      end
+      fallbacks = routes["fallbacks"]
+      unless fallbacks.is_a?(Array)
+        raise ConfigError, "plan_review.routes.fallbacks in #{describe_source(source_path)} must be an Array"
+      end
+      fallbacks.each_with_index do |row, index|
+        unless row.is_a?(Hash)
+          raise ConfigError,
+                "plan_review.routes.fallbacks[#{index}] in #{describe_source(source_path)} must be a Hash"
+        end
+        validate_closed_mapping!(row, route_keys, "plan_review.routes.fallbacks[#{index}]", source_path)
+        validate_plan_review_route_row!(row, "plan_review.routes.fallbacks[#{index}]", source_path)
+      end
+    end
+
+    def validate_plan_review_route_row!(row, label, source_path)
+      validate_agent_name!(row["agent"], "#{label}.agent", source_path)
+      %w[model family route].each do |key|
+        unless row[key].is_a?(String) && !row[key].strip.empty?
+          raise ConfigError, "#{label}.#{key} in #{describe_source(source_path)} must be non-empty"
+        end
+      end
+      unless Hive::ModelRouting::EFFORT_VALUES.include?(row["effort"])
+        raise ConfigError,
+              "#{label}.effort in #{describe_source(source_path)} must be one of " \
+              "#{Hive::ModelRouting::EFFORT_VALUES.inspect}"
+      end
+    end
+
+    def validate_plan_review_approval_policies!(policies, source_path)
+      unless policies.is_a?(Array)
+        raise ConfigError,
+              "plan_review.approval_policies in #{describe_source(source_path)} must be an Array"
+      end
+      ids = Set.new
+      policies.each_with_index do |policy, index|
+        label = "plan_review.approval_policies[#{index}]"
+        unless policy.is_a?(Hash)
+          raise ConfigError, "#{label} in #{describe_source(source_path)} must be a Hash"
+        end
+        validate_closed_mapping!(policy, PLAN_REVIEW_POLICY_KEYS, label, source_path)
+        id = policy["id"]
+        unless id.is_a?(String) && PLAN_REVIEW_NAME.match?(id) && ids.add?(id)
+          raise ConfigError,
+                "#{label}.id in #{describe_source(source_path)} must be a unique lowercase identifier"
+        end
+        validate_bounded_integer!(policy["version"], "#{label}.version", 1, 1_000_000, source_path)
+        unless policy["action"] == "approve_finding"
+          raise ConfigError,
+                "#{label}.action in #{describe_source(source_path)} must be approve_finding"
+        end
+        unless Hive::PlanReview::Finding::RISKS.include?(policy["risk"])
+          raise ConfigError,
+                "#{label}.risk in #{describe_source(source_path)} must be one of " \
+                "#{Hive::PlanReview::Finding::RISKS.inspect}"
+        end
+        validate_path_glob_list!(policy["paths"], "#{label}.paths", source_path)
+        unless policy["revoked"] == true || policy["revoked"] == false
+          raise ConfigError, "#{label}.revoked in #{describe_source(source_path)} must be true or false"
+        end
+        %w[valid_from valid_until].each do |key|
+          begin
+            Time.iso8601(policy.fetch(key))
+          rescue ArgumentError, TypeError, KeyError
+            raise ConfigError,
+                  "#{label}.#{key} in #{describe_source(source_path)} must be an ISO-8601 timestamp"
+          end
+        end
+      end
     end
 
     def validate_provider_routing!(cfg, source_path)
@@ -2279,6 +2354,14 @@ module Hive
         calls, cfg, "plan", cfg.dig("plan", "agent"),
         current: model_routing_current(cfg["plan"])
       )
+      plan_review = cfg.fetch("plan_review")
+      %w[primary adversarial verification].each do |role|
+        route = plan_review.dig("routes", role)
+        add_model_routing_call(
+          calls, cfg, plan_review.dig("reviewers", role), route.fetch("agent"),
+          current: model_routing_current(route)
+        )
+      end
       add_model_routing_call(
         calls, cfg, "execute_implementation", execute_agent,
         current: model_routing_current(cfg["execute"])
@@ -2288,8 +2371,16 @@ module Hive
         current: model_routing_current(cfg["open_pr"])
       )
       add_model_routing_call(
-        calls, cfg, "artifacts", cfg.dig("artifacts", "agent"),
-        current: model_routing_current(cfg["artifacts"])
+        calls, cfg, "artifacts", artifacts_evidence_agent(cfg, "inference"),
+        current: model_routing_current(cfg.dig("artifacts", "evidence", "inference"))
+      )
+      add_model_routing_call(
+        calls, cfg, "artifacts", artifacts_evidence_agent(cfg, "producer"),
+        current: model_routing_current(cfg.dig("artifacts", "evidence", "producer"))
+      )
+      add_model_routing_call(
+        calls, cfg, "artifacts", artifacts_evidence_agent(cfg, "reviewer"),
+        current: model_routing_current(cfg.dig("artifacts", "evidence", "reviewer"))
       )
       add_model_routing_call(
         calls, cfg, "finalize", cfg.dig("finalize", "agent"),
@@ -2509,6 +2600,65 @@ module Hive
             "integer between 1 and 600"
     end
 
+    def validate_artifact_evidence!(cfg, source_path)
+      evidence = cfg.dig("artifacts", "evidence")
+      unless evidence.is_a?(Hash)
+        raise ConfigError, "artifacts.evidence in #{describe_source(source_path)} must be a Hash"
+      end
+      unknown = evidence.keys - %w[max_recaptures inference producer reviewer]
+      unless unknown.empty?
+        raise ConfigError, "artifacts.evidence has unknown roles: #{unknown.sort.join(', ')}"
+      end
+
+      max_recaptures = evidence["max_recaptures"]
+      unless max_recaptures.is_a?(Integer) && max_recaptures.between?(0, 2)
+        raise ConfigError,
+              "artifacts.evidence.max_recaptures in #{describe_source(source_path)} " \
+              "must be an integer from 0 through 2"
+      end
+
+      %w[inference producer reviewer].each do |role|
+        block = evidence[role]
+        unless block.is_a?(Hash)
+          raise ConfigError, "artifacts.evidence.#{role} in #{describe_source(source_path)} must be a Hash"
+        end
+        allowed = %w[agent model effort]
+        allowed << "permissions" unless role == "producer"
+        allowed << "capabilities" if role == "reviewer"
+        extra = block.keys - allowed
+        unless extra.empty?
+          raise ConfigError, "artifacts.evidence.#{role} has unknown keys: #{extra.sort.join(', ')}"
+        end
+        %w[model effort].each do |field|
+          value = block[field]
+          next if value.nil? || (value.is_a?(String) && !value.strip.empty?)
+
+          raise ConfigError,
+                "artifacts.evidence.#{role}.#{field} in #{describe_source(source_path)} " \
+                "must be a non-empty String when present"
+        end
+      end
+
+      capabilities = evidence.dig("reviewer", "capabilities")
+      unless capabilities.is_a?(Hash) &&
+             (capabilities.keys - %w[proof_kinds temporal_video]).empty?
+        raise ConfigError, "artifacts.evidence.reviewer.capabilities must be a closed Hash"
+      end
+      kinds = capabilities["proof_kinds"]
+      known = %w[screenshot video terminal document]
+      unless kinds.is_a?(Array) && kinds.any? && kinds.uniq == kinds && (kinds - known).empty?
+        raise ConfigError, "artifacts.evidence.reviewer.capabilities.proof_kinds is invalid"
+      end
+      unless [ true, false ].include?(capabilities["temporal_video"])
+        raise ConfigError, "artifacts.evidence.reviewer.capabilities.temporal_video must be boolean"
+      end
+    end
+
+    def artifacts_evidence_agent(cfg, role)
+      cfg.dig("artifacts", "evidence", role, "agent") || cfg.dig("artifacts", "agent")
+    end
+    private_class_method :artifacts_evidence_agent
+
     def validate_stage_skill_by_agent!(cfg, source_path)
       %w[brainstorm plan].each do |stage|
         value = cfg.dig(stage, "skill_by_agent")
@@ -2579,13 +2729,6 @@ module Hive
       end
 
       auto_commit
-    end
-
-    def validate_review_fix_auto_commit_scope!(cfg, source_path)
-      auto_commit = review_fix_auto_commit_config(cfg, source_path)
-      return if auto_commit.nil?
-
-      validate_review_fix_auto_commit_scope_config!(auto_commit["scope_check"], source_path)
     end
 
     def validate_review_fix_auto_commit_scope_config!(scope, source_path)
@@ -2935,6 +3078,13 @@ module Hive
         next if key.to_s == "review"
 
         collect.call(key.to_s, value)
+      end
+
+      evidence = cfg.dig("artifacts", "evidence")
+      if evidence.is_a?(Hash)
+        %w[inference producer reviewer].each do |role|
+          collect.call("artifacts.evidence.#{role}", evidence[role])
+        end
       end
 
       review = cfg["review"]
@@ -3347,44 +3497,20 @@ module Hive
       "ultrapatrol" => {
         "trigger" => "timer",
         "poll_interval_sec" => 1800,
-        "max_tokens_per_cycle" => 800_000,
-        "max_tokens_per_day" => 2_400_000,
-        "max_tokens_per_agent" => 100_000,
-        "max_agent_spawns_per_cycle" => 10,
-        "max_agent_spawns_per_day" => 36,
-        "max_budget_usd_per_agent" => 100,
         "enabled" => true
       },
       "high" => {
         "trigger" => "timer",
         "poll_interval_sec" => 7200,
-        "max_tokens_per_cycle" => 400_000,
-        "max_tokens_per_day" => 1_200_000,
-        "max_tokens_per_agent" => 75_000,
-        "max_agent_spawns_per_cycle" => 6,
-        "max_agent_spawns_per_day" => 18,
-        "max_budget_usd_per_agent" => 50,
         "enabled" => true
       },
       "medium" => {
         "trigger" => "timer",
         "poll_interval_sec" => 14_400,
-        "max_tokens_per_cycle" => 200_000,
-        "max_tokens_per_day" => 600_000,
-        "max_tokens_per_agent" => 50_000,
-        "max_agent_spawns_per_cycle" => 3,
-        "max_agent_spawns_per_day" => 8,
-        "max_budget_usd_per_agent" => 25,
         "enabled" => true
       },
       "low" => {
         "trigger" => "new_commits",
-        "max_tokens_per_cycle" => 100_000,
-        "max_tokens_per_day" => 200_000,
-        "max_tokens_per_agent" => 40_000,
-        "max_agent_spawns_per_cycle" => 1,
-        "max_agent_spawns_per_day" => 2,
-        "max_budget_usd_per_agent" => 10,
         "enabled" => true
       },
       "off" => {
@@ -3400,15 +3526,7 @@ module Hive
       [ "max_fixes_per_feature_per_cycle", 1 ],
       [ "max_fix_attempts_per_cycle", 1 ],
       [ "max_prs_per_cycle", 1 ],
-      [ "max_tokens_per_cycle", 1 ],
-      [ "max_tokens_per_day", 1 ],
-      [ "max_tokens_per_agent", 1 ],
-      [ "max_agent_spawns_per_cycle", 1 ],
-      [ "max_agent_spawns_per_day", 1 ],
-      [ "max_architecture_review_spawns_per_day", 1 ],
-      [ "max_architecture_unmetered_spawns_per_day", 1 ],
-      [ "architecture_budget_multiplier", 1 ],
-      [ "fix_budget_multiplier", 1 ]
+      [ "max_tokens_per_agent", 1 ]
     ].freeze
 
     def validate_patrol!(cfg, source_path)
@@ -3472,13 +3590,6 @@ module Hive
         raise ConfigError,
               "patrol.min_alpha_to_fix in #{describe_source(source_path)} must be <= 100; " \
               "got #{patrol['min_alpha_to_fix'].inspect}"
-      end
-
-      per_agent_budget = patrol["max_budget_usd_per_agent"]
-      unless per_agent_budget.is_a?(Numeric) && per_agent_budget.positive?
-        raise ConfigError,
-              "patrol.max_budget_usd_per_agent in #{describe_source(source_path)} must be a positive number; " \
-              "got #{per_agent_budget.inspect} (#{per_agent_budget.class})"
       end
 
       validate_agent_name!(patrol["agent"], "patrol.agent", source_path)
@@ -3557,15 +3668,6 @@ module Hive
       "max_theses_per_run" => 1,
       "max_review_seconds_per_run" => 1
     }.freeze
-    REFACTOR_PATROL_WEIGHT_KEYS = %w[
-      churn
-      fan_in
-      complexity
-      coupling
-      bug_density
-      coverage_gap
-    ].freeze
-
     def validate_refactor_patrol!(cfg, source_path)
       refactor = cfg["refactor_patrol"]
       return if refactor.nil?
@@ -3583,13 +3685,6 @@ module Hive
               "#{REFACTOR_PATROL_CONFIDENCE_LEVELS.inspect}; got #{confidence.inspect} (#{confidence.class})"
       end
 
-      leverage_score = refactor["min_leverage_score"]
-      unless leverage_score.is_a?(Numeric) && leverage_score.between?(0, 1)
-        raise ConfigError,
-              "refactor_patrol.min_leverage_score in #{describe_source(source_path)} " \
-              "must be a number between 0 and 1; got #{leverage_score.inspect} (#{leverage_score.class})"
-      end
-
       REFACTOR_PATROL_NUMERIC_BOUNDS.each do |key, min|
         validate_integer_min!(refactor[key], "refactor_patrol.#{key}", min, source_path)
       end
@@ -3599,7 +3694,6 @@ module Hive
       validate_path_glob_list!(refactor["exclude"], "refactor_patrol.exclude", source_path)
       validate_refactor_patrol_commands!(refactor, source_path)
       validate_refactor_patrol_caps!(refactor, source_path)
-      validate_refactor_patrol_leverage!(refactor, source_path)
       validate_refactor_patrol_review!(refactor, source_path)
     end
 
@@ -3613,14 +3707,6 @@ module Hive
 
       validate_required_boolean!(gate["enabled"], "refactor_patrol.#{key}.enabled", source_path)
       validate_refactor_patrol_identity!(gate, "refactor_patrol.auto_fix", source_path) if key == "auto_fix"
-      if key == "issue_filing"
-        score = gate["min_leverage_score"]
-        unless score.is_a?(Numeric) && score.between?(0, 1)
-          raise ConfigError,
-                "refactor_patrol.issue_filing.min_leverage_score in #{describe_source(source_path)} " \
-                "must be a number between 0 and 1; got #{score.inspect} (#{score.class})"
-        end
-      end
     end
 
     def validate_refactor_patrol_identity!(block, label, source_path)
@@ -3672,39 +3758,6 @@ module Hive
 
       REFACTOR_PATROL_CAP_BOOLEAN_KEYS.each do |key|
         validate_boolean!(caps[key], "refactor_patrol.caps.#{key}", source_path)
-      end
-    end
-
-    def validate_refactor_patrol_leverage!(refactor, source_path)
-      leverage = refactor["leverage"]
-      unless leverage.is_a?(Hash)
-        raise ConfigError,
-              "refactor_patrol.leverage in #{describe_source(source_path)} must be a Hash; " \
-              "got #{leverage.inspect} (#{leverage.class})"
-      end
-
-      weights = leverage["weights"]
-      unless weights.is_a?(Hash)
-        raise ConfigError,
-              "refactor_patrol.leverage.weights in #{describe_source(source_path)} must be a Hash; " \
-              "got #{weights.inspect} (#{weights.class})"
-      end
-
-      REFACTOR_PATROL_WEIGHT_KEYS.each do |key|
-        value = weights[key]
-        next if value.is_a?(Numeric) && value >= 0
-
-        raise ConfigError,
-              "refactor_patrol.leverage.weights.#{key} in #{describe_source(source_path)} must be a number >= 0; " \
-              "got #{value.inspect} (#{value.class})"
-      end
-
-      # An all-zero weight set produces an empty leverage breakdown, which fails
-      # the thesis schema's expected_leverage.breakdown.minProperties and
-      # silently drops every thesis; require at least one positive weight.
-      unless REFACTOR_PATROL_WEIGHT_KEYS.any? { |key| weights[key].is_a?(Numeric) && weights[key].positive? }
-        raise ConfigError,
-              "refactor_patrol.leverage.weights in #{describe_source(source_path)} must have at least one positive weight"
       end
     end
 

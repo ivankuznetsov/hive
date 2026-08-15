@@ -157,7 +157,8 @@ module Hive
                 permission_mode: nil, mcp_config_path: nil,
                 strict_mcp_config: false, identity_arguments: nil,
                 routing_arguments: nil, runtime_policy: nil,
-                additional_read_roots: [], additional_write_roots: [])
+                additional_read_roots: [], additional_write_roots: [],
+                resource_guards: nil, agent_custody: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
@@ -196,7 +197,9 @@ module Hive
           routing_arguments: routing_arguments,
           runtime_policy: runtime_policy,
           additional_read_roots: additional_read_roots,
-          additional_write_roots: additional_write_roots
+          additional_write_roots: additional_write_roots,
+          resource_guards: resource_guards,
+          agent_custody: agent_custody
         )
       end
 

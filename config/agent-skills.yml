@@ -132,6 +132,14 @@ capabilities:
       grok: { invocation: /ce-code-review, probe: skills/ce-code-review/SKILL.md }
       opencode: { invocation: /ce-code-review, probe: skills/ce-code-review/SKILL.md }
 
+  - id: ce-doc-review
+    package: compound-engineering
+    agents:
+      claude: { invocation: /ce-doc-review, probe: skills/ce-doc-review/SKILL.md }
+      codex: { invocation: /ce-doc-review, probe: skills/ce-doc-review/SKILL.md }
+      pi: { invocation: "/skill:ce-doc-review", probe: skills/ce-doc-review/SKILL.md }
+      grok: { invocation: /ce-doc-review, probe: skills/ce-doc-review/SKILL.md }
+
   - id: ce-test-browser
     package: compound-engineering
     agents:

@@ -3,9 +3,18 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-12
-tags: [gap, todo, release-proof, agent-skills]
+updated: 2026-08-14
+tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Patrol v4 needs installed fleet dogfood (2026-08-14)
+
+Focused tests prove scoreless route normalization, fresh v4 JobStore isolation,
+automatic retired-config removal, and the single per-agent runaway fuse. This
+change has not yet been installed over the registered project fleet or observed
+through a real Architecture Patrol discovery, `fix` PR, `discuss` issue, and
+token-limit retry. Retain those four live receipts after merge before treating
+the operational migration as release-proven.
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
@@ -19,6 +28,82 @@ on an explicit backend/model, selected config, credential environment key, and
 operator opt-in. Until that gate is supplied, real model transport and live
 provider permission behavior remain unverified; an offline inventory check is
 not equivalent to a model request.
+
+## Parallel Hive web CI exact-head evidence (2026-08-14)
+
+The serial Hive web job took 441 seconds in exact-head run `31818138021`, led
+by the 184-second Playwright system-test step and the 149-second Rails
+integration step. CI now schedules integration/lint, system, and golden-path
+cells independently behind the existing aggregate check name. Exact-head run
+`31819264376` passed all three cells and the aggregate. From the first web-cell
+start through aggregate completion the path took 246 seconds, down from the
+441-second serial job; the system, integration/lint, and golden-path cells took
+220, 115, and 111 seconds. This closes the hosted-concurrency uncertainty.
+
+## Sharded CI coverage exact-head evidence (2026-08-14)
+
+The four-way coverage collector and downstream exact merge are locally pinned
+at the harness level: all four disjoint file partitions ran, and their 1,546
+raw process results merged to 84,609/84,609 covered executable lines with no
+unloaded files or result errors. Three collectors were green. The fourth
+completed in 560 seconds but one 0.5-second subprocess-start assertion lost a
+race while another repository-wide test process saturated the host; that test
+passed immediately in an isolated coverage reproduction. The source-byte
+heuristic is intentionally only an initial partition, and local green shard
+wall times ranged from 187 to 486 seconds. Exact-head GitHub Actions run
+`31818138021` then proved artifact upload/download, the exact
+100% merge, and the unchanged protected aggregate. The workflow completed in
+484 seconds versus the 1,592-second four-run `main` median; hosted shard jobs
+took 300, 284, 430, and 388 seconds, and the merge gate took 44 seconds. This
+closes the missing hosted-proof gap, while confirming that source bytes are
+only an approximate runtime weight: the 146-second fastest-to-slowest spread
+identified the third partition as the long pole. A second hosted run measured
+that same collector at 440 seconds while the others took 244--294 seconds. CI
+therefore split that measured hot partition into two source-byte-balanced
+halves. Five-way exact-head run `31821818842` passed at 469 seconds overall;
+the two halves took 219 and 280 collector seconds. The unchanged fourth
+original partition then became the 370-second long pole, consistent with its
+368- and 294-second samples in the prior runs. Six-way exact-head run
+`31823734367` passed all 23 jobs at 394 seconds overall. The new pair took 154
+collector seconds each (172- and 176-second jobs), reducing the prior
+long-pole step by 58.4% while exact 100% coverage and the protected aggregate
+remained green. This closes the final hosted-timing gap for the six-way design.
+
+Post-review accounting found that flattened artifact download consumed four
+fewer process results than the collectors produced in both sampled six-way
+runs. The branch now preserves one directory per artifact and requires a
+revision/run/Ruby/shard/test-file/result-list manifest before merging. Focused
+tests prove same-basename preservation and rejection of missing, duplicate,
+foreign, empty, corrupt, error-marked, and unlisted inputs. Rebased exact-head
+run `31861365214` consumed all 1,727 process results across six shards, retained
+100% line coverage, and passed all 23 gates. This closes the artifact-transport
+and source-catalog ownership proof gap.
+
+## Task workspace forward evidence and live-provider gaps (2026-08-12)
+
+- Tasks admitted before the task-workspace capture seams normally have no
+  historical repository/wiki/context receipt, exact child-session identity,
+  provider-reported actual model, or attempt-attributed usage. The workspace
+  deliberately reports those fields as missing, partial, unavailable, or
+  unattributed; no timestamp, prompt, argv, log, artifact prose, or current
+  checkout is a trustworthy backfill source.
+- `observed_at_launch` proves what the controller captured, while
+  `agent_asserted_used` proves only that a validated attempt-bound receipt was
+  promoted. Even matching digests do not prove the model consumed every
+  selected reference. Providers that do not emit structured actual-model or
+  usage data remain unavailable until a durable observation lands.
+- Publication behavior is deterministic against injected bounded transports.
+  No live credentialed GitHub refresh or live-provider task is required for
+  repository verification, and no such run should be cited as implemented
+  proof. Authentication, rate limits, deleted branches, and cache staleness
+  remain honest advisory states in production.
+- The dependency workspace view projects the connected subset of the reused
+  bounded status snapshot. If that snapshot lacks other projects or exhausts a
+  cap, the component remains partial rather than starting a new fleet scan.
+  This is an operator explanation of the existing scalar `depends_on` model,
+  not a durable DAG or publication authority.
+
+See [[modules/task_workspace]].
 
 ## Provider-routing trusted captures (updated 2026-08-11)
 
@@ -191,6 +276,11 @@ stable class and scope.
   `Hive::Markers.set`; an installed-daemon retry still needs to prove the fix
   live. A separate campaign-specific Hive project is no longer an intended
   validation target. Honeycomb is not a dependency of this named-workflow path.
+  The DeepSeek and Grok expansion then reproduced a second false-success path:
+  a provider process returned while Hive's pre-spawn `AGENT_WORKING` marker
+  remained current. Source tests now rewrite that state to a recoverable
+  `ERROR reason=agent_exited_without_terminal_marker`; a post-merge retry on the
+  shared current-main Hive deployment remains the required live proof.
 - The packaged mixed Sol/Terra/Grok and Opus/Fable profiles, provider-neutral
   model routes, explicit reviewer identities, and combined Sol-runner selection
   are locally test-pinned; the Opus/Fable profiles now have one paid end-to-end
@@ -1084,3 +1174,78 @@ one-file shape remains rejected and no compatibility reader exists. No
 provider-backed exact-head run, publication, or release qualification was
 performed here; hostile/property campaigns remain optional and outside the
 normal merge gate.
+
+## Plan-review native route still needs an authorized live capture (2026-08-12)
+
+Deterministic policy, adapter, lineage, decision, transition-bypass, status/TUI,
+and Rails Web tests pin the conditional plan-review contract, including
+requested native Grok Build / `grok-4.6` and different-family independence.
+`test/smoke/plan_review_smoke_test.rb` now provides the credential-preserving
+real route proof, but it deliberately requires `HIVE_LIVE_PLAN_REVIEW=1` and is
+excluded from normal CI. Until an operator runs that opt-in smoke on the exact
+candidate and retains its sanitized receipt, native route/model/effort and
+real-provider JSON-file behavior remain source/offline-test evidence rather
+than an authenticated live claim. The default runtime still fails mandatory
+coverage closed when that capability is unavailable.
+
+## Outcome evidence needs one fully accepted live package (2026-08-14)
+
+A read-only retrospective ran the completed conditional-plan-critique task at
+source `48223ab9c2fab1b9c8716d759da6eea968d3fb7e` over its reconstructed exact
+159-path implementation range. Inference produced four outcome claims with the
+appropriate video, screenshot, and terminal proof kinds, plus two supporting
+documentation/test exclusions. Three fresh reviewer passes accepted both
+exclusions but rejected every behavior claim: the producer repeatedly supplied
+fixture-like summaries, selected test output, terminal-styled composites, or
+curated commandless output instead of real product surfaces and transitions.
+The controller exhausted its two recaptures and published a semantic blocked
+package rather than accepting the historical synthetic Hivebox screenshot and
+two-second board-to-task video.
+
+This proves the fail-closed reviewer and bounded-recapture path against the
+historical bad-evidence class.
+
+Latest refresh (2026-08-14): Hive now ships one preflighted capture toolkit:
+pinned native agent-browser plus managed Chrome for Web, a native Ruby PTY
+recorder for terminal/TUI, and ffmpeg/ffprobe/Tesseract admission. Mechanical
+source identity, sizes, hashes, and reviewer hash inventory moved into the
+controller, and missing claim proof can be retained as `revise` instead of
+collapsing into an undurable StoreError. Focused tests, a native terminal CLI
+smoke, and a real 0.34.0 agent-browser bootstrap/managed-Chrome launch produced
+and decoded a PNG/WebM locally. A second exact-range retrospective then inferred
+three grouped claims. Its actual Hive Web coverage-blocked task screenshot was
+independently accepted: it showed review identity, failed/unsupported coverage,
+reviewer routes, audit receipts, state-valid waiver/downgrade controls, and no
+execution action. Both terminal claims remained `revise` because their casts
+summarized probes rather than driving critique, planner revision, verification,
+real cross-surface actions, and stale-token denial. After three attempts Hive
+published `blocked` with those exact reasons; it did not discard the accepted
+Web proof or overstate package completion. The run also exposed and fixed
+keep-alive Host rewriting and raw browser-daemon output custody. The prewarmed
+multi-architecture Hivebox image remains a CI merge gate and was not built
+locally. Keep this gap open until a current task publishes a fully accepted
+package from genuine Web/CLI/TUI or document behavior without weakening the
+reviewer contract.
+
+The 2026-08-14 review hardening replaced the producer-visible gateway socket
+with a bounded controller mailbox, enabled Codex's managed limited network proxy
+with local binding but no domains, moved browser state outside the producer
+write root, and requires controller receipts for screenshot/video/terminal
+representations. Media sizes are checked before hashing/copying, and Hivebox
+package listing now validates immutable metadata without rerunning OCR/ffmpeg
+for every retained file; selected downloads still recheck exact size/digest.
+Focused tests pin these boundaries, but a fully accepted live provider package
+through the new mailbox/network configuration remains part of this open gap.
+
+A frozen four-task retrospective over 350 exact changed paths sharpened this
+gap. Legacy marked all four tasks complete even though manual policy review
+found zero complete evidence packages; the new controller blocked all four,
+preventing every false completion. It accepted 2 of 9 final claims and all 9
+supporting exclusions, but accepted zero complete packages. Managed Web,
+terminal, and document capture all operated; the runs instead exposed omitted
+promised outcomes, claims too broad for one artifact, unreachable historical
+Web fixtures, and a producer substituting a custom script for the shipped CLI.
+One visual-custody contract defect was fixed, and a post-fix CLI inference rerun
+restored the omitted compatibility outcome and split one broad claim into three.
+Keep the gap open until at least one exact-range Web package and one CLI/TUI
+package are fully accepted without weakening the 4/4 false-completion result.

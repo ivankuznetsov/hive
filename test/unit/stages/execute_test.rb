@@ -13,12 +13,17 @@ class HiveStagesExecuteTest < Minitest::Test
       FileUtils.mkdir_p(path)
     end
 
-    def write_pointer!(task_folder, branch_name, execute_base_head: nil)
-      File.write(File.join(task_folder, "worktree.yml"), {
+    def write_pointer!(task_folder, branch_name, execute_base_head: nil,
+                       base_branch: nil, base_oid: nil, repository: nil)
+      data = {
         "path" => path,
         "branch" => branch_name,
         "execute_base_head" => execute_base_head
-      }.to_yaml)
+      }
+      data["base_branch"] = base_branch if base_branch
+      data["base_oid"] = base_oid if base_oid
+      data["repository"] = repository if repository
+      File.write(File.join(task_folder, "worktree.yml"), data.to_yaml)
     end
   end
 
@@ -41,6 +46,35 @@ class HiveStagesExecuteTest < Minitest::Test
       raise Hive::GitError, "ancestor failed" if raise_ancestor
 
       ancestor_result
+    end
+  end
+
+  def test_run_checks_plan_review_before_identity_or_worktree_initialization
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      identity_calls = 0
+      guard = lambda do |**|
+        raise Hive::PlanReview::TransitionBlocked, "review blocked"
+      end
+
+      with_replaced_singleton_method(
+        Hive::PlanReview::TransitionGuard, :validate_execute_entry!, guard
+      ) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :capture_implementation_identity, lambda { |*|
+            identity_calls += 1
+          }
+        ) do
+          assert_raises(Hive::PlanReview::TransitionBlocked) do
+            Hive::Stages::Execute.run!(task, "worktree_root" => File.join(dir, "worktrees"))
+          end
+        end
+      end
+
+      assert_equal 0, identity_calls
+      refute File.exist?(task.worktree_yml_path)
+      refute Dir.exist?(File.join(dir, "worktrees", task.slug))
     end
   end
 
@@ -282,9 +316,11 @@ class HiveStagesExecuteTest < Minitest::Test
       with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
         with_replaced_singleton_method(
           Hive::Stages::Execute, :spawn_implementation,
-          lambda { |_task, _cfg, _path, **_kwargs|
-            File.write(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME), "tampered\n")
-            { status: :ok }
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            agent_custody.call do
+              File.write(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME), "tampered\n")
+              { status: :ok }
+            end
           }
         ) do
           result = Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
@@ -294,6 +330,77 @@ class HiveStagesExecuteTest < Minitest::Test
 
       assert_includes Hive::Markers.current(task.state_file).attrs["files"],
                       Hive::TaskJournal::JOURNAL_BASENAME
+    end
+  end
+
+  def test_execute_custody_protects_controller_workspace_receipts
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      FileUtils.mkdir_p(File.join(task.folder, "context-receipts"))
+      FileUtils.mkdir_p(File.join(task.folder, "activity-operations"))
+      File.write(File.join(task.folder, "context-receipts", "older.launch.json"), "launch\n")
+      File.write(File.join(task.folder, "context-receipts", "current.json.next"), "candidate\n")
+      File.write(File.join(task.folder, "activity-operations", "operation.json"), "operation\n")
+
+      protected = Hive::Stages::Execute.execute_protected_files(task)
+
+      assert_includes protected, "task-projection.checkpoint.json"
+      assert_includes protected, "context-receipts/older.launch.json"
+      assert_includes protected, "activity-operations/operation.json"
+      refute_includes protected, "context-receipts/current.json.next"
+    end
+  end
+
+  def test_execute_custody_keeps_a_receipt_that_disappears_during_stat
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      directory = File.join(task.folder, "activity-operations")
+      FileUtils.mkdir_p(directory)
+      path = File.join(directory, "vanishing.json")
+      File.write(path, "operation\n")
+      original_lstat = File.method(:lstat)
+      replacement = lambda do |candidate|
+        raise Errno::ENOENT if candidate == path
+
+        original_lstat.call(candidate)
+      end
+
+      protected = with_replaced_singleton_method(File, :lstat, replacement) do
+        Hive::Stages::Execute.execute_protected_files(task)
+      end
+      assert_includes protected, "activity-operations/vanishing.json"
+    end
+  end
+
+  def test_run_pass_keeps_controller_journal_writes_outside_implementer_custody
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug,
+                    "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      journal = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            File.write(journal, "controller session start\n")
+            begin
+              agent_custody.call { raise IOError, "provider failed" }
+            ensure
+              File.open(journal, "ab") { |file| file.write("controller session finish\n") }
+            end
+          }
+        ) do
+          error = assert_raises(IOError) do
+            Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
+          end
+          assert_equal "provider failed", error.message
+        end
+      end
+
+      assert_equal "controller session start\ncontroller session finish\n", File.binread(journal)
     end
   end
 
@@ -315,9 +422,11 @@ class HiveStagesExecuteTest < Minitest::Test
       with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
         with_replaced_singleton_method(
           Hive::Stages::Execute, :spawn_implementation,
-          lambda { |_task, _cfg, _path, **_kwargs|
-            File.write(File.join(task.folder, "plan.md"), "forged\n")
-            raise IOError, "provider stream failed"
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            agent_custody.call do
+              File.write(File.join(task.folder, "plan.md"), "forged\n")
+              raise IOError, "provider stream failed"
+            end
           }
         ) do
           error = assert_raises(IOError) do
@@ -415,9 +524,11 @@ class HiveStagesExecuteTest < Minitest::Test
       with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
         with_replaced_singleton_method(
           Hive::Stages::Execute, :spawn_implementation,
-          lambda { |_task, _cfg, _path, **_kwargs|
-            File.write(File.join(task.folder, "plan.md"), "forged\n")
-            raise Hive::ProviderRouteFailed, "admitted provider route failed"
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            agent_custody.call do
+              File.write(File.join(task.folder, "plan.md"), "forged\n")
+              raise Hive::ProviderRouteFailed, "admitted provider route failed"
+            end
           }
         ) do
           assert_raises(Hive::ProviderRouteFailed) do
@@ -528,6 +639,10 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal [
         { branch_name: task.slug, default_branch: "master", base_override: "base-task" }
       ], fake_wt.create_calls
+      pointer = YAML.safe_load(File.read(task.worktree_yml_path))
+      assert_equal "base-head", pointer.fetch("execute_base_head")
+      assert_equal "master", pointer.fetch("base_branch")
+      assert_equal "base-head", pointer.fetch("base_oid")
     end
   end
 

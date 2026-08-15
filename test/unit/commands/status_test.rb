@@ -6,6 +6,49 @@ require "hive/task_action"
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
 
+  def test_json_payload_exposes_resolved_clean_exit_config
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(
+        File.join(hive_state, "config.yml"),
+        { "stages" => { "ensure_clean_on_exit" => false } }.to_yaml
+      )
+
+      project = Hive::Commands::Status.new.json_payload([
+        status_project(project_root, hive_state)
+      ]).fetch("projects").first
+
+      assert_equal false,
+                   project.dig("config_summary", "stages", "ensure_clean_on_exit")
+    end
+  end
+
+  def test_json_payload_surfaces_current_run_clean_exit_residue
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = write_status_task(
+        hive_state, "4-execute", "residue-task-260813-abcd",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      Hive::Events.emit(task_folder: folder, slug: "residue-task-260813-abcd",
+                        stage: "4-execute", event_type: :stage_enter)
+      Hive::Events.emit(
+        task_folder: folder, slug: "residue-task-260813-abcd", stage: "4-execute",
+        event_type: :clean_exit_auto_committed, message: "head=abc paths=wiki/a.md",
+        data: { head: "abc", reason: "stage_exit", paths: [ "wiki/a.md" ], path_count: 1 }
+      )
+
+      task = Hive::Commands::Status.new.json_payload([
+        status_project(project_root, hive_state)
+      ]).dig("projects", 0, "tasks", 0)
+
+      assert_equal 1, task.dig("auto_residue", "commits")
+      assert_equal [ "wiki/a.md" ], task.dig("auto_residue", "paths")
+      assert_equal "abc", task.dig("auto_residue", "latest_head")
+    end
+  end
+
   def test_corrupt_metadata_in_dispatchable_stage_emits_structured_admission_error
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -561,7 +604,7 @@ class CommandsStatusTest < Minitest::Test
 
       assert_equal({
         "brainstorm-task-260620-aaaa" => "ready_to_plan",
-        "plan-task-260620-bbbb" => "needs_input",
+        "plan-task-260620-bbbb" => "plan_reviewing",
         "execute-task-260620-cccc" => "ready_to_open_pr"
       }, actions_by_slug)
       assert_equal [ { "stage_dir" => "5-review", "task_count" => 1 } ],
@@ -2291,6 +2334,19 @@ class CommandsStatusTest < Minitest::Test
     assert_equal "error detail=line 1 line 2", cmd.send(:label_for, marker)
     assert_equal Hive::Schemas::StatusErrorKind::ERROR,
                  cmd.send(:error_kind_for, Hive::Error.new("generic"))
+
+    assert_equal "", cmd.send(:operational_plan_review_token, nil)
+    assert_equal " · review deep/awaiting_decision coverage=2/3 open=3",
+                 cmd.send(:operational_plan_review_token, {
+                   "effective_level" => "deep", "state" => "awaiting_decision",
+                   "coverage_counts" => { "completed" => 2, "pending" => 1 },
+                   "finding_counts" => { "open_gated" => 1, "open_manual" => 2 }
+                 })
+    # No effective level yet: fall back to the computed one, then to "pending".
+    assert_equal " · review standard/unknown coverage=0/0 open=0",
+                 cmd.send(:operational_plan_review_token, { "computed_level" => "standard" })
+    assert_equal " · review pending/unknown coverage=0/0 open=0",
+                 cmd.send(:operational_plan_review_token, {})
 
     with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::EPERM }) do
       assert_equal true, cmd.send(:pid_alive?, 12_345)

@@ -23,7 +23,8 @@ class UsageDbTest < Minitest::Test
 
   def record(agent: "claude", project_slug: "alpha", task_slug: "task-a",
              stage: "2-brainstorm", started_at: Time.utc(2026, 5, 24, 10),
-             input: 100, output: 50, cached: 10)
+             input: 100, output: 50, cached: 10, attempt_id: nil,
+             session_id: nil, task_generation: nil)
     Hive::UsageDb.record!(
       agent: agent,
       model: "test-model",
@@ -34,7 +35,9 @@ class UsageDbTest < Minitest::Test
       ended_at: started_at + 60,
       input: input,
       output: output,
-      cached: cached
+      cached: cached,
+      attempt_id: attempt_id, session_id: session_id,
+      task_generation: task_generation, source: session_id && "runtime_receipt"
     )
   end
 
@@ -231,6 +234,159 @@ class UsageDbTest < Minitest::Test
       assert current.key?("requested_backend")
     ensure
       db&.close
+    end
+  end
+
+  def test_legacy_schema_migrates_transactionally_and_rows_remain_unattributed
+    with_usage_db do
+      require "sqlite3"
+      db = SQLite3::Database.new(Hive::UsageDb.path)
+      db.execute_batch(Hive::UsageDb::LEGACY_SCHEMA_SQL)
+      db.execute(
+        "INSERT INTO token_usage (id, agent, model, project_slug, task_slug, stage, " \
+        "started_at, ended_at, input, output, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [ "legacy-1", "claude", "legacy-model", "alpha", "task-a", "4-execute",
+          "2026-05-24T10:00:00Z", "2026-05-24T10:01:00Z", 10, 5, 1 ]
+      )
+      db.close
+
+      record(
+        agent: "codex", input: 20, output: 7, cached: 2,
+        attempt_id: "attempt-1", session_id: "session-1", task_generation: 3
+      )
+
+      db = SQLite3::Database.new(Hive::UsageDb.path)
+      columns = db.table_info("token_usage").map { |row| row["name"] || row[1] }
+      assert_includes columns, "attempt_id"
+      assert_includes columns, "session_id"
+      assert_includes columns, "task_generation"
+      assert_includes columns, "source"
+      assert_equal Hive::UsageDb::SCHEMA_VERSION, db.get_first_value("PRAGMA user_version")
+      db.close
+
+      exact = Hive::UsageDb.exact_attempt(attempt_id: "attempt-1", task_generation: 3)
+      assert exact.fetch(:available)
+      assert_equal 1, exact.fetch(:sessions).length
+      assert_equal({ input: 20, output: 7, cached: 2 }, exact.fetch(:totals))
+      assert_equal 1, exact.fetch(:unattributed_count)
+      assert_equal "legacy-model", exact.fetch(:unattributed).first.fetch(:model)
+    end
+  end
+
+  def test_session_record_is_idempotently_upserted_without_double_counting
+    with_usage_db do
+      common = {
+        agent: "codex", model: "gpt-test", project_slug: "alpha",
+        task_slug: "task-a", stage: "4-execute",
+        started_at: Time.utc(2026, 5, 24, 10), ended_at: Time.utc(2026, 5, 24, 10, 1),
+        attempt_id: "attempt-1", session_id: "session-1", task_generation: 3,
+        source: "runtime_receipt"
+      }
+      assert Hive::UsageDb.record!(**common, input: 10, output: 2, cached: 1)
+      assert Hive::UsageDb.record!(**common, input: 12, output: 4, cached: 2)
+
+      exact = Hive::UsageDb.exact_attempt(attempt_id: "attempt-1", task_generation: 3)
+      assert_equal 1, exact.fetch(:sessions).length
+      assert_equal({ input: 12, output: 4, cached: 2 }, exact.fetch(:totals))
+      assert_equal "session-1", exact.fetch(:sessions).first.fetch(:session_id)
+    end
+  end
+
+  def test_concurrent_schema_migrators_and_session_writers_converge
+    with_usage_db do
+      ready = Queue.new
+      release = Queue.new
+      threads = 2.times.map do |index|
+        Thread.new do
+          ready << true
+          release.pop
+          Hive::UsageDb.record!(
+            agent: "codex", model: "gpt-test", project_slug: "alpha",
+            task_slug: "task-a", stage: "4-execute",
+            started_at: Time.utc(2026, 5, 24, 10), ended_at: Time.utc(2026, 5, 24, 10, 1),
+            input: 10 + index, output: 2, cached: 1,
+            attempt_id: "attempt-1", session_id: "session-#{index}",
+            task_generation: 3, source: "runtime_receipt"
+          )
+        end
+      end
+      2.times { ready.pop }
+      2.times { release << true }
+      assert threads.map(&:value).all?
+
+      exact = Hive::UsageDb.exact_attempt(attempt_id: "attempt-1", task_generation: 3)
+      assert_equal 2, exact.fetch(:sessions).length
+      assert_equal 21, exact.dig(:totals, :input)
+    end
+  end
+
+  def test_session_identity_cannot_move_between_attempts
+    with_usage_db do
+      common = {
+        agent: "codex", model: "gpt-test", project_slug: "alpha",
+        task_slug: "task-a", stage: "4-execute",
+        started_at: Time.utc(2026, 5, 24, 10), ended_at: Time.utc(2026, 5, 24, 10, 1),
+        input: 10, output: 2, cached: 1, session_id: "session-1",
+        task_generation: 3, source: "runtime_receipt"
+      }
+      assert Hive::UsageDb.record!(**common, attempt_id: "attempt-1")
+      _out, _err = capture_io do
+        refute Hive::UsageDb.record!(**common, attempt_id: "attempt-2")
+      end
+
+      assert_equal 1,
+                   Hive::UsageDb.exact_attempt(
+                     attempt_id: "attempt-1", task_generation: 3
+                   ).fetch(:sessions).length
+      assert_empty Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt-2", task_generation: 3
+      ).fetch(:sessions)
+    end
+  end
+
+  def test_exact_attempt_marks_missing_or_failed_storage_unavailable_not_zero
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = File.join(dir, "missing.db")
+      missing = Hive::UsageDb.exact_attempt(attempt_id: "attempt-1")
+      refute missing.fetch(:available)
+      assert_nil missing.fetch(:totals)
+
+      Hive::UsageDb.path = dir
+      _out, _err = capture_io do
+        broken = Hive::UsageDb.exact_attempt(attempt_id: "attempt-1")
+        refute broken.fetch(:available)
+        assert_nil broken.fetch(:totals)
+      end
+    end
+  end
+
+  def test_exact_attempt_scopes_legacy_rows_by_project_and_task
+    with_usage_db do
+      record(project_slug: "alpha", task_slug: "task-a", input: 10)
+      record(project_slug: "alpha", task_slug: "task-b", input: 20)
+      record(project_slug: "beta", task_slug: "task-a", input: 30)
+
+      exact = Hive::UsageDb.exact_attempt(
+        attempt_id: "missing", project_slug: "alpha", task_slug: "task-a"
+      )
+      assert exact.fetch(:available)
+      assert_equal 1, exact.fetch(:unattributed_count)
+      assert_equal "alpha", exact.fetch(:unattributed).first.fetch(:project_slug)
+      assert_equal "task-a", exact.fetch(:unattributed).first.fetch(:task_slug)
+    end
+  end
+
+  def test_exact_attempt_corrupt_store_is_reported_as_unavailable
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = File.join(dir, "usage.db")
+      File.write(Hive::UsageDb.path, "not a sqlite database")
+
+      _out, err = capture_io do
+        exact = Hive::UsageDb.exact_attempt(attempt_id: "attempt-1")
+        refute exact.fetch(:available)
+        assert_equal "read_failed", exact.fetch(:reason)
+      end
+      assert_match(/exact attempt usage failed/, err)
     end
   end
 

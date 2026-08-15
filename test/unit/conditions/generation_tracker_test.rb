@@ -64,6 +64,25 @@ class ConditionsGenerationTrackerTest < Minitest::Test
     end
   end
 
+  def test_attempt_activity_does_not_advance_an_unpersisted_input_generation
+    with_tmp_dir do |dir|
+      task = FakeTask.new(folder: dir, state_file: File.join(dir, "task.md"))
+      File.write(File.join(dir, "plan.md"), "plan\n")
+      tracker = Hive::Conditions::GenerationTracker.new
+      admitted = tracker.resolve(task: task, records: [])
+      activity = record(
+        "event_type" => "activity_recorded",
+        "task_generation" => admitted.task_generation,
+        "payload" => { "activity_kind" => "attempt_admitted" }
+      )
+
+      worker_observation = tracker.resolve(task: task, records: [ activity ])
+
+      assert_equal admitted.task_generation, worker_observation.task_generation,
+                   "an admission receipt must not make its own worker generation stale"
+    end
+  end
+
   def test_commit_generation_changes_only_for_exact_head_changes
     tracker = Hive::Conditions::GenerationTracker.new
     first = tracker.commit(records: [], task_generation: 1, head_sha: "a" * 40, branch: "feature")

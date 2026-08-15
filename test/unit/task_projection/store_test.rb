@@ -262,6 +262,138 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
+  def test_bounded_read_replays_only_the_checkpoint_and_suffix
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      store.rebuild!
+      File.open(store.journal_path, "a") do |journal|
+        journal.write("#{JSON.generate(condition_event('event-2', state: 'unsatisfied'))}\n")
+      end
+
+      replacement = -> { raise "unbounded journal read must not run" }
+      result = with_replaced_singleton_method(store, :journal_bytes, replacement) do
+        store.read_bounded
+      end
+      expected = store.read.to_h
+      expected["journal"]["hash"] = nil
+
+      assert_equal "current", result.state
+      assert_equal expected, result.projection.to_h
+      assert_equal "unsatisfied",
+                   result.projection.current_condition("AgentHealthy").fetch("state")
+      assert_equal File.size(store.journal_path), result.journal_cursor
+      assert_equal %w[event-2],
+                   result.journal_records.map { |record| record.fetch("event_id") }
+      refute result.journal_records.any? { |record| record.keys.any? { |key| key.start_with?("__") } }
+      refute result.truncated
+    end
+  end
+
+  def test_bounded_read_reports_changed_prefix_without_rewriting_history
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      original = store.rebuild!
+      changed = condition_event("event-x")
+      write_journal(dir, [ changed ])
+
+      result = store.read_bounded
+
+      assert_equal "stale", result.state
+      assert_equal "checkpoint_prefix_changed", result.diagnostics.first.fetch("reason")
+      assert_equal original.to_h, result.projection.to_h
+    end
+  end
+
+  def test_bounded_read_checks_bounded_checkpoint_anchors
+    with_tmp_dir do |dir|
+      records = 20.times.map { |index| condition_event("event-#{index}") }
+      write_journal(dir, records)
+      store = projection_store(dir)
+      store.rebuild!
+      bytes = File.binread(store.journal_path)
+      replacement = bytes.getbyte(-2) == 32 ? "x" : " "
+      bytes.setbyte(-2, replacement.ord)
+      File.binwrite(store.journal_path, bytes)
+
+      result = store.read_bounded
+
+      assert_equal "stale", result.state
+      assert_equal "checkpoint_prefix_changed", result.diagnostics.first.fetch("reason")
+    end
+  end
+
+  def test_checkpoint_stores_projection_without_the_complete_journal_prefix
+    with_tmp_dir do |dir|
+      rows = [ condition_event("event-1") ] + 1_000.times.map do |index|
+        condition_event("noise-#{index}").merge(
+          "event_type" => "activity_recorded",
+          "payload" => {
+            "activity_kind" => "stage_transition",
+            "operation_id" => "checkpoint-noise-#{index}",
+            "correlation_id" => "checkpoint-noise-#{index}",
+            "from_stage" => "3-plan", "to_stage" => "4-execute"
+          },
+          "reason" => "stage transition"
+        )
+      end
+      write_journal(dir, rows)
+      store = projection_store(dir)
+      store.rebuild!
+      checkpoint = JSON.parse(File.read(store.checkpoint_path))
+
+      assert_equal "current", checkpoint.fetch("state")
+      refute checkpoint.key?("records")
+      refute checkpoint.fetch("journal").key?("prefix_hash")
+      assert_operator File.size(store.checkpoint_path), :<, File.size(store.journal_path)
+      assert_equal "current", store.read_bounded.state
+    end
+  end
+
+  def test_bounded_read_accepts_an_empty_suffix_after_rebuild
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      expected = store.rebuild!
+
+      result = store.read_bounded
+
+      assert_equal "current", result.state
+      assert_equal expected.to_h, result.projection.to_h
+    end
+  end
+
+  def test_bounded_read_fails_closed_when_suffix_exceeds_its_budget
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      original = store.rebuild!
+      File.open(store.journal_path, "a") do |journal|
+        journal.write("#{JSON.generate(condition_event('event-2'))}\n")
+      end
+
+      result = store.read_bounded(journal_suffix_max_bytes: 8)
+
+      assert_equal "partial", result.state
+      assert result.truncated
+      assert_equal "journal_suffix_bytes", result.diagnostics.first.dig("details", "cap")
+      assert_equal original.to_h, result.projection.to_h
+    end
+  end
+
+  def test_missing_checkpoint_uses_only_a_small_bounded_journal_and_marks_partial
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      result = projection_store(dir).read_bounded
+
+      assert_equal "partial", result.state
+      assert_equal "checkpoint_missing", result.diagnostics.first.fetch("reason")
+      assert_equal "satisfied",
+                   result.projection.current_condition("AgentHealthy").fetch("state")
+    end
+  end
+
   private
 
   def write_journal(dir, records)

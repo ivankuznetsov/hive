@@ -49,12 +49,22 @@ module Hive
           end
         end
 
-        restart_daemon_if_required!
-
         migrated = projects.size - failures.size
         if failures.empty?
+          # A successful fleet migration is also the update cutover point.
+          # Restart once even when this retry did not rewrite anything: an
+          # earlier partial fleet pass may already have committed a config
+          # migration and deferred its restart. The restarter is idempotent
+          # when no daemon is running.
+          restart_daemon_after_successful_fleet!
           @output.puts "hive: migration: complete (#{project_count(migrated)} migrated, 0 failed)"
           return 0
+        end
+
+        if @daemon_restart_required
+          @error_output.puts(
+            "hive: migration: daemon restart deferred until every registered project migrates successfully"
+          )
         end
 
         @error_output.puts(
@@ -123,8 +133,8 @@ module Hive
         @daemon_restart_required = true
       end
 
-      def restart_daemon_if_required!
-        @daemon_restarter.call if @daemon_restart_required
+      def restart_daemon_after_successful_fleet!
+        @daemon_restarter.call
       end
 
       def migrate_all_command

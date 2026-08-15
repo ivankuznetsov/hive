@@ -106,7 +106,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       results = watcher.observe(tasks.map { |task| row_for(task) }, now: T0)
 
       assert_equal [ :observed ], results.map { |result| result.fetch(:status) }.uniq
-      assert_equal 4, watcher.pending_count
       state = store.load(identity_for(tasks.first.project_root))
       assert_equal 4, state.fetch("candidates").length
       assert_equal true, state.dig("backlog", "complete")
@@ -147,7 +146,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
       assert_equal :observed, result.fetch(:status)
       assert_equal 2, result.fetch(:candidates)
-      assert_equal 2, watcher.pending_count
       assert_empty watcher.tick(now: T0)
       candidates = store.load(identity_for(tasks.first.project_root))
                         .fetch("candidates").values
@@ -183,7 +181,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       assert_equal :blocked, blocked.fetch(:status)
       assert_equal tasks.first.slug, blocked.fetch(:slug)
       assert_match(/canonical GitHub pull request/, blocked.fetch(:reason))
-      assert_equal 1, watcher.pending_count
       outcomes = store.load(identity_for(tasks.first.project_root))
                       .dig("backlog", "outcomes").values
       rejected = outcomes.find { |outcome| outcome.fetch("slug") == tasks.first.slug }
@@ -211,7 +208,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       result = restarted.tick(now: T0 + 61).first
 
       assert_equal :closed_unmerged, result.fetch(:status)
-      assert restarted.watching?(project: "app", slug: tasks.first.slug)
       assert_equal "CLOSED_UNMERGED",
                    restarted.state_for(project: "app", slug: tasks.first.slug)
     end
@@ -354,7 +350,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       state = store.load(identity_for(tasks.first.project_root))
       candidate = state.fetch("candidates").values.first
       assert_equal 26, candidate.dig("retry", "failures")
-      assert watcher.watching?(project: "app", slug: tasks.first.slug)
       assert_match(/offline/, candidate.dig("archive", "last_error"))
     end
   end
@@ -646,7 +641,278 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       result = watcher.tick(now: T0 + 1).first
       assert_equal :blocked, result.fetch(:status)
       assert_match(/ledger unreadable/, result.fetch(:reason))
-      refute watcher.watching?(project: "app", slug: task.slug)
+      assert_nil watcher.state_for(project: "app", slug: task.slug)
+    end
+  end
+
+  def test_open_pr_head_drift_is_polled_and_releases_orphaned_review_recovery
+    with_merge_project(stages: [ "6-review" ]) do |tasks, _home|
+      task = tasks.first
+      Hive::Markers.set(
+        task.state_file, :review_error,
+        "phase" => "reviewers", "pass" => "1", "reason" => "review_orphaned"
+      )
+      gh = FakeGh.new(state: "OPEN")
+      watcher, store = build_watcher(gh: gh, poll_interval_sec: 60)
+      observed_head = "b" * 40
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :local_pr_head_binding,
+        ->(*, **) { observed_head }
+      ) do
+        watcher.observe([ row_for(task) ], now: T0)
+        observed_head = "c" * 40
+        gh.head_oid = observed_head
+        watcher.observe([ row_for(task) ], now: T0 + 1)
+
+        candidate = store.load(identity_for(task.project_root))
+                         .fetch("candidates").values
+                         .find { |item| item.dig("archive", "status") != "superseded" }
+        assert_equal true, candidate.dig("observation", "held")
+        assert_equal "observed_head_changed",
+                     candidate.dig("observation", "hold_reason")
+        assert watcher.recovery_blocked?(project: "app", slug: task.slug)
+
+        result = watcher.tick(now: T0 + 1).first
+
+        refute_nil result, "held observed-head drift must still poll remote PR state"
+        assert_equal :open, result.fetch(:status)
+        refute watcher.recovery_blocked?(project: "app", slug: task.slug)
+        candidate = store.load(identity_for(task.project_root))
+                         .fetch("candidates").values
+                         .find { |item| item.dig("archive", "status") != "superseded" }
+        assert_equal true, candidate.dig("observation", "held")
+        assert_equal 1, gh.fact_calls.length
+        assert_empty watcher.tick(now: T0 + 2)
+        assert_equal 1, gh.fact_calls.length
+      end
+    end
+  end
+
+  def test_closed_unmerged_pr_head_drift_releases_orphaned_review_recovery
+    with_merge_project(stages: [ "6-review" ]) do |tasks, _home|
+      task = tasks.first
+      Hive::Markers.set(
+        task.state_file, :review_error,
+        "phase" => "reviewers", "pass" => "1", "reason" => "review_orphaned"
+      )
+      gh = FakeGh.new(state: "CLOSED")
+      watcher, store = build_watcher(gh: gh)
+      observed_head = "b" * 40
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :local_pr_head_binding,
+        ->(*, **) { observed_head }
+      ) do
+        watcher.observe([ row_for(task) ], now: T0)
+        observed_head = "c" * 40
+        gh.head_oid = observed_head
+        watcher.observe([ row_for(task) ], now: T0 + 1)
+
+        result = watcher.tick(now: T0 + 1).first
+
+        assert_equal :closed_unmerged, result.fetch(:status)
+        refute watcher.recovery_blocked?(project: "app", slug: task.slug)
+        candidate = store.load(identity_for(task.project_root))
+                         .fetch("candidates").values
+                         .find { |item| item.dig("archive", "status") != "superseded" }
+        assert_equal true, candidate.dig("observation", "held")
+        assert_equal "observed_head_changed",
+                     candidate.dig("observation", "hold_reason")
+      end
+    end
+  end
+
+  def test_operational_hold_outranks_head_drift_until_it_clears
+    with_merge_project(stages: [ "6-review" ]) do |tasks, _home|
+      task = tasks.first
+      gh = FakeGh.new(state: "OPEN")
+      watcher, store = build_watcher(gh: gh)
+      observed_head = "b" * 40
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :local_pr_head_binding,
+        ->(*, **) { observed_head }
+      ) do
+        base = row_for(task)
+        watcher.observe([ base ], now: T0)
+        observed_head = "c" * 40
+        gh.head_oid = observed_head
+        blocked = base.dup.tap { |row| row.blocked = true }
+        watcher.observe([ blocked ], now: T0 + 1)
+
+        candidate = store.load(identity_for(task.project_root))
+                         .fetch("candidates").values
+                         .find { |item| item.dig("archive", "status") != "superseded" }
+        assert_equal "dependency_blocked",
+                     candidate.dig("observation", "hold_reason")
+        assert_empty watcher.tick(now: T0 + 1)
+        assert_empty gh.fact_calls
+
+        watcher.observe([ base ], now: T0 + 2)
+        candidate = store.load(identity_for(task.project_root))
+                         .fetch("candidates").values
+                         .find { |item| item.dig("archive", "status") != "superseded" }
+        assert_equal "observed_head_changed",
+                     candidate.dig("observation", "hold_reason")
+        assert_equal :open, watcher.tick(now: T0 + 2).first.fetch(:status)
+        refute watcher.recovery_blocked?(project: "app", slug: task.slug)
+
+        watcher.observe([ blocked ], now: T0 + 3)
+        assert watcher.recovery_blocked?(project: "app", slug: task.slug)
+        assert_empty watcher.tick(now: T0 + 3)
+
+        watcher.observe([ base ], now: T0 + 4)
+        refute watcher.recovery_blocked?(project: "app", slug: task.slug)
+      end
+    end
+  end
+
+  def test_repository_mismatch_outranks_head_drift_and_never_polls
+    with_merge_project(stages: [ "6-review" ]) do |tasks, _home|
+      task = tasks.first
+      gh = FakeGh.new(state: "OPEN")
+      watcher, store = build_watcher(gh: gh)
+      observed_head = "b" * 40
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :local_pr_head_binding,
+        ->(*, **) { observed_head }
+      ) do
+        cross = row_for(task).dup.tap do |row|
+          row.pr_url = "https://github.com/other/repo/pull/9"
+        end
+        watcher.observe([ cross ], now: T0)
+        observed_head = "c" * 40
+        watcher.observe([ cross ], now: T0 + 1)
+
+        candidate = store.load(identity_for(task.project_root))
+                         .fetch("candidates").values
+                         .find { |item| item.dig("archive", "status") != "superseded" }
+        assert_equal "pull_request_repository_mismatch",
+                     candidate.dig("observation", "hold_reason")
+        assert_empty watcher.tick(now: T0 + 1)
+        assert_empty gh.fact_calls
+      end
+    end
+  end
+
+  def test_merged_pr_head_drift_remains_held_without_automatic_archive
+    with_merge_project(stages: [ "6-review" ]) do |tasks, _home|
+      task = tasks.first
+      gh = FakeGh.new(state: "MERGED")
+      closure = FakeClosure.new
+      watcher, store = build_watcher(gh: gh, task_closure: closure)
+      observed_head = "b" * 40
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :local_pr_head_binding,
+        ->(*, **) { observed_head }
+      ) do
+        watcher.observe([ row_for(task) ], now: T0)
+        observed_head = "c" * 40
+        gh.head_oid = observed_head
+        watcher.observe([ row_for(task) ], now: T0 + 1)
+
+        result = watcher.tick(now: T0 + 1).first
+
+        refute_nil result, "held observed-head drift must still poll remote PR state"
+        assert_equal :blocked, result.fetch(:status)
+        assert_equal "merged", result.dig(:remote, "state")
+        assert_match(/observed head changed/, result.dig(:archive, "last_error"))
+        assert_empty closure.calls
+        candidate = store.load(identity_for(task.project_root))
+                         .fetch("candidates").values
+                         .find { |item| item.dig("archive", "status") != "superseded" }
+        assert_equal true, candidate.dig("observation", "held")
+        assert_equal "blocked", candidate.dig("archive", "status")
+        assert_empty watcher.tick(now: T0 + 301)
+      end
+    end
+  end
+
+  def test_merged_head_drift_with_remote_head_mismatch_stops_after_block
+    with_merge_project(stages: [ "6-review" ]) do |tasks, _home|
+      task = tasks.first
+      gh = FakeGh.new(state: "MERGED")
+      watcher, store = build_watcher(gh: gh)
+      observed_head = "b" * 40
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :local_pr_head_binding,
+        ->(*, **) { observed_head }
+      ) do
+        watcher.observe([ row_for(task) ], now: T0)
+        observed_head = "c" * 40
+        watcher.observe([ row_for(task) ], now: T0 + 1)
+
+        result = watcher.tick(now: T0 + 1).first
+
+        assert_equal :blocked, result.fetch(:status)
+        assert_equal "delivered_elsewhere", result.dig(:remote, "state")
+        candidate = store.load(identity_for(task.project_root))
+                         .fetch("candidates").values
+                         .find { |item| item.dig("archive", "status") != "superseded" }
+        assert_equal "blocked", candidate.dig("archive", "status")
+        assert_empty watcher.tick(now: T0 + 301)
+      end
+    end
+  end
+
+  def test_merged_head_drift_without_new_binding_stops_after_block
+    with_merge_project(stages: [ "6-review" ]) do |tasks, _home|
+      task = tasks.first
+      gh = FakeGh.new(state: "MERGED")
+      watcher, store = build_watcher(gh: gh)
+      observed_head = "b" * 40
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :local_pr_head_binding,
+        ->(*, **) { observed_head }
+      ) do
+        watcher.observe([ row_for(task) ], now: T0)
+        observed_head = nil
+        watcher.observe([ row_for(task) ], now: T0 + 1)
+
+        result = watcher.tick(now: T0 + 1).first
+
+        assert_equal :blocked, result.fetch(:status)
+        assert_equal "ambiguous", result.dig(:remote, "state")
+        candidate = store.load(identity_for(task.project_root))
+                         .fetch("candidates").values
+                         .find { |item| item.dig("archive", "status") != "superseded" }
+        assert_equal "blocked", candidate.dig("archive", "status")
+        assert_empty watcher.tick(now: T0 + 301)
+      end
+    end
+  end
+
+  def test_checkpointed_merged_drift_gets_missing_block_diagnostic_after_restart
+    with_merge_project(stages: [ "6-review" ]) do |tasks, _home|
+      task = tasks.first
+      closure = FakeClosure.new
+      watcher, store = build_watcher(task_closure: closure)
+      observed_head = "b" * 40
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :local_pr_head_binding,
+        ->(*, **) { observed_head }
+      ) do
+        watcher.observe([ row_for(task) ], now: T0)
+        observed_head = "c" * 40
+        watcher.observe([ row_for(task) ], now: T0 + 1)
+      end
+      identity = identity_for(task.project_root)
+      store.transaction(identity, now: T0 + 1) do |state|
+        candidate = state.fetch("candidates").values
+                         .find { |item| item.dig("archive", "status") != "superseded" }
+        candidate["remote"] = {
+          "state" => "merged", "merge_oid" => "a" * 40,
+          "merged_at" => T0.iso8601(6), "observed_at" => T0.iso8601(6)
+        }
+      end
+
+      result = watcher.tick(now: T0 + 2).first
+
+      assert_equal :blocked, result.fetch(:status)
+      assert_empty closure.calls
+      candidate = store.load(identity).fetch("candidates").values
+                       .find { |item| item.dig("archive", "status") != "superseded" }
+      assert_equal "blocked", candidate.dig("archive", "status")
+      assert_match(/observed head changed/, candidate.dig("archive", "last_error"))
+      assert_empty watcher.tick(now: T0 + 302)
     end
   end
 

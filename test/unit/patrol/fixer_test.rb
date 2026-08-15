@@ -1593,7 +1593,9 @@ class HivePatrolFixerTest < Minitest::Test
       agent_singleton.define_method(:new) { |**kwargs| captured = kwargs; fake_agent }
       assert_equal({ status: :ok },
                    fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo))
-      assert_equal 100_000, captured.fetch(:max_tokens)
+      assert_equal Hive::Patrol::TokenBudget::DEFAULT_MAX_TOKENS_PER_AGENT,
+                   captured.fetch(:max_tokens)
+      assert_nil captured.fetch(:max_budget_usd)
       assert_equal File.join(repo, "fix.json"), captured.fetch(:expected_output)
       assert_equal :output_file_exists, captured.fetch(:status_mode)
     ensure
@@ -1629,15 +1631,13 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_run_agent_wrapper_refuses_an_exhausted_patrol_budget
+  def test_run_agent_wrapper_refuses_initial_context_above_the_runaway_ceiling
     with_tmp_git_repo do |repo|
       budget = Object.new
-      budget.define_singleton_method(:acquire) do |stage:, minimum_tokens:|
-        minimum_tokens >= 0 && stage != "patrol-fix"
-      end
-      budget.define_singleton_method(:exhaustion_message) { "cycle exhausted" }
+      budget.define_singleton_method(:acquire) { |minimum_tokens:| minimum_tokens.negative? }
+      budget.define_singleton_method(:exhaustion_message) { "runaway ceiling too small" }
       budget.define_singleton_method(:resource_exhaustion) do
-        { reason: "cycle_agent_spawn_limit", limit: 3, observed: 3 }
+        { reason: "insufficient_launch_headroom", limit: 10, observed: 20_001 }
       end
       fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), token_budget: budget)
       profile = Struct.new(:name, :initial_context_tokens) do
@@ -1653,8 +1653,8 @@ class HivePatrolFixerTest < Minitest::Test
       end
 
       assert_equal :error, result.fetch(:status)
-      assert_equal "cycle exhausted", result.fetch(:error_message)
-      assert_equal "cycle_agent_spawn_limit", result.dig(:resource_exhaustion, :reason)
+      assert_equal "runaway ceiling too small", result.fetch(:error_message)
+      assert_equal "insufficient_launch_headroom", result.dig(:resource_exhaustion, :reason)
     end
   end
 

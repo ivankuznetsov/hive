@@ -6,6 +6,7 @@ module ApplicationHelper
     repos: ->(c) { c == "repos" },
     workflows: ->(c) { c == "workflows" },
     modules: ->(c) { c == "modules" },
+    patrol: ->(c) { c == "patrol" },
     agents: ->(c) { c == "agents" },
     telegram: ->(c) { c == "telegram" }
   }.freeze

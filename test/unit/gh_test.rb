@@ -32,8 +32,6 @@ class GhUnitTest < Minitest::Test
       ].each { |k| ENV.delete(k) }
   end
 
-  # --- with_network_timeout --------------------------------------------
-
   def test_remote_branch_validation_matches_worktree_contract
     %w[feature//nested feature/.hidden feature/locked.lock feature@{upstream}].each do |branch|
       error = assert_raises(Hive::GhError) do
@@ -42,15 +40,6 @@ class GhUnitTest < Minitest::Test
       assert_match(/branch name is invalid/, error.message)
     end
     assert_equal "feature/nested", Hive::Gh.send(:validated_branch_name, " feature/nested ")
-  end
-
-  def test_with_network_timeout_raises_typed_error_on_timeout
-    err = assert_raises(Hive::GhError) do
-      Hive::Gh.with_network_timeout do
-        Timeout.timeout(0.01) { sleep 0.5 }
-      end
-    end
-    assert_match(/network operation exceeded/, err.message)
   end
 
   def test_capture3_enforces_stdout_limit_while_streaming
@@ -84,6 +73,19 @@ class GhUnitTest < Minitest::Test
     end
 
     assert_match(/max_stdout_bytes must be non-negative/, error.message)
+  end
+
+  def test_capture3_silences_mise_wrappers_for_machine_readable_github_output
+    previous = ENV.delete("MISE_QUIET")
+    out, _err, status = Hive::Gh.capture3(
+      RbConfig.ruby, "-e", "STDOUT.write(ENV.fetch('MISE_QUIET', 'missing'))",
+      timeout_sec: 5
+    )
+
+    assert status.success?
+    assert_equal "1", out
+  ensure
+    ENV["MISE_QUIET"] = previous if previous
   end
 
   def test_capture3_can_stream_stdout_directly_to_private_file
@@ -140,7 +142,7 @@ class GhUnitTest < Minitest::Test
       state = File.join(dir, "pr.md")
       File.write(state, "no secrets here\n")
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "")
-      assert result.clean?
+      assert_empty result.hits
       refute result.fetch_failed
     end
   end
@@ -151,7 +153,7 @@ class GhUnitTest < Minitest::Test
         state_file: File.join(dir, "pr.md"), pr_url: ""
       )
 
-      assert result.clean?
+      assert_empty result.hits
       refute result.fetch_failed
     end
   end
@@ -161,7 +163,6 @@ class GhUnitTest < Minitest::Test
       state = File.join(dir, "pr.md")
       File.write(state, "key: sk-ant-#{'a' * 30}\n")
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "")
-      refute result.clean?
       assert_includes result.hits.map { |h| h[:name].to_s }, "anthropic_api_key"
     end
   end
@@ -177,7 +178,6 @@ class GhUnitTest < Minitest::Test
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "https://example.com/pr/42")
       assert result.fetch_failed, "gh pr view non-zero must set fetch_failed=true"
       refute_empty result.fetch_error.to_s, "fetch_error must preserve the gh failure detail"
-      refute result.clean?, "fetch_failed must NOT be reported as clean"
     end
   end
 
@@ -1171,8 +1171,16 @@ def gh_test_pid_alive?(pid)
 
   Process.kill(0, pid)
   true
-rescue Errno::ESRCH
+rescue Errno::ENOENT, Errno::ESRCH
   false
+end
+
+def test_gh_test_pid_alive_treats_proc_disappearance_as_dead
+  with_replaced_singleton_method(File, :file?, ->(*) { true }) do
+    with_replaced_singleton_method(File, :read, ->(*) { raise Errno::ENOENT }) do
+      refute gh_test_pid_alive?(1234)
+    end
+  end
 end
 
 def test_process_group_liveness_is_fail_closed_on_permissions_and_false_when_missing
@@ -1271,43 +1279,6 @@ def test_list_open_prs_raises_on_gh_error
   end
 end
 
-def test_repo_name_with_owner_uses_the_actual_origin_push_url
-  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  captured = nil
-  with_env("GH_REPO" => "attacker/spoofed") do
-    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
-      captured = [ cmd, kwargs ]
-      [ "git@github.com:owner/repo.git\n", "", status ]
-    }) do
-      assert_equal "owner/repo", Hive::Gh.repo_name_with_owner("/tmp/repo", cfg: { "cfg" => true })
-    end
-  end
-
-  assert_equal(
-    [ "git", "-C", "/tmp/repo", "remote", "get-url", "--push", "--all", "origin" ],
-    captured.first
-  )
-  refute captured.last.key?(:chdir)
-  assert_equal({ "cfg" => true }, captured.last.fetch(:cfg))
-end
-
-def test_repo_name_with_owner_raises_when_origin_lookup_fails
-  status = Hive::Gh::CommandStatus.new(exitstatus: 1)
-  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "", "no remote", status ] }) do
-    err = assert_raises(Hive::GhError) { Hive::Gh.repo_name_with_owner("/tmp/repo") }
-    assert_match(/git remote get-url.*failed/, err.message)
-    assert_match(/no remote/, err.message)
-  end
-end
-
-def test_repo_name_with_owner_raises_on_unsupported_origin
-  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "/tmp/local.git\n", "", status ] }) do
-    err = assert_raises(Hive::GhError) { Hive::Gh.repo_name_with_owner("/tmp/repo") }
-    assert_match(/not a supported GitHub remote/, err.message)
-  end
-end
-
 def test_repository_identity_binds_slug_and_https_host
   status = Hive::Gh::CommandStatus.new(exitstatus: 0)
   captured = nil
@@ -1338,6 +1309,16 @@ def test_repository_identity_rejects_multiple_origin_push_urls
       Hive::Gh.repository_identity("/tmp/repo")
     end
     assert_match(/returned 2 records/, error.message)
+  end
+end
+
+def test_repository_identity_rejects_unsupported_origin
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "/tmp/local.git\n", "", status ] }) do
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.repository_identity("/tmp/repo")
+    end
+    assert_match(/not a supported GitHub remote/, error.message)
   end
 end
 
@@ -1628,24 +1609,28 @@ def test_merged_prs_page_fails_closed_above_graphql_search_traversal_cap
   end
 end
 
-def test_pr_failing_job_logs_tail_clips_each_job
+def test_retained_pr_status_and_failing_job_log_paths
   calls = []
   status = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  rollup = {
+  expected_rollup = {
     "statusCheckRollup" => [
       { "name" => "unit", "databaseId" => 11, "conclusion" => "FAILURE" },
       { "name" => "lint", "databaseId" => 12, "conclusion" => "SUCCESS" }
     ]
   }
+
   with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
     calls << cmd
     if cmd.include?("pr")
-      [ JSON.generate(rollup), "", status ]
+      [ JSON.generate(expected_rollup), "", status ]
     else
       [ "x" * 100, "", status ]
     end
   }) do
-    logs = Hive::Gh.pr_failing_job_logs("/tmp/repo", 42, byte_cap: 20)
+    rollup = Hive::Gh.pr_status_rollup("/tmp/repo", 42)
+    logs = Hive::Gh.failing_jobs_with_logs("/tmp/repo", rollup, byte_cap: 20)
+
+    assert_equal expected_rollup, rollup
     assert_equal 1, logs.size
     assert_equal "unit", logs.first.fetch("name")
     assert_operator logs.first.fetch("log").bytesize, :>, 20

@@ -19,6 +19,7 @@ module Hive
                        status_snapshot_provider: -> { [] },
                        last_project: -> { nil },
                        closure_authorizer: ->(_update) { false },
+                       plan_approval: Hive::Daemon::PlanApproval,
                        logger: nil)
           @pending_ideas = pending_ideas
           @set_last_project = set_last_project
@@ -29,6 +30,7 @@ module Hive
           @status_snapshot_provider = status_snapshot_provider
           @last_project = last_project
           @closure_authorizer = closure_authorizer
+          @plan_approval = plan_approval
           @logger = logger
         end
 
@@ -217,7 +219,7 @@ module Hive
           # malformed callback still routes to handle's generic "Bot got
           # confused" while corrupt plan state gets its own actionable reply.
           begin
-            argv = Shellwords.split(Hive::Daemon::PlanApproval.prepare(command, row.state_file))
+            argv = Shellwords.split(@plan_approval.prepare(command, row.state_file))
           rescue Hive::Daemon::PlanApproval::NotApprovable
             return @result_class.new(action: :reply, text: "Plan is no longer waiting for approval. Reopen /queue.")
           rescue ArgumentError => e

@@ -430,6 +430,42 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_plan_review_requirement_is_true_only_and_survives_rewrites
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(
+        dir, id: 7, slug: "reviewed-plan", display_name: nil,
+        plan_review_required: true
+      )
+
+      assert Hive::TaskMeta.plan_review_required?(dir)
+      Hive::TaskMeta.update_display_name(dir, "Reviewed plan")
+      assert_equal true, Hive::TaskMeta.read(dir).fetch(:plan_review_required)
+
+      File.write(File.join(dir, "meta.yml"), "plan_review_required: false\n")
+      error = assert_raises(Hive::TaskMeta::InvalidMetadata) do
+        Hive::TaskMeta.plan_review_required?(dir)
+      end
+      assert_includes error.message, "must be true"
+
+      _out, err = capture_io { assert_nil Hive::TaskMeta.read(dir)[:plan_review_required] }
+      assert_includes err, "treating metadata as legacy"
+    end
+  end
+
+  def test_plan_review_requirement_rejects_duplicate_metadata
+    with_tmp_dir do |dir|
+      File.write(
+        File.join(dir, "meta.yml"),
+        "plan_review_required: true\nplan_review_required: true\n"
+      )
+
+      error = assert_raises(Hive::TaskMeta::InvalidMetadata) do
+        Hive::TaskMeta.plan_review_required?(dir)
+      end
+      assert_includes error.message, "duplicate plan_review_required"
+    end
+  end
+
   def test_update_id_preserves_slug_display_name_dependency_and_workflow
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(
@@ -495,6 +531,34 @@ class TaskMetaTest < Minitest::Test
         Hive::TaskMeta.update_id(dir, 42)
       end
       assert_equal original, File.binread(path)
+    end
+  end
+
+  def test_write_rejects_a_non_true_plan_review_requirement
+    with_tmp_dir do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::TaskMeta.write(
+          dir, id: 3, slug: "task", display_name: nil, plan_review_required: false
+        )
+      end
+
+      assert_includes error.message, "plan_review_required must be true when present"
+    end
+  end
+
+  def test_read_downgrades_a_non_true_plan_review_requirement_to_legacy
+    with_tmp_dir do |dir|
+      File.write(
+        File.join(dir, "meta.yml"),
+        "id: 4\nslug: task\nplan_review_required: false\n"
+      )
+
+      data = nil
+      _out, err = capture_io { data = Hive::TaskMeta.read(dir) }
+
+      assert_nil data[:plan_review_required]
+      assert_includes err, "invalid plan_review_required"
+      assert_includes err, "treating metadata as legacy"
     end
   end
 end

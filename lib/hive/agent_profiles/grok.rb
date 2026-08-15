@@ -8,6 +8,7 @@ module Hive
       auth_configuration_required: true,
       skill_syntax_format: "/%{skill}",
       status_detection_mode: :output_file_exists,
+      billing_semantics: :subscription_backed,
       skill_verifier: Hive::SkillCheck::Grok.method(:verify),
       default_model_resolver: ->(**kwargs) {
         Hive::ImplementationIdentity::NativeDefaults.resolve(:grok, **kwargs)

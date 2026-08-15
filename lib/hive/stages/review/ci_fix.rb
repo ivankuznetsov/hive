@@ -122,23 +122,26 @@ module Hive
               protected_anchors: PROTECTED_FILES,
               permitted_writable_roots: [ ctx.task_folder, ctx.worktree_path ]
             )
-            custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
-            begin
-              spawn_result = spawn_fix_agent(
-                cfg: cfg,
-                ctx: ctx,
-                command: command,
-                attempt: attempts,
-                max_attempts: max_attempts,
-                captured_output: output,
-                identity: fix_identity
-              )
-            ensure
-              custody_report = Hive::ArtifactFirewall.validate_and_restore(
-                custody_manifest, custody_snapshot
+            agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
+            spawn_result = spawn_fix_agent(
+              cfg: cfg,
+              ctx: ctx,
+              command: command,
+              attempt: attempts,
+              max_attempts: max_attempts,
+              captured_output: output,
+              identity: fix_identity,
+              agent_custody: agent_custody
+            )
+            custody_report = agent_custody.report
+            if !custody_report && spawn_result[:status] == :ok
+              return Result.new(
+                status: :error, attempts: attempts, last_output: output,
+                error_message: "ci fix agent custody was not invoked",
+                limit_text: nil
               )
             end
-            if custody_report.tampered?
+            if custody_report&.tampered?
               return Result.new(
                 status: :error,
                 attempts: attempts,
@@ -348,7 +351,8 @@ module Hive
           status.success? && !out.empty?
         end
 
-        def spawn_fix_agent(cfg:, ctx:, command:, attempt:, max_attempts:, captured_output:, identity: nil)
+        def spawn_fix_agent(cfg:, ctx:, command:, attempt:, max_attempts:, captured_output:,
+                            identity: nil, agent_custody: nil)
           task = synthetic_task(ctx)
           identity ||= Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.ci")
           profile_name = identity&.provider || cfg.dig("review", "ci", "agent") || "claude"
@@ -389,6 +393,7 @@ module Hive
             log_label: "review-ci-fix-attempt#{format('%02d', attempt)}",
             profile: profile,
             implementation_stage: "review.ci",
+            agent_custody: agent_custody,
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :exit_code_only,
             **Hive::Stages::Base.implementation_launch_arguments(identity, profile)

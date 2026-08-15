@@ -77,6 +77,18 @@ module Hive
         matches.one? ? matches.first : nil
       end
 
+      # Read-only presentation inventory. Active snapshots precede fallback
+      # snapshots so consumers can preserve the same active-shadows-archive
+      # semantics without reaching into Context's private indexes or
+      # re-reading the filesystem.
+      def project_snapshots
+        project_snapshot_layers.flatten.freeze
+      end
+
+      def project_snapshot_layers
+        ([ projects ] + Array(@fallback&.project_snapshot_layers)).freeze
+      end
+
       def verdict(project:, slug:)
         source_project = unique_project(project)
         return admission_error("dependency_project_unknown", project, project_correction(project)) unless source_project

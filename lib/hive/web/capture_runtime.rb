@@ -35,7 +35,8 @@ module Hive
         BUNDLE_PATH BUNDLE_APP_CONFIG BUNDLE_FROZEN BUNDLE_DEPLOYMENT
         BUNDLE_DISABLE_SHARED_GEMS BUNDLE_USER_HOME GEM_HOME GEM_PATH
         RAILS_ENV SECRET_KEY_BASE HIVE_CLI_ROOT TMPDIR
-        PLAYWRIGHT_BROWSERS_PATH HIVE_PLAYWRIGHT_MODULE NODE_OPTIONS NODE_PATH
+        PUPPETEER_CACHE_DIR AGENT_BROWSER_SOCKET_DIR AGENT_BROWSER_SKILLS_DIR
+        AGENT_BROWSER_EXECUTABLE_PATH NODE_OPTIONS NODE_PATH
       ].freeze
 
       class OwnershipError < Hive::Error; end
@@ -247,6 +248,10 @@ module Hive
           end.sort_by { |artifact| artifact.fetch("file") },
           "cleanup" => cleanup.to_h.sort.to_h,
           "diagnostic" => redacted(diagnostic),
+          # The built-in recorder always renders a synthetic Hivebox fixture.
+          # It is useful for controller diagnostics, never for product claims.
+          "evidence_role" =>
+            recorder.to_h["kind"] == "project_provider" ? "claim_evidence" : "diagnostic_only",
           "evidence" => evidence.to_h
         }
       end

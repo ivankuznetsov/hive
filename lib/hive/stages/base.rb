@@ -7,6 +7,8 @@ require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/config"
 require "hive/events"
+require "base64"
+require "json"
 require "hive/markers"
 require "hive/model_routing"
 require "hive/permission_scope"
@@ -14,12 +16,23 @@ require "hive/stages/clean_exit"
 require "hive/usage_db"
 require "hive/worktree"
 require "hive/attempts/context"
+require "hive/agent_observation"
+require "hive/context_provenance"
+require "hive/task_activity"
+require "hive/brainstorm_parser"
+require "hive/task_workspace/bounded_reader"
 require "hive/implementation_identity/store"
 
 module Hive
   module Stages
     module Base
       DEFAULT_GENERIC_STAGE_TIMEOUT_SEC = 1800
+      CONTROLLER_LAUNCH_ENV_KEYS = %w[
+        HIVE_EVIDENCE_WRITE_ROOT HIVE_EVIDENCE_TASK_ROOT
+        HIVE_EVIDENCE_SOURCE_ROOT HIVE_EVIDENCE_SOURCE_SHA
+        HIVE_EVIDENCE_APP_PORT HIVE_EVIDENCE_BROWSER_ORIGIN
+        HIVE_EVIDENCE_WEB_HIVE_HOME HIVE_EVIDENCE_CAPTURE_MAILBOX
+      ].freeze
 
       module_function
 
@@ -481,6 +494,7 @@ module Hive
 
       def with_stage_events(task, cfg: nil)
         stage = stage_label(task)
+        record_stage_activity(task, stage, "entered")
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
@@ -506,6 +520,8 @@ module Hive
           end
         end
         marker = Hive::Markers.current(task.state_file)
+        record_stage_activity(task, stage, "exited", marker: marker)
+        record_waiting_questions(task, stage, marker)
         emit_marker_event(task, stage, marker)
         Hive::Events.emit(
           task_folder: task.folder,
@@ -554,7 +570,7 @@ module Hive
       # CleanExit checks the worktree at `stage_exit`. On residue:
       #   - `:auto_committed` → log and fall through (the residue is
       #     committed; the stage marker the runner wrote stands).
-      #   - `:scope_violation` / `:git_failed` → write
+      #   - `:scope_violation` / `:safety_violation` / `:git_failed` → write
       #     `:error reason=ensure_clean_on_exit_failed`, BUT never
       #     downgrade an already-terminal `:error` (the wrapped runner's
       #     own error wins for diagnostic clarity).
@@ -562,7 +578,7 @@ module Hive
       # Returns a sentinel hash describing the outcome so the caller
       # (`with_stage_events`) can decide whether the stage's
       # `result[:commit]` is now stale:
-      #   { status: :clean | :auto_committed | :scope_violation |
+      #   { status: :clean | :auto_committed | :scope_violation | :safety_violation |
       #             :git_failed | :skipped,
       #     overwrote_marker: true | false }
       # `:skipped` covers PAUSE_MARKERS and missing-worktree no-ops; any
@@ -592,7 +608,7 @@ module Hive
         when :clean, :auto_committed
           log_clean_exit_event(task, stage, result)
           { status: result[:status], overwrote_marker: false }
-        when :scope_violation, :git_failed
+        when :scope_violation, :safety_violation, :git_failed
           overwrote = mark_clean_exit_failure(task, result, existing_marker)
           { status: result[:status], overwrote_marker: overwrote }
         else
@@ -667,12 +683,16 @@ module Hive
       def log_clean_exit_event(task, stage, result)
         return unless result[:status] == :auto_committed
 
+        paths = Hive::Events.clean_exit_paths(result[:paths])
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
           stage: stage,
           event_type: :clean_exit_auto_committed,
-          message: "head=#{result[:head]} paths=#{Array(result[:paths]).join(',')[0, 200]}"
+          message: "head=#{result[:head]} paths=#{paths.join(',')[0, 200]}",
+          data: Hive::Events.clean_exit_data(
+            head: result[:head], reason: "stage_exit", paths: paths
+          )
         )
       rescue StandardError
         nil
@@ -686,7 +706,11 @@ module Hive
           reason: "ensure_clean_on_exit_failed",
           detail: result[:message].to_s[0, 200]
         }
-        attrs[:residue_paths] = Array(result[:paths]).join(",")[0, 200] if result[:paths]
+        if result[:paths]
+          paths = Array(result[:paths]).first(Hive::Events::MAX_EVENT_PATHS).map(&:to_s)
+          attrs[:residue_paths] = paths.join(",")[0, 200]
+          attrs[:residue_paths_b64] = Base64.strict_encode64(JSON.generate(paths))
+        end
         Hive::Markers.set(task.state_file, :error, **attrs)
         true
       end
@@ -703,6 +727,7 @@ module Hive
       # mask the original exception the caller is propagating.
       def emit_rescue_close(task, stage, error_message)
         stage ||= stage_label(task)
+        record_stage_activity(task, stage, "failed", error: error_message)
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
@@ -719,6 +744,81 @@ module Hive
         )
       rescue StandardError
         nil
+      end
+
+      def record_stage_activity(task, stage, transition, marker: nil, error: nil)
+        payload = {
+          "transition" => transition,
+          "marker" => marker&.name&.to_s,
+          "error_class" => error.to_s.split(":", 2).first.to_s.byteslice(0, 128)
+        }
+        context = Hive::Attempts::Context.current
+        return false unless context
+
+        suffix = transition == "entered" ? "enter" : "exit"
+        record_task_activity(
+          task, kind: "stage_transition",
+          operation_id: "stage:#{context.attempt_id}:#{suffix}",
+          correlation_id: context.attempt_id,
+          reason: "stage #{transition}", source: "stage_service", payload: payload,
+          stage: stage
+        )
+      end
+
+      def record_task_activity(task, kind:, operation_id:, reason:, source:, payload: {},
+                               evidence: [], correlation_id: nil, stage: nil,
+                               occurred_at: nil)
+        context = Hive::Attempts::Context.current
+        return false unless context && context.attempt_id && context.task_generation
+
+        activity = Hive::TaskActivity.for_context(task, context: context)
+        return false unless activity
+
+        activity.record(
+          kind: kind, operation_id: operation_id,
+          correlation_id: correlation_id,
+          reason: reason, source: source,
+          payload: payload, evidence: evidence,
+          occurred_at: occurred_at
+        )
+        true
+      rescue Hive::TaskActivity::Error, SystemCallError, IOError
+        false
+      end
+
+      def record_waiting_questions(task, stage, marker)
+        return false unless task.respond_to?(:stage_name) && task.stage_name == "brainstorm"
+        return false unless marker.name == :waiting
+
+        context = Hive::Attempts::Context.current
+        return false unless context&.attempt_id
+
+        reference = File.basename(task.state_file)
+        read = Hive::TaskWorkspace::BoundedReader.new(root: task.folder).read(
+          reference, max_bytes: 512 * 1024
+        )
+        return false if read.truncated || read.binary
+
+        questions = Hive::BrainstormParser.parse_text(read.content)
+        questions.each_with_index do |question, index|
+          fingerprint = Hive::BrainstormParser.question_fingerprint(question.text)
+          record_task_activity(
+            task, kind: "question_asked",
+            operation_id: "question:#{context.attempt_id}:#{fingerprint}",
+            correlation_id: "question:#{fingerprint}",
+            reason: "brainstorm question asked", source: "stage_service",
+            stage: stage,
+            payload: {
+              "question_id" => "Q#{index + 1}", "round" => question.round,
+              "question_number" => question.n,
+              "question_fingerprint" => fingerprint
+            },
+            evidence: [ { "evidence_ref" => reference, "kind" => "question_slot" } ]
+          )
+        end
+        true
+      rescue Hive::TaskWorkspace::SourceError, Hive::Error, SystemCallError, IOError
+        false
       end
 
       def stage_label(task)
@@ -789,12 +889,20 @@ module Hive
                       add_dirs: [], cwd: nil, log_label: nil,
                       profile: nil, expected_output: nil, status_mode: nil,
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
+                      permission_arguments: nil,
                       disallowed_tools: nil, cli_flags: nil,
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
                       routing_resolution: nil, routing_arguments: nil,
                       additional_read_roots: [], additional_write_roots: [],
                       implementation_stage: nil,
-                      defer_implementation_observation: false)
+                      defer_implementation_observation: false,
+                      resource_guards: nil, agent_custody: nil,
+                      isolate_environment: false, launch_environment: nil)
+        launch_environment = (launch_environment || {}).to_h.transform_keys(&:to_s)
+        unknown_launch_keys = launch_environment.keys - CONTROLLER_LAUNCH_ENV_KEYS
+        unless unknown_launch_keys.empty? && launch_environment.values.all? { |value| value.is_a?(String) }
+          raise ArgumentError, "controller launch environment is invalid"
+        end
         context = Hive::Attempts::Context.current
         launch_binding = nil
         provider_route = nil
@@ -813,6 +921,9 @@ module Hive
           provider_route = context.admitted_route
         end
         profile ||= Hive::AgentProfiles.lookup(:claude)
+        prompt = Hive::ContextProvenance.decorate_prompt(
+          task: task, prompt: prompt, context: context
+        )
         if routing_resolution && routing_arguments
           raise ArgumentError, "pass routing_resolution or routing_arguments, not both"
         end
@@ -880,53 +991,85 @@ module Hive
 
         started_at = Time.now.utc.iso8601
         effective_status_mode = runtime_policy&.host_outputs? ? :exit_code_only : status_mode
-        result = Hive::Agent.new(
-          task: task,
-          prompt: prompt,
-          max_budget_usd: max_budget_usd,
+        observation = session_observation(
+          task: task, context: context, profile: profile,
+          role: log_label || task.stage_name,
+          requested_model: requested_model(context, routing_arguments, launch_arguments, model),
+          requested_effort: requested_effort(context, routing_arguments, launch_arguments, effort),
           timeout_sec: timeout_sec,
-          add_dirs: add_dirs,
-          cwd: cwd,
-          log_label: log_label,
-          profile: profile,
-          expected_output: expected_output,
-          status_mode: effective_status_mode,
-          permission_mode: permission_mode,
-          allowed_tools: allowed_tools,
-          disallowed_tools: disallowed_tools,
-          cli_flags: cli_flags,
-          identity_arguments: identity_arguments || [],
-          launch_arguments: launch_arguments,
-          runtime_policy: runtime_policy,
-          routing_arguments: routing_arguments,
-          launch_environment: launch_binding&.environment || {},
-          provider_route: provider_route,
-          additional_read_roots: additional_read_roots,
-          additional_write_roots: additional_write_roots
-        ).run!
-        if result[:status] == :ok && runtime_policy&.host_outputs?
-          begin
-            runtime_policy.materialize_outputs!(result)
-          rescue Hive::ConfigError => e
-            result[:status] = :error
-            result[:error_reason] = "managed_output_invalid"
-            result[:error_message] = e.message
-          end
-        end
-        if profile.name == :opencode && implementation_stage &&
-           !defer_implementation_observation
-          record_deferred_opencode_observation(
-            task, cfg, implementation_stage, result
+          guards: runtime_resource_guards(
+            resource_guards, profile: profile, max_budget_usd: max_budget_usd,
+            timeout_sec: timeout_sec
           )
-        end
-        record_usage(task, profile, result, started_at)
-        if result[:provider_signal]
-          unless context.publish_provider_signal(result.fetch(:provider_signal))
-            raise Hive::ProviderRouteFailed, "admitted provider route failed without durable evidence delivery"
+        )
+        result = nil
+        start_session_observation!(observation)
+        begin
+          result = run_with_agent_custody(agent_custody) do
+            agent_result = Hive::Agent.new(
+              task: task,
+              prompt: prompt,
+              max_budget_usd: max_budget_usd,
+              timeout_sec: timeout_sec,
+              add_dirs: add_dirs,
+              cwd: cwd,
+              log_label: log_label,
+              profile: profile,
+              expected_output: expected_output,
+              status_mode: effective_status_mode,
+              permission_mode: permission_mode,
+              permission_arguments: permission_arguments,
+              allowed_tools: allowed_tools,
+              disallowed_tools: disallowed_tools,
+              cli_flags: cli_flags,
+              identity_arguments: identity_arguments || [],
+              launch_arguments: launch_arguments,
+              runtime_policy: runtime_policy,
+              routing_arguments: routing_arguments,
+              launch_environment: (launch_binding&.environment || {}).merge(launch_environment),
+              provider_route: provider_route,
+              additional_read_roots: additional_read_roots,
+              additional_write_roots: additional_write_roots,
+              isolate_environment: isolate_environment
+            ).run!
+            if agent_result[:status] == :ok && runtime_policy&.host_outputs?
+              begin
+                runtime_policy.materialize_outputs!(agent_result)
+              rescue Hive::ConfigError => e
+                agent_result[:status] = :error
+                agent_result[:error_reason] = "managed_output_invalid"
+                agent_result[:error_message] = e.message
+              end
+            end
+            agent_result
           end
-          raise Hive::ProviderRouteFailed, "admitted provider route failed"
+          if profile.name == :opencode && implementation_stage &&
+             !defer_implementation_observation && agent_custody_safe_after?(agent_custody)
+            record_deferred_opencode_observation(
+              task, cfg, implementation_stage, result
+            )
+          end
+          record_usage(
+            task, profile, result, started_at,
+            context: context, session_id: observation.session_id
+          )
+          if context && agent_custody_safe_after?(agent_custody)
+            Hive::ContextProvenance.promote_agent_receipt(
+              task: task, context: context
+            )
+          end
+          if result[:provider_signal]
+            unless context.publish_provider_signal(result.fetch(:provider_signal))
+              raise Hive::ProviderRouteFailed, "admitted provider route failed without durable evidence delivery"
+            end
+            raise Hive::ProviderRouteFailed, "admitted provider route failed"
+          end
+          result
+        ensure
+          if agent_custody_safe_after?(agent_custody)
+            observation.finish!(result || {}, exception: $!)
+          end
         end
-        result
       ensure
         runtime_policy&.cleanup!
       end
@@ -957,15 +1100,18 @@ module Hive
       end
 
       def stage_resource_limits(cfg, stage)
+        budget = Hive::Config.stage_resource_limit_resolution(
+          cfg, "budget_usd", stage.name, descriptor_default: stage.budget_usd
+        )
+        timeout = Hive::Config.stage_resource_limit_resolution(
+          cfg, "timeout_sec", stage.name,
+          descriptor_default: stage.timeout_sec,
+          fallback: DEFAULT_GENERIC_STAGE_TIMEOUT_SEC
+        )
         {
-          max_budget_usd: Hive::Config.stage_resource_limit(
-            cfg, "budget_usd", stage.name, descriptor_default: stage.budget_usd
-          ),
-          timeout_sec: Hive::Config.stage_resource_limit(
-            cfg, "timeout_sec", stage.name,
-            descriptor_default: stage.timeout_sec,
-            fallback: DEFAULT_GENERIC_STAGE_TIMEOUT_SEC
-          )
+          max_budget_usd: budget.value,
+          timeout_sec: timeout.value,
+          resource_guards: [ budget.to_h, timeout.to_h ]
         }
       end
 
@@ -977,7 +1123,8 @@ module Hive
                          strict_mcp_config: false, identity_arguments: nil,
                          routing_arguments: nil, runtime_policy: nil,
                          implementation_stage: nil,
-                         additional_read_roots: [], additional_write_roots: [])
+                         additional_read_roots: [], additional_write_roots: [],
+                         resource_guards: nil, agent_custody: nil)
         require "hive/claude_launcher"
 
         context = Hive::Attempts::Context.current
@@ -1002,7 +1149,9 @@ module Hive
             runtime_policy: runtime_policy,
             implementation_stage: implementation_stage,
             additional_read_roots: additional_read_roots,
-            additional_write_roots: additional_write_roots
+            additional_write_roots: additional_write_roots,
+            resource_guards: resource_guards,
+            agent_custody: agent_custody
           )
         end
 
@@ -1013,30 +1162,74 @@ module Hive
                 "spawn_claude! only supports the claude profile; got #{profile.name.inspect}"
         end
 
-        Hive::ClaudeLauncher.launch!(
-          task: task,
-          cfg: cfg,
-          prompt: prompt,
-          add_dirs: add_dirs,
-          cwd: cwd || task.folder,
-          max_budget_usd: max_budget_usd,
-          timeout_sec: timeout_sec,
-          log_label: log_label,
-          session_name: session_name,
-          status_mode: status_mode,
-          expected_output: expected_output,
-          profile: profile,
-          permission_mode: permission_mode,
-          allowed_tools: allowed_tools,
-          disallowed_tools: disallowed_tools,
-          mcp_config_path: mcp_config_path,
-          strict_mcp_config: strict_mcp_config,
-          identity_arguments: identity_arguments,
-          routing_arguments: routing_arguments,
-          runtime_policy: runtime_policy,
-          additional_read_roots: additional_read_roots,
-          additional_write_roots: additional_write_roots
+        headless = context&.explicit_routing? || Hive::Config.claude_mode(cfg) == :headless
+        if headless
+          return Hive::ClaudeLauncher.launch!(
+            task: task, cfg: cfg, prompt: prompt, add_dirs: add_dirs,
+            cwd: cwd || task.folder, max_budget_usd: max_budget_usd,
+            timeout_sec: timeout_sec, log_label: log_label,
+            session_name: session_name, status_mode: status_mode,
+            expected_output: expected_output, profile: profile,
+            permission_mode: permission_mode, allowed_tools: allowed_tools,
+            disallowed_tools: disallowed_tools, mcp_config_path: mcp_config_path,
+            strict_mcp_config: strict_mcp_config,
+            identity_arguments: identity_arguments,
+            routing_arguments: routing_arguments, runtime_policy: runtime_policy,
+            additional_read_roots: additional_read_roots,
+            additional_write_roots: additional_write_roots,
+            resource_guards: resource_guards, agent_custody: agent_custody
+          )
+        end
+
+        prompt = Hive::ContextProvenance.decorate_prompt(
+          task: task, prompt: prompt, context: context
         )
+        observation = session_observation(
+          task: task, context: context, profile: profile,
+          role: log_label || task.stage_name,
+          requested_model: requested_model(context, routing_arguments, nil, nil),
+          requested_effort: requested_effort(context, routing_arguments, nil, nil),
+          timeout_sec: timeout_sec,
+          guards: runtime_resource_guards(
+            resource_guards, profile: profile, max_budget_usd: max_budget_usd,
+            timeout_sec: timeout_sec
+          )
+        )
+        result = nil
+        started_at = Time.now.utc.iso8601
+        start_session_observation!(observation)
+        begin
+          result = run_with_agent_custody(agent_custody) do
+            Hive::ClaudeLauncher.launch!(
+              task: task, cfg: cfg, prompt: prompt, add_dirs: add_dirs,
+              cwd: cwd || task.folder, max_budget_usd: max_budget_usd,
+              timeout_sec: timeout_sec, log_label: log_label,
+              session_name: session_name, status_mode: status_mode,
+              expected_output: expected_output, profile: profile,
+              permission_mode: permission_mode, allowed_tools: allowed_tools,
+              disallowed_tools: disallowed_tools, mcp_config_path: mcp_config_path,
+              strict_mcp_config: strict_mcp_config,
+              identity_arguments: identity_arguments,
+              routing_arguments: routing_arguments, runtime_policy: runtime_policy,
+              additional_read_roots: additional_read_roots,
+              additional_write_roots: additional_write_roots
+            )
+          end
+          record_usage(
+            task, profile, result, started_at,
+            context: context, session_id: observation.session_id
+          )
+          if context && agent_custody_safe_after?(agent_custody)
+            Hive::ContextProvenance.promote_agent_receipt(
+              task: task, context: context
+            )
+          end
+          result
+        ensure
+          if agent_custody_safe_after?(agent_custody)
+            observation.finish!(result || {}, exception: $!)
+          end
+        end
       end
 
       # Wrap a spawn_claude! call so that AgentErrors land on the
@@ -1085,6 +1278,21 @@ module Hive
                           exception_class: e.class.name,
                           message: e.message)
         { status: :error, error_message: e.message }
+      end
+
+      # Artifact custody belongs around the untrusted provider execution, not
+      # around controller-authored session, usage, or context receipts. The
+      # caller supplies a callable that captures and validates its stage-local
+      # protected-file manifest while this block runs.
+      def run_with_agent_custody(agent_custody)
+        return yield unless agent_custody
+        raise ArgumentError, "agent_custody must respond to call" unless agent_custody.respond_to?(:call)
+
+        agent_custody.call { yield }
+      end
+
+      def agent_custody_safe_after?(agent_custody)
+        !agent_custody.respond_to?(:safe_after?) || agent_custody.safe_after?
       end
 
       class TemplateBindings
@@ -1160,7 +1368,67 @@ module Hive
         end
       end
 
-      def record_usage(task, profile, result, started_at)
+      def session_observation(task:, context:, profile:, role:, requested_model:,
+                              requested_effort:, timeout_sec:, guards:)
+        Hive::AgentObservation.new(
+          task: task, context: context, session_id: SecureRandom.uuid,
+          role: role, provider: profile.name.to_s,
+          requested_model: requested_model, requested_effort: requested_effort,
+          timeout_sec: timeout_sec, guards: guards
+        )
+      end
+
+      def start_session_observation!(observation)
+        return true if observation.start!
+        return true unless observation.available?
+
+        raise Hive::AgentError, "failed to record durable agent session start"
+      end
+
+      def requested_model(context, routing_arguments, launch_arguments, fallback)
+        return context.model if context&.explicit_routing?
+
+        routing_arguments&.model || launch_arguments&.model || fallback
+      end
+
+      def requested_effort(context, routing_arguments, launch_arguments, fallback)
+        return context.effort if context&.explicit_routing?
+
+        routing_arguments&.effort || launch_arguments&.requested_effort || fallback
+      end
+
+      def runtime_resource_guards(resolutions, profile:, max_budget_usd:, timeout_sec:)
+        indexed = Array(resolutions).to_h do |resolution|
+          row = resolution.to_h.transform_keys(&:to_s)
+          [ row["field"], row ]
+        end
+        budget = indexed["budget_usd"] || {
+          "value" => max_budget_usd, "source" => "caller", "scope" => "session"
+        }
+        timeout = indexed["timeout_sec"] || {
+          "value" => timeout_sec, "source" => "caller", "scope" => "session"
+        }
+        billing = profile.billing_semantics.to_s
+        budget_kind = billing == "api_billed" ?
+          "monetary_api_cap" : "budget_equivalent_guard"
+        [
+          {
+            "kind" => budget_kind, "unit" => "usd", "scope" => "session",
+            "source" => budget.fetch("source", "unknown"),
+            "enforcement" => profile.budget_flag ? "provider_cli" : "unenforced",
+            "billing_semantics" => billing,
+            "configured" => budget["value"], "observed" => nil
+          },
+          {
+            "kind" => "timeout", "unit" => "seconds", "scope" => "session",
+            "source" => timeout.fetch("source", "unknown"),
+            "enforcement" => "controller", "billing_semantics" => "not_applicable",
+            "configured" => timeout["value"], "observed" => nil
+          }
+        ]
+      end
+
+      def record_usage(task, profile, result, started_at, context: nil, session_id: nil)
         usage = result && result[:usage]
         return unless usage
 
@@ -1180,7 +1448,11 @@ module Hive
           reasoning: usage[:reasoning],
           cost: usage[:cost],
           requested_route: result[:requested_opencode_route],
-          actual_route: result[:actual_opencode_route]
+          actual_route: result[:actual_opencode_route],
+          attempt_id: context&.attempt_id,
+          session_id: context ? session_id : nil,
+          task_generation: context&.task_generation,
+          source: context ? "runtime_receipt" : nil
         )
       rescue StandardError => e
         warn "[hive] usage record failed: #{e.message}"

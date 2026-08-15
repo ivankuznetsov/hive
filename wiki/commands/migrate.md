@@ -1,10 +1,10 @@
 ---
 title: hive migrate
 type: command
-source: lib/hive/commands/migrate.rb, lib/hive/commands/migrate_all.rb, lib/hive/stages.rb
+source: lib/hive/commands/migrate.rb, lib/hive/commands/migrate_all.rb, lib/hive/workflow_package/task_migrator.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-08-10
-tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, update, attempt-storage]
+updated: 2026-08-13
+tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, plan-review, update, attempt-storage]
 ---
 
 **TLDR**: `hive migrate [PROJECT_PATH]` is the explicit, idempotent upgrade
@@ -70,6 +70,13 @@ keep. Generated Hive configs use a block-form `review:` mapping; a hand-written
 flow mapping must be converted manually before the comment-preserving rewrite
 can run.
 
+The Patrol-policy cutover removes only the retired mapping entry and its value.
+Blank lines and comments that follow it remain attached to the next surviving
+key or section. The rewrite is committed independently before current config
+loading; a single-project migration requests its best-effort daemon restart at
+that point, so a later project-specific migration failure cannot leave a live
+daemon on the removed policy.
+
 After replacing the installed CLI through its package channel, `hive update`
 runs the new binary's `hive migrate --all`. That can mutate and commit each
 registered project's tracked `.hive-state` exactly as an explicit
@@ -78,9 +85,11 @@ single-project migration would. A failed project is named with its error and
 rolled back.
 
 Each single-project migration still requests a daemon restart when it changes
-stage layout or managed workflow pins. Fleet mode coalesces those requests and
-restarts at most once after all registered projects have been attempted, so a
-fresh daemon never starts against a half-migrated fleet.
+stage layout or managed workflow tasks. Fleet mode restarts once after every
+successful all-project pass, including an otherwise no-op retry after a partial
+failure. That makes the successful pass the update cutover without maintaining
+another durable restart marker. A partial fleet failure defers the restart
+until the operator repairs the failed project and reruns `hive migrate --all`.
 
 `Stages::Finalize` likewise reads legacy `budget_usd.pr` /
 `timeout_sec.pr` as fallbacks. `hive migrate` rewrites those keys to
@@ -97,6 +106,14 @@ After any stage-directory movement, or on an otherwise no-op migrated project, `
   complete managed workflow provenance rather than reconstructing `meta.yml`.
 - The global counter is first seeded above the maximum existing id in the scanned project, so cloned or partially migrated state continues from the highest committed sidecar id instead of restarting at 1.
 - Backfill order is deterministic: tasks sort by `idea.md` frontmatter `created_at`, then slug; tasks with no parseable `created_at` sort last by slug.
+
+The same locked pass stamps `plan_review_required: true` on every built-in
+coding task still in stages 1–3. New coding tasks receive the bit at creation.
+Tasks already at `4-execute` or later are deliberately not stamped, allowing
+the execute-entry guard to issue the explicit pre-feature adoption receipt
+without retroactively stranding work. This durable distinction prevents a
+post-feature task from deleting its task-local review root and using a raw
+folder move as a legacy bypass. Non-coding workflows are untouched.
 
 After the locked id/config/stage migration finishes, `hive migrate` also backfills missing/null `display_name` values for every canonical task folder using `Hive::DisplayName::Generator`, the same agent-backed pipeline as `hive generate-name <target>`. Generation runs outside the commit lock because agent naming can take seconds per task; successful names are committed in a separate `.hive-state` commit. Existing display names are skipped, including patrol handoff names such as `Patrol: <finding title>`. A generation failure is fail-soft: that task keeps its null display name and can be retried by rerunning `hive migrate` or `hive generate-name`.
 
@@ -157,23 +174,40 @@ GitHub-only services such as the PR babysitter then skip them without making a
 failing `gh` call. If no origin can be resolved, the row remains unresolved and
 can be repaired after adding `origin` by rerunning `hive migrate`.
 
-## Managed workflow configuration pin cutover
+## Managed workflow generation cutover
 
-A managed workflow mapping can change agent, model, effort, or profile
-fingerprint without changing the immutable package generation. Existing tasks
-on that same source commit and manifest would otherwise remain pinned to an
-obsolete execution snapshot and fail closed forever after the old profile
-disappears.
+A managed workflow release can change its immutable package generation, stage
+positions, agent mapping, model, effort, or profile fingerprint. Runtime
+dispatch supports only the selected generation and configuration; it never
+executes a historical package because a retained task still carries an old
+pin.
 
-`hive migrate` compares each managed task with the currently selected
-configuration. When the workflow name, source commit, and manifest digest
-match, it validates the selected configuration against the installed package
-before changing any task, rewrites only
-`workflow_configuration_digest`, and preserves the rest of `meta.yml`.
-After every candidate validates, it updates all matching tasks and removes
-configuration snapshots that are no longer selected or referenced. Tasks on a
-different package generation are intentionally untouched because changing
-their descriptor or instructions requires a workflow-specific migration.
+`hive migrate` compares every managed task with the currently selected package
+and configuration. The old descriptor is read only inside this migration
+boundary to recover the semantic name of the task's current stage. The task is
+then moved to that stage's position in the selected descriptor and its source,
+manifest, and configuration pins are rewritten together. This permits stage
+insertion and reordering. A selected release that removes or renames a stage
+still occupied by a retained task fails closed before task mutation; restore
+the stable stage name or archive/reset the task. Destination collisions,
+malformed metadata, and live task locks likewise stop the project migration
+without partially repinning its managed tasks.
+
+The migration preserves task id, display name, dependency, base branch, and
+all non-provenance metadata. It removes pending or claimed recovery dispatches
+for each migrated task because their stage/policy snapshot is stale, while
+terminal recovery receipts remain evidence. Once every task is current,
+unreferenced package generations and configuration snapshots are deleted.
+`hive workflow install` and `hive workflow update` run the same migration inside
+the selection-activation transaction, so the pointer and retained tasks land in
+one state commit; `hive workflow remove` refuses while any retained task still
+names the workflow.
+
+Recovery-marker backfill resolves a pinned managed task's state file directly
+from its descriptor while the workflow mutation lock is held. Unpinned tasks
+use an immutable workflow generation captured before that lock. Neither path
+performs live workflow loading inside the transaction, because that would
+reacquire the same non-reentrant lock and deadlock an update.
 
 The cutover is idempotent. Updating one or more pins restarts a running daemon
 so its managed-workflow cache observes the new selection immediately.
@@ -186,8 +220,9 @@ All changes run under the project commit lock. The command stages and commits ch
 - `hive: migrate config keys (no tasks moved)` for config-only rewrites.
 - `hive: migrate task ids (N tasks)` for id-only backfills.
 - `hive: migrate recovery markers (N tasks)` for recovery-only identity backfills.
-- `hive: migrate managed workflow pins (N tasks)` for a configuration-pin-only cutover.
-- `hive: migrate project state (N ids, M recovery markers, P managed workflow pins)` when multiple non-stage upgrades land together; zero-value categories are omitted.
+- `hive: migrate managed workflow tasks (N tasks)` for a managed-generation-only cutover.
+- `hive: migrate plan review requirements (N tasks)` for a plan-review-requirement-only cutover.
+- `hive: migrate project state (N ids, M recovery markers, P managed workflow tasks, Q plan review requirements)` when multiple non-stage upgrades land together; zero-value categories are omitted.
 - `hive: migrate display names (N tasks)` for display-name-only backfills.
 
 A rerun after successful migration prints that there is nothing to move and keeps the current stage directories in place.
@@ -200,10 +235,14 @@ A rerun after successful migration prints that there is nothing to move and keep
   recovery commands.
 - `test/integration/migrate_test.rb` covers stage-dir moves, the legacy
   reviewers relocation/conflict boundary, other config rewrites, task-id
-  backfill order, display-name backfill, `ERROR` / `REVIEW_ERROR` identity
-  backfill, managed same-generation configuration rebinding and all-candidate
-  preflight, repository-identity backfill, idempotency, null-id repair, and
+  backfill order, plan-review requirement/adoption boundary, display-name
+  backfill, `ERROR` / `REVIEW_ERROR` identity
+  backfill, managed semantic-stage generation/configuration migration,
+  repository-identity backfill, idempotency, null-id repair, and
   counter seeding.
+- `test/unit/workflow_package/task_migrator_test.rb` covers semantic stage
+  moves, same-position repins, removed-stage refusal, lock contention, cleanup,
+  and idempotency.
 - `test/unit/recovery/migration_test.rb` covers the physical v2-to-v3 cutover,
   exact parity and crash resume, real finalization obligations, v1 empty-skeleton
   pruning, strict schema rejection, queue upgrades, and live/ambiguous-state
@@ -212,4 +251,4 @@ A rerun after successful migration prints that there is nothing to move and keep
 
 ## Backlinks
 
-- [[cli]] · [[commands/status]] · [[stages/index]] · [[state-model]]
+- [[cli]] · [[commands/status]] · [[stages/index]] · [[state-model]] · [[modules/plan_review]]

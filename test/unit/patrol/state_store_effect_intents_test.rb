@@ -40,6 +40,60 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
     end
   end
 
+  def test_cycle_lock_repairs_the_projection_only_after_it_owns_the_writer_lock
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+
+      store.with_cycle_lock do
+        assert_path_exists File.join(store.root, "finding-query.json")
+        refute_path_exists File.join(store.root, "finding-query.dirty")
+        assert_equal 0, store.finding_query_projection.fetch("total")
+      end
+    end
+  end
+
+  def test_waiting_writer_cannot_clear_an_active_writers_dirty_projection
+    with_tmp_dir do |root|
+      first = Hive::Patrol::StateStore.new(root)
+      second = Hive::Patrol::StateStore.new(root)
+      written = Queue.new
+      release = Queue.new
+      repaired = Queue.new
+      first_thread = Thread.new do
+        first.with_cycle_lock do
+          first.write_finding(
+            Hive::Patrol::Finding.new(
+              id: "finding-1", feature_id: "feature-1", category: "bug",
+              severity: "high", confidence: "high", title: "Race",
+              description: "Evidence", lifecycle_state: "active",
+              lifecycle_updated_at: NOW.iso8601
+            )
+          )
+          written << true
+          release.pop
+        end
+      end
+      written.pop
+      second_thread = Thread.new do
+        second.with_cycle_lock do
+          repaired << second.finding_query_projection.fetch("total")
+        end
+      end
+
+      assert_raises(Timeout::Error) do
+        Timeout.timeout(0.1) { repaired.pop }
+      end
+      release << true
+      assert_equal 1, Timeout.timeout(2) { repaired.pop }
+      first_thread.join
+      second_thread.join
+    ensure
+      release << true if first_thread&.alive?
+      first_thread&.join
+      second_thread&.join
+    end
+  end
+
   def test_occurrence_journal_is_the_only_effect_recovery_authority
     with_tmp_dir do |root|
       store = Hive::Patrol::StateStore.new(root)
@@ -514,23 +568,6 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
         )
       end
 
-      reserved = []
-      projection_pending = []
-      all = []
-      store.each_reserved_occurrence { |record| reserved << record.fetch("occurrence_id") }
-      store.each_projection_pending_occurrence do |record|
-        projection_pending << record.fetch("occurrence_id")
-      end
-      store.each_occurrence { |record| all << record.fetch("occurrence_id") }
-
-      assert_empty reserved
-      assert_equal [ capture.occurrence_id ], projection_pending
-      assert_equal [ capture.occurrence_id ], all
-      assert_equal reserved,
-                   store.each_reserved_occurrence.map { |record| record.fetch("occurrence_id") }
-      assert_equal projection_pending,
-                   store.each_projection_pending_occurrence.map { |record| record.fetch("occurrence_id") }
-      assert_equal all, store.each_occurrence.map { |record| record.fetch("occurrence_id") }
       assert_equal(
         [ capture.occurrence_id ],
         store.rebuild_recovery_index!.fetch("occurrence_ids")

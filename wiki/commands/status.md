@@ -3,8 +3,8 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-10
-tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, terminal-outcomes, dependencies, scheduler]
+updated: 2026-08-13
+tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler]
 ---
 
 **TLDR**: `hive status` now defaults to a compact operational snapshot for
@@ -208,6 +208,14 @@ editable target. `condition_overrides` contains the latest 20 forced gate
 waivers with source command and waived diagnostics; the journal retains full
 history. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row, and `0` otherwise.
 
+Each healthy project also carries
+`config_summary.stages.ensure_clean_on_exit`, the resolved boolean after
+defaults and project overrides. Each task carries `auto_residue`: `null` when
+the current stage invocation made no CleanExit commit, otherwise a bounded
+summary with `commits`, `path_count`, up to 20 paths, and the latest
+head/reason/time. Bot and TUI consume this producer field rather than reading
+`events.jsonl` independently.
+
 Every task row has `depends_on`, `blocked_by`, `dependency_stage`, `blocked`, and required nullable `admission_error`. The correlations are closed:
 
 - clear: `blocked: false`, ordinary wait fields null, `admission_error: null`;
@@ -299,7 +307,7 @@ continuing to omit ordinary archived rows.
 
 ## Legacy stage directories (`legacy_stage_dirs`)
 
-Every Project entry in `hive status --json` carries a `legacy_stage_dirs` array — `[]` for healthy projects, otherwise a list of `{ "stage_dir": "<name>", "task_count": <N> }` entries (sorted alphabetically by `stage_dir`). The field is populated by `Status#detect_legacy_stage_dirs`, which scans `<hive_state>/stages/` for directories that are **not** in the current workflow generation, are not status-private siblings such as `archived-manual/`, and contain at least one slug-shaped task subfolder that requires migration. A managed task with complete immutable workflow provenance is excluded only when its retained workflow generation loads successfully at that historical stage; package stage renames therefore do not turn valid pinned history into a project-wide migration blocker. Missing, corrupt, or incomplete managed generations fail closed and remain in the legacy count. Stray non-slug siblings (`logs/`, `.gitkeep`, `.DS_Store`) are ignored.
+Every Project entry in `hive status --json` carries a `legacy_stage_dirs` array — `[]` for healthy projects, otherwise a list of `{ "stage_dir": "<name>", "task_count": <N> }` entries (sorted alphabetically by `stage_dir`). The field is populated by `Status#detect_legacy_stage_dirs`, which scans `<hive_state>/stages/` for directories that are **not** in the current workflow generation, are not status-private siblings such as `archived-manual/`, and contain at least one slug-shaped task subfolder that requires migration. A managed task is excluded only when it resolves against the selected workflow generation; a stale, corrupt, or incomplete generation pin fails closed and remains in the legacy count until `hive migrate` rewrites it. Stray non-slug siblings (`logs/`, `.gitkeep`, `.DS_Store`) are ignored.
 
 When the field is non-empty, the text output prints a warning under the project header:
 
@@ -395,6 +403,26 @@ With `--write`, `Hive::DiagnosisAgent` uses the configured development profile (
 
 JSON output uses schema `hive-status-diagnose`, version `2`, and returns `slug`, `id`, `display_name`, `task_folder`, `diagnostic`, and `path` (set only when `--write` wrote an artifact).
 
+## Plan-review projection
+
+Both current status contracts have a required nullable `plan_review` field on
+task rows. It is `null` for non-coding workflows and tasks outside the
+applicable boundary. A coding plan row exposes the shared
+[[modules/plan_review]] summary: logical review/version/observation identity,
+task generation and plan/policy digests, computed/effective level,
+state/outcome/degradation, attempt identity, complete coverage and finding
+counts, exact blockers and owner, retry time, one required action, sanitized
+planner/reviewer route receipts, safe artifact references, freshness, and
+`execution_allowed`.
+
+Status validates every referenced artifact before projecting clearance. A
+missing, corrupt, symlinked, stale, or hash-mismatched record becomes an inert
+visible `plan_review_blocked` row; it never falls back to the coarse plan
+marker. Concise text leads with review level/state and its exact next action.
+The same object is copied into operational status, daemon status rows, and TUI
+snapshot rows, and remains visible after a degraded plan advances while the
+task surface can still expose its evidence.
+
 ## Read-only
 
 Normal status does not mutate task stage, markers, dependencies, or ordinary
@@ -426,4 +454,4 @@ task/commit locks and committed before the clock can hide a row.
 ## Backlinks
 
 - [[cli]] · [[commands/run]] · [[commands/approve]] · [[commands/watch]]
-- [[modules/markers]] · [[modules/task]] · [[modules/task_action]] · [[modules/task_dependencies]] · [[modules/config]]
+- [[modules/markers]] · [[modules/task]] · [[modules/task_action]] · [[modules/task_dependencies]] · [[modules/config]] · [[modules/plan_review]]

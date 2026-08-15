@@ -20,6 +20,10 @@ class WorkflowBaseTest < Minitest::Test
     def state_path = hive_state_path
     def admit(*args, **kwargs) = admit_runtime!(*args, **kwargs)
     def cleanup(name, error) = cleanup_after_failed_activation(name, error)
+    def migrate(name) = migrate_managed_tasks!(name)
+    def commit_migration(prepared, name, action:, commit_empty:)
+      commit_prepared_task_migration!(prepared, name, action: action, commit_empty: commit_empty)
+    end
     def envelope_schema = "hive-workflow-install"
   end
 
@@ -139,5 +143,53 @@ class WorkflowBaseTest < Minitest::Test
       assert_same original, raised
     end
     assert_includes err, "candidate cleanup also failed"
+  end
+
+  def test_managed_task_migration_preserves_config_errors_and_wraps_operational_failures
+    command = Probe.new(project_root: Dir.pwd, json: false, stdout: StringIO.new)
+    unsupported = Hive::UnsupportedProjectConfigError.new("unsupported config")
+    command.define_singleton_method(:prepare_managed_tasks!) { |_name| raise unsupported }
+    assert_same unsupported, assert_raises(Hive::UnsupportedProjectConfigError) { command.migrate("demo") }
+
+    command.define_singleton_method(:prepare_managed_tasks!) { |_name| raise Errno::EBUSY, "task lock" }
+    error = assert_raises(Hive::Error) { command.migrate("demo") }
+    assert_includes error.message, "retained task migration failed"
+    assert_includes error.message, "finish any live task"
+  end
+
+  def test_default_combined_commit_describes_task_and_pointer_mutations
+    calls = []
+    ops = Object.new
+    ops.define_singleton_method(:hive_commit) { |**kwargs| calls << kwargs }
+
+    with_tmp_dir do |project|
+      FileUtils.mkdir_p(File.join(project, ".hive-state"))
+      File.write(
+        File.join(project, ".hive-state", "config.yml"),
+        Hive::Config::DEFAULTS.merge("hive_state_path" => ".hive-state").to_yaml
+      )
+      command = Probe.new(project_root: project, json: false, stdout: StringIO.new)
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { ops }) do
+        with_replaced_singleton_method(Hive::Lock, :with_commit_lock, ->(_path, &block) { block.call }) do
+          [ 2, 0 ].each do |task_count|
+            preview = Hive::WorkflowPackage::TaskMigrator::Result.new(
+              task_count: task_count, moved_count: task_count,
+              pathspecs: [ "stages/1-inbox/task" ], warnings: []
+            )
+            prepared = Object.new
+            prepared.define_singleton_method(:apply) do |&block|
+              block.call(preview)
+              preview
+            end
+            command.commit_migration(prepared, "demo", action: "updated", commit_empty: true)
+          end
+        end
+      end
+    end
+
+    assert_equal "updated and migrated 2 tasks", calls.first.fetch(:action)
+    assert_equal "updated", calls.last.fetch(:action)
+    assert_equal [ "stages/1-inbox/task", "workflows/demo" ], calls.first.fetch(:pathspecs)
   end
 end

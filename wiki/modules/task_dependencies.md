@@ -1,9 +1,9 @@
 ---
 title: Task dependencies
 type: module
-source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb
+source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/task_workspace/dependency_component.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb
 created: 2026-06-18
-updated: 2026-07-17
+updated: 2026-08-12
 tags: [task, dependencies, admission, status, daemon, repository]
 ---
 
@@ -176,6 +176,28 @@ branch, then local branch, then default branch under the existing placeholder
 preservation rules. Open-PR uses the prerequisite base only while that remote
 branch exists. Explicit cross-project edges always return no stacked base.
 
+## Bounded task-workspace component
+
+`Hive::TaskWorkspace::DependencyComponent` explains the target's ancestors and
+transitive descendants without creating a second dependency model. It reuses
+the `DependencyAdmission::Context` and task metadata rows already collected by
+the status snapshot, builds a reverse index under a semantic dependency
+fingerprint, and never falls back to another fleet directory traversal. A
+snapshot that lacks enough rows returns a partial-project sentinel.
+
+Traversal is capped at 32 projects, 10,000 scanned metadata entries, 100 nodes,
+200 edges, depth 20, 4 MiB, and two seconds. Missing or inaccessible nodes,
+cycles, blocked chains, and each exhausted cap remain explicit nodes/edges or
+truncation diagnostics. Same-repository stack evidence compares immutable
+worktree repository/base branch/base OID with separately observed local refs;
+cross-project dependencies remain scheduling-only. No component node triggers
+a Git fetch or GitHub query.
+
+The compact view is a deterministic rooted spanning forest: every task renders
+once and non-tree, cyclic, or back edges become labeled cross-references. An
+always-present semantic node/edge table is authoritative for the complete
+bounded relationship set. See [[modules/task_workspace]].
+
 ## Recovery
 
 Inspect `hive status --json` or the TUI's admission text, then repair the named
@@ -191,6 +213,9 @@ after admission becomes clear.
   `plan_frontmatter_test.rb` pin the declaration grammar and strict evidence.
 - `test/unit/dependency_admission_test.rb`, `dependency_snapshot_test.rb`, and
   `repository_identity_test.rb` pin graph, gate, workflow, and remote identity.
+- `test/unit/task_workspace/dependency_component_test.rb` pins bounded reverse
+  traversal, cycles, missing nodes, divergence, truncation, and deterministic
+  forest/table parity without additional scans or remote calls.
 - `test/integration/dependency_admission_test.rb` reproduces anonymized
   plan-only ordering and cross-project repository-mismatch failures across
   status and manual boundaries.
@@ -202,3 +227,4 @@ after admission becomes clear.
 - [[modules/task]] · [[commands/status]] · [[modules/daemon]]
 - [[commands/run]] · [[commands/approve]] · [[commands/new]] · [[stages/plan]]
 - [[modules/worktree]] · [[stages/execute]] · [[stages/open-pr]]
+- [[modules/task_workspace]]

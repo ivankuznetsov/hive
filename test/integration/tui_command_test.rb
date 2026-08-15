@@ -69,7 +69,10 @@ class TuiCommandTest < Minitest::Test
     # call so a non-tty CI invocation gets a clean exit with the same
     # exit-code contract as the `--json` rejection.
     require "hive/tui"
-    err = assert_raises(Hive::InvalidTaskPath) { Hive::Tui.run }
+    err = nil
+    capture_io do
+      err = assert_raises(Hive::InvalidTaskPath) { Hive::Tui.run }
+    end
     assert_match(/requires a terminal/, err.message)
     assert_equal Hive::ExitCodes::USAGE, err.exit_code
   end

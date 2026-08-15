@@ -7,7 +7,11 @@ DRY_RUN=0
 VERSION="${HIVE_VERSION:-}"
 PREFIX="${HIVE_PREFIX:-}"
 INSTALL_QMD="${HIVE_INSTALL_QMD:-1}"
-QMD_NPM_PACKAGE="${HIVE_QMD_NPM_PACKAGE:-@tobilu/qmd}"
+DEFAULT_QMD_NPM_PACKAGE="@tobilu/qmd@2.5.3"
+DEFAULT_QMD_NPM_INTEGRITY="sha512-wUKc4pSPDbgs7mV7JYE8/Qj1pNXXatJFV8byTT/T3yLaoAXheFtWu0BgSWwoWGhRkMmxl5Qyitt66NHgbMyeBA=="
+QMD_NPM_PACKAGE="${HIVE_QMD_NPM_PACKAGE:-${DEFAULT_QMD_NPM_PACKAGE}}"
+QMD_NPM_INTEGRITY="${DEFAULT_QMD_NPM_INTEGRITY}"
+QMD_TIMEOUT_SECONDS="${HIVE_QMD_TIMEOUT_SECONDS:-600}"
 
 usage() {
   cat <<USAGE
@@ -31,8 +35,14 @@ Hive data directory and links it beside the \`hive\` executable. Set
 HIVE_INSTALL_QMD=0 to skip that step.
 
 QMD env knobs:
-  HIVE_QMD_NPM_PACKAGE  Override the npm package spec used for the QMD
-                        install; defaults to \`@tobilu/qmd\`.
+  HIVE_QMD_NPM_PACKAGE  QMD package spec. Must match the release-owned
+                        dependency lock: \`${DEFAULT_QMD_NPM_PACKAGE}\`.
+  HIVE_QMD_NPM_INTEGRITY
+                        Deprecated compatibility input. When set, it must
+                        equal the release-owned integrity exactly.
+  HIVE_QMD_TIMEOUT_SECONDS
+                        Timeout for each optional npm/QMD/Node subprocess;
+                        defaults to ${QMD_TIMEOUT_SECONDS} seconds.
   HIVE_QMD_BIN          Runtime override read by generated wiki scripts
                         and \`hive doctor\`; points at an executable
                         \`qmd\` when PATH or the managed install path is
@@ -64,6 +74,19 @@ validate_inputs() {
   fi
   if [[ -n "$REPO_NAME" ]] && ! [[ "$REPO_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
     die "invalid HIVE_REPO_NAME '${REPO_NAME}'"
+  fi
+  case "$INSTALL_QMD" in
+    0|false|False|FALSE|no|No|NO) return 0 ;;
+  esac
+  if [[ "$QMD_NPM_PACKAGE" != "$DEFAULT_QMD_NPM_PACKAGE" ]]; then
+    die "unsupported HIVE_QMD_NPM_PACKAGE '${QMD_NPM_PACKAGE}'; release dependency lock requires ${DEFAULT_QMD_NPM_PACKAGE}"
+  fi
+  if [[ -n "${HIVE_QMD_NPM_INTEGRITY:-}" &&
+        "$HIVE_QMD_NPM_INTEGRITY" != "$DEFAULT_QMD_NPM_INTEGRITY" ]]; then
+    die "unsupported HIVE_QMD_NPM_INTEGRITY; release dependency lock requires the published ${DEFAULT_QMD_NPM_PACKAGE} integrity"
+  fi
+  if ! [[ "$QMD_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    die "invalid HIVE_QMD_TIMEOUT_SECONDS '${QMD_TIMEOUT_SECONDS}'; expected positive integer seconds"
   fi
 }
 
@@ -297,6 +320,23 @@ daemon_autostart_setup() {
   fi
 }
 
+# An installed binary owns the state transition for every registered project.
+# Run it before daemon setup so no newly started daemon can dispatch a retained
+# task against a stale managed-workflow generation.
+migrate_registered_projects() {
+  local migrate_help
+  if ! migrate_help="$("${gem_home}/bin/hive" help migrate 2>/dev/null)" ||
+     [[ "$migrate_help" != *"--all"* ]]; then
+    log "installed Hive ${version} predates fleet migration; no automatic project migration is available"
+    return 0
+  fi
+
+  log "migrating registered projects with installed Hive"
+  if ! "${gem_home}/bin/hive" migrate --all; then
+    die "automatic project migration failed; resolve the reported project error and run '${gem_home}/bin/hive migrate --all'"
+  fi
+}
+
 qmd_install_enabled() {
   case "$INSTALL_QMD" in
     0|false|False|FALSE|no|No|NO) return 1 ;;
@@ -305,8 +345,57 @@ qmd_install_enabled() {
 }
 
 qmd_repair_hint() {
-  local qmd_home_arg="$1"
-  printf 'rerun hive update, or run: npm install --global --prefix %q %q' "$qmd_home_arg" "$QMD_NPM_PACKAGE"
+  printf 'rerun hive update after fixing npm/Node.js; Hive keeps the previous managed qmd until a verified replacement is ready'
+}
+
+# Resolve an existing path without GNU-only `readlink -f`. Ruby is already a
+# hard prerequisite on real installs, and File.realpath behaves consistently
+# on macOS and Linux. If the target disappeared between the existence check
+# and resolution, fall back symmetrically to the absolute lexical path.
+canonical_existing_path() {
+  ruby -e 'begin; print File.realpath(ARGV.fetch(0)); rescue SystemCallError; print File.expand_path(ARGV.fetch(0)); end' "$1"
+}
+
+run_with_timeout() {
+  local seconds="$1"
+  shift
+  ruby -rtimeout -e '
+    seconds = Integer(ARGV.shift, 10)
+    pid = Process.spawn(*ARGV, pgroup: true)
+    status = nil
+    begin
+      Timeout.timeout(seconds) { _pid, status = Process.wait2(pid) }
+    rescue Timeout::Error
+      begin
+        Process.kill("TERM", -pid)
+      rescue Errno::ESRCH
+      end
+      begin
+        Timeout.timeout(2) { _pid, status = Process.wait2(pid) }
+      rescue Timeout::Error
+        begin
+          Process.kill("KILL", -pid)
+        rescue Errno::ESRCH
+        end
+        begin
+          _pid, status = Process.wait2(pid)
+        rescue Errno::ECHILD
+        end
+      rescue Errno::ECHILD
+      end
+      exit 124
+    end
+    exit(status&.exitstatus || 1)
+  ' "$seconds" "$@"
+}
+
+qmd_command_failed() {
+  local operation="$1" rc="$2"
+  if [[ "$rc" -eq 124 ]]; then
+    warn "qmd ${operation} timed out after ${QMD_TIMEOUT_SECONDS}s; $(qmd_repair_hint)"
+  else
+    warn "qmd ${operation} failed (exit ${rc}); $(qmd_repair_hint)"
+  fi
 }
 
 # Install the qmd CLI used by Hive-managed llm-wiki refresh scripts into
@@ -314,7 +403,11 @@ qmd_repair_hint() {
 # of the user's global npm prefix while still making `qmd` available from
 # the same bin directory as `hive`.
 install_qmd() {
-  local qmd_home qmd_bin qmd_link existing_qmd_link managed_qmd_link active_qmd active_qmd_canon managed_qmd_canon qmd_version
+  local qmd_home qmd_bin qmd_link qmd_stage qmd_stage_bin qmd_package_json
+  local qmd_download_dir qmd_pack_json qmd_tarball qmd_tarball_integrity qmd_backup
+  local qmd_lock_root qmd_install_root qmd_node_header_root qmd_node_gyp qmd_better_sqlite
+  local existing_qmd_link active_qmd active_qmd_canon managed_qmd_canon qmd_version rc
+  local qmd_had_original=0
   qmd_home="${data_home}/qmd"
   qmd_bin="${qmd_home}/bin/qmd"
   qmd_link="${bin_home}/qmd"
@@ -329,32 +422,182 @@ install_qmd() {
     return 0
   fi
 
-  log "qmd: installing ${QMD_NPM_PACKAGE} into ${qmd_home}"
-  mkdir -p "$qmd_home"
-  if ! npm install --global --prefix "$qmd_home" --no-audit --no-fund "$QMD_NPM_PACKAGE"; then
-    warn "qmd install failed; $(qmd_repair_hint "$qmd_home")"
+  qmd_lock_root="${gem_home}/gems/hive-cli-${gem_version}/lib/hive/assets/qmd"
+  if [[ -f "${qmd_lock_root}/package.json" && -f "${qmd_lock_root}/package-lock.json" ]]; then
+    :
+  else
+    warn "release-owned qmd dependency lock is unavailable; qmd was not installed"
     return 0
   fi
 
-  # `npm install` may leave an existing native better-sqlite3 build in place
-  # after a Node upgrade. Rebuild explicitly so `hive update` repairs the
-  # NODE_MODULE_VERSION mismatch class of failures.
-  npm rebuild --global --prefix "$qmd_home" better-sqlite3 >/dev/null 2>&1 || true
-
-  if [[ ! -x "$qmd_bin" ]]; then
-    warn "qmd install completed but no executable was found at ${qmd_bin}; $(qmd_repair_hint "$qmd_home")"
+  log "qmd: downloading and verifying ${QMD_NPM_PACKAGE}"
+  mkdir -p "$data_home"
+  qmd_download_dir="$(mktemp -d "${tmpdir}/qmd-package.XXXXXX")"
+  if qmd_pack_json="$(run_with_timeout "$QMD_TIMEOUT_SECONDS" \
+    npm pack "$QMD_NPM_PACKAGE" --json --pack-destination "$qmd_download_dir")"; then
+    :
+  else
+    rc=$?
+    qmd_command_failed "package download" "$rc"
     return 0
   fi
 
-  if ! "$qmd_bin" --version >/dev/null 2>&1; then
-    warn "qmd installed at ${qmd_bin} but failed to start; $(qmd_repair_hint "$qmd_home")"
+  if qmd_tarball="$(printf '%s' "$qmd_pack_json" | ruby -rjson -e '
+    entry = JSON.parse(STDIN.read).fetch(0)
+    filename = entry.fetch("filename")
+    abort "unsafe npm pack filename" unless File.basename(filename) == filename && filename.end_with?(".tgz")
+    print File.join(ARGV.fetch(0), filename)
+  ' "$qmd_download_dir")" && [[ -f "$qmd_tarball" && ! -L "$qmd_tarball" ]]; then
+    :
+  else
+    warn "qmd package download returned no safe tarball for ${QMD_NPM_PACKAGE}; $(qmd_repair_hint)"
     return 0
   fi
+
+  qmd_tarball_integrity="$(ruby -rdigest -rbase64 -e '
+    digest = Digest::SHA512.file(ARGV.fetch(0)).digest
+    print "sha512-", Base64.strict_encode64(digest)
+  ' "$qmd_tarball")"
+  if [[ "$qmd_tarball_integrity" != "$QMD_NPM_INTEGRITY" ]]; then
+    warn "qmd package integrity mismatch for ${QMD_NPM_PACKAGE}; refusing npm install"
+    return 0
+  fi
+
+  qmd_stage="$(mktemp -d "${data_home}/.qmd-stage.XXXXXX")"
+  qmd_rollback_stage="$qmd_stage"
+  qmd_stage_bin="${qmd_stage}/bin/qmd"
+  qmd_install_root="${qmd_stage}/lib"
+  mkdir -p "$qmd_install_root" "${qmd_stage}/bin"
+  cp "${qmd_lock_root}/package.json" "${qmd_install_root}/package.json"
+  cp "${qmd_lock_root}/package-lock.json" "${qmd_install_root}/package-lock.json"
+  cp "$qmd_tarball" "${qmd_install_root}/qmd.tgz"
+  log "qmd: installing verified package and locked dependency closure into staging"
+  if run_with_timeout "$QMD_TIMEOUT_SECONDS" \
+    npm ci --prefix "$qmd_install_root" --ignore-scripts --no-audit --no-fund; then
+    :
+  else
+    rc=$?
+    qmd_command_failed "install" "$rc"
+    rm -rf "$qmd_stage"
+    return 0
+  fi
+  rm -f "${qmd_install_root}/qmd.tgz"
+  ln -s "../lib/node_modules/.bin/qmd" "$qmd_stage_bin"
+
+  # Lifecycle scripts are disabled above so dependency packages cannot fetch
+  # mutable prebuilds outside package-lock integrity. Build better-sqlite3
+  # directly from its verified package source with the locked node-gyp and the
+  # local Node installation's headers. Supplying --nodedir and offline mode
+  # prevents node-gyp from downloading a second, unpinned input.
+  if qmd_node_header_root="$(run_with_timeout "$QMD_TIMEOUT_SECONDS" node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const prefix = path.dirname(path.dirname(process.execPath));
+    const candidates = [prefix, path.dirname(prefix), "/usr"];
+    const root = candidates.find(candidate => fs.existsSync(path.join(candidate, "include", "node", "node.h")));
+    if (!root) process.exit(1);
+    process.stdout.write(root);
+  ')"; then
+    :
+  else
+    rc=$?
+    qmd_command_failed "local Node header discovery" "$rc"
+    rm -rf "$qmd_stage"
+    return 0
+  fi
+  qmd_node_gyp="${qmd_install_root}/node_modules/node-gyp/bin/node-gyp.js"
+  qmd_better_sqlite="${qmd_install_root}/node_modules/better-sqlite3"
+  if [[ ! -f "$qmd_node_gyp" || ! -f "${qmd_better_sqlite}/binding.gyp" ]]; then
+    warn "qmd locked native-build inputs are unavailable; $(qmd_repair_hint)"
+    rm -rf "$qmd_stage"
+    return 0
+  fi
+  if run_with_timeout "$QMD_TIMEOUT_SECONDS" \
+    env npm_config_offline=true npm_config_nodedir="$qmd_node_header_root" \
+    node "$qmd_node_gyp" rebuild --release --directory="$qmd_better_sqlite" \
+    --nodedir="$qmd_node_header_root"; then
+    :
+  else
+    rc=$?
+    qmd_command_failed "native rebuild" "$rc"
+    rm -rf "$qmd_stage"
+    return 0
+  fi
+
+  if [[ ! -x "$qmd_stage_bin" ]]; then
+    warn "qmd install completed but no executable was found in staging; $(qmd_repair_hint)"
+    rm -rf "$qmd_stage"
+    return 0
+  fi
+
+  if qmd_version="$(run_with_timeout "$QMD_TIMEOUT_SECONDS" \
+    "$qmd_stage_bin" --version 2>/dev/null)"; then
+    :
+  else
+    rc=$?
+    qmd_command_failed "startup check" "$rc"
+    rm -rf "$qmd_stage"
+    return 0
+  fi
+
+  # `qmd --version` does not import better-sqlite3. Resolve the dependency
+  # from QMD's own package root, open an in-memory database, and execute one
+  # statement so a stale NODE_MODULE_VERSION cannot be reported as healthy.
+  qmd_package_json="${qmd_stage}/lib/node_modules/@tobilu/qmd/package.json"
+  if run_with_timeout "$QMD_TIMEOUT_SECONDS" node -e '
+    const { createRequire } = require("node:module");
+    const qmdRequire = createRequire(process.argv[1]);
+    const Database = qmdRequire("better-sqlite3");
+    const db = new Database(":memory:");
+    db.prepare("SELECT 1").get();
+    db.close();
+  ' "$qmd_package_json"; then
+    :
+  else
+    rc=$?
+    qmd_command_failed "native SQLite health check" "$rc"
+    rm -rf "$qmd_stage"
+    return 0
+  fi
+
+  qmd_backup="$(mktemp -d "${data_home}/.qmd-backup.XXXXXX")"
+  rmdir "$qmd_backup"
+  qmd_rollback_home="$qmd_home"
+  qmd_rollback_backup="$qmd_backup"
+  qmd_rollback_stage="$qmd_stage"
+  qmd_rollback_had_original=0
+  qmd_rollback_armed=1
+  if [[ -e "$qmd_home" || -L "$qmd_home" ]]; then
+    if ! mv "$qmd_home" "$qmd_backup"; then
+      warn "qmd could not preserve the previous managed tree; $(qmd_repair_hint)"
+      qmd_rollback_armed=0
+      rm -rf "$qmd_stage"
+      return 0
+    fi
+    qmd_had_original=1
+    qmd_rollback_had_original=1
+  fi
+  if ! mv "$qmd_stage" "$qmd_home"; then
+    warn "qmd could not activate the verified tree; restoring the previous managed qmd"
+    rm -rf "$qmd_home"
+    if [[ "$qmd_had_original" -eq 1 ]]; then
+      mv "$qmd_backup" "$qmd_home"
+    fi
+    qmd_rollback_armed=0
+    rm -rf "$qmd_stage"
+    return 0
+  fi
+  qmd_rollback_stage=""
+  if [[ "$qmd_had_original" -eq 1 ]]; then
+    rm -rf "$qmd_backup"
+  fi
+  qmd_rollback_armed=0
+
+  managed_qmd_canon="$(canonical_existing_path "$qmd_bin")"
 
   if [[ -e "$qmd_link" || -L "$qmd_link" ]]; then
-    existing_qmd_link="$(readlink -f "$qmd_link" 2>/dev/null || true)"
-    managed_qmd_link="$(readlink -f "$qmd_bin" 2>/dev/null || echo "$qmd_bin")"
-    if [[ "$existing_qmd_link" != "$managed_qmd_link" ]]; then
+    existing_qmd_link="$(canonical_existing_path "$qmd_link")"
+    if [[ "$existing_qmd_link" != "$managed_qmd_canon" ]]; then
       warn "existing qmd at ${qmd_link}; leaving it unchanged (Hive-managed qmd is ${qmd_bin})"
     else
       ln -sfn "$qmd_bin" "$qmd_link"
@@ -365,14 +608,12 @@ install_qmd() {
 
   active_qmd="$(command -v qmd 2>/dev/null || true)"
   if [[ -n "$active_qmd" ]]; then
-    active_qmd_canon="$(readlink -f "$active_qmd" 2>/dev/null || true)"
-    managed_qmd_canon="$(readlink -f "$qmd_bin" 2>/dev/null || echo "$qmd_bin")"
+    active_qmd_canon="$(canonical_existing_path "$active_qmd")"
     if [[ -n "$active_qmd_canon" && "$active_qmd_canon" != "$managed_qmd_canon" ]]; then
       warn "PATH resolves qmd to ${active_qmd}, not Hive-managed ${qmd_bin}; wiki refreshes may use the earlier binary"
     fi
   fi
 
-  qmd_version="$("$qmd_bin" --version 2>/dev/null || true)"
   log "qmd: installed ${qmd_version:-${QMD_NPM_PACKAGE}}"
 }
 
@@ -382,6 +623,16 @@ platform="$(detect_platform)"
 installer_preflight
 version="${VERSION:-$(latest_version)}"
 [[ -n "$version" ]] || die "could not resolve a hive release version"
+
+# A real install already requires Ruby 3.4. Normalize the caller's prefix
+# before deriving any install path or writing install-prefix sidecars. Dry-run
+# remains dependency-light and writes no sidecar.
+if [[ "$DRY_RUN" -ne 1 ]]; then
+  ruby_preflight
+  if [[ -n "$PREFIX" ]]; then
+    PREFIX="$(ruby -e 'print File.expand_path(ARGV.fetch(0))' "$PREFIX")"
+  fi
+fi
 
 data_base="${PREFIX:-${XDG_DATA_HOME:-${HOME}/.local/share}}"
 data_home="${data_base%/}/hive"
@@ -409,10 +660,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "dry run: would download ${gem_url}"
   log "dry run: would verify SHA256SUMS and write ${data_home}/install-channel"
   log "dry run: would gem install --install-dir ${gem_home} ${gem_file}"
+  log "dry run: would run ${gem_home}/bin/hive migrate --all before daemon startup"
   log "dry run: would run ${link_path} daemon install to enable daemon autostart"
   if qmd_install_enabled; then
-    log "dry run: would npm install --global --prefix ${data_home}/qmd ${QMD_NPM_PACKAGE}"
-    log "dry run: would npm rebuild --global --prefix ${data_home}/qmd better-sqlite3"
+    log "dry run: would npm ci --ignore-scripts the release-owned QMD dependency lock under ${data_home}/qmd"
+    log "dry run: would build better-sqlite3 from locked source with local Node headers"
     log "dry run: would link ${bin_home}/qmd"
   else
     log "dry run: would skip qmd install (HIVE_INSTALL_QMD=${INSTALL_QMD})"
@@ -421,9 +673,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
-# Probe Ruby/gem now that we know this is not a dry-run; the gem
-# install path requires Ruby 3.4 on PATH.
-ruby_preflight
+# RubyGems canonicalizes prerelease versions in install directory names
+# (`1.2.3-rc.1` -> `1.2.3.pre.rc.1`). Resolve that spelling before changing
+# GEM_HOME so bundled callers and test harnesses cannot affect lookup.
+gem_version="$(ruby -rrubygems -e 'print Gem::Version.new(ARGV.fetch(0)).to_s' "${version#v}")"
+
 command -v cosign >/dev/null 2>&1 || die "missing installer prerequisite 'cosign'"
 
 tmpdir="$(mktemp -d)"
@@ -437,6 +691,11 @@ launcher_shim_backup="${tmpdir}/launcher-shim.backup"
 staged_wrapper=""
 staged_hv=""
 staged_shim=""
+qmd_rollback_armed=0
+qmd_rollback_had_original=0
+qmd_rollback_home=""
+qmd_rollback_backup=""
+qmd_rollback_stage=""
 
 restore_launcher_path() {
   local path="$1" had_original="$2" backup="$3"
@@ -449,6 +708,18 @@ restore_launcher_path() {
 
 cleanup() {
   local rc=$?
+
+  if [[ "$qmd_rollback_armed" -eq 1 ]]; then
+    set +e
+    rm -rf "$qmd_rollback_home"
+    if [[ "$qmd_rollback_had_original" -eq 1 && -e "$qmd_rollback_backup" ]]; then
+      mv "$qmd_rollback_backup" "$qmd_rollback_home"
+    fi
+    warn "qmd activation was interrupted; restored the previous managed tree"
+  fi
+  if [[ -n "$qmd_rollback_stage" ]]; then
+    rm -rf "$qmd_rollback_stage"
+  fi
 
   # Keep recovery armed until all three launcher files are installed and
   # verified. A failure in gem install, shim staging, wrapper construction,
@@ -667,6 +938,7 @@ else
 fi
 
 runtime_preflight
+migrate_registered_projects
 daemon_autostart_setup
 
 log "installed hive ${version} (hive-cli rubygem)"

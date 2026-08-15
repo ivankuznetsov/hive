@@ -1,0 +1,60 @@
+<% decision = workspace.fetch("decision") %>
+<% attempts = workspace.dig("panels", "attempts") %>
+<% resources = workspace.dig("panels", "resources") %>
+<% current_attempt = Array(attempts["records"]).find { |record| record["current"] } %>
+<% current_session = Array(current_attempt&.fetch("sessions", [])).find { |session| session["live"] } ||
+                     Array(current_attempt&.fetch("sessions", [])).last %>
+<% model = current_session&.dig("actual_model", "value") ||
+           current_session&.dig("requested_model", "value") ||
+           current_attempt&.dig("requested_provider", "value") %>
+<% decisive_panel = case decision.fetch("posture")
+                    when "answer" then "task-questions"
+                    when "approve", "retry" then "task-state"
+                    when "wait" then "workspace-attempts"
+                    else
+                      %w[provenance attempts resources timeline dependencies publication artifacts]
+                        .find { |name| workspace.dig("panels", name, "state") != "current" }
+                        &.then { |name| "workspace-#{name}" } || "workspace-timeline"
+                    end %>
+
+<section id="workspace-summary"
+         class="workspace-summary workspace-state-<%= workspace.dig("status", "state") %>"
+         aria-labelledby="workspace-summary-heading"
+         data-task-workspace-target="summary">
+  <div class="workspace-summary-decision">
+    <p class="workspace-eyebrow">Recommended posture</p>
+    <h2 id="workspace-summary-heading"><%= decision.fetch("posture").humanize %></h2>
+    <p><%= decision.fetch("reason") %></p>
+    <p class="workspace-summary-link">
+      <a href="#<%= decisive_panel %>">Review the decisive evidence</a>
+    </p>
+  </div>
+
+  <dl class="workspace-summary-facts">
+    <div>
+      <dt>Workspace evidence</dt>
+      <dd><span class="workspace-state-label"><%= workspace.dig("status", "state").humanize %></span></dd>
+    </div>
+    <div>
+      <dt>Current attempt</dt>
+      <dd><code><%= current_attempt&.fetch("attempt_id", nil)&.first(16) || "Unavailable" %></code></dd>
+    </div>
+    <div>
+      <dt>Observed model</dt>
+      <dd><%= model.presence || "Unavailable" %></dd>
+    </div>
+    <div>
+      <dt>Resources</dt>
+      <dd><span class="workspace-state-label"><%= resources.fetch("state").humanize %></span></dd>
+    </div>
+    <div>
+      <dt>Canonical action</dt>
+      <dd>
+        <%= decision.dig("action", "label").presence || "None available" %>
+        <% unless decision.dig("action", "enabled") %>
+          <span class="muted">— unavailable</span>
+        <% end %>
+      </dd>
+    </div>
+  </dl>
+</section>

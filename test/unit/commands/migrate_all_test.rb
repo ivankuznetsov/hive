@@ -125,7 +125,8 @@ class MigrateAllCommandTest < Minitest::Test
         projects: projects,
         output: StringIO.new,
         binary: "hive",
-        global_migration: -> { global_calls += 1 }
+        global_migration: -> { global_calls += 1 },
+        daemon_restarter: -> { }
       ).call
     end
 
@@ -157,6 +158,74 @@ class MigrateAllCommandTest < Minitest::Test
     end
 
     assert_equal 1, restart_calls
+  end
+
+  def test_partial_fleet_failure_does_not_restart_the_daemon
+    projects = [
+      { "name" => "alpha", "path" => "/tmp/alpha" },
+      { "name" => "broken", "path" => "/tmp/broken" }
+    ]
+    restart_calls = 0
+    error_output = StringIO.new
+
+    replacement = lambda { |path, global_migration:, daemon_restarter:|
+      Command.new(lambda {
+        global_migration.call
+        daemon_restarter.call if path.end_with?("alpha")
+        raise Hive::ConfigError, "blocked migration" if path.end_with?("broken")
+      })
+    }
+    with_replaced_singleton_method(Hive::Commands::Migrate, :new, replacement) do
+      assert_raises(Hive::Error) do
+        Hive::Commands::MigrateAll.new(
+          projects: projects, output: StringIO.new, error_output: error_output,
+          binary: "hive", global_migration: -> { },
+          daemon_restarter: -> { restart_calls += 1 }
+        ).call
+      end
+    end
+
+    assert_equal 0, restart_calls
+    assert_includes error_output.string, "daemon restart deferred"
+  end
+
+  def test_successful_retry_restarts_after_an_earlier_deferred_config_migration
+    projects = [
+      { "name" => "alpha", "path" => "/tmp/alpha" },
+      { "name" => "broken", "path" => "/tmp/broken" }
+    ]
+    restart_calls = 0
+    phase = :first
+
+    replacement = lambda { |path, global_migration:, daemon_restarter:|
+      Command.new(lambda {
+        global_migration.call
+        if phase == :first
+          daemon_restarter.call if path.end_with?("alpha")
+          raise Hive::ConfigError, "blocked migration" if path.end_with?("broken")
+        end
+      })
+    }
+    with_replaced_singleton_method(Hive::Commands::Migrate, :new, replacement) do
+      assert_raises(Hive::Error) do
+        Hive::Commands::MigrateAll.new(
+          projects: projects, output: StringIO.new, error_output: StringIO.new,
+          binary: "hive", global_migration: -> { },
+          daemon_restarter: -> { restart_calls += 1 }
+        ).call
+      end
+      assert_equal 0, restart_calls
+
+      phase = :retry
+      result = Hive::Commands::MigrateAll.new(
+        projects: projects, output: StringIO.new, error_output: StringIO.new,
+        binary: "hive", global_migration: -> { },
+        daemon_restarter: -> { restart_calls += 1 }
+      ).call
+
+      assert_equal 0, result
+      assert_equal 1, restart_calls
+    end
   end
 
   def test_default_daemon_restarter_delegates_to_migrate

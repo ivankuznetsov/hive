@@ -25,14 +25,18 @@ compatibility metadata, and policy digests belong to
 
 The public keys are:
 
-`brainstorm`, `plan`, `execute`, `execute_implementation`, `rebase`,
+`brainstorm`, `plan`, `plan_review`, `plan_review_adversarial`,
+`plan_review_verification`, `execute`, `execute_implementation`, `rebase`,
 `diagnose`, `babysitter`, `review`, `review_ci`, `review_reviewers`,
 `review_triage`, `review_fix`, `review_browser`, `patrol`, `patrol_review`,
 `patrol_fix`, `open_pr`, `artifacts`, and `finalize`.
 
-`execute_implementation`, `rebase`, `diagnose`, and `babysitter` inherit from
-`execute`; every `review_*` key inherits from `review`; and every `patrol_*`
-key inherits from `patrol`. Other keys are roots. Every key is project-owned;
+`plan_review_adversarial` and `plan_review_verification` inherit from
+`plan_review`; `execute_implementation`, `rebase`, `diagnose`, and `babysitter`
+inherit from `execute`; every `review_*` key inherits from `review`; and every
+`patrol_*` key inherits from `patrol`. The three plan-review identities route
+the primary critique, independent adversarial critique, and disposition
+verification respectively. Other keys are roots. Every key is project-owned;
 Hive's former in-process PR digest was removed in favour of standalone
 PRDigest, so `digest` is intentionally not a route. `entries` and `keys` are
 registry-derived frozen enumerations.

@@ -1418,6 +1418,54 @@ class HiveBotSupervisorTest < Minitest::Test
                  "the bot must NOT spawn `hive run` itself anymore — that's the daemon's job now"
   end
 
+  def test_enqueue_dispatch_request_uses_foreground_dispatch_when_supported
+    calls = []
+    reference = Struct.new(:request_id, :attempt_id, :state, :status).new(
+      "req-live", "attempt-1", "running", :accepted
+    )
+    writer = Object.new
+    writer.define_singleton_method(:dispatch!) do |**attributes|
+      calls << attributes
+      reference
+    end
+    @supervisor.instance_variable_set(:@dispatch_request_writer, writer)
+    result = FakeRouter::Result.new(
+      project: "hive", slug: "task", command_argv: %w[hive run task], intent: :slash_done
+    )
+
+    request_id = @supervisor.send(
+      :enqueue_dispatch_request, result, Update.new(chat_id: 42, update_id: 7)
+    )
+
+    assert_equal "req-live", request_id
+    assert_equal %w[hive run task], calls.first.fetch(:argv)
+    event = @logger.events.find { |entry| entry[:name] == :dispatched_command }
+    assert_equal "attempt-1", event.fetch(:payload).fetch(:attempt_id)
+  end
+
+  def test_enqueue_dispatch_request_binds_preallocated_delivery_to_current_task
+    calls = []
+    writer = Object.new
+    writer.define_singleton_method(:write_current!) do |**attributes|
+      calls << attributes
+      attributes.fetch(:request_id)
+    end
+    @supervisor.instance_variable_set(:@dispatch_request_writer, writer)
+    result = FakeRouter::Result.new(
+      project: "hive", slug: "task", command_argv: %w[hive review task], intent: :callback_rerun
+    )
+
+    request_id = @supervisor.send(
+      :enqueue_dispatch_request,
+      result,
+      Update.new(chat_id: 42, update_id: 7),
+      request_id: "req-sequence"
+    )
+
+    assert_equal "req-sequence", request_id
+    assert_equal "req-sequence", calls.first.fetch(:request_id)
+  end
+
   def test_register_bot_commands_sends_full_command_list_to_telegram
     @supervisor.send(:register_bot_commands)
 

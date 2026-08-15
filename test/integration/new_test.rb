@@ -38,6 +38,7 @@ class NewTest < Minitest::Test
         assert_nil meta[:display_name]
         assert_nil meta[:depends_on]
         assert_nil meta[:workflow]
+        assert_equal true, meta[:plan_review_required]
         refute_includes File.read(File.join(glob.first, "meta.yml")), "depends_on:"
         refute_includes File.read(File.join(glob.first, "meta.yml")), "workflow:"
         refute File.directory?(File.join(glob.first, "assets")),

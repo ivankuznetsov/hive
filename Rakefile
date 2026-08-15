@@ -20,6 +20,32 @@ HIVE_CI_GATE_TEST_OPTIONS = {
 HIVE_DEFAULT_TEST_FILES = FileList[
   "test/{unit,integration,babysitter}/**/*_test.rb"
 ].exclude(*HIVE_CI_GATE_TESTS.values).to_a.freeze
+HIVE_COVERAGE_SHARD_COUNT = 6
+HIVE_COVERAGE_SHARDS = begin
+  partition_by_bytes = lambda do |files, count|
+    shards = Array.new(count) { [] }
+    shard_bytes = Array.new(count, 0)
+
+    files.sort_by { |path| [ -File.size(path), path ] }.each do |path|
+      shard = shard_bytes.each_index.min_by { |index| [ shard_bytes[index], index ] }
+      shards.fetch(shard) << path
+      shard_bytes[shard] += File.size(path)
+    end
+
+    shards
+  end
+
+  # Hosted runs identified the third source-balanced partition as the original
+  # long pole, then exposed the fourth as the remaining long pole. Split those
+  # measured hot partitions while preserving the two faster partitions and
+  # adding only two runners instead of reshuffling or doubling the whole matrix.
+  base_shards = partition_by_bytes.call(HIVE_DEFAULT_TEST_FILES, 4)
+  hot_shards = partition_by_bytes.call(base_shards.fetch(2), 2)
+  tail_shards = partition_by_bytes.call(base_shards.fetch(3), 2)
+  shards = [ base_shards[0], base_shards[1], *hot_shards, *tail_shards ]
+  shards.each(&:freeze)
+  shards.freeze
+end
 HIVE_HOSTILE_TEST_FILES = FileList[
   "test/unit/packaging/workflow_creator_values_test.rb",
   "test/unit/packaging/patrol_evidence_candidate_test.rb",
@@ -61,7 +87,7 @@ end
 desc "Run the default suite with merged stdlib Coverage reporting and a 100% line threshold"
 task :coverage do
   root = File.expand_path(__dir__)
-  run_id = "#{Process.pid}-#{SecureRandom.hex(4)}"
+  run_id = ENV.fetch("HIVE_COVERAGE_RUN_ID") { "#{Process.pid}-#{SecureRandom.hex(4)}" }
   report_path = File.join(root, "coverage", "coverage.json")
   env_keys = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID RUBYOPT]
   old_env = env_keys.to_h { |key| [ key, ENV[key] ] }
@@ -89,6 +115,100 @@ task :coverage do
     abort HiveTestCoverage.failure_message(report) unless HiveTestCoverage.coverage_ok?(report)
   ensure
     old_env.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
+end
+
+namespace :coverage do
+  coverage_shard_index = Integer(ENV["HIVE_COVERAGE_SHARD_INDEX"], exception: false)
+  coverage_shard_files = if coverage_shard_index&.between?(0, HIVE_COVERAGE_SHARD_COUNT - 1)
+    HIVE_COVERAGE_SHARDS.fetch(coverage_shard_index)
+  else
+    []
+  end
+
+  task :prepare_shard do
+    shard_index = Integer(ENV.fetch("HIVE_COVERAGE_SHARD_INDEX"))
+    shard_count = Integer(ENV.fetch("HIVE_COVERAGE_SHARD_COUNT"))
+    unless shard_count == HIVE_COVERAGE_SHARD_COUNT && shard_index.between?(0, shard_count - 1)
+      abort "coverage shard must be 0..#{HIVE_COVERAGE_SHARD_COUNT - 1} " \
+            "of #{HIVE_COVERAGE_SHARD_COUNT}"
+    end
+    shard_files = HIVE_COVERAGE_SHARDS.fetch(shard_index)
+    abort "coverage shard #{shard_index} has no test files" if shard_files.empty?
+
+    root = File.expand_path(__dir__)
+    run_id = ENV.fetch("HIVE_COVERAGE_RUN_ID")
+    abort "HIVE_COVERAGE_RUN_ID must not be empty" if run_id.empty?
+
+    FileUtils.rm_rf(File.join(root, "coverage", ".resultset"))
+    FileUtils.rm_f(File.join(root, "coverage", "coverage.json"))
+    ENV["HIVE_COVERAGE"] = "1"
+    ENV["HIVE_COVERAGE_ROOT"] = root
+    ENV["HIVE_COVERAGE_COLLECT_ONLY"] = "1"
+    # One collector owns the complete source catalog so files that no test
+    # requires are still represented as unloaded at the exact merge gate. Keep
+    # the other five collectors lazy: their forked custody children inherit the
+    # parent's measured files, and redundant preloads can make coverage-aware
+    # exit! flushes exceed bounded subprocess deadlines under runner contention.
+    ENV["HIVE_COVERAGE_LOAD_ALL"] = shard_index.zero? ? "1" : "0"
+    ENV["HIVE_REQUIRE_TEST_RUNS"] = "1"
+    coverage_rubyopt = "-I#{File.join(root, 'test')} -rhive_coverage_boot"
+    ENV["RUBYOPT"] = [ coverage_rubyopt, ENV["RUBYOPT"] ].compact.join(" ")
+  rescue ArgumentError, KeyError
+    abort "coverage shard index, count, and run ID must be provided"
+  end
+
+  Rake::TestTask.new(run_shard: :prepare_shard) do |t|
+    t.libs << "test"
+    t.libs << "lib"
+    t.test_files = coverage_shard_files
+    t.warning = false
+  end
+  Rake::Task["coverage:run_shard"].enhance([ "test:agent_cli_runtime" ]) if coverage_shard_index == 0
+
+  desc "Collect one deterministic CI coverage shard without applying the final percentage gate"
+  task collect: :run_shard do
+    run_id = ENV.fetch("HIVE_COVERAGE_RUN_ID")
+    resultset_dir = File.join(__dir__, "coverage", ".resultset", run_id)
+    process_results = Dir.glob(File.join(resultset_dir, "*.marshal"))
+    dump_errors = Dir.glob(File.join(resultset_dir, "*.error.json"))
+    abort "coverage shard wrote no process results to #{resultset_dir}" if process_results.empty?
+    abort "coverage shard recorded dump errors in #{resultset_dir}" if dump_errors.any?
+
+    shard_index = Integer(ENV.fetch("HIVE_COVERAGE_SHARD_INDEX"))
+    shard_count = Integer(ENV.fetch("HIVE_COVERAGE_SHARD_COUNT"))
+    HiveTestCoverage.configure!(root: File.expand_path(__dir__))
+    HiveTestCoverage.write_shard_manifest!(
+      shard_index: shard_index,
+      shard_count: shard_count,
+      revision: ENV.fetch("HIVE_COVERAGE_REVISION"),
+      workflow_run_id: ENV.fetch("HIVE_COVERAGE_WORKFLOW_RUN_ID"),
+      test_files: HIVE_COVERAGE_SHARDS.fetch(shard_index)
+    )
+
+    puts "Collected #{process_results.length} coverage process result(s) for #{run_id}"
+  rescue ArgumentError, KeyError, HiveTestCoverage::ShardManifestError => e
+    abort "coverage shard manifest error: #{e.message}"
+  end
+
+  desc "Merge previously collected CI coverage artifacts and apply the exact coverage gate"
+  task :report do
+    root = File.expand_path(__dir__)
+    report_path = File.join(root, "coverage", "coverage.json")
+    HiveTestCoverage.configure!(root: root)
+    if ENV.key?("HIVE_COVERAGE_EXPECTED_SHARDS")
+      HiveTestCoverage.verify_shard_manifests!(
+        expected_shards: Integer(ENV.fetch("HIVE_COVERAGE_EXPECTED_SHARDS")),
+        revision: ENV.fetch("HIVE_COVERAGE_REVISION"),
+        workflow_run_id: ENV.fetch("HIVE_COVERAGE_WORKFLOW_RUN_ID"),
+        test_files_by_shard: HIVE_COVERAGE_SHARDS
+      )
+    end
+    HiveTestCoverage.report!
+    report = HiveTestCoverage.read_report(report_path)
+    abort HiveTestCoverage.failure_message(report) unless HiveTestCoverage.coverage_ok?(report)
+  rescue ArgumentError, KeyError, HiveTestCoverage::ShardManifestError => e
+    abort "coverage shard manifest error: #{e.message}"
   end
 end
 

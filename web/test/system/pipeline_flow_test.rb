@@ -85,7 +85,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     end
   end
 
-  test "login gate, composer with image, live stream update, approve" do
+  test "login gate, composer with image, live stream update, safe task controls" do
     # Unauthenticated → login page, nothing leaks.
     visit "/"
     assert_selector "h1", text: "Hive web", wait: 5
@@ -138,8 +138,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_operator all(".task-row").size, :>, row_count_before,
                     "the new row must arrive over the stream, not a reload"
 
-    # Approve through the task page (force-free path is gated; the grid is
-    # the redirect target).
+    # The task page must fail closed until exact attempt/resource evidence is
+    # available, even though the underlying force route remains a sharp tool.
     task_href = "/tasks/#{@project}/#{folder.basename}"
     assert_selector ".task-row a[href='#{task_href}']", text: "Browser test idea", wait: 5
     visit task_href
@@ -150,10 +150,35 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # Advanced section at the bottom, confirm-gated.
     assert_no_button "Approve", exact: true, wait: 0
     find(".advanced summary").click
-    accept_confirm { within(".advanced") { click_button "Force approve" } }
-    assert_selector ".flash-notice", text: "Approved", wait: 5
-    assert stage_dir(@project, "2-brainstorm").children.any? { |c| c.basename.to_s.start_with?("browser-test-idea") },
-           "approve must move the task into 2-brainstorm"
+    within(".advanced") { assert_button "Force approve", disabled: true }
+    assert folder.directory?, "disabled controls must leave the inbox task in place"
+  end
+
+  test "plan review detail offers an exact decision but no force bypass" do
+    slug = create_task!(@project, "Review decision probe")
+    source = stage_dir(@project, "1-inbox").join(slug)
+    destination = stage_dir(@project, "3-plan").join(slug)
+    destination.dirname.mkpath
+    FileUtils.mv(source, destination)
+    destination.join("plan.md").write("# Plan\n\n<!-- WAITING -->\n")
+
+    details = system_plan_review_details
+    with_replaced_task_method(:plan_review_details, -> { details }) do
+      sign_in!
+      visit "/tasks/#{@project}/#{slug}"
+
+      assert_selector "section.plan-review[data-review-state='awaiting_decision']", wait: 5
+      within "section.plan-review" do
+        assert_text "mandatory"
+        assert_text "Choose the rollback boundary"
+        assert_field "Answer this finding"
+        assert_button "Record answer"
+        assert_selector "input[name=expected_artifact_digest][value='#{'e' * 64}']",
+                        visible: :all
+      end
+      find(".advanced summary").click
+      assert_no_button "Force approve", wait: 0
+    end
   end
 
   test "a failed Turbo submission keeps the draft and staged attachment" do
@@ -509,7 +534,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # observable, but must not restart/cancel that navigation until Turbo
     # clears its busy state.
     execute_script(<<~JS)
-      const frame = document.querySelector("#task-log")
+      const frame = document.querySelector("turbo-frame[id^='task-log-']")
       document.body.dataset.busyPollRequests = "0"
       document.addEventListener("turbo:before-fetch-request", (event) => {
         if (event.target !== frame) return
@@ -524,11 +549,11 @@ class PipelineFlowTest < ApplicationSystemTestCase
       frame.setAttribute("busy", "")
       frame.setAttribute("aria-busy", "true")
     JS
-    busy_ticks = page.evaluate_script("Number(document.querySelector('#task-log').dataset.pollTicks || 0)")
-    assert_selector "#task-log[data-poll-ticks='#{busy_ticks + 2}']", wait: 10
+    busy_ticks = page.evaluate_script("Number(document.querySelector(\"turbo-frame[id^='task-log-']\").dataset.pollTicks || 0)")
+    assert_selector "turbo-frame[id^='task-log-'][data-poll-ticks='#{busy_ticks + 2}']", wait: 10
     assert_selector "body[data-busy-poll-requests='0']", visible: :all
     execute_script(<<~JS)
-      const frame = document.querySelector("#task-log")
+      const frame = document.querySelector("turbo-frame[id^='task-log-']")
       frame.removeAttribute("busy")
       frame.removeAttribute("aria-busy")
     JS
@@ -549,8 +574,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # timer firing (including paused ones) in data-poll-ticks, so waiting
     # for the counter to advance is an explicit wait, not a sleep — and a
     # deleted readerBusy() would fail the absence assertions below.
-    ticks = page.evaluate_script("Number(document.querySelector('#task-log').dataset.pollTicks || 0)")
-    assert_selector "#task-log[data-poll-ticks='#{ticks + 2}']", wait: 10
+    ticks = page.evaluate_script("Number(document.querySelector(\"turbo-frame[id^='task-log-']\").dataset.pollTicks || 0)")
+    assert_selector "turbo-frame[id^='task-log-'][data-poll-ticks='#{ticks + 2}']", wait: 10
     assert_selector "pre[data-tail-follow][data-following='false']"
     assert_no_text "marker-while-reading"
     assert_equal 0, page.evaluate_script("document.querySelector('pre[data-tail-follow]').scrollTop"),
@@ -653,28 +678,22 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_selector ".qa-question", text: /Deadline/
   end
 
-  test "typing in the Q&A survives a pushed morph refresh" do
+  test "degraded Q&A controls remain disabled across a pushed morph refresh" do
     folder = move_to_brainstorm(create_task!(@project, "Focus probe"))
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
     sign_in!
     visit "/tasks/#{@project}/#{folder.basename}"
 
-    field = find("textarea[data-question-number='1']", wait: 5)
+    assert_field "Answer to question 1", disabled: true, wait: 5
     wait_for_live_status
-    field.fill_in with: "typing slowly"
     # Change the task's OWN visible context without changing the bound question,
     # then force a broadcast → morph. Waiting for that updated context proves the
-    # morph actually landed before we assert survival — without it every
-    # assertion could pass against the pre-morph DOM.
+    # morph actually landed before we assert the safety state survives.
     idea_path = folder.join("idea.md")
     idea_path.write(idea_path.read.gsub("Focus probe", "Context refreshed"))
     create_task!(@project, "Refresh trigger")
     assert_selector ".idea-text", text: /Context refreshed/, wait: 10
-    assert_equal "typing slowly", find("textarea[data-question-number='1']").value,
-                 "a pushed morph must not discard typed-but-unsent input"
-    field.send_keys(" still here")
-    assert_equal "typing slowly still here", find("textarea[data-question-number='1']").value,
-                 "focus must remain in the field across refreshes"
+    assert_field "Answer to question 1", disabled: true, with: ""
   end
 
   test "pasting an image attaches it like the TUI" do
@@ -705,6 +724,56 @@ class PipelineFlowTest < ApplicationSystemTestCase
   end
 
   private
+
+  def system_plan_review_details
+    summary = {
+      "applicable" => true, "review_id" => "pr-#{'a' * 64}", "version" => 2,
+      "observation_digest" => "e" * 64, "task_generation" => "generation-1",
+      "plan_digest" => "b" * 64, "policy_fingerprint" => "c" * 64,
+      "computed_level" => "mandatory", "effective_level" => "mandatory",
+      "state" => "awaiting_decision", "outcome" => nil, "degraded" => false,
+      "degradation_reason" => nil, "attempt_count" => 2,
+      "current_attempt_id" => "pra-#{'d' * 64}",
+      "coverage_counts" => {
+        "requested" => 0, "completed" => 2, "failed" => 0,
+        "unsupported" => 0, "waived" => 0
+      },
+      "finding_counts" => {
+        "open" => 1, "approved" => 0, "answered" => 0, "incorporated" => 0,
+        "verified" => 0, "resolved" => 0, "waived" => 0, "total" => 1,
+        "open_gated" => 0, "open_manual" => 1, "fyi" => 0
+      },
+      "blockers" => [ { "owner" => "operator", "reason" => "manual finding" } ],
+      "blocker_owner" => "operator", "blocker_reason" => "manual finding",
+      "required_action" => "answer manual plan finding", "retry_at" => nil,
+      "routes" => [], "artifacts" => {},
+      "freshness" => { "status" => "current", "reason" => nil },
+      "execution_allowed" => false
+    }
+    finding = {
+      "fingerprint" => "prf-#{'f' * 64}", "source" => "whole_document",
+      "classification" => "manual", "risk" => "high",
+      "title" => "Choose the rollback boundary",
+      "description" => "The plan needs an operator answer.",
+      "evidence" => {
+        "path" => "plan.md", "start_line" => 1, "end_line" => 1,
+        "anchor_digest" => "1" * 64
+      },
+      "lifecycle" => "open", "display_order" => 1
+    }
+    {
+      "summary" => summary, "coverage" => [], "findings" => [ finding ],
+      "routes" => [], "artifacts" => []
+    }
+  end
+
+  def with_replaced_task_method(name, replacement)
+    original = Task.instance_method(name)
+    Task.define_method(name, replacement)
+    yield
+  ensure
+    Task.define_method(name, original)
+  end
 
   # Turbo refreshes the project rail and composer select while this test is
   # using them. Query and click in one JavaScript turn so a refresh cannot

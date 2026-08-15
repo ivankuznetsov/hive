@@ -3,7 +3,7 @@ title: Hive::Task
 type: module
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_counter.rb
 created: 2026-04-25
-updated: 2026-07-24
+updated: 2026-08-13
 tags: [model, task, parsing, task-id, dependencies, workflows]
 ---
 
@@ -24,6 +24,13 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
    Managed task resolution keeps the same strict exception; it converts other
    managed configuration failures to `InvalidTaskPath` but never converts an
    unsupported project root key to exit 64.
+   A managed task must match the workflow's selected source, manifest, and
+   configuration digests. Historical pins are not executable: Hive raises an
+   `InvalidTaskPath` instruction to run `hive migrate`, whose dedicated
+   migration boundary reads the old descriptor and moves/repins the task to
+   the selected semantic stage. Launch-time context repeats the selection
+   check so a task object created immediately before an update cannot dispatch
+   the superseded package.
 5. Validate the parsed stage name and numeric prefix against the selected
    descriptor. A policy-only repin may retain an existing directory when that
    directory is the exact terminal stage of another registered descriptor.
@@ -53,7 +60,6 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
 | `#id` | Numeric id from `meta.yml`, or nil when absent/malformed/unallocated |
 | `#display_name` | `display_name` from `meta.yml`, or nil |
 | `#depends_on` | Single same-project id/slug or explicit `project:slug` prerequisite from `meta.yml`, or nil |
-| `#display_label` | `display_name || slug` |
 | `#lock_file` | `File.join(folder, ".lock")` |
 | `#log_dir` | `File.join(@hive_state_path, "logs", @slug)` |
 | `#commit_lock_file` | `File.join(@hive_state_path, ".commit-lock")` |
@@ -74,9 +80,16 @@ For stages 4 and later:
 
 `Hive::TaskMeta` (`lib/hive/task_meta.rb`) owns the optional `<task>/meta.yml` sidecar:
 
-- `read(task_folder)` returns `{id:, slug:, display_name:, depends_on:, workflow:}` and is total over missing, malformed, or non-Hash YAML.
+- `read(task_folder)` returns the identity/workflow fields plus optional
+  `plan_review_required: true`; it is total over missing, malformed, or
+  non-Hash YAML.
 - `read_for_admission(task_folder)` returns a result-bearing strict read. It distinguishes an absent legacy sidecar from unreadable YAML, a non-mapping document, and an invalid dependency reference; admission code must use this path rather than interpreting tolerant-read nil as “no dependency.”
-- `write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil)` normalizes empty strings to nil, normalizes ids with `Integer(...)`, writes optional `depends_on` / `workflow` only when present, and writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
+- `write(..., plan_review_required: nil)` preserves the ordinary identity and
+  workflow fields, accepts only literal `true` for the plan-review flag, and
+  writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
+- `plan_review_required?(task_folder)` strictly distinguishes migrated/new
+  pre-execute coding tasks from legacy execute tasks. Absence is the durable
+  compatibility shape; malformed values fail closed.
 - `update_display_name(task_folder, name)` preserves the existing id, slug, `depends_on`, and `workflow`, defaulting slug to `File.basename(task_folder)` only when the sidecar is absent. It refuses corrupt input.
 - `update_id(task_folder, id)` preserves slug, display name, `depends_on`, and `workflow`, and likewise refuses corrupt input; daemon backfill cannot sanitize dependency evidence by replacing a damaged mapping.
 

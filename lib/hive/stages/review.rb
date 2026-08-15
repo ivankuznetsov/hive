@@ -601,21 +601,23 @@ module Hive
             protected_anchors: protected_set,
             permitted_writable_roots: [ task.folder, worktree_path ]
           )
-          custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
+          agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
           before_fix_head = git_head(worktree_path)
 
-          begin
-            fix_result = spawn_fix_agent(
-              task, cfg, ctx_pass, accepted: accepted, identity: fix_identity
-            )
-          ensure
-            custody_report = Hive::ArtifactFirewall.validate_and_restore(
-              custody_manifest, custody_snapshot
-            )
+          fix_result = spawn_fix_agent(
+            task, cfg, ctx_pass, accepted: accepted, identity: fix_identity,
+            agent_custody: agent_custody
+          )
+          custody_report = agent_custody.report
+          if !custody_report && !agent_failed?(fix_result)
+            Hive::Markers.set(task.state_file, :review_error,
+                              phase: :fix, reason: "fix_custody_missing", pass: pass)
+            return { commit: "fix_custody_missing_pass_#{format('%02d', pass)}",
+                     status: :review_error }
           end
           after_fix_head = git_head(worktree_path)
 
-          if custody_report.tampered?
+          if custody_report&.tampered?
             Hive::Markers.set(task.state_file, :review_error,
                               phase: :fix, reason: "fix_tampered",
                               files: custody_report.tampered_labels.join(","), pass: pass,
@@ -2000,10 +2002,6 @@ module Hive
         true
       end
 
-      def collect_answered_escalation_findings(ctx)
-        collect_answered_escalation_findings_with_count(ctx).text
-      end
-
       def collect_answered_escalation_findings_with_count(ctx)
         path = Hive::Stages::Review::Triage.escalations_path(ctx)
         questions = parse_escalation_questions(path)
@@ -2023,10 +2021,6 @@ module Hive
           out << "\n"
         end
         AcceptedFindings.new(text: out, count: answered.size)
-      end
-
-      def collect_legacy_checked_escalations(path)
-        collect_legacy_checked_escalations_with_count(path).text
       end
 
       def collect_legacy_checked_escalations_with_count(path)
@@ -2119,7 +2113,8 @@ module Hive
         File.write(path, body)
       end
 
-      def spawn_fix_agent(task, cfg, ctx, accepted:, identity: nil)
+      def spawn_fix_agent(task, cfg, ctx, accepted:, identity: nil,
+                          agent_custody: nil)
         identity ||= Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
         profile_name = identity&.provider || cfg.dig("review", "fix", "agent") || "claude"
         profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
@@ -2158,6 +2153,7 @@ module Hive
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
           implementation_stage: "review.fix",
+          agent_custody: agent_custody,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only,
           **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
@@ -2514,7 +2510,7 @@ module Hive
         when :auto_committed
           emit_pre_fix_clean_exit_event(task, cleanup)
           worktree_status(worktree_path)
-        when :git_failed
+        when :safety_violation, :git_failed
           [ :status_failed, cleanup[:message].to_s ]
         else
           :dirty
@@ -2524,12 +2520,16 @@ module Hive
       end
 
       def emit_pre_fix_clean_exit_event(task, result)
+        paths = Hive::Events.clean_exit_paths(result[:paths])
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
           stage: "6-review", # coding-scoped: coding review stage event
           event_type: :clean_exit_auto_committed,
-          message: "reason=pre_fix_dirty_worktree head=#{result[:head]} paths=#{Array(result[:paths]).join(',')[0, 200]}"
+          message: "reason=pre_fix_dirty_worktree head=#{result[:head]} paths=#{paths.join(',')[0, 200]}",
+          data: Hive::Events.clean_exit_data(
+            head: result[:head], reason: "pre_fix_dirty_worktree", paths: paths
+          )
         )
       rescue StandardError
         nil

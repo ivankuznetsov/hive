@@ -1,0 +1,313 @@
+{
+  "schema": "hive-plan-review-proof",
+  "schema_version": 1,
+  "captured_at": "2026-08-12T12:00:00Z",
+  "outcomes": [
+    {
+      "name": "skipped",
+      "task_id": "local-reversible-plan",
+      "review_id": "pr-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "plan": {
+        "generation": "plan-generation-1",
+        "digest": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "policy": {
+        "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "computed_level": "skip",
+        "effective_level": "skip",
+        "matched_reasons": ["all_skip_predicates_satisfied"]
+      },
+      "attempts": {
+        "generated": 0,
+        "current": 0,
+        "superseded": 0,
+        "current_artifact_sets": 1
+      },
+      "coverage": {
+        "requested": [],
+        "completed": [],
+        "failed": [],
+        "unsupported": [],
+        "waived": []
+      },
+      "findings": {
+        "open": 0,
+        "approved": 0,
+        "answered": 0,
+        "incorporated": 0,
+        "resolved": 0,
+        "duplicate_actions": 0
+      },
+      "planner": {
+        "provider": "claude",
+        "model": "opus",
+        "family": "anthropic",
+        "effort": "high",
+        "route": "native_claude"
+      },
+      "reviewer": {
+        "requested": null,
+        "actual": null,
+        "independence_verified": false,
+        "reason": "review_not_invoked"
+      },
+      "state": "skipped",
+      "outcome": "skipped",
+      "degradation_reason": null,
+      "blocker": null,
+      "required_action": null,
+      "execution_allowed": true,
+      "transition": {
+        "before_resolution": "denied",
+        "after_resolution": "allowed_once"
+      },
+      "surfaces": {
+        "cli_json": {"state": "skipped", "blocker": null, "required_action": null},
+        "operational_status": {"state": "skipped", "blocker": null, "required_action": null},
+        "daemon_tui": {"state": "skipped", "blocker": null, "required_action": null},
+        "web": {"state": "skipped", "blocker": null, "required_action": null}
+      }
+    },
+    {
+      "name": "cleared",
+      "task_id": "standard-reviewed-plan",
+      "review_id": "pr-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "plan": {
+        "generation": "plan-generation-2",
+        "digest": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "policy": {
+        "fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "computed_level": "standard",
+        "effective_level": "standard",
+        "matched_reasons": ["default_standard"]
+      },
+      "attempts": {
+        "generated": 3,
+        "current": 1,
+        "superseded": 2,
+        "current_artifact_sets": 1
+      },
+      "coverage": {
+        "requested": ["whole_document", "adversarial"],
+        "completed": ["whole_document", "adversarial"],
+        "failed": [],
+        "unsupported": [],
+        "waived": []
+      },
+      "findings": {
+        "open": 0,
+        "approved": 1,
+        "answered": 1,
+        "incorporated": 2,
+        "resolved": 2,
+        "duplicate_actions": 0
+      },
+      "planner": {
+        "provider": "claude",
+        "model": "opus",
+        "family": "anthropic",
+        "effort": "high",
+        "route": "native_claude"
+      },
+      "reviewer": {
+        "requested": {
+          "provider": "grok",
+          "model": "grok-4.6",
+          "family": "grok",
+          "effort": "high",
+          "route": "native_grok"
+        },
+        "actual": {
+          "provider": "grok",
+          "model": "grok-4.6",
+          "family": "grok",
+          "effort": "high",
+          "route": "native_grok"
+        },
+        "independence_verified": true,
+        "reason": "different_model_family"
+      },
+      "state": "cleared",
+      "outcome": "cleared",
+      "degradation_reason": null,
+      "blocker": null,
+      "required_action": null,
+      "execution_allowed": true,
+      "transition": {
+        "before_resolution": "denied",
+        "after_resolution": "allowed_once"
+      },
+      "surfaces": {
+        "cli_json": {"state": "cleared", "blocker": null, "required_action": null},
+        "operational_status": {"state": "cleared", "blocker": null, "required_action": null},
+        "daemon_tui": {"state": "cleared", "blocker": null, "required_action": null},
+        "web": {"state": "cleared", "blocker": null, "required_action": null}
+      }
+    },
+    {
+      "name": "degraded_cleared",
+      "task_id": "standard-provider-unavailable",
+      "review_id": "pr-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "plan": {
+        "generation": "plan-generation-3",
+        "digest": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "policy": {
+        "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "computed_level": "standard",
+        "effective_level": "standard",
+        "matched_reasons": ["default_standard"]
+      },
+      "attempts": {
+        "generated": 2,
+        "current": 1,
+        "superseded": 1,
+        "current_artifact_sets": 1
+      },
+      "coverage": {
+        "requested": ["whole_document", "adversarial"],
+        "completed": [],
+        "failed": ["whole_document", "adversarial"],
+        "unsupported": [],
+        "waived": []
+      },
+      "findings": {
+        "open": 0,
+        "approved": 0,
+        "answered": 0,
+        "incorporated": 0,
+        "resolved": 0,
+        "duplicate_actions": 0
+      },
+      "planner": {
+        "provider": "claude",
+        "model": "opus",
+        "family": "anthropic",
+        "effort": "high",
+        "route": "native_claude"
+      },
+      "reviewer": {
+        "requested": {
+          "provider": "grok",
+          "model": "grok-4.6",
+          "family": "grok",
+          "effort": "high",
+          "route": "native_grok"
+        },
+        "actual": null,
+        "independence_verified": false,
+        "reason": "provider_timeout_after_bounded_attempts"
+      },
+      "state": "degraded_cleared",
+      "outcome": "degraded_cleared",
+      "degradation_reason": "review_unavailable",
+      "blocker": null,
+      "required_action": null,
+      "execution_allowed": true,
+      "transition": {
+        "before_resolution": "denied",
+        "after_resolution": "allowed_once"
+      },
+      "surfaces": {
+        "cli_json": {"state": "degraded_cleared", "blocker": null, "required_action": null},
+        "operational_status": {"state": "degraded_cleared", "blocker": null, "required_action": null},
+        "daemon_tui": {"state": "degraded_cleared", "blocker": null, "required_action": null},
+        "web": {"state": "degraded_cleared", "blocker": null, "required_action": null}
+      }
+    },
+    {
+      "name": "blocked",
+      "task_id": "mandatory-independent-coverage-missing",
+      "review_id": "pr-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "plan": {
+        "generation": "plan-generation-4",
+        "digest": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "policy": {
+        "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "computed_level": "mandatory",
+        "effective_level": "mandatory",
+        "matched_reasons": ["authentication_or_permissions"]
+      },
+      "attempts": {
+        "generated": 1,
+        "current": 1,
+        "superseded": 0,
+        "current_artifact_sets": 1
+      },
+      "coverage": {
+        "requested": ["whole_document", "adversarial"],
+        "completed": ["whole_document"],
+        "failed": ["adversarial"],
+        "unsupported": [],
+        "waived": []
+      },
+      "findings": {
+        "open": 1,
+        "approved": 0,
+        "answered": 0,
+        "incorporated": 0,
+        "resolved": 0,
+        "duplicate_actions": 0
+      },
+      "planner": {
+        "provider": "claude",
+        "model": "opus",
+        "family": "anthropic",
+        "effort": "high",
+        "route": "native_claude"
+      },
+      "reviewer": {
+        "requested": {
+          "provider": "grok",
+          "model": "grok-4.6",
+          "family": "grok",
+          "effort": "high",
+          "route": "native_grok"
+        },
+        "actual": {
+          "provider": "claude",
+          "model": "sonnet",
+          "family": "anthropic",
+          "effort": "high",
+          "route": "fallback_claude"
+        },
+        "independence_verified": false,
+        "reason": "same_model_family"
+      },
+      "state": "blocked",
+      "outcome": "blocked",
+      "degradation_reason": null,
+      "blocker": "required independent adversarial coverage is incomplete",
+      "required_action": "waive named coverage or restore required reviewer capability",
+      "execution_allowed": false,
+      "transition": {
+        "before_resolution": "denied",
+        "after_resolution": "still_denied"
+      },
+      "surfaces": {
+        "cli_json": {
+          "state": "blocked",
+          "blocker": "required independent adversarial coverage is incomplete",
+          "required_action": "waive named coverage or restore required reviewer capability"
+        },
+        "operational_status": {
+          "state": "blocked",
+          "blocker": "required independent adversarial coverage is incomplete",
+          "required_action": "waive named coverage or restore required reviewer capability"
+        },
+        "daemon_tui": {
+          "state": "blocked",
+          "blocker": "required independent adversarial coverage is incomplete",
+          "required_action": "waive named coverage or restore required reviewer capability"
+        },
+        "web": {
+          "state": "blocked",
+          "blocker": "required independent adversarial coverage is incomplete",
+          "required_action": "waive named coverage or restore required reviewer capability"
+        }
+      }
+    }
+  ]
+}

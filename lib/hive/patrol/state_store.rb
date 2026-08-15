@@ -24,6 +24,24 @@ module Hive
       FINDING_PROJECTION_KEYS = %w[
         category feature_id root_cause_tokens target_sha title_tokens
       ].freeze
+      FINDING_QUERY_SCHEMA = "hive-patrol-finding-query".freeze
+      FINDING_QUERY_SCHEMA_VERSION = 1
+      FINDING_QUERY_LIMIT = 25
+      FINDING_QUERY_MAX_BYTES = 256 * 1024
+      FINDING_QUERY_KEYS = %w[
+        counts items schema schema_version total truncated
+      ].freeze
+      FINDING_QUERY_ITEM_LIMITS = {
+        "id" => 128,
+        "feature_id" => 128,
+        "category" => 64,
+        "severity" => 32,
+        "confidence" => 32,
+        "title" => 512,
+        "description" => 4 * 1024,
+        "lifecycle_state" => 32,
+        "lifecycle_updated_at" => 64
+      }.freeze
 
       def initialize(project_root, hive_state_path: nil)
         super(
@@ -42,6 +60,14 @@ module Hive
         @cycle_lock_owner = nil
       end
 
+      # The finding query file is a bounded, derived read model. Patrol owns
+      # its construction so status consumers never need to parse the complete
+      # finding corpus. A dirty marker makes an interrupted writer fail closed
+      # until the next Patrol cycle repairs the projection.
+      def ensure!
+        super
+      end
+
       # One stable installation-local lock spans recovery, suppression reads,
       # agent work, and every resulting effect. Nested collaborators reuse the
       # same lock in one thread; other threads/processes wait on the flock.
@@ -52,6 +78,8 @@ module Hive
         @cycle_directory.prepare!
         @cycle_directory.with_lock("cycle.lock") do
           @cycle_lock_owner = owner
+          ensure!
+          repair_finding_query_projection!
           yield
         ensure
           @cycle_lock_owner = nil
@@ -115,18 +143,6 @@ module Hive
         )
       end
 
-      def each_reserved_occurrence(&block)
-        return @occurrence_store.each_reserved unless block
-
-        @occurrence_store.each_reserved(&block)
-      end
-
-      def each_projection_pending_occurrence(&block)
-        return @occurrence_store.each_projection_pending unless block
-
-        @occurrence_store.each_projection_pending(&block)
-      end
-
       def each_recovery_active_occurrence(&block)
         return @occurrence_store.each_recovery_active unless block
 
@@ -137,12 +153,6 @@ module Hive
 
       def rebuild_recovery_index!
         @occurrence_store.rebuild_recovery_index!
-      end
-
-      def each_occurrence(&block)
-        return @occurrence_store.each_record unless block
-
-        @occurrence_store.each_record(&block)
       end
 
       def finalize_occurrence!(capture:, event: nil, evidence_store:,
@@ -445,7 +455,59 @@ module Hive
           sink: "finding",
           target: "findings/#{finding.id}",
           value: finding.to_h
-        ) { write_record("findings", finding) }
+        ) do
+          mark_finding_query_dirty!
+          write_record("findings", finding)
+        end
+      end
+
+      def finding_query_projection
+        dirty = @cycle_directory.entry_type(
+          "finding-query.dirty", missing: true
+        )
+        raise Hive::ConfigError, "patrol finding query projection is rebuilding" if dirty
+
+        bytes = @cycle_directory.read(
+          "finding-query.json", max_bytes: FINDING_QUERY_MAX_BYTES,
+          missing: true
+        )
+        payload = bytes && JSON.parse(bytes)
+        finding_query_projection_valid!(payload)
+        payload
+      rescue JSON::ParserError, EncodingError, Hive::ManagedDirectory::UnsafeError
+        raise_finding_query_unavailable!
+      end
+
+      # Writer-side repair only. It may scan the authoritative finding corpus,
+      # but no read-only Web or CLI request calls it.
+      def rebuild_finding_query_projection!
+        mark_finding_query_dirty!
+        values = findings
+        counts = values.each_with_object(Hash.new(0)) do |finding, result|
+          result[finding_lifecycle(finding)] += 1
+        end
+        ordered = values.sort_by do |finding|
+          [ finding_lifecycle(finding) == "active" ? 0 : 1,
+            -finding_query_time(finding) ]
+        end
+        payload = {
+          "schema" => FINDING_QUERY_SCHEMA,
+          "schema_version" => FINDING_QUERY_SCHEMA_VERSION,
+          "total" => values.size,
+          "counts" => counts.sort.to_h,
+          "items" => ordered.first(FINDING_QUERY_LIMIT).map do |finding|
+            finding_query_item(finding)
+          end,
+          "truncated" => values.size > FINDING_QUERY_LIMIT
+        }
+        bytes = "#{JSON.pretty_generate(payload)}\n"
+        raise_finding_query_unavailable! if bytes.bytesize > FINDING_QUERY_MAX_BYTES
+
+        @cycle_directory.atomic_write(
+          "finding-query.json", bytes, mode: 0o600
+        )
+        @cycle_directory.unlink("finding-query.dirty", missing: true)
+        payload
       end
 
       def findings
@@ -479,6 +541,99 @@ module Hive
         finding.superseded_by = nil unless state.to_s == "superseded"
         write_finding(finding)
       end
+
+      private
+
+      def mark_finding_query_dirty!
+        @cycle_directory.atomic_write(
+          "finding-query.dirty", "dirty\n", mode: 0o600
+        )
+      end
+
+      def repair_finding_query_projection!
+        finding_query_projection
+      rescue Hive::ConfigError
+        rebuild_finding_query_projection!
+      end
+
+      def finding_lifecycle(finding)
+        value = finding.lifecycle_state.to_s
+        Hive::Patrol::Finding::LIFECYCLE_STATES.include?(value) ? value : "active"
+      end
+
+      def finding_query_item(finding)
+        {
+          "id" => bounded_finding_query_string(finding.id, 128),
+          "feature_id" => bounded_finding_query_string(finding.feature_id, 128),
+          "category" => bounded_finding_query_string(finding.category, 64),
+          "severity" => bounded_finding_query_string(finding.severity, 32),
+          "confidence" => bounded_finding_query_string(finding.confidence, 32),
+          "title" => bounded_finding_query_string(finding.title, 512),
+          "description" => bounded_finding_query_string(finding.description, 4 * 1024),
+          "lifecycle_state" => finding_lifecycle(finding),
+          "lifecycle_updated_at" => bounded_finding_query_string(
+            finding.lifecycle_updated_at, 64
+          )
+        }
+      end
+
+      def bounded_finding_query_string(value, max_bytes)
+        text = value.to_s.encode(
+          Encoding::UTF_8, invalid: :replace, undef: :replace, replace: ""
+        )
+        return text if text.bytesize <= max_bytes
+
+        text.b.byteslice(0, max_bytes).to_s.force_encoding(Encoding::UTF_8).scrub("")
+      end
+
+      def finding_query_projection_valid!(payload)
+        valid = payload.is_a?(Hash) &&
+                payload.keys.sort == FINDING_QUERY_KEYS &&
+                payload["schema"] == FINDING_QUERY_SCHEMA &&
+                payload["schema_version"] == FINDING_QUERY_SCHEMA_VERSION &&
+                payload["total"].is_a?(Integer) && payload["total"] >= 0 &&
+                valid_finding_query_counts?(payload["counts"]) &&
+                valid_finding_query_items?(payload["items"]) &&
+                [ true, false ].include?(payload["truncated"]) &&
+                payload["counts"].values.sum == payload["total"] &&
+                payload["items"].size == [ payload["total"], FINDING_QUERY_LIMIT ].min &&
+                payload["truncated"] == (payload["total"] > FINDING_QUERY_LIMIT)
+        raise_finding_query_unavailable! unless valid
+      end
+
+      def valid_finding_query_counts?(counts)
+        counts.is_a?(Hash) &&
+          (counts.keys - Hive::Patrol::Finding::LIFECYCLE_STATES).empty? &&
+          counts.values.all? { |value| value.is_a?(Integer) && value >= 0 }
+      end
+
+      def valid_finding_query_items?(items)
+        items.is_a?(Array) && items.size <= FINDING_QUERY_LIMIT &&
+          items.all? do |item|
+            item.is_a?(Hash) &&
+              item.keys.sort == FINDING_QUERY_ITEM_LIMITS.keys.sort &&
+              FINDING_QUERY_ITEM_LIMITS.all? do |key, max_bytes|
+                item[key].is_a?(String) && item[key].valid_encoding? &&
+                  item[key].bytesize <= max_bytes
+              end &&
+              Hive::Patrol::Finding::LIFECYCLE_STATES.include?(
+                item["lifecycle_state"]
+              )
+          end
+      end
+
+      def raise_finding_query_unavailable!
+        raise Hive::ConfigError,
+              "patrol finding query projection is unavailable; run a patrol cycle to rebuild it"
+      end
+
+      def finding_query_time(finding)
+        Time.iso8601(finding.lifecycle_updated_at.to_s).to_f
+      rescue ArgumentError
+        0.0
+      end
+
+      public
 
       def write_patch(id, data)
         data = data.merge(

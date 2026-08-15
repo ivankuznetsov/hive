@@ -45,6 +45,10 @@ module Hive
       ARCHITECTURE_STATES = %w[pending accepted deferred failed not_required].freeze
       ARCHIVE_STATES = %w[pending blocked archived failed superseded].freeze
       OUTCOME_STATES = %w[candidate rejected].freeze
+      REMOTE_POLL_HOLD_REASONS = %w[observed_head_changed].freeze
+      REMOTE_POLL_TERMINAL_STATES = %w[
+        merged delivered_elsewhere ambiguous
+      ].freeze
       MAX_DIAGNOSTIC_BYTES = 500
       DEFAULT_BACKOFF_BASE_SEC = 60
       DEFAULT_BACKOFF_MAX_SEC = 3600
@@ -147,13 +151,26 @@ module Hive
         keys.rotate(start).each do |key|
           candidate = state.fetch("candidates").fetch(key)
           next if %w[archived superseded].include?(candidate.dig("archive", "status"))
-          next if candidate.dig("observation", "held") == true
+          if candidate.dig("observation", "held") == true
+            hold_reason = candidate.dig("observation", "hold_reason")
+            next unless remote_poll_hold_reason?(hold_reason)
+            next unless candidate.dig("pull_request", "host") == state["host"]
+            next unless candidate.dig("pull_request", "repository") == state["repository"]
+            terminal_remote = REMOTE_POLL_TERMINAL_STATES.include?(
+              candidate.dig("remote", "state")
+            )
+            next if terminal_remote && candidate.dig("archive", "status") == "blocked"
+          end
           not_before = candidate.dig("retry", "not_before")
           next if not_before && Time.iso8601(not_before) > now
 
           return candidate
         end
         nil
+      end
+
+      def remote_poll_hold_reason?(reason)
+        REMOTE_POLL_HOLD_REASONS.include?(reason)
       end
 
       def advance_cursor!(state, key)

@@ -1,5 +1,6 @@
 require "hive/stages/base"
 require "hive/claude_launcher"
+require "hive/plan_review/orchestrator"
 
 module Hive
   module Stages
@@ -25,9 +26,13 @@ module Hive
         )
         # See brainstorm.rb: add-dir narrowed to the task folder so a
         # prompt-injected brainstorm.md cannot reach the project source.
-        spawn_plan_agent(task, cfg, prompt, profile)
+        result = spawn_plan_agent(task, cfg, prompt, profile)
         marker = Hive::Markers.current(task.state_file)
-        { commit: action_for(marker.name), status: marker.name }
+        review = start_plan_review(task, cfg, profile, result, marker)
+        {
+          commit: action_for(marker.name), status: marker.name,
+          plan_review: review&.summary
+        }
       end
 
       def spawn_plan_agent(task, cfg, prompt, profile)
@@ -69,6 +74,39 @@ module Hive
         when :error then "error"
         else marker_name.to_s
         end
+      end
+
+      def start_plan_review(task, cfg, profile, result, marker)
+        return nil unless %i[waiting complete].include?(marker.name)
+        return nil unless task.respond_to?(:workflow) && task.respond_to?(:meta_yml_path)
+
+        Hive::PlanReview::Orchestrator.run!(
+          task:, cfg:, planner_identity: planner_identity(profile, cfg, result)
+        )
+      end
+
+      def planner_identity(profile, cfg, result)
+        routing = Hive::ModelRouting.resolve(
+          models: cfg.fetch("models", Hive::ModelRouting::EMPTY_MODELS),
+          stage: "plan", provider: profile.name,
+          current: Hive::Stages::Base.model_routing_current(cfg["plan"]),
+          legacy: Hive::Stages::Base.model_routing_current(cfg["claude"])
+        )
+        model = result&.dig(:usage, :model) || routing.model || cfg.dig("plan", "model") || "unknown"
+        effort = routing.effort || cfg.dig("plan", "effort") || cfg.dig("claude", "effort") || "unknown"
+        {
+          "provider" => profile.name.to_s,
+          "model" => model.to_s,
+          "family" => planner_family(profile.name),
+          "effort" => effort.to_s,
+          "route" => profile.launcher_identity.to_s
+        }.freeze
+      end
+
+      def planner_family(name)
+        {
+          claude: "anthropic", codex: "openai", grok: "grok", pi: "pi"
+        }.fetch(name.to_sym, "unknown")
       end
     end
   end

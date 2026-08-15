@@ -1,5 +1,4 @@
 require "json"
-require "timeout"
 require "uri"
 require "yaml"
 require "hive/agent_git_gate"
@@ -43,11 +42,7 @@ module Hive
     # distinguishable from a clean scan. A blanket rescue that
     # returned `[]` on any error would reduce a security-critical
     # gate to a no-op on any transient gh hiccup.
-    ScanResult = Struct.new(:hits, :fetch_failed, :fetch_error, keyword_init: true) do
-      def clean?
-        hits.empty? && !fetch_failed
-      end
-    end
+    ScanResult = Struct.new(:hits, :fetch_failed, :fetch_error, keyword_init: true)
 
     module_function
 
@@ -520,10 +515,6 @@ module Hive
       raise Hive::GhError, "`gh pr list` returned unparseable JSON: #{e.message}"
     end
 
-    def repo_name_with_owner(worktree_path, cfg: nil)
-      repository_identity(worktree_path, cfg: cfg).fetch("repository")
-    end
-
     def repository_identity(worktree_path, cfg: nil, timeout_sec: nil, managed: false)
       repository_identity_from_remote(
         origin_push_url(
@@ -614,11 +605,6 @@ module Hive
       doc
     rescue JSON::ParserError => e
       raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
-    end
-
-    def pr_failing_job_logs(worktree_path, number, cfg: nil, byte_cap: 50 * 1024)
-      rollup = pr_status_rollup(worktree_path, number, cfg: cfg)
-      failing_jobs_with_logs(worktree_path, rollup, cfg: cfg, byte_cap: byte_cap)
     end
 
     def failing_jobs_with_logs(worktree_path, rollup, cfg: nil, byte_cap: 50 * 1024)
@@ -823,7 +809,22 @@ module Hive
       end
       stdout_r, stdout_w = IO.pipe
       stderr_r, stderr_w = IO.pipe
-      env = { "GIT_TERMINAL_PROMPT" => "0", "GIT_SSH_COMMAND" => "ssh -o BatchMode=yes" }
+      env = {
+        "GIT_TERMINAL_PROMPT" => "0",
+        "GIT_SSH_COMMAND" => "ssh -o BatchMode=yes",
+        # mise-backed gh shims may announce the selected tool on stdout.
+        # Every Hive::Gh caller treats stdout as GitHub's machine-readable
+        # payload, so keep compatibility chatter on the shim side silent.
+        "MISE_QUIET" => "1",
+        # Controller subprocesses must not inherit the parent bundle. Besides
+        # making packaged binaries deterministic, this prevents a helper
+        # implemented in Ruby from trying to materialize Hive's development
+        # Gemfile under a different system Ruby.
+        "RUBYOPT" => nil, "RUBYLIB" => nil, "BUNDLE_GEMFILE" => nil,
+        "BUNDLE_BIN_PATH" => nil, "BUNDLER_SETUP" => nil,
+        "BUNDLER_VERSION" => nil, "RUBYGEMS_GEMDEPS" => nil,
+        "GEM_HOME" => nil, "GEM_PATH" => nil
+      }
       # A dedicated process group lets the deadline cover helpers that inherit
       # stdout/stderr after the direct gh process exits. Otherwise waitpid can
       # succeed while reader threads block forever on a descendant-held pipe.
@@ -961,12 +962,6 @@ module Hive
 
     def monotonic_now
       Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    end
-
-    def with_network_timeout(timeout_sec: NETWORK_TIMEOUT_SEC, &block)
-      yield
-    rescue Timeout::Error
-      raise Hive::GhError, "network operation exceeded #{timeout_sec}s"
     end
   end
 end

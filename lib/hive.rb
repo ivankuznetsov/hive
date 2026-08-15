@@ -33,6 +33,12 @@ module Hive
       "hive-web-status" => 1,
       "hive-web-install" => 1,
       "hive-capture-requirement" => 1,
+      # Controller-owned, generation-bound outcome-evidence ledger. Legacy
+      # visual capture remains readable through its own v1/v2 contracts but
+      # cannot satisfy these universal coding-task requirements.
+      "hive-outcome-evidence-requirement" => 1,
+      "hive-outcome-evidence-attempt" => 1,
+      "hive-outcome-evidence-current" => 1,
       "hive-web-capture-runtime" => 1,
       "hive-artifact-capture" => 2,
       "hive-doctor" => 2,
@@ -40,6 +46,10 @@ module Hive
       "hive-run" => 2,
       "hive-approve" => 2,
       "hive-decide" => 1,
+      "hive-plan-review" => 1,
+      "hive-plan-review-action" => 1,
+      "hive-plan-review-level" => 1,
+      "hive-plan-review-adoption" => 1,
       "hive-findings" => 1,
       "hive-stage-action" => 2,
       "hive-metrics-rollback-rate" => 1,
@@ -47,6 +57,7 @@ module Hive
       "hive-forget" => 1,
       "hive-drop" => 2,
       "hive-prune" => 1,
+      "hive-worktree" => 1,
       "hive-daemon-status" => 1,
       "hive-daemon-stop" => 1,
       "hive-daemon-enroll" => 1,
@@ -57,10 +68,11 @@ module Hive
       # `Hive::Commands::Daemon#queue_command`.
       "hive-daemon-queue" => 1,
       "hive-patrol" => 3,
+      "hive-patrol-findings" => 1,
       "hive-patrol-finding" => 3,
-      "hive-refactor-patrol" => 3,
-      "hive-refactor-patrol-jobs" => 1,
-      "hive-refactor-patrol-thesis" => 3,
+      "hive-refactor-patrol" => 4,
+      "hive-refactor-patrol-jobs" => 2,
+      "hive-refactor-patrol-thesis" => 4,
       # Scaffold a blank per-project workflow descriptor (`hive workflow new ID
       # --json`). The error arm routes through Hive::Schemas::ErrorEnvelope so
       # its output carries the same schema/schema_version/error_kind keys as
@@ -126,6 +138,11 @@ module Hive
       # task-local authorities, not agent-callable command envelopes.
       "hive-task-closure-input" => 1,
       "hive-task-closure" => 1,
+      # Bounded, read-only detail projection shared by authenticated Web HTML
+      # and JSON. It is intentionally independent from fleet-wide status v7.
+      "hive-task-workspace" => 1,
+      # Forward-only controller and agent context provenance receipts.
+      "hive-context-receipt" => 1,
       # Project-local daemon ledger for task-bound merged-PR reconciliation.
       "hive-pr-merge-reconciliation" => 1
     }.freeze
@@ -233,6 +250,12 @@ module Hive
       READY_TO_ARCHIVE    = "ready_to_archive".freeze
       READY_TO_ADVANCE    = "ready_to_advance".freeze
       READY_TO_RUN        = "ready_to_run".freeze
+      PLAN_REVIEWING      = "plan_reviewing".freeze
+      PLAN_REVIEW_RETRY   = "plan_review_retry".freeze
+      PLAN_REVIEW_DECISION = "plan_review_decision".freeze
+      PLAN_REVIEW_DEGRADED = "plan_review_degraded".freeze
+      PLAN_REVIEW_UNSUPPORTED = "plan_review_unsupported".freeze
+      PLAN_REVIEW_BLOCKED = "plan_review_blocked".freeze
       # Explicit operator-only retry for a validated draft-PR handoff. The
       # daemon's Policy does not dispatch this key; status still exposes the
       # exact `hive run` command for a human-controlled retry.
@@ -264,6 +287,7 @@ module Hive
       CONCURRENT_RUN    = "concurrent_run".freeze
       TASK_IN_ERROR     = "task_in_error".freeze
       WRONG_STAGE       = "wrong_stage".freeze
+      PLAN_REVIEW_BLOCKED = "plan_review_blocked".freeze
       STAGE             = "stage".freeze
       CONFIG            = "config".freeze
       AGENT             = "agent".freeze
@@ -328,12 +352,11 @@ module Hive
     #   * `envelope_error_kind(error)` — map an exception to a
     #     closed-enum `error_kind` value
     #
-    # Used by default-stdout command producers whose error schemas share
-    # ErrorEnvelope's common shape. Commands with injected output streams,
-    # variant schema routing, or schema-specific payloads keep specialised
-    # emitters. Metrics, for example, deliberately retains its narrower v1
-    # payload, which omits `error_class`; forcing it through this mixin would
-    # change a published contract rather than remove duplication.
+    # Used by default-stdout command producers. Commands with injected output
+    # streams or variant schema routing keep specialised emitters. Consumers
+    # with a narrower published schema may override `envelope_payload_for`;
+    # Metrics does this to retain its v1 payload without `error_class` while
+    # still sharing the rescue, single-document guard, and write handling.
     #
     # Consumers may also override `envelope_extras` to merge per-command
     # fields (e.g. `{"verb" => "review"}`) into the envelope; the default is

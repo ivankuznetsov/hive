@@ -68,6 +68,14 @@ class HiveBotDispatchRequestWriterTest < Minitest::Test
     assert_equal "3-plan", W.intended_stage_for([ "hive", "plan", "task" ], task)
   end
 
+  def test_plan_review_runner_stays_bound_to_the_current_plan_stage
+    task = Struct.new(:stage_index, :stage_name).new(3, "plan")
+
+    assert_equal "3-plan", W.intended_stage_for(
+      [ "hive", "plan-review-run", "task" ], task
+    )
+  end
+
   def test_write_uses_chronologically_sortable_filename
     Dir.mktmpdir("hive-writer") do |dir|
       W.write!(project: "p", slug: "first", argv: [ "hive", "run", "first" ],

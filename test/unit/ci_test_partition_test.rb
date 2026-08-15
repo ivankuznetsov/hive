@@ -1,9 +1,13 @@
 require "test_helper"
+require "json"
 require "open3"
 require "rake"
 require "yaml"
+require_relative "../support/coverage"
 
 class CiTestPartitionTest < Minitest::Test
+  include HiveTestHelper
+
   ROOT = File.expand_path("../..", __dir__)
   UPLOAD_ARTIFACT_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
   DOWNLOAD_ARTIFACT_ACTION = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
@@ -11,6 +15,8 @@ class CiTestPartitionTest < Minitest::Test
     HIVE_CI_GATE_TESTS
     HIVE_CI_GATE_TEST_OPTIONS
     HIVE_DEFAULT_TEST_FILES
+    HIVE_COVERAGE_SHARD_COUNT
+    HIVE_COVERAGE_SHARDS
     HIVE_HOSTILE_TEST_FILES
   ].freeze
 
@@ -40,6 +46,34 @@ class CiTestPartitionTest < Minitest::Test
       assert gate_tests.keys.all? { |name|
         Rake::Task[name].prerequisites == [ "test:require_nonempty_ci_gate" ]
       }
+    end
+  end
+
+  def test_coverage_shards_are_complete_disjoint_and_split_the_measured_hot_partition
+    with_loaded_rakefile do
+      files = Object.const_get(:HIVE_DEFAULT_TEST_FILES)
+      shard_count = Object.const_get(:HIVE_COVERAGE_SHARD_COUNT)
+      shards = Object.const_get(:HIVE_COVERAGE_SHARDS)
+
+      assert_equal 6, shard_count
+      assert_equal shard_count, shards.length
+      assert_equal files.sort, shards.flatten.sort
+      assert_equal files.length, shards.flatten.uniq.length
+      refute shards.any?(&:empty?)
+      assert shards.all?(&:frozen?)
+      assert shards.frozen?
+
+      base_shards = size_balanced_shards(files, 4)
+      assert_equal base_shards[0].sort, shards[0].sort
+      assert_equal base_shards[1].sort, shards[1].sort
+      assert_equal base_shards[2].sort, (shards[2] + shards[3]).sort
+      assert_equal base_shards[3].sort, (shards[4] + shards[5]).sort
+
+      [ shards[2, 2], shards[4, 2] ].each do |pair|
+        byte_counts = pair.map { |shard| shard.sum { |path| File.size(File.join(ROOT, path)) } }
+        assert_operator byte_counts.max - byte_counts.min, :<, 10_000,
+                        "split hot coverage shards should remain source-byte balanced: #{byte_counts.inspect}"
+      end
     end
   end
 
@@ -74,7 +108,58 @@ class CiTestPartitionTest < Minitest::Test
       assert_equal 'bundle exec rake "$HIVE_CI_GATE_TASK"', run_step.fetch("run")
       assert_equal "${{ matrix.task }}", run_step.fetch("env").fetch("HIVE_CI_GATE_TASK")
 
-      assert_equal "coverage (Ruby ${{ matrix.ruby }})", workflow.fetch("jobs").fetch("test").fetch("name")
+      coverage_shards = workflow.fetch("jobs").fetch("coverage-shards")
+      assert_equal "coverage shard ${{ matrix.label }}/6", coverage_shards.fetch("name")
+      assert_equal [
+        { "shard" => 0, "label" => 1 },
+        { "shard" => 1, "label" => 2 },
+        { "shard" => 2, "label" => 3 },
+        { "shard" => 3, "label" => 4 },
+        { "shard" => 4, "label" => 5 },
+        { "shard" => 5, "label" => 6 }
+      ], coverage_shards.dig("strategy", "matrix", "include")
+      collect = coverage_shards.fetch("steps").find { |step| step["name"] == "Collect coverage shard" }
+      assert_equal "bundle exec rake coverage:collect", collect.fetch("run")
+      assert_equal "${{ matrix.shard }}", collect.fetch("env").fetch("HIVE_COVERAGE_SHARD_INDEX")
+      assert_equal "6", collect.fetch("env").fetch("HIVE_COVERAGE_SHARD_COUNT")
+      assert_equal "shard-${{ matrix.shard }}", collect.fetch("env").fetch("HIVE_COVERAGE_RUN_ID")
+      assert_equal "${{ github.sha }}", collect.fetch("env").fetch("HIVE_COVERAGE_REVISION")
+      assert_equal "${{ github.run_id }}",
+                   collect.fetch("env").fetch("HIVE_COVERAGE_WORKFLOW_RUN_ID")
+
+      upload = coverage_shards.fetch("steps").find { |step| step["name"] == "Retain raw coverage results" }
+      assert_equal UPLOAD_ARTIFACT_ACTION, upload.fetch("uses")
+      assert_equal "always()", upload.fetch("if")
+      assert_equal "coverage-shard-${{ matrix.shard }}", upload.dig("with", "name")
+      assert_equal "coverage/.resultset/shard-${{ matrix.shard }}", upload.dig("with", "path")
+      assert_equal true, upload.dig("with", "include-hidden-files")
+      assert_equal "error", upload.dig("with", "if-no-files-found")
+      assert_equal true, upload.dig("with", "overwrite")
+
+      coverage_gate = workflow.fetch("jobs").fetch("test")
+      assert_equal "coverage (Ruby 3.4)", coverage_gate.fetch("name")
+      assert_equal "${{ always() }}", coverage_gate.fetch("if")
+      assert_equal "coverage-shards", coverage_gate.fetch("needs")
+      shard_verdict = coverage_gate.fetch("steps").fetch(0)
+      assert_equal "Require every coverage collector", shard_verdict.fetch("name")
+      assert_equal "bash", shard_verdict.fetch("shell")
+      assert_equal "${{ needs.coverage-shards.result }}",
+                   shard_verdict.dig("env", "HIVE_COVERAGE_SHARDS_RESULT")
+      assert_equal 'test "$HIVE_COVERAGE_SHARDS_RESULT" = "success"', shard_verdict.fetch("run")
+      download = coverage_gate.fetch("steps").find { |step| step["name"] == "Download coverage shards" }
+      assert_equal DOWNLOAD_ARTIFACT_ACTION, download.fetch("uses")
+      assert_equal "coverage-shard-*", download.dig("with", "pattern")
+      assert_equal "coverage/.resultset/merged", download.dig("with", "path")
+      refute download.fetch("with").key?("merge-multiple")
+      merge = coverage_gate.fetch("steps").find { |step| step["name"] == "Merge shards and enforce exact coverage" }
+      assert_equal "bundle exec rake coverage:report", merge.fetch("run")
+      assert_equal "100", merge.fetch("env").fetch("HIVE_COVERAGE_MIN_LINE")
+      assert_equal "merged", merge.fetch("env").fetch("HIVE_COVERAGE_RUN_ID")
+      assert_equal "6", merge.fetch("env").fetch("HIVE_COVERAGE_EXPECTED_SHARDS")
+      assert_equal "${{ github.sha }}", merge.fetch("env").fetch("HIVE_COVERAGE_REVISION")
+      assert_equal "${{ github.run_id }}",
+                   merge.fetch("env").fetch("HIVE_COVERAGE_WORKFLOW_RUN_ID")
+
       required_gate = workflow.fetch("jobs").fetch("required-test-gate")
       assert_equal "rake test (Ruby 3.4)", required_gate.fetch("name")
       assert_equal "${{ always() }}", required_gate.fetch("if")
@@ -128,6 +213,61 @@ class CiTestPartitionTest < Minitest::Test
       command
     )
     refute_includes command, "--path web"
+  end
+
+  def test_ci_runs_independent_web_suites_in_parallel_behind_the_existing_gate
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+    jobs = workflow.fetch("jobs")
+    web_tests = jobs.fetch("web-tests")
+    matrix = web_tests.dig("strategy", "matrix", "include")
+
+    assert_equal [
+      { "name" => "Hive web integration tests", "suite" => "integration" },
+      { "name" => "Hive web system tests", "suite" => "system" },
+      { "name" => "Hive web golden-path E2E", "suite" => "golden" }
+    ], matrix
+    assert_equal "${{ matrix.name }}", web_tests.fetch("name")
+    assert_equal false, web_tests.dig("strategy", "fail-fast")
+
+    steps = web_tests.fetch("steps")
+    playwright = steps.find do |step|
+      step["name"] == "Install Playwright chromium for Capybara system tests"
+    end
+    integration = steps.find { |step| step["name"] == "Rails integration tests" }
+    system = steps.find { |step| step["name"] == "Rails system tests (Capybara + Playwright)" }
+    golden = steps.find do |step|
+      step["name"] == "Hive web golden-path E2E (claim → idea → Q&A → daemon → PR gate)"
+    end
+    golden_bundle = steps.find do |step|
+      step["name"] == "Install the gem bundle (the golden-path E2E spawns a real daemon)"
+    end
+    lint = steps.find { |step| step["name"] == "rubocop (web)" }
+
+    assert_equal "${{ matrix.suite != 'integration' }}", playwright.fetch("if")
+    assert_equal "${{ matrix.suite == 'integration' }}", integration.fetch("if")
+    assert_equal "bin/rails test", integration.fetch("run")
+    assert_equal "${{ matrix.suite == 'system' }}", system.fetch("if")
+    assert_equal "bin/rails test:system", system.fetch("run")
+    assert_equal "${{ matrix.suite == 'golden' }}", golden.fetch("if")
+    assert_equal "bin/rails test test/e2e/golden_path_e2e.rb", golden.fetch("run")
+    assert_equal "${{ github.workspace }}/vendor/root-bundle",
+                 golden.dig("env", "GOLDEN_E2E_BUNDLE_PATH")
+    assert_equal "${{ matrix.suite == 'golden' }}", golden_bundle.fetch("if")
+    assert_equal ".", golden_bundle.fetch("working-directory")
+    assert_equal "bundle install --jobs 4", golden_bundle.fetch("run")
+    assert_equal "${{ github.workspace }}/Gemfile", golden_bundle.dig("env", "BUNDLE_GEMFILE")
+    assert_equal "${{ github.workspace }}/vendor/root-bundle",
+                 golden_bundle.dig("env", "BUNDLE_PATH")
+    assert_equal "${{ matrix.suite == 'integration' }}", lint.fetch("if")
+    assert_equal "bin/rubocop --format github", lint.fetch("run")
+
+    web_gate = jobs.fetch("web")
+    assert_equal "Hive web (Rails tests + system)", web_gate.fetch("name")
+    assert_equal "${{ always() }}", web_gate.fetch("if")
+    assert_equal "web-tests", web_gate.fetch("needs")
+    gate_step = web_gate.fetch("steps").fetch(0)
+    assert_equal "${{ needs.web-tests.result }}", gate_step.dig("env", "HIVE_WEB_TESTS_RESULT")
+    assert_equal 'test "$HIVE_WEB_TESTS_RESULT" = "success"', gate_step.fetch("run")
   end
 
   def test_incident_duration_budget_is_advisory_and_separate_from_functional_e2e
@@ -214,7 +354,144 @@ class CiTestPartitionTest < Minitest::Test
     assert_includes output, "CI gate selected zero non-skipped tests with assertions"
   end
 
+  def test_coverage_prepare_shard_rejects_invalid_metadata
+    cases = [
+      [ { "HIVE_COVERAGE_SHARD_INDEX" => nil }, "index, count, and run ID must be provided" ],
+      [ { "HIVE_COVERAGE_SHARD_INDEX" => "nope" }, "index, count, and run ID must be provided" ],
+      [ { "HIVE_COVERAGE_SHARD_INDEX" => "6" }, "coverage shard must be 0..5 of 6" ],
+      [ { "HIVE_COVERAGE_SHARD_COUNT" => "5" }, "coverage shard must be 0..5 of 6" ],
+      [ { "HIVE_COVERAGE_RUN_ID" => "" }, "HIVE_COVERAGE_RUN_ID must not be empty" ]
+    ]
+    baseline = {
+      "HIVE_COVERAGE_SHARD_INDEX" => "0",
+      "HIVE_COVERAGE_SHARD_COUNT" => "6",
+      "HIVE_COVERAGE_RUN_ID" => "task-contract"
+    }
+
+    cases.each do |overrides, expected|
+      output = capture_io do
+        with_env(baseline.merge(overrides)) do
+          with_loaded_rakefile do
+            assert_raises(SystemExit) { Rake::Task["coverage:prepare_shard"].invoke }
+          end
+        end
+      end.join
+      assert_includes output, expected
+    end
+  end
+
+  def test_coverage_prepare_shard_assigns_catalog_preload_to_first_collector_only
+    { "0" => "1", "1" => "0", "5" => "0" }.each do |shard_index, expected|
+      env = {
+        "HIVE_COVERAGE_SHARD_INDEX" => shard_index,
+        "HIVE_COVERAGE_SHARD_COUNT" => "6",
+        "HIVE_COVERAGE_RUN_ID" => "preload-contract-#{shard_index}",
+        "HIVE_COVERAGE" => nil,
+        "HIVE_COVERAGE_ROOT" => nil,
+        "HIVE_COVERAGE_COLLECT_ONLY" => nil,
+        "HIVE_COVERAGE_LOAD_ALL" => nil,
+        "HIVE_REQUIRE_TEST_RUNS" => nil,
+        "RUBYOPT" => nil
+      }
+
+      with_env(env) do
+        with_loaded_rakefile do
+          with_replaced_singleton_method(FileUtils, :rm_rf, ->(_path) { }) do
+            with_replaced_singleton_method(FileUtils, :rm_f, ->(_path) { }) do
+              Rake::Task["coverage:prepare_shard"].invoke
+            end
+          end
+
+          assert_equal expected, ENV.fetch("HIVE_COVERAGE_LOAD_ALL")
+        end
+      end
+    end
+  end
+
+  def test_coverage_collect_rejects_missing_results_and_errors_then_writes_manifest
+    coverage_state = coverage_state_snapshot
+    run_id = "task-contract-#{Process.pid}"
+    resultset = File.join(ROOT, "coverage", ".resultset", run_id)
+    env = {
+      "HIVE_COVERAGE_RUN_ID" => run_id,
+      "HIVE_COVERAGE_SHARD_INDEX" => "0",
+      "HIVE_COVERAGE_SHARD_COUNT" => "6",
+      "HIVE_COVERAGE_REVISION" => "reviewed-head",
+      "HIVE_COVERAGE_WORKFLOW_RUN_ID" => "1234"
+    }
+    FileUtils.rm_rf(resultset)
+    FileUtils.mkdir_p(resultset)
+
+    output = capture_io do
+      with_env(env) do
+        with_loaded_rakefile do
+          task = Rake::Task["coverage:collect"]
+          task.clear_prerequisites
+          assert_raises(SystemExit) { task.invoke }
+        end
+      end
+    end.join
+    assert_includes output, "coverage shard wrote no process results"
+
+    File.binwrite(File.join(resultset, "1-8.marshal"), Marshal.dump({}))
+    File.write(File.join(resultset, "1-8.error.json"), JSON.dump(error_class: "IOError"))
+    output = capture_io do
+      with_env(env) do
+        with_loaded_rakefile do
+          task = Rake::Task["coverage:collect"]
+          task.clear_prerequisites
+          assert_raises(SystemExit) { task.invoke }
+        end
+      end
+    end.join
+    assert_includes output, "coverage shard recorded dump errors"
+
+    FileUtils.rm_f(File.join(resultset, "1-8.error.json"))
+    output = capture_io do
+      with_env(env) do
+        with_loaded_rakefile do
+          task = Rake::Task["coverage:collect"]
+          task.clear_prerequisites
+          task.invoke
+        end
+      end
+    end.join
+    manifest = JSON.parse(File.read(File.join(resultset, "manifest.json")))
+    assert_includes output, "Collected 1 coverage process result(s)"
+    assert_equal HiveTestCoverage::SHARD_MANIFEST_SCHEMA, manifest.fetch("schema")
+    assert_equal 0, manifest.fetch("shard_index")
+    assert_equal [ "1-8.marshal" ], manifest.fetch("process_results")
+    refute_empty manifest.fetch("test_files")
+  ensure
+    restore_coverage_state(coverage_state) if coverage_state
+    FileUtils.rm_rf(resultset) if resultset
+  end
+
   private
+
+  def size_balanced_shards(files, count)
+    shards = Array.new(count) { [] }
+    byte_counts = Array.new(count, 0)
+    files.sort_by { |path| [ -File.size(File.join(ROOT, path)), path ] }.each do |path|
+      shard = byte_counts.each_index.min_by { |index| [ byte_counts[index], index ] }
+      shards.fetch(shard) << path
+      byte_counts[shard] += File.size(File.join(ROOT, path))
+    end
+    shards
+  end
+
+  def coverage_state_snapshot
+    HiveTestCoverage.instance_variables.to_h do |ivar|
+      [ ivar, HiveTestCoverage.instance_variable_get(ivar) ]
+    end
+  end
+
+  def restore_coverage_state(snapshot)
+    HiveTestCoverage.instance_variables.each do |ivar|
+      HiveTestCoverage.remove_instance_variable(ivar) unless snapshot.key?(ivar)
+    end
+    snapshot.each { |ivar, value| HiveTestCoverage.instance_variable_set(ivar, value) }
+  end
 
   def with_loaded_rakefile
     previous_application = Rake.application

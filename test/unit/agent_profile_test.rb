@@ -13,6 +13,18 @@ class AgentProfileTest < Minitest::Test
     assert_predicate capable.policy_capabilities, :frozen?
   end
 
+  def test_billing_semantics_distinguish_subscription_guards_from_api_charges
+    assert_equal :unknown, make_profile.billing_semantics
+    assert_equal :subscription_backed,
+                 make_profile(billing_semantics: :subscription_backed).billing_semantics
+    assert_equal :api_billed, make_profile(billing_semantics: :api_billed).billing_semantics
+
+    error = assert_raises(ArgumentError) do
+      make_profile(billing_semantics: :guess)
+    end
+    assert_includes error.message, "billing_semantics"
+  end
+
   def test_runtime_adapter_fields_are_optional_validated_and_frozen
     profile = make_profile
     assert_equal({}, profile.tool_scope_flags)
@@ -954,7 +966,7 @@ class AgentProfileTest < Minitest::Test
     assert overridden.frozen?
   end
 
-  def test_runtime_override_probes_binary_paths_path_entries_and_capabilities
+  def test_runtime_override_inherits_binary_probe_and_checks_capabilities
     with_tmp_dir do |dir|
       binary = capability_binary(dir, help: "--safe-mode")
       profile = make_profile(

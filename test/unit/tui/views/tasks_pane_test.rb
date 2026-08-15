@@ -20,6 +20,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 depends_on: nil, blocked_by: nil, dependency_stage: nil,
                 blocked: false, admission_error: nil,
                 implementation_identity: nil,
+                auto_residue: nil,
                 suggested: "hive plan #{slug} --from 2-brainstorm")
     {
       "slug" => slug,
@@ -42,6 +43,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       "claude_pid" => nil,
       "claude_pid_alive" => nil,
       "implementation_identity" => implementation_identity,
+      "auto_residue" => auto_residue,
       "action" => action,
       "action_label" => action_label,
       "suggested_command" => suggested
@@ -87,9 +89,17 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   # Hyperlink/pr_cell is exercised. Swaps in a tty-reporting StringIO and
   # restores the original $stdout afterward.
   def with_tty_stdout
+    with_stdout_tty(true) { yield }
+  end
+
+  def with_non_tty_stdout
+    with_stdout_tty(false) { yield }
+  end
+
+  def with_stdout_tty(value)
     original = $stdout
     io = StringIO.new
-    io.define_singleton_method(:tty?) { true }
+    io.define_singleton_method(:tty?) { value }
     $stdout = io
     yield
   ensure
@@ -175,7 +185,9 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                   pr_url: "https://github.com/example/repo/pull/561")
       ] }
     ])
-    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    out = with_non_tty_stdout do
+      Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    end
     assert_includes out, "   7",             "id column must render"
     assert_match(/\s7\s+#561\s+Readable Task/, out,
                  "PR number must render between id and display name")
@@ -256,13 +268,13 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   # refute_match(/\e\]8;;/) guard): a populated pr_url rendered through
   # pr_cell in a NON-tty must emit zero OSC 8 bytes, so the link is gated on
   # `$stdout.tty?` and never leaks escape sequences into piped/captured
-  # output. The default test $stdout is non-tty, so pr_cell takes the
-  # disabled branch here without any stubbing.
+  # output. Pin the stream explicitly so this contract is independent of
+  # whether the test runner itself was launched from a terminal.
   def test_pr_cell_emits_no_osc8_in_non_tty
     url = "https://github.com/example/repo/pull/561"
     row = Struct.new(:pr_url).new(url)
 
-    out = Hive::Tui::Views::TasksPane.pr_cell(row, 6)
+    out = with_non_tty_stdout { Hive::Tui::Views::TasksPane.pr_cell(row, 6) }
 
     refute_match(/\e\]8;;/, out, "non-tty pr_cell must not emit OSC 8 bytes")
     assert_includes out, "#561", "the plain PR token must still render in non-tty"
@@ -309,6 +321,42 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_equal "Ready to plan ⏸ blocked by base-task (7-artifacts)",
                  Hive::Tui::Views::TasksPane.status_label(row),
                  "a blocked row must append the dependency block to its action-state label"
+  end
+
+  def test_plan_review_status_includes_the_shared_required_action
+    task = make_task(
+      slug: "reviewed-task", stage: "3-plan", action: "plan_review_decision",
+      action_label: "Plan review needs an operator decision", marker: "waiting"
+    ).merge(
+      "plan_review" => {
+        "effective_level" => "mandatory", "state" => "awaiting_decision",
+        "coverage_counts" => { "completed" => 2, "failed" => 0 },
+        "finding_counts" => { "open_gated" => 1, "open_manual" => 0 },
+        "required_action" => "approve gated plan finding prf-abc"
+      }
+    )
+    row = make_snapshot([ { "name" => "hive", "tasks" => [ task ] } ]).projects.first.rows.first
+
+    label = Hive::Tui::Views::TasksPane.status_label(row)
+    assert_includes label, "next=approve gated plan finding prf-abc"
+  end
+
+  def test_status_label_surfaces_current_run_auto_residue_count
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "residue-task",
+          auto_residue: {
+            "commits" => 2, "path_count" => 3, "paths" => [ "a.rb", "b.rb", "c.rb" ],
+            "latest_head" => "abc", "latest_reason" => "stage_exit",
+            "latest_at" => "2026-08-13T00:00:00Z"
+          }
+        )
+      ] }
+    ])
+
+    assert_equal "Ready to plan auto-residue:2",
+                 Hive::Tui::Views::TasksPane.status_label(snap.projects.first.rows.first)
   end
 
   def test_admission_error_shows_reason_and_safe_correction_without_wait_label

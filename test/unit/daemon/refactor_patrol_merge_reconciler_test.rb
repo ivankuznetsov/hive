@@ -563,14 +563,12 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       assert_equal :seeded, intake.tick(now: T0).fetch(0).fetch(:status)
       gh.details = { 7 => details(7, at: T0) }
 
-      assert_nil intake.watcher_poll_timeout(project: "demo", now: T0, maximum: 60)
       assert_equal :deferred, intake.ingest(
         project: "demo", pr: "https://github.com/acme/demo/pull/7", now: T0
       )
       assert_empty gh.detail_calls,
                    "immediate hydration must not start after catch-up spent the shared deadline"
 
-      assert_in_delta 2, intake.watcher_poll_timeout(project: "demo", now: T0 + 1, maximum: 60)
       aggregate = intake.ingest(
         project: "demo", pr: "https://github.com/acme/demo/pull/7", now: T0 + 1
       )
@@ -670,9 +668,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       gh.details = { 2 => details(2, at: T0) }
       cfg = enabled_cfg
       cfg["refactor_patrol"]["auto_fix"].merge!("enabled" => true, "agent" => "codex")
-      cfg["refactor_patrol"]["issue_filing"].merge!(
-        "enabled" => true, "min_leverage_score" => 0.7
-      )
+      cfg["refactor_patrol"]["issue_filing"]["enabled"] = true
       cfg["refactor_patrol"]["commands"]["test"] = "bin/test"
 
       reconciler(dir, gh, cfg: cfg).ingest(
@@ -686,7 +682,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       refute policy.dig("action", "caps").key?("max_files")
       refute policy.dig("action", "caps").key?("max_diff_lines")
       assert_equal "bin/test", policy.dig("action", "commands", "test")
-      assert_equal 0.7, policy.dig("action", "issue_min_leverage_score")
+      refute policy.fetch("action").key?("issue_min_leverage_score")
       assert_match(/\A[a-f0-9]{64}\z/, policy.fetch("epoch"))
     end
   end
@@ -889,19 +885,6 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       assert_equal :deferred, result.fetch(:status)
       assert_empty gh.page_calls
       assert_equal progress_path(dir), intake.progress_path(dir)
-    end
-  end
-
-  def test_watcher_timeout_falls_back_when_enabled_project_config_fails
-    with_tmp_dir do |dir|
-      entry = entry_for(dir)
-      intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
-        registry: -> { [ entry ] },
-        config_loader: ->(_path) { raise Hive::ConfigError, "broken" },
-        gh: FakeGh.new, github_gateway: FakeGh.new, poll_interval_sec: 0
-      )
-
-      assert_equal 3.0, intake.watcher_poll_timeout(project: "demo", now: T0, maximum: 3)
     end
   end
 

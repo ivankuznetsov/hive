@@ -1,8 +1,8 @@
 PATH
   remote: .
   specs:
-    hive-cli (0.7.1)
-      agent-cli-runtime (~> 0.2.0)
+    hive-cli (0.7.2)
+      agent-cli-runtime (~> 0.1.1)
       base64 (>= 0.2)
       bubbletea (= 0.1.4)
       bundler (= 2.7.2)
@@ -163,10 +163,10 @@ GEM
     ruby-progressbar (1.13.0)
     securerandom (0.4.1)
     simpleidn (0.2.3)
-    sqlite3 (2.9.5-aarch64-linux-gnu)
-    sqlite3 (2.9.5-arm64-darwin)
-    sqlite3 (2.9.5-x86_64-linux-gnu)
-    sqlite3 (2.9.5-x86_64-linux-musl)
+    sqlite3 (2.9.6-aarch64-linux-gnu)
+    sqlite3 (2.9.6-arm64-darwin)
+    sqlite3 (2.9.6-x86_64-linux-gnu)
+    sqlite3 (2.9.6-x86_64-linux-musl)
     telegram-bot-ruby (2.8.1)
       dry-struct (~> 1.6)
       faraday (~> 2.0)

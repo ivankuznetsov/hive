@@ -53,13 +53,10 @@ steps:
   - kind: state_assert
     path: "{task_dir:6-review}/task.md"
     marker: { current: REVIEW_COMPLETE }
-  # AC: the workflow inserts 7-artifacts between review and finalize.
-  # The artifacts verb is network-free, so exercise the real CLI command here.
+  # AC: the workflow inserts 7-artifacts between review and finalize. Exercise
+  # the real three-role controller and its retained/reviewed document proof.
   - kind: cli
     args: [artifacts, "{slug}", --from, 6-review]
-    env:
-      HIVE_FAKE_CLAUDE_WRITE_FILE: "{task_dir:7-artifacts}/artifact.md"
-      HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Synthetic artifact capture\n\nNo additional artifacts.\n\n<!-- COMPLETE -->\n"
   - kind: state_assert
     path: "{task_dir:7-artifacts}/artifact.md"
     marker: { current: COMPLETE }

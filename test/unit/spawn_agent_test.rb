@@ -1216,7 +1216,7 @@ class SpawnAgentTest < Minitest::Test
 
   # A7 golden, brainstorm stage: brainstorm has a DISTINCT dual-path impl
   # (run_headless! → spawn_agent vs run_claude! → spawn_claude_with_tmux_marker!,
-  # plus the legacy brainstorm_tmux.rb) that threads
+  # plus the shared Claude launcher) that threads
   # stage_permission_scope("brainstorm", ...) independently of plan/execute. The
   # plan/execute goldens don't exercise it, so pin the absent-permissions (yolo)
   # argv in BOTH modes here — a brainstorm path that dropped the builtin
@@ -1638,6 +1638,20 @@ class SpawnAgentTest < Minitest::Test
       assert_equal :unobserved, observation.fetch(:resolution_status)
       assert_equal :configuration_failure, observation.fetch(:outcome_kind)
       assert_same typed_usage, observation.fetch(:usage)
+    end
+  end
+
+  def test_controller_launch_environment_rejects_unknown_or_non_string_values
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      [ { "HOME" => "/tmp" }, { "HIVE_EVIDENCE_TASK_ROOT" => 123 } ].each do |environment|
+        assert_raises(ArgumentError) do
+          Hive::Stages::Base.spawn_agent(
+            task, prompt: "prompt", max_budget_usd: nil, timeout_sec: 5,
+            launch_environment: environment
+          )
+        end
+        end
     end
   end
 

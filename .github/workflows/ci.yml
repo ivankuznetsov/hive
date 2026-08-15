@@ -14,13 +14,25 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: coverage (Ruby ${{ matrix.ruby }})
+  coverage-shards:
+    name: coverage shard ${{ matrix.label }}/6
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        ruby: ["3.4"]
+        include:
+          - shard: 0
+            label: 1
+          - shard: 1
+            label: 2
+          - shard: 2
+            label: 3
+          - shard: 3
+            label: 4
+          - shard: 4
+            label: 5
+          - shard: 5
+            label: 6
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -29,12 +41,57 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: ${{ matrix.ruby }}
+          ruby-version: "3.4"
           bundler-cache: true
-      - name: Run minitest suite with merged coverage report
+      - name: Collect coverage shard
+        env:
+          HIVE_COVERAGE_RUN_ID: shard-${{ matrix.shard }}
+          HIVE_COVERAGE_SHARD_INDEX: ${{ matrix.shard }}
+          HIVE_COVERAGE_SHARD_COUNT: "6"
+          HIVE_COVERAGE_REVISION: ${{ github.sha }}
+          HIVE_COVERAGE_WORKFLOW_RUN_ID: ${{ github.run_id }}
+        run: bundle exec rake coverage:collect
+      - name: Retain raw coverage results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-shard-${{ matrix.shard }}
+          path: coverage/.resultset/shard-${{ matrix.shard }}
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  test:
+    name: coverage (Ruby 3.4)
+    if: ${{ always() }}
+    needs: coverage-shards
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every coverage collector
+        shell: bash
+        env:
+          HIVE_COVERAGE_SHARDS_RESULT: ${{ needs.coverage-shards.result }}
+        run: test "$HIVE_COVERAGE_SHARDS_RESULT" = "success"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Download coverage shards
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-shard-*
+          path: coverage/.resultset/merged
+      - name: Merge shards and enforce exact coverage
         env:
           HIVE_COVERAGE_MIN_LINE: "100"
-        run: bundle exec rake coverage
+          HIVE_COVERAGE_RUN_ID: merged
+          HIVE_COVERAGE_EXPECTED_SHARDS: "6"
+          HIVE_COVERAGE_REVISION: ${{ github.sha }}
+          HIVE_COVERAGE_WORKFLOW_RUN_ID: ${{ github.run_id }}
+        run: bundle exec rake coverage:report
 
   expensive-test-gates:
     name: ${{ matrix.name }}
@@ -135,9 +192,19 @@ jobs:
           HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
         run: ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --timing-only
 
-  web:
-    name: Hive web (Rails tests + system)
+  web-tests:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Hive web integration tests
+            suite: integration
+          - name: Hive web system tests
+            suite: system
+          - name: Hive web golden-path E2E
+            suite: golden
     defaults:
       run:
         working-directory: web
@@ -149,14 +216,18 @@ jobs:
           bundler-cache: true
           working-directory: web
       - name: Install Playwright chromium for Capybara system tests
+        if: ${{ matrix.suite != 'integration' }}
         run: |
           npm install playwright
           npx playwright install --with-deps chromium
       - name: Rails integration tests
+        if: ${{ matrix.suite == 'integration' }}
         run: bin/rails test
       - name: Rails system tests (Capybara + Playwright)
+        if: ${{ matrix.suite == 'system' }}
         run: bin/rails test:system
       - name: Install the gem bundle (the golden-path E2E spawns a real daemon)
+        if: ${{ matrix.suite == 'golden' }}
         working-directory: .
         env:
           BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
@@ -165,11 +236,25 @@ jobs:
           BUNDLE_FROZEN: ""
         run: bundle install --jobs 4
       - name: Hive web golden-path E2E (claim → idea → Q&A → daemon → PR gate)
+        if: ${{ matrix.suite == 'golden' }}
         env:
           GOLDEN_E2E_BUNDLE_PATH: ${{ github.workspace }}/vendor/root-bundle
         run: bin/rails test test/e2e/golden_path_e2e.rb
       - name: rubocop (web)
+        if: ${{ matrix.suite == 'integration' }}
         run: bin/rubocop --format github
+
+  web:
+    name: Hive web (Rails tests + system)
+    if: ${{ always() }}
+    needs: web-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require Rails integration, system, and golden-path gates
+        shell: bash
+        env:
+          HIVE_WEB_TESTS_RESULT: ${{ needs.web-tests.result }}
+        run: test "$HIVE_WEB_TESTS_RESULT" = "success"
 
   # Hosted Windows runners cannot run Linux containers (Windows-container
   # mode only, no WSL2) — the per-OS surface that CAN break is our

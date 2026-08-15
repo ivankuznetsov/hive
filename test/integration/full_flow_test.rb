@@ -66,8 +66,22 @@ class FullFlowTest < Minitest::Test
         File.write(File.join(folder, "brainstorm.md"),
           "## Round 1\n### Q1.\n### A1. yes\n\n## Requirements\n- foo\n\n<!-- COMPLETE -->\n")
       when "plan-complete"
-        File.write(File.join(folder, "plan.md"),
-          "## Overview\nstub\n## Implementation Units\n- U1: foo\n<!-- COMPLETE -->\n")
+        File.write(File.join(folder, "plan.md"), <<~MD)
+          ---
+          files:
+            - lib/demo.rb
+            - test/demo_test.rb
+          ---
+          ## Overview
+          stub
+          ## Test scenarios
+          - The focused test passes.
+          ## Rollback
+          Revert the local change; it is reversible.
+          ## Implementation Units
+          - U1: foo
+          <!-- COMPLETE -->
+        MD
       when "execute-implement"
         task_md = File.join(folder, "task.md")
         if File.exist?(task_md)
@@ -273,7 +287,7 @@ class FullFlowTest < Minitest::Test
         FileUtils.mv(review_dir, artifacts_dir)
         ENV["HIVE_FLOW_FOLDER"] = artifacts_dir
         ENV["HIVE_FLOW_PHASE"] = "artifacts"
-        with_not_applicable_capture_policy do
+        with_accepted_outcome_evidence do
           capture_io { Hive::Commands::Run.new(artifacts_dir).call }
         end
         assert_equal :complete, Hive::Markers.current(File.join(artifacts_dir, "artifact.md")).name

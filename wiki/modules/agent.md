@@ -242,10 +242,15 @@ Claude/tmux teardown is deliberately narrower than a shell-pattern kill. `with_s
 | provider-limit text in a failed/timeout result's raw stream `limit_text` or `final_message` | `<!-- ERROR reason=limits_reached message="limits reached for <agent>: ..." marker_id=<hex16> -->` for `:state_file_marker`; other status modes return `result[:error_message] = "limits reached for <agent>: ..."` without clobbering orchestrator-owned markers |
 | `result[:timed_out]` | `<!-- ERROR reason=timeout timeout_sec=N marker_id=<hex16> -->` |
 | `exit_code` non-zero | `<!-- ERROR reason=exit_code exit_code=N marker_id=<hex16> -->` |
+| `exit_code` is zero or nil **and** the marker is still `:agent_working` | `<!-- ERROR reason=agent_exited_without_terminal_marker observed_marker=agent_working provider=<agent> marker_id=<hex16> -->`; the child returned but never replaced Hive's pre-spawn marker, so the ordinary recovery lifecycle retries the stage instead of reporting a successful action |
 | `exit_code` is nil **and** marker is `:none` | `<!-- ERROR reason=no_marker_no_exit_code marker_id=<hex16> -->` (corrupted state, not silent OK) |
 | Otherwise | `result[:status] = Markers.current(state_file).name` (trust the marker the agent wrote) |
 
-`exit_code` can come back nil when claude streams large output and the parent's pipe-drain race loses the WNOHANG status; in that case we trust the marker the agent wrote. The nil-and-`:none` combination is treated as failure because a successful agent always writes a known marker. The generic completed-artifact precedence is intentionally structural only at the Agent layer; stages such as Brainstorm apply their stricter artifact validation before accepting the outcome.
+`exit_code` can come back nil when claude streams large output and the parent's pipe-drain race loses the WNOHANG status; in that case we trust a terminal marker the agent wrote. Neither zero nor a missing captured status can make the pre-spawn `AGENT_WORKING` marker terminal: the adapter rewrites that impossible resting state to a recoverable `ERROR`. The nil-and-`:none` combination is also treated as failure because a successful agent always writes a known marker. The generic completed-artifact precedence is intentionally structural only at the Agent layer; stages such as Brainstorm apply their stricter artifact validation before accepting the outcome.
+
+This is Hive stage-supervision policy, not provider compatibility behavior.
+Provider profiles, argument compilation, probes, and observable CLI results stay
+in the separately versioned `agent-cli-runtime` library.
 
 ## Why these three boundaries matter
 

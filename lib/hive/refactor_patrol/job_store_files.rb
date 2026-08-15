@@ -3,7 +3,7 @@ require "hive/managed_directory"
 
 module Hive
   module RefactorPatrol
-    # Descriptor-confined physical storage for the v3 JobStore. Domain
+    # Descriptor-confined physical storage for the v4 JobStore. Domain
     # validation remains in JobStore; this collaborator owns every mutable
     # file lookup so a namespace symlink swap cannot redirect a later read,
     # lock, or write outside the registered Hive state root.
@@ -27,7 +27,7 @@ module Hive
         @directory = directory || Hive::ManagedDirectory.new(
           root: @root,
           anchor: anchor,
-          label: "v3 refactor patrol JobStore"
+          label: "v4 refactor patrol JobStore"
         )
       end
 

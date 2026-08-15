@@ -22,7 +22,6 @@ require "hive/refactor_patrol/repository_ownership"
 require "hive/modules/event_publisher"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
-require "hive/patrol/token_budget"
 require "hive/workflow_package/canonical_json"
 require "hive/workflows"
 
@@ -35,8 +34,9 @@ module Hive
       PATROL_SLUG_PREFIX = "refactor-patrol".freeze
       MODULE_SCHEDULE = "*/10 * * * *".freeze
       RETRY_BACKOFF_SEC = 60
-      ACTION_RETRY_BACKOFF_SEC =
+      RUNAWAY_RETRY_BACKOFF_SEC =
         Hive::RefactorPatrol::ActionClaimTransitions::RETRY_BACKOFF_SEC
+      RUNAWAY_RESOURCE_EXHAUSTION_REASONS = %w[token_limit turn_limit].freeze
       EFFECT_CAPACITY_RESERVE = 1
       SUPPORTED_REPORT_SCHEMA_VERSIONS = [
         Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
@@ -155,7 +155,7 @@ module Hive
           unless recover_occurrences(store, entry, now)
             next [ entry.fetch("name"), [] ]
           end
-          discovery = if entry.dig("_refactor_patrol_cfg", "refactor_patrol", "enabled") == true
+          discovery = if discovery_available?(entry)
             store.claimable_jobs(now: now)
           else
             []
@@ -268,6 +268,58 @@ module Hive
         end
         manifest_path = candidate.fetch(:manifest_path)
         assert_manifest_matches!(manifest_path, aggregate)
+        branch = cfg["default_branch"].to_s
+        raise ReservationBlocked.new("missing_default_branch") if branch.empty?
+        if phase == :discovery && @owner_process_start_time.to_s.empty?
+          evidence = { "owner_pid" => @owner_pid }
+          block(
+            entry, aggregate, reason: "process_identity_unavailable",
+            evidence: evidence, now: now, phase: phase
+          )
+          raise ReservationBlocked.new("process_identity_unavailable", evidence)
+        end
+
+        analysis_sha = begin
+          @checkout_guard_factory.call(entry.fetch("path"), branch)
+                                 .validate_and_snapshot!(
+                                   merge_sha: aggregate.dig("source", "merge_sha"),
+                                   analysis_sha: aggregate["analysis_sha"]
+                                 ).fetch("analysis_sha")
+        rescue Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk => error
+          retirement = if @dry_run
+            :retired
+          else
+            @discovery_transitions.retire(
+              entry: entry,
+              store: store,
+              aggregate: aggregate,
+              merge_sha: error.merge_sha,
+              trunk_sha: error.trunk_sha,
+              now: now,
+              claim_resolver: @claim_resolver
+            )
+          end
+          if retirement == :retired || retirement == :already_terminal
+            evidence = {
+              "merge_sha" => error.merge_sha,
+              "trunk_sha" => error.trunk_sha,
+              "retirement" => retirement.to_s
+            }
+            @events << {
+              status: :retired,
+              project: entry.fetch("name"),
+              job_id: aggregate.fetch("job_id"),
+              reason: "source_no_longer_on_trunk",
+              evidence: evidence
+            }
+            raise ReservationBlocked.new("source_no_longer_on_trunk", evidence)
+          end
+          raise unless phase == :action && retirement == :continuation_required
+
+          aggregate = store.read_job(aggregate.fetch("job_id"))
+          aggregate.fetch("analysis_sha")
+        end
+
         capture = reserve_occurrence(
           store, entry, aggregate, migration, now
         )
@@ -299,23 +351,6 @@ module Hive
             dispatch_token: token
           )
         end
-        branch = cfg["default_branch"].to_s
-        raise ReservationBlocked.new("missing_default_branch") if branch.empty?
-        if @owner_process_start_time.to_s.empty?
-          evidence = { "owner_pid" => @owner_pid }
-          block(
-            entry, aggregate, reason: "process_identity_unavailable",
-            evidence: evidence, now: now, phase: phase
-          )
-          raise ReservationBlocked.new("process_identity_unavailable", evidence)
-        end
-
-        snapshot = @checkout_guard_factory.call(entry.fetch("path"), branch)
-                                          .validate_and_snapshot!(
-                                            merge_sha: aggregate.dig("source", "merge_sha"),
-                                            analysis_sha: aggregate["analysis_sha"]
-                                          )
-        analysis_sha = snapshot.fetch("analysis_sha")
         token = if @dry_run
           { job_id: aggregate.fetch("job_id"), owner: @owner, generation: 0, dry_run: true }
         else
@@ -412,7 +447,7 @@ module Hive
         aggregate = checkpoint_discovery_through_gateway!(
           entry, store, dispatch_token,
           envelope: envelope, now: now,
-          backoff_sec: discovery_backoff_sec(envelope, now)
+          backoff_sec: discovery_retry_backoff_sec(envelope)
         )
         result = completion_result(
           if envelope.fetch("complete")
@@ -565,6 +600,11 @@ module Hive
           entry.fetch("path"),
           hive_state_path: entry.fetch("hive_state_path")
         )
+      end
+
+      def discovery_available?(entry)
+        cfg = entry.fetch("_refactor_patrol_cfg")
+        cfg.dig("refactor_patrol", "enabled") == true
       end
 
       def result_path_for(entry, job_id, phase)
@@ -780,18 +820,6 @@ module Hive
         "malformed_envelope"
       end
 
-      def discovery_backoff_sec(envelope, now)
-        errors = Array(envelope["review_errors"])
-        reasons = errors.filter_map do |error|
-          error.dig("details", "resource_exhaustion", "reason") if error.is_a?(Hash)
-        end
-        return RETRY_BACKOFF_SEC unless reasons.size == errors.size
-
-        Hive::Patrol::TokenBudget.resource_exhaustion_backoff_sec(
-          reasons, now: now, fallback: RETRY_BACKOFF_SEC
-        )
-      end
-
       def complete_action(token, exit_code, envelope, now)
         entry = entry_for_token(token)
         store = store_for(entry)
@@ -811,7 +839,7 @@ module Hive
           aggregate = block_through_gateway!(
             entry, store, aggregate, phase: :action,
             reason: "action_no_progress", evidence: {}, now: now,
-            backoff_sec: ACTION_RETRY_BACKOFF_SEC
+            backoff_sec: RUNAWAY_RETRY_BACKOFF_SEC
           )
           :retry
         else
@@ -820,7 +848,7 @@ module Hive
             reason: action_completion_failure_reason(exit_code, envelope),
             evidence: {},
             now: now,
-            backoff_sec: ACTION_RETRY_BACKOFF_SEC
+            backoff_sec: RUNAWAY_RETRY_BACKOFF_SEC
           )
           :retry
         end
@@ -850,7 +878,15 @@ module Hive
       end
 
       def retry_backoff_sec(phase)
-        phase.to_sym == :action ? ACTION_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
+        phase.to_sym == :action ? RUNAWAY_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
+      end
+
+      def discovery_retry_backoff_sec(envelope)
+        runaway = Array(envelope["review_errors"]).any? do |error|
+          reason = error.dig("details", "resource_exhaustion", "reason")
+          RUNAWAY_RESOURCE_EXHAUSTION_REASONS.include?(reason)
+        end
+        runaway ? RUNAWAY_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
       end
 
       def valid_report_envelope?(envelope)
@@ -865,9 +901,9 @@ module Hive
         {
           status: status, job_id: token[:job_id],
           pr_number: source && source["number"], pr_url: source && source["url"],
-          accepted_count: use_envelope ? Array(envelope["accepted"]).size : Array(dispositions && dispositions["accepted"]).size,
-          flagged_count: use_envelope ? Array(envelope["flagged"]).size : Array(dispositions && dispositions["flagged"]).size,
-          suppressed_count: use_envelope ? Array(envelope["suppressed"]).size : Array(dispositions && dispositions["suppressed"]).size,
+          fix_count: use_envelope ? Array(envelope["fix"]).size : Array(dispositions && dispositions["fix"]).size,
+          discuss_count: use_envelope ? Array(envelope["discuss"]).size : Array(dispositions && dispositions["discuss"]).size,
+          dismiss_count: use_envelope ? Array(envelope["dismiss"]).size : Array(dispositions && dispositions["dismiss"]).size,
           action_count: actions.size,
           terminal_action_count: actions.count { |action| action["terminal"] == true },
           pending_action_ids: actions.reject { |action| action["terminal"] == true }

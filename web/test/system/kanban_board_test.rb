@@ -274,7 +274,15 @@ class KanbanBoardTest < ApplicationSystemTestCase
     assert_status_refresh_ready
 
     find(".advanced summary").click
-    dismiss_confirm { within(".advanced") { click_button "Reject" } }
+    within(".advanced") { assert_button "Reject", disabled: true }
+    dismiss_confirm do
+      execute_script(<<~JS)
+        const button = Array.from(document.querySelectorAll(".advanced button[type='submit']"))
+          .find((candidate) => candidate.textContent.trim() === "Reject")
+        button.disabled = false
+        button.click()
+      JS
+    end
 
     stage_dir(project, "1-inbox").join(slug, "brainstorm.md").write("# Visible after cancellation\n")
     execute_script(<<~JS)

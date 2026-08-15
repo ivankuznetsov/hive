@@ -19,6 +19,7 @@ Rails.application.routes.draw do
   get "board" => "status#index", defaults: { view: "board" }, as: :board
   get "grid" => "status#index", defaults: { view: "grid" }, as: :grid
   get "archive" => "status#archive", as: :archive
+  get "patrol" => "patrol#index", as: :patrol
   resource :status_view_preference, only: :create
   resource :daemon_repair, only: :create, path: "daemon/repair"
 
@@ -51,10 +52,19 @@ Rails.application.routes.draw do
   scope "tasks/:project/:slug", constraints: { slug: /[a-z][a-z0-9-]{0,62}[a-z0-9]/, project: %r{[^/]+} } do
     get  "" => "tasks#show", as: :task
     get  "diff" => "tasks/diffs#show", as: :task_diff
+    get  "publication" => "tasks/publications#show", as: :task_publication
+    post "publication" => "tasks/publications#create"
+    get  "timeline" => "tasks/timelines#show", as: :task_timeline
     get  "log" => "tasks/logs#show", as: :task_log
     get  "media/:filename" => "tasks/media#show", as: :task_media,
          format: false,
          constraints: { filename: /[\w.-]+\.(?:png|jpe?g|gif|webp|webm|mp4)/i }
+    get  "evidence/:attempt_id/:digest" => "tasks/evidence#show", as: :task_evidence,
+         format: false,
+         constraints: {
+           attempt_id: /[A-Za-z0-9][A-Za-z0-9._-]{0,127}/,
+           digest: /[0-9a-f]{64}/
+         }
     post "approve" => "tasks/approvals#create", as: :task_approve
     post "reject" => "tasks/rejections#create", as: :task_reject
     post "drop" => "tasks/drops#create", as: :task_drop
@@ -64,6 +74,7 @@ Rails.application.routes.draw do
     post "closure" => "tasks/closures#create", as: :task_closure
     post "intervene" => "tasks/interventions#create", as: :task_intervene
     post "answers" => "tasks/answers#create", as: :task_answers
+    post "plan-review" => "tasks/plan_review_actions#create", as: :task_plan_review_action
   end
 
   get  "repos" => "repos#index", as: :repos

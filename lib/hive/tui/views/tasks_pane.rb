@@ -49,6 +49,12 @@ module Hive
           "admission_error" => "⚠ ",
           "recover_execute" => "⚠ ",
           "recover_review"  => "⚠ ",
+          "plan_reviewing"  => "◉ ",
+          "plan_review_retry" => "↻ ",
+          "plan_review_decision" => "⏸ ",
+          "plan_review_degraded" => "△ ",
+          "plan_review_unsupported" => "⚠ ",
+          "plan_review_blocked" => "⚠ ",
           "needs_input"     => "⏸ ",
           "archived"        => "✓ ",
           "ready_to_brainstorm" => "▶ ",
@@ -238,9 +244,15 @@ module Hive
           # the tail, preserving the action and dependency signals on narrow
           # layouts while still surfacing the owner when space permits.
           parts = [ base ]
+          parts << auto_residue_token(row)
           parts << dependency_status(row) if row.blocked && !row.admission_error
           parts << implementation_owner_token(row)
           parts.reject { |part| part.to_s.empty? }.join(" ")
+        end
+
+        def auto_residue_token(row)
+          commits = row.auto_residue&.fetch("commits", 0).to_i
+          "auto-residue:#{commits}" if commits.positive?
         end
 
         def implementation_owner_token(row)
@@ -260,7 +272,18 @@ module Hive
           return review_recovery_status(row) if row.action_key.to_s == "recover_review"
           return error_status(row) if row.action_key.to_s == "error"
 
-          row.action_label.to_s
+          review = row.plan_review
+          return row.action_label.to_s unless review.is_a?(Hash)
+
+          level = review["effective_level"] || review["computed_level"] || "pending"
+          coverage = review.fetch("coverage_counts", {})
+          findings = review.fetch("finding_counts", {})
+          total = coverage.values.sum { |value| value.to_i }
+          open = findings.fetch("open_gated", 0).to_i + findings.fetch("open_manual", 0).to_i
+          label = "#{row.action_label} [#{level}/#{review['state']} " \
+            "cov=#{coverage.fetch('completed', 0)}/#{total} open=#{open}]"
+          required = Hive::Tui::Text.sanitize(review["required_action"])
+          required.empty? ? label : "#{label} next=#{required}"
         end
 
         def admission_error_status(row)

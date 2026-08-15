@@ -1,10 +1,13 @@
 <div class="task-actions<%= " task-actions-compact" if local_assigns[:compact] %>">
   <% mutations_enabled = local_assigns.fetch(:mutations_enabled, true) %>
-  <% if task.recovery_action_visible? %>
+  <% recovery = local_assigns[:recovery] %>
+  <% recovery_visible = recovery ? recovery.fetch("action_visible") : task.recovery_action_visible? %>
+  <% recovery_enabled = recovery ? recovery.fetch("action_enabled") : task.recovery_action_enabled? %>
+  <% if recovery_visible %>
     <%= button_to "Retry stage",
           task_recover_path(task.project.name, task.slug, source: @task_source),
-          disabled: !mutations_enabled || !task.recovery_action_enabled?,
-          aria: { disabled: (!mutations_enabled || !task.recovery_action_enabled?).to_s },
+          disabled: !mutations_enabled || !recovery_enabled,
+          aria: { disabled: (!mutations_enabled || !recovery_enabled).to_s },
           data: { turbo_submits_with: "Checking…" } %>
   <% end %>
   <% if task.passable? %>

@@ -1,0 +1,115 @@
+<% content_for(:title, "#{web_product_name} — patrol") %>
+<h1>Patrol</h1>
+<p class="muted">Read-only health and finding evidence from ordinary and Architecture Patrol.</p>
+
+<% if @projects.empty? %>
+  <div class="empty-state">
+    <p>Add a repository before inspecting patrol results.</p>
+    <p><%= link_to "Add a repository", repos_path %></p>
+  </div>
+<% else %>
+  <%= form_with url: patrol_path, method: :get, class: "repo-form patrol-project-form" do |f| %>
+    <%= select_tag :project,
+          options_for_select(@projects.map { |project| [project.name, project.name] },
+                             @selected_project.name),
+          aria: { label: "Project to inspect" } %>
+    <%= f.submit "Show patrol evidence" %>
+  <% end %>
+
+  <div class="patrol-grid">
+    <% ordinary = @overview.ordinary %>
+    <section class="card patrol-section" aria-labelledby="ordinary-patrol-heading">
+      <div class="patrol-heading">
+        <div>
+          <h2 id="ordinary-patrol-heading">Ordinary Patrol</h2>
+          <p class="muted">Defect findings from repository sweeps.</p>
+        </div>
+        <span class="tag tag-health-<%= ordinary.health %>"><%= ordinary.health.humanize %></span>
+      </div>
+      <% if ordinary.error %>
+        <p class="flash flash-alert"><%= ordinary.error %></p>
+      <% elsif !ordinary.enabled %>
+        <p class="muted">Ordinary Patrol is disabled for this project.</p>
+      <% else %>
+        <div class="patrol-summary">
+          <span><strong><%= ordinary.counts.fetch("active", 0) %></strong> active</span>
+          <span><strong><%= ordinary.total %></strong> total</span>
+          <% if ordinary.last_run_at %><span>updated <%= ordinary.last_run_at %></span><% end %>
+        </div>
+        <% if ordinary.items.empty? %>
+          <div class="empty-state"><p>No ordinary Patrol findings recorded.</p></div>
+        <% else %>
+          <div class="patrol-list">
+            <% ordinary.items.each do |finding| %>
+              <article class="patrol-row">
+                <div class="patrol-row-title">
+                  <strong><%= finding["title"].presence || finding["category"].to_s.humanize %></strong>
+                  <span class="tag"><%= finding["lifecycle_state"].to_s.presence || "active" %></span>
+                </div>
+                <p class="patrol-meta"><%= finding["severity"] %> · <%= finding["confidence"] %> confidence · <%= finding["feature_id"] %></p>
+                <% if finding["description"].present? %><p><%= truncate(finding["description"], length: 280) %></p><% end %>
+              </article>
+            <% end %>
+          </div>
+        <% end %>
+        <% if ordinary.truncated %><p class="faint">Showing <%= ordinary.items.size %> of <%= ordinary.total %> findings.</p><% end %>
+      <% end %>
+    </section>
+
+    <% architecture = @overview.architecture %>
+    <section class="card patrol-section" aria-labelledby="architecture-patrol-heading">
+      <div class="patrol-heading">
+        <div>
+          <h2 id="architecture-patrol-heading">Architecture Patrol</h2>
+          <p class="muted">Post-merge architecture jobs and their current blockers.</p>
+        </div>
+        <span class="tag tag-health-<%= architecture.health %>"><%= architecture.health.humanize %></span>
+      </div>
+      <% if architecture.error %>
+        <p class="flash flash-alert"><%= architecture.error %></p>
+      <% elsif !architecture.enabled %>
+        <p class="muted">Architecture Patrol is disabled for this project.</p>
+      <% else %>
+        <div class="patrol-summary">
+          <span><strong><%= architecture.counts.fetch("blocked", 0) %></strong> blocked on this page</span>
+          <span><strong><%= architecture.total %></strong> jobs</span>
+          <% if architecture.last_run_at %><span>updated <%= architecture.last_run_at %></span><% end %>
+        </div>
+        <% if architecture.items.empty? %>
+          <div class="empty-state"><p>No Architecture Patrol jobs recorded.</p></div>
+        <% else %>
+          <div class="patrol-list">
+            <% architecture.items.each do |job| %>
+              <article class="patrol-row">
+                <div class="patrol-row-title">
+                  <strong><%= job.fetch("job_id") %></strong>
+                  <span class="tag"><%= job.fetch("state") %></span>
+                </div>
+                <p class="patrol-meta">
+                  <%= link_to "PR ##{job.dig('source', 'number')}", job.dig("source", "url"), target: "_blank", rel: "noopener noreferrer" %>
+                  · <%= job.dig("counts", "fix") %> fix
+                  · <%= job.dig("counts", "discuss") %> discuss
+                  · <%= job.dig("counts", "pending_actions") %> pending actions
+                </p>
+                <% reasons = Array(job["blockers"]).map { |blocker| blocker["reason"] }.compact.uniq %>
+                <% if reasons.any? %><p>Blocked: <%= reasons.join(", ") %></p><% end %>
+                <% if Array(job["findings"]).any? %>
+                  <ul class="patrol-findings">
+                    <% job.fetch("findings").each do |finding| %>
+                      <li>
+                        <span class="tag"><%= finding.fetch("route") %></span>
+                        <strong><%= finding["problem"].presence || finding["id"] %></strong>
+                        <% if finding["proposed_refactor"].present? %> — <%= truncate(finding["proposed_refactor"], length: 220) %><% end %>
+                      </li>
+                    <% end %>
+                  </ul>
+                <% end %>
+              </article>
+            <% end %>
+          </div>
+        <% end %>
+        <% if architecture.truncated %><p class="faint">Showing the newest <%= architecture.items.size %> of <%= architecture.total %> durable jobs. Use <code>hive refactor-patrol <%= @selected_project.name %> --list</code> for paginated history.</p><% end %>
+      <% end %>
+    </section>
+  </div>
+<% end %>

@@ -10,6 +10,8 @@ require "hive/claude_launcher"
 require "hive/stages"
 require "hive/stages/base"
 require "hive/stages/clean_exit"
+require "base64"
+require "json"
 require "hive/worktree"
 
 module Hive
@@ -97,15 +99,17 @@ module Hive
           protected_anchors: Hive::ArtifactFirewall::ORCHESTRATOR_OWNED,
           permitted_writable_roots: [ task.folder, worktree_path ]
         )
-        custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
-        begin
-          spawn_finalize_agent(task, cfg, prompt, profile, worktree_path)
-        ensure
-          custody_report = Hive::ArtifactFirewall.validate_and_restore(
-            custody_manifest, custody_snapshot
-          )
+        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
+        spawn_result = spawn_finalize_agent(
+          task, cfg, prompt, profile, worktree_path,
+          agent_custody: agent_custody
+        )
+        custody_report = agent_custody.report
+        if !custody_report && spawn_result.is_a?(Hash) && spawn_result[:status] == :ok
+          Hive::Markers.set(task.state_file, :error, reason: "finalize_custody_missing")
+          return { commit: "finalize_custody_missing", status: :error }
         end
-        if custody_report.tampered?
+        if custody_report&.tampered?
           Hive::Markers.set(task.state_file, :error,
                             reason: "finalize_tampered",
                             files: custody_report.tampered_labels.join(","),
@@ -150,12 +154,22 @@ module Hive
 
         ready_result = mark_pr_ready(task, pr_url, cfg)
         return ready_result if ready_result
+        if (context = Hive::Attempts::Context.current)
+          Hive::Stages::Base.record_task_activity(
+            task, kind: "pr_observed",
+            operation_id: "publication:#{context.attempt_id}:ready",
+            correlation_id: "publication:#{context.attempt_id}",
+            reason: "pull request marked ready", source: "finalize",
+            payload: { "pr_state" => "ready" }
+          )
+        end
 
         write_summary(task, worktree_path, branch, pr_url, cfg)
         { commit: "pr_finalized", status: :complete }
       end
 
-      def spawn_finalize_agent(task, cfg, prompt, profile, worktree_path)
+      def spawn_finalize_agent(task, cfg, prompt, profile, worktree_path,
+                               agent_custody: nil)
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "finalize", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
@@ -168,6 +182,7 @@ module Hive
           timeout_sec: finalize_timeout(cfg),
           log_label: "finalize",
           profile: profile,
+          agent_custody: agent_custody,
           routing_arguments: Hive::Stages::Base.model_routing_arguments(
             cfg, "finalize", profile,
             current: Hive::Stages::Base.model_routing_current(cfg["finalize"])
@@ -282,12 +297,16 @@ module Hive
             log_finalize_residue_committed(task, result)
             # Fall through to the push / pushed? logic below — the
             # residue is now part of the branch history.
-          when :scope_violation, :git_failed
+          when :scope_violation, :safety_violation, :git_failed
             attrs = {
               reason: "ensure_clean_on_exit_failed",
               detail: result[:message].to_s[0, 200]
             }
-            attrs[:residue_paths] = Array(result[:paths]).join(",")[0, 200] if result[:paths]
+            if result[:paths]
+              paths = Array(result[:paths]).first(Hive::Events::MAX_EVENT_PATHS).map(&:to_s)
+              attrs[:residue_paths] = paths.join(",")[0, 200]
+              attrs[:residue_paths_b64] = Base64.strict_encode64(JSON.generate(paths))
+            end
             Hive::Markers.set(task.state_file, :error, **attrs)
             return { commit: "finalize_dirty_worktree", status: :error }
           when :clean
@@ -414,6 +433,17 @@ module Hive
       # produced by the finalize backstop (vs. a per-stage `stage_exit`
       # hook). Best-effort — log-write failure must not abort finalize.
       def log_finalize_residue_committed(task, result)
+        paths = Hive::Events.clean_exit_paths(result[:paths])
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: "8-finalize", # coding-scoped: finalize backstop event
+          event_type: :clean_exit_auto_committed,
+          message: "reason=finalize_backstop head=#{result[:head]} paths=#{paths.join(',')[0, 200]}",
+          data: Hive::Events.clean_exit_data(
+            head: result[:head], reason: "finalize_backstop", paths: paths
+          )
+        )
         return unless task.respond_to?(:log_dir)
 
         FileUtils.mkdir_p(task.log_dir)
@@ -424,7 +454,7 @@ module Hive
           head: #{result[:head]}
           commit_subject: #{result[:commit_subject]}
           paths:
-          #{Array(result[:paths]).map { |p| "  - #{p}" }.join("\n")}
+          #{paths.map { |p| "  - #{p}" }.join("\n")}
         LOG
         File.write(path, body)
       rescue StandardError => e

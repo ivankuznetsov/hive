@@ -3,7 +3,7 @@ title: Hive::Gh
 type: module
 source: lib/hive/gh.rb, lib/hive/gh/repository_identity.rb, lib/hive/agent_git_gate.rb
 created: 2026-06-08
-updated: 2026-07-25
+updated: 2026-08-13
 tags: [github, gh, module, pr, closure, evidence]
 ---
 
@@ -29,9 +29,9 @@ tags: [github, gh, module, pr, closure, evidence]
 | `closure_commit_facts(host:, repository:, oid:, default_branch:, cfg: nil)` | Resolves one full 40/64-character OID and uses the GitHub compare API to require `ahead` or `identical` reachability from the named default branch. |
 | `pr_metadata(number, cfg: nil, chdir: nil)` | Runs `gh pr view <n> --json number,url,baseRefName,headRefOid,isCrossRepository,state` and returns `PrMetadata`. `Hive::Commands::AdhocReview` uses it to confirm the PR exists, record declared base/head state, and cross-check the materialized worktree HEAD. The load-bearing `chdir:` kwarg runs the `gh` call in the resolved project root because `gh` has no `-C`; this makes `hive review --pr N --project NAME` query the selected repository instead of the caller's cwd. |
 | `list_open_prs(worktree_path, cfg: nil)` | Runs `gh pr list --state open --limit 1000` and includes `mergeStateStatus`; [[modules/babysitter]] uses that field to prioritize dirty/conflicted PRs before age. |
-| `repo_name_with_owner(worktree_path, cfg: nil)` / `repository_identity(worktree_path, cfg: nil, timeout_sec: nil)` | Parse the actual origin push URL into canonical `owner/repo` plus host. They do not trust ambient `GH_REPO` or `gh repo view`, so GitHub Enterprise, duplicate registration, and repository drift gates bind to the Git target. The optional timeout is threaded through the underlying origin lookup. |
+| `repository_identity(worktree_path, cfg: nil, timeout_sec: nil)` | Parse the actual origin push URL into canonical `owner/repo` plus host. It does not trust ambient `GH_REPO` or `gh repo view`, so GitHub Enterprise, duplicate registration, and repository drift gates bind to the Git target. The optional timeout is threaded through the underlying origin lookup. |
 | `Gh::RepositoryIdentity.validated_repository_slug` / `validated_github_host` / `github_repository_target` | Enforce one strict owner/name and hostname-only policy for both normal GitHub transport and architecture-patrol remote operations. Invalid values retain the established `Hive::GhError` messages. |
-| `pr_status_rollup` / `pr_failing_job_logs` | Fetch PR merge/check state and tail-clipped failing job logs for babysitter repair context. |
+| `pr_status_rollup` / `failing_jobs_with_logs` | Fetch PR merge/check state and tail-clipped failing job logs for babysitter repair context. |
 | `pr_diff_stat` / `pr_base_divergence` | Fetch base and compute diff/divergence context for babysitter prompts. `pr_base_divergence` is best-effort and returns blank fields on git hiccups. |
 | `pr_frontmatter(path)` | Safe YAML frontmatter reader for `pr.md`; malformed YAML warns and returns `{}`. |
 | `scan_pr_for_secrets(state_file:, pr_url:, cfg: nil)` | Scans local state-file text plus remote PR body for `Hive::SecretPatterns`; returns `ScanResult` with `fetch_failed` instead of silently treating remote fetch errors as clean. |
@@ -57,7 +57,7 @@ shapes and fail-closed reconciliation rules out of unrelated GitHub callers.
 
 ## Subprocess Contract
 
-`capture3` uses `Process.spawn` with argv-form commands, never shell interpolation. It sets `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` so unattended daemon/babysitter paths fail instead of blocking on terminal prompts. The timeout comes from `cfg["gh"]["network_timeout_sec"]` when present and positive, otherwise defaults to `NETWORK_TIMEOUT_SEC = 60`. Each capture owns a process group, and the deadline covers both direct-process exit and stdout/stderr drain; timeout handling sends TERM and then KILL to the group. A helper that outlives `gh` while retaining a pipe therefore cannot stall a daemon reader indefinitely.
+`capture3` uses `Process.spawn` with argv-form commands, never shell interpolation. It sets `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` so unattended daemon/babysitter paths fail instead of blocking on terminal prompts. It also sets `MISE_QUIET=1`: a mise-managed `gh` shim must not prepend tool-version notices to JSON stdout. The timeout comes from `cfg["gh"]["network_timeout_sec"]` when present and positive, otherwise defaults to `NETWORK_TIMEOUT_SEC = 60`. Each capture owns a process group, and the deadline covers both direct-process exit and stdout/stderr drain; timeout handling sends TERM and then KILL to the group. A helper that outlives `gh` while retaining a pipe therefore cannot stall a daemon reader indefinitely.
 
 Push and remote-OID helpers validate branch names before constructing refspecs,
 and refuse empty, option-shaped, NUL-bearing, or newline-bearing remote targets.

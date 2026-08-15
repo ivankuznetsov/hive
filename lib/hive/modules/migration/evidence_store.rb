@@ -53,24 +53,6 @@ module Hive
           append(receipts_root, receipt.receipt_id, receipt)
         end
 
-        def fetch_capture(capture_id)
-          capture_id = validated_id(capture_id, :capture)
-          read_record(
-            File.join(captures_root, "#{capture_id}.json"),
-            expected_id: capture_id,
-            type: PatrolCapture
-          )
-        end
-
-        def fetch_receipt(receipt_id)
-          receipt_id = validated_id(receipt_id, :receipt)
-          read_record(
-            File.join(receipts_root, "#{receipt_id}.json"),
-            expected_id: receipt_id,
-            type: EffectReceipt
-          )
-        end
-
         def captures
           records(captures_root, type: PatrolCapture)
         end
@@ -83,13 +65,6 @@ module Hive
                                     cursor: nil)
           indexed_receipts(
             :occurrence, validated_id(occurrence_id, :occurrence),
-            limit: limit, cursor: cursor
-          )
-        end
-
-        def receipts_for_intent(intent_id, limit: MAX_PAGE_SIZE, cursor: nil)
-          indexed_receipts(
-            :intent, validated_id(intent_id, :intent),
             limit: limit, cursor: cursor
           )
         end

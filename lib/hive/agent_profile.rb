@@ -14,6 +14,7 @@ module Hive
     PROMPT_STYLES = AgentCliRuntime::Profile::PROMPT_STYLES
     ROUTING_ARGUMENT_PLACEMENTS = %i[global subcommand].freeze
     STRUCTURED_OUTPUT_PROTOCOLS = %i[grok_end].freeze
+    BILLING_SEMANTICS = %i[unknown subscription_backed api_billed].freeze
     WORKSPACE_WRITE_PERMISSION_MODE =
       AgentCliRuntime::Profile::WORKSPACE_WRITE_PERMISSION_MODE
     READ_ONLY_PERMISSION_MODE = AgentCliRuntime::Profile::READ_ONLY_PERMISSION_MODE
@@ -66,7 +67,8 @@ module Hive
                 :structured_output_protocol, :cli_capabilities,
                 :permission_presets, :opencode_configuration_path,
                 :opencode_configuration, :opencode_credential_environment_keys,
-                :opencode_credential_file, :opencode_plugins, :opencode_pure
+                :opencode_credential_file, :opencode_plugins, :opencode_pure,
+                :billing_semantics
 
     # Existing custom profile registrations remain source compatible. Shipped
     # profiles pass runtime_profile: so their compatibility definition comes
@@ -92,6 +94,7 @@ module Hive
                    tool_scope_flags: TOOL_SCOPE_FLAGS_UNSET,
                    raw_cli_arguments_supported: false,
                    structured_output_protocol: nil,
+                   billing_semantics: :unknown,
                    credential_environment_keys: [],
                    configuration_environment_key: nil,
                    default_configuration_directory: nil,
@@ -193,6 +196,11 @@ module Hive
       @opencode_credential_file = opencode_credential_file&.to_s&.dup&.freeze
       @opencode_plugins = normalize_opencode_plugins(opencode_plugins)
       @opencode_pure = opencode_pure != false
+      @billing_semantics = billing_semantics.to_sym
+      unless BILLING_SEMANTICS.include?(@billing_semantics)
+        raise ArgumentError,
+              "billing_semantics must be one of #{BILLING_SEMANTICS.inspect}"
+      end
       freeze
     end
 
@@ -656,7 +664,8 @@ module Hive
           @opencode_credential_environment_keys.dup,
         opencode_credential_file: @opencode_credential_file,
         opencode_plugins: @opencode_plugins.dup,
-        opencode_pure: @opencode_pure
+        opencode_pure: @opencode_pure,
+        billing_semantics: @billing_semantics
       }
     end
 
@@ -815,20 +824,6 @@ module Hive
       def bin(env: ENV)
         key = @env_bin_override_keys.find { |candidate| !env[candidate].to_s.empty? }
         key ? env.fetch(key) : @bin_default_override
-      end
-
-      def binary_installed?(env: ENV)
-        executable = bin(env:)
-        if executable.include?(File::SEPARATOR)
-          return File.file?(executable) && File.executable?(executable)
-        end
-
-        env.fetch("PATH", "").split(File::PATH_SEPARATOR).any? do |directory|
-          candidate = File.join(directory, executable)
-          File.file?(candidate) && File.executable?(candidate)
-        end
-      rescue ArgumentError
-        false
       end
 
       def check_version!(env: ENV)

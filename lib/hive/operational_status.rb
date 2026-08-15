@@ -24,6 +24,8 @@ module Hive
     REPAIR_ACTIONS = %w[error recover_execute recover_review admission_error].freeze
     COMPLETION_ACTIONS = %w[ready_to_archive review_parked].freeze
     HUMAN_ACTIONS = %w[needs_input].freeze
+    PLAN_REVIEW_WAIT_ACTIONS = %w[plan_reviewing plan_review_retry].freeze
+    PLAN_REVIEW_REPAIR_ACTIONS = %w[plan_review_unsupported plan_review_blocked].freeze
     CODING_PLAN_STAGE = Hive::Workflows::Registry.default.stage_named("plan").dir.freeze
 
     def initialize(status_payload:, project_context: {}, scheduler_snapshot: nil, now: Time.now.utc)
@@ -397,6 +399,7 @@ module Hive
         "retry" => retry_payload(scheduler_disposition),
         "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
         "closure" => closure_payload(project, row),
+        "plan_review" => row["plan_review"],
         "dependency" => {
           "blocked" => row["blocked"] == true,
           "blocked_by" => row["blocked_by"],
@@ -563,6 +566,14 @@ module Hive
       return [ "unknown", "unknown" ] if invalid_task?(row)
       return [ "needs_repair", "hive" ] if stale_liveness?(row)
       return [ "running", "agent" ] if running?(row)
+      return [ "waiting_on_you", "operator" ] if row["action"] == "plan_review_decision"
+      if PLAN_REVIEW_WAIT_ACTIONS.include?(row["action"])
+        owner = daemon_enabled?(project["name"]) ? "scheduler" : operational_review_owner(row)
+        return [ "waiting_on_provider_or_scheduler", owner ]
+      end
+      if PLAN_REVIEW_REPAIR_ACTIONS.include?(row["action"])
+        return [ "needs_repair", operational_review_owner(row) ]
+      end
       return [ "waiting_on_provider_or_scheduler", "scheduler" ] if automatic_error_retry?(project, row)
       return [ "needs_repair", "operator" ] if repair?(row)
       return [ "waiting_on_provider_or_scheduler", "provider" ] if row["held"]
@@ -861,6 +872,10 @@ module Hive
           "task has a verified live runner"
         end
         reasons << reason("live_runner", message, "liveness")
+      elsif row["plan_review"].is_a?(Hash) && row["action"].to_s.start_with?("plan_review")
+        review = row.fetch("plan_review")
+        message = review["required_action"] || review["blocker_reason"] || row["action_label"]
+        reasons << reason("plan_review_#{review['state']}", message, "plan_review")
       elsif row["admission_error"]
         error = row.fetch("admission_error")
         reasons << reason(error.fetch("reason_code"), error.fetch("safe_correction"), "dependency")
@@ -906,6 +921,15 @@ module Hive
         reasons << reason("condition_warning", row.fetch("condition_warning"), "condition")
       end
       reasons
+    end
+
+    def operational_review_owner(row)
+      owner = row.dig("plan_review", "blocker_owner").to_s
+      case owner
+      when "operator", "provider", "scheduler", "hive", "none", "unknown" then owner
+      when "agent", "reviewer", "planner" then "agent"
+      else "unknown"
+      end
     end
 
     def reason(code, message, source)

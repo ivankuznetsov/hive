@@ -189,6 +189,24 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", manual.fetch("blocker_owner")
   end
 
+  def test_plan_review_state_owner_reason_and_projection_are_preserved
+    review = {
+      "state" => "awaiting_decision", "required_action" => "answer manual finding",
+      "blocker_owner" => "operator", "blocker_reason" => "manual_answer_required"
+    }
+    source = task(
+      action: "plan_review_decision", slug: "review", stage: "3-plan",
+      marker: "waiting", plan_review: review
+    )
+
+    projected = project(status_payload(source)).fetch("tasks").first
+
+    assert_equal "waiting_on_you", projected.fetch("state")
+    assert_equal "operator", projected.fetch("blocker_owner")
+    assert_equal "answer manual finding", projected.fetch("reason")
+    assert_equal review, projected.fetch("plan_review")
+  end
+
   def test_daemon_owned_error_retry_is_not_reported_as_operator_repair
     error = task(
       action: "error",
@@ -219,7 +237,11 @@ class OperationalStatusTest < Minitest::Test
   end
 
   def test_terminal_outcome_errors_remain_operator_owned_when_auto_retry_is_enabled
-    %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
+    %w[
+      terminal_outcome_blocked terminal_outcome_invalid
+      outcome_evidence_capability_blocked outcome_evidence_review_blocked
+      outcome_evidence_recaptures_exhausted
+    ].each do |reason|
       semantic_error = task(
         action: "error",
         slug: reason,
@@ -1007,7 +1029,54 @@ class OperationalStatusTest < Minitest::Test
     assert_includes error.message, "not-an-integer"
   end
 
+  def test_plan_review_wait_actions_defer_to_the_scheduler_only_when_the_daemon_is_enabled
+    row = task(action: "plan_reviewing", slug: "reviewing", stage: "3-plan",
+               plan_review: { "blocker_owner" => "provider" })
+
+    assert_equal [ "waiting_on_provider_or_scheduler", "provider" ],
+                 classify_row(row)
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ],
+                 classify_row(row, daemon_enabled: true)
+  end
+
+  def test_plan_review_repair_actions_report_the_review_blocker_owner
+    Hive::OperationalStatus::PLAN_REVIEW_REPAIR_ACTIONS.each do |action|
+      row = task(action:, slug: "repair", stage: "3-plan",
+                 plan_review: { "blocker_owner" => "operator" })
+
+      assert_equal [ "needs_repair", "operator" ], classify_row(row), action
+    end
+  end
+
+  def test_review_blocker_owner_collapses_agent_roles_and_rejects_unknown_owners
+    subject = Hive::OperationalStatus.new(
+      status_payload: status_payload, project_context: {}, scheduler_snapshot: nil,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    )
+    owner_for = lambda do |owner|
+      subject.send(:operational_review_owner, { "plan_review" => { "blocker_owner" => owner } })
+    end
+
+    %w[operator provider scheduler hive none unknown].each do |owner|
+      assert_equal owner, owner_for.call(owner)
+    end
+    # Reviewer-side roles are internal detail; operators only need "an agent".
+    %w[agent reviewer planner].each do |owner|
+      assert_equal "agent", owner_for.call(owner)
+    end
+    assert_equal "unknown", owner_for.call("bogus-role")
+    assert_equal "unknown", owner_for.call(nil)
+  end
+
   private
+
+  def classify_row(row, daemon_enabled: false)
+    context = daemon_enabled ? { "demo" => { "daemon_enabled" => true } } : {}
+    Hive::OperationalStatus.new(
+      status_payload: status_payload, project_context: context, scheduler_snapshot: nil,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    ).send(:classify, { "name" => "demo" }, row)
+  end
 
   def project(payload, project_context: {}, scheduler_snapshot: nil)
     Hive::OperationalStatus.new(
@@ -1108,7 +1177,7 @@ class OperationalStatusTest < Minitest::Test
   def task(action:, slug:, stage: "1-inbox", marker: "waiting", attrs: {}, held: nil,
            live_task_lock: false, task_lock_pid: nil, unanswered_questions: 0,
            blocked: false, depends_on: nil, blocked_by: nil, dependency_stage: nil,
-           admission_error: nil, closure: nil)
+           admission_error: nil, closure: nil, plan_review: nil)
     attrs = attrs.dup
     if Hive::Recovery.recoverable_marker?(marker) && !attrs.key?("marker_id")
       attrs["marker_id"] = "marker-#{slug}"
@@ -1154,6 +1223,7 @@ class OperationalStatusTest < Minitest::Test
       "condition_provenance" => {},
       "shadow_audit" => {},
       "condition_warning" => nil,
+      "plan_review" => plan_review,
       "unanswered_questions" => unanswered_questions,
       "action" => action,
       "action_label" => action.tr("_", " "),

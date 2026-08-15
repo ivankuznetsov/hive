@@ -41,7 +41,12 @@ module Hive
         )
         generation_events = authoritative(records).select { |record| record["event_type"] == "generation_advanced" }
         latest = generation_events.last
-        current = authoritative(records).filter_map { |record| record["task_generation"] }.select do |value|
+        current = authoritative(records).reject do |record|
+          # Activity receipts describe work within an already-selected input
+          # generation. Counting an attempt's own admission receipt here would
+          # advance the generation before its detached worker can validate it.
+          record["event_type"] == "activity_recorded"
+        end.filter_map { |record| record["task_generation"] }.select do |value|
           value.is_a?(Integer)
         end.max || 0
         same_observation = latest &&

@@ -136,6 +136,11 @@ module Hive
     SCRUBBED_CHILD_ENV = {
       "HIVE_SCREENOTE_BASE_URL" => nil
     }.freeze
+    ISOLATED_CHILD_ENV_KEYS = %w[
+      HOME PATH LANG LC_ALL LC_CTYPE TMPDIR TZ SSL_CERT_FILE SSL_CERT_DIR
+      XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_RUNTIME_DIR
+      DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS TERM COLORTERM
+    ].freeze
 
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :max_tokens, :max_turns, :timeout_sec,
                 :profile, :expected_output, :status_mode, :permission_mode,
@@ -144,14 +149,15 @@ module Hive
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
                    profile: nil, expected_output: nil, status_mode: nil,
-                   permission_mode: nil, allowed_tools: nil,
+                   permission_mode: nil, permission_arguments: nil, allowed_tools: nil,
                    disallowed_tools: nil, cli_flags: [], max_tokens: nil,
                    max_turns: nil, identity_arguments: [], runtime_policy: nil,
                    launch_arguments: nil, routing_arguments: nil,
                    launch_environment: {}, provider_route: nil, log_stream: true,
                    opencode_invocation_root: nil,
                    opencode_permission_policy: nil,
-                   additional_read_roots: [], additional_write_roots: [])
+                   additional_read_roots: [], additional_write_roots: [],
+                   isolate_environment: false)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -170,6 +176,13 @@ module Hive
       @additional_read_roots = Array(additional_read_roots).map(&:to_s).freeze
       @additional_write_roots = Array(additional_write_roots).map(&:to_s).freeze
       @runtime_policy = runtime_policy
+      if runtime_policy && permission_arguments
+        raise ArgumentError, "permission_arguments cannot be combined with runtime_policy"
+      end
+      @permission_arguments = permission_arguments && Array(permission_arguments).map do |argument|
+        argument.to_s.dup.freeze
+      end.freeze
+      @isolate_environment = isolate_environment == true
       @expected_output = expected_output
       # Per-spawn override of the profile's default detection mode. The
       # same CLI (e.g., claude) serves multiple roles — 4-execute uses
@@ -196,7 +209,14 @@ module Hive
         @disallowed_tools = disallowed_tools
         @cli_flags = Array(cli_flags)
         @runtime_cli_flags = []
-        @child_environment = SCRUBBED_CHILD_ENV
+        @child_environment = if @isolate_environment
+          ISOLATED_CHILD_ENV_KEYS.each_with_object({}) do |key, environment|
+            value = ENV[key]
+            environment[key] = value if value && !value.empty?
+          end.merge(SCRUBBED_CHILD_ENV)
+        else
+          SCRUBBED_CHILD_ENV
+        end
       end
       @child_environment = @child_environment
         .merge(@launch_environment)
@@ -324,7 +344,7 @@ module Hive
       end
       r, w = IO.pipe
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
-      spawn_opts[:unsetenv_others] = true if @runtime_policy
+      spawn_opts[:unsetenv_others] = true if @runtime_policy || @isolate_environment
       spawn_opts[:in] = stdin_file if stdin_file
       pid = Process.spawn(@child_environment, *cmd, **spawn_opts)
       w.close
@@ -966,7 +986,50 @@ module Hive
     # and #test_argv_includes_verbose_when_stream_json which still pass after
     # the refactor — the claude profile's flag set IS today's flag set).
     def build_cmd
-      compiled_invocation.argv.dup
+      command = compiled_invocation.argv.dup
+      command[0] = isolated_executable(command.fetch(0)) if @isolate_environment
+      command
+    end
+
+    # Resolve a bare agent command before `unsetenv_others` removes the shell
+    # activation state that some local tool-manager launchers require. Prefer
+    # the configured PATH entry, but when that entry is only a mise/asdf/rbenv
+    # trampoline select the next distinct executable of the same name. The
+    # child receives the concrete path, never opaque tool-manager session
+    # blobs that could encode project environment values.
+    def isolated_executable(value)
+      name = value.to_s
+      return name if name.include?(File::SEPARATOR)
+
+      candidates = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).filter_map do |directory|
+        candidate = File.join(directory, name)
+        candidate if File.file?(candidate) && File.executable?(candidate)
+      end
+      first = candidates.first
+      return name unless first
+      return first unless tool_manager_launcher?(first)
+
+      first_identity = File.realpath(first)
+      alternatives = candidates.select do |candidate|
+        File.realpath(candidate) != first_identity && !tool_manager_launcher?(candidate)
+      rescue SystemCallError
+        false
+      end
+      managed_segment = [ "mise", "installs", name ].join(File::SEPARATOR)
+      alternatives.find { |candidate| candidate.include?(managed_segment) } ||
+        alternatives.first || first
+    rescue SystemCallError
+      name
+    end
+
+    def tool_manager_launcher?(path)
+      source = File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
+        file.read(4096)
+      end
+      source.start_with?("#!") &&
+        source.match?(/\b(?:mise|asdf|rbenv)\b/)
+    rescue SystemCallError
+      false
     end
 
     def prompt_via_stdin?
@@ -988,7 +1051,7 @@ module Hive
           profile: @profile,
           prompt: @prompt,
           permission_mode: @permission_mode,
-          permission_arguments: @runtime_policy&.permission_flags,
+          permission_arguments: @permission_arguments || @runtime_policy&.permission_flags,
           add_dirs: @add_dirs,
           allowed_tools: @allowed_tools,
           disallowed_tools: @disallowed_tools,
@@ -1089,11 +1152,13 @@ module Hive
         # adjacent provider reset date instead of the formatted one-line error.
         result[:limit_text] = limit_text
         limit_message = Hive::AgentLimit.error_message(limit_text, agent: @profile.name)
+        result[:error_reason] = "limits_reached"
+        result[:retry_at] = Hive::AgentLimit.retry_after(text: limit_text)
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(@task.state_file, :error,
                             reason: "limits_reached",
                             message: limit_message,
-                            retry_after: Hive::AgentLimit.retry_after(text: limit_text))
+                            retry_after: result[:retry_at])
         end
         result[:status] = :error
         result[:error_message] = limit_message
@@ -1297,6 +1362,15 @@ module Hive
         if marker.name == :none && result[:exit_code].nil?
           Hive::Markers.set(@task.state_file, :error, reason: "no_marker_no_exit_code")
           result[:status] = :error
+        elsif marker.name == :agent_working
+          Hive::Markers.set(
+            @task.state_file,
+            :error,
+            reason: "agent_exited_without_terminal_marker",
+            observed_marker: marker.name,
+            provider: @profile.name
+          )
+          result[:status] = :error
         else
           result[:status] = marker.name
         end
@@ -1370,13 +1444,6 @@ module Hive
           required_outputs: { File.basename(path) => path }
         )
       end
-    end
-
-    def extract_final_message(data)
-      Hive::Agent::MessageExtractor.extract(
-        data,
-        structured_output_protocol: @profile.structured_output_protocol
-      )
     end
 
     def parse_json_line(line)

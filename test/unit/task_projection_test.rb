@@ -276,6 +276,28 @@ class TaskProjectionTest < Minitest::Test
     assert_equal projection.to_h.fetch("conditions"), overlaid.to_h.fetch("conditions")
   end
 
+  def test_attempt_admission_is_the_canonical_current_attempt_binding
+    admitted = event(
+      event_type: "activity_recorded", event_id: "admitted-b",
+      attempt_id: "attempt-b", task_generation: 2, commit_generation: nil,
+      payload: {
+        "activity_kind" => "attempt_admitted",
+        "operation_id" => "attempt-admitted:attempt-b",
+        "correlation_id" => nil, "supersedes_event_id" => nil
+      }
+    )
+    stale_condition = condition_event(
+      "AgentHealthy", event_id: "old-health", attempt_id: "attempt-a",
+      task_generation: 1
+    )
+
+    projection = Hive::TaskProjection.project(records: [ stale_condition, admitted ])
+
+    assert_equal 2, projection["identity"].fetch("task_generation")
+    assert_equal "attempt-b", projection["identity"].fetch("attempt_id")
+    assert_equal "pending", projection.current_condition("AgentHealthy").fetch("state")
+  end
+
   private
 
   def condition_event(name, state: "satisfied", event_id:, attempt_id: "attempt-a",

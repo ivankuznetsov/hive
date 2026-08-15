@@ -145,12 +145,12 @@ namespace :coverage do
     ENV["HIVE_COVERAGE"] = "1"
     ENV["HIVE_COVERAGE_ROOT"] = root
     ENV["HIVE_COVERAGE_COLLECT_ONLY"] = "1"
-    # Keep collector processes lazy. Forked custody children inherit the
-    # parent's measured files; preloading the complete catalog makes their
-    # coverage-aware exit! flush exceed bounded test deadlines under six-runner
-    # contention. The aggregate still enumerates every lib/ source and fails
-    # unloaded files, so the exact gate remains fail-closed.
-    ENV["HIVE_COVERAGE_LOAD_ALL"] = "0"
+    # One collector owns the complete source catalog so files that no test
+    # requires are still represented as unloaded at the exact merge gate. Keep
+    # the other five collectors lazy: their forked custody children inherit the
+    # parent's measured files, and redundant preloads can make coverage-aware
+    # exit! flushes exceed bounded subprocess deadlines under runner contention.
+    ENV["HIVE_COVERAGE_LOAD_ALL"] = shard_index.zero? ? "1" : "0"
     ENV["HIVE_REQUIRE_TEST_RUNS"] = "1"
     coverage_rubyopt = "-I#{File.join(root, 'test')} -rhive_coverage_boot"
     ENV["RUBYOPT"] = [ coverage_rubyopt, ENV["RUBYOPT"] ].compact.join(" ")

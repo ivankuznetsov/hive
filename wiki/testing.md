@@ -107,9 +107,11 @@ installed.
 The default suite excludes four expensive outer-proof files and skips the
 single large babysitter command-classification matrix. CI runs all five proofs
 as named gates. Exhaustive coverage is collected by six deterministic
-test-file shards and merged once by the exact coverage
-gate. CI feeds both results into the already-required `rake test (Ruby 3.4)`
-check. The aggregator uses
+test-file shards and merged once by the exact coverage gate. The first shard
+preloads the complete `lib/` catalog so never-required source files remain
+visible as unloaded, while the other five stay lazy to avoid redundant
+coverage state in forked subprocesses. CI feeds both results into the
+already-required `rake test (Ruby 3.4)` check. The aggregator uses
 `always()` and fails unless coverage and the complete matrix succeeded,
 preserving one fail-closed merge contract for branches created before and after
 this workflow change. The remaining babysitter dry-run tests stay in the normal

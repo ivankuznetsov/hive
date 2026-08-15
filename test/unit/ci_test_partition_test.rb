@@ -380,28 +380,30 @@ class CiTestPartitionTest < Minitest::Test
     end
   end
 
-  def test_coverage_prepare_shard_keeps_collectors_lazy
-    env = {
-      "HIVE_COVERAGE_SHARD_INDEX" => "1",
-      "HIVE_COVERAGE_SHARD_COUNT" => "6",
-      "HIVE_COVERAGE_RUN_ID" => "preload-contract",
-      "HIVE_COVERAGE" => nil,
-      "HIVE_COVERAGE_ROOT" => nil,
-      "HIVE_COVERAGE_COLLECT_ONLY" => nil,
-      "HIVE_COVERAGE_LOAD_ALL" => nil,
-      "HIVE_REQUIRE_TEST_RUNS" => nil,
-      "RUBYOPT" => nil
-    }
+  def test_coverage_prepare_shard_assigns_catalog_preload_to_first_collector_only
+    { "0" => "1", "1" => "0", "5" => "0" }.each do |shard_index, expected|
+      env = {
+        "HIVE_COVERAGE_SHARD_INDEX" => shard_index,
+        "HIVE_COVERAGE_SHARD_COUNT" => "6",
+        "HIVE_COVERAGE_RUN_ID" => "preload-contract-#{shard_index}",
+        "HIVE_COVERAGE" => nil,
+        "HIVE_COVERAGE_ROOT" => nil,
+        "HIVE_COVERAGE_COLLECT_ONLY" => nil,
+        "HIVE_COVERAGE_LOAD_ALL" => nil,
+        "HIVE_REQUIRE_TEST_RUNS" => nil,
+        "RUBYOPT" => nil
+      }
 
-    with_env(env) do
-      with_loaded_rakefile do
-        with_replaced_singleton_method(FileUtils, :rm_rf, ->(_path) { }) do
-          with_replaced_singleton_method(FileUtils, :rm_f, ->(_path) { }) do
-            Rake::Task["coverage:prepare_shard"].invoke
+      with_env(env) do
+        with_loaded_rakefile do
+          with_replaced_singleton_method(FileUtils, :rm_rf, ->(_path) { }) do
+            with_replaced_singleton_method(FileUtils, :rm_f, ->(_path) { }) do
+              Rake::Task["coverage:prepare_shard"].invoke
+            end
           end
-        end
 
-        assert_equal "0", ENV.fetch("HIVE_COVERAGE_LOAD_ALL")
+          assert_equal expected, ENV.fetch("HIVE_COVERAGE_LOAD_ALL")
+        end
       end
     end
   end

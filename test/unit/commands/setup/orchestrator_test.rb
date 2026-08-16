@@ -10,6 +10,7 @@ require "hive/invoked_binary"
 require "hive/commands/init"
 require "hive/commands/daemon"
 require "hive/commands/daemon/service_installer"
+require "hive/commands/babysit"
 require "hive/commands/babysit/service_installer"
 require "hive/commands/web/service_installer"
 

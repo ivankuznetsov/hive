@@ -42,7 +42,7 @@ another container boundary when inherited settings, plugins, MCP servers, or
 the shared OS user must also be isolated.
 
 The authoritative package-policy specification—including disclosure versus
-runtime enforcement, high-risk consent classification, provider admission, and
+runtime enforcement, high-risk access classification, provider admission, and
 publication projection—lives in the managed wiki's
 [`Hive::WorkflowPackage` module page](../wiki/modules/workflow_package.md).
 

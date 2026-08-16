@@ -3,13 +3,13 @@ title: Hive::WorkflowPackage
 type: module
 source: lib/hive/workflow_package/
 created: 2026-08-13
-updated: 2026-08-13
-tags: [module, workflow-package, honeycomb, registry, permissions, consent, managed-store]
+updated: 2026-08-16
+tags: [module, workflow-package, honeycomb, registry, permissions, disclosure, managed-store]
 ---
 
 <!-- documentation-owner: managed-honeycomb-policy -->
 
-**TLDR**: Reviewed Honeycomb packages cross a stricter trust boundary than owner-authored workflow descriptors. Hive verifies immutable catalog and package identity, stores digest-addressed generations and operator configuration snapshots, binds tasks to exact provenance, distinguishes coarse disclosure from exact actor enforcement, requires separate consent for unbounded actors, and fails closed when the selected runtime cannot enforce a declared scope. The legacy `hive workflow install|list|update|remove` commands are a compatibility projection over the generalized managed-module lifecycle.
+**TLDR**: Reviewed Honeycomb packages cross a stricter trust boundary than owner-authored workflow descriptors. Hive verifies immutable catalog and package identity, stores digest-addressed generations and operator configuration snapshots, binds tasks to exact provenance, distinguishes coarse disclosure from exact actor enforcement, installs after informing the operator of declared access, and fails closed when the selected runtime cannot enforce a declared scope. The legacy `hive workflow install|list|update|remove` commands are a compatibility projection over the generalized managed-module lifecycle.
 
 ## Managed Honeycomb boundary
 
@@ -123,10 +123,10 @@ Managed locks/generations/configurations are Hive-owned. Lifecycle commands cann
 built-in or `<id>.yml` authored descriptor, and task metadata rewrites preserve
 all three managed provenance fields.
 
-Honeycomb v2 permission summaries are disclosure/consent data, not executable
-policy. Managed execution uses each stage/reviewer/reviser descriptor's exact
-`permissions:` block. Explicit `yolo`, scoped shell, and unqualified scoped
-file-write actors are portable only after separate high-risk consent; a v2
+Honeycomb v2 permission summaries are disclosure data, not executable policy.
+Managed execution uses each stage/reviewer/reviser descriptor's exact
+`permissions:` block. Install reports explicit `yolo`, scoped shell, and
+unqualified scoped file-write actors without adding a second approval gate; a v2
 manifest hiding that actor surface behind a narrower disclosure is rejected.
 Bounded actors admit only on profiles that enforce the bound. Claude uses its
 native tool rules. Codex and Grok may also execute read-only actors through the

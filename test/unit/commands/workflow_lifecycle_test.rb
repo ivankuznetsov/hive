@@ -59,20 +59,16 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
-  def test_install_requires_noninteractive_consent_and_different_version_requires_update
+  def test_install_proceeds_without_noninteractive_consent_and_different_version_requires_update
     with_project_and_package do |project, package, resolution|
       client = stub_client(package, resolution)
-      command = Hive::Commands::Workflow::Install.new(
+      installed = Hive::Commands::Workflow::Install.new(
         "honeycomb/demo", project_root: project, json: true, yes: false,
         stdout: StringIO.new, registry_client: client, committer: ->(*) { }
-      )
-      assert_raises(Hive::Commands::Workflow::ConsentRequired) { command.call! }
-      assert_empty Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state")).selections
-
-      Hive::Commands::Workflow::Install.new(
-        "honeycomb/demo", project_root: project, json: true, yes: true,
-        stdout: StringIO.new, registry_client: client, committer: ->(*) { }
       ).call!
+      assert_equal "installed", installed.fetch("status")
+      refute_empty Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state")).selections
+
       different = resolution.with(source_commit: "c" * 40)
       assert_raises(Hive::Commands::Workflow::UpdateRequired) do
         Hive::Commands::Workflow::Install.new(
@@ -103,37 +99,41 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
-  def test_unbounded_install_requires_separate_escalation_acknowledgement
+  def test_unbounded_install_is_disclosed_and_does_not_require_escalation_acknowledgement
     with_project_and_package(permission_spec: "yolo") do |project, package, resolution|
       client = stub_client(package, resolution)
-      assert_raises(Hive::Commands::Workflow::ConsentRequired) do
-        Hive::Commands::Workflow::Install.new(
-          "honeycomb/demo", project_root: project, json: true, yes: true,
-          stdout: StringIO.new, registry_client: client, committer: ->(*) { }
-        ).call!
-      end
       payload = Hive::Commands::Workflow::Install.new(
-        "honeycomb/demo", project_root: project, json: true, yes: true, allow_escalation: true,
+        "honeycomb/demo", project_root: project, json: true,
         stdout: StringIO.new, registry_client: client, committer: ->(*) { }
       ).call!
       assert_equal "installed", payload.fetch("status")
+      assert_equal resolution.permissions, payload.fetch("permissions")
     end
   end
 
-  def test_interactive_high_risk_install_can_decline_escalation_after_policy_disclosure
+  def test_interactive_high_risk_install_warns_and_proceeds_without_confirmation
     with_project_and_package(permission_spec: "yolo") do |project, package, resolution|
+      disclosed = resolution.with(permissions: resolution.permissions.merge(
+        "risk" => "high",
+        "capabilities" => %w[filesystem-read filesystem-write network],
+        "network_hosts" => [ "*" ],
+        "filesystem_read" => [ "repository", "task" ],
+        "filesystem_write" => [ "task/**" ],
+        "secrets" => []
+      ))
       output = StringIO.new
       payload = Hive::Commands::Workflow::Install.new(
         "honeycomb/demo", project_root: project, json: false,
-        stdin: TTYInput.new("yes\nno\n"), stdout: output,
+        stdin: TTYInput.new(""), stdout: output,
         mapping_overrides: [ "stages.work=claude" ],
-        registry_client: stub_client(package, resolution), committer: ->(*) { }
+        registry_client: stub_client(package, disclosed), committer: ->(*) { }
       ).call!
 
-      assert_equal "cancelled", payload.fetch("status")
+      assert_equal "installed", payload.fetch("status")
       assert_includes output.string, "map: stages.work -> claude"
-      assert_includes output.string, "Allow high-risk execution?"
-      assert_includes output.string, "high-risk install cancelled"
+      assert_includes output.string, "warning: this workflow requires network access to *"
+      refute_includes output.string, "[y/N]"
+      refute_includes output.string, "cancelled"
     end
   end
 
@@ -194,22 +194,15 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
-  def test_scoped_shell_and_unqualified_write_require_separate_escalation_acknowledgement
+  def test_scoped_shell_and_unqualified_write_are_disclosed_without_an_escalation_gate
     [
       "{ preset: scoped, bash: true }",
       "{ preset: scoped, tools: [Read, Write] }"
     ].each do |permission_spec|
       with_project_and_package(permission_spec: permission_spec) do |project, package, resolution|
         client = stub_client(package, resolution)
-        assert_raises(Hive::Commands::Workflow::ConsentRequired) do
-          Hive::Commands::Workflow::Install.new(
-            "honeycomb/demo", project_root: project, json: true, yes: true,
-            stdout: StringIO.new, registry_client: client, committer: ->(*) { }
-          ).call!
-        end
-
         installed = Hive::Commands::Workflow::Install.new(
-          "honeycomb/demo", project_root: project, json: true, yes: true, allow_escalation: true,
+          "honeycomb/demo", project_root: project, json: true,
           stdout: StringIO.new, registry_client: client, committer: ->(*) { }
         ).call!
         assert_equal "installed", installed.fetch("status")
@@ -260,17 +253,11 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     Hive::AgentProfiles.register(:pi, Hive::AgentProfiles::PI)
   end
 
-  def test_high_registry_risk_requires_separate_escalation_even_when_actor_is_bounded
+  def test_high_registry_risk_is_disclosed_without_separate_escalation
     with_project_and_package do |project, package, resolution|
       high = resolution.with(permissions: resolution.permissions.merge("risk" => "high"))
-      assert_raises(Hive::Commands::Workflow::ConsentRequired) do
-        Hive::Commands::Workflow::Install.new(
-          "honeycomb/demo", project_root: project, json: true, yes: true,
-          stdout: StringIO.new, registry_client: stub_client(package, high), committer: ->(*) { }
-        ).call!
-      end
       installed = Hive::Commands::Workflow::Install.new(
-        "honeycomb/demo", project_root: project, json: true, yes: true, allow_escalation: true,
+        "honeycomb/demo", project_root: project, json: true,
         stdout: StringIO.new, registry_client: stub_client(package, high), committer: ->(*) { }
       ).call!
       assert_equal "installed", installed.fetch("status")
@@ -302,7 +289,7 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
-  def test_reinstall_is_a_typed_noop_and_interactive_decline_is_cancelled
+  def test_reinstall_is_a_typed_noop_and_interactive_install_needs_no_confirmation
     with_project_and_package do |project, package, resolution|
       client = stub_client(package, resolution)
       command = lambda do |**options|
@@ -311,11 +298,13 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
           registry_client: client, committer: ->(*) { }, **options
         ).call!
       end
-      cancelled = command.call(json: false, yes: false, stdin: TTYInput.new("no\n"))
-      assert_equal "cancelled", cancelled.fetch("status")
+      installed = command.call(
+        json: false, yes: false, stdin: TTYInput.new(""),
+        mapping_overrides: [ "stages.work=claude" ]
+      )
+      assert_equal "installed", installed.fetch("status")
 
-      command.call(json: true, yes: true)
-      assert_equal "already_installed", command.call(json: true, yes: true).fetch("status")
+      assert_equal "already_installed", command.call(json: true, yes: false).fetch("status")
     end
   end
 

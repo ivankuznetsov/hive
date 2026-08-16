@@ -42,18 +42,27 @@ approval. Never infer a missing non-interactive choice or grant.
 diagnostic; `migration report`, `cutover`, and `rollback`
 are administrative, human-only transitions and are not `hive act` actions.
 
-For reviewed Honeycomb workflows, preview the exact no-write operation first:
+Verified Honeycomb workflow installs are informational, not approval-bound.
+Run the install directly; Hive verifies immutable catalog/package identity,
+prints the network and filesystem access in human mode, and returns the same
+permission object in JSON mode:
 
 ```bash
-hive workflow install honeycomb/NAME --dry-run --json
+hive workflow install honeycomb/NAME
+```
+
+`--dry-run --json` remains available when the user asks for a preview, but it
+is not a prerequisite for install. Updates and removals retain their existing
+preview and confirmation boundary:
+
+```bash
 hive workflow update NAME --dry-run --json
 hive workflow remove NAME --dry-run --json
 ```
 
 Only after the user approves that output, run the matching operation with
-`--yes --json`. Permission growth or another high-risk change requires separate
-approval before `--allow-escalation`; ordinary install/update consent does not
-authorize escalation.
+`--yes --json`. Permission growth in an update requires separate approval
+before `--allow-escalation`.
 
 Publishing an authored workflow has a stronger digest-bound confirmation
 boundary. First run the complete local preflight with no remote or receipt

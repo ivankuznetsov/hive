@@ -16,7 +16,9 @@ module Hive
           @source = source
           @dry_run = dry_run
           @registry_client = registry_client || Hive::WorkflowPackage::RegistryClient.new
-          @allow_escalation = allow_escalation
+          # Retain the lifecycle keyword arguments for API compatibility with
+          # callers that share install/update options. A verified Honeycomb
+          # install is disclosure-only and never consumes either consent flag.
           @mapping_overrides = mapping_overrides
           @input_bindings = input_bindings
           @expected_configuration_digest = expected_configuration_digest
@@ -38,14 +40,10 @@ module Hive
               )
             end
             resolver = configuration_resolver(validated, resolution, previous: previous_configuration)
-            if interactive?
-              if @mapping_overrides.empty?
-                resolver = customize_interactively(
-                  resolver, validated, resolution, previous: previous_configuration
-                )
-              else
-                human_disclosure(resolution, resolver, verb: "proposed").each { |line| @stdout.puts line }
-              end
+            if interactive? && @mapping_overrides.empty?
+              resolver = customize_interactively(
+                resolver, validated, resolution, previous: previous_configuration
+              )
             end
             ensure_reviewed_configuration!(resolver)
             if same_generation && current.fetch("configuration_digest") == resolver.configuration.digest
@@ -71,13 +69,7 @@ module Hive
               return emit(payload(resolution, resolver, "dry_run"),
                           human_lines: human_disclosure(resolution, resolver, verb: "would install"))
             end
-            disclosure = payload(resolution, resolver, "cancelled")
-            unless confirmed?("Install honeycomb/#{resolution.name}@#{resolution.version} with the disclosed policy?")
-              return emit(disclosure, human_lines: [ "hive: install cancelled; no project state changed" ])
-            end
-            unless escalation_confirmed?(resolver, resolution)
-              return emit(disclosure, human_lines: [ "hive: high-risk install cancelled; no project state changed" ])
-            end
+            human_disclosure(resolution, resolver, verb: "installing").each { |line| @stdout.puts line } unless @json
 
             migration = activate_with_task_migration!(
               candidate: candidate, configuration: resolver.configuration,
@@ -96,7 +88,7 @@ module Hive
             report["warnings"] = warnings unless warnings.empty?
             emit(
               report,
-              human_lines: human_disclosure(resolution, resolver) +
+              human_lines: [ "hive: installed honeycomb/#{resolution.name}@#{resolution.version}" ] +
                 [ migration_line(migration) ].compact + warning_lines(warnings)
             )
           end
@@ -137,7 +129,7 @@ module Hive
           "migrated retained tasks: #{migration.task_count} (#{migration.moved_count} stage#{migration.moved_count == 1 ? '' : 's'} moved)"
         end
 
-        def human_disclosure(resolution, resolver, verb: "installed")
+        def human_disclosure(resolution, resolver, verb:)
           mapping_lines = resolver.mappings.map do |mapping|
             identity = [
               mapping.fetch("agent"),
@@ -151,8 +143,9 @@ module Hive
             return [
               "hive: #{verb} honeycomb/#{resolution.name}@#{resolution.version}",
               "registry: #{resolution.catalog_commit} source provenance: #{resolution.source_revision} manifest: #{resolution.manifest_digest}",
-              "risk: #{permissions['risk']}; capabilities: #{Array(permissions['capabilities']).join(', ')}",
-              "network: #{Array(permissions['network_hosts']).join(', ')}; read: #{Array(permissions['filesystem_read']).join(', ')}; " \
+              "capabilities: #{Array(permissions['capabilities']).join(', ')}",
+              "warning: this workflow requires network access to #{Array(permissions['network_hosts']).join(', ')}; " \
+                "read: #{Array(permissions['filesystem_read']).join(', ')}; " \
                 "write: #{Array(permissions['filesystem_write']).join(', ')}; secrets: #{Array(permissions['secrets']).join(', ')}",
               *optional_input_disclosure(resolver.inputs),
               *mapping_lines
@@ -216,18 +209,6 @@ module Hive
           return nil if %w[default inherit unpinned].include?(answer.downcase)
 
           answer
-        end
-
-        def escalation_confirmed?(resolver, resolution)
-          high_risk = resolver.unbounded? || resolution.permissions["risk"] == "high"
-          return true unless high_risk
-          return true if @allow_escalation
-          unless interactive?
-            raise ConsentRequired,
-                  "unbounded/high-risk installation requires --allow-escalation in addition to --yes"
-          end
-          @stdout.print "This workflow includes unbounded actors. Allow high-risk execution? [y/N] "
-          %w[y yes].include?(@stdin.gets.to_s.strip.downcase)
         end
 
         def envelope_schema = SCHEMA

@@ -180,9 +180,9 @@ settings, or grants.
 Typical operator commands are:
 
 ```bash
-hive workflow install honeycomb/architecture --yes
-hive workflow install honeycomb/writing --yes
-hive workflow install honeycomb/seo-content --yes --allow-escalation
+hive workflow install honeycomb/architecture
+hive workflow install honeycomb/writing
+hive workflow install honeycomb/seo-content
 hive workflow list --json
 hive workflow update architecture --dry-run --json
 hive workflow update architecture --yes
@@ -199,11 +199,11 @@ install command. The owner-authored samples that remain are `blank` and
 `research`.
 
 The command contract—including accepted source forms, mapping/input flags,
-consent UX, dry-run behavior, statuses, and JSON fields—is maintained in the
+install disclosure, dry-run behavior, statuses, and JSON fields—is maintained in the
 [`hive workflow` command page](../wiki/commands/workflow.md). The managed
 [package module page](../wiki/modules/workflow_package.md) is authoritative for
 catalog/package trust, immutable identity, task pins, disclosure versus exact
-runtime enforcement, high-risk consent classification, and publication
+runtime enforcement, high-risk access classification, and publication
 recovery. The generalized native-module lifecycle is documented in
 [modules.md](modules.md).
 
@@ -421,7 +421,7 @@ differs from `state_file`.
 For a ready-to-copy example:
 
 ```bash
-hive workflow install honeycomb/architecture --yes
+hive workflow install honeycomb/architecture
 hive new <project> --workflow architecture "Plan the system..."
 ```
 

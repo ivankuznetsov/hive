@@ -505,11 +505,11 @@ module Hive
     option :template, type: :string,
                       desc: "for `new`: seed from a named sample workflow (e.g. research) instead of the blank stub"
     option :yes, type: :boolean, default: false,
-                 desc: "confirm install/update/remove in JSON or non-interactive mode"
+                 desc: "confirm update/remove in JSON or non-interactive mode"
     option :dry_run, type: :boolean, default: false,
                      desc: "for workflow mutations: validate and report without changing project or remote state"
     option :allow_escalation, type: :boolean, default: false,
-                              desc: "for `install`/`update`: separately allow unbounded or increased capabilities"
+                              desc: "for `update`: separately allow unbounded or increased capabilities"
     option :mapping, type: :array, default: [],
                      desc: "for `install`/`update`: SLOT=AGENT[,model=MODEL][,effort=EFFORT] overrides"
     option :input_binding, type: :array, default: [],

@@ -8,7 +8,7 @@ Install the reviewed Architecture workflow when the deliverable is a plan or
 design document rather than code:
 
 ```bash
-hive workflow install honeycomb/architecture --yes
+hive workflow install honeycomb/architecture
 hive new <project> --workflow architecture "Plan the system..."
 ```
 

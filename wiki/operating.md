@@ -222,8 +222,9 @@ Host mutations remain reviewable: package-manager confirmation is never
 suppressed; direct installed-runtime patches and service-manager override
 writes are prohibited; Hive-native diagnosis, dry-run, preview, and repair
 commands are preferred. Agent-skill setup uses its structured consent-required
-preview before `--yes --json`; Honeycomb lifecycle changes use supported
-`--dry-run --json` previews and separately approved permission escalation.
+preview before `--yes --json`; verified Honeycomb workflow installs disclose
+network/filesystem access and proceed without an approval flag, while update,
+remove, and permission escalation retain their explicit boundaries.
 Patrol dry-runs still require consent because they launch agents, and exact
 token totals remain a human-only TUI view. Daemon auto-advance is allowed only
 within previously approved enrollment, and printed `next:` commands remain

@@ -9,7 +9,7 @@ Explain scope, affected state, and recovery before running:
 - Killing workers, deleting or moving worktrees, rewriting task folders, changing destinations, replacing user-global configuration, or overwriting a foreign skill.
 - Foreground or unbounded streams such as daemon or bot tails when a bounded native status/watch answer is sufficient.
 - Any external message, PR mutation beyond the user’s request, publication, deployment, tag, package release, or version change.
-- Workflow install/update/remove/publish, `setup-agents`, manual patrol starts,
+- Workflow update/remove/publish, `setup-agents`, manual patrol starts,
   module install/update/enable/disable/uninstall, module migration
   report/cutover/rollback, and outbound `bench submit` operations.
 
@@ -26,6 +26,11 @@ No-write Honeycomb workflow previews (`workflow install|update|remove` with
 and refactor-patrol dry-runs still launch agents and remain consent-gated.
 `hive module dry-run`, by contrast, is explicitly pure and read-only; it never
 persists a trigger or launches a hook.
+
+A verified `hive workflow install honeycomb/NAME` needs no confirmation.
+Hive discloses the package's network and filesystem access and proceeds.
+Agents must not insert a preview/approval/`--yes` loop in front of this ordinary
+install. Workflow update, remove, and publish keep their separate boundaries.
 
 Prefer `hive daemon start --detach` for startup. Before a foreground daemon or
 bot start, or a live daemon/bot tail, explain that it can hold the session and

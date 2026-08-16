@@ -56,7 +56,8 @@ class ReleaseContractTest < Minitest::Test
     refute_includes readme, "why no built-in web UI"
 
     assert_includes workflows, "built-in `coding`, `content`, and `bench` workflows"
-    assert_includes workflows, "hive workflow install honeycomb/architecture --yes"
+    assert_includes workflows, "hive workflow install honeycomb/architecture"
+    refute_includes workflows, "hive workflow install honeycomb/architecture --yes"
     assert_includes workflows, "/hive create a three-stage editorial workflow"
     assert_includes workflows, "hive workflow validate editorial --json"
     assert_includes workflows, "hive decide <task> approve --from approval --decision-id <decision-id>"

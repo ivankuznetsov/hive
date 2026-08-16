@@ -299,10 +299,13 @@ A workflow is just an **ordered list of stages in a YAML descriptor**, so you ca
 Architecture, Writing, and SEO Content ship as full reviewed Honeycomb workflows. Installation chooses an agent for every stage/reviewer slot, suggests runnable defaults from `hive init`, and keeps those choices in project configuration rather than the package:
 
 ```bash
-hive workflow install honeycomb/architecture --yes
-hive workflow install honeycomb/writing --yes
-hive workflow install honeycomb/seo-content --yes --allow-escalation
+hive workflow install honeycomb/architecture
+hive workflow install honeycomb/writing
+hive workflow install honeycomb/seo-content
 ```
+
+Install verifies the reviewed immutable package, prints its network and
+filesystem access, and proceeds without an approval flag.
 
 Authors can preflight and submit a new immutable package without a separate
 status command. The real call is bound to the exact locally validated release

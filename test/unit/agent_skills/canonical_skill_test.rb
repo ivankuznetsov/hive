@@ -129,7 +129,9 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_match(/non-TTY `hive init`.*medium patrol.*pull requests/im, text)
     assert_includes text, "openclaw skills install @ivankuznetsov/hive-cli"
     assert_includes text, "Never patch an installed Hive runtime"
-    assert_includes text, "workflow install honeycomb/NAME --dry-run --json"
+    assert_includes text, "hive workflow install honeycomb/NAME"
+    assert_includes text, "needs no confirmation"
+    refute_includes text, "workflow install honeycomb/NAME --dry-run --json"
     assert_includes text, "hive module status --json"
     assert_includes text, "hive module dry-run NAME"
     assert_includes text, "migration report"

@@ -261,7 +261,9 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
                        "authorized slots: stages.work; available; value: [redacted]"
           assert_includes human_out.string, disclosure
           assert_operator human_out.string.index(disclosure), :<,
-                          human_out.string.index("Install honeycomb/demo@1.0.0")
+                          human_out.string.index("hive: installed honeycomb/demo@1.0.0")
+          refute_includes human_out.string, "Install honeycomb/demo@1.0.0 with the disclosed policy?"
+          refute_includes human_out.string, "Allow high-risk execution?"
           refute_includes human_out.string, secret
 
           list_out = StringIO.new

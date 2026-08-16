@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-08-13
+updated: 2026-08-16
 tags: [command, workflow, authoring, validation, human-stage, honeycomb, registry, archive, retention]
 ---
 
@@ -17,8 +17,8 @@ hive workflow new my-flow --template research
 hive workflow new my-flow --json
 hive workflow validate my-flow --json
 hive workflow commit my-flow
-hive workflow install honeycomb/repo-brief --yes
-hive workflow install honeycomb/repo-brief --yes --allow-escalation \
+hive workflow install honeycomb/repo-brief
+hive workflow install honeycomb/repo-brief \
   --mapping stages.research=codex,model=gpt-5.6-sol,effort=high \
   --input-binding GSC_TOKEN=PRODUCTION_GSC_TOKEN
 hive workflow install honeycomb/repo-brief --dry-run --json
@@ -62,11 +62,14 @@ executable; `remove` refuses while retained tasks still name the workflow.
 Stale nonterminal dispatch requests are removed, and identity fencing rejects
 deliveries that raced the cutover.
 
-JSON and non-TTY mutations require `--yes`. A package or update that needs the
-separate high-risk consent also requires `--allow-escalation`; the preview
-states that requirement without duplicating the policy classification here.
-Interactive refusal is a successful `cancelled` no-op. Missing consent is a
-USAGE error with `error_kind: consent_required`.
+Install verifies the immutable reviewed package, discloses its network,
+filesystem, secret, and actor-mapping access, and proceeds without `--yes` or
+`--allow-escalation`. `--dry-run --json` remains an optional no-write preview,
+not a prerequisite. Update and remove retain their `--yes` boundary; an update
+that grows permissions separately requires `--allow-escalation`. Interactive
+refusal for those verbs is a successful `cancelled` no-op, while missing
+non-interactive consent remains a USAGE error with
+`error_kind: consent_required`.
 
 `list --json` reports orthogonal `origin`, `selection`, `integrity`, and
 `catalog_visibility` fields. Managed rows add the selected configuration

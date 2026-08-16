@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/commands/babysit"
 require "hive/commands/uninstall"
 require "hive/user_service"
 

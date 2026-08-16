@@ -271,7 +271,7 @@ module Hive
       unsafe!
     end
 
-    def with_lock(relative, shared: false)
+    def with_lock(relative, shared: false, nonblock: false)
       parent_components, name = target_components(relative)
       lock = nil
 
@@ -290,7 +290,14 @@ module Hive
           unsafe! unless before.nil? || before == opened
           unsafe! unless opened == session.regular_identity_at(parent, name)
           session.verify_binding!(parent)
-          lock.flock(shared ? File::LOCK_SH : File::LOCK_EX)
+          lock_mode = shared ? File::LOCK_SH : File::LOCK_EX
+          lock_mode |= File::LOCK_NB if nonblock
+          acquired = lock.flock(lock_mode)
+          unless acquired
+            unsafe! unless opened == session.regular_identity_at(parent, name)
+            session.verify_binding!(parent)
+            next nil
+          end
           unsafe! unless opened == session.regular_identity_at(parent, name)
           result = begin
             yield

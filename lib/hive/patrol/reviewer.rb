@@ -315,7 +315,17 @@ module Hive
           slug: STAGE
         )
         profile = Hive::AgentProfiles.lookup(@cfg.dig("patrol", "agent") || "claude", cfg: @cfg)
-        launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :review)
+        routing_arguments = Hive::Stages::Base.model_routing_arguments(
+          @cfg, "patrol_review", profile,
+          current: Hive::Stages::Base.model_routing_current(@cfg["patrol"])
+        )
+        launch = Hive::Patrol::AgentLaunch.prepare(
+          profile: profile,
+          prompt: prompt,
+          role: :review,
+          cfg: @cfg,
+          routing_arguments: routing_arguments
+        )
         unless @token_budget.acquire(minimum_tokens: launch.fetch(:minimum_tokens))
           exhaustion = @token_budget.resource_exhaustion if @token_budget.respond_to?(:resource_exhaustion)
           return {
@@ -341,10 +351,7 @@ module Hive
             expected_output: output_path,
             status_mode: :output_file_exists,
             cli_flags: launch.fetch(:cli_flags),
-            routing_arguments: Hive::Stages::Base.model_routing_arguments(
-              @cfg, "patrol_review", profile,
-              current: Hive::Stages::Base.model_routing_current(@cfg["patrol"])
-            )
+            routing_arguments: routing_arguments
           ).run!
         ensure
           @token_budget.record!(

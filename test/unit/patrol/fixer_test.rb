@@ -233,6 +233,103 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_stale_target_accepts_an_edited_line_when_the_exact_snippet_remains
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      File.write(File.join(repo, "app.rb"), "puts('healthy') # formatting changed\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "edit evidence line", "--quiet")
+      agent_ran = false
+      agent = lambda do |output_path:, **|
+        agent_ran = true
+        write_fix_proof(output_path, status: "rejected")
+      end
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["test"] = "ruby -c app.rb"
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: configured, agent_runner: agent
+      ).attempt(candidate)
+
+      refute patch.passed
+      assert agent_ran
+      assert_equal "fix_agent_rejected", patch.validation.fetch("reason")
+    end
+  end
+
+  def test_stale_target_keeps_a_finding_when_each_evidence_role_still_has_an_anchor
+    with_tmp_git_repo do |repo|
+      File.write(
+        File.join(repo, "app.rb"),
+        "source = binary_read\ncanonical = encode(source)\nreject unless source == canonical\n"
+      )
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.evidence = [
+        { "file" => "app.rb", "line" => 1, "snippet" => "binary_read", "role" => "trigger" },
+        { "file" => "app.rb", "line" => 2, "snippet" => "encode(source)", "role" => "root_cause" },
+        { "file" => "app.rb", "line" => 3, "snippet" => "source == canonical", "role" => "impact" },
+        { "file" => "app.rb", "line" => 3, "snippet" => "reject unless", "role" => "trigger" }
+      ]
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      File.write(
+        File.join(repo, "app.rb"),
+        "source = safe_file_read\ncanonical = encode(source)\nreject unless source == canonical\n"
+      )
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "replace one trigger", "--quiet")
+      observed_evidence = nil
+      agent = lambda do |finding:, output_path:, **|
+        observed_evidence = finding.evidence
+        write_fix_proof(output_path, status: "rejected")
+      end
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["test"] = "ruby -c app.rb"
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: configured, agent_runner: agent
+      ).attempt(candidate)
+
+      refute patch.passed
+      assert_equal "fix_agent_rejected", patch.validation.fetch("reason")
+      assert_equal %w[root_cause impact trigger], observed_evidence.map { |item| item.fetch("role") }
+    end
+  end
+
+  def test_stale_target_fails_when_a_required_evidence_role_has_no_current_anchor
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "source = binary_read\nreject source\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.evidence = [
+        { "file" => "app.rb", "line" => 1, "snippet" => "binary_read", "role" => "root_cause" },
+        { "file" => "app.rb", "line" => 2, "snippet" => "reject source", "role" => "impact" }
+      ]
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      File.write(File.join(repo, "app.rb"), "source = fixed_read\nreject source\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "remove root cause", "--quiet")
+      agent_ran = false
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo), agent_runner: ->(**) { agent_ran = true }
+      ).attempt(candidate)
+
+      refute patch.passed
+      refute agent_ran
+      assert_equal "stale_evidence", patch.validation.fetch("reason")
+    end
+  end
+
   def test_stale_target_with_missing_current_evidence_fails_closed_before_agent_work
     with_tmp_git_repo do |repo|
       File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
@@ -1347,7 +1444,7 @@ class HivePatrolFixerTest < Minitest::Test
       run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
       validator = Object.new
       validator.define_singleton_method(:validate) do |path, names: nil|
-        if names
+        if names == [ "test" ]
           passed = !File.basename(path).start_with?(".control-")
           {
             "passed" => passed,
@@ -1370,9 +1467,11 @@ class HivePatrolFixerTest < Minitest::Test
         write_regression(worktree_path)
         write_fix_proof(output_path)
       end
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["lint"] = "configured lint"
 
       patch = Hive::Patrol::Fixer.new(
-        repo, cfg: cfg(repo), validator: validator, agent_runner: agent
+        repo, cfg: configured, validator: validator, agent_runner: agent
       ).attempt(finding)
 
       refute patch.passed
@@ -1388,7 +1487,7 @@ class HivePatrolFixerTest < Minitest::Test
       run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
       validator = Object.new
       validator.define_singleton_method(:validate) do |path, names: nil|
-        if names
+        if names == [ "test" ]
           passed = !File.basename(path).start_with?(".control-")
           {
             "passed" => passed,
@@ -1409,14 +1508,58 @@ class HivePatrolFixerTest < Minitest::Test
         write_regression(worktree_path)
         write_fix_proof(output_path)
       end
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["lint"] = "configured lint"
 
       patch = Hive::Patrol::Fixer.new(
-        repo, cfg: cfg(repo), validator: validator, agent_runner: agent
+        repo, cfg: configured, validator: validator, agent_runner: agent
       ).attempt(finding)
 
       refute patch.passed
       assert_equal "validation_mutated_worktree", patch.validation["reason"]
       assert_equal 0, patch.validation.dig("fix_proof", "after", "exit_code")
+    end
+  end
+
+  def test_selected_machine_proof_command_is_not_repeated_as_broad_validation
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "if\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      calls = []
+      validator = Object.new
+      validator.define_singleton_method(:validate) do |path, names: nil|
+        calls << [ File.basename(path), names ]
+        passed = !File.basename(path).start_with?(".control-")
+        {
+          "passed" => passed,
+          "commands" => [
+            {
+              "name" => "test", "command" => "configured test/patrol_regression_test.rb",
+              "exit_code" => passed ? 0 : 1, "signal" => nil, "timed_out" => false,
+              "stdout" => passed ? "" : "test/patrol_regression_test.rb failed", "stderr" => ""
+            }
+          ]
+        }
+      end
+      agent = lambda do |worktree_path:, output_path:, **|
+        File.write(File.join(worktree_path, "app.rb"), "puts 'fixed'\n")
+        write_regression(worktree_path)
+        write_fix_proof(output_path)
+      end
+      candidate = finding
+      candidate.validation_key = "test"
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo), validator: validator, agent_runner: agent
+      ).attempt(candidate)
+
+      assert patch.passed, patch.validation.inspect
+      assert_equal 3, calls.size,
+                   "preflight, regression-before, and regression-after are sufficient for one configured command"
+      assert calls.all? { |_path, names| names == [ "test" ] }
+      assert_equal 1, patch.validation.fetch("commands").size
+      assert_equal "test", patch.validation.dig("commands", 0, "name")
     end
   end
 
@@ -1759,12 +1902,47 @@ class HivePatrolFixerTest < Minitest::Test
         captured = kwargs
         fake_agent
       end
-
       fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
 
       assert_equal [
         "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh"
       ], captured.fetch(:routing_arguments).global_arguments
+    ensure
+      Hive::Agent.define_singleton_method(:new, original) if original
+    end
+  end
+
+  def test_run_agent_wrapper_uses_project_claude_model_without_patrol_route
+    with_tmp_git_repo do |repo|
+      claude_cfg = cfg(repo)
+      claude_cfg["patrol"]["agent"] = "claude"
+      claude_cfg["claude"]["model"] = "claude-opus-4-8"
+      claude_cfg["models"] = {
+        "babysitter" => { "model" => "claude-opus-5" }
+      }
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: claude_cfg)
+      fake_agent = Object.new
+      def fake_agent.run! = { status: :ok }
+      captured = nil
+      original = Hive::Agent.method(:new)
+      Hive::Agent.define_singleton_method(:new) do |**kwargs|
+        captured = kwargs
+        fake_agent
+      end
+      profile = Struct.new(:name, :initial_context_tokens) do
+        def require_cli_capability!(_name)
+          [ "--disable-slash-commands" ]
+        end
+      end.new(:claude, 0)
+
+      with_replaced_singleton_method(
+        Hive::AgentProfiles, :lookup, ->(*) { profile }
+      ) do
+        fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
+      end
+
+      assert_includes captured.fetch(:cli_flags), "claude-opus-4-8"
+      assert_nil captured.fetch(:routing_arguments)
     ensure
       Hive::Agent.define_singleton_method(:new, original) if original
     end

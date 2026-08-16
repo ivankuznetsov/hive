@@ -243,6 +243,7 @@ module Hive
                     :clear_recovery_failure!, :prepare_effect!, :effect_state,
                     :effect_intent, :recorded_effect_transitions,
                     :unsettled_recorded_transitions,
+                    :deny_unrecorded_prepared_effects_for_rollover!,
                     :assert_recorded_transitions_terminal!,
                     :with_effect_sender_lock, :mark_dispatch_uncertain!,
                     :reset_effect_prepared!, :settle_effect!, :deny_effect!,
@@ -275,6 +276,51 @@ module Hive
           aggregate["updated_at"] = now.utc.iso8601
           aggregate
         end
+      end
+
+      # Capacity rollover may retire only a discovery claim whose recorded
+      # process identity is provably gone. This job-local transition
+      # does not allocate another occurrence effect, so a completely full
+      # journal can still recover without weakening the live-claim fence.
+      def resolve_inactive_discovery_for_rollover!(
+        job_id, occurrence_id:, now: Time.now,
+        claim_liveness_resolver: nil
+      )
+        mutate_job(job_id) do |aggregate, path|
+          active = active_discovery_attempt(aggregate)
+          next aggregate unless active
+          unless active.fetch("occurrence_id") == occurrence_id.to_s
+            raise InconsistentRecord.new(
+              "refactor patrol occurrence cannot roll with an active claim",
+              path: path
+            )
+          end
+          resolved = begin
+            claim_liveness_resolver&.call(json_copy(active))
+          rescue StandardError
+            :unresolved
+          end
+          unless resolved == :resolved
+            raise InconsistentRecord.new(
+              "refactor patrol occurrence cannot roll with an active claim",
+              path: path
+            )
+          end
+
+          @claim_transitions.finish!(
+            active,
+            state: "superseded",
+            outcome: "effect_capacity_rollover",
+            now: now,
+            touch_heartbeat: false
+          )
+          aggregate["state"] = "blocked"
+          aggregate["updated_at"] = now.utc.iso8601
+          aggregate
+        end
+      rescue ArgumentError, KeyError => e
+        raise InconsistentRecord,
+              "refactor patrol claim has invalid evidence (#{e.message})"
       end
 
       def record_job_transition_rejection!(job_id, operation:, generation:,
@@ -365,16 +411,24 @@ module Hive
       end
       private :eligible_from
 
-      # Includes an expired analyzing claim so a restarted daemon can prove
-      # the prior process group gone (or terminate it) before fencing a new
-      # generation. The claim CAS remains authoritative.
-      def claimable_jobs(now: Time.now)
+      # Includes an expired analyzing claim, plus an unexpired claim whose
+      # recorded process identity is already provably gone, so a restarted
+      # daemon can fence a new generation without waiting out the full lease.
+      # The claim CAS remains authoritative.
+      def claimable_jobs(now: Time.now, claim_liveness_resolver: nil)
         records = jobs
         (eligible_from(records, now: now) + records.select do |aggregate|
           next false unless aggregate.fetch("state") == "analyzing"
 
           attempt = active_discovery_attempt(aggregate)
-          attempt && Time.iso8601(attempt.fetch("expires_at")) <= now
+          next false unless attempt
+          next true if Time.iso8601(attempt.fetch("expires_at")) <= now
+
+          begin
+            claim_liveness_resolver&.call(json_copy(attempt)) == :resolved
+          rescue StandardError
+            false
+          end
         end).uniq { |aggregate| aggregate.fetch("job_id") }
           .sort_by { |aggregate| scheduling_key(aggregate) }
       rescue ArgumentError, KeyError => e
@@ -473,7 +527,8 @@ module Hive
 
       def claim_discovery!(job_id, owner:, analysis_sha:, now: Time.now, lease_sec: 3600,
                            claim_resolver: nil, owner_pid: nil,
-                           owner_process_start_time: nil, transition: nil)
+                           owner_process_start_time: nil, transition: nil,
+                           allow_unexpired_recovery: false)
         mutate_job(job_id) do |aggregate, path|
           return nil if aggregate.fetch("complete")
           return nil unless %w[queued blocked analyzing].include?(aggregate.fetch("state"))
@@ -481,7 +536,8 @@ module Hive
 
           active = active_discovery_attempt(aggregate)
           if active
-            return nil if Time.iso8601(active.fetch("expires_at")) > now
+            expired = Time.iso8601(active.fetch("expires_at")) <= now
+            return nil unless expired || allow_unexpired_recovery
             resolved = begin
               claim_resolver&.call(json_copy(active))
             rescue StandardError
@@ -492,7 +548,7 @@ module Hive
             @claim_transitions.finish!(
               active,
               state: "superseded",
-              outcome: "expired_claim_resolved",
+              outcome: expired ? "expired_claim_resolved" : "inactive_claim_resolved",
               now: now,
               touch_heartbeat: false
             )

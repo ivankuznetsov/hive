@@ -836,12 +836,7 @@ module Hive
             @logger.event(:project_dropped, project: entry.project)
           end
           if entry.stage == Hive::Daemon::PatrolScheduler::PATROL_STAGE
-            @patrol_scheduler&.complete(
-              project: entry.project,
-              exit_code: entry.exit_code,
-              envelope: entry.json_envelope,
-              now: now
-            )
+            complete_patrol_scheduler_for(entry, now: now)
           end
           if entry.dispatch_token && entry.dispatch_token[:kind] == :architecture_patrol
             result = @refactor_patrol_scheduler&.complete(
@@ -867,6 +862,29 @@ module Hive
           complete_digest_scheduler_for(entry, now: now)
         end
         entries.any?
+      end
+
+      # An ordinary Patrol worker can exit while its occurrence still owns a
+      # prepared or dispatch-uncertain effect. The scheduler deliberately
+      # leaves that occurrence reserved for recovery and clears its
+      # process-local pending marker, but durable finalization then fails
+      # closed. Isolate that expected recovery boundary from child reaping so
+      # one Patrol occurrence cannot restart the daemon and interrupt every
+      # unrelated worker in the service cgroup.
+      def complete_patrol_scheduler_for(entry, now:)
+        @patrol_scheduler&.complete(
+          project: entry.project,
+          exit_code: entry.exit_code,
+          envelope: entry.json_envelope,
+          now: now
+        )
+      rescue StandardError => e
+        @logger.event(
+          :fatal,
+          message: "patrol_scheduler.complete raised #{e.class}: #{e.message}",
+          project: entry.project,
+          slug: entry.slug
+        )
       end
 
       # Advance the matching global-digest scheduler's cursor after one of its

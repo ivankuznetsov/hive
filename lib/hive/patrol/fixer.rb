@@ -197,7 +197,7 @@ module Hive
         source_reader = SourceReader.new(worktree_path)
         current_lines_by_path = {}
         reviewed_lines_by_path = {}
-        normalized = evidence.map do |item|
+        normalized = evidence.filter_map do |item|
           next unless item.is_a?(Hash)
 
           entry = item.each_with_object({}) { |(key, value), copy| copy[key.to_s] = value }
@@ -222,7 +222,7 @@ module Hive
           reviewed_line = reviewed_lines[line - 1]
           next unless reviewed_line&.include?(snippet)
 
-          current_line = if current_lines[line - 1] == reviewed_line
+          current_line = if current_lines[line - 1]&.include?(snippet)
             line
           else
             matches = current_lines.each_index.select do |index|
@@ -236,7 +236,15 @@ module Hive
             copy.delete("path")
           end
         end
-        return if normalized.any?(&:nil?)
+        roles = evidence.filter_map do |item|
+          next unless item.is_a?(Hash)
+
+          item.fetch("role", item.fetch(:role, "__untyped__")).to_s
+        end.uniq
+        return if normalized.empty? || roles.empty?
+
+        matched_roles = normalized.map { |item| item.fetch("role", "__untyped__").to_s }.uniq
+        return unless (roles - matched_roles).empty?
 
         normalized
       rescue SystemCallError, ArgumentError
@@ -527,7 +535,7 @@ module Hive
           return proof_failure
         end
 
-        validation = @validator.validate(worktree_path)
+        validation = validate_remaining_commands(worktree_path, receipt)
         validation["fix_proof"] = receipt
         return validation unless validation["passed"]
 
@@ -556,6 +564,19 @@ module Hive
 
         validation["stabilization_passes"] = validation_pass + 1
         validation
+      end
+
+      def validate_remaining_commands(worktree_path, receipt)
+        selected = receipt.fetch("validation_key")
+        configured = Validator.configured_names(@cfg.dig("patrol", "commands"))
+        remaining = configured - [ selected ]
+        selected_result = receipt.fetch("after")
+        return { "passed" => true, "commands" => [ selected_result ] } if remaining.empty?
+
+        validation = @validator.validate(worktree_path, names: remaining)
+        validation.merge(
+          "commands" => [ selected_result, *Array(validation["commands"]) ]
+        )
       end
 
       def machine_fix_proof(worktree_path, base_sha, paths, agent_proof, finding)
@@ -899,7 +920,17 @@ module Hive
           slug: STAGE
         )
         profile = Hive::AgentProfiles.lookup(@cfg.dig("patrol", "agent") || "claude", cfg: @cfg)
-        launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :fix)
+        routing_arguments = Hive::Stages::Base.model_routing_arguments(
+          @cfg, "patrol_fix", profile,
+          current: Hive::Stages::Base.model_routing_current(@cfg["patrol"])
+        )
+        launch = Hive::Patrol::AgentLaunch.prepare(
+          profile: profile,
+          prompt: prompt,
+          role: :fix,
+          cfg: @cfg,
+          routing_arguments: routing_arguments
+        )
         unless @token_budget.acquire(minimum_tokens: launch.fetch(:minimum_tokens))
           exhaustion = @token_budget.resource_exhaustion if @token_budget.respond_to?(:resource_exhaustion)
           return {
@@ -925,10 +956,7 @@ module Hive
             expected_output: output_path,
             status_mode: :output_file_exists,
             cli_flags: launch.fetch(:cli_flags),
-            routing_arguments: Hive::Stages::Base.model_routing_arguments(
-              @cfg, "patrol_fix", profile,
-              current: Hive::Stages::Base.model_routing_current(@cfg["patrol"])
-            )
+            routing_arguments: routing_arguments
           ).run!
         ensure
           @token_budget.record!(

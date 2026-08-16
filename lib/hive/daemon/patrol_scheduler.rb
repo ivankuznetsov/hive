@@ -85,12 +85,10 @@ module Hive
       # Side-effect-free with respect to dispatch ownership: callers may
       # compare ordinary and architecture work without consuming a patrol
       # turn (`@pending` is touched only by reserve/complete/cancel).
-      # Due-check throttles are NOT deferred, though: every project this
-      # scan evaluates commits its `@next_check_at` window at evaluation
-      # time — disabled, not-yet-due, and due candidates alike — and
-      # `reserve` never touches the throttle. So a due candidate the
-      # arbiter passes over is re-evaluated only after a full poll window,
-      # and a second `candidates` call within one tick yields no work.
+      # Not-due checks commit their next evaluation deadline, but a due
+      # candidate remains eligible until `reserve` acquires dispatch
+      # ownership. Timer schedules wake at their exact due time rather than
+      # a full poll interval after the most recent daemon scan.
       def candidates(now: Time.now)
         @events.clear
         dispatches = []
@@ -129,8 +127,9 @@ module Hive
           # reload its full config on every ~30s tick just to rediscover
           # patrol.enabled: false. A project that flips to enabled
           # mid-interval is picked up on its next poll window.
+          state = read_state(entry)
           selection_input = schedule_selection_input(
-            entry, cfg, patrol, now
+            entry, cfg, patrol, now, state: state
           )
           selection = legacy_schedule_selection(selection_input)
           unless selection.rationale == "due"
@@ -141,11 +140,12 @@ module Hive
               selection: selection,
               now: now
             )
-            @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
+            @next_check_at[project] = next_schedule_check_at(
+              state, patrol, selection_input, now
+            )
             next
           end
 
-          @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
           dispatches << dispatch_for(
             entry,
             patrol: patrol,
@@ -180,37 +180,44 @@ module Hive
         return nil unless reservation_owner?(snapshot)
 
         state = state_store(entry)
-        capture = if candidate[:recovery_occurrence_id]
-          state.occurrence_capture(candidate.fetch(:recovery_occurrence_id))
-        else
-          interval = cfg.dig("patrol", "poll_interval_sec") || 600
-          base_id = schedule_reservation_id(entry, now, interval)
-          state.reserve_attempt_occurrence!(
-            base_id,
-            window_started_at: schedule_window(now, interval),
-            now: now
-          ) do |generation|
-            capture_reservation(
-              entry, snapshot, now,
-              poll_interval_sec: interval,
-              attempt_generation: generation,
-              selection_input: candidate.fetch(:selection_input),
-              selection: candidate.fetch(:selection)
-            )
+        cycle_admitted, capture = state.try_with_cycle_admission do
+          selected = if candidate[:recovery_occurrence_id]
+            state.occurrence_capture(candidate.fetch(:recovery_occurrence_id))
+          else
+            interval = cfg.dig("patrol", "poll_interval_sec") || 600
+            base_id = schedule_reservation_id(entry, now, interval)
+            state.reserve_attempt_occurrence!(
+              base_id,
+              window_started_at: schedule_window(now, interval),
+              now: now
+            ) do |generation|
+              capture_reservation(
+                entry, snapshot, now,
+                poll_interval_sec: interval,
+                attempt_generation: generation,
+                selection_input: candidate.fetch(:selection_input),
+                selection: candidate.fetch(:selection)
+              )
+            end
           end
+          if selected && candidate[:recovery_occurrence_id]
+            state.reserve_occurrence!(selected, now: now)
+          end
+          selected
         end
+        return nil unless cycle_admitted
         return nil unless capture &&
                           capture.owner == snapshot.fetch("owner") &&
                           capture.owner_epoch == snapshot.fetch("epoch")
-
-        if candidate[:recovery_occurrence_id]
-          state.reserve_occurrence!(capture, now: now)
-        end
         @pending[project] = {
           started_at: now,
           entry: entry,
           occurrence_id: capture.occurrence_id
         }
+        unless candidate[:recovery_occurrence_id]
+          @next_check_at[project] = now +
+            (cfg.dig("patrol", "poll_interval_sec") || 600).to_i
+        end
         public_dispatch(candidate, capture: capture)
       rescue StandardError
         @pending.delete(project)
@@ -247,13 +254,14 @@ module Hive
       # stay pending until daemon restart: the gated paths never reach
       # `complete`, the only other thing that clears `@pending`. In
       # always-on arbiter mode the Dispatcher calls `reserve` only AFTER
-      # those gates pass, so nothing is pending when they fire and its
-      # pre-reserve `cancel` calls are no-ops there. No failure is
-      # recorded — the scan never ran, so there is nothing to back off
-      # from. Genuine spawn *errors* go through `complete` with a
-      # non-zero exit instead.
+      # those gates pass, so `cancel` also clears the due-check throttle
+      # and lets a candidate that lost shared capacity be reconsidered on
+      # the next tick. No failure is recorded — the scan never ran, so
+      # there is nothing to back off from. Genuine spawn *errors* go
+      # through `complete` with a non-zero exit instead.
       def cancel(project:)
         @pending.delete(project)
+        @next_check_at.delete(project)
       end
 
       def pending?(project)
@@ -274,7 +282,7 @@ module Hive
         deadline && now < deadline
       end
 
-      def schedule_selection_input(entry, cfg, patrol, now)
+      def schedule_selection_input(entry, cfg, patrol, now, state:)
         trigger = patrol.fetch("trigger", "continuous").to_s
         unless patrol["enabled"] == true &&
                Hive::Workflows.coding_id?(cfg["default_workflow"])
@@ -286,7 +294,6 @@ module Hive
           )
         end
 
-        state = read_state(entry)
         branch_changed = if %w[continuous new_commits].include?(trigger)
           default_branch_changed?(entry, cfg, state)
         end
@@ -299,6 +306,17 @@ module Hive
           timer_due: timer_due,
           branch_changed: branch_changed
         )
+      end
+
+      def next_schedule_check_at(state, patrol, selection_input, now)
+        interval = patrol.fetch("poll_interval_sec", 600).to_i
+        return now + interval unless %w[timer continuous].include?(
+          selection_input.fetch("trigger")
+        )
+        return now + interval unless selection_input["timer_due"] == false
+
+        last_run_at = parse_time(state["last_run_at"])
+        last_run_at ? last_run_at + interval : now + interval
       end
 
       # This is intentionally independent from the module-side decision
@@ -439,11 +457,18 @@ module Hive
         ].join(":")
       end
 
-      def recover_projections(entry, now:)
+      def recover_projections(entry, now:, store: nil, admitted: false)
         project = entry.fetch("name")
-        store = nil
         occurrence_id = nil
-        store = state_store(entry)
+        store ||= state_store(entry)
+        unless admitted
+          cycle_admitted, result = store.try_with_cycle_admission do
+            recover_projections(entry, now: now, store: store, admitted: true)
+          end
+          return false unless cycle_admitted
+
+          return result
+        end
         backoff = store.recovery_backoff(now: now)
         return false if backoff.fetch("blocked")
 

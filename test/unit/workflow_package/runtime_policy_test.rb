@@ -562,7 +562,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
-  def test_codex_doctor_accepts_valid_runtime_provenance_when_aggregate_fails
+  def test_codex_doctor_silences_mise_and_accepts_valid_runtime_provenance_when_aggregate_fails
     profile = Object.new
     profile.define_singleton_method(:bin) { "codex-nonzero-doctor" }
     status = Object.new
@@ -585,7 +585,12 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       captured_environment = environment
       probe_home = environment.fetch("CODEX_HOME")
       probe_home_visible = File.directory?(probe_home)
-      [ JSON.generate(report), "unrelated doctor failure", status ]
+      stdout = if environment["MISE_QUIET"] == "1"
+        JSON.generate(report)
+      else
+        "mise selected codex\n#{JSON.generate(report)}"
+      end
+      [ stdout, "unrelated doctor failure", status ]
     end
     reset_codex_executable_cache
 
@@ -598,7 +603,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     assert_equal File.realpath("/bin/true"), resolved
     assert_equal [ "codex-nonzero-doctor", "doctor", "--json" ], captured_argv
     assert_equal Hive::WorkflowPackage::RuntimePolicy::CODEX_DOCTOR_TIMEOUT_SEC, captured_timeout
-    assert_equal({ "CODEX_HOME" => probe_home }, captured_environment)
+    assert_equal({ "CODEX_HOME" => probe_home, "MISE_QUIET" => "1" }, captured_environment)
     assert probe_home_visible
     refute File.exist?(probe_home)
   ensure

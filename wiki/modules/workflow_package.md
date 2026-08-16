@@ -149,7 +149,9 @@ validation failed. Codex executable discovery accepts valid
 runtime provenance even when unrelated aggregate doctor checks fail, while a
 dedicated bounded probe and executable-path validation remain fail-closed. The
 probe uses an ephemeral empty Codex state root, so executable discovery does
-not scan the operator's rollout archive or inherit its user configuration.
+not scan the operator's rollout archive or inherit its user configuration. It
+also sets `MISE_QUIET=1` so a mise-backed `codex` shim cannot prepend a version
+selection notice to the machine-readable doctor JSON.
 When a launch is built from typed model/effort selection, its private spawn log
 and `agent_start` event record only the normalized model, requested/effective
 effort, pin state, and effort-support state. They never serialize the provider

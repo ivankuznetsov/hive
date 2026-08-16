@@ -549,7 +549,7 @@ module Hive
           capture3_bounded(
             configured, "doctor", "--json",
             timeout_sec: CODEX_DOCTOR_TIMEOUT_SEC,
-            environment: { "CODEX_HOME" => probe_home }
+            environment: { "CODEX_HOME" => probe_home, "MISE_QUIET" => "1" }
           )
         end
       end

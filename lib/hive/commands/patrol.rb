@@ -289,9 +289,13 @@ module Hive
           raise Hive::ConfigError,
                 "patrol reservation capture #{@occurrence_id.inspect} is unavailable"
         end
+        if @occurrence_id.nil? && !@dry_run && state.recovery_active?
+          raise Hive::ConfigError,
+                "patrol cycle is already reserved; wait for daemon recovery"
+        end
         capture ||= build_manual_capture(entry)
         validate_capture!(capture, entry)
-        state.reserve_occurrence!(capture)
+        state.reserve_occurrence!(capture) unless @dry_run
         capture
       end
 

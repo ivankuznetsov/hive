@@ -68,21 +68,29 @@ module Hive
         @logger = logger
         @client = client || ::Telegram::Bot::Client.new(token)
         @poll_health = poll_health
+        @last_poll_failed = false
         @build_update_error_classes_seen = {}
+      end
+
+      def last_poll_failed?
+        @last_poll_failed
       end
 
       def poll_updates(timeout:, since_update_id:)
         params = { timeout: timeout }
         params[:offset] = since_update_id if since_update_id
         raw_updates = client.api.get_updates(params)
+        @last_poll_failed = false
         @poll_health.record_success
         Array(raw_updates).filter_map { |raw| build_update(raw) }
       rescue *BENIGN_POLL_ERRORS => e
+        @last_poll_failed = true
         @logger.event(:poll_failure, level: :debug, category: Logger::CATEGORY_NOISE,
                                      error_class: e.class.name, message: e.message)
         emit_poll_unhealthy_if_needed
         []
       rescue StandardError => e
+        @last_poll_failed = true
         @logger.event(:poll_failure, error_class: e.class.name, message: e.message)
         emit_poll_unhealthy_if_needed
         []

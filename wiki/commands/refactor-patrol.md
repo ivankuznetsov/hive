@@ -293,8 +293,11 @@ preserving the original job bytes. Canonical action ids
 still prevent duplicate remote effects across replays. Production ids hash the
 normalized source host, repository, action kind, and either the fix fingerprint
 or issue family id. Semantic-family descriptors and ids also include the source
-host, so identical repository slugs on different GitHub/GHES hosts cannot share
-an action or family identity.
+host when a family is first created, so identical repository slugs on different
+GitHub/GHES hosts cannot share an action or family identity. The resulting
+family id is durable publication identity: later descriptor-algorithm changes
+refresh the rebuildable descriptor from authoritative jobs without renaming the
+family or invalidating an existing issue receipt.
 
 ## Read-only job inspection
 
@@ -576,6 +579,9 @@ create state, while the first mutation lazily creates only v4. Runtime never
 probes, reads, hashes, moves, deletes, or interprets an obsolete v3 JobStore;
 those bytes remain opaque. Reconciler manifests, families, result transport,
 and global terminal proofs retain their separate namespaces and authority.
+Family ids remain stable once an issue action owns them; rebuilding the family
+projection refreshes its canonical descriptor from the current authoritative
+v4 thesis snapshot without rewriting that publication identity.
 
 Terminal remote-effect proof is repository-global rather than registration
 local:

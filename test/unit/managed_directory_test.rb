@@ -48,6 +48,35 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_nonblocking_lock_does_not_wait_or_yield_while_held
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(root: root, label: "test state")
+      ready = Queue.new
+      release = Queue.new
+      holder = Thread.new do
+        directory.with_lock("state.lock") do
+          ready << true
+          release.pop
+        end
+      end
+      ready.pop
+
+      yielded = false
+      begin
+        assert_nil directory.with_lock("state.lock", nonblock: true) {
+          yielded = true
+        }
+        refute yielded
+      ensure
+        release << true
+        holder.join
+      end
+
+      assert_equal :acquired,
+                   directory.with_lock("state.lock", nonblock: true) { :acquired }
+    end
+  end
+
   def test_prepares_private_directories_and_reads_atomic_writes
     with_tmp_dir do |anchor|
       root = File.join(anchor, "state", "evidence")

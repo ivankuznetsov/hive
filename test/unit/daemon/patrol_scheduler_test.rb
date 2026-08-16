@@ -131,6 +131,28 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_live_cycle_blocks_recovery_and_reservation_admission
+    with_tmp_dir do |dir|
+      write_state(dir, "last_scanned_sha" => "old")
+      entry = project_entry(dir)
+      state = Hive::Patrol::StateStore.new(dir)
+      state.reserve_occurrence!(reservation_capture(entry), now: T0)
+      sched = scheduler(entry, enabled_cfg)
+
+      state.with_cycle_lock do
+        assert_empty sched.candidates(now: T0),
+                     "scheduler recovery must not adopt a live worker occurrence"
+      end
+
+      candidate = sched.candidates(now: T0).fetch(0)
+      state.with_cycle_lock do
+        assert_nil sched.reserve(candidate, now: T0),
+                   "reservation must lose to a cycle that starts after selection"
+      end
+      refute sched.pending?("p1")
+    end
+  end
+
   def test_candidate_boundary_preserves_identity_and_reservation_rechecks_ownership
     with_tmp_dir do |dir|
       write_state(dir, "last_scanned_sha" => "old")
@@ -270,6 +292,37 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       write_state(dir, "last_run_at" => (T0 - 600).utc.iso8601)
       sched = scheduler(project_entry(dir), cfg)
       assert_equal 1, sched.tick(now: T0).size
+    end
+  end
+
+  def test_timer_mode_rechecks_at_the_exact_due_time
+    with_tmp_dir do |dir|
+      cfg = enabled_cfg("patrol" => {
+        "enabled" => true,
+        "trigger" => "timer",
+        "poll_interval_sec" => 600
+      })
+      write_state(dir, "last_run_at" => (T0 - 500).utc.iso8601)
+      sched = scheduler(project_entry(dir), cfg)
+
+      assert_empty sched.candidates(now: T0)
+      assert_empty sched.candidates(now: T0 + 99)
+      assert_equal 1, sched.candidates(now: T0 + 100).size
+    end
+  end
+
+  def test_unselected_due_candidate_remains_eligible_for_the_next_tick
+    with_tmp_dir do |dir|
+      cfg = enabled_cfg("patrol" => {
+        "enabled" => true,
+        "trigger" => "timer",
+        "poll_interval_sec" => 600
+      })
+      write_state(dir, "last_run_at" => (T0 - 600).utc.iso8601)
+      sched = scheduler(project_entry(dir), cfg)
+
+      assert_equal 1, sched.candidates(now: T0).size
+      assert_equal 1, sched.candidates(now: T0 + 1).size
     end
   end
 
@@ -477,8 +530,10 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
 
     sched = Hive::Daemon::PatrolScheduler.new(registry: -> { [] })
     sched.instance_variable_set(:@pending, "p1" => { started_at: T0 })
+    sched.instance_variable_set(:@next_check_at, "p1" => T0 + 600)
     sched.cancel(project: "p1")
     refute sched.pending?("p1")
+    assert_empty sched.instance_variable_get(:@next_check_at)
 
     with_tmp_dir do |dir|
       cfg = enabled_cfg("patrol" => {
@@ -734,6 +789,9 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       ) do |**|
         raise RuntimeError, "masking persistence error"
       end
+      masking_store.define_singleton_method(:try_with_cycle_admission) do |&block|
+        [ true, block.call ]
+      end
       factories = [
         ->(_candidate) { raise original },
         ->(_candidate) { masking_store }
@@ -805,6 +863,9 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       store = Object.new
       store.define_singleton_method(:occurrence_capture) { |_occurrence_id| capture }
       store.define_singleton_method(:reserve_occurrence!) { |_capture, now:| now }
+      store.define_singleton_method(:try_with_cycle_admission) do |&block|
+        [ true, block.call ]
+      end
       sched = Hive::Daemon::PatrolScheduler.new(
         registry: -> { [ entry ] },
         migration_ownership: ->(*) { true },
@@ -975,6 +1036,9 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
 
       failure = nil
       true
+    end
+    store.define_singleton_method(:try_with_cycle_admission) do |&block|
+      [ true, block.call ]
     end
     store
   end

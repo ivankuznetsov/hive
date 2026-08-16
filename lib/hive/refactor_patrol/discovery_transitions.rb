@@ -1,4 +1,5 @@
 require "hive/refactor_patrol/discovery_block_transitions"
+require "hive/refactor_patrol/discovery_capacity"
 require "hive/refactor_patrol/discovery_claim_transitions"
 require "hive/refactor_patrol/discovery_transition_context"
 
@@ -6,10 +7,14 @@ module Hive
   module RefactorPatrol
     # Facade for scheduler discovery transition collaborators.
     class DiscoveryTransitions
+      MAX_FEATURES_PER_CLAIM = DiscoveryCapacity::MAX_FEATURES_PER_CLAIM
+      MAX_EFFECTS_PER_CLAIM = DiscoveryCapacity::MAX_EFFECTS_PER_CLAIM
+
       def initialize(config_loader:, migration_snapshot: nil,
                      evidence_store_factory: nil, module_execution:, owner:,
                      owner_pid:, owner_process_start_time:, lease_sec:,
-                     claim_resolver:, reservation_error:,
+                     claim_resolver:, claim_liveness_resolver: nil,
+                     reservation_error:,
                      occurrence_lifecycle:,
                      claim_operation: "discovery-claim",
                      operation_prefix: "discovery-",
@@ -29,6 +34,7 @@ module Hive
           owner_process_start_time: owner_process_start_time,
           lease_sec: lease_sec,
           claim_resolver: claim_resolver,
+          claim_liveness_resolver: claim_liveness_resolver,
           reservation_error: reservation_error,
           claim_operation: claim_operation,
           operation_prefix: operation_prefix

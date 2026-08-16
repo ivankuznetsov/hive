@@ -1382,9 +1382,33 @@ class RefactorPatrolCommandTest < Minitest::Test
   end
 
   def test_claim_liveness_resolver_fails_safe_when_identity_fields_are_missing
-    resolver = Hive::Commands::RefactorPatrol::ClaimLivenessResolver.new
+    resolver = Hive::RefactorPatrol::ClaimLivenessResolver.new
 
-    assert_equal :resolved, resolver.call({})
+    assert_equal :unresolved, resolver.call({})
+  end
+
+  def test_manual_discovery_waits_for_automatic_capacity_rollover
+    command = command_for
+    effects = Array.new(
+      Hive::Modules::Migration::PatrolEvidence::MAX_EFFECTS_PER_OCCURRENCE -
+        Hive::RefactorPatrol::DiscoveryCapacity::MAX_EFFECTS_PER_CLAIM
+    ) { {} }
+    store = Object.new
+    store.define_singleton_method(:occurrence_for_job) do |_job_id|
+      { "effects" => effects }
+    end
+    command.instance_variable_set(:@job_store, store)
+
+    error = assert_raises(Hive::ConfigError) do
+      command.send(
+        :assert_manual_discovery_capacity!, { "job_id" => "job-1" }
+      )
+    end
+
+    assert_equal(
+      "refactor patrol occurrence is awaiting automatic capacity rollover",
+      error.message
+    )
   end
 
   def test_mode_validation_rejects_ambiguous_or_unsafe_flag_combinations

@@ -41,6 +41,7 @@ require "hive/update_check/state"
 module Hive
   module Bot
     class Supervisor
+      POLL_FAILURE_BACKOFF_SEC = 1
       BOT_COMMANDS = [
         { command: "idea",    description: "Capture an idea, or just send any message" },
         { command: "status",  description: "Show active tasks" },
@@ -245,6 +246,10 @@ module Hive
               timeout: @config.fetch("long_poll_timeout_sec"),
               since_update_id: @next_update_id
             )
+            if @telegram.respond_to?(:last_poll_failed?) && @telegram.last_poll_failed?
+              interruptible_sleep(POLL_FAILURE_BACKOFF_SEC)
+              next
+            end
             if first_poll
               queued = queued_updates(updates)
               send_reconnect_summary(queued)

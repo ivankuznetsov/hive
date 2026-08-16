@@ -107,6 +107,50 @@ module Hive
         raise @inconsistent_record, "prior recorded transitions are not terminal"
       end
 
+      # A worker can die after reserving a local transition but before the
+      # JobStore mutation begins. Once liveness and claim fences have already
+      # been resolved by the rollover owner, that prepared effect is proven
+      # unsent: no matching transition exists in the authoritative aggregate.
+      # Terminalize it in place so a full occurrence can be finalized without
+      # allocating another effect. Uncertain or recorded effects remain fenced.
+      def deny_unrecorded_prepared_effects_for_rollover!(
+        job, occurrence_id:, now: Time.now
+      )
+        @before_mutation.call
+        aggregate = aggregate_for(job)
+        unless aggregate.fetch("occurrence_id") == occurrence_id.to_s
+          raise @inconsistent_record,
+                "occurrence effect rollover fence is stale"
+        end
+        occurrence = occurrence_store.fetch(occurrence_id)
+        unless occurrence && occurrence.fetch("phase") == "reserved"
+          raise @inconsistent_record,
+                "occurrence effect rollover is unavailable"
+        end
+
+        recorded = current_recorded_effect_transitions(aggregate).to_h do |entry|
+          [ entry.fetch("intent_id"), true ]
+        end
+        pending = occurrence.fetch("effects").filter_map do |intent_id, cell|
+          next if Hive::Modules::Migration::OccurrenceJournal::
+                    TERMINAL_STATES.include?(cell.fetch("state"))
+          if cell.fetch("state") != "prepared" || recorded.key?(intent_id)
+            raise @inconsistent_record,
+                  "prior occurrence effects are not safely retireable"
+          end
+
+          effect_intent(occurrence_id, intent_id)
+        end
+        pending.each do |intent|
+          occurrence_store.deny_effect!(
+            intent,
+            outcome: { "reason" => "effect_capacity_rollover_abandoned" },
+            now: now
+          )
+        end
+        true
+      end
+
       private
 
       def aggregate_for(job) = @aggregate_reader.call(job)

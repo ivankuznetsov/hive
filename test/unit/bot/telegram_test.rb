@@ -111,14 +111,28 @@ class HiveBotTelegramTest < Minitest::Test
   def test_poll_updates_logs_transient_network_error_and_returns_empty
     api = FakeApi.new
     api.raise_on_get_updates = Faraday::ConnectionFailed.new("offline")
+    bot = telegram(api)
 
-    updates = telegram(api).poll_updates(timeout: 25, since_update_id: nil)
+    updates = bot.poll_updates(timeout: 25, since_update_id: nil)
 
     assert_equal [], updates
+    assert bot.last_poll_failed?
     assert_equal :poll_failure, logger.events.first.first
     assert_match(/ConnectionFailed/, logger.events.first.last[:error_class])
     assert_equal :debug, logger.events.first.last[:level]
     assert_equal :noise, logger.events.first.last[:category]
+  end
+
+  def test_successful_poll_clears_failure_signal
+    api = FakeApi.new
+    api.raise_on_get_updates = Faraday::ConnectionFailed.new("offline")
+    bot = telegram(api)
+
+    bot.poll_updates(timeout: 25, since_update_id: nil)
+    api.raise_on_get_updates = nil
+    bot.poll_updates(timeout: 25, since_update_id: nil)
+
+    refute bot.last_poll_failed?
   end
 
   def test_poll_updates_logs_net_read_timeout_as_debug_noise

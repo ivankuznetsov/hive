@@ -1342,6 +1342,19 @@ class PatrolCommandTest < Minitest::Test
     assert_match(/reservation capture .* is unavailable/, error.message)
   end
 
+  def test_manual_capture_refuses_a_reserved_daemon_occurrence
+    state = Object.new
+    state.define_singleton_method(:recovery_active?) { true }
+    command = Hive::Commands::Patrol.new("demo")
+
+    error = assert_raises(Hive::ConfigError) do
+      command.send(:patrol_capture, {}, state)
+    end
+
+    assert_equal "patrol cycle is already reserved; wait for daemon recovery",
+                 error.message
+  end
+
   def test_manual_capture_requires_the_selected_migration_authority
     with_patrol_project do
       entry = Hive::Config.find_project("demo")

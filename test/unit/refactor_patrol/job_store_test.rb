@@ -732,6 +732,53 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_unexpired_dead_claim_is_claimable_and_reclaimed_only_after_liveness_proof
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      first = store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
+        now: T0, lease_sec: 7200
+      )
+      store.attach_discovery_process!(
+        first, pid: 1234, process_start_time: "boot-1", pgid: 1234,
+        now: T0 + 1, lease_sec: 7200
+      )
+
+      assert_empty store.claimable_jobs(
+        now: T0 + 60,
+        claim_liveness_resolver: ->(_attempt) { :unresolved }
+      )
+      assert_empty store.claimable_jobs(
+        now: T0 + 60,
+        claim_liveness_resolver: ->(_attempt) { raise "probe failed" }
+      )
+      assert_equal [ "pr-7-stable" ], store.claimable_jobs(
+        now: T0 + 60,
+        claim_liveness_resolver: ->(_attempt) { :resolved }
+      ).map { |item| item.fetch("job_id") }
+
+      assert_nil store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-b", analysis_sha: "c" * 40,
+        now: T0 + 60, lease_sec: 7200,
+        claim_resolver: ->(_attempt) { :unresolved },
+        allow_unexpired_recovery: true
+      )
+      reclaimed = store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-b", analysis_sha: "c" * 40,
+        now: T0 + 60, lease_sec: 7200,
+        claim_resolver: ->(_attempt) { :resolved },
+        allow_unexpired_recovery: true
+      )
+
+      assert_equal first.fetch(:generation) + 1,
+                   reclaimed.fetch(:generation)
+      attempts = store.read_job("pr-7-stable").fetch("attempts")
+      assert_equal "superseded", attempts[-2].fetch("state")
+      assert_equal "inactive_claim_resolved", attempts[-2].fetch("outcome")
+    end
+  end
+
   def test_rejects_zombie_records_with_two_active_or_unordered_discovery_attempts
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
@@ -1953,6 +2000,183 @@ class RefactorPatrolJobStoreTest < Minitest::Test
           "pr-7-stable", owner: "three", analysis_sha: "d" * 40, now: T0 + 13
         )
       end
+    end
+  end
+
+  def test_capacity_rollover_resolution_leaves_job_immediately_claimable
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      aggregate = store.read_job("pr-7-stable")
+      store.claim_discovery!(
+        "pr-7-stable", owner: "expired", analysis_sha: "c" * 40,
+        now: T0, lease_sec: 10, owner_pid: 4242,
+        owner_process_start_time: "gone"
+      )
+
+      store.resolve_inactive_discovery_for_rollover!(
+        "pr-7-stable",
+        occurrence_id: aggregate.fetch("occurrence_id"),
+        now: T0 + 11,
+        claim_liveness_resolver: ->(_claim) { :resolved }
+      )
+
+      recovered = store.read_job("pr-7-stable")
+      assert_equal "blocked", recovered.fetch("state")
+      assert_equal "effect_capacity_rollover",
+                   recovered.fetch("attempts").last.fetch("outcome")
+      assert_equal [ "pr-7-stable" ],
+                   store.claimable_jobs(now: T0 + 11).map { |job| job.fetch("job_id") }
+    end
+  end
+
+  def test_capacity_rollover_resolution_fails_closed_for_stale_or_invalid_claim_evidence
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      occurrence_id = store.read_job("pr-7-stable").fetch("occurrence_id")
+      store.claim_discovery!(
+        "pr-7-stable", owner: "expired", analysis_sha: "c" * 40,
+        now: T0, lease_sec: 10, owner_pid: 4242,
+        owner_process_start_time: "gone"
+      )
+
+      stale = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        store.resolve_inactive_discovery_for_rollover!(
+          "pr-7-stable", occurrence_id: "occ-other", now: T0 + 11,
+          claim_liveness_resolver: ->(_claim) { :resolved }
+        )
+      end
+      assert_match(/active claim/, stale.message)
+
+      unresolved = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        store.resolve_inactive_discovery_for_rollover!(
+          "pr-7-stable", occurrence_id: occurrence_id, now: T0 + 11,
+          claim_liveness_resolver: ->(_claim) { raise "probe failed" }
+        )
+      end
+      assert_match(/active claim/, unresolved.message)
+
+      transitions = store.instance_variable_get(:@claim_transitions)
+      with_replaced_singleton_method(
+        transitions, :finish!, ->(*, **) { raise KeyError, "bad claim" }
+      ) do
+        invalid = assert_raises(
+          Hive::RefactorPatrol::JobStore::InconsistentRecord
+        ) do
+          store.resolve_inactive_discovery_for_rollover!(
+            "pr-7-stable", occurrence_id: occurrence_id, now: T0 + 11,
+            claim_liveness_resolver: ->(_claim) { :resolved }
+          )
+        end
+        assert_match(/invalid evidence/, invalid.message)
+      end
+    end
+  end
+
+  def test_capacity_rollover_denies_only_an_unrecorded_prepared_effect
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      valid_manifest = manifest
+      valid_manifest["manifest_checksum"] =
+        Hive::RefactorPatrol::PrManifest.checksum(
+          valid_manifest.reject do |key, _value|
+            key == "manifest_checksum"
+          end
+        )
+      capture = architecture_capture(valid_manifest)
+      store.reserve_manifest_occurrence!(
+        valid_manifest, capture: capture, now: T0
+      )
+      intake = architecture_intent(
+        capture,
+        sink: "job",
+        target: "pr-7-stable",
+        idempotency_key: "pr-7-stable:enqueue",
+        claim_generation: capture.owner_epoch
+      )
+      store.prepare_effect!(intake, now: T0)
+      store.mark_dispatch_uncertain!(intake, now: T0)
+      store.settle_effect!(
+        intake,
+        status: "committed",
+        outcome: { "transition_status" => "applied" },
+        now: T0
+      )
+      store.enqueue_manifest!(
+        valid_manifest,
+        occurrence_id: capture.occurrence_id,
+        intake_transition_id: intake.intent_id,
+        policy: intake_policy,
+        now: T0
+      )
+      aggregate = store.read_job("pr-7-stable")
+      claim = store.claim_discovery!(
+        "pr-7-stable",
+        owner: "expired",
+        analysis_sha: "c" * 40,
+        now: T0,
+        lease_sec: 10,
+        owner_pid: 4242,
+        owner_process_start_time: "gone"
+      )
+      intent = architecture_intent(
+        capture,
+        sink: "discovery",
+        target: "pr-7-stable:checkpoint-progress",
+        idempotency_key: "pr-7-stable:abandoned-progress",
+        claim_generation: claim.fetch(:generation)
+      )
+      store.prepare_effect!(intent, now: T0 + 1)
+      uncertain = architecture_intent(
+        capture,
+        sink: "discovery",
+        target: "pr-7-stable:checkpoint-progress",
+        idempotency_key: "pr-7-stable:uncertain-progress",
+        claim_generation: claim.fetch(:generation)
+      )
+      store.prepare_effect!(uncertain, now: T0 + 1)
+      store.mark_dispatch_uncertain!(uncertain, now: T0 + 1)
+      store.resolve_inactive_discovery_for_rollover!(
+        "pr-7-stable",
+        occurrence_id: aggregate.fetch("occurrence_id"),
+        now: T0 + 11,
+        claim_liveness_resolver: ->(_claim) { :resolved }
+      )
+
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        store.deny_unrecorded_prepared_effects_for_rollover!(
+          "pr-7-stable",
+          occurrence_id: capture.occurrence_id,
+          now: T0 + 11
+        )
+      end
+      assert_match(/not safely retireable/, error.message)
+      assert_equal "prepared", store.effect_state(intent).fetch("state")
+      assert_equal "dispatch_uncertain",
+                   store.effect_state(uncertain).fetch("state")
+      store.settle_effect!(
+        uncertain,
+        status: "failed",
+        outcome: { "reason" => "reconciled_for_test" },
+        now: T0 + 11
+      )
+      store.deny_unrecorded_prepared_effects_for_rollover!(
+        "pr-7-stable",
+        occurrence_id: capture.occurrence_id,
+        now: T0 + 11
+      )
+
+      state = store.effect_state(intent)
+      assert_equal "denied", state.fetch("state")
+      assert_equal "effect_capacity_rollover_abandoned",
+                   state.dig("outcome", "reason")
     end
   end
 

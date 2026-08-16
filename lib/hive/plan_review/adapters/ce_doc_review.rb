@@ -33,7 +33,7 @@ module Hive
 
             profile = Hive::AgentProfiles.lookup(request.reviewer.fetch("provider"), cfg: @cfg)
             scope = Hive::PlanReview::WorkspaceScope.launch_kwargs(
-              profile:, workspace: cwd, role: request.kind
+              profile:, workspace: cwd, role: request.kind, output_path:
             )
             manifest = custody_manifest(cwd, output_path)
             snapshot = Hive::ArtifactFirewall.capture(manifest)
@@ -231,6 +231,12 @@ module Hive
 
         def capability_for(request)
           return { "status" => "present", "diagnostic" => nil } if request.kind == "adversarial"
+          if request.reviewer.fetch("provider") == "pi"
+            return {
+              "status" => "present", "diagnostic" => nil,
+              "invocation" => nil
+            }
+          end
 
           contract = @capability_resolver.call(CAPABILITY, request.reviewer.fetch("provider"))
           stringify(@capability_probe.call(

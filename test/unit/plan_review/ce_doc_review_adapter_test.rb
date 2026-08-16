@@ -41,6 +41,37 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_pi_primary_uses_the_built_in_direct_review_contract_without_skill_probe
+    with_request do |request, _plan_path|
+      pi_request = request.with(
+        reviewer: request.reviewer.merge(
+          "provider" => "pi",
+          "model" => "openrouter/deepseek/deepseek-v4-pro:xhigh",
+          "family" => "deepseek",
+          "route" => "pi-openrouter"
+        )
+      )
+      prompt = nil
+      runner = lambda do |output_path:, request:, **kwargs|
+        prompt = kwargs.fetch(:prompt)
+        File.write(output_path, JSON.generate(valid_result(request)))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+      adapter = Hive::PlanReview::Adapters::CeDocReview.new(
+        runner:,
+        capability_probe: ->(**) { flunk "Pi direct review must not probe a host skill" },
+        capability_resolver: ->(*) { flunk "Pi direct review must not resolve a host skill" }
+      )
+
+      result = adapter.call(pi_request)
+
+      assert_equal "success", result.outcome
+      assert_includes prompt, "Review the immutable executable-plan copy"
+      assert_includes prompt, "do not require an external skill or subagent"
+      refute_includes prompt, "Invoke `"
+    end
+  end
+
   def test_route_receipt_normalizes_model_family_before_attesting_independence
     with_request do |request, _plan_path|
       runner = lambda do |output_path:, request:, **|

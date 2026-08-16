@@ -1657,6 +1657,235 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
+  def test_host_materialization_ignores_a_malformed_fence_beside_the_managed_payload
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+      article = File.join(task, "article.md")
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          { "preset" => "scoped", "tools" => [ "Read", "Edit(./article.md)" ] },
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          managed_outputs: [ article ]
+        )
+      end
+      payload = JSON.generate("files" => { "article.md" => "reviewed\n" })
+      result = {
+        status: :ok,
+        final_message: <<~MESSAGE,
+          Here is the shape I am about to emit:
+
+          ```json
+          { "files": { "article.md": <the reviewed body> } }
+          ```
+
+          And here is the real payload:
+
+          ```json
+          #{payload}
+          ```
+        MESSAGE
+        final_message_truncated: false
+      }
+
+      policy.materialize_outputs!(result)
+
+      assert_equal "reviewed\n", File.read(article)
+    ensure
+      policy&.cleanup!
+    end
+  end
+
+  def test_codex_actor_rejects_a_path_qualified_read_target_that_cannot_be_resolved
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+
+      error = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            {
+              "preset" => "scoped",
+              "tools" => [ "Read(./missing-brief.md)", "Edit(./result.md)" ]
+            },
+            task_folder: task,
+            package_root: package,
+            profile: Hive::AgentProfiles.lookup(:codex),
+            managed_outputs: [ File.join(task, "result.md") ]
+          )
+        end
+      end
+
+      assert_includes error.message, "path-qualified Read target is unavailable"
+    end
+  end
+
+  def test_scoped_pi_actor_rejects_missing_bubblewrap
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+
+      sandbox = Hive::WorkflowPackage::RuntimePolicy::PI_SANDBOX_PATH
+      original_file = File.method(:file?)
+      file_check = ->(path) { path == sandbox ? false : original_file.call(path) }
+
+      error = with_replaced_singleton_method(File, :file?, file_check) do
+        assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            { "preset" => "scoped", "tools" => [ "Read" ] },
+            task_folder: task,
+            package_root: package,
+            profile: Hive::AgentProfiles.lookup(:pi)
+          )
+        end
+      end
+      assert_includes error.message, "requires bubblewrap"
+    end
+  end
+
+  def test_scoped_pi_actor_rejects_an_unavailable_auth_file
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      runtime = pi_runtime_fixture(File.join(dir, "pi-runtime"))
+      home = File.join(dir, "home")
+      FileUtils.mkdir_p([ task, package, home ])
+
+      error = with_available_pi_sandbox do
+        with_env(
+          "HOME" => home,
+          "PI_CODING_AGENT_DIR" => File.join(home, ".pi", "agent"),
+          "HIVE_PI_BIN" => File.join(runtime, "pi")
+        ) do
+          assert_raises(Hive::ConfigError) do
+            Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+              { "preset" => "scoped", "tools" => [ "Read" ] },
+              task_folder: task,
+              package_root: package,
+              profile: Hive::AgentProfiles.lookup(:pi)
+            )
+          end
+        end
+      end
+      assert_includes error.message, "auth file is unavailable"
+    end
+  end
+
+  def test_pi_executable_falls_back_to_mise_when_the_configured_binary_is_not_managed
+    with_tmp_dir do |dir|
+      runtime = pi_runtime_fixture(File.join(dir, "pi-runtime"))
+      shim = executable_fixture(File.join(dir, "shims", "pi"))
+      path_dir = File.dirname(executable_fixture(File.join(dir, "bin", "mise")))
+      captured_argv = nil
+      captured_timeout = nil
+      captured_environment = nil
+      # The replacement runs with RuntimePolicy as self, so the probe result has
+      # to be built out here where the test's own helpers are still reachable.
+      probe = [ "#{File.join(runtime, 'pi')}\n", "", pi_exit_status(true) ]
+      capture = lambda do |*argv, timeout_sec:, environment:|
+        captured_argv = argv
+        captured_timeout = timeout_sec
+        captured_environment = environment
+        probe
+      end
+
+      resolved = with_env("PATH" => path_dir, "HIVE_PI_BIN" => shim) do
+        with_replaced_singleton_method(
+          Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
+        ) do
+          Hive::WorkflowPackage::RuntimePolicy.pi_executable(
+            Hive::AgentProfiles.lookup(:pi)
+          )
+        end
+      end
+
+      assert_equal File.realpath(File.join(runtime, "pi")), resolved
+      assert_equal [ File.join(path_dir, "mise"), "which", "pi" ], captured_argv
+      assert_equal Hive::WorkflowPackage::RuntimePolicy::PI_RESOLVE_TIMEOUT_SEC,
+                   captured_timeout
+      assert_equal({ "MISE_QUIET" => "1" }, captured_environment)
+    end
+  end
+
+  def test_pi_executable_fails_closed_when_mise_cannot_name_a_managed_runtime
+    with_tmp_dir do |dir|
+      shim = executable_fixture(File.join(dir, "shims", "pi"))
+      empty_path = File.join(dir, "empty-bin")
+      FileUtils.mkdir_p(empty_path)
+
+      error = with_env("PATH" => empty_path, "HIVE_PI_BIN" => shim) do
+        assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy.pi_executable(
+            Hive::AgentProfiles.lookup(:pi)
+          )
+        end
+      end
+      assert_includes error.message, "unavailable managed executable"
+
+      path_dir = File.dirname(executable_fixture(File.join(dir, "bin", "mise")))
+      unmanaged = executable_fixture(File.join(dir, "unmanaged", "pi"))
+      [
+        [ "#{unmanaged}\n", pi_exit_status(true) ],
+        [ "#{File.join(dir, 'pi-runtime', 'pi')}\n", pi_exit_status(false) ],
+        [ "pi\n", pi_exit_status(true) ]
+      ].each do |stdout, status|
+        capture = ->(*_argv, timeout_sec:, environment:) { [ stdout, "", status ] }
+        error = with_env("PATH" => path_dir, "HIVE_PI_BIN" => shim) do
+          with_replaced_singleton_method(
+            Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
+          ) do
+            assert_raises(Hive::ConfigError) do
+              Hive::WorkflowPackage::RuntimePolicy.pi_executable(
+                Hive::AgentProfiles.lookup(:pi)
+              )
+            end
+          end
+        end
+        assert_includes error.message, "unavailable managed executable"
+      end
+    end
+  end
+
+  def test_pi_executable_probe_is_bounded_and_fails_closed_on_a_broken_mise
+    with_tmp_dir do |dir|
+      shim = executable_fixture(File.join(dir, "shims", "pi"))
+      path_dir = File.dirname(executable_fixture(File.join(dir, "bin", "mise")))
+
+      timeout = ->(*_argv, timeout_sec:, environment:) { raise Timeout::Error }
+      error = with_env("PATH" => path_dir, "HIVE_PI_BIN" => shim) do
+        with_replaced_singleton_method(
+          Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, timeout
+        ) do
+          assert_raises(Hive::ConfigError) do
+            Hive::WorkflowPackage::RuntimePolicy.pi_executable(
+              Hive::AgentProfiles.lookup(:pi)
+            )
+          end
+        end
+      end
+      assert_includes error.message, "probe timed out after 30s"
+
+      missing = ->(*_argv, timeout_sec:, environment:) { raise Errno::ENOENT }
+      error = with_env("PATH" => path_dir, "HIVE_PI_BIN" => shim) do
+        with_replaced_singleton_method(
+          Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, missing
+        ) do
+          assert_raises(Hive::ConfigError) do
+            Hive::WorkflowPackage::RuntimePolicy.pi_executable(
+              Hive::AgentProfiles.lookup(:pi)
+            )
+          end
+        end
+      end
+      assert_includes error.message, "unavailable managed executable"
+    end
+  end
+
   private
 
   def permissions
@@ -1718,6 +1947,29 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     with_replaced_singleton_method(File, :file?, file_check) do
       with_replaced_singleton_method(File, :executable?, executable_check) { yield }
     end
+  end
+
+  def executable_fixture(path)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, "#!/bin/sh\n")
+    FileUtils.chmod(0o755, path)
+    path
+  end
+
+  # A managed pi runtime is recognized by its adjacent theme files, so a
+  # believable fixture needs the binary and both themes in the same directory.
+  def pi_runtime_fixture(root)
+    executable_fixture(File.join(root, "pi"))
+    FileUtils.mkdir_p(File.join(root, "theme"))
+    File.write(File.join(root, "theme", "dark.json"), "{}")
+    File.write(File.join(root, "theme", "light.json"), "{}")
+    root
+  end
+
+  def pi_exit_status(successful)
+    status = Object.new
+    status.define_singleton_method(:success?) { successful }
+    status
   end
 
   def with_available_pi_sandbox

@@ -3,6 +3,31 @@ require "stringio"
 require_relative "../support/outcome_evidence_helper"
 
 class TaskTest < ActiveSupport::TestCase
+  test "correlated log reads an integrity-bearing bounded frame tail and fails inert" do
+    root = Dir.mktmpdir("hive-web-attempt-log")
+    previous_root = ENV["HIVE_ATTEMPT_STORE_ROOT"]
+    ENV["HIVE_ATTEMPT_STORE_ROOT"] = root
+    store = Hive::Attempts::Store.new(root: root)
+    writer = store.log_archive.open_writer("attempt-web-log")
+    writer.append("stdout", "receipt-correlated line\n")
+    writer.close
+    path = store.log_archive.hot_path("attempt-web-log")
+    reference = Hive::OutputReference.build(path, root: store.root)
+    task = Task.new(project: nil, attributes: { "slug" => "task-260816-abcd" })
+
+    log = task.correlated_log(reference)
+
+    assert_equal "attempt-web-log.frames", log.fetch("path")
+    assert_equal "receipt-correlated line\n", log.fetch("tail")
+    refute_includes log.to_s, root
+    assert_nil task.correlated_log(reference.merge("sha256" => "0" * 64))
+    assert_nil task.correlated_log(reference.merge("size" => Task::EXACT_LOG_MAX_BYTES + 1))
+  ensure
+    writer&.close unless writer&.closed?
+    ENV["HIVE_ATTEMPT_STORE_ROOT"] = previous_root
+    FileUtils.rm_rf(root) if root
+  end
+
   include OutcomeEvidenceHelper
   ProcessStatus = Data.define(:successful) do
     def success? = successful

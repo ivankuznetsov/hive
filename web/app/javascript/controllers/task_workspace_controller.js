@@ -28,6 +28,17 @@ export default class extends Controller {
     if (this.element.isConnected) requestAnimationFrame(() => this.recordMaterialSignature())
   }
 
+  loadDiagnosticLog(event) {
+    const details = event.currentTarget
+    if (!details.open) return
+
+    const frame = details.querySelector("turbo-frame[data-diagnostic-log-src]")
+    if (!frame) return
+
+    frame.src = frame.dataset.diagnosticLogSrc
+    delete frame.dataset.diagnosticLogSrc
+  }
+
   snapshot(event) {
     if (event.detail.renderMethod !== "morph") return
 

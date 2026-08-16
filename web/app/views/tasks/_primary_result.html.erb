@@ -1,0 +1,39 @@
+<% primary = result["primary"] %>
+<section id="workspace-primary-result" class="workspace-panel workspace-wide primary-work-product"
+         aria-labelledby="workspace-primary-result-heading"
+         <% if primary %>data-primary-artifact="<%= primary.fetch("reference") %>"<% end %>>
+  <div class="workspace-panel-heading">
+    <div>
+      <p class="workspace-eyebrow">Primary work product</p>
+      <h2 id="workspace-primary-result-heading"><%= primary&.fetch("name", nil) || "Work product pending" %></h2>
+    </div>
+    <span class="workspace-state-label"><%= result.fetch("kind").humanize %></span>
+  </div>
+
+  <% if result["warning"].present? %>
+    <p class="state-banner" role="status"><%= result.fetch("warning") %></p>
+  <% end %>
+
+  <% if primary.nil? %>
+    <p class="workspace-empty">The workflow has not produced its primary work product yet.</p>
+  <% elsif primary["binary"] %>
+    <p class="workspace-empty">The primary work product is binary and cannot be rendered here.</p>
+  <% elsif primary["content"].nil? %>
+    <p class="workspace-empty">The primary work product is unavailable within the bounded workspace read.</p>
+  <% elsif primary.fetch("name").end_with?(".md") %>
+    <% document = render_markdown_document(primary.fetch("content")) %>
+    <% if document.fetch(:outline).any? %>
+      <nav class="document-outline" aria-label="Document outline">
+        <p class="document-outline-title">On this page</p>
+        <ol>
+          <% document.fetch(:outline).each do |heading| %>
+            <li><a href="#<%= heading.fetch(:id) %>"><%= heading.fetch(:label) %></a></li>
+          <% end %>
+        </ol>
+      </nav>
+    <% end %>
+    <article class="markdown primary-markdown"><%= document.fetch(:html) %></article>
+  <% else %>
+    <pre><%= primary.fetch("content") %></pre>
+  <% end %>
+</section>

@@ -1,4 +1,5 @@
 require "digest"
+require "base64"
 require "json_schemer"
 require "pathname"
 require "shellwords"
@@ -8,6 +9,8 @@ require "hive/web/environment"
 require "hive/task_workspace/artifacts"
 require "hive/task_workspace/publication"
 require "hive/artifacts/outcome_evidence/store"
+require "hive/attempts/store"
+require "hive/output_reference"
 
 class Task
   include TaskMutations
@@ -65,6 +68,9 @@ class Task
     Pathname.new(Hive::Schemas.schema_path("hive-artifact-capture", version: 2))
   )
   DIFF_TIMEOUT_SEC = Integer(Hive::Web::Environment.value("HIVE_WEB_DIFF_TIMEOUT_SEC"))
+  EXACT_LOG_MAX_BYTES = 8 * 1024 * 1024
+  LOG_TAIL_BYTES = 256 * 1024
+  LOG_TAIL_LINES = 200
   RECOVERY_ACTIONS = %w[recover_execute recover_review error].freeze
   RECOVERY_LABELS = {
     "queued" => "Recovery queued",
@@ -467,7 +473,69 @@ class Task
     { "path" => path, "tail" => lines.join }
   end
 
+  # Read only the integrity-bearing log selected by semantic v2. The
+  # reference stays server-side; the browser sends back only its digest and
+  # the controller re-resolves the current semantic document before calling
+  # this seam. Large or changed files fail inert instead of becoming an
+  # unbounded request-time read.
+  def correlated_log(reference)
+    reference = reference.to_h.transform_keys(&:to_s)
+    Hive::OutputReference.validate_shape!(reference)
+    return nil if reference.fetch("size") > EXACT_LOG_MAX_BYTES
+
+    store = attempt_store_for_read
+    root = store.root
+    return nil unless Hive::OutputReference.verify(reference, root: root)
+
+    path = File.join(root, reference.fetch("path"))
+    tail = bounded_file_tail(path)
+    content = if reference.fetch("path").end_with?(".frames")
+      decode_log_frames(tail)
+    else
+      tail.force_encoding(Encoding::UTF_8).scrub
+    end
+    lines = content.lines.last(LOG_TAIL_LINES)
+    {
+      "path" => File.basename(reference.fetch("path")),
+      "tail" => lines.join,
+      "reference_sha256" => reference.fetch("sha256")
+    }
+  rescue Hive::Error, SystemCallError, IOError, JSON::ParserError, ArgumentError, TypeError
+    nil
+  end
+
   private
+
+  def attempt_store_for_read
+    root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
+    return Hive::Attempts::Store.new(create_directories: false) if root.empty?
+
+    Hive::Attempts::Store.new(root: root, create_directories: false)
+  end
+
+  def bounded_file_tail(path)
+    size = File.size(path)
+    File.open(path, "rb") do |file|
+      start = [ size - LOG_TAIL_BYTES, 0 ].max
+      file.seek(start)
+      value = file.read(LOG_TAIL_BYTES).to_s
+      value = value.byteslice(value.index("\n").to_i + 1..) if start.positive?
+      value
+    end
+  end
+
+  def decode_log_frames(value)
+    value.lines.filter_map do |line|
+      next unless line.end_with?("\n")
+
+      frame = JSON.parse(line)
+      next unless %w[stdout stderr supervisor].include?(frame["channel"])
+
+      Base64.strict_decode64(frame.fetch("data"))
+    rescue JSON::ParserError, KeyError, ArgumentError
+      nil
+    end.join.force_encoding(Encoding::UTF_8).scrub
+  end
 
   def safe_plan_review_artifacts(store, references)
     references.sort.filter_map do |name, reference|

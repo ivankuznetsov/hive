@@ -1,0 +1,32 @@
+<% records = Array(result["supporting"]) %>
+<% if records.any? %>
+  <section id="workspace-supporting-artifacts" class="workspace-panel workspace-wide"
+           aria-labelledby="workspace-supporting-artifacts-heading">
+    <div class="workspace-panel-heading">
+      <div>
+        <p class="workspace-eyebrow">Supporting evidence</p>
+        <h2 id="workspace-supporting-artifacts-heading">Earlier work products</h2>
+      </div>
+      <span class="workspace-state-label"><%= records.length %></span>
+    </div>
+    <div data-controller="artifacts">
+      <% records.each do |record| %>
+        <details class="artifact" data-artifact-name="<%= record.fetch("name") %>"
+                 data-workspace-disclosure-key="supporting-artifact-<%= record.fetch("reference") %>">
+          <summary><%= record.fetch("name") %><% if record["truncated"] %> <span class="workspace-state-label">Partial</span><% end %></summary>
+          <div class="artifact-body">
+            <% if record["binary"] %>
+              <p class="workspace-empty">Binary content is not rendered.</p>
+            <% elsif record["content"].nil? %>
+              <p class="workspace-empty">Content is unavailable within the bounded workspace read.</p>
+            <% elsif record.fetch("name").end_with?(".md") %>
+              <div class="markdown"><%= render_markdown(record.fetch("content")) %></div>
+            <% else %>
+              <pre><%= record.fetch("content") %></pre>
+            <% end %>
+          </div>
+        </details>
+      <% end %>
+    </div>
+  </section>
+<% end %>

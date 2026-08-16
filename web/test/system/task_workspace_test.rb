@@ -79,9 +79,11 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     refute_match(/\s/, zoomed.fetch("columns"), "400% zoom must reflow to one column")
 
     assert_selector "#status-stream-owner > .task-header > h1", count: 1
-    assert_selector "#workspace-attempts h2", text: "Attempts and resources"
-    assert_selector "#workspace-provenance h2", text: "Context provenance"
-    assert_selector "#workspace-timeline h2", text: "Audit timeline"
+    assert_no_selector "#workspace-attempts"
+    assert_no_selector "#workspace-provenance"
+    assert_no_selector "#workspace-timeline"
+    assert_selector "#workspace-usage h2"
+    assert_selector "#workspace-primary-result"
     assert_selector "#workspace-dependencies h2", text: "Dependency component"
     assert_selector "#workspace-dependencies table", minimum: 1
 
@@ -111,6 +113,18 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
 
       #{Array.new(12, "Read the evidence carefully, preserve its context, and record the resulting decision.").join("\n\n")}
 
+      ## Evidence review
+
+      Compare the second review without colliding with the first heading.
+
+      ## Delivery
+
+      Keep the final work product first.
+
+      ## Follow-up
+
+      Record what happens next.
+
       | Evidence | Durable value |
       | --- | --- |
       | receipt | #{wide_value} |
@@ -123,12 +137,14 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     sign_in!
     page.current_window.resize_to(1280, 900)
     visit task_path(@project, @slug)
-    assert_selector "#workspace-artifacts .markdown h1", text: "Long-form operator guide", wait: 10
+    assert_selector "#workspace-primary-result .markdown h1", text: "Long-form operator guide", wait: 10
+    assert_selector ".document-outline[aria-label='Document outline'] a[href='#evidence-review']", count: 1
+    assert_selector ".document-outline a[href='#evidence-review-2']", count: 1
 
     desktop = page.evaluate_script(<<~JS)
       (() => {
         const root = document.documentElement
-        const documentBody = document.querySelector("#workspace-artifacts .markdown")
+        const documentBody = document.querySelector("#workspace-primary-result .markdown")
         const bodyStyle = getComputedStyle(documentBody)
         return {
           viewport: root.clientWidth,
@@ -164,8 +180,8 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     mobile = page.evaluate_script(<<~JS)
       (() => {
         const root = document.documentElement
-        const pre = document.querySelector("#workspace-artifacts .markdown pre")
-        const table = document.querySelector("#workspace-artifacts .markdown table")
+        const pre = document.querySelector("#workspace-primary-result .markdown pre")
+        const table = document.querySelector("#workspace-primary-result .markdown table")
         return {
           viewport: root.clientWidth,
           documentWidth: root.scrollWidth,
@@ -265,13 +281,13 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
   end
 
   test "keyboard users can reach disclosures and the semantic dependency alternative" do
+    @folder.join("brainstorm.md").write("# Supporting context\n")
     sign_in!
     visit task_path(@project, @slug)
-    assert_selector "#workspace-artifacts details[data-artifact-name='idea.md']", wait: 10
+    assert_selector "#workspace-supporting-artifacts details[data-artifact-name='brainstorm.md']", wait: 10
 
-    artifact = find("#workspace-artifacts details[data-artifact-name='idea.md']")
+    artifact = find("#workspace-supporting-artifacts details[data-artifact-name='brainstorm.md']")
     summary = artifact.find("summary")
-    summary.click
     refute artifact[:open]
     summary.send_keys(:enter)
     assert artifact[:open]
@@ -293,7 +309,7 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     assert_selector "#workspace-summary-heading", wait: 10
     wait_for_live_status
 
-    disclosure = find("details[data-workspace-disclosure-key='provenance-diagnostics']")
+    disclosure = find("details[data-workspace-disclosure-key='usage-details']")
     disclosure.find("summary").click
     assert disclosure[:open]
     artifact = find("details[data-artifact-name='brainstorm.md']")
@@ -302,7 +318,7 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     execute_script(<<~JS)
       document.querySelector("turbo-frame[id^='task-publication-']").__workspaceOwned = true
       document.querySelector("turbo-frame[id^='task-diff-']").__workspaceOwned = true
-      document.querySelector("details[data-workspace-disclosure-key='provenance-diagnostics'] summary").focus()
+      document.querySelector("details[data-workspace-disclosure-key='usage-details'] summary").focus()
       window.scrollTo(0, Math.min(500, document.documentElement.scrollHeight - innerHeight))
     JS
     original_scroll = page.evaluate_script("window.scrollY")
@@ -312,20 +328,22 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     create_task!(@project, "Equivalent workspace refresh trigger")
     assert_text "more detail", wait: 10
     assert_equal "", page.evaluate_script("document.querySelector('#task-workspace-announcement').textContent")
-    assert find("details[data-workspace-disclosure-key='provenance-diagnostics']")[:open]
+    assert find("details[data-workspace-disclosure-key='usage-details']")[:open]
     assert find("details[data-artifact-name='brainstorm.md']")[:open]
     assert page.evaluate_script("document.querySelector(\"turbo-frame[id^='task-publication-']\").__workspaceOwned")
     assert page.evaluate_script("document.querySelector(\"turbo-frame[id^='task-diff-']\").__workspaceOwned")
     assert_in_delta original_scroll, page.evaluate_script("window.scrollY"), 2
 
-    Hive::Markers.set(@folder.join("idea.md").to_s, :complete)
+    brainstorm = stage_dir(@project, "2-brainstorm").join(@slug)
+    FileUtils.mv(@folder, brainstorm)
+    @folder = brainstorm
     create_task!(@project, "Material workspace refresh trigger")
-    assert_selector "#workspace-summary-heading", text: "Investigate", wait: 10
-    assert_equal "", page.evaluate_script(
+    assert_selector "#workspace-primary-result[data-primary-artifact='brainstorm.md']", wait: 10
+    refute_empty page.evaluate_script(
       "document.querySelector('#task-workspace-announcement').textContent"
-    ), "a marker must not announce approval while attempt/resource evidence is missing"
-    assert find("details[data-workspace-disclosure-key='provenance-diagnostics']")[:open]
-    assert_equal "provenance-diagnostics",
+    ), "a canonical action change should be announced without relying on attempts/resources"
+    assert find("details[data-workspace-disclosure-key='usage-details']")[:open]
+    assert_equal "usage-details",
                  page.evaluate_script("document.activeElement.closest('details')?.dataset.workspaceDisclosureKey")
   end
 end

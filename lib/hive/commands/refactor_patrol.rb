@@ -13,8 +13,10 @@ require "hive/process_kill"
 require "hive/patrol/mapper"
 require "hive/patrol/token_budget"
 require "hive/refactor_patrol/architecture_intake_transitions"
+require "hive/refactor_patrol/claim_liveness_resolver"
 require "hive/refactor_patrol/claim_maintenance_transitions"
 require "hive/refactor_patrol/caps"
+require "hive/refactor_patrol/discovery_capacity"
 require "hive/refactor_patrol/action_runner"
 require "hive/refactor_patrol/collisions"
 require "hive/refactor_patrol/checkout_guard"
@@ -42,28 +44,8 @@ module Hive
       # Durable discovery checkpoints each completed slice before returning,
       # so a fixed batch keeps daemon fan-out bounded without truncating an
       # ordinary on-demand scan.
-      DURABLE_DISCOVERY_FEATURE_SLICE = 12
-
-      # Unlike the expired-claim resolver, heartbeat liveness checks are
-      # strictly observational: a live worker must never be terminated merely
-      # to prove that it still owns its lease.
-      class ClaimLivenessResolver
-        def call(claim)
-          child = !claim["pid"].nil?
-          pid = Integer(child ? claim.fetch("pid") : claim.fetch("owner_pid"))
-          recorded_start = claim.fetch(
-            child ? "process_start_time" : "owner_process_start_time"
-          ).to_s
-          return :resolved unless Hive::ProcessKill.valid_target_pid?(pid)
-          return :resolved if recorded_start.empty? || !Hive::ProcessKill.pid_alive?(pid)
-          return :resolved unless Hive::ProcessKill.process_start_time(pid).to_s == recorded_start
-          return :resolved if child && Process.getpgid(pid) != Integer(claim.fetch("pgid"))
-
-          :unresolved
-        rescue KeyError, ArgumentError, TypeError, Errno::EPERM, Errno::ESRCH
-          :resolved
-        end
-      end
+      DURABLE_DISCOVERY_FEATURE_SLICE =
+        Hive::RefactorPatrol::DiscoveryCapacity::MAX_FEATURES_PER_CLAIM
 
       def initialize(project, json: false, dry_run: false, feature: nil, entrypoint: nil, path: nil, changed_since: nil, pr: nil,
                      job_manifest: nil, actions: false, result_file: nil, list: false, show: nil,
@@ -75,7 +57,8 @@ module Hive
                      analysis_worktree_factory: nil,
                      heartbeat_interval_sec: CLAIM_HEARTBEAT_INTERVAL_SEC,
                      heartbeat_lease_sec: CLAIM_HEARTBEAT_LEASE_SEC,
-                     heartbeat_clock: -> { Time.now }, heartbeat_resolver: ClaimLivenessResolver.new,
+                     heartbeat_clock: -> { Time.now },
+                     heartbeat_resolver: Hive::RefactorPatrol::ClaimLivenessResolver.new,
                      project_entry: nil, capability_context: nil,
                      occurrence_id: nil, module_execution: nil,
                      config_loader: ->(path) { Hive::Config.load(path) })
@@ -648,6 +631,7 @@ module Hive
         # Incomplete occurrences still reuse their durable analysis_sha.
         pin_checkout!(project_root, cfg)
         prepare_discovery_transition_coordinator!
+        assert_manual_discovery_capacity!(aggregate)
         @manual_claim_token = @manual_discovery_transitions.claim(
           entry: @transition_entry,
           store: @job_store,
@@ -661,6 +645,23 @@ module Hive
           raise Hive::ConfigError, "refactor patrol job is already claimed by another worker"
         end
         @durable_aggregate = @job_store.read_job(aggregate.fetch("job_id"))
+      end
+
+      def assert_manual_discovery_capacity!(aggregate)
+        return unless @job_store.respond_to?(:occurrence_for_job)
+
+        occurrence = @job_store.occurrence_for_job(
+          aggregate.fetch("job_id")
+        )
+        return unless occurrence
+        return unless Hive::RefactorPatrol::DiscoveryCapacity.exhausted?(
+          effect_count: occurrence.fetch("effects").size,
+          effect_limit:
+            Hive::Modules::Migration::PatrolEvidence::MAX_EFFECTS_PER_OCCURRENCE
+        )
+
+        raise Hive::ConfigError,
+              "refactor patrol occurrence is awaiting automatic capacity rollover"
       end
 
       def prepare_discovery_transition_coordinator!

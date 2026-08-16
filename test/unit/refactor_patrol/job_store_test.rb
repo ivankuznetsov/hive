@@ -1956,6 +1956,33 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_capacity_rollover_resolution_leaves_job_immediately_claimable
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      aggregate = store.read_job("pr-7-stable")
+      store.claim_discovery!(
+        "pr-7-stable", owner: "expired", analysis_sha: "c" * 40,
+        now: T0, lease_sec: 10, owner_pid: 4242,
+        owner_process_start_time: "gone"
+      )
+
+      store.resolve_expired_discovery_for_rollover!(
+        "pr-7-stable",
+        occurrence_id: aggregate.fetch("occurrence_id"),
+        now: T0 + 11,
+        claim_liveness_resolver: ->(_claim) { :resolved }
+      )
+
+      recovered = store.read_job("pr-7-stable")
+      assert_equal "blocked", recovered.fetch("state")
+      assert_equal "effect_capacity_rollover",
+                   recovered.fetch("attempts").last.fetch("outcome")
+      assert_equal [ "pr-7-stable" ],
+                   store.claimable_jobs(now: T0 + 11).map { |job| job.fetch("job_id") }
+    end
+  end
+
   def test_block_discovery_records_retry_evidence_and_is_idempotent_for_complete_jobs
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)

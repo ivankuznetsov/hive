@@ -631,7 +631,9 @@ recommended model — no hardcoded name, no inheriting the operator's
 interactive selection; `inherit` omits the flag; aliases/full names pass
 through. `effort: default` omits `--effort` (Claude Code's own tier);
 low/medium/high pass through. `Hive::Config.claude_cli_flags(cfg)` builds
-the argv fragment used by both the tmux wrapper and headless `Hive::Agent`.
+the argv fragment used by the tmux wrapper, headless `Hive::Agent`, and
+ordinary Patrol's shared review/fix launch envelope whenever no exact or
+coarse `models:` route overrides it.
 
 `validate_agent_name!` accepts `nil` (field is optional) and otherwise requires the value to resolve via `Hive::AgentProfiles.registered?`. Failure messages include the registered profile names so the agent reading the error learns the valid set.
 

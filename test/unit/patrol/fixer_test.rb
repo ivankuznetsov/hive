@@ -1759,12 +1759,47 @@ class HivePatrolFixerTest < Minitest::Test
         captured = kwargs
         fake_agent
       end
-
       fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
 
       assert_equal [
         "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh"
       ], captured.fetch(:routing_arguments).global_arguments
+    ensure
+      Hive::Agent.define_singleton_method(:new, original) if original
+    end
+  end
+
+  def test_run_agent_wrapper_uses_project_claude_model_without_patrol_route
+    with_tmp_git_repo do |repo|
+      claude_cfg = cfg(repo)
+      claude_cfg["patrol"]["agent"] = "claude"
+      claude_cfg["claude"]["model"] = "claude-opus-4-8"
+      claude_cfg["models"] = {
+        "babysitter" => { "model" => "claude-opus-5" }
+      }
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: claude_cfg)
+      fake_agent = Object.new
+      def fake_agent.run! = { status: :ok }
+      captured = nil
+      original = Hive::Agent.method(:new)
+      Hive::Agent.define_singleton_method(:new) do |**kwargs|
+        captured = kwargs
+        fake_agent
+      end
+      profile = Struct.new(:name, :initial_context_tokens) do
+        def require_cli_capability!(_name)
+          [ "--disable-slash-commands" ]
+        end
+      end.new(:claude, 0)
+
+      with_replaced_singleton_method(
+        Hive::AgentProfiles, :lookup, ->(*) { profile }
+      ) do
+        fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
+      end
+
+      assert_includes captured.fetch(:cli_flags), "claude-opus-4-8"
+      assert_nil captured.fetch(:routing_arguments)
     ensure
       Hive::Agent.define_singleton_method(:new, original) if original
     end

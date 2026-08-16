@@ -277,6 +277,52 @@ module Hive
         end
       end
 
+      # Capacity rollover may retire only an expired discovery claim whose
+      # recorded process identity is provably gone. This job-local transition
+      # does not allocate another occurrence effect, so a completely full
+      # journal can still recover without weakening the live-claim fence.
+      def resolve_expired_discovery_for_rollover!(
+        job_id, occurrence_id:, now: Time.now,
+        claim_liveness_resolver: nil
+      )
+        mutate_job(job_id) do |aggregate, path|
+          active = active_discovery_attempt(aggregate)
+          next aggregate unless active
+          unless active.fetch("occurrence_id") == occurrence_id.to_s &&
+                 Time.iso8601(active.fetch("expires_at")) <= now
+            raise InconsistentRecord.new(
+              "refactor patrol occurrence cannot roll with an active claim",
+              path: path
+            )
+          end
+          resolved = begin
+            claim_liveness_resolver&.call(json_copy(active))
+          rescue StandardError
+            :unresolved
+          end
+          unless resolved == :resolved
+            raise InconsistentRecord.new(
+              "refactor patrol occurrence cannot roll with an active claim",
+              path: path
+            )
+          end
+
+          @claim_transitions.finish!(
+            active,
+            state: "superseded",
+            outcome: "effect_capacity_rollover",
+            now: now,
+            touch_heartbeat: false
+          )
+          aggregate["state"] = "blocked"
+          aggregate["updated_at"] = now.utc.iso8601
+          aggregate
+        end
+      rescue ArgumentError, KeyError => e
+        raise InconsistentRecord,
+              "refactor patrol claim has invalid evidence (#{e.message})"
+      end
+
       def record_job_transition_rejection!(job_id, operation:, generation:,
                                            transition:, now: Time.now)
         mutate_job(job_id) do |aggregate, _path|

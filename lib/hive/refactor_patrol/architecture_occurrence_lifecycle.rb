@@ -92,7 +92,8 @@ module Hive
         capture
       end
 
-      def rollover(store:, entry:, aggregate:, now:)
+      def rollover(store:, entry:, aggregate:, now:,
+                   claim_liveness_resolver: nil)
         occurrence = store.occurrence_for_job(
           aggregate.fetch("job_id")
         )
@@ -106,6 +107,13 @@ module Hive
         successor = successor_capture(provisional, now: now)
         return aggregate if @dry_run
 
+        store.resolve_expired_discovery_for_rollover!(
+          aggregate.fetch("job_id"),
+          occurrence_id: provisional.occurrence_id,
+          now: now,
+          claim_liveness_resolver: claim_liveness_resolver
+        )
+        aggregate = store.read_job(aggregate.fetch("job_id"))
         store.assert_recorded_transitions_terminal!(aggregate)
         store.reserve_successor_occurrence!(
           aggregate.fetch("job_id"),

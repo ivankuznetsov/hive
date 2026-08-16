@@ -1,4 +1,5 @@
 require "test_helper"
+require "open3"
 require "hive/refactor_patrol/architecture_occurrence_lifecycle"
 require "hive/refactor_patrol/discovery_transitions"
 
@@ -10,6 +11,20 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
   )
   INTENT_ID = "intent-#{'1' * 64}".freeze
   ReservationError = Class.new(StandardError)
+
+  def test_discovery_transitions_loads_without_command_require_cycle
+    script = <<~'RUBY'
+      require "hive/refactor_patrol/discovery_transitions"
+      print Hive::RefactorPatrol::DiscoveryTransitions::MAX_EFFECTS_PER_CLAIM
+    RUBY
+    output, error, status = Open3.capture3(
+      RbConfig.ruby, "-Ilib", "-e", script,
+      chdir: File.expand_path("../../..", __dir__)
+    )
+
+    assert status.success?, error
+    assert_equal "14", output
+  end
 
   class Gateway
     def initialize(&handler)

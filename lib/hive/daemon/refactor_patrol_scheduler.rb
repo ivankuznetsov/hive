@@ -13,6 +13,8 @@ require "hive/process_kill"
 require "hive/refactor_patrol/checkout_guard"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/architecture_occurrence_lifecycle"
+require "hive/refactor_patrol/claim_liveness_resolver"
+require "hive/refactor_patrol/discovery_capacity"
 require "hive/refactor_patrol/action_claim_transitions"
 require "hive/refactor_patrol/claim_maintenance_transitions"
 require "hive/refactor_patrol/discovery_transitions"
@@ -37,7 +39,7 @@ module Hive
       RUNAWAY_RETRY_BACKOFF_SEC =
         Hive::RefactorPatrol::ActionClaimTransitions::RETRY_BACKOFF_SEC
       RUNAWAY_RESOURCE_EXHAUSTION_REASONS = %w[token_limit turn_limit].freeze
-      EFFECT_CAPACITY_RESERVE = 1
+      ACTION_EFFECT_CAPACITY_RESERVE = 1
       SUPPORTED_REPORT_SCHEMA_VERSIONS = [
         Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
       ].freeze
@@ -60,6 +62,7 @@ module Hive
                      checkout_guard_factory: nil, repository_resolver: nil,
                      repository_ownership: nil,
                      owner: nil, claim_resolver: ProcessGroupResolver.new,
+                     claim_liveness_resolver: Hive::RefactorPatrol::ClaimLivenessResolver.new,
                      lease_sec: 7200, dry_run: false,
                      migration_authority: :legacy, migration_ownership: nil,
                      migration_snapshot: nil, evidence_store_factory: nil,
@@ -81,6 +84,7 @@ module Hive
         @owner_process_start_time = Hive::Lock.process_start_time(Process.pid)
         @owner = owner || "daemon-#{Process.pid}-#{@owner_process_start_time || 'unverified'}"
         @claim_resolver = claim_resolver
+        @claim_liveness_resolver = claim_liveness_resolver
         @lease_sec = lease_sec.to_i
         @dry_run = dry_run
         @migration_authority = migration_authority
@@ -181,7 +185,7 @@ module Hive
           work.filter_map do |item|
             aggregate = item.fetch(:aggregate)
             if (capacity = effect_capacity_exhaustion(
-              store, aggregate
+              store, aggregate, phase: item.fetch(:phase), now: now
             ))
               aggregate = rollover_effect_capacity(
                 entry, store, aggregate, capacity, now
@@ -682,23 +686,29 @@ module Hive
         @events << { status: :blocked, project: entry.fetch("name"), reason: reason, error: e.message }
       end
 
-      def effect_capacity_exhaustion(store, aggregate)
+      def effect_capacity_exhaustion(store, aggregate, phase:, now:)
         occurrence = store.occurrence_for_job(aggregate.fetch("job_id"))
         return unless occurrence
-        return if active_claim_for_occurrence?(
-          aggregate, occurrence.fetch("occurrence_id")
-        )
-
         count = occurrence.fetch("effects").size
         limit = Hive::Modules::Migration::PatrolEvidence::MAX_EFFECTS_PER_OCCURRENCE
-        return if count < limit - EFFECT_CAPACITY_RESERVE
+        reserve = effect_capacity_reserve(phase)
+        return if count < limit - reserve
+        return if blocking_claim_for_occurrence?(
+          aggregate, occurrence.fetch("occurrence_id"), now: now
+        )
 
         {
           "occurrence_id" => occurrence.fetch("occurrence_id"),
           "effect_count" => count,
           "effect_limit" => limit,
-          "reserved_effects" => EFFECT_CAPACITY_RESERVE
+          "reserved_effects" => reserve
         }
+      end
+
+      def effect_capacity_reserve(phase)
+        return ACTION_EFFECT_CAPACITY_RESERVE if phase.to_sym == :action
+
+        Hive::RefactorPatrol::DiscoveryCapacity::MAX_EFFECTS_PER_CLAIM
       end
 
       def rollover_effect_capacity(entry, store, aggregate, evidence, now)
@@ -712,7 +722,8 @@ module Hive
             store: store,
             entry: entry,
             aggregate: aggregate,
-            now: now
+            now: now,
+            claim_liveness_resolver: @claim_liveness_resolver
           )
         end
         @events << {
@@ -744,8 +755,8 @@ module Hive
         nil
       end
 
-      def active_claim_for_occurrence?(aggregate, occurrence_id)
-        discovery = aggregate.fetch("attempts").any? do |attempt|
+      def blocking_claim_for_occurrence?(aggregate, occurrence_id, now:)
+        discovery = aggregate.fetch("attempts").reverse_each.find do |attempt|
           attempt["kind"] ==
             Hive::RefactorPatrol::JobStore::DISCOVERY_ATTEMPT_KIND &&
             attempt["occurrence_id"] == occurrence_id &&
@@ -753,7 +764,17 @@ module Hive
               attempt["state"]
             )
         end
-        return true if discovery
+        if discovery
+          return true if Time.iso8601(discovery.fetch("expires_at")) > now
+          return true if @dry_run
+
+          resolved = begin
+            @claim_liveness_resolver&.call(discovery) == :resolved
+          rescue StandardError
+            false
+          end
+          return true unless resolved
+        end
 
         aggregate.fetch("actions").any? do |action|
           Array(action["claims"]).any? do |claim|
@@ -762,6 +783,8 @@ module Hive
                 ACTIVE_ACTION_CLAIM_STATES.include?(claim["state"])
           end
         end
+      rescue ArgumentError, KeyError
+        true
       end
 
       def assert_rollover_admission!(entry, store, aggregate)

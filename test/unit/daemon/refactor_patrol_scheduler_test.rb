@@ -1950,7 +1950,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       with_constant(
         Hive::Modules::Migration::PatrolEvidence,
         :MAX_EFFECTS_PER_OCCURRENCE,
-        2
+        15
       ) do
         candidates = scheduler.candidates(now: T0)
 
@@ -1961,11 +1961,13 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         refute_equal predecessor.occurrence_id,
                      store.read_job("job-7").fetch("occurrence_id")
         assert store.occurrence_terminalized?(predecessor)
+        event = scheduler.drain_events.fetch(0)
+        assert_equal 14, event.dig(:evidence, "reserved_effects")
       end
     end
   end
 
-  def test_saturated_occurrence_lets_expired_claim_recovery_run_before_rollover
+  def test_saturated_occurrence_rolls_over_a_provably_expired_claim
     with_project do |_dir, entry, store|
       enqueue(store)
       predecessor = store.occurrence_capture("job-7")
@@ -1983,7 +1985,51 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       with_constant(
         Hive::Modules::Migration::PatrolEvidence,
         :MAX_EFFECTS_PER_OCCURRENCE,
-        8
+        15
+      ) do
+        candidates = scheduler.candidates(now: T0 + 120)
+
+        assert_equal [ "job-7" ],
+                     candidates.map { |item| item.fetch(:job_id) }
+        recovered = store.read_job("job-7")
+        refute_equal predecessor.occurrence_id,
+                     recovered.fetch("occurrence_id")
+        assert_equal "superseded",
+                     recovered.fetch("attempts").last.fetch("state")
+        assert_equal "effect_capacity_rollover",
+                     recovered.fetch("attempts").last.fetch("outcome")
+        assert store.occurrence_terminalized?(predecessor)
+        dispatch = scheduler.reserve(
+          candidates.fetch(0), now: T0 + 120
+        )
+        assert_equal expired.fetch(:generation) + 1,
+                     dispatch.dig(:dispatch_token, :generation)
+      end
+    end
+  end
+
+  def test_saturated_occurrence_does_not_roll_over_an_unresolved_claim
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      predecessor = store.occurrence_capture("job-7")
+      store.claim_discovery!(
+        "job-7",
+        owner: "daemon-live",
+        analysis_sha: "head",
+        now: T0,
+        lease_sec: 60,
+        owner_pid: 4242,
+        owner_process_start_time: "boot-live"
+      )
+      scheduler = scheduler(
+        entry, store,
+        claim_liveness_resolver: ->(_claim) { :unresolved }
+      )
+
+      with_constant(
+        Hive::Modules::Migration::PatrolEvidence,
+        :MAX_EFFECTS_PER_OCCURRENCE,
+        15
       ) do
         candidates = scheduler.candidates(now: T0 + 120)
 
@@ -1991,11 +2037,37 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
                      candidates.map { |item| item.fetch(:job_id) }
         assert_equal predecessor.occurrence_id,
                      store.read_job("job-7").fetch("occurrence_id")
-        dispatch = scheduler.reserve(
-          candidates.fetch(0), now: T0 + 120
-        )
-        assert_equal expired.fetch(:generation) + 1,
-                     dispatch.dig(:dispatch_token, :generation)
+        assert_empty scheduler.drain_events
+      end
+    end
+  end
+
+
+  def test_dry_run_capacity_check_never_resolves_or_terminates_a_claim
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      predecessor = store.occurrence_capture("job-7")
+      store.claim_discovery!(
+        "job-7", owner: "daemon-live", analysis_sha: "head",
+        now: T0, lease_sec: 60, owner_pid: Process.pid,
+        owner_process_start_time: Hive::Lock.process_start_time(Process.pid)
+      )
+      scheduler = scheduler(
+        entry, store, dry_run: true,
+        claim_liveness_resolver: ->(_claim) { raise "must not inspect" }
+      )
+
+      with_constant(
+        Hive::Modules::Migration::PatrolEvidence,
+        :MAX_EFFECTS_PER_OCCURRENCE,
+        15
+      ) do
+        candidates = scheduler.candidates(now: T0 + 120)
+
+        assert_equal [ "job-7" ],
+                     candidates.map { |item| item.fetch(:job_id) }
+        assert_equal predecessor.occurrence_id,
+                     store.read_job("job-7").fetch("occurrence_id")
       end
     end
   end
@@ -2149,13 +2221,15 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def scheduler(entry, store, claim_resolver: ->(_attempt) { :resolved }, **options)
+  def scheduler(entry, store, claim_resolver: ->(_attempt) { :resolved },
+                claim_liveness_resolver: claim_resolver, **options)
     Hive::Daemon::RefactorPatrolScheduler.new(
       registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
       job_store_factory: ->(_path) { store },
       repository_resolver: ->(_entry, _cfg) { repository_identity },
       checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a",
       claim_resolver: claim_resolver,
+      claim_liveness_resolver: claim_liveness_resolver,
       **options
     )
   end

@@ -233,6 +233,103 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_stale_target_accepts_an_edited_line_when_the_exact_snippet_remains
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      File.write(File.join(repo, "app.rb"), "puts('healthy') # formatting changed\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "edit evidence line", "--quiet")
+      agent_ran = false
+      agent = lambda do |output_path:, **|
+        agent_ran = true
+        write_fix_proof(output_path, status: "rejected")
+      end
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["test"] = "ruby -c app.rb"
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: configured, agent_runner: agent
+      ).attempt(candidate)
+
+      refute patch.passed
+      assert agent_ran
+      assert_equal "fix_agent_rejected", patch.validation.fetch("reason")
+    end
+  end
+
+  def test_stale_target_keeps_a_finding_when_each_evidence_role_still_has_an_anchor
+    with_tmp_git_repo do |repo|
+      File.write(
+        File.join(repo, "app.rb"),
+        "source = binary_read\ncanonical = encode(source)\nreject unless source == canonical\n"
+      )
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.evidence = [
+        { "file" => "app.rb", "line" => 1, "snippet" => "binary_read", "role" => "trigger" },
+        { "file" => "app.rb", "line" => 2, "snippet" => "encode(source)", "role" => "root_cause" },
+        { "file" => "app.rb", "line" => 3, "snippet" => "source == canonical", "role" => "impact" },
+        { "file" => "app.rb", "line" => 3, "snippet" => "reject unless", "role" => "trigger" }
+      ]
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      File.write(
+        File.join(repo, "app.rb"),
+        "source = safe_file_read\ncanonical = encode(source)\nreject unless source == canonical\n"
+      )
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "replace one trigger", "--quiet")
+      observed_evidence = nil
+      agent = lambda do |finding:, output_path:, **|
+        observed_evidence = finding.evidence
+        write_fix_proof(output_path, status: "rejected")
+      end
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["test"] = "ruby -c app.rb"
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: configured, agent_runner: agent
+      ).attempt(candidate)
+
+      refute patch.passed
+      assert_equal "fix_agent_rejected", patch.validation.fetch("reason")
+      assert_equal %w[root_cause impact trigger], observed_evidence.map { |item| item.fetch("role") }
+    end
+  end
+
+  def test_stale_target_fails_when_a_required_evidence_role_has_no_current_anchor
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "source = binary_read\nreject source\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.evidence = [
+        { "file" => "app.rb", "line" => 1, "snippet" => "binary_read", "role" => "root_cause" },
+        { "file" => "app.rb", "line" => 2, "snippet" => "reject source", "role" => "impact" }
+      ]
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      File.write(File.join(repo, "app.rb"), "source = fixed_read\nreject source\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "remove root cause", "--quiet")
+      agent_ran = false
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo), agent_runner: ->(**) { agent_ran = true }
+      ).attempt(candidate)
+
+      refute patch.passed
+      refute agent_ran
+      assert_equal "stale_evidence", patch.validation.fetch("reason")
+    end
+  end
+
   def test_stale_target_with_missing_current_evidence_fails_closed_before_agent_work
     with_tmp_git_repo do |repo|
       File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")

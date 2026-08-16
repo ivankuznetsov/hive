@@ -197,7 +197,7 @@ module Hive
         source_reader = SourceReader.new(worktree_path)
         current_lines_by_path = {}
         reviewed_lines_by_path = {}
-        normalized = evidence.map do |item|
+        normalized = evidence.filter_map do |item|
           next unless item.is_a?(Hash)
 
           entry = item.each_with_object({}) { |(key, value), copy| copy[key.to_s] = value }
@@ -222,7 +222,7 @@ module Hive
           reviewed_line = reviewed_lines[line - 1]
           next unless reviewed_line&.include?(snippet)
 
-          current_line = if current_lines[line - 1] == reviewed_line
+          current_line = if current_lines[line - 1]&.include?(snippet)
             line
           else
             matches = current_lines.each_index.select do |index|
@@ -236,7 +236,15 @@ module Hive
             copy.delete("path")
           end
         end
-        return if normalized.any?(&:nil?)
+        roles = evidence.filter_map do |item|
+          next unless item.is_a?(Hash)
+
+          item.fetch("role", item.fetch(:role, "__untyped__")).to_s
+        end.uniq
+        return if normalized.empty? || roles.empty?
+
+        matched_roles = normalized.map { |item| item.fetch("role", "__untyped__").to_s }.uniq
+        return unless (roles - matched_roles).empty?
 
         normalized
       rescue SystemCallError, ArgumentError

@@ -251,6 +251,11 @@ module Hive
             end
 
             store.assert_recorded_transitions_terminal!(aggregate)
+            store.deny_unrecorded_prepared_effects_for_rollover!(
+              aggregate,
+              occurrence_id: predecessor.occurrence_id,
+              now: now
+            )
             finalize_rollover_segment(
               store, entry, predecessor, aggregate, now
             )

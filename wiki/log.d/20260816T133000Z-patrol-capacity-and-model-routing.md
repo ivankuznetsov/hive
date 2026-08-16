@@ -16,7 +16,9 @@ that cannot finish within the remaining journal capacity.
 If that dead worker stopped after preparing a local transition but before the
 authoritative JobStore mutation, rollover denies the provably unrecorded
 prepared effect in place. A recorded or dispatch-uncertain effect remains
-fenced for exact reconciliation rather than being discarded.
+fenced for exact reconciliation rather than being discarded. Restart recovery
+applies the same retirement step before it finalizes an interrupted rollover,
+so the successor occurrence cannot strand its predecessor indefinitely.
 
 Ordinary Patrol review and fix now use one launch-envelope policy. Exact
 and coarse `models:` routes retain precedence, while Claude-backed runs

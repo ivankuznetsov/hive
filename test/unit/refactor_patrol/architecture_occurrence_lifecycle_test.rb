@@ -195,6 +195,63 @@ class RefactorPatrolArchitectureOccurrenceLifecycleTest < Minitest::Test
     assert_same original, error
   end
 
+  def test_pending_rollover_retires_abandoned_prepared_effects_before_finalization
+    occurrence = reserved_occurrence("job-7", generation: 2)
+    successor = Hive::Modules::Migration::PatrolCapture.from_h(
+      occurrence.fetch("provisional_capture")
+    )
+    predecessor = lifecycle.send(:predecessor_capture, successor)
+    aggregate = {
+      "job_id" => "job-7",
+      "occurrence_id" => predecessor.occurrence_id,
+      "state" => "blocked",
+      "actions" => []
+    }
+    predecessor_occurrence = reserved_occurrence("job-7", generation: 1)
+    calls = []
+    store = Object.new
+    store.define_singleton_method(:read_job) { |_job_id| aggregate }
+    store.define_singleton_method(:assert_recorded_transitions_terminal!) do |_job|
+      calls << :assert_terminal
+    end
+    store.define_singleton_method(
+      :deny_unrecorded_prepared_effects_for_rollover!
+    ) do |_job, occurrence_id:, now:|
+      calls << [ :deny_abandoned, occurrence_id, now ]
+    end
+    store.define_singleton_method(:occurrence) do |occurrence_id|
+      calls << :fetch_predecessor
+      occurrence_id == predecessor.occurrence_id ?
+        predecessor_occurrence : nil
+    end
+    store.define_singleton_method(:terminal_effect_receipt_ids) { |_id| [] }
+    store.define_singleton_method(:finalize_occurrence!) do |**|
+      calls << :finalize
+    end
+    store.define_singleton_method(:drain_occurrence_outbox!) do |*args, **|
+      calls << [ :drain, args.first ]
+    end
+    store.define_singleton_method(:occurrence_terminalized?) { |_capture| true }
+    store.define_singleton_method(:rollover_occurrence!) do |job_id, from:, to:, now:|
+      calls << [ :rollover, job_id, from, to, now ]
+    end
+
+    assert lifecycle.send(
+      :recover_pending_rollovers,
+      store,
+      { "name" => "demo" },
+      NOW,
+      [ occurrence ]
+    )
+    assert_equal [ :deny_abandoned, predecessor.occurrence_id, NOW ],
+                 calls.fetch(1)
+    assert_operator calls.index(:finalize), :>, calls.index(calls.fetch(1))
+    assert_equal [
+      :rollover, "job-7", predecessor.occurrence_id,
+      successor.occurrence_id, NOW
+    ], calls.last
+  end
+
   def test_segment_generation_guards_reject_missing_or_malformed_values
     capture = Struct.new(:reservation)
 

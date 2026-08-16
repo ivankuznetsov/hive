@@ -1,4 +1,5 @@
 require "test_helper"
+require "sqlite3"
 require "hive/usage_db"
 
 class UsageDbTest < Minitest::Test

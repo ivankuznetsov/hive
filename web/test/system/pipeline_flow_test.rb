@@ -1,4 +1,5 @@
 require "application_system_test_case"
+require "hive/task_workspace/builder"
 
 # Browser-level happy path over the real pipeline: sign in (dev seam), see
 # the grid, compose an idea with an attached image (upload button path),
@@ -527,6 +528,68 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_no_selector "turbo-frame[id^='task-log-']"
     assert_no_selector "pre[data-tail-follow]"
     assert_no_text "unrelated legacy log"
+  end
+
+  test "receipt-correlated log pane follows, pauses, resumes, and morphs in place" do
+    slug = create_task!(@project, "Receipt log probe")
+    root = Dir.mktmpdir("hive-web-receipt-log")
+    previous_root = ENV["HIVE_ATTEMPT_STORE_ROOT"]
+    ENV["HIVE_ATTEMPT_STORE_ROOT"] = root
+    store = Hive::Attempts::Store.new(root: root)
+    writer = store.log_archive.open_writer("receipt-attempt")
+    writer.append("stdout", (1..120).map { |n| "line #{n}" }.join("\n") + "\n")
+    writer.close
+    reference = Hive::OutputReference.build(
+      store.log_archive.hot_path("receipt-attempt"), root: store.root
+    )
+    original = Hive::TaskWorkspace::Builder.instance_method(:semantic)
+    replacement = lambda do
+      original.bind_call(self).tap do |value|
+        value["headline"] = {
+          "state" => "needs_attention", "label" => "Needs recovery",
+          "explanation" => "Receipt-correlated failure"
+        }
+        value["diagnostic"] = {
+          "state" => "current", "summary" => "Receipt-correlated failure",
+          "log" => {
+            "state" => "current", "quality" => "receipt_correlated",
+            "reference" => reference
+          }
+        }
+      end
+    end
+    Hive::TaskWorkspace::Builder.define_method(:semantic, &replacement)
+
+    sign_in!
+    visit "/tasks/#{@project}/#{slug}"
+    frame = find("turbo-frame[data-diagnostic-log-src]", visible: :all, wait: 5)
+    refute frame[:src], "the exact log must remain unloaded until disclosure"
+    find("details[data-workspace-disclosure-key='diagnostic-log'] summary").click
+    pane = find("pre[data-tail-follow]", wait: 5)
+    assert pane.text.include?("line 120"), "the receipt-correlated tail must show its newest line"
+    assert_selector "pre[data-tail-follow][data-following]", wait: 5
+
+    distance_from_bottom = page.evaluate_script(
+      "(() => { const p = document.querySelector('pre[data-tail-follow]'); return p.scrollHeight - p.scrollTop - p.clientHeight; })()"
+    )
+    assert_operator distance_from_bottom, :<=, 8, "the pane must start pinned to the receipt tail"
+
+    page.execute_script("document.querySelector('pre[data-tail-follow]').scrollTop = 0")
+    ticks = page.evaluate_script("Number(document.querySelector(\"turbo-frame[id^='task-log-']\").dataset.pollTicks || 0)")
+    assert_selector "turbo-frame[id^='task-log-'][data-poll-ticks='#{ticks + 2}']", wait: 10
+    assert_selector "pre[data-tail-follow][data-following='false']"
+    assert_equal 0, page.evaluate_script("document.querySelector('pre[data-tail-follow]').scrollTop"),
+                 "reading position must survive lazy-log poll ticks"
+
+    page.execute_script("const p = document.querySelector('pre[data-tail-follow]'); p.scrollTop = p.scrollHeight; p.__sameNode = true")
+    assert_selector "pre[data-tail-follow][data-following='true']", wait: 10
+    assert page.evaluate_script("document.querySelector('pre[data-tail-follow]').__sameNode"),
+           "an exact-log poll reload must morph the pane instead of replacing it"
+  ensure
+    Hive::TaskWorkspace::Builder.define_method(:semantic, original) if original
+    writer&.close unless writer&.closed?
+    ENV["HIVE_ATTEMPT_STORE_ROOT"] = previous_root
+    FileUtils.rm_rf(root) if root
   end
 
   test "artifact open state survives a pushed morph while content stays live" do

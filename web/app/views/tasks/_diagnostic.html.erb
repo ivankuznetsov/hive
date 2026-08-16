@@ -20,7 +20,11 @@
               "task-log", @project.name, @task.slug, reference_sha256
             ),
               refresh: "morph",
-              data: { turbo_permanent: true, diagnostic_log_src: log_url } do %>
+              data: {
+                controller: "poll", poll_interval_value: 3000,
+                poll_wait_for_content_value: true,
+                turbo_permanent: true, diagnostic_log_src: log_url
+              } do %>
           <div class="log-pane"><p class="muted">Open this disclosure to load the correlated log.</p></div>
         <% end %>
       </details>

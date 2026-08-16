@@ -8,7 +8,8 @@ export default class extends Controller {
   static values = {
     interval: { type: Number, default: 3000 },
     maxInterval: { type: Number, default: 30000 },
-    requestTimeout: { type: Number, default: 15000 }
+    requestTimeout: { type: Number, default: 15000 },
+    waitForContent: { type: Boolean, default: false }
   }
 
   connect() {
@@ -29,6 +30,8 @@ export default class extends Controller {
     this.frame.addEventListener("turbo:frame-load", this.requestFinished)
     this.frame.addEventListener("turbo:fetch-request-error", this.requestFailed)
     document.addEventListener("visibilitychange", this.visibilityChanged)
+    if (this.waitForContentValue && !this.tailPane()) return
+
     this.pinToBottom()
     this.schedule(this.intervalValue)
   }

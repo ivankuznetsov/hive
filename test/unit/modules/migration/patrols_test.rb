@@ -595,6 +595,9 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     state_store.define_singleton_method(
       :clear_recovery_failure!
     ) { |expected_generation:| expected_generation.zero? }
+    state_store.define_singleton_method(
+      :try_with_cycle_admission
+    ) { |&block| [ true, block.call ] }
     scheduler = Hive::Daemon::PatrolScheduler.new(
       registry: -> { [ entry ] },
       config_loader: ->(_path) {

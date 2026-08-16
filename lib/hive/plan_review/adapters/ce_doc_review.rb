@@ -144,6 +144,7 @@ module Hive
         end
 
         def call(request)
+          runner_result = nil
           validate_snapshot!(request)
           capability = capability_for(request)
           if capability.fetch("status") != "present"
@@ -194,7 +195,7 @@ module Hive
           end
           validate_output!(output_path, disposable)
           bytes = File.binread(output_path, ResultParser::MAX_BYTES + 1)
-          bytes = normalize_host_anchors(bytes, snapshot_bytes, request)
+          bytes = normalize_pi_result(bytes, snapshot_bytes, request)
           parsed = ResultParser.parse(
             bytes,
             expected: {
@@ -225,7 +226,11 @@ module Hive
             route_receipt: route_receipt(request)
           )
         rescue StaleObservation, InvalidRecord, Hive::ConfigError => e
-          result("terminal_failure", diagnostic: e.message)
+          actual = runner_result.is_a?(Hash) ? runner_result["actual_route"] : nil
+          result(
+            "terminal_failure", diagnostic: e.message,
+            route_receipt: route_receipt(request, actual:)
+          )
         rescue SystemCallError, IOError => e
           result("terminal_failure", diagnostic: "plan review adapter filesystem failure: #{e.message}")
         end
@@ -311,10 +316,11 @@ module Hive
           )
         end
 
-        def normalize_host_anchors(bytes, snapshot_bytes, request)
+        def normalize_pi_result(bytes, snapshot_bytes, request)
           return bytes unless request.reviewer.fetch("provider") == "pi"
 
           data = JSON.parse(bytes)
+          data["residual_evidence"] = [] unless request.kind == "verification"
           findings = data["findings"]
           return bytes unless findings.is_a?(Array)
 

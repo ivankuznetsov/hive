@@ -56,6 +56,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
         prompt = kwargs.fetch(:prompt)
         payload = valid_result(request)
         payload.fetch("findings").first.fetch("evidence")["anchor_digest"] = "0" * 64
+        payload["residual_evidence"] = [ { "unexpected" => "initial review residue" } ]
         File.write(output_path, JSON.generate(payload))
         { "status" => "ok", "actual_route" => request.reviewer }
       end
@@ -76,6 +77,24 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       refute_includes prompt, "Invoke `"
       assert_equal Digest::SHA256.hexdigest("# Plan"),
                    result.findings.first["evidence"].fetch("anchor_digest")
+      assert_empty result.residual_evidence
+    end
+  end
+
+  def test_parser_failure_preserves_the_actual_reviewer_route
+    with_request do |request, _plan_path|
+      runner = lambda do |output_path:, request:, **|
+        payload = valid_result(request)
+        payload["coverage"] = "invalid"
+        File.write(output_path, JSON.generate(payload))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+
+      result = adapter_for(runner).call(request)
+
+      assert_equal "terminal_failure", result.outcome
+      assert_equal request.reviewer, result.route_receipt.fetch("actual")
+      assert_equal "different_model_family", result.route_receipt.fetch("independence_reason")
     end
   end
 

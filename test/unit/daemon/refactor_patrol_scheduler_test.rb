@@ -763,8 +763,8 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_review_runaway_ceiling_uses_the_shared_one_hour_retry
-    %w[token_limit turn_limit].each do |reason|
+  def test_review_resource_deferral_uses_the_shared_one_hour_retry
+    %w[token_limit turn_limit agent_in_flight].each do |reason|
       with_project do |_dir, entry, store|
         enqueue(store)
         scheduler = scheduler(entry, store)

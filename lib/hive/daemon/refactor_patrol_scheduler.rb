@@ -38,7 +38,9 @@ module Hive
       RETRY_BACKOFF_SEC = 60
       RUNAWAY_RETRY_BACKOFF_SEC =
         Hive::RefactorPatrol::ActionClaimTransitions::RETRY_BACKOFF_SEC
-      RUNAWAY_RESOURCE_EXHAUSTION_REASONS = %w[token_limit turn_limit].freeze
+      DEFERRED_RESOURCE_EXHAUSTION_REASONS = %w[
+        token_limit turn_limit agent_in_flight
+      ].freeze
       ACTION_EFFECT_CAPACITY_RESERVE = 1
       SUPPORTED_REPORT_SCHEMA_VERSIONS = [
         Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
@@ -905,11 +907,11 @@ module Hive
       end
 
       def discovery_retry_backoff_sec(envelope)
-        runaway = Array(envelope["review_errors"]).any? do |error|
+        deferred = Array(envelope["review_errors"]).any? do |error|
           reason = error.dig("details", "resource_exhaustion", "reason")
-          RUNAWAY_RESOURCE_EXHAUSTION_REASONS.include?(reason)
+          DEFERRED_RESOURCE_EXHAUSTION_REASONS.include?(reason)
         end
-        runaway ? RUNAWAY_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
+        deferred ? RUNAWAY_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
       end
 
       def valid_report_envelope?(envelope)

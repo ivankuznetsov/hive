@@ -76,7 +76,7 @@ module Hive
             raise Hive::ConfigError, "managed runner output was truncated before validation"
           end
 
-          payload = JSON.parse(result[:final_message].to_s)
+          payload = parse_structured_output(result[:final_message].to_s)
           files = payload.is_a?(Hash) ? payload["files"] : nil
           unless files.is_a?(Hash) && files.keys.sort == output_paths.keys.sort
             raise Hive::ConfigError, "managed runner returned the wrong output file set"
@@ -120,6 +120,19 @@ module Hive
         end
 
         private
+
+        def parse_structured_output(message)
+          JSON.parse(message)
+        rescue JSON::ParserError => raw_error
+          payloads = message.scan(/^```json[ \t]*\r?\n(.*?)^```[ \t]*$/m).filter_map do |body|
+            JSON.parse(body.first)
+          rescue JSON::ParserError
+            nil
+          end
+          raise raw_error unless payloads.one?
+
+          payloads.first
+        end
 
         def output_snapshot(target)
           stat = File.lstat(target)

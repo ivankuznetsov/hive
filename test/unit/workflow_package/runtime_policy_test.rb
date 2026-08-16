@@ -505,6 +505,77 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
+  def test_host_materialization_accepts_one_json_fence_amid_runner_commentary
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+      article = File.join(task, "article.md")
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          { "preset" => "scoped", "tools" => [ "Read", "Edit(./article.md)" ] },
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          managed_outputs: [ article ]
+        )
+      end
+      payload = JSON.generate("files" => { "article.md" => "reviewed\n" })
+      result = {
+        status: :ok,
+        final_message: <<~MESSAGE,
+          I reviewed the artifact first.
+
+          ```markdown
+          This is explanatory text, not the managed payload.
+          ```
+
+          ```json
+          #{payload}
+          ```
+        MESSAGE
+        final_message_truncated: false
+      }
+
+      policy.materialize_outputs!(result)
+
+      assert_equal "reviewed\n", File.read(article)
+    ensure
+      policy&.cleanup!
+    end
+  end
+
+  def test_host_materialization_rejects_ambiguous_json_fences_without_writing
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+      article = File.join(task, "article.md")
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          { "preset" => "scoped", "tools" => [ "Read", "Edit(./article.md)" ] },
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          managed_outputs: [ article ]
+        )
+      end
+      payload = JSON.generate("files" => { "article.md" => "reviewed\n" })
+      result = {
+        status: :ok,
+        final_message: "```json\n#{payload}\n```\n```json\n#{payload}\n```\n",
+        final_message_truncated: false
+      }
+
+      error = assert_raises(Hive::ConfigError) { policy.materialize_outputs!(result) }
+
+      assert_includes error.message, "invalid structured output"
+      refute File.exist?(article)
+    ensure
+      policy&.cleanup!
+    end
+  end
+
   def test_host_materialization_restores_earlier_output_when_commit_artifact_write_fails
     with_tmp_dir do |dir|
       task = File.join(dir, "task")

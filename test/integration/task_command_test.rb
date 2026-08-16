@@ -35,4 +35,52 @@ class TaskCommandTest < Minitest::Test
       end
     end
   end
+
+  def test_native_task_log_reads_only_the_current_correlated_reference
+    reference = { "path" => "logs/attempt.frames", "size" => 12, "sha256" => "a" * 64 }
+    document = {
+      "diagnostic" => {
+        "log" => { "state" => "current", "reference" => reference }
+      }
+    }
+    observed = nil
+    reader = lambda do |value|
+      observed = value
+      { "tail" => "exact failure\n" }
+    end
+    command = Hive::Commands::Task.new("unused", log: true, log_reader: reader)
+
+    out, err = capture_io { command.send(:emit, document) }
+
+    assert_empty err
+    assert_equal "exact failure\n", out
+    assert_equal reference, observed
+  end
+
+  def test_cli_forwards_the_read_only_log_option
+    captured = nil
+    fake = Object.new
+    fake.define_singleton_method(:call) { true }
+    factory = lambda do |target, **options|
+      captured = [ target, options ]
+      fake
+    end
+
+    with_replaced_singleton_method(Hive::Commands::Task, :new, factory) do
+      Hive::CLI.start([ "task", "task-260816-abcd", "--project", "demo", "--log" ])
+    end
+
+    assert_equal "task-260816-abcd", captured.first
+    assert_equal "demo", captured.last.fetch(:project)
+    assert captured.last.fetch(:log)
+    refute captured.last.fetch(:json)
+  end
+
+  def test_log_and_json_are_mutually_exclusive
+    error = assert_raises(Hive::InvalidTaskPath) do
+      Hive::Commands::Task.new("unused", log: true, json: true)
+    end
+
+    assert_equal "--log cannot be combined with --json", error.message
+  end
 end

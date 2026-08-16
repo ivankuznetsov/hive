@@ -261,12 +261,25 @@ module Hive
     SQL
 
     def exact_attempt(attempt_id:, task_generation: nil, project_slug: nil,
-                      task_slug: nil, legacy_limit: 100)
+                      task_slug: nil, legacy_limit: 100, session_limit: 100,
+                      deadline: nil,
+                      monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
+      session_limit = positive_limit(session_limit, "session_limit")
+      legacy_limit = positive_limit(legacy_limit, "legacy_limit")
+      return unavailable_exact("deadline_exhausted") if
+        deadline_exhausted?(deadline, monotonic_clock)
+
       db_path = path
       return unavailable_exact("store_missing") unless File.file?(db_path)
 
-      with_database(create: false) do |db|
+      with_database(
+        create: false,
+        busy_timeout_ms: deadline_busy_timeout(deadline, monotonic_clock)
+      ) do |db|
         ensure_schema!(db)
+        raise IOError, "usage read deadline exhausted" if
+          deadline_exhausted?(deadline, monotonic_clock)
+
         clauses = [ "attempt_id = ?" ]
         binds = [ attempt_id.to_s ]
         unless task_generation.nil?
@@ -281,10 +294,12 @@ module Hive
           "cached_available, cache_read_available, cache_write_available, " \
           "reasoning_available, cost_available, billing_route, billing_evidence_source, " \
           "input_includes_cache_read, input_includes_cache_write, output_includes_reasoning " \
-          "FROM token_usage WHERE #{clauses.join(' AND ')} ORDER BY session_id, started_at",
-          binds
+          "FROM token_usage WHERE #{clauses.join(' AND ')} " \
+          "ORDER BY session_id, started_at LIMIT ?",
+          binds + [ session_limit + 1 ]
         )
-        sessions = rows.map { |row| exact_row(row) }
+        sessions_truncated = rows.length > session_limit
+        sessions = rows.first(session_limit).map { |row| exact_row(row) }
         legacy_clauses = [ "attempt_id IS NULL" ]
         legacy_binds = []
         unless blank?(project_slug)
@@ -305,20 +320,27 @@ module Hive
           "input_includes_cache_read, input_includes_cache_write, output_includes_reasoning " \
           "FROM token_usage WHERE #{legacy_clauses.join(' AND ')} " \
           "ORDER BY started_at DESC LIMIT ?",
-          legacy_binds + [ Integer(legacy_limit) ]
+          legacy_binds + [ legacy_limit ]
         ).map { |row| exact_row(row) }
+        unattributed_count = db.get_first_value(
+          "SELECT COUNT(*) FROM (SELECT 1 FROM token_usage " \
+          "WHERE #{legacy_clauses.join(' AND ')} LIMIT ?)",
+          legacy_binds + [ legacy_limit + 1 ]
+        ).to_i
         {
           available: true,
           sessions: sessions,
           totals: sum_usage(sessions),
           unattributed: unattributed_rows,
-          unattributed_count: db.get_first_value(
-            "SELECT COUNT(*) FROM token_usage WHERE #{legacy_clauses.join(' AND ')}",
-            legacy_binds
-          ).to_i
+          unattributed_count: [ unattributed_count, legacy_limit ].min,
+          unattributed_truncated: unattributed_count > legacy_limit,
+          truncated: sessions_truncated
         }
       end
     rescue StandardError => e
+      return unavailable_exact("deadline_exhausted") if
+        deadline_exhausted?(deadline, monotonic_clock)
+
       warn "[hive] exact attempt usage failed: #{e.class}: #{e.message}"
       unavailable_exact("read_failed")
     end
@@ -508,16 +530,38 @@ module Hive
       }
     end
 
-    def with_database(create:)
+    def with_database(create:, busy_timeout_ms: BUSY_TIMEOUT_MS)
       require "sqlite3"
 
       db_path = path
       FileUtils.mkdir_p(File.dirname(db_path)) if create
       db = SQLite3::Database.new(db_path)
-      db.busy_timeout(BUSY_TIMEOUT_MS)
+      db.busy_timeout(Integer(busy_timeout_ms))
       yield db
     ensure
       db&.close
+    end
+
+    def positive_limit(value, name)
+      limit = Integer(value)
+      raise ArgumentError, "#{name} must be positive" unless limit.positive?
+
+      limit
+    end
+
+    def deadline_exhausted?(deadline, monotonic_clock)
+      !deadline.nil? && monotonic_clock.call >= Float(deadline)
+    rescue ArgumentError, TypeError
+      true
+    end
+
+    def deadline_busy_timeout(deadline, monotonic_clock)
+      return BUSY_TIMEOUT_MS if deadline.nil?
+
+      remaining_ms = ((Float(deadline) - monotonic_clock.call) * 1000).ceil
+      [ [ remaining_ms, 1 ].max, BUSY_TIMEOUT_MS ].min
+    rescue ArgumentError, TypeError
+      1
     end
 
     def schema_columns(db)

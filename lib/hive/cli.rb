@@ -1286,12 +1286,15 @@ module Hive
 
       Example:
         hive task TASK-SLUG --project PROJECT --json
+        hive task TASK-SLUG --project PROJECT --log
     DESC
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :log, type: :boolean, default: false,
+                 desc: "read the current receipt-correlated diagnostic log tail"
     def task(target)
       require "hive/commands/task"
       Hive::Commands::Task.new(
-        target, project: options[:project], json: options[:json]
+        target, project: options[:project], json: options[:json], log: options[:log]
       ).call
     end
 

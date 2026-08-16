@@ -74,6 +74,62 @@ class TaskWorkspaceUsageTest < Minitest::Test
     assert_equal 2, envelope.fetch("sessions_count")
   end
 
+  def test_unavailable_and_failed_usage_reads_degrade_without_zero_filling
+    unavailable = ->(**) { { available: false, reason: "store_missing" } }
+    missing = Hive::TaskWorkspace::Usage.new(
+      attempts_panel: attempts_panel, usage_reader: unavailable,
+      pricing: unavailable_pricing
+    ).call
+
+    assert_equal "partial", missing.fetch("coverage")
+    assert_nil missing.dig("sessions", 0, "input")
+    assert_includes missing.fetch("diagnostics").map { |row| row.fetch("reason") },
+                    "usage_store_unavailable"
+
+    failing = ->(**) { raise IOError, "read failed" }
+    failed = Hive::TaskWorkspace::Usage.new(
+      attempts_panel: attempts_panel, usage_reader: failing,
+      pricing: unavailable_pricing
+    ).call
+
+    assert_equal "partial", failed.fetch("coverage")
+    assert_includes failed.fetch("diagnostics").map { |row| row.fetch("reason") },
+                    "usage_read_failed"
+  end
+
+  def test_bounded_reader_caps_rows_caches_attempts_and_fails_closed_at_deadline
+    calls = 0
+    now = 0.0
+    reader = lambda do |**|
+      calls += 1
+      {
+        available: true,
+        sessions: [ usage_row("session-failed"), usage_row("extra-session") ],
+        unattributed_count: 0
+      }
+    end
+    limits = Hive::TaskWorkspace::Limits.new(
+      usage_sessions_per_attempt: 1, usage_deadline_seconds: 2
+    )
+    bounded = Hive::TaskWorkspace::BoundedUsageReader.new(
+      reader: reader, limits: limits, monotonic_clock: -> { now }
+    )
+
+    first = bounded.exact_attempt(attempt_id: "attempt-failed")
+    second = bounded.exact_attempt(attempt_id: "attempt-failed")
+
+    assert_equal 1, calls
+    assert_equal 1, first.fetch(:sessions).length
+    assert first.fetch(:truncated)
+    assert_equal first, second
+
+    now = 3.0
+    expired = bounded.exact_attempt(attempt_id: "attempt-retry")
+    refute expired.fetch(:available)
+    assert_equal "deadline_exhausted", expired.fetch(:reason)
+    assert_equal 1, calls
+  end
+
   def test_mixed_routes_keep_harness_provider_and_reported_cost_separate_from_observed_price
     sessions = [
       session_binding("session-subscription", outcome: "succeeded"),

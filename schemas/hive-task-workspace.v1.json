@@ -321,7 +321,9 @@
         "state": { "$ref": "#/$defs/State" },
         "sessions": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/UsageSession" } },
         "totals": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/TokenTotals" }] },
-        "unattributed_count": { "$ref": "#/$defs/IntegerOrNull" }
+        "unattributed_count": { "$ref": "#/$defs/IntegerOrNull" },
+        "unattributed_truncated": { "type": "boolean" },
+        "truncated": { "type": "boolean" }
       }
     },
     "TokenTotals": {

@@ -12,6 +12,8 @@ module Hive
         attempt_ids: 100,
         predecessor_fetches: 32,
         attempt_bytes: 512 * 1024,
+        usage_sessions_per_attempt: 100,
+        usage_deadline_seconds: 2,
         timeline_material_items: 200,
         timeline_noise_groups: 100,
         timeline_bytes: 512 * 1024,

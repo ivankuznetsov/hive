@@ -97,8 +97,12 @@ the billing provider.
 `Hive::TaskWorkspace::Usage` starts from the bounded durable attempt/session
 inventory, then performs exact `UsageDb.exact_attempt` reads. It includes failed
 attempts and retries, deduplicates by durable session ID, rejects rows not bound
-to that inventory, and reports unattributed legacy rows separately. The task
-coverage vocabulary is:
+to that inventory, and reports unattributed legacy rows separately.
+The v1 resource and v2 semantic projections share one request-local reader:
+each attempt is read at most once, no attempt returns more than 100 sessions,
+and the complete task read has one two-second monotonic deadline. Exhaustion,
+truncation, and store failures lower coverage and never become zero usage.
+The task coverage vocabulary is:
 
 - `complete` — every bounded session is terminal, metered, attributable, and
   priceable;

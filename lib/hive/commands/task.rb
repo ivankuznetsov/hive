@@ -1,9 +1,11 @@
 require "json"
 require "hive/config"
 require "hive/commands/status"
+require "hive/paths"
 require "hive/task_resolver"
 require "hive/task_workspace/artifacts"
 require "hive/task_workspace/builder"
+require "hive/task_workspace/correlated_log"
 
 module Hive
   module Commands
@@ -39,10 +41,17 @@ module Hive
         end
       end
 
-      def initialize(target, project: nil, json: false, clock: -> { Time.now.utc })
+      def initialize(target, project: nil, json: false, log: false, log_reader: nil,
+                     clock: -> { Time.now.utc })
         @target = target
         @project_filter = project
         @json = json == true
+        @log = log == true
+        if @log && @json
+          raise Hive::InvalidTaskPath, "--log cannot be combined with --json"
+        end
+
+        @log_reader = log_reader
         @clock = clock
       end
 
@@ -64,11 +73,40 @@ module Hive
           clock: @clock
         ).semantic
 
-        @json ? puts(JSON.generate(document)) : render(document)
+        emit(document)
         document
       end
 
       private
+
+      def emit(document)
+        return puts(JSON.generate(document)) if @json
+        return render_log(document) if @log
+
+        render(document)
+      end
+
+      def render_log(document)
+        reference = document.dig("diagnostic", "log", "reference")
+        unless document.dig("diagnostic", "log", "state") == "current" &&
+               reference.is_a?(Hash)
+          raise Hive::Error, "no receipt-correlated diagnostic log is available"
+        end
+
+        reader = @log_reader || default_log_reader
+        log = reader.respond_to?(:read) ? reader.read(reference) : reader.call(reference)
+        raise Hive::Error, "receipt-correlated diagnostic log is unavailable" unless log
+
+        tail = log.fetch("tail").to_s
+        print tail
+        puts unless tail.end_with?("\n")
+      end
+
+      def default_log_reader
+        root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
+        root = File.join(Hive::Paths.state_home, "attempts", "v4") if root.empty?
+        Hive::TaskWorkspace::CorrelatedLog.new(root: root)
+      end
 
       def registered_project!(task)
         project = Hive::Config.registered_projects.find do |entry|

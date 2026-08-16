@@ -14,11 +14,13 @@ surface for the task's canonical headline/action, workflow result and primary
 artifact, applicable evidence, exactly attributed usage, API-equivalent price
 coverage, and receipt-correlated diagnostic-log reference. It is read-only and
 does not expand fleet `hive status --json`.
+`hive task TARGET --project NAME --log` re-resolves a current diagnostic and
+prints only its integrity-checked bounded receipt-correlated tail.
 
 ## Synopsis
 
 ```bash
-hive task TARGET [--project NAME] [--json]
+hive task TARGET [--project NAME] [--json | --log]
 ```
 
 `TARGET` follows `Hive::TaskResolver`: an exact path, globally unique slug, or
@@ -30,6 +32,9 @@ remains inspectable and is marked read-only.
 Without `--json`, the command prints a compact human summary: headline, action,
 primary-result reference, and usage coverage. `--json` is the stable machine
 surface and emits one schema-valid `hive-task-workspace` v2 document.
+`--log` is a read-only diagnostic surface and cannot be combined with `--json`.
+It fails closed when the semantic diagnostic is not current, the receipt
+reference changed, its digest/size is invalid, or the bounded file is absent.
 
 ## Meaning and boundaries
 
@@ -47,9 +52,10 @@ CLI-only result model:
   retries. Harness, actual provider/model, and billing route remain separate.
   API-equivalent USD includes coverage and missing dimensions.
 - `diagnostic.log.reference` is the current attempt receipt's bounded
-  `log_reference` when a genuine error/recovery state exists. Follow that
-  reference through trusted task resolution for deep diagnosis; do not select
-  a log by newest-file mtime.
+  `log_reference` when a genuine error/recovery state exists. Use the same
+  target with `--log` for deep diagnosis; Hive re-resolves the reference and
+  reads it through one no-follow descriptor. Do not open its path or select a
+  log by newest-file mtime.
 
 The document is local, deterministic, bounded, redacted, credential-free, and
 mutation-token-free. It contains neither raw logs nor attempt/provenance/
@@ -68,6 +74,7 @@ the dedicated provider-account/model health projection.
 - `test/unit/task_workspace/schema_test.rb`
 - `test/unit/task_workspace/builder_test.rb`
 - `test/unit/task_workspace/usage_test.rb`
+- `test/unit/task_workspace/correlated_log_test.rb`
 - `web/test/integration/tasks_test.rb`
 
 ## Backlinks

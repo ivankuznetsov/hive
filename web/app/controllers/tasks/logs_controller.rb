@@ -10,7 +10,8 @@ class Tasks::LogsController < Tasks::BaseController
       @task.latest_log
     end
     render partial: "tasks/log", locals: {
-      log: log, project: @project, task: @task
+      log: log, project: @project, task: @task,
+      reference_sha256: params[:reference_sha256].presence
     }
   end
 

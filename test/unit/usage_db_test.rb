@@ -472,6 +472,32 @@ class UsageDbTest < Minitest::Test
     end
   end
 
+  def test_exact_attempt_caps_session_rows_and_honors_an_expired_deadline
+    with_usage_db do
+      common = {
+        project_slug: "alpha", task_slug: "task-a", attempt_id: "attempt-1",
+        task_generation: 3
+      }
+      record(**common, session_id: "session-1", input: 10)
+      record(**common, session_id: "session-2", input: 20)
+
+      exact = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt-1", task_generation: 3, session_limit: 1
+      )
+
+      assert exact.fetch(:available)
+      assert exact.fetch(:truncated)
+      assert_equal 1, exact.fetch(:sessions).length
+
+      expired = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt-1", deadline: 9.0,
+        monotonic_clock: -> { 10.0 }
+      )
+      refute expired.fetch(:available)
+      assert_equal "deadline_exhausted", expired.fetch(:reason)
+    end
+  end
+
   def test_aggregate_returns_patrol_bucket_for_patrol_stage_rows
     with_usage_db do
       now = Time.utc(2026, 5, 24, 12)

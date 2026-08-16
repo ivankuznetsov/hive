@@ -9,6 +9,9 @@
 - Use `hive task TARGET --project NAME --json` for one task's semantic result,
   primary artifact, applicable evidence, exact usage, API-equivalent estimate,
   and receipt-correlated diagnostic-log reference.
+- Use `hive task TARGET --project NAME --log` only after that diagnostic is
+  current; it re-resolves and integrity-checks the current receipt reference
+  before printing a bounded tail.
 - Use `hive daemon status --json` for daemon process health. Do not substitute daemon health for task or scheduler truth.
 - Use `hive circuits inspect --json` for the shared provider-account/model health, capacity, and routing-decision projection. Add `--provider ACCOUNT` or `--model MODEL` to keep accounts and decisions in the same scope.
 
@@ -59,8 +62,15 @@ the local public API rate catalog. `partial`, `pending`, `unavailable`, and
 
 When `diagnostic.state` is `current`, prefer
 `diagnostic.log.reference` because it came from the exact attempt receipt.
-Resolve and read that bounded correlated log through Hive's trusted task path
-for deep diagnosis. Do not choose a log by newest-file mtime and do not use raw
+Resolve and read it through Hive's trusted task path:
+
+```bash
+hive task TASK-SLUG --project PROJECT --log
+```
+
+The command re-resolves the current semantic reference and reads only its
+integrity-checked bounded tail. Do not open the reference path yourself, choose
+a log by newest-file mtime, or use raw
 `agent_start`, `agent_end`, session-lifecycle, or stage-transition events as a
 substitute for the task's result or the correlated failure log.
 

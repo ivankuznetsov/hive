@@ -77,9 +77,18 @@ remain distinct. API-equivalent USD is a local rate-card estimate with coverage
 and missing dimensions, never an invoice or a claim that subscription use cost
 zero. Provider-reported cost is deliberately absent from v2.
 
+One request-wide `BoundedUsageReader` shares exact-attempt results between the
+v1 and v2 projections. It caps each attempt at 100 usage sessions and applies a
+single two-second deadline; row/deadline exhaustion makes coverage partial or
+unavailable and never invents zero. `UsageDb.exact_attempt` applies the same
+row bound to SQLite and bounds its unattributed-legacy sample/count.
+
 `diagnostic` is `not_applicable` for normal tasks. A genuine red/recovery state
 can carry one bounded summary and the current attempt receipt's safe
 `log_reference`; the log route binds the request to that reference digest.
+Native agents use `hive task TARGET --project NAME --log`, which re-resolves
+the current semantic reference and shares Web's no-follow, 8 MiB verification
+and 256 KiB/200-line tail reader.
 Newest-file mtime is only the older unqualified log compatibility behavior and
 does not select the semantic diagnostic. Raw log content is never embedded in
 v2.
@@ -370,7 +379,9 @@ Stable DOM identities and `data-workspace-disclosure-key` values let the
 task-workspace Stimulus controller preserve focus, selection, scroll, usage,
 supporting-artifact, change-evidence, and diagnostic-log disclosure state
 across Turbo morphs. The correlated log frame loads only when its diagnostic
-disclosure opens. Only changed semantic headline/action/result/usage material
+disclosure opens and its permanent frame identity includes the receipt digest,
+so a later failure cannot retain an earlier log. Only changed semantic
+headline/action/result/usage material
 enters the polite live region. Tables scroll inside named regions, identifiers
 wrap, and layout reflows to one column without removing decisive state or
 controls.
@@ -380,8 +391,8 @@ controls.
 - `test/unit/task_workspace/` pins v1/v2 schemas, bounded readers, semantic
   result/applicability/usage/diagnostic composition, provenance,
   attempts/resources, timeline, dependency, and publication/cache.
-- `test/integration/task_command_test.rb` pins native semantic v2 output and
-  the absence of absolute project paths.
+- `test/integration/task_command_test.rb` pins native semantic v2 output,
+  bounded diagnostic-log resolution, and the absence of absolute project paths.
 - `test/unit/context_provenance_test.rb`, `task_activity_test.rb`,
   `task_projection_store_test.rb`, and `usage_db_test.rb` pin capture and
   persistence boundaries.

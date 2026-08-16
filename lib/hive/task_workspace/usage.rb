@@ -1,14 +1,15 @@
 require "bigdecimal"
 require "hive/model_pricing"
 require "hive/usage_db"
+require "hive/task_workspace"
 
 module Hive
   module TaskWorkspace
     class Usage
       def initialize(attempts_panel:, usage_reader: Hive::UsageDb,
-                     pricing: Hive::ModelPricing.new)
+                     pricing: Hive::ModelPricing.new, limits: Limits.new)
         @attempts_panel = attempts_panel.to_h
-        @usage_reader = usage_reader
+        @usage_reader = BoundedUsageReader.wrap(usage_reader, limits: limits)
         @pricing = pricing
       end
 
@@ -29,7 +30,20 @@ module Hive
               "usage_store_unavailable", attempt_id: attempt["attempt_id"],
               detail: response[:reason]
             )
+            break if response[:reason] == "deadline_exhausted"
             next
+          end
+          if response[:truncated] == true
+            read_unavailable = true
+            diagnostics << diagnostic(
+              "usage_sessions_truncated", attempt_id: attempt["attempt_id"]
+            )
+          end
+          if response[:unattributed_truncated] == true
+            read_unavailable = true
+            diagnostics << diagnostic(
+              "unattributed_usage_truncated", attempt_id: attempt["attempt_id"]
+            )
           end
           unattributed_counts << Integer(response[:unattributed_count]) unless
             response[:unattributed_count].nil?

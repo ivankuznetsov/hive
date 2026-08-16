@@ -18,7 +18,10 @@ Strict v1 remains an explicit authenticated audit/mutation compatibility path.
 Normal task HTML no longer renders raw attempts, provenance receipts, lifecycle
 events, stage chronology, or a newest-file log tail. Genuine error/recovery
 states expose the exact attempt receipt's bounded correlated-log reference for
-deep diagnosis.
+deep diagnosis. Native `hive task TARGET --project NAME --log` now re-resolves
+that current reference and shares Web's integrity-checked bounded tail reader;
+digest-bound Turbo frame identities prevent a later failure from retaining an
+earlier log.
 
 Exact failed/retry sessions are deduplicated into known token totals while
 harness, actual provider/model, and launch-bound billing route remain distinct.
@@ -26,6 +29,9 @@ A versioned local catalog calculates coverage-labelled API-equivalent estimates
 from official first-party OpenAI, Anthropic, and xAI rates without a render-time
 network request. Missing evidence remains partial, pending, unavailable, or
 unknown; subscription use is never described as zero actual spend.
+Exact usage reads are capped per attempt, share one request deadline/cache
+across v1 and v2, and degrade visibly on truncation rather than rescanning or
+inventing zero.
 
 The canonical Hive operating skill and its checked-in OpenClaw projection now
 direct agents to semantic task inspection and receipt-correlated logs, while

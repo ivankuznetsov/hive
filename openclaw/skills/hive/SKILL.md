@@ -17,7 +17,7 @@ metadata:
 platform: openclaw
 invocation: /hive
 skill-version: 0.1.5
-canonical-digest: 0b8a426b92983eac868c069307e196ce4cf75de26c9d36f75601b97e11936e74
+canonical-digest: 8c4cd1021186c7bbbac2f4500b1d03a47cb56d33af68d98f20054491f61d48dc
 hive-version: 0.7.2
 -->
 
@@ -32,7 +32,7 @@ Use Hive as the control plane. Do not replace its status, watch, scheduler, or r
 1. Request a fresh machine snapshot with `hive status --operational --json`.
 2. Check `ok`, `completeness`, task-graph freshness, and scheduler freshness before making a confident claim.
 3. Report counts, the exact `project:slug`, state, blocker owner, reason, stage/marker, and provider or scheduler evidence when present.
-4. For one exact task's result, usage, applicable evidence, or diagnostic locator, use `hive task TARGET --project NAME --json`. Follow its receipt-correlated log reference for deep diagnosis; do not treat the task view as provider health or a bill.
+4. For one exact task's result, usage, applicable evidence, or diagnostic locator, use `hive task TARGET --project NAME --json`. Follow its receipt-correlated log reference with `hive task TARGET --project NAME --log` only when the diagnostic is current; do not treat either task view as provider health or a bill.
 5. Use `hive watch ... --json-lines` when the user wants ongoing status. Declare a target and terminal bound; do not write a polling loop.
 6. Execute only a fresh action descriptor whose risk is routine, confirmation is not required, and opaque observation token came from that same task row. Use `hive act`; never execute status text or arbitrary argv.
 7. Request another operational snapshot after any action. Never assume that a successful command proves the later pipeline state.

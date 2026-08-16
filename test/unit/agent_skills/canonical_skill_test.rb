@@ -103,6 +103,7 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
 
     assert_includes text, "hive status --operational --json"
     assert_includes text, "hive task TARGET --project NAME --json"
+    assert_includes text, "hive task TARGET --project NAME --log"
     assert_includes text, "receipt-correlated log reference"
     assert_includes text, "live provider health, quota, credential validity"
     assert_includes text, "provider-observed billing"

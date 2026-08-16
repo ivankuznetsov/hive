@@ -95,6 +95,47 @@ class TaskWorkspaceResourcesTest < Minitest::Test
                  usage.fetch("totals"))
   end
 
+  def test_truncated_usage_rows_make_the_resource_panel_partial
+    reader = lambda do |**|
+      {
+        available: true, truncated: true,
+        sessions: [
+          { session_id: "session-1", input: 12, output: 4, cached: 2,
+            model: "gpt", source: "runtime_receipt" }
+        ],
+        unattributed_count: 0
+      }
+    end
+
+    panel = Hive::TaskWorkspace::Resources.new(
+      attempts_panel: attempts_panel(guards: []), usage_reader: reader
+    ).call
+    usage = panel.fetch("records").find { |row| row["record_kind"] == "usage" }
+
+    assert_equal "partial", panel.fetch("state")
+    assert_equal "partial", usage.fetch("state")
+    assert usage.fetch("truncated")
+  end
+
+  def test_truncated_legacy_usage_is_partial_even_without_attributed_sessions
+    panel = Hive::TaskWorkspace::Resources.new(
+      attempts_panel: attempts_panel(guards: []),
+      usage_reader: lambda do |**|
+        {
+          available: true, sessions: [], unattributed_count: 100,
+          unattributed_truncated: true
+        }
+      end
+    ).call
+    usage = panel.fetch("records").find { |row| row["record_kind"] == "usage" }
+
+    assert_equal "partial", panel.fetch("state")
+    assert_equal "partial", usage.fetch("state")
+    assert usage.fetch("unattributed_truncated")
+    assert_includes panel.fetch("diagnostics").map { |row| row.fetch("reason") },
+                    "usage_truncated"
+  end
+
   private
 
   def attempts_panel(guards:)

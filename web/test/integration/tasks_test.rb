@@ -408,6 +408,61 @@ class TasksTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "a declared primary outside stage state files leads the task page" do
+    project = create_hive_project!("declared-primary-app")
+    project_root = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project)
+    workflows = File.join(project_root, ".hive-state", "workflows")
+    FileUtils.mkdir_p(File.join(workflows, "declared-primary-fixture"))
+    File.write(
+      File.join(workflows, "declared-primary-fixture", "research.md"),
+      "Research the task.\n"
+    )
+    File.write(
+      File.join(workflows, "declared-primary-fixture", "done.md"),
+      "Write the final article.\n"
+    )
+    File.write(File.join(workflows, "declared-primary-fixture.yml"), <<~YAML)
+      id: declared-primary-fixture
+      result:
+        kind: document
+        primary_artifact: article.md
+        capabilities: [supporting_artifacts]
+      stages:
+        - name: inbox
+          kind: terminal
+          state_file: idea.md
+        - name: research
+          kind: agent
+          state_file: research.md
+          instruction: declared-primary-fixture/research.md
+        - name: done
+          kind: agent
+          state_file: done.md
+          instruction: declared-primary-fixture/done.md
+          deliverable: article.md
+    YAML
+    Hive::Workflows::Project.reset!
+
+    slug = "declared-primary-260816-aaaa"
+    folder = stage_dir(project, "2-research").join(slug)
+    folder.mkpath
+    folder.join("idea.md").write("# Idea\n")
+    folder.join("research.md").write("# Research\n")
+    folder.join("article.md").write("# Final article\n")
+    Hive::TaskMeta.write(
+      folder.to_s, id: 1, slug: slug, display_name: nil,
+      workflow: "declared-primary-fixture"
+    )
+
+    get task_path(project, slug)
+
+    assert_response :success
+    assert_select "#workspace-primary-result[data-primary-artifact='article.md']", 1
+    assert_select "#workspace-primary-result .markdown h1", text: "Final article"
+  ensure
+    Hive::Workflows::Project.reset!
+  end
+
   test "earlier stages keep the chronological order, idea first" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
     folder.join("artifact.md").write("# Early\n")
@@ -469,13 +524,37 @@ class TasksTest < ActionDispatch::IntegrationTest
       assert_select "turbo-frame[data-diagnostic-log-src*='reference_sha256=#{reference.fetch('sha256')}']", 1
       assert_select "turbo-frame[data-diagnostic-log-src][src]", 0,
                     "the normal page must not load raw log content before disclosure"
+      first_frame_id = css_select("turbo-frame[data-diagnostic-log-src]").sole["id"]
 
       get task_log_path(
         @project, @slug, reference_sha256: reference.fetch("sha256")
       )
       assert_response :success
+      assert_select "turbo-frame##{first_frame_id}", 1,
+                    "the lazy response must target the digest-bound frame"
       assert_includes response.body, "exact receipt failure"
       refute_includes response.body, "wrong newest failure"
+
+      replacement_reference = reference.merge("sha256" => "b" * 64)
+      later = lambda do
+        original.bind_call(self).tap do |value|
+          value["diagnostic"] = {
+            "state" => "current", "summary" => "A later failure",
+            "log" => {
+              "state" => "current", "quality" => "receipt_correlated",
+              "reference" => replacement_reference
+            }
+          }
+        end
+      end
+      with_replaced_instance_method(Hive::TaskWorkspace::Builder, :semantic, later) do
+        get task_path(@project, @slug)
+        replacement_frame_id = css_select(
+          "turbo-frame[data-diagnostic-log-src]"
+        ).sole["id"]
+        refute_equal first_frame_id, replacement_frame_id,
+                     "a new receipt digest must replace the permanent log frame"
+      end
 
       get task_log_path(@project, @slug, reference_sha256: "0" * 64)
       assert_response :success

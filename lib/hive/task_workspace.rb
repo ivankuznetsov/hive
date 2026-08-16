@@ -4,6 +4,7 @@ require "hive/task_workspace/source_error"
 require "hive/task_workspace/limits"
 require "hive/task_workspace/field"
 require "hive/task_workspace/bounded_reader"
+require "hive/task_workspace/bounded_usage_reader"
 
 module Hive
   module TaskWorkspace

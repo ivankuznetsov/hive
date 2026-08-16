@@ -333,6 +333,26 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     end
   end
 
+  def test_v1_and_v2_share_exact_usage_reads
+    calls = 0
+    usage_reader = lambda do |**|
+      calls += 1
+      { available: true, sessions: [], unattributed_count: 0 }
+    end
+    with_fixture do |native, task|
+      projector = builder(
+        native, task, questions: 0, usage_reader: usage_reader,
+        usage_session: true
+      )
+
+      projector.call
+      projector.semantic
+
+      assert_equal 1, calls,
+                   "one HTML request must reuse its exact attempt usage read"
+    end
+  end
+
   private
 
   def with_fixture(artifact: "# Artifact\n", material_events: 1, log_reference: nil,
@@ -381,7 +401,8 @@ class TaskWorkspaceBuilderTest < Minitest::Test
   def builder(native, task, questions:, limits: Hive::TaskWorkspace::Limits.new,
               status_availability: "fresh", status_error: nil,
               projection_state: "current", projection_diagnostics: [],
-              projection_truncated: false, usage_available: true, questions_payload: nil)
+              projection_truncated: false, usage_available: true,
+              usage_reader: nil, usage_session: false, questions_payload: nil)
     questions_payload ||= Array.new(questions) do |index|
       {
         "n" => index + 1, "text" => "Question #{index + 1}?",
@@ -400,6 +421,23 @@ class TaskWorkspaceBuilderTest < Minitest::Test
         "payload" => {
           "activity_kind" => "stage_transition", "operation_id" => "op-#{index}",
           "correlation_id" => "correlation-#{index}"
+        }
+      }
+    end
+    if usage_session
+      events << {
+        "schema" => "hive-task-journal-event", "schema_version" => 1,
+        "event_id" => "session-finished", "event_type" => "activity_recorded",
+        "occurred_at" => "2026-08-12T12:00:01Z",
+        "observed_at" => "2026-08-12T12:00:01Z",
+        "stage" => "4-execute", "attempt_id" => "attempt-1",
+        "task_generation" => 3, "provenance" => { "source" => "stage_service" },
+        "payload" => {
+          "activity_kind" => "session_finished", "session_id" => "session-1",
+          "role" => "implementer", "provider" => "codex",
+          "started_at" => "2026-08-12T12:00:00Z",
+          "ended_at" => "2026-08-12T12:00:01Z", "outcome" => "succeeded",
+          "live" => false, "usage" => {}
         }
       }
     end
@@ -443,7 +481,8 @@ class TaskWorkspaceBuilderTest < Minitest::Test
           )
         end
       end.new(nil),
-      usage_reader: ->(**) { { available: usage_available, sessions: [], unattributed_count: 0 } },
+      usage_reader: usage_reader ||
+        ->(**) { { available: usage_available, sessions: [], unattributed_count: 0 } },
       current_context_observation: {
         "observed_at" => "2026-08-12T12:00:00Z",
         "repository" => nil, "wiki" => nil

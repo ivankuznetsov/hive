@@ -54,7 +54,7 @@ module Hive
         @attempt_store = attempt_store
         @event_reader = event_reader
         @journal_reader = journal_reader
-        @usage_reader = usage_reader
+        @usage_reader = BoundedUsageReader.wrap(usage_reader, limits: @limits)
         @current_context_observation = current_context_observation
         @questions = questions
         @daemon_enabled = daemon_enabled == true
@@ -65,12 +65,7 @@ module Hive
       def call
         read = projection_read
         projection = projection_hash(read)
-        attempts = panel("attempts") do
-          Attempts.new(
-            projection: projection, attempt_store: attempt_store,
-            activities: read.journal_records, limits: @limits
-          ).call
-        end
+        attempts = attempts_panel(read: read, projection: projection)
         resources = panel("resources") do
           Resources.new(
             attempts_panel: attempts, usage_reader: @usage_reader, limits: @limits
@@ -87,7 +82,7 @@ module Hive
           dependency_panel(publication)
         end
         timeline = timeline_panel(read: read)
-        artifacts = panel("artifacts") { artifact_panel }
+        artifacts = artifacts_panel
         panels = {
           "provenance" => provenance, "attempts" => attempts,
           "resources" => resources, "timeline" => timeline,
@@ -124,13 +119,8 @@ module Hive
       def semantic
         read = projection_read
         projection = projection_hash(read)
-        attempts = panel("attempts") do
-          Attempts.new(
-            projection: projection, attempt_store: attempt_store,
-            activities: read.journal_records, limits: @limits
-          ).call
-        end
-        artifacts = panel("artifacts") { artifact_panel }
+        attempts = attempts_panel(read: read, projection: projection)
+        artifacts = artifacts_panel
         usage = semantic_usage(attempts)
         status = status_payload(read)
         result = semantic_result(artifacts)
@@ -157,6 +147,19 @@ module Hive
       end
 
       private
+
+      def attempts_panel(read:, projection:)
+        @attempts_panel ||= panel("attempts") do
+          Attempts.new(
+            projection: projection, attempt_store: attempt_store,
+            activities: read.journal_records, limits: @limits
+          ).call
+        end
+      end
+
+      def artifacts_panel
+        @artifacts_panel ||= panel("artifacts") { artifact_panel }
+      end
 
       def semantic_snapshot_with_budget(**values)
         compaction = 0
@@ -260,7 +263,7 @@ module Hive
 
       def semantic_usage(attempts)
         value = Usage.new(
-          attempts_panel: attempts, usage_reader: @usage_reader
+          attempts_panel: attempts, usage_reader: @usage_reader, limits: @limits
         ).call
         value = deep_stringify(value)
         value.delete("sessions")

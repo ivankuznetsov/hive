@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-08-14
+updated: 2026-08-16
 tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention]
 ---
 
@@ -13,7 +13,10 @@ tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, rete
 local registry and workflow state, with no mandatory sign-in on a verified
 loopback request. Hivebox is the separate owner-gated container distribution
 of the same app at `/app/web`. The web tier adds no
-pipeline logic: status reads call `Hive::Commands::Status#json_payload` (via
+pipeline logic. Task detail is an operator-first semantic v2 view of the same
+workflow result and exact usage projection exposed by native `hive task`; v1
+attempt/provenance/timeline evidence remains on explicit audit paths. Status
+reads call `Hive::Commands::Status#json_payload` (via
 `Hive::Web::StatusFeed`), gate approval calls `Hive::Commands::Approve`
 in-process, task Drop calls `Hive::Commands::Drop` in-process, stage runs go
 through the daemon dispatch queue from the filesystem-backed Rails `Task`, daemon status
@@ -486,9 +489,27 @@ Honeycomb projections.
   the closed safe media types before streaming. Blocked packages show the exact
   generation-and-recovery-digest `hive evidence recover` command.
 
-  Legacy visual media from `7-artifacts` follows in a visibly labelled
-  `Legacy diagnostic` Demo section:
-  captured PNG/JPEG/GIF files are served from
+  The normal task view is composed from semantic `hive-task-workspace` v2.
+  Canonical headline/actions lead, followed by concise known usage and
+  API-equivalent coverage, the workflow's primary result as a full-width work
+  product, a genuine diagnostic only for red/recovery state, and then only
+  applicable supporting/change evidence. Document, change, Architecture,
+  Writing, Coding, and legacy custom workflows use the same normalized result
+  contract rather than view branches. A declared final deliverable opens first;
+  the current stage artifact is the in-progress fallback, and supporting
+  artifacts remain collapsed.
+
+  Raw attempt cards, provenance receipts, `agent_start`/`agent_end`, session
+  lifecycle rows, stage chronology, and the newest-log tail no longer render in
+  normal task HTML. Their authenticated v1 workspace, timeline, and log
+  endpoints remain available for audit and deep diagnosis. A red task's
+  diagnostic disclosure binds the current attempt receipt's exact bounded
+  `log_reference` digest before loading raw content; a newer unrelated log file
+  cannot displace it.
+
+  Legacy visual media from `7-artifacts` remains available when workflow
+  capability or actual semantic evidence makes it applicable. Captured
+  PNG/JPEG/GIF files are served from
   `GET /tasks/:project/:slug/media/:filename` and shown as an inline gallery
   with captions plus screenote links when the manifest carries
   `screenote_url`; failed captures render a warning banner with the recorded
@@ -499,29 +520,14 @@ Honeycomb projections.
   which re-checks the filename against an anchored regex, requires `File.basename`
   equality, and resolves `File.realpath` to confirm containment under
   `<task>/media/` — refusing symlink and path-traversal escapes — before
-  streaming with inline content type. Artifact summaries are UI chrome:
-  filename-style tabs in muted monospace, while rendered markdown bodies sit
-  in a bordered document panel so the file label and document headings do not
-  visually compete. Long documents use a centered 82-character prose measure,
-  full-size body text with 1.75 leading, stronger heading hierarchy and section
-  rhythm, while direct code and table evidence may use the wider document panel
-  before falling back to contained horizontal scrolling. Wide evidence cannot
-  widen the page on mobile. Open/closed choices survive pushed morphs (a
-  Stimulus controller snapshots/restores them around the morph while content
-  stays live) and artifact order is
-  stage-aware — chronological (idea first) while working, artifact.md first
-  and open from 8-finalize/9-done — and, as the page's appendix after the
-  artifacts, a log tail in a turbo-permanent turbo-frame
-  whose own reloads use Turbo frame morphing, patching the live pane in place
-  instead of replacing it on every poll. The poll controller gives the pane
-  `tail -f` semantics: it pins to the bottom while following, pauses reloads
-  while the operator scrolls up to read, and resumes when scrolled back down.
-  It also skips timer ticks while Turbo marks the frame busy, so a slow frame
-  request cannot be repeatedly cancelled and restarted by its own interval.
-  Server-side, the polled controller delegates to `Task#latest_log`, which
-  reads only a 256 KiB byte
-  window and returns the last 200 lines with a torn leading line dropped, so a
-  multi-MB agent log cannot pin a Puma worker every 3 seconds.
+  streaming with inline content type. Primary Markdown retains the sanitized
+  GFM pipeline and uses a centered 82-character measure, full-size body text,
+  1.75 leading, clear heading rhythm, collision-safe heading anchors, and an
+  outline only at four or more `h2` sections. Direct code and tables remain
+  inside horizontally scrollable containers, so wide evidence cannot widen the
+  page at mobile widths or real 400% zoom. Stable disclosure keys preserve
+  usage detail, supporting artifact, change-evidence, and correlated-log state
+  through Turbo morphs.
   `Task#diff` has the same bounded-subprocess discipline: it runs
   `git diff --` in its own process group, enforces
   `HIVE_WEB_DIFF_TIMEOUT_SEC` (default 15s), writes combined output to a
@@ -543,27 +549,21 @@ Honeycomb projections.
   so content, bench, managed, and project-authored workflows do not inherit the
   coding workflow's `9-done` assumption.
 
-  The same route now composes the `hive-task-workspace` v1 snapshot described
-  in [[modules/task_workspace]]. A decision summary leads with `wait`,
-  `answer`, `approve`, `retry`, or `investigate` and links to its decisive
-  evidence. Attempt/session and typed-resource truth, immutable versus current
-  provenance, the bounded audit timeline, the connected dependency component,
-  local/cached publication state, and bounded artifacts render as semantic
-  panels. Missing legacy evidence stays visibly missing or partial. The
-  dependency forest always has a complete bounded table alternative; field and
-  panel states are written as text rather than encoded by color alone.
-
-  `GET /tasks/:project/:slug.json` returns that exact authenticated normalized
-  document without changing the task route or `hive-status` v7. Signed
-  task-bound timeline cursors are read through the namespaced timeline GET.
-  Diff and publication use lazy permanent Turbo frames, while the log retains
-  its own permanent poll owner. The workspace Stimulus controller preserves
-  disclosure state, non-answer focus/caret, and scroll during pushed morphs;
-  the existing answers controller remains authoritative for typed answer
-  fields. Only a changed decision/status/resource signature is announced in
-  the polite live region. The responsive grid becomes one column at narrow
-  widths, contains tables as independently scrollable named regions, and keeps
-  named controls at least 24 CSS pixels.
+  The compatibility paths stay explicit. `GET
+  /tasks/:project/:slug.json` returns strict `hive-task-workspace` v1 for audit
+  and guarded mutation state. `GET /tasks/:project/:slug/workspace` returns the
+  same semantic v2 document consumed by normal HTML and native `hive task
+  TARGET --project NAME --json`. Signed task-bound timeline cursors remain on
+  the namespaced timeline GET. None of these routes changes `hive-status` v7.
+  Diff and publication retain bounded/lazy frames when applicable; the
+  receipt-correlated diagnostic log frame loads only after its disclosure is
+  opened. The workspace Stimulus controller preserves stable disclosure state,
+  non-answer focus/caret, and scroll during pushed morphs; the answers
+  controller remains authoritative for typed answer fields. Only changed
+  semantic headline/action/result/usage material is announced in the polite
+  live region. The responsive layout becomes one column at narrow widths,
+  contains tables as independently scrollable named regions, and keeps named
+  controls at least 24 CSS pixels.
 - **Workflows** — a project-scoped view of the real `hive workflow list`
   dimensions: built-in and authored descriptors, managed selected/retained
   generations, integrity, version/provenance, and the configured default.
@@ -940,11 +940,13 @@ share typed `available`, `empty`, `truncated`, and `unavailable` results with
 abortable timeout at a time, pauses while hidden, backs off failures, and
 ignores late responses after disconnect.
 
-Task detail JSON and HTML share `Hive::TaskWorkspace::Builder`. Its projection
-store reader validates a checkpoint-anchored journal prefix and replays only a
-bounded suffix under the journal lock; HTTP never repairs by replaying an
-unbounded journal. Known artifacts are descriptor-opened without following
-links, and every panel reports the cap plus observed amount when truncated.
+Task detail v1 JSON, v2 JSON, and HTML share
+`Hive::TaskWorkspace::Builder`. HTML and `/workspace` consume `#semantic`; the
+content-negotiated `.json` compatibility path consumes strict v1. The
+projection-store reader validates a checkpoint-anchored journal prefix and
+replays only a bounded suffix under the journal lock; HTTP never repairs by
+replaying an unbounded journal. Known artifacts are descriptor-opened without
+following links, and truncation stays explicit.
 Ordinary page/JSON/publication GET and status broadcasts make no GitHub request
 or Git fetch. Only authenticated, CSRF-protected publication POST refreshes may
 perform one fixed read for the validated registered repository/PR/head, under

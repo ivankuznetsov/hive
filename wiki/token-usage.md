@@ -1,13 +1,21 @@
 ---
 title: Token Usage Stats
 type: observability
-source: lib/hive/agent.rb, lib/hive/usage_db.rb, lib/hive/task_workspace/resources.rb, lib/hive/patrol/token_budget.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
+source: lib/hive/agent.rb, lib/hive/usage_db.rb, lib/hive/billing_evidence.rb, lib/hive/model_pricing.rb, lib/hive/task_workspace/resources.rb, lib/hive/task_workspace/usage.rb, config/model-pricing.v1.yml, lib/hive/patrol/token_budget.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-24
-updated: 2026-08-14
-tags: [observability, tui, sqlite, agent]
+updated: 2026-08-16
+tags: [observability, usage, pricing, billing, tui, sqlite, agent]
 ---
 
-**TLDR**: Hive records token usage only for hive-driven agent spawns. `Hive::Agent#spawn_and_wait` captures the last structured usage event seen in the child stream, `Hive::Stages::Base.spawn_agent` writes one SQLite row after normal stage spawns, and ordinary plus architecture patrol wrappers write project-scoped rows after every default agent launch. Patrol launches without trustworthy positive counts use an `-unmetered` stage suffix. Usage is telemetry, never a daily/cycle allowance. `hive tui` surfaces scoped aggregates in the footer plus a full-screen `T` matrix with a patrol attribution row. There is no historical log backfill and no ingestion of ad-hoc agent sessions.
+**TLDR**: Hive records evidence-backed usage for Hive-driven agent spawns. The
+runtime keeps unknown token categories distinct from numeric zero, and the
+launch receipt keeps harness, actual provider/model, and `api`, `subscription`,
+or `unknown` billing evidence separate. Semantic task inspection joins every
+exactly bound failed/retried/current session once, shows known input-plus-output
+tokens, and calculates a coverage-labelled API-equivalent estimate from a
+versioned local first-party price catalog. That estimate is not an invoice or
+provider health signal. Fleet/TUI aggregates remain telemetry; Hive does no
+historical log backfill and ingests no ad-hoc sessions.
 
 ## Capture Boundary
 
@@ -22,17 +30,20 @@ That placement deliberately excludes sessions launched outside Hive and avoids s
 
 ## Agent Extractors
 
-`lib/hive/agent_profiles/usage_extractors.rb` holds the concrete parsers:
+`agent-cli-runtime` owns the concrete parsers;
+`lib/hive/agent_profiles/usage_extractors.rb` is the compatibility alias:
 
 | Agent | Event shape |
 |-------|-------------|
 | `claude` | Reads terminal `result` totals plus `stream_event` message-start/delta usage, including nested `event.message.usage`. The live meter sums completed turns without double-counting cumulative output deltas. |
-| `codex` | accepts known final result / turn-completed JSON shapes and zero-fills when a usage payload is absent. |
-| `pi` | accepts known final result / completion JSON shapes and zero-fills when a usage payload is absent. |
+| `codex` | accepts supported terminal/turn usage shapes; omitted categories remain unavailable rather than zero. |
+| `pi` | accepts supported terminal/completion shapes; omitted categories remain unavailable rather than zero. |
 | `grok` | accepts a real usage object if a future streaming event supplies one; current `end` events contain no counts, so the extractor returns nil rather than fabricating zero usage. |
 | `opencode` | uses the strict run/export normalizer. Sanitized export supplies authoritative input, output, cache-read, cache-write, reasoning, and cost values; unavailable fields remain nil and numeric zero remains zero. |
 
-Codex and Pi payload shapes still need refinement from captured real streams; the zero-fill path keeps one row per Hive spawn without pretending unknown usage is known. The follow-up is tracked in [[gaps]].
+Extractor output preserves nullable input, output, cache-read, cache-write, and
+reasoning counts plus explicit inclusion semantics. A numeric zero means the
+runtime observed zero; `nil` means it could not establish the value.
 
 ## Storage
 
@@ -61,16 +72,72 @@ Schema:
 | `source` | Nullable symbolic producer of the attributed observation. |
 | `started_at` / `ended_at` | UTC ISO8601 timestamps. |
 | `input` / `output` / `cached` | Backward-compatible aggregate counters. Claude cached tokens are cache-read plus cache-creation input tokens. Unknown detailed values store numeric zero here only for legacy aggregation and have a false availability flag. |
-| `cache_read` / `cache_write` / `reasoning` / `cost` | Nullable OpenCode details; cache directions are never collapsed when only one is available. |
+| `cache_read` / `cache_write` / `reasoning` / `cost` | Nullable detailed usage. `cost` is provider-reported comparison evidence and does not drive Hive's estimate. |
 | `*_available` | Per-field evidence flags preserving unavailable separately from numeric zero. Existing databases gain these additive columns in place; legacy input/output/cached rows are marked available and newly introduced details unavailable. |
+| `billing_route` / `billing_evidence_source` | Launch-bound `subscription`, `api`, or `unknown`, with `provider_account_config`, `agent_profile_contract`, or `unavailable` evidence. |
+| `input_includes_cache_read` / `input_includes_cache_write` / `output_includes_reasoning` | Nullable inclusion semantics used to prevent overlapping token charges. |
 
 Indexes cover `started_at`, `(project_slug, started_at)`, and `(task_slug,
-started_at)`. Schema v2 evolves the existing database transactionally through
+started_at)`. Schema v4 evolves the existing database transactionally through
 `PRAGMA user_version`, retains every legacy row, and uses a busy timeout plus
 bounded retry for concurrent migration/writes. Legacy rows remain explicitly
 unattributed: Hive never joins them to an attempt from similar timestamps.
 Session writes are idempotent upserts, and an exact attributed read failure is
 `available: false`, not zero usage.
+
+Conflicting non-unknown billing routes, attempt/generation ownership, or token
+inclusion flags cannot overwrite an existing exact session. Direct Claude,
+Codex, and Grok profiles can prove subscription semantics from their profile
+contract. Pi and OpenCode remain `unknown` unless an admitted provider-account
+configuration explicitly declares the route. Harness identity is never used as
+the billing provider.
+
+## Semantic task usage
+
+`Hive::TaskWorkspace::Usage` starts from the bounded durable attempt/session
+inventory, then performs exact `UsageDb.exact_attempt` reads. It includes failed
+attempts and retries, deduplicates by durable session ID, rejects rows not bound
+to that inventory, and reports unattributed legacy rows separately. The task
+coverage vocabulary is:
+
+- `complete` — every bounded session is terminal, metered, attributable, and
+  priceable;
+- `partial` — the visible values are an observed subtotal because sessions,
+  token categories, modifiers, or the attempt window are missing;
+- `pending` — at least one exact session is still live;
+- `unavailable` — no durable session inventory or trustworthy usage is
+  available.
+
+The summary publishes known input-plus-output tokens, harness sets, evidenced
+actual providers/models, combined billing route, and API-equivalent coverage.
+Details group sessions by stage/outcome and retain cache/reasoning categories,
+billing evidence, rate basis, and missing dimensions. Raw attempt/session IDs
+are not headings, and the v2 projection removes provider-reported cost.
+
+## API-equivalent price catalog
+
+`config/model-pricing.v1.yml` is a versioned, request-time-network-free catalog
+of first-party OpenAI, Anthropic, and xAI USD-per-million-token rates. Each card
+binds provider, canonical model/aliases, effective interval, lifecycle,
+official HTTPS source URL, catalog check date, required request dimensions,
+rates, and modifiers. The validator accepts only the official hosts
+`developers.openai.com`, `platform.claude.com`, and `docs.x.ai`.
+
+`Hive::ModelPricing` selects a card by actual provider/model and session time,
+uses `BigDecimal`, and calculates non-overlapping provider-aware input,
+cache-read, cache-write, and output quantities. It applies evidenced
+long-context, service-tier, cache-write-TTL, inference-geography, reasoning,
+and server-tool semantics. A missing or unsupported required modifier produces
+`partial` or `unavailable` instead of guessing. The calculation sums exact
+decimals before Web display rounding.
+
+The catalog was checked on 2026-08-16 against the URLs stored on every card.
+It is maintainer-owned historical data: a refresh updates checked/effective
+metadata and retains old time-bounded cards rather than changing historical
+task estimates. API-equivalent values answer “what would these evidenced tokens
+cost at the matching public API rate?” They do not claim provider-observed
+spend, subscription allocation, credits, taxes, negotiated discounts, quota,
+credential validity, or live provider health.
 
 ## Task workspace resource truth
 
@@ -142,6 +209,9 @@ See [[commands/tui]] for the broader TUI mode and keybinding contract.
 ## Tests
 
 - `test/unit/usage_db_test.rb`
+- `test/unit/model_pricing_test.rb`
+- `test/unit/task_workspace/usage_test.rb`
+- `test/integration/task_command_test.rb`
 - `test/unit/patrol/token_budget_test.rb`
 - `test/unit/usage_extractors_test.rb`
 - `test/integration/stages_base_usage_test.rb`

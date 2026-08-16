@@ -49,15 +49,15 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     refute_match(/hive init[^\n]*--force/, creator)
   end
 
-  def test_four_platform_projections_share_payload_but_keep_thin_wrappers
+  def test_all_platform_projections_share_payload_but_keep_thin_wrappers
     skill = Hive::AgentSkills::CanonicalSkill.new
-    projections = %w[openclaw claude codex pi].to_h do |platform|
+    projections = %w[openclaw claude codex pi opencode].to_h do |platform|
       [ platform, skill.render(platform) ]
     end
 
     assert_equal({
       "openclaw" => "/hive", "claude" => "/hive",
-      "codex" => "$hive", "pi" => "/skill:hive"
+      "codex" => "$hive", "pi" => "/skill:hive", "opencode" => "/hive"
     }, projections.transform_values(&:invocation))
     assert_equal [ skill.version ], projections.values.map(&:skill_version).uniq
     assert_equal [ skill.canonical_digest ], projections.values.map(&:canonical_digest).uniq
@@ -102,6 +102,10 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     text = Hive::AgentSkills::CanonicalSkill.new.rendered_canonical_files.values.join("\n")
 
     assert_includes text, "hive status --operational --json"
+    assert_includes text, "hive task TARGET --project NAME --json"
+    assert_includes text, "receipt-correlated log reference"
+    assert_includes text, "live provider health, quota, credential validity"
+    assert_includes text, "provider-observed billing"
     assert_includes text, "hive watch"
     assert_includes text, "--json-lines"
     assert_includes text, "risk_class: routine_idempotent"

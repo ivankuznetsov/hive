@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-08-14
+updated: 2026-08-16
 tags: [commands, api, skills, agents, operational, provisioning]
 ---
 
@@ -14,9 +14,10 @@ setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
 corpus producer,
 `hive pairing` as the Telegram first-contact approval surface, the read-only
 agent-first `hive status --operational --json`, explicit `hive circuits`
-inspection/administration, bounded `hive watch`, closed `hive act`, the
+inspection/administration, bounded `hive watch`, closed `hive act`, native
+semantic `hive task` detail, the
 `hive doctor` / consent-safe setup split for one canonical Hive
-operating skill projected to OpenClaw, Claude, Codex, and Pi, and the single
+operating skill projected to OpenClaw, Claude, Codex, Pi, and OpenCode, and the single
 ClawHub `hive-cli` listing whose installed slash command is `/hive`.
 The Ruby command/API contract lives in [[cli]] and the
 per-command pages. OpenClaw does not add a second runtime and does not publish
@@ -75,6 +76,8 @@ authorized actions), and
 [[commands/doctor]] read-only managed health reporting,
 [[commands/setup-agents]] consent-safe native provisioning,
 [[commands/circuits]] as the generation-fenced provider-health surface,
+[[commands/task]] as the bounded read-only semantic result/usage/diagnostic
+surface for one exact task,
 `--json` envelopes where the command page says they exist.
 The default human `hive status` is the concise operational projection;
 `--full` retains the detailed table, bare `--json` retains the complete v7

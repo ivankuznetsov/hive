@@ -6,6 +6,9 @@
 - Use `hive status --operational --json` for agent decisions. It emits `hive-operational-status.v4`.
 - Use `hive status --json` only when a consumer needs the complete `hive-status.v7` task graph.
 - Use `hive status --full` for the detailed human table.
+- Use `hive task TARGET --project NAME --json` for one task's semantic result,
+  primary artifact, applicable evidence, exact usage, API-equivalent estimate,
+  and receipt-correlated diagnostic-log reference.
 - Use `hive daemon status --json` for daemon process health. Do not substitute daemon health for task or scheduler truth.
 - Use `hive circuits inspect --json` for the shared provider-account/model health, capacity, and routing-decision projection. Add `--provider ACCOUNT` or `--model MODEL` to keep accounts and decisions in the same scope.
 
@@ -36,6 +39,36 @@ For status questions, include:
 - A clear distinction between verified facts and unavailable or stale evidence.
 
 Do not dump every compatibility field unless asked. Do not call a generated row publishable, complete, or archived unless the corresponding workflow evidence proves that state.
+
+## Inspect one task and diagnose from its log
+
+After operational status identifies the exact task, inspect its operator-facing
+meaning without scraping Web HTML:
+
+```bash
+hive task TASK-SLUG --project PROJECT --json
+```
+
+Read `headline` and `action` as canonical task posture; read `result.primary`
+as the workflow's current work product; read `applicability` before expecting
+worktree, diff, publication, media, dependency, or supporting-artifact evidence.
+Usage keeps harness, actual provider/model, and launch-bound billing route
+separate. Treat `api_equivalent` only as a coverage-labelled estimate against
+the local public API rate catalog. `partial`, `pending`, `unavailable`, and
+`unknown` are evidence states, not zero.
+
+When `diagnostic.state` is `current`, prefer
+`diagnostic.log.reference` because it came from the exact attempt receipt.
+Resolve and read that bounded correlated log through Hive's trusted task path
+for deep diagnosis. Do not choose a log by newest-file mtime and do not use raw
+`agent_start`, `agent_end`, session-lifecycle, or stage-transition events as a
+substitute for the task's result or the correlated failure log.
+
+The task view does not probe providers and does not reconcile invoices. Never
+infer live provider health, quota, credential validity, actual subscription or
+API charge, or provider-observed billing from it. Use current operational
+scheduler evidence for task ownership and `hive circuits inspect --json` for
+the dedicated provider-account/model health projection.
 
 ## Watch selected work
 

@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, bin/hive-patrol-installed-live-smoke, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate,patrol_evidence}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-08-14
+updated: 2026-08-16
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage]
 ---
 
@@ -11,7 +11,7 @@ tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, 
 e2e, eval, native package/bootstrap, authenticated agent skills, install
 verification, release proof, and Hivebox images. Offline tests pin the
 agent-first status/watch/action contracts, coherent daemon snapshots, canonical
-four-platform skill projections, safe consent-gated provisioning, native web
+five-platform skill projections, safe consent-gated provisioning, native web
 service/readiness contracts, and the exact-artifact proof verifier. The trusted
 pre-tag candidate workflow owns release readiness without provider
 credentials; the live-agent workflow is an optional diagnostic that directly
@@ -73,6 +73,23 @@ bundle exec ruby -Itest test/integration/brainstorm_answering_skill_contract_tes
 bundle exec ruby -Itest test/unit/agent_skills/canonical_skill_test.rb
 bundle exec ruby -Itest test/unit/openclaw_skills_test.rb
 ```
+
+The operator-first semantic task checkpoint is:
+
+```bash
+bundle exec ruby -Itest test/unit/workflows/descriptor_parser_test.rb
+bundle exec ruby -Itest test/unit/model_pricing_test.rb
+bundle exec ruby -Itest test/unit/usage_db_test.rb
+bundle exec ruby -Itest test/unit/task_workspace/usage_test.rb
+bundle exec ruby -Itest test/unit/task_workspace/schema_test.rb
+bundle exec ruby -Itest test/unit/task_workspace/builder_test.rb
+bundle exec ruby -Itest test/integration/task_command_test.rb
+bundle exec ruby -Itest test/unit/agent_skills/canonical_skill_test.rb
+```
+
+From `web/`, run the Rails task integration/helper/model tests with
+`bundle exec ruby bin/rails test ...` and the focused Playwright file with
+`bundle exec ruby bin/rails test:system test/system/task_workspace_test.rb`.
 
 Do not run the full suite after every commit. Use the default suite as a broad
 local checkpoint, normally once before handoff:
@@ -1205,17 +1222,22 @@ manifest.
 ## Task workspace verification
 
 The read-only task workspace is verified in layers. Root unit coverage under
-`test/unit/task_workspace/` pins field provenance/conflicts, descriptor-safe
-bounded reads, schema validation, attempt/session attribution, typed resources,
-timeline ordering/cursors/noise grouping, connected dependency bounds,
+`test/unit/task_workspace/` pins strict v1 audit compatibility, closed semantic
+v2 schema, workflow-aware primary/applicability projection, descriptor-safe
+bounded reads, exact failed/retry session aggregation, usage completeness,
+local API-equivalent pricing, correlated-log selection, field provenance,
+typed resources, timeline ordering/cursors/noise grouping, dependency bounds,
 artifact handling, publication/cache isolation, and the shared builder.
 Context provenance, activity reconciliation, task-journal checkpoints,
 attempt dispatch, UsageDb migration, dependency admission, worktree/Git, and
 status/TUI correspondence tests cover their capture and compatibility seams.
+`test/integration/task_command_test.rb` proves native v2 output uses the shared
+builder, validates against the schema, and contains no absolute project path.
 
-Rails model/integration tests assert authenticated HTML/JSON operator-state
-parity, exact target resolution, every archived mutation route's read-only
-boundary, per-panel degradation, signed
+Rails model/integration tests assert authenticated v1/v2/HTML parity, exact
+target resolution, workflow-aware primary and evidence applicability, usage
+summary/detail wording, raw lifecycle omission, receipt-correlated log loading,
+every archived mutation route's read-only boundary, per-panel degradation, signed
 timeline pagination, canonical action routes, publication refresh auth/CSRF,
 zero remote reads from ordinary page/JSON/broadcast paths, and enabled
 binding-backed Q&A on legacy tasks whose execution projection has no checkpoint.
@@ -1223,10 +1245,11 @@ The Playwright
 `task_workspace_test.rb` plus existing pipeline and kanban suites exercise
 1280x800, 3840x1400, 375x812, and real Chromium 400% device-scale emulation at
 an effective 320-CSS-pixel viewport;
-keyboard traversal, 24-pixel targets, dependency forest/table parity,
-focus/exact-selection/disclosure/scroll preservation, permanent log/diff and
-timeline-inspection frames, morph-owned publication facts, and non-repeating
-material announcements. Pipeline coverage keeps a typed answer enabled and
+keyboard traversal, 24-pixel targets, primary-result hierarchy, collision-safe
+heading anchors, outline threshold, contained code/tables,
+focus/exact-selection/disclosure/scroll preservation, lazy correlated logs,
+morph-owned publication facts, and non-repeating material announcements.
+Pipeline coverage keeps a typed answer enabled and
 intact across a pushed morph while the task workspace remains partial, rejects
 an intervention draft when its opaque binding changes between rounds, and unit
 coverage separately proves non-answer actions still fail closed.

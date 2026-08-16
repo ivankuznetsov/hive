@@ -1,18 +1,21 @@
 ---
 title: Task workspace projection
 type: module
-source: lib/hive/task_workspace.rb, lib/hive/task_workspace/, lib/hive/context_provenance.rb, lib/hive/task_activity.rb, schemas/hive-task-workspace.v1.json, schemas/hive-context-receipt.v1.json, web/app/controllers/tasks/, web/app/views/tasks/
+source: lib/hive/task_workspace.rb, lib/hive/task_workspace/, lib/hive/context_provenance.rb, lib/hive/task_activity.rb, schemas/hive-task-workspace.v1.json, schemas/hive-task-workspace.v2.json, schemas/hive-context-receipt.v1.json, lib/hive/commands/task.rb, web/app/controllers/tasks/, web/app/views/tasks/
 created: 2026-08-12
-updated: 2026-08-14
-tags: [task, web, projection, provenance, attempts, timeline, dependencies, publication]
+updated: 2026-08-16
+tags: [task, web, projection, semantic, result, usage, provenance, attempts, timeline, dependencies, publication]
 ---
 
 **TLDR**: `Hive::TaskWorkspace::Builder` turns one already-resolved task into
-the bounded, read-only `hive-task-workspace` v1 document used by both the task
-HTML and authenticated JSON on the existing task route. The projection makes
-missing, stale, partial, conflicting, and unavailable evidence explicit. It
-does not replace `hive-status` v7, own task lifecycle state, scan the fleet,
-contact GitHub, or create a second action protocol.
+two bounded read models. Semantic `hive-task-workspace` v2 is the normal Web
+and native-agent contract: canonical headline/action, workflow result and
+applicability, primary/supporting artifacts, exactly attributed usage with an
+API-equivalent estimate, and an attempt-correlated diagnostic-log reference.
+Strict v1 remains the authenticated audit/mutation compatibility document with
+attempts, provenance, resources, and timeline panels. Neither version replaces
+`hive-status` v7, scans the fleet, performs provider/pricing network requests,
+or creates a new action protocol.
 
 ## Boundary and route
 
@@ -21,12 +24,20 @@ through `Hive::Web::TaskTargetResolver`. It passes that native task, its
 already-projected status row, the broadcaster's existing dependency context,
 and injected bounded readers to `Hive::TaskWorkspace::Builder`.
 
-The existing route is content negotiated:
+The authenticated routes keep version choice explicit:
 
 ```text
-GET /tasks/:project/:slug          # HTML workspace
-GET /tasks/:project/:slug.json     # hive-task-workspace v1
-GET /tasks/:project/:slug/timeline # signed older/raw cursor page
+GET /tasks/:project/:slug            # HTML composed from semantic v2; v1 is private mutation state
+GET /tasks/:project/:slug.json       # explicit strict v1 audit compatibility document
+GET /tasks/:project/:slug/workspace  # semantic v2 JSON
+GET /tasks/:project/:slug/timeline   # signed older/raw v1 audit cursor page
+```
+
+Native agents read the same semantic projection without starting or scraping
+Rails:
+
+```bash
+hive task TARGET --project NAME --json
 ```
 
 All three are authenticated by the ordinary Hive Web gate. `source=archive`
@@ -41,12 +52,51 @@ The strict `hive-status` v7 contract is unchanged. Workspace detail is kept in
 its own schema so fleet status, the TUI correspondence contract, and existing
 automation do not acquire task-detail fields or new read costs.
 
-## Document shape and evidence states
+## Semantic v2 document
 
-The top-level document contains exact task identity, generation time, status
+V2 answers the operator's task-local questions without publishing the raw
+audit chronology. Its closed top-level fields are:
+
+```text
+task · status · headline · action · result · applicability · usage · evidence · diagnostic
+```
+
+`result` is derived from the normalized [[modules/workflows]] result contract,
+never a workflow-ID branch. A declared primary artifact wins when it exists;
+the current stage artifact is the in-progress fallback. A completed task whose
+declared deliverable is absent carries a specific warning. The six applicability
+booleans decide whether worktree, diff, publication, media, dependency, and
+supporting-artifact evidence is meaningful; actual safe evidence can make a
+section applicable even when a legacy declaration omitted the capability.
+
+`usage` aggregates every session in the bounded durable attempt inventory once
+by exact session ID, including failed attempts and retries. It separates
+harness, evidenced actual provider/model, and `api`, `subscription`, `mixed`,
+or `unknown` billing route. `complete`, `partial`, `pending`, and `unavailable`
+remain distinct. API-equivalent USD is a local rate-card estimate with coverage
+and missing dimensions, never an invoice or a claim that subscription use cost
+zero. Provider-reported cost is deliberately absent from v2.
+
+`diagnostic` is `not_applicable` for normal tasks. A genuine red/recovery state
+can carry one bounded summary and the current attempt receipt's safe
+`log_reference`; the log route binds the request to that reference digest.
+Newest-file mtime is only the older unqualified log compatibility behavior and
+does not select the semantic diagnostic. Raw log content is never embedded in
+v2.
+
+Semantic snapshots are closed-schema, canonical JSON. Decimal estimates become
+exact decimal strings. When the document reaches its 2 MiB budget, the builder
+removes supporting contents, then usage groups, then primary content while
+retaining identities and explicit truncation. Absolute paths, executable
+commands/tokens, prompts, credentials, secrets, and provider-reported cost are
+rejected recursively.
+
+## Audit v1 document and evidence states
+
+The v1 top-level document contains exact task identity, generation time, status
 freshness, normalized operator state, one decision posture, and seven panel
-envelopes. Operator state owns the bounded open-question bindings, recovery
-lifecycle/action facts, and diagnostic summary used by both HTML and JSON:
+envelopes. Operator state owns bounded open-question bindings, recovery
+lifecycle/action facts, and its compatibility diagnostic summary:
 
 ```text
 provenance · attempts · resources · timeline · dependencies · publication · artifacts
@@ -107,7 +157,7 @@ Legacy tasks without receipts stay missing or partial; the projector never
 reconstructs selection from current files, prompts, argv, prose, logs, or
 timestamps.
 
-## Attempts, sessions, and resources
+## Attempts, sessions, resources, and semantic usage
 
 Exactly one attempt can be current: the ID bound by `TaskProjection.identity`.
 Workspace history starts from task-local bindings and follows only exact
@@ -148,11 +198,13 @@ unit and session scope. Tokens are never converted to cost, absent usage is
 never rendered as zero, and a subscription-backed `budget_usd` guard is not
 described as billed spend.
 
-`UsageDb` schema v2 adds nullable attempt/session/generation/source columns and
-a unique partial index for non-null session IDs. Exact session upserts are
-idempotent and cannot change attempt/generation ownership. Legacy rows remain
-queryable as explicitly unattributed and are never joined to an attempt by
-time.
+`UsageDb` schema v4 keeps nullable attempt/session/generation/source columns,
+field-availability flags, actual provider/model identity, launch-bound billing
+route/evidence, and token inclusion semantics. A unique partial index for
+non-null session IDs makes exact session updates idempotent without changing
+attempt/generation ownership. Conflicting route or inclusion evidence refuses
+the update. Legacy rows remain explicitly unattributed and are never joined to
+an attempt by time.
 
 ## Audit timeline
 
@@ -250,12 +302,13 @@ the local interval and a later GitHub `Retry-After` deadline.
 Artifacts use descriptor-based no-follow reads over known workflow files, with
 per-file and aggregate limits, binary/encoding detection, redaction, and stable
 descriptor checks. Markdown still passes through the existing escape and
-sanitization pipeline. Rendered Markdown uses a centered 82-character prose
-measure, full-size body type with generous leading, and visibly stepped section
-headings so long plans and reports remain scannable. Direct code blocks and wide
-tables can use the wider document panel on desktop; they keep their intrinsic
-layout but scroll inside the panel instead of widening the task page at narrow
-viewports. Diff and log keep their existing independent bounded readers.
+sanitization pipeline. The normal task page promotes the semantic primary
+result to its own full-width work-product panel and keeps supporting artifacts
+collapsed below it. A post-sanitization DOM pass adds deterministic,
+collision-safe IDs to headings; an outline appears only at four or more `h2`
+sections. Prose keeps a centered 82-character measure, generous
+leading, and stepped headings. Direct code and wide tables scroll inside the
+panel instead of widening the page at mobile widths or 400% zoom.
 
 ## Default limits
 
@@ -304,40 +357,41 @@ conflicting, unavailable, or lacks the exact current attempt. Questions,
 recovery lifecycle/action state, and diagnostic summary are normalized into
 the same snapshot consumed by JSON and task HTML.
 
-The versioned workspace schema defines closed, typed records for attempts,
-resources, timeline entries, dependency nodes/edges, publication facts, and
-artifacts rather than accepting arbitrary panel mappings. The task page renders
-the decision summary before lower evidence, then
-attempt/resource, provenance, timeline, dependency, change/publication,
-artifact/media, and log panels. Stable DOM identities and the task-workspace
-Stimulus controller preserve focus, exact selection range, scroll, and
-disclosure choices across pushed morphs and cancel queued scroll restoration
-when disconnected. Diff and log frames are permanent
-owners; cheap local publication facts remain morph-owned so branch, head, push,
-and dirty state update with the task. Timeline drill-down uses its own
-task-stable permanent frame and links back to the current timeline, so status
-morphs cannot discard an operator's inspection. Only a changed
-decision/status/resource signature enters the polite live
-region. Permanent frame identities include project and task identity, and the
-diff live region contains only its concise state summary rather than patch
-content. Tables scroll inside the page, identifiers wrap, and the layout
-reflows to one column at narrow widths without removing decisive state or
+The v1 schema continues to define closed records for attempts, resources,
+timeline entries, dependency nodes/edges, publication facts, and artifacts.
+Normal HTML instead renders semantic v2 in this order: headline and guarded
+actions, concise usage, primary work product, genuine diagnostic if any, then
+only applicable supporting/change evidence. Raw attempt cards, provenance
+receipts, `agent_start`/`agent_end`, session lifecycle, stage chronology, and
+the newest-log tail are absent from the normal page; their v1/timeline/log
+audit sources remain available.
+
+Stable DOM identities and `data-workspace-disclosure-key` values let the
+task-workspace Stimulus controller preserve focus, selection, scroll, usage,
+supporting-artifact, change-evidence, and diagnostic-log disclosure state
+across Turbo morphs. The correlated log frame loads only when its diagnostic
+disclosure opens. Only changed semantic headline/action/result/usage material
+enters the polite live region. Tables scroll inside named regions, identifiers
+wrap, and layout reflows to one column without removing decisive state or
 controls.
 
 ## Tests
 
-- `test/unit/task_workspace/` pins bounded readers, schema, provenance,
-  attempts/resources, timeline, dependency, publication/cache, and composition.
+- `test/unit/task_workspace/` pins v1/v2 schemas, bounded readers, semantic
+  result/applicability/usage/diagnostic composition, provenance,
+  attempts/resources, timeline, dependency, and publication/cache.
+- `test/integration/task_command_test.rb` pins native semantic v2 output and
+  the absence of absolute project paths.
 - `test/unit/context_provenance_test.rb`, `task_activity_test.rb`,
   `task_projection_store_test.rb`, and `usage_db_test.rb` pin capture and
   persistence boundaries.
-- `web/test/integration/tasks_test.rb` pins authentication, HTML/JSON parity,
-  per-panel degradation, cursor and publication refresh boundaries, and old
-  task/action routes.
-- `web/test/system/task_workspace_test.rb` covers wide/desktop/375 reflow and
-  actual Chromium 400% device-scale emulation at 320 effective CSS pixels,
-  keyboard use, target sizing, semantic dependency fallback, permanent-frame
-  isolation, exact selection preservation, and material-only announcements.
+- `web/test/integration/tasks_test.rb` pins authenticated v1 compatibility,
+  v2 workspace/HTML parity, workflow-aware primary/applicability behavior,
+  exact log-reference selection, raw-lifecycle omission, and existing task
+  actions.
+- `web/test/system/task_workspace_test.rb` covers the semantic result/usage
+  hierarchy, long-document anchors/outline, disclosure persistence, keyboard
+  use, desktop/mobile reflow, and actual Chromium 400% zoom containment.
 
 ## Backlinks
 

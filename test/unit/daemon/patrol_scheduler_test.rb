@@ -295,6 +295,37 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_timer_mode_rechecks_at_the_exact_due_time
+    with_tmp_dir do |dir|
+      cfg = enabled_cfg("patrol" => {
+        "enabled" => true,
+        "trigger" => "timer",
+        "poll_interval_sec" => 600
+      })
+      write_state(dir, "last_run_at" => (T0 - 500).utc.iso8601)
+      sched = scheduler(project_entry(dir), cfg)
+
+      assert_empty sched.candidates(now: T0)
+      assert_empty sched.candidates(now: T0 + 99)
+      assert_equal 1, sched.candidates(now: T0 + 100).size
+    end
+  end
+
+  def test_unselected_due_candidate_remains_eligible_for_the_next_tick
+    with_tmp_dir do |dir|
+      cfg = enabled_cfg("patrol" => {
+        "enabled" => true,
+        "trigger" => "timer",
+        "poll_interval_sec" => 600
+      })
+      write_state(dir, "last_run_at" => (T0 - 600).utc.iso8601)
+      sched = scheduler(project_entry(dir), cfg)
+
+      assert_equal 1, sched.candidates(now: T0).size
+      assert_equal 1, sched.candidates(now: T0 + 1).size
+    end
+  end
+
   def test_continuous_mode_dispatches_when_default_branch_changes_even_before_timer
     with_tmp_dir do |dir|
       cfg = enabled_cfg("patrol" => {
@@ -499,8 +530,10 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
 
     sched = Hive::Daemon::PatrolScheduler.new(registry: -> { [] })
     sched.instance_variable_set(:@pending, "p1" => { started_at: T0 })
+    sched.instance_variable_set(:@next_check_at, "p1" => T0 + 600)
     sched.cancel(project: "p1")
     refute sched.pending?("p1")
+    assert_empty sched.instance_variable_get(:@next_check_at)
 
     with_tmp_dir do |dir|
       cfg = enabled_cfg("patrol" => {

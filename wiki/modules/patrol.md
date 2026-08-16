@@ -241,7 +241,19 @@ daemon may supersede the abandoned generation and resume immediately even if
 its two-hour lease has not expired. A matching live worker, missing identity,
 or failed probe remains fenced; dry runs never perform the probe or mutation.
 
-`Hive::Daemon::PatrolScheduler` still consumes the lower-level `patrol.trigger` modes. `continuous` dispatches when either the default branch SHA changed or `poll_interval_sec` has elapsed, allowing patrol to keep reviewing existing feature slices between infrequent merges. Each cycle persists a SHA-bound feature cursor; `last_scanned_sha` advances only after the full mapped sweep succeeds. `new_commits` therefore keeps dispatching successive batches until that sweep completes. `timer` dispatches solely from `last_run_at` age.
+`Hive::Daemon::PatrolScheduler` still consumes the lower-level `patrol.trigger`
+modes. `continuous` dispatches when either the default branch SHA changed or
+`poll_interval_sec` has elapsed, allowing patrol to keep reviewing existing
+feature slices between infrequent merges. A not-yet-due timer wakes at the
+exact `last_run_at + poll_interval_sec` deadline; daemon startup does not push
+that deadline out by another full interval. A due candidate consumes its
+cadence slot only when reservation succeeds, so ordinary Patrol remains
+eligible on the next daemon tick when the shared arbiter gives the current
+slot to Architecture Patrol. Each cycle
+persists a SHA-bound feature cursor; `last_scanned_sha` advances only after the
+full mapped sweep succeeds. `new_commits` therefore keeps dispatching
+successive batches until that sweep completes. `timer` dispatches solely from
+`last_run_at` age.
 
 ## First-party module adapters and ownership
 

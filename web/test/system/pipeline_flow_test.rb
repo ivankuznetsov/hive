@@ -515,86 +515,18 @@ class PipelineFlowTest < ApplicationSystemTestCase
                  "a grid update must not clear the composer"
   end
 
-  test "log pane follows the tail, pauses for reading, resumes at the bottom" do
-    slug = create_task!(@project, "Tail probe")
+  test "normal task pages do not load unrelated logs" do
+    slug = create_task!(@project, "Unrelated log probe")
     log_dir = Pathname(ENV["HIVE_TEST_HOME_ROOT"]).join("repos", @project, ".hive-state", "logs", slug)
     log_dir.mkpath
-    log_file = log_dir.join("stage-20260611T000000Z.log")
-    log_file.write((1..120).map { |n| "line #{n}" }.join("\n") + "\n")
+    log_dir.join("stage-20260611T000000Z.log").write("unrelated legacy log\n")
 
     sign_in!
     visit "/tasks/#{@project}/#{slug}"
-    pane = find("pre[data-tail-follow]", wait: 5)
-    assert pane.text.include?("line 120"), "the tail must show the newest lines"
-    # The controller stamps data-following once it pins — the explicit wait
-    # for "Stimulus has booted and taken over", instead of racing it.
-    assert_selector "pre[data-tail-follow][data-following]", wait: 5
 
-    # A slow in-flight frame request owns the next render. Timer ticks remain
-    # observable, but must not restart/cancel that navigation until Turbo
-    # clears its busy state.
-    execute_script(<<~JS)
-      const frame = document.querySelector("turbo-frame[id^='task-log-']")
-      document.body.dataset.busyPollRequests = "0"
-      document.addEventListener("turbo:before-fetch-request", (event) => {
-        if (event.target !== frame) return
-
-        const count = Number(document.body.dataset.busyPollRequests) + 1
-        document.body.dataset.busyPollRequests = String(count)
-        document.body.dataset.busyPollResumed = "true"
-      })
-      frame.addEventListener("turbo:frame-load", () => {
-        document.body.dataset.busyPollLoaded = "true"
-      }, { once: true })
-      frame.setAttribute("busy", "")
-      frame.setAttribute("aria-busy", "true")
-    JS
-    busy_ticks = page.evaluate_script("Number(document.querySelector(\"turbo-frame[id^='task-log-']\").dataset.pollTicks || 0)")
-    assert_selector "turbo-frame[id^='task-log-'][data-poll-ticks='#{busy_ticks + 2}']", wait: 10
-    assert_selector "body[data-busy-poll-requests='0']", visible: :all
-    execute_script(<<~JS)
-      const frame = document.querySelector("turbo-frame[id^='task-log-']")
-      frame.removeAttribute("busy")
-      frame.removeAttribute("aria-busy")
-    JS
-    assert_selector "body[data-busy-poll-resumed='true']", visible: :all, wait: 5
-    assert_selector "body[data-busy-poll-loaded='true']", visible: :all, wait: 5
-
-    # Scroll geometry is unobservable through user-facing APIs, and
-    # capybara-playwright cannot wheel-scroll an inner pane — the sanctioned
-    # JS exception, used only to position and read scrollTop.
-    distance_from_bottom = page.evaluate_script(
-      "(() => { const p = document.querySelector('pre[data-tail-follow]'); return p.scrollHeight - p.scrollTop - p.clientHeight; })()"
-    )
-    assert_operator distance_from_bottom, :<=, 8, "the pane must start pinned to the live end (tail -f)"
-
-    page.execute_script("document.querySelector('pre[data-tail-follow]').scrollTop = 0")
-    log_file.write("line 121 marker-while-reading\n", mode: "a")
-    # Provably outlast TWO real poll ticks: the controller counts every
-    # timer firing (including paused ones) in data-poll-ticks, so waiting
-    # for the counter to advance is an explicit wait, not a sleep — and a
-    # deleted readerBusy() would fail the absence assertions below.
-    ticks = page.evaluate_script("Number(document.querySelector(\"turbo-frame[id^='task-log-']\").dataset.pollTicks || 0)")
-    assert_selector "turbo-frame[id^='task-log-'][data-poll-ticks='#{ticks + 2}']", wait: 10
-    assert_selector "pre[data-tail-follow][data-following='false']"
-    assert_no_text "marker-while-reading"
-    assert_equal 0, page.evaluate_script("document.querySelector('pre[data-tail-follow]').scrollTop"),
-                 "reading position must survive poll ticks"
-
-    page.execute_script("const p = document.querySelector('pre[data-tail-follow]'); p.scrollTop = p.scrollHeight")
-    assert_text "marker-while-reading", wait: 10
-
-    # No-blink contract: reloads MORPH the pane (patch, not replace). Tag the
-    # live DOM node, let the next refresh bring a new line in, and verify the
-    # same node survived — a child-replacing reload (the old behavior, a
-    # visible 3s blink) would have swapped it out. This line appearing at all
-    # also proves the pane re-pinned after the previous morph: an unpinned
-    # pane pauses the poll.
-    page.execute_script("document.querySelector('pre[data-tail-follow]').__sameNode = true")
-    log_file.write("line 122 after-morph\n", mode: "a")
-    assert_text "after-morph", wait: 10
-    assert page.evaluate_script("document.querySelector('pre[data-tail-follow]').__sameNode"),
-           "a poll refresh must patch the pane in place, not rebuild it"
+    assert_no_selector "turbo-frame[id^='task-log-']"
+    assert_no_selector "pre[data-tail-follow]"
+    assert_no_text "unrelated legacy log"
   end
 
   test "artifact open state survives a pushed morph while content stays live" do

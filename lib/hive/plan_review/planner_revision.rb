@@ -72,11 +72,16 @@ module Hive
               "diagnostic" => "planner revision modified protected artifacts: #{report.tampered_labels.join(', ')}"
             }
           end
-          return { "status" => "retryable_failure", "diagnostic" => result[:error_message] } unless
-            result[:status] == :ok && report.required_outputs_valid?
+          output_valid = report.required_outputs_valid?
+          timed_out_complete = result[:timed_out] && output_valid &&
+                               Hive::Markers.current(output_path).name == :complete
+          unless (result[:status] == :ok && output_valid) || timed_out_complete
+            return { "status" => "retryable_failure", "diagnostic" => result[:error_message] }
+          end
 
           {
             "status" => "success",
+            "diagnostic" => timed_out_complete ? "salvaged complete candidate after planner timeout" : nil,
             "actual_route" => planner_identity.merge("model" => result.dig(:usage, :model).to_s).reject do |key, value|
               key == "model" && value.empty?
             end

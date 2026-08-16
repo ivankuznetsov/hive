@@ -160,7 +160,9 @@ other portable runners still reject path-qualified reads they cannot enforce.
 Pi's namespace mounts only declared read roots plus its immutable runtime and
 mode-0600 auth file, exposes read-only Pi tools, disables extensions, skills,
 prompt templates, context files, and agent web tools, and keeps the writable
-runtime home disposable. The namespace shares the network only because the Pi
+runtime home disposable. Host-owned-output actors also receive a system-level
+single-JSON response contract, so a provider cannot mistake an instruction to
+produce an artifact for permission to write it directly. The namespace shares the network only because the Pi
 process must reach its configured model provider; no shell or web tool is
 available to the model.
 When a launch is built from typed model/effort selection, its private spawn log

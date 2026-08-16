@@ -8,7 +8,9 @@ review councils despite valid model routing and credentials.
 read roots, the immutable Pi runtime, and the Pi auth file; supplies a disposable
 home; maps Hive's read-only tools to Pi's `read`, `ls`, `grep`, and `find`; disables
 extension, skill, prompt-template, and context discovery; and rejects agent web
-tools. Provider network remains available to the sandboxed Pi process.
+tools. Host-owned outputs receive a system-level exact-JSON response contract
+so the provider returns the artifact to Hive instead of attempting a direct
+write. Provider network remains available to the sandboxed Pi process.
 
 **Verification:** Runtime-policy coverage pins the namespace mounts, auth path,
 disposable environment, read-only tool list, host-owned output, and network-tool

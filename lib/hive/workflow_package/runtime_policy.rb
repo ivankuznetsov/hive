@@ -504,6 +504,9 @@ module Hive
           "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files"
         ]
         flags.concat(pi_tools.empty? ? [ "--no-tools" ] : [ "--tools", pi_tools.join(",") ])
+        unless outputs.empty?
+          flags.concat([ "--append-system-prompt", pi_host_output_system_prompt(outputs.keys) ])
+        end
         pi_environment = environment.merge(
           "HOME" => "/runtime-home",
           "PI_CODING_AGENT_DIR" => "/runtime-home/.pi/agent",
@@ -520,6 +523,19 @@ module Hive
           cli_flags: flags, executable: File.join(PI_RUNTIME_MOUNT, File.basename(executable)),
           command_prefix: prefix
         )
+      end
+
+      def self.pi_host_output_system_prompt(paths)
+        keys = paths.sort.map { |path| JSON.generate(path) }.join(", ")
+        <<~PROMPT.strip
+          Hive host-output mode is active. You cannot write task files directly.
+          Your final response MUST be exactly one JSON object and nothing else:
+          {"files":{PATH:"complete file contents"}}.
+          The files object MUST contain exactly these keys: #{keys}.
+          Do not wrap the object in Markdown, prefix it with prose, or say that
+          you will write a file. Put the complete requested artifact inside each
+          JSON string value and end the turn with that object.
+        PROMPT
       end
 
       def self.portable_policy(scope, task_root:, directories:, environment:, outputs:, runtime_root:,

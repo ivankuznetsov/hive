@@ -1403,6 +1403,10 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       tools_index = policy.cli_flags.index("--tools")
       assert_equal "read,ls,grep,find", policy.cli_flags.fetch(tools_index + 1)
       assert_includes policy.cli_flags, "--no-extensions"
+      system_index = policy.cli_flags.index("--append-system-prompt")
+      system_prompt = policy.cli_flags.fetch(system_index + 1)
+      assert_includes system_prompt, "exactly one JSON object"
+      assert_includes system_prompt, JSON.generate("draft.md")
       assert_equal [ "draft.md" ], policy.output_paths.keys
     ensure
       policy&.cleanup!

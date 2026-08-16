@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "json_schemer"
+require "timeout"
 require "hive/commands/bot"
 
 class HiveBotLifecycleTest < Minitest::Test
@@ -131,7 +132,14 @@ class HiveBotLifecycleTest < Minitest::Test
         ensure
           contender&.close
           Process.kill("TERM", pid) rescue nil
-          Process.wait(pid) rescue nil
+          begin
+            Timeout.timeout(5) { Process.wait(pid) }
+          rescue Timeout::Error
+            Process.kill("KILL", pid) rescue nil
+            Process.wait(pid) rescue nil
+          rescue Errno::ECHILD
+            nil
+          end
         end
       end
     end

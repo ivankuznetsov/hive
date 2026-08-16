@@ -273,7 +273,9 @@ line carries `level` (`debug`, `info`, `warn`, or `error`) and may carry
 `v3` keeps event names stable and adds severity. Benign Telegram long-poll
 transport timeouts still emit `poll_failure`, but at `debug`/`noise`; real poll
 failures remain `warn`, and sustained outages also emit `poll_unhealthy` at
-`warn`. `notification_skipped_dedupe` and `notification_skipped_backoff` are
+`warn`. Every failed poll is paced by an interruptible one-second supervisor
+delay; an immediately rejected token therefore cannot spin and flood the log.
+`notification_skipped_dedupe` and `notification_skipped_backoff` are
 debug/noise and are logged only on skip-state transitions. `v2` was introduced
 when the Telegram "Codex draft-assist" feature was retired; `schemas/hive-bot-log.v1.json`
 and `schemas/hive-bot-log.v2.json` are kept as-is for historical log lines.

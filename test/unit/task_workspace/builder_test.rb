@@ -64,7 +64,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     end
   end
 
-  def test_partial_projection_evidence_disables_actions_even_with_a_fresh_status_feed
+  def test_partial_projection_evidence_preserves_bound_answer_action_with_a_fresh_status_feed
     with_fixture do |native, task|
       snapshot = builder(
         native, task, questions: 1, projection_state: "partial",
@@ -75,14 +75,34 @@ class TaskWorkspaceBuilderTest < Minitest::Test
       ).call
 
       assert_equal "partial", snapshot.dig("status", "state")
-      assert_equal "investigate", snapshot.dig("decision", "posture")
-      refute snapshot.dig("decision", "action", "enabled")
+      assert_equal "answer", snapshot.dig("decision", "posture")
+      assert snapshot.dig("decision", "action", "enabled")
     end
   end
 
-  def test_truncated_projection_evidence_disables_actions_even_when_marked_current
+  def test_truncated_projection_evidence_preserves_bound_answer_action
     with_fixture do |native, task|
       snapshot = builder(native, task, questions: 1, projection_truncated: true).call
+
+      assert_equal "partial", snapshot.dig("status", "state")
+      assert_equal "answer", snapshot.dig("decision", "posture")
+      assert snapshot.dig("decision", "action", "enabled")
+    end
+  end
+
+  def test_attempt_or_resource_integrity_degradation_preserves_bound_answer_action
+    with_fixture do |native, task|
+      snapshot = builder(native, task, questions: 1, usage_available: false).call
+
+      assert_equal "partial", snapshot.dig("panels", "resources", "state")
+      assert_equal "answer", snapshot.dig("decision", "posture")
+      assert snapshot.dig("decision", "action", "enabled")
+    end
+  end
+
+  def test_partial_projection_evidence_still_disables_non_answer_actions
+    with_fixture do |native, task|
+      snapshot = builder(native, task, questions: 0, projection_state: "partial").call
 
       assert_equal "partial", snapshot.dig("status", "state")
       assert_equal "investigate", snapshot.dig("decision", "posture")
@@ -90,11 +110,17 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     end
   end
 
-  def test_attempt_or_resource_integrity_degradation_fails_actions_closed
+  def test_partial_projection_does_not_enable_an_unbound_question
     with_fixture do |native, task|
-      snapshot = builder(native, task, questions: 1, usage_available: false).call
+      malformed_question = {
+        "n" => 1, "text" => "Scope?", "binding" => "", "ordinal" => 0
+      }
+      snapshot = builder(
+        native, task, questions: 1, questions_payload: [ malformed_question ],
+        projection_state: "partial"
+      ).call
 
-      assert_equal "partial", snapshot.dig("panels", "resources", "state")
+      assert_empty snapshot.dig("operator", "questions")
       assert_equal "investigate", snapshot.dig("decision", "posture")
       refute snapshot.dig("decision", "action", "enabled")
     end
@@ -213,6 +239,12 @@ class TaskWorkspaceBuilderTest < Minitest::Test
               status_availability: "fresh", status_error: nil,
               projection_state: "current", projection_diagnostics: [],
               projection_truncated: false, usage_available: true, questions_payload: nil)
+    questions_payload ||= Array.new(questions) do |index|
+      {
+        "n" => index + 1, "text" => "Question #{index + 1}?",
+        "binding" => "binding-#{index + 1}", "ordinal" => index
+      }
+    end
     events = Array.new(@material_events || 1) do |index|
       {
         "schema" => "hive-task-journal-event", "schema_version" => 1,
@@ -271,7 +303,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
         "observed_at" => "2026-08-12T12:00:00Z",
         "repository" => nil, "wiki" => nil
       },
-      questions_count: questions, questions: questions_payload, daemon_enabled: true,
+      questions: questions_payload, daemon_enabled: true,
       clock: -> { Time.utc(2026, 8, 12, 12) }
     )
   end

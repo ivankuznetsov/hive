@@ -58,6 +58,16 @@ state vocabulary is `current`, `stale`, `partial`, `missing`, `conflicting`,
 symbolic source, safe task-relative evidence reference, observation time,
 quality label, retained conflicts, and truncation flag.
 
+Answer readiness is intentionally narrower than execution-action readiness. A
+fresh status observation plus at least one exact task-local opaque question
+binding establishes the `answer` posture even when the bounded task projection,
+attempt, or resource panels are partial or missing. Every answer write
+revalidates that binding through `Hive::Commands::Answer`, so a replaced round,
+changed question, or moved task still fails closed. Approve, Retry, Run, and
+other execution-dependent controls continue to require current projection,
+attempt, and resource evidence; archived or stale-status task pages remain
+read-only.
+
 Source precedence is deterministic: canonical task projection and task journal
 own lifecycle identity; attempt records own attempt lineage; controller and
 agent receipts own captured context; runtime receipts own actual session/model

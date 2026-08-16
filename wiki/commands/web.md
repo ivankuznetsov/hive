@@ -456,14 +456,19 @@ Honeycomb projections.
   brainstorm Q&A (the original idea shown above the form; every textarea and
   free-form intervention carries the opaque slot binding from
   `Hive::Commands::Answer`, and writes return through that shared identity-bound
-  seam. Blank intervention bindings are rejected, multi-answer forms preflight
-  every submitted binding before the first write, and lock contention returns
-  retry-later copy rather than claiming the question changed. Non-brainstorm
-  task pages skip answer inventory entirely. The forms are not
+  seam. Fresh bound questions remain answerable when execution-attempt or
+  resource evidence is partial (including legacy tasks without a projection
+  checkpoint); those evidence gates still fail Approve, Retry, Run, and other
+  execution-dependent controls closed. Blank intervention bindings are
+  rejected, multi-answer forms preflight every submitted binding before the
+  first write, and lock contention returns retry-later copy rather than
+  claiming the question changed. Non-brainstorm task pages skip answer
+  inventory entirely. The forms are not
   `data-turbo-permanent`, and the answers controller
-  snapshots/restores typed text plus caret across morphs, keyed by binding-bearing
-  textarea name, so a changed question or new round replaces the old field
-  without carrying stale drafts forward), artifacts rendered as sanitized markdown
+  snapshots/restores typed text plus caret across morphs, keyed by opaque binding
+  (the Q&A textarea name or the intervention field's draft key), so a changed
+  question or new round replaces the old field without carrying stale drafts
+  forward), artifacts rendered as sanitized markdown
   (redcarpet, GFM tables/fenced code; raw HTML escaped at render AND
   sanitized after; leading YAML front matter and standalone
   `Hive::Markers::MARKER_RE` comments dropped, while non-marker comments and

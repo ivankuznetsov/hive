@@ -1001,8 +1001,12 @@ class TasksTest < ActionDispatch::IntegrationTest
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n### Q2. Acceptance?\n\n### A2.\n\n")
 
     get task_path(@project, @slug, format: :json)
-    operator_questions = response.parsed_body.dig("operator", "questions")
+    workspace = response.parsed_body
+    operator_questions = workspace.dig("operator", "questions")
     assert_equal [ "Scope?", "Acceptance?" ], operator_questions.map { |row| row.fetch("text") }
+    assert_equal "partial", workspace.dig("status", "state")
+    assert_equal "answer", workspace.dig("decision", "posture")
+    assert workspace.dig("decision", "action", "enabled")
 
     get "/tasks/#{@project}/#{@slug}"
 
@@ -1010,9 +1014,10 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select ".qa-item", 2, "each open question must get its own answer field"
     operator_questions.each do |question|
       assert_select ".qa-question", text: /#{Regexp.escape(question.fetch("text"))}/
-      assert_select "textarea[data-question-number=?][name=?]",
+      assert_select "textarea[data-question-number=?][name=?]:not([disabled])",
                     question.fetch("n").to_s, "answers[#{question.fetch('binding')}]", count: 1
     end
+    assert_select "form[id^='qa-form-'] input[type='submit']:not([disabled])", 1
   end
 
   test "submitted answers land under the right question headers" do

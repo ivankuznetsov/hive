@@ -6,9 +6,20 @@ class AgentCliRuntimeGemspecTest < Minitest::Test
 
   def test_public_identity_and_inventory
     spec = Gem::Specification.load(GEMSPEC)
+    description = spec.description.gsub(/\s+/, " ").strip
 
     assert_equal "agent-cli-runtime", spec.name
     assert_equal Gem::Version.new("0.2.0"), spec.version
+    assert_equal(
+      "One Ruby API for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode",
+      spec.summary
+    )
+    assert_includes description,
+                    "one stable integration layer for local coding-agent CLIs"
+    assert_includes description,
+                    "easier to add, switch, and upgrade"
+    refute_match(/\b(?:does not|doesn't|never)\b/i,
+                 [ spec.summary, description ].join(" "))
     assert_equal Gem::Requirement.new(">= 3.4.0"), spec.required_ruby_version
     assert_equal [ "agent-runtime" ], spec.executables
     assert_equal "MIT", spec.license
@@ -31,8 +42,11 @@ class AgentCliRuntimeGemspecTest < Minitest::Test
   def test_version_changelog_and_consumer_readme_describe_the_same_candidate
     readme = File.read(File.join(ROOT, "README.md"))
     changelog = File.read(File.join(ROOT, "CHANGELOG.md"))
+    normalized_changelog = changelog.gsub(/\s+/, " ")
 
     assert_includes readme, 'gem "agent-cli-runtime", "~> 0.2.0"'
+    assert_includes readme, "## Why use it?"
+    assert_includes readme, "Version 0.2.0 adds first-class OpenCode support"
     assert_includes readme, "OpenCode `1.18.16+`"
     assert_includes readme, "PreparedInvocation#cleanup!"
     refute_match(/~> 0\.1\./, readme)
@@ -40,6 +54,13 @@ class AgentCliRuntimeGemspecTest < Minitest::Test
       /\A# Changelog\n\n## Unreleased\n\n## 0\.2\.0 - 2026-08-15\n/,
       changelog
     )
+    assert_includes changelog, "first-class OpenCode `1.18.16+` support"
+    assert_includes normalized_changelog,
+                    "shared request and facade"
+    assert_includes normalized_changelog,
+                    "provider-specific preparation, route probing, and " \
+                    "strict result normalization"
+    assert_includes normalized_changelog, "selected authentication source"
   end
 
   def test_public_links_use_the_distribution_mirror_and_canonical_issue_tracker

@@ -102,6 +102,38 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  def test_delete_branch_if_head_removes_only_the_expected_ref
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      expected = ops.head_sha
+      run!("git", "-C", dir, "branch", "patrol/recovery")
+
+      assert ops.delete_branch_if_head!("patrol/recovery", expected)
+      refute ops.ref_exists?("refs/heads/patrol/recovery")
+    end
+  end
+
+  def test_delete_branch_if_head_preserves_a_concurrently_moved_ref
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      expected = ops.head_sha
+      run!("git", "-C", dir, "branch", "patrol/recovery")
+      File.write(File.join(dir, "moved.txt"), "moved\n")
+      run!("git", "-C", dir, "add", "moved.txt")
+      run!("git", "-C", dir, "commit", "-qm", "move branch target")
+      moved = ops.head_sha
+      run!("git", "-C", dir, "branch", "-f", "patrol/recovery", moved)
+
+      error = assert_raises(Hive::GitError) do
+        ops.delete_branch_if_head!("patrol/recovery", expected)
+      end
+
+      assert_match(/could not delete/, error.message)
+      assert_equal moved,
+                   run!("git", "-C", dir, "rev-parse", "patrol/recovery").strip
+    end
+  end
+
   def test_read_blob_at_returns_bounded_file_from_exact_revision
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

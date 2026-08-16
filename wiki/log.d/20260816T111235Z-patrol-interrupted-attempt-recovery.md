@@ -14,6 +14,8 @@ or uniquely committed work remains untouched for operator recovery. Patch JSON
 is stored as the outer attempt's subordinate result rather than creating a
 nested effect. Retirement uses non-force checkout removal and deletes the
 branch only under an expected-head lease, so work added after the proof survives.
+Ancestry checks and branch retirement stay behind `GitOps`, which validates the
+Git arguments and owns the compare-and-swap ref deletion.
 
 The daemon scheduler also tests the occurrence's complete effect set before
 strict finalization. An unresolved effect keeps the occurrence recovery-active

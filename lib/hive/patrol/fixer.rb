@@ -268,18 +268,10 @@ module Hive
           end
         end
         current_default = fresh_default_sha!
-        _out, error, status = Open3.capture3(
-          "git", "-C", @project_root, "merge-base", "--is-ancestor",
-          head, current_default
-        )
-        if status.exitstatus == 1
+        unless @git_ops.ancestor?(head, current_default)
           preserve_interrupted_worktree!(
             "the Patrol branch contains unique committed work"
           )
-        end
-        unless status.success?
-          raise Hive::GitError,
-                "cannot verify interrupted Patrol branch ancestry: #{error.to_s.strip}"
         end
         [ head, head ]
       rescue PublicationRecoveryError
@@ -296,26 +288,13 @@ module Hive
         end
         return unless expected_head
 
-        out, error, status = Open3.capture3(
-          "git", "-C", @project_root, "update-ref", "-d",
-          "refs/heads/#{branch}", expected_head
-        )
-        return if status.success? &&
-                  !Hive::Worktree.local_branch_ref_exists?(
-                    @project_root, branch
-                  )
-
-        detail = error.to_s.strip.empty? ? out.to_s.strip : error.to_s.strip
-        reason = "the Patrol branch changed before retirement"
-        reason = "#{reason}: #{detail}" unless detail.empty?
-        preserve_interrupted_worktree!(
-          reason
-        )
+        @git_ops.delete_branch_if_head!(branch, expected_head)
       rescue PublicationRecoveryError
         raise
       rescue StandardError => error
         raise PublicationRecoveryError,
-              "patrol cannot safely retire the interrupted attempt " \
+              "patrol cannot safely retire the interrupted attempt because " \
+              "the Patrol branch changed before retirement " \
               "(#{error.class}: #{error.message}); preserving its work"
       end
 

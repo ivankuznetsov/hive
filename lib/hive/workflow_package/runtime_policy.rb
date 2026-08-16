@@ -283,10 +283,15 @@ module Hive
           match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s.strip)
           rule if match && match[:tool] == "Read" && match[:specifier]
         end
-        unless path_read_rules.empty?
+        if path_read_rules.any? && profile.name != :codex
           raise Hive::ConfigError,
                 "runner #{profile.name.inspect} cannot enforce path-qualified Read rules " \
                 "#{path_read_rules.inspect}"
+        end
+        codex_read_paths = if path_read_rules.any?
+          portable_codex_read_paths(
+            path_read_rules, task_root: task_root, allowed_roots: directories, prepare: prepare
+          )
         end
 
         tool_names = Array(scope.allowed_tools).flat_map do |rule|
@@ -312,7 +317,8 @@ module Hive
           compile_codex_actor(
             scope, task_root: task_root, directories: directories, profile: profile,
             environment: environment, outputs: outputs, runtime_root: runtime_root, schema: schema,
-            web_enabled: (tool_names & PORTABLE_NETWORK_TOOLS).any?
+            web_enabled: (tool_names & PORTABLE_NETWORK_TOOLS).any?,
+            read_paths: codex_read_paths || directories
           )
         when :grok
           compile_grok_actor(
@@ -336,6 +342,36 @@ module Hive
         raise
       end
 
+      def self.portable_codex_read_paths(rules, task_root:, allowed_roots:, prepare:)
+        roots = allowed_roots.map { |root| File.realpath(root) }
+        rules.map do |rule|
+          match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s.strip)
+          raw = match[:specifier]
+          if raw.include?("*")
+            raise Hive::ConfigError,
+                  "runner :codex cannot enforce wildcard path-qualified Read rule #{rule.inspect}"
+          end
+
+          expanded = File.absolute_path?(raw) ? File.expand_path(raw) : File.expand_path(raw, task_root)
+          unless roots.any? { |root| expanded == root || expanded.start_with?(root + File::SEPARATOR) }
+            raise Hive::ConfigError,
+                  "runner :codex path-qualified Read rule escapes declared roots: #{rule.inspect}"
+          end
+
+          next expanded unless prepare
+
+          resolved = File.realpath(expanded)
+          unless roots.any? { |root| resolved == root || resolved.start_with?(root + File::SEPARATOR) }
+            raise Hive::ConfigError,
+                  "runner :codex path-qualified Read rule resolves outside declared roots: #{rule.inspect}"
+          end
+          resolved
+        rescue Errno::ENOENT, Errno::EACCES, Errno::ENOTDIR
+          raise Hive::ConfigError,
+                "runner :codex path-qualified Read target is unavailable: #{rule.inspect}"
+        end.uniq.freeze
+      end
+
       def self.portable_admission_policy(scope, task_root:, directories:, environment:)
         portable_policy(
           scope, task_root: task_root, directories: directories, environment: environment,
@@ -344,7 +380,7 @@ module Hive
       end
 
       def self.compile_codex_actor(scope, task_root:, directories:, profile:, environment:,
-                                   outputs:, runtime_root:, schema:, web_enabled:)
+                                   outputs:, runtime_root:, schema:, web_enabled:, read_paths:)
         executable = codex_executable(profile)
         runtime_read_root = codex_runtime_root(executable)
         schema_path = nil
@@ -353,9 +389,9 @@ module Hive
           Hive::AtomicFile.write(schema_path, CanonicalJSON.generate(schema), mode: 0o600)
         end
 
-        read_paths = directories + [ runtime_read_root ]
-        read_paths << runtime_root if runtime_root
-        filesystem = ([ [ ":minimal", "read" ] ] + read_paths.uniq.map { |path| [ path, "read" ] })
+        runtime_read_paths = read_paths + [ runtime_read_root ]
+        runtime_read_paths << runtime_root if runtime_root
+        filesystem = ([ [ ":minimal", "read" ] ] + runtime_read_paths.uniq.map { |path| [ path, "read" ] })
         filesystem_toml = filesystem.map do |path, access|
           "#{JSON.generate(path)}=#{JSON.generate(access)}"
         end.join(",")

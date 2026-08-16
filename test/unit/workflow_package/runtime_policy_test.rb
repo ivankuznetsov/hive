@@ -1073,7 +1073,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       end
       assert_includes error.message, "path-qualified Edit"
 
-      %i[codex grok].each do |profile_name|
+      %i[grok opencode].each do |profile_name|
         error = assert_raises(Hive::ConfigError) do
           Hive::WorkflowPackage::RuntimePolicy.compile_actor(
             {
@@ -1088,6 +1088,78 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
         end
         assert_includes error.message, "cannot enforce path-qualified Read", profile_name
       end
+    end
+  end
+
+  def test_codex_actor_enforces_exact_path_qualified_read_without_mounting_task_root
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+      brief = File.join(task, "brief.md")
+      output = File.join(task, "result.md")
+      File.write(brief, "brief\n")
+
+      policy = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          {
+            "preset" => "scoped",
+            "tools" => [ "Read(./brief.md)", "WebSearch", "WebFetch", "Edit(./result.md)" ]
+          },
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          managed_outputs: [ output ]
+        )
+      end
+
+      filesystem = policy.cli_flags.find do |flag|
+        flag.start_with?("permissions.hive-managed.filesystem=")
+      end
+      assert_includes filesystem, "#{JSON.generate(brief)}=\"read\""
+      refute_includes filesystem, "#{JSON.generate(task)}=\"read\""
+      refute_includes filesystem, "#{JSON.generate(package)}=\"read\""
+    ensure
+      policy&.cleanup!
+    end
+  end
+
+  def test_codex_actor_rejects_unenforceable_path_qualified_reads
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      outside = File.join(dir, "outside.md")
+      FileUtils.mkdir_p([ task, package ])
+      File.write(outside, "outside\n")
+      File.symlink(outside, File.join(task, "escape.md"))
+
+      [ "Read(./*.md)", "Read(../outside.md)" ].each do |rule|
+        error = assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            { "preset" => "scoped", "tools" => [ rule, "Edit(./result.md)" ] },
+            task_folder: task,
+            package_root: package,
+            profile: Hive::AgentProfiles.lookup(:codex),
+            prepare: false
+          )
+        end
+        assert_includes error.message, "path-qualified Read"
+      end
+
+      error = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            {
+              "preset" => "scoped",
+              "tools" => [ "Read(./escape.md)", "Edit(./result.md)" ]
+            },
+            task_folder: task,
+            package_root: package,
+            profile: Hive::AgentProfiles.lookup(:codex)
+          )
+        end
+      end
+      assert_includes error.message, "resolves outside declared roots"
     end
   end
 

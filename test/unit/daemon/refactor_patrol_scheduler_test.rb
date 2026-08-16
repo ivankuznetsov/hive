@@ -2153,6 +2153,9 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       assert instance.send(
         :blocking_claim_for_occurrence?, invalid, "occ-7", now: T0
       )
+      assert instance.send(
+        :blocking_claim_for_occurrence?, {}, "occ-7", now: T0
+      )
     end
   end
 

@@ -749,6 +749,10 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         now: T0 + 60,
         claim_liveness_resolver: ->(_attempt) { :unresolved }
       )
+      assert_empty store.claimable_jobs(
+        now: T0 + 60,
+        claim_liveness_resolver: ->(_attempt) { raise "probe failed" }
+      )
       assert_equal [ "pr-7-stable" ], store.claimable_jobs(
         now: T0 + 60,
         claim_liveness_resolver: ->(_attempt) { :resolved }

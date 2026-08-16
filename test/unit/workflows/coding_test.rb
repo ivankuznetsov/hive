@@ -13,6 +13,15 @@ class WorkflowsCodingTest < Minitest::Test
     assert descriptor.stages.frozen?
   end
 
+  def test_descriptor_explicitly_declares_change_result_capabilities
+    result = Hive::Workflows::Coding::DESCRIPTOR.result
+
+    assert_equal :change, result.kind
+    assert_nil result.primary_artifact
+    assert_equal %i[worktree diff publication media dependencies supporting_artifacts], result.capabilities
+    assert_equal :declared, result.provenance
+  end
+
   def test_descriptor_carries_transition_verbs
     verbs = Hive::Workflows::Coding::DESCRIPTOR.stages.map { |stage| stage.advance_verb&.name }
 

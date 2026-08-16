@@ -41,6 +41,12 @@ module Hive
       DESCRIPTOR = Hive::Workflow.new(
         id: :coding,
         archive_visibility_retention_days: 3,
+        result: Hive::Workflow::Result.new(
+          kind: :change,
+          capabilities: %i[
+            worktree diff publication media dependencies supporting_artifacts
+          ]
+        ),
         stages: [
           Hive::Workflow::Stage.new(
             name: "inbox",

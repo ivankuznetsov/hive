@@ -1454,6 +1454,158 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal "architecture.md", workflow.stage_named("work").deliverable
   end
 
+  def test_explicit_document_result_is_typed_frozen_and_declared
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "architecture",
+        "result" => {
+          "kind" => "document",
+          "primary_artifact" => "architecture.md",
+          "capabilities" => [ "supporting_artifacts" ]
+        },
+        "stages" => [
+          {
+            "name" => "work", "kind" => "agent", "state_file" => "architecture.md",
+            "skill" => "/architecture", "deliverable" => "architecture.md"
+          }
+        ]
+      },
+      path: "/tmp/architecture.yml"
+    )
+
+    assert_instance_of Hive::Workflow::Result, workflow.result
+    assert_equal :document, workflow.result.kind
+    assert_equal "architecture.md", workflow.result.primary_artifact
+    assert_equal [ :supporting_artifacts ], workflow.result.capabilities
+    assert_equal :declared, workflow.result.provenance
+    assert workflow.result.frozen?
+    assert workflow.result.capabilities.frozen?
+  end
+
+  def test_legacy_result_inference_has_deterministic_provenance
+    terminal_deliverable = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "architecture",
+        "stages" => [
+          {
+            "name" => "work", "kind" => "agent", "state_file" => "work.md",
+            "skill" => "/architecture", "deliverable" => "architecture.md"
+          }
+        ]
+      },
+      path: "/tmp/architecture.yml"
+    )
+    human_outcome = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "editorial",
+        "stages" => [
+          {
+            "name" => "approval", "kind" => "human", "state_file" => "approval.md",
+            "input" => "draft.md",
+            "outcomes" => { "approve" => { "complete" => true, "artifact" => "article.md" } }
+          }
+        ]
+      },
+      path: "/tmp/editorial.yml"
+    )
+    terminal_state = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "legacy",
+        "stages" => [ { "name" => "done", "kind" => "terminal", "state_file" => "done.md" } ]
+      },
+      path: "/tmp/legacy.yml"
+    )
+
+    assert_equal [ :document, "architecture.md", :terminal_deliverable ],
+                 [ terminal_deliverable.result.kind, terminal_deliverable.result.primary_artifact,
+                   terminal_deliverable.result.provenance ]
+    assert_equal [ :document, "article.md", :completing_outcome_artifact ],
+                 [ human_outcome.result.kind, human_outcome.result.primary_artifact,
+                   human_outcome.result.provenance ]
+    assert_equal [ :document, "done.md", :terminal_state_file ],
+                 [ terminal_state.result.kind, terminal_state.result.primary_artifact,
+                   terminal_state.result.provenance ]
+  end
+
+  def test_legacy_worktree_handoff_infers_change_delivery_capabilities
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "managed-fix",
+        "stages" => [
+          {
+            "name" => "fix", "kind" => "agent", "state_file" => "fix-report.md",
+            "skill" => "/fix", "deliverable" => "fix-report.md",
+            "workspace" => "worktree", "handoff" => "draft_pr"
+          }
+        ]
+      },
+      path: "/tmp/managed-fix.yml"
+    )
+
+    assert_equal :change, workflow.result.kind
+    assert_nil workflow.result.primary_artifact
+    assert_equal %i[worktree diff publication supporting_artifacts], workflow.result.capabilities
+    assert_equal :workspace_handoff, workflow.result.provenance
+  end
+
+  def test_result_rejects_invalid_kinds_paths_capabilities_and_contradictions
+    base = {
+      "id" => "bad",
+      "result" => { "kind" => "document", "primary_artifact" => "result.md" },
+      "stages" => [ { "name" => "done", "kind" => "terminal", "state_file" => "done.md" } ]
+    }
+    cases = [
+      [ { "kind" => "report", "primary_artifact" => "result.md" }, "kind" ],
+      [ { "kind" => "document" }, "primary_artifact" ],
+      [ { "kind" => "change", "primary_artifact" => "result.md" }, "must be omitted" ],
+      [ { "kind" => "document", "primary_artifact" => "/tmp/result.md" }, "bare filename" ],
+      [ { "kind" => "document", "primary_artifact" => "../result.md" }, "bare filename" ],
+      [ { "kind" => "document", "primary_artifact" => "nested/result.md" }, "bare filename" ],
+      [ { "kind" => "document", "primary_artifact" => "..\\result.md" }, "bare filename" ],
+      [
+        { "kind" => "document", "primary_artifact" => "result.md", "capabilities" => [ "shell" ] },
+        "capability"
+      ]
+    ]
+
+    cases.each do |result, message|
+      error = assert_config_error(base.merge("result" => result), path: "/tmp/bad.yml")
+      assert_includes error.message, "result"
+      assert_includes error.message, message
+    end
+
+    mismatch = base.merge(
+      "result" => { "kind" => "document", "primary_artifact" => "result.md" },
+      "stages" => [
+        {
+          "name" => "done", "kind" => "agent", "state_file" => "done.md",
+          "skill" => "/write", "deliverable" => "article.md"
+        }
+      ]
+    )
+    error = assert_config_error(mismatch, path: "/tmp/bad.yml")
+    assert_includes error.message, "primary_artifact must match terminal deliverable"
+  end
+
+  def test_explicit_change_result_must_include_workspace_handoff_capabilities
+    data = {
+      "id" => "managed-fix",
+      "result" => { "kind" => "change", "capabilities" => [ "worktree" ] },
+      "stages" => [
+        {
+          "name" => "fix", "kind" => "agent", "state_file" => "fix-report.md",
+          "skill" => "/fix", "deliverable" => "fix-report.md",
+          "workspace" => "worktree", "handoff" => "draft_pr"
+        }
+      ]
+    }
+
+    error = assert_config_error(data, path: "/tmp/managed-fix.yml")
+    assert_includes error.message, "result capabilities"
+    assert_includes error.message, "diff"
+    assert_includes error.message, "publication"
+  end
+
   def test_last_stage_may_be_council
     workflow = Hive::Workflows::DescriptorParser.parse_hash(
       {

@@ -125,7 +125,8 @@ module Hive
         Hive::Workflow.new(
           id: workflow.id,
           stages: stages,
-          archive_visibility_retention_days: workflow.archive_visibility_retention_days
+          archive_visibility_retention_days: workflow.archive_visibility_retention_days,
+          result: workflow.result
         )
       end
 

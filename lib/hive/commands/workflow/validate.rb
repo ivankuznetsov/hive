@@ -64,6 +64,7 @@ module Hive
             "origin" => origin,
             "descriptor_path" => descriptor_path,
             "instruction_paths" => workflow.filter_map(&:instruction).uniq,
+            "result" => result_payload(workflow.result),
             "stages" => workflow.map { |stage| stage_payload(stage) },
             "automatic_edges" => automatic_edges(workflow),
             "human_outcomes" => human_outcomes(workflow),
@@ -85,6 +86,15 @@ module Hive
 
         def terminal_outcomes_payload(outcomes)
           outcomes&.to_h&.transform_keys(&:to_s)
+        end
+
+        def result_payload(result)
+          {
+            "kind" => result.kind.to_s,
+            "primary_artifact" => result.primary_artifact,
+            "capabilities" => result.capabilities.map(&:to_s),
+            "provenance" => result.provenance.to_s
+          }
         end
 
         def automatic_edges(workflow)

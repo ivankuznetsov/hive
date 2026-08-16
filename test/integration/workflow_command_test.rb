@@ -34,6 +34,15 @@ class WorkflowCommandTest < Minitest::Test
       assert_equal true, payload.fetch("valid")
       assert_equal "authored", payload.fetch("origin")
       assert_equal descriptor, payload.fetch("descriptor_path")
+      assert_equal(
+        {
+          "kind" => "document",
+          "primary_artifact" => "draft.md",
+          "capabilities" => [ "supporting_artifacts" ],
+          "provenance" => "completing_outcome_artifact"
+        },
+        payload.fetch("result")
+      )
       assert_equal %w[research draft approval], payload.fetch("stages").map { |row| row.fetch("name") }
       assert payload.fetch("stages").all? { |row| row.key?("terminal_outcomes") }
       assert payload.fetch("stages").all? { |row| row["terminal_outcomes"].nil? }
@@ -107,6 +116,8 @@ class WorkflowCommandTest < Minitest::Test
 
       assert_equal "built_in", payload.fetch("origin")
       assert_nil payload.fetch("descriptor_path")
+      assert_equal "change", payload.fetch("result").fetch("kind")
+      assert_nil payload.fetch("result").fetch("primary_artifact")
       assert_equal Hive::Workflows::Coding::DESCRIPTOR.stage_names,
                    payload.fetch("stages").map { |row| row.fetch("name") }
     end

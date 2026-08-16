@@ -14,6 +14,11 @@ module Hive
       DESCRIPTOR = Hive::Workflow.new(
         id: :content,
         archive_visibility_retention_days: 3,
+        result: Hive::Workflow::Result.new(
+          kind: :document,
+          primary_artifact: "article.md",
+          capabilities: [ :supporting_artifacts ]
+        ),
         stages: [
           Hive::Workflow::Stage.new(
             name: "inbox",
@@ -72,6 +77,7 @@ module Hive
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "done"),
             kind: :agent,
             skill: "/write:writer",
+            deliverable: "article.md",
             status_mode: :state_file_marker,
             budget_usd: BUDGET_USD.fetch("done"),
             timeout_sec: 900

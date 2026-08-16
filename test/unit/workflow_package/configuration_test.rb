@@ -27,12 +27,23 @@ class WorkflowPackageConfigurationTest < Minitest::Test
     assert_equal "claude", review.council.revise.agent
   end
 
-  def test_apply_preserves_archive_visibility_retention
-    source = workflow.with(archive_visibility_retention_days: :never)
+  def test_apply_preserves_archive_visibility_retention_and_result_contract
+    declared_result = Hive::Workflow::Result.new(
+      kind: :document,
+      primary_artifact: "article.md",
+      capabilities: %i[media supporting_artifacts]
+    )
+    source = Hive::Workflow.new(
+      id: workflow.id,
+      stages: workflow.stages,
+      archive_visibility_retention_days: :never,
+      result: declared_result
+    )
 
     mapped = build_configuration.apply(source)
 
     assert_equal :never, mapped.archive_visibility_retention_days
+    assert_same declared_result, mapped.result
   end
 
   def test_optional_inputs_are_isolated_to_authorized_slots_and_values_are_not_snapshotted

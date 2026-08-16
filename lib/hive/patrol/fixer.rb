@@ -535,7 +535,7 @@ module Hive
           return proof_failure
         end
 
-        validation = @validator.validate(worktree_path)
+        validation = validate_remaining_commands(worktree_path, receipt)
         validation["fix_proof"] = receipt
         return validation unless validation["passed"]
 
@@ -564,6 +564,19 @@ module Hive
 
         validation["stabilization_passes"] = validation_pass + 1
         validation
+      end
+
+      def validate_remaining_commands(worktree_path, receipt)
+        selected = receipt.fetch("validation_key")
+        configured = Validator.configured_names(@cfg.dig("patrol", "commands"))
+        remaining = configured - [ selected ]
+        selected_result = receipt.fetch("after")
+        return { "passed" => true, "commands" => [ selected_result ] } if remaining.empty?
+
+        validation = @validator.validate(worktree_path, names: remaining)
+        validation.merge(
+          "commands" => [ selected_result, *Array(validation["commands"]) ]
+        )
       end
 
       def machine_fix_proof(worktree_path, base_sha, paths, agent_proof, finding)

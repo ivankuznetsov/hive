@@ -1444,7 +1444,7 @@ class HivePatrolFixerTest < Minitest::Test
       run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
       validator = Object.new
       validator.define_singleton_method(:validate) do |path, names: nil|
-        if names
+        if names == [ "test" ]
           passed = !File.basename(path).start_with?(".control-")
           {
             "passed" => passed,
@@ -1467,9 +1467,11 @@ class HivePatrolFixerTest < Minitest::Test
         write_regression(worktree_path)
         write_fix_proof(output_path)
       end
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["lint"] = "configured lint"
 
       patch = Hive::Patrol::Fixer.new(
-        repo, cfg: cfg(repo), validator: validator, agent_runner: agent
+        repo, cfg: configured, validator: validator, agent_runner: agent
       ).attempt(finding)
 
       refute patch.passed
@@ -1485,7 +1487,7 @@ class HivePatrolFixerTest < Minitest::Test
       run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
       validator = Object.new
       validator.define_singleton_method(:validate) do |path, names: nil|
-        if names
+        if names == [ "test" ]
           passed = !File.basename(path).start_with?(".control-")
           {
             "passed" => passed,
@@ -1506,14 +1508,58 @@ class HivePatrolFixerTest < Minitest::Test
         write_regression(worktree_path)
         write_fix_proof(output_path)
       end
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["lint"] = "configured lint"
 
       patch = Hive::Patrol::Fixer.new(
-        repo, cfg: cfg(repo), validator: validator, agent_runner: agent
+        repo, cfg: configured, validator: validator, agent_runner: agent
       ).attempt(finding)
 
       refute patch.passed
       assert_equal "validation_mutated_worktree", patch.validation["reason"]
       assert_equal 0, patch.validation.dig("fix_proof", "after", "exit_code")
+    end
+  end
+
+  def test_selected_machine_proof_command_is_not_repeated_as_broad_validation
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "if\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      calls = []
+      validator = Object.new
+      validator.define_singleton_method(:validate) do |path, names: nil|
+        calls << [ File.basename(path), names ]
+        passed = !File.basename(path).start_with?(".control-")
+        {
+          "passed" => passed,
+          "commands" => [
+            {
+              "name" => "test", "command" => "configured test/patrol_regression_test.rb",
+              "exit_code" => passed ? 0 : 1, "signal" => nil, "timed_out" => false,
+              "stdout" => passed ? "" : "test/patrol_regression_test.rb failed", "stderr" => ""
+            }
+          ]
+        }
+      end
+      agent = lambda do |worktree_path:, output_path:, **|
+        File.write(File.join(worktree_path, "app.rb"), "puts 'fixed'\n")
+        write_regression(worktree_path)
+        write_fix_proof(output_path)
+      end
+      candidate = finding
+      candidate.validation_key = "test"
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo), validator: validator, agent_runner: agent
+      ).attempt(candidate)
+
+      assert patch.passed, patch.validation.inspect
+      assert_equal 3, calls.size,
+                   "preflight, regression-before, and regression-after are sufficient for one configured command"
+      assert calls.all? { |_path, names| names == [ "test" ] }
+      assert_equal 1, patch.validation.fetch("commands").size
+      assert_equal "test", patch.validation.dig("commands", 0, "name")
     end
   end
 

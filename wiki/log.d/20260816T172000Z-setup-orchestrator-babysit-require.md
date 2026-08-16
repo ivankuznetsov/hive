@@ -19,7 +19,8 @@ each require the command before using it.
 
 **Verification:** Both tests reproduced their `NameError` in isolation before the
 change; afterwards the orchestrator file passes 45 runs and the uninstall file 46
-runs, with no failures. An audit of the remaining tests that stub singleton methods
-through a nested-only require (`agent_skills/bundled_skill`, `current_main_coverage_gap`,
-`provider_health/store`, `task_projection/store`) found all four already load their
-parent transitively and pass standalone.
+runs, with no failures. Isolation runs over the 56 test files whose constant
+references are not statically reachable from their own requires found one more
+latent case — `workflow_package/transaction_test.rb` never loaded
+`hive/workflow_package/mutation_lock` — which got the same one-line require. Every
+other flagged file already loads its constants transitively and passes standalone.

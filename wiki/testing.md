@@ -117,7 +117,8 @@ every production file it depends on rather than relying on a co-running file to
 load it: requiring only a nested file such as
 `hive/commands/babysit/service_installer` opens `Hive::Commands::Babysit` as a
 bare namespace, and stubbing a class method defined in `babysit.rb` then raises
-`NameError` in whichever shard happens to lack a fuller require. CI feeds both results into the
+`NameError` in whichever shard happens to lack a fuller require.
+CI feeds both results into the
 already-required `rake test (Ruby 3.4)` check. The aggregator uses
 `always()` and fails unless coverage and the complete matrix succeeded,
 preserving one fail-closed merge contract for branches created before and after

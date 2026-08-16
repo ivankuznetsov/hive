@@ -2085,6 +2085,42 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_rollover_claim_probe_fails_closed_for_errors_actions_and_invalid_times
+    with_project do |_dir, entry, store|
+      instance = scheduler(
+        entry, store,
+        claim_liveness_resolver: ->(_claim) { raise "probe failed" }
+      )
+      expired = {
+        "attempts" => [ {
+          "kind" => Hive::RefactorPatrol::JobStore::DISCOVERY_ATTEMPT_KIND,
+          "occurrence_id" => "occ-7", "state" => "claimed",
+          "expires_at" => (T0 - 1).iso8601
+        } ],
+        "actions" => []
+      }
+      assert instance.send(
+        :blocking_claim_for_occurrence?, expired, "occ-7", now: T0
+      )
+
+      action = {
+        "attempts" => [],
+        "actions" => [ { "claims" => [ {
+          "occurrence_id" => "occ-7", "state" => "running"
+        } ] } ]
+      }
+      assert instance.send(
+        :blocking_claim_for_occurrence?, action, "occ-7", now: T0
+      )
+
+      invalid = Marshal.load(Marshal.dump(expired))
+      invalid.fetch("attempts").first["expires_at"] = "not-a-time"
+      assert instance.send(
+        :blocking_claim_for_occurrence?, invalid, "occ-7", now: T0
+      )
+    end
+  end
+
 
   def test_dry_run_capacity_check_never_resolves_or_terminates_a_claim
     with_project do |_dir, entry, store|

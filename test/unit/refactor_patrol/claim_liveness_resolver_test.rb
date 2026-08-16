@@ -80,6 +80,33 @@ class RefactorPatrolClaimLivenessResolverTest < Minitest::Test
     end
   end
 
+  def test_disappearing_process_group_is_resolved
+    claim = {
+      "pid" => 4242,
+      "pgid" => 4242,
+      "process_start_time" => "boot-live"
+    }
+    resolver = Hive::RefactorPatrol::ClaimLivenessResolver.new
+
+    with_replaced_singleton_method(
+      Hive::ProcessKill, :valid_target_pid?, ->(_pid) { true }
+    ) do
+      with_replaced_singleton_method(
+        Hive::ProcessKill, :pid_alive?, ->(_pid) { true }
+      ) do
+        with_replaced_singleton_method(
+          Hive::ProcessKill, :process_start_time, ->(_pid) { "boot-live" }
+        ) do
+          with_replaced_singleton_method(
+            Process, :getpgid, ->(_pid) { raise Errno::ESRCH }
+          ) do
+            assert_equal :resolved, resolver.call(claim)
+          end
+        end
+      end
+    end
+  end
+
   def test_invalid_owner_pid_remains_unresolved
     resolver = Hive::RefactorPatrol::ClaimLivenessResolver.new
     claim = {

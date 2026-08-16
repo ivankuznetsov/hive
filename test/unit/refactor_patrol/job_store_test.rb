@@ -1983,6 +1983,54 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_capacity_rollover_resolution_fails_closed_for_stale_or_invalid_claim_evidence
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      occurrence_id = store.read_job("pr-7-stable").fetch("occurrence_id")
+      store.claim_discovery!(
+        "pr-7-stable", owner: "expired", analysis_sha: "c" * 40,
+        now: T0, lease_sec: 10, owner_pid: 4242,
+        owner_process_start_time: "gone"
+      )
+
+      stale = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        store.resolve_expired_discovery_for_rollover!(
+          "pr-7-stable", occurrence_id: "occ-other", now: T0 + 11,
+          claim_liveness_resolver: ->(_claim) { :resolved }
+        )
+      end
+      assert_match(/active claim/, stale.message)
+
+      unresolved = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        store.resolve_expired_discovery_for_rollover!(
+          "pr-7-stable", occurrence_id: occurrence_id, now: T0 + 11,
+          claim_liveness_resolver: ->(_claim) { raise "probe failed" }
+        )
+      end
+      assert_match(/active claim/, unresolved.message)
+
+      transitions = store.instance_variable_get(:@claim_transitions)
+      with_replaced_singleton_method(
+        transitions, :finish!, ->(*, **) { raise KeyError, "bad claim" }
+      ) do
+        invalid = assert_raises(
+          Hive::RefactorPatrol::JobStore::InconsistentRecord
+        ) do
+          store.resolve_expired_discovery_for_rollover!(
+            "pr-7-stable", occurrence_id: occurrence_id, now: T0 + 11,
+            claim_liveness_resolver: ->(_claim) { :resolved }
+          )
+        end
+        assert_match(/invalid evidence/, invalid.message)
+      end
+    end
+  end
+
   def test_capacity_rollover_denies_only_an_unrecorded_prepared_effect
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)

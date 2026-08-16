@@ -215,6 +215,26 @@ class HiveRefactorPatrolJobOccurrenceLifecycleTest < Minitest::Test
     assert_match(/prior recorded transitions are not terminal/, error.message)
   end
 
+  def test_prepared_effect_retirement_rejects_stale_and_unavailable_occurrences
+    lifecycle = build_lifecycle
+    stale = assert_raises(StandardError) do
+      lifecycle.deny_unrecorded_prepared_effects_for_rollover!(
+        "job-7", occurrence_id: "occ-other"
+      )
+    end
+    assert_match(/rollover fence is stale/, stale.message)
+
+    unavailable_occurrences = Object.new
+    unavailable_occurrences.define_singleton_method(:fetch) { |_id| nil }
+    lifecycle = build_lifecycle(occurrences: unavailable_occurrences)
+    unavailable = assert_raises(StandardError) do
+      lifecycle.deny_unrecorded_prepared_effects_for_rollover!(
+        "job-7", occurrence_id: "occ-7"
+      )
+    end
+    assert_match(/rollover is unavailable/, unavailable.message)
+  end
+
   def test_legacy_transition_without_digest_must_be_the_intake_transition
     aggregate = aggregate_with_transition
     aggregate.fetch("attempts").first.fetch("transitions").first

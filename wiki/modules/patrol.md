@@ -415,6 +415,10 @@ remain unproven.
   misreported as unresolved repository identity, including at store capacity.
 - Cutover and rollback quiescence include ordinary active occurrences, architecture active occurrences, and incomplete v4 jobs before advancing an ownership epoch.
 - Ordinary and architecture projection/recovery failures emit bounded project/occurrence/job diagnostics with retry count and next backoff time; durable outbox or exact-transition recovery remains pending while the scheduler backs off.
+- Ordinary child reaping isolates scheduler-completion failures. A worker that
+  exits with a prepared or dispatch-uncertain effect leaves its occurrence
+  reserved for exact recovery and emits one project-scoped fatal diagnostic;
+  it cannot unwind the daemon poll loop or terminate unrelated workers.
 - Closed-unmerged patrol PRs become dismissals and are skipped on future cycles.
 - Agent prompts treat findings and recommendations as data; validation commands come only from project config. Each admitted finding retains its exact reviewed target SHA as provenance. Before the fixer agent starts, Hive checks out the fresh current base and, when that SHA has advanced, loads each bounded cited line from the reviewed commit and revalidates that full line there. An unchanged line or one uniquely relocated byte-for-byte continues; missing, changed, oversized, or ambiguous evidence becomes a fail-closed `stale_evidence` outcome. Hive then runs the configured command as a clean baseline and refuses a failing baseline or one that mutates the checkout.
 - Review launches are admitted only with conservative initial-context headroom,

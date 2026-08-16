@@ -2914,6 +2914,46 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal [ { project: "p1", exit_code: 0, now: T0 + 10 } ], patrol.completed
   end
 
+  def test_patrol_completion_failure_is_isolated_from_child_reaping
+    config = { "daemon" => { "edit_debounce_sec" => 30, "poll_interval_sec" => 30 } }
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 5, max_concurrent_per_project: 5,
+      max_runs_per_day_per_project: 100
+    )
+    supervisor = FakeSupervisor.new
+    def supervisor.reap_all(now: Time.now)
+      return [] if @reaped
+
+      @reaped = true
+      [ ChildExit.new(pid: 901, exit_code: Hive::ExitCodes::CONFIG,
+                      project: "p1", slug: "patrol", stage: "patrol",
+                      command: "hive patrol p1 --json", started_at: T0,
+                      finished_at: now, json_envelope: nil) ]
+    end
+    controller.record_dispatch(pid: 901, project: "p1", slug: "patrol", stage: "patrol",
+                               command: "hive patrol p1 --json", started_at: T0,
+                               state_file_mtime: nil)
+    patrol = FakePatrolScheduler.new
+    patrol.define_singleton_method(:complete) do |**|
+      raise Hive::ConfigError, "patrol occurrence has nonterminal effects"
+    end
+    logger = StubLogger.new
+    dispatcher = Hive::Daemon::Dispatcher.new(
+      config: config, controller: controller, supervisor: supervisor,
+      status_consumer: FakeStatusConsumer.new, logger: logger,
+      patrol_scheduler: patrol
+    )
+
+    dispatcher.tick(now: T0 + 10)
+
+    fatal = logger.events.find do |name, attrs|
+      name == :fatal && attrs[:message].include?("patrol_scheduler.complete raised")
+    end
+    refute_nil fatal
+    assert_match(/nonterminal effects/, fatal.last.fetch(:message))
+    assert_equal "p1", fatal.last.fetch(:project)
+  end
+
   def test_edit_action_within_debounce_after_baseline_logs_debouncing
     # With a baseline already recorded (i.e. NOT first sight), a fresh
     # edit within the debounce window logs :debouncing and does not

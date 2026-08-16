@@ -129,9 +129,26 @@ module Hive
           rescue JSON::ParserError
             nil
           end
+          payloads.concat(trailing_json_payloads(message))
           raise raw_error unless payloads.one?
 
           payloads.first
+        end
+
+        def trailing_json_payloads(message)
+          offset = 0
+          message.each_line.filter_map do |line|
+            stripped = line.lstrip
+            candidate = if stripped.start_with?("{")
+              start = offset + line.bytesize - stripped.bytesize
+              JSON.parse(message.byteslice(start..))
+            end
+            offset += line.bytesize
+            candidate
+          rescue JSON::ParserError
+            offset += line.bytesize
+            nil
+          end
         end
 
         def output_snapshot(target)

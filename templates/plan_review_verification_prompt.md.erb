@@ -15,8 +15,17 @@ Accepted dispositions to verify:
 <%= verification_findings_json %>
 </user_supplied_<%= nonce %>>
 
-Write one JSON object to `<%= output_path %>` using schema
-`hive-plan-review-adapter-result`, version 1, bound to:
+<% if host_output_mode %>
+Return the review-result JSON as the complete string value at
+`files["<%= output_basename %>"]` in the required host-output wrapper. The
+outer response must be that wrapper, not the review-result object, and its file
+key must be the basename exactly, never the absolute path.
+<% else %>
+Write one JSON object to `<%= output_path %>`.
+<% end %>
+
+The review-result object must use schema `hive-plan-review-adapter-result`,
+version 1, bound to:
 
 - `attempt_id`: `<%= attempt_id %>`
 - `plan_digest`: `<%= plan_digest %>`

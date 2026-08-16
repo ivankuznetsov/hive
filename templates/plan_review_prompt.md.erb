@@ -21,7 +21,14 @@ Required coverage: `<%= required_coverage_json %>`
 
 The reviewer may edit only the disposable directory containing that copy. It
 must not edit the canonical plan, task metadata, markers, or project source.
+<% if host_output_mode %>
+Return the review-result JSON as the complete string value at
+`files["<%= output_basename %>"]` in the required host-output wrapper. The
+outer response must be that wrapper, not the review-result object, and its file
+key must be the basename exactly, never the absolute path.
+<% else %>
 Write one JSON object to `<%= output_path %>` and no other authority artifact.
+<% end %>
 The object must use schema `hive-plan-review-adapter-result`, version 1, and
 include these exact observation bindings:
 

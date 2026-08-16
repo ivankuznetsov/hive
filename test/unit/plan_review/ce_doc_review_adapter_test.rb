@@ -71,6 +71,8 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       assert_includes prompt, "Review the immutable executable-plan copy"
       assert_includes prompt, "do not require an external skill or subagent"
       assert_includes prompt, "Hive will replace it from the cited"
+      assert_includes prompt, 'files["hive-plan-review-result.json"]'
+      assert_includes prompt, "never the absolute path"
       refute_includes prompt, "Invoke `"
       assert_equal Digest::SHA256.hexdigest("# Plan"),
                    result.findings.first["evidence"].fetch("anchor_digest")

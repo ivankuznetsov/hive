@@ -305,6 +305,8 @@ module Hive
             plan_digest: request.plan_digest,
             policy_fingerprint: request.policy_fingerprint,
             host_computed_anchors: request.reviewer.fetch("provider") == "pi",
+            host_output_mode: request.reviewer.fetch("provider") == "pi",
+            output_basename: OUTPUT_BASENAME,
             verification_findings_json: JSON.pretty_generate(request.verification_findings)
           )
         end

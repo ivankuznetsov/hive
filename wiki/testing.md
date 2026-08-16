@@ -110,7 +110,14 @@ as named gates. Exhaustive coverage is collected by six deterministic
 test-file shards and merged once by the exact coverage gate. The first shard
 preloads the complete `lib/` catalog so never-required source files remain
 visible as unloaded, while the other five stay lazy to avoid redundant
-coverage state in forked subprocesses. CI feeds both results into the
+coverage state in forked subprocesses. Shard membership is a greedy
+byte-balanced partition of the test-file list, so editing the size of any test
+file can move unrelated files between shards. A test therefore has to require
+every production file it depends on rather than relying on a co-running file to
+load it: requiring only a nested file such as
+`hive/commands/babysit/service_installer` opens `Hive::Commands::Babysit` as a
+bare namespace, and stubbing a class method defined in `babysit.rb` then raises
+`NameError` in whichever shard happens to lack a fuller require. CI feeds both results into the
 already-required `rake test (Ruby 3.4)` check. The aggregator uses
 `always()` and fails unless coverage and the complete matrix succeeded,
 preserving one fail-closed merge contract for branches created before and after

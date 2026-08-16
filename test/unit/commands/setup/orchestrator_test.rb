@@ -10,6 +10,9 @@ require "hive/invoked_binary"
 require "hive/commands/init"
 require "hive/commands/daemon"
 require "hive/commands/daemon/service_installer"
+# Load the babysit command itself, not just its installer: the service
+# installer file only opens `Hive::Commands::Babysit` as a namespace, so the
+# takeover stub below needs babysit.rb regardless of what else a shard loads.
 require "hive/commands/babysit"
 require "hive/commands/babysit/service_installer"
 require "hive/commands/web/service_installer"

@@ -409,22 +409,34 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
     end
   end
 
-  def test_deterministic_id_detects_descriptor_tampering_and_quarantines_the_record
+  def test_authoritative_descriptor_refresh_preserves_the_durable_family_id
     with_tmp_dir do |dir|
-      store = family_store(dir)
-      created = store.resolve(thesis: thesis, repository: "acme/polyglot", job_id: "job-1", source: source)
-      path = File.join(store.root, "#{created.family_id}.json")
-      tampered = JSON.parse(File.read(path))
-      tampered["descriptor"]["concepts"] = %w[different semantic subject]
-      File.binwrite(path, JSON.generate(tampered))
-      tampered_bytes = File.binread(path)
+      original_descriptor = Hive::RefactorPatrol::SemanticDescriptor.call(
+        thesis: thesis, source: source
+      )
+      durable_id = SemanticFamily.id_for(original_descriptor)
+      revised = thesis(
+        proposed_refactor: "Consolidate checkout authorization behind one shared routing boundary",
+        evidence: [
+          {
+            "file" => "services/checkout/policy.ts", "line" => 9,
+            "claim" => "Checkout policy is now exposed through the routing boundary"
+          }
+        ]
+      )
+      aggregate = authoritative_aggregate(thesis_snapshot: revised.to_h)
+      aggregate.fetch("actions").first["family_id"] = durable_id
+      store = family_store(dir, jobs: [ aggregate ])
 
-      assert_raises(FamilyStore::InconsistentRecord) { store.send(:read_record, path) }
+      records = store.rebuild!
 
-      capture_io { store.resolve(thesis: thesis, repository: "acme/polyglot", job_id: "job-new", source: source) }
-      quarantined = quarantined_family_records(dir, created.family_id)
-      assert_equal 1, quarantined.size
-      assert_equal tampered_bytes, File.binread(quarantined.first)
+      assert_equal [ durable_id ], records.map { |record| record.fetch("family_id") }
+      assert_equal Hive::RefactorPatrol::SemanticDescriptor.call(thesis: revised, source: source),
+                   records.first.fetch("descriptor")
+      refute_equal durable_id, SemanticFamily.id_for(records.first.fetch("descriptor")),
+                   "descriptor evolution must not rename a family with durable publication identity"
+      assert_equal records.first,
+                   JSON.parse(File.read(File.join(store.root, "#{durable_id}.json")))
     end
   end
 

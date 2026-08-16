@@ -16,7 +16,6 @@ module Hive
       OCCURRENCE_KEYS = %w[fingerprint job_id thesis_id source].freeze
       SOURCE_KEYS = %w[repository url number merge_sha].freeze
       ID_PATTERN = /\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\z/
-      DETERMINISTIC_ID_PATTERN = /\Aaf1-[0-9a-f]{64}\z/
 
       private
 
@@ -113,9 +112,10 @@ module Hive
         inconsistent!("architecture family id conflicts with its filename", path) unless filename_id == family_id
         normalized = SemanticFamily.descriptor(**symbolized_descriptor(data["descriptor"]))
         inconsistent!("architecture family descriptor is not canonical", path) unless normalized == data["descriptor"]
-        if family_id.match?(DETERMINISTIC_ID_PATTERN) && SemanticFamily.id_for(normalized) != family_id
-          inconsistent!("architecture family descriptor conflicts with its deterministic id", path)
-        end
+        # SemanticFamily.id_for chooses a new identity; it is not a permanent
+        # checksum. Once an issue action publishes that id, authoritative jobs
+        # may refresh this rebuildable descriptor without renaming the remote
+        # effect or invalidating its receipt.
       rescue ArgumentError, KeyError => e
         corrupt!("architecture family descriptor is invalid (#{e.message})", path)
       end

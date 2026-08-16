@@ -160,22 +160,28 @@ class TaskWorkspaceBuilderCoverageGapsTest < Minitest::Test
 
       task.values["action"] = "ready_execute"
       decision = subject.send(
-        :decision_payload, attempts: {}, resources: {}, action_evidence_current: true
+        :decision_payload, attempts: {}, resources: {}, action_evidence_current: true,
+        answerable_questions: []
       )
       assert_equal "wait", decision.fetch("posture")
 
       archived = builder(task, native, archive: true).send(
-        :decision_payload, attempts: {}, resources: {}, action_evidence_current: true
+        :decision_payload, attempts: {}, resources: {}, action_evidence_current: true,
+        answerable_questions: []
       )
       assert_equal "investigate", archived.fetch("posture")
 
       task.values.merge!("recovery_visible" => true, "recovery_enabled" => false)
-      disabled = subject.send(:action_enabled, evidence_current: true)
+      disabled = subject.send(
+        :action_enabled, evidence_current: true, answer_evidence_current: false
+      )
       assert_equal false, disabled.first
       task.values["recovery_visible"] = false
       task.values["dispatch_action"] = "execute"
       no_daemon = builder(task, native, daemon_enabled: false)
-      assert_equal [ true, nil ], no_daemon.send(:action_enabled, evidence_current: true)
+      assert_equal [ true, nil ], no_daemon.send(
+        :action_enabled, evidence_current: true, answer_evidence_current: false
+      )
 
       task.recovery_value = { "status" => "queued" }
       payload = subject.send(:operator_payload)
@@ -184,8 +190,6 @@ class TaskWorkspaceBuilderCoverageGapsTest < Minitest::Test
       question = Object.new
       question.define_singleton_method(:[]) { |*| raise "bad question" }
       assert_nil subject.send(:question_value, question, :n)
-      subject.instance_variable_set(:@questions_count, "bad")
-      assert_equal 0, subject.send(:question_count)
       task.predicate_error = true
       refute subject.send(:task_predicate, :passable?)
 

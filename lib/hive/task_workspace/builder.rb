@@ -33,8 +33,7 @@ module Hive
                      cursor_codec:, limits: Limits.new, attempt_store: nil,
                      projection_store: nil, projection_read: nil,
                      event_reader: nil, journal_reader: nil, usage_reader: Hive::UsageDb,
-                     current_context_observation: nil, questions_count: nil,
-                     questions: nil,
+                     current_context_observation: nil, questions: nil,
                      daemon_enabled: true, archive: false,
                      clock: -> { Time.now.utc })
         @task = task
@@ -55,7 +54,6 @@ module Hive
         @journal_reader = journal_reader
         @usage_reader = usage_reader
         @current_context_observation = current_context_observation
-        @questions_count = questions_count
         @questions = questions
         @daemon_enabled = daemon_enabled == true
         @archive = archive == true
@@ -95,6 +93,8 @@ module Hive
           "artifacts" => artifacts
         }
         status = status_payload(read)
+        operator = operator_payload
+        answerable_questions = status["freshness"] == "fresh" ? operator.fetch("questions") : []
         action_evidence_current = status["state"] == "current" &&
                                   decision_panels_current?(attempts, resources)
 
@@ -107,10 +107,11 @@ module Hive
               task_value("condition_task_generation") || task_value("task_generation")
           },
           status: status,
-          operator: operator_payload,
+          operator: operator,
           decision: decision_payload(
             attempts: attempts, resources: resources,
-            action_evidence_current: action_evidence_current
+            action_evidence_current: action_evidence_current,
+            answerable_questions: answerable_questions
           ),
           panels: panels
         )
@@ -355,16 +356,22 @@ module Hive
         }
       end
 
-      def decision_payload(attempts:, resources:, action_evidence_current:)
+      def decision_payload(attempts:, resources:, action_evidence_current:,
+                           answerable_questions:)
         action_kind = task_value("action")&.to_s
         action_label = task_value("action_label")&.to_s
-        enabled, action_reason = action_enabled(evidence_current: action_evidence_current)
+        answer_evidence_current = answerable_questions.any?
+        enabled, action_reason = action_enabled(
+          evidence_current: action_evidence_current,
+          answer_evidence_current: answer_evidence_current
+        )
         posture, reason = if @archive
           [ "investigate", "Archived task evidence is read-only." ]
+        elsif answer_evidence_current
+          count = answerable_questions.length
+          [ "answer", "#{count} required #{count == 1 ? 'question is' : 'questions are'} unanswered." ]
         elsif !action_evidence_current
           [ "investigate", "Action-driving workspace evidence is degraded or incomplete." ]
-        elsif question_count.positive?
-          [ "answer", "#{question_count} required #{question_count == 1 ? 'question is' : 'questions are'} unanswered." ]
         elsif task_predicate(:passable?)
           [ "approve", "The current stage has a canonical completion marker." ]
         elsif task_predicate(:recovery_action_visible?) && task_predicate(:recovery_action_enabled?)
@@ -448,12 +455,12 @@ module Hive
         nil_if_empty && text.empty? ? nil : text
       end
 
-      def action_enabled(evidence_current:)
+      def action_enabled(evidence_current:, answer_evidence_current:)
         return [ false, "Archived tasks are read-only." ] if @archive
+        return [ true, nil ] if answer_evidence_current
         unless evidence_current
           return [ false, "Refresh complete workspace evidence before acting." ]
         end
-        return [ true, nil ] if question_count.positive?
         return [ true, nil ] if task_predicate(:passable?)
         if task_predicate(:recovery_action_visible?)
           return task_predicate(:recovery_action_enabled?) ? [ true, nil ] :
@@ -490,14 +497,6 @@ module Hive
         return "The task is on an authorized hold." if task_value("held")
 
         "The canonical task action reports an active agent."
-      end
-
-      def question_count
-        return Integer(@questions_count) unless @questions_count.nil?
-
-        Integer(task_value("unanswered_questions") || 0)
-      rescue ArgumentError, TypeError
-        0
       end
 
       def task_predicate(name)

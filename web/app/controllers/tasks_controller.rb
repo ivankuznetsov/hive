@@ -3,10 +3,14 @@ class TasksController < Tasks::BaseController
     questions = @task.open_questions
     @daemon_enabled = @project.daemon_enabled?
     @workspace = task_workspace_builder(
-      questions_count: questions.length, questions: questions, daemon_enabled: @daemon_enabled
+      questions: questions, daemon_enabled: @daemon_enabled
     ).call
     @workspace_action_evidence_current = @task_source.nil? &&
                                          @workspace.dig("status", "state") == "current"
+    # Bound questions are revalidated by Hive::Commands::Answer on write; the
+    # workspace decision keeps their readiness independent of execution evidence.
+    @answer_input_enabled = @workspace.dig("decision", "posture") == "answer" &&
+                            @workspace.dig("decision", "action", "enabled") == true
     @artifact_panel = @workspace.dig("panels", "artifacts")
     @publication_refresh_available = @task_source.nil? &&
                                      session[:github_token].present? &&

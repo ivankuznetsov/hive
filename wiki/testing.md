@@ -1217,14 +1217,19 @@ Rails model/integration tests assert authenticated HTML/JSON operator-state
 parity, exact target resolution, every archived mutation route's read-only
 boundary, per-panel degradation, signed
 timeline pagination, canonical action routes, publication refresh auth/CSRF,
-and zero remote reads from ordinary page/JSON/broadcast paths. The Playwright
+zero remote reads from ordinary page/JSON/broadcast paths, and enabled
+binding-backed Q&A on legacy tasks whose execution projection has no checkpoint.
+The Playwright
 `task_workspace_test.rb` plus existing pipeline and kanban suites exercise
 1280x800, 3840x1400, 375x812, and real Chromium 400% device-scale emulation at
 an effective 320-CSS-pixel viewport;
 keyboard traversal, 24-pixel targets, dependency forest/table parity,
 focus/exact-selection/disclosure/scroll preservation, permanent log/diff and
 timeline-inspection frames, morph-owned publication facts, and non-repeating
-material announcements.
+material announcements. Pipeline coverage keeps a typed answer enabled and
+intact across a pushed morph while the task workspace remains partial, rejects
+an intervention draft when its opaque binding changes between rounds, and unit
+coverage separately proves non-answer actions still fail closed.
 
 During implementation, run the smallest named files first. Before handoff run
 `bundle exec rake test` from the repository root, then the Web application's

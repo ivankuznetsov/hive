@@ -2008,6 +2008,49 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_saturated_occurrence_denies_an_abandoned_prepared_effect_before_rollover
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      predecessor = store.occurrence_capture("job-7")
+      expired = store.claim_discovery!(
+        "job-7",
+        owner: "daemon-crashed",
+        analysis_sha: "head",
+        now: T0,
+        lease_sec: 60,
+        owner_pid: 4242,
+        owner_process_start_time: "boot-dead"
+      )
+      intent = Hive::Modules::Migration::EffectIntent.build(
+        module_name: "architecture-patrol",
+        occurrence_id: predecessor.occurrence_id,
+        authority: predecessor.owner,
+        owner_epoch: predecessor.owner_epoch,
+        sink: "discovery",
+        target: "job-7:checkpoint-progress",
+        idempotency_key: "job-7:abandoned-progress",
+        capability: "filesystem_write",
+        claim_generation: expired.fetch(:generation),
+        scope: { "job_id" => "job-7" },
+        created_at: T0 + 1
+      )
+      store.prepare_effect!(intent, now: T0 + 1)
+      scheduler = scheduler(entry, store)
+
+      with_constant(
+        Hive::Modules::Migration::PatrolEvidence,
+        :MAX_EFFECTS_PER_OCCURRENCE,
+        16
+      ) do
+        candidates = scheduler.candidates(now: T0 + 120)
+
+        assert_equal [ "job-7" ],
+                     candidates.map { |item| item.fetch(:job_id) }
+        assert store.occurrence_terminalized?(predecessor)
+      end
+    end
+  end
+
   def test_saturated_occurrence_does_not_roll_over_an_unresolved_claim
     with_project do |_dir, entry, store|
       enqueue(store)

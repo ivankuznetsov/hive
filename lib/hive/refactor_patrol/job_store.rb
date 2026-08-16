@@ -243,6 +243,7 @@ module Hive
                     :clear_recovery_failure!, :prepare_effect!, :effect_state,
                     :effect_intent, :recorded_effect_transitions,
                     :unsettled_recorded_transitions,
+                    :deny_unrecorded_prepared_effects_for_rollover!,
                     :assert_recorded_transitions_terminal!,
                     :with_effect_sender_lock, :mark_dispatch_uncertain!,
                     :reset_effect_prepared!, :settle_effect!, :deny_effect!,

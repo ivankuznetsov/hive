@@ -13,8 +13,13 @@ leaves the job immediately schedulable if rollover is interrupted. Manual PR
 discovery waits for the daemon's automatic rollover instead of starting a claim
 that cannot finish within the remaining journal capacity.
 
+If that dead worker stopped after preparing a local transition but before the
+authoritative JobStore mutation, rollover denies the provably unrecorded
+prepared effect in place. A recorded or dispatch-uncertain effect remains
+fenced for exact reconciliation rather than being discarded.
+
 Ordinary Patrol review and fix now use one launch-envelope policy. Exact
-exact and coarse `models:` routes retain precedence, while Claude-backed runs
+and coarse `models:` routes retain precedence, while Claude-backed runs
 without an active route receive the project's
 `claude.model` and `claude.effort` pins instead of inheriting Claude Code's
 interactive default model.

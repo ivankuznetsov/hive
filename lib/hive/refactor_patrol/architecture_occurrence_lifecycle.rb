@@ -115,6 +115,11 @@ module Hive
         )
         aggregate = store.read_job(aggregate.fetch("job_id"))
         store.assert_recorded_transitions_terminal!(aggregate)
+        store.deny_unrecorded_prepared_effects_for_rollover!(
+          aggregate,
+          occurrence_id: provisional.occurrence_id,
+          now: now
+        )
         store.reserve_successor_occurrence!(
           aggregate.fetch("job_id"),
           predecessor: provisional,

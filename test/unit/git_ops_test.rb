@@ -134,6 +134,25 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  def test_delete_branch_if_head_rejects_unusable_lease_arguments
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      run!("git", "-C", dir, "branch", "patrol/recovery")
+
+      head_error = assert_raises(Hive::GitError) do
+        ops.delete_branch_if_head!("patrol/recovery", "not-a-sha")
+      end
+      assert_match(/invalid expected branch head/, head_error.message)
+
+      name_error = assert_raises(Hive::GitError) do
+        ops.delete_branch_if_head!("patrol/..recovery", ops.head_sha)
+      end
+      assert_match(/invalid Git branch name/, name_error.message)
+
+      assert ops.ref_exists?("refs/heads/patrol/recovery")
+    end
+  end
+
   def test_read_blob_at_returns_bounded_file_from_exact_revision
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

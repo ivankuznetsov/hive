@@ -1137,6 +1137,37 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
     end
   end
 
+  # Record validation already rejects a record without effect cells, so this
+  # covers the second line of defence: recovery selection must fail closed with
+  # its own message rather than leak a raw KeyError into the cycle.
+  def test_pending_attempt_effects_fails_closed_on_an_unreadable_occurrence
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      store.reserve_occurrence!(capture)
+      fingerprint = "c" * 64
+      intent = Hive::Modules::Migration::EffectIntent.build(
+        module_name: "patrol",
+        occurrence_id: capture.occurrence_id,
+        authority: capture.owner,
+        owner_epoch: capture.owner_epoch,
+        sink: "attempt",
+        target: "attempts/#{fingerprint}",
+        idempotency_key: "#{capture.occurrence_id}:attempt:#{fingerprint}",
+        capability: "repository_write",
+        created_at: capture.recorded_at
+      )
+      store.prepare_effect!(intent)
+      store.define_singleton_method(:occurrence) { |_id| { "id" => "occ-1" } }
+
+      error = assert_raises(Hive::ConfigError) do
+        store.pending_attempt_effects(capture.occurrence_id)
+      end
+
+      assert_equal "patrol interrupted attempt recovery is malformed",
+                   error.message
+    end
+  end
+
   def test_attempt_patch_write_has_no_nested_effect_crash_window
     with_tmp_dir do |root|
       store = configured_store(root, File.join(root, "evidence"))

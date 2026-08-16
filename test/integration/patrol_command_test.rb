@@ -1552,6 +1552,74 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_interrupted_fix_attempt_recovery_fails_closed_on_bad_reconciliation
+    unavailable = assert_raises(Hive::ConfigError) do
+      command_for.send(
+        :recover_pending_fix_attempts!,
+        recovery_state_double(
+          reconciliations: { "fp-1" => { "status" => "absent" } }
+        ),
+        recovery_fixer_double,
+        recovery_capture_double
+      )
+    end
+    assert_equal "patrol interrupted attempt finding is unavailable",
+                 unavailable.message
+
+    ambiguous = assert_raises(Hive::ConfigError) do
+      command_for.send(
+        :recover_pending_fix_attempts!,
+        recovery_state_double(
+          reconciliations: { "fp-1" => { "status" => "conflicted" } }
+        ),
+        recovery_fixer_double,
+        recovery_capture_double
+      )
+    end
+    assert_equal "patrol interrupted attempt recovery is ambiguous",
+                 ambiguous.message
+
+    malformed = assert_raises(Hive::ConfigError) do
+      command_for.send(
+        :recover_pending_fix_attempts!,
+        recovery_state_double(reconciliations: {}),
+        recovery_fixer_double,
+        recovery_capture_double
+      )
+    end
+    assert_equal "patrol interrupted attempt recovery is malformed",
+                 malformed.message
+  end
+
+  def recovery_capture_double
+    capture = Object.new
+    capture.define_singleton_method(:occurrence_id) { "occ-1" }
+    capture
+  end
+
+  def recovery_fixer_double
+    fixer = Object.new
+    fixer.define_singleton_method(:recover_interrupted_attempt) do |_finding|
+      raise "recovery fixer must not run for an unresolvable attempt"
+    end
+    fixer
+  end
+
+  def recovery_state_double(reconciliations:, findings: [])
+    state = Object.new
+    state.define_singleton_method(:pending_attempt_effects) do |_occurrence_id|
+      [ [ :intent, "fp-1" ] ]
+    end
+    state.define_singleton_method(:reconcile_attempts) do |_fingerprints|
+      reconciliations
+    end
+    state.define_singleton_method(:findings) { findings }
+    state.define_singleton_method(:settle_effect!) do |*_args, **_kwargs|
+      raise "unresolvable attempts must not settle their effect"
+    end
+    state
+  end
+
   def test_malformed_reconciled_patch_fails_closed
     error = assert_raises(Hive::ConfigError) do
       command_for.send(

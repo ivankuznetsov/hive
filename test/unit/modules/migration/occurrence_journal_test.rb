@@ -71,6 +71,23 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     end
   end
 
+  # Record validation already rejects a record without effect states, so this
+  # covers the second line of defence: terminal_effects? must fail closed on
+  # its own rather than leak a raw KeyError to a recovery caller.
+  def test_terminal_effects_fails_closed_on_a_record_without_effects
+    with_journal do |journal|
+      intent = effect_intent
+      journal.prepare_effect!(intent, now: NOW)
+      journal.define_singleton_method(:fetch) { |_id| { "id" => "occ-1" } }
+
+      error = assert_raises(Hive::ConfigError) do
+        journal.terminal_effects?(intent.occurrence_id)
+      end
+
+      assert_equal "patrol occurrence is malformed", error.message
+    end
+  end
+
   def test_recovery_active_is_one_view_for_reserved_and_pending_projection
     with_journal do |journal|
       occurrence_id = patrol_capture.occurrence_id

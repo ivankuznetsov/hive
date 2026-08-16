@@ -916,7 +916,9 @@ move after current degraded clearance, an external-plan-edit linked rollover,
 and an explicit legacy execute adoption receipt. The complete
 `test/unit/plan_review/` set covers classifier categories, immutable/CAS state,
 stable finding fingerprints, exact-scoped decisions, adapter parsing and
-canonical-plan isolation, model-family independence, bounded retries, one
+canonical-plan isolation, the Pi host-computed anchor rewrite including its
+deferral of unparsable reviewer output to the shared result parser,
+model-family independence, bounded retries, one
 revision/verification, coverage semantics, and stale transition rejection.
 Status integration plus Rails model/integration/system tests pin the same
 projection and actions through CLI, operational status, daemon/TUI, and Web.

@@ -79,6 +79,33 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_pi_anchor_rewrite_defers_unparsable_output_to_the_result_parser
+    with_request do |request, _plan_path|
+      pi_request = request.with(
+        reviewer: request.reviewer.merge(
+          "provider" => "pi",
+          "model" => "openrouter/deepseek/deepseek-v4-pro:xhigh",
+          "family" => "deepseek",
+          "route" => "pi-openrouter"
+        )
+      )
+      runner = lambda do |output_path:, request:, **|
+        File.write(output_path, "{not json")
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+      adapter = Hive::PlanReview::Adapters::CeDocReview.new(
+        runner:,
+        capability_probe: ->(**) { flunk "Pi direct review must not probe a host skill" },
+        capability_resolver: ->(*) { flunk "Pi direct review must not resolve a host skill" }
+      )
+
+      result = adapter.call(pi_request)
+
+      assert_equal "terminal_failure", result.outcome
+      assert_includes result.diagnostic, "not valid JSON"
+    end
+  end
+
   def test_route_receipt_normalizes_model_family_before_attesting_independence
     with_request do |request, _plan_path|
       runner = lambda do |output_path:, request:, **|

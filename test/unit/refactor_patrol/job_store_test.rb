@@ -732,6 +732,49 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_unexpired_dead_claim_is_claimable_and_reclaimed_only_after_liveness_proof
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      first = store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
+        now: T0, lease_sec: 7200
+      )
+      store.attach_discovery_process!(
+        first, pid: 1234, process_start_time: "boot-1", pgid: 1234,
+        now: T0 + 1, lease_sec: 7200
+      )
+
+      assert_empty store.claimable_jobs(
+        now: T0 + 60,
+        claim_liveness_resolver: ->(_attempt) { :unresolved }
+      )
+      assert_equal [ "pr-7-stable" ], store.claimable_jobs(
+        now: T0 + 60,
+        claim_liveness_resolver: ->(_attempt) { :resolved }
+      ).map { |item| item.fetch("job_id") }
+
+      assert_nil store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-b", analysis_sha: "c" * 40,
+        now: T0 + 60, lease_sec: 7200,
+        claim_resolver: ->(_attempt) { :unresolved },
+        allow_unexpired_recovery: true
+      )
+      reclaimed = store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-b", analysis_sha: "c" * 40,
+        now: T0 + 60, lease_sec: 7200,
+        claim_resolver: ->(_attempt) { :resolved },
+        allow_unexpired_recovery: true
+      )
+
+      assert_equal first.fetch(:generation) + 1,
+                   reclaimed.fetch(:generation)
+      attempts = store.read_job("pr-7-stable").fetch("attempts")
+      assert_equal "superseded", attempts[-2].fetch("state")
+      assert_equal "inactive_claim_resolved", attempts[-2].fetch("outcome")
+    end
+  end
+
   def test_rejects_zombie_records_with_two_active_or_unordered_discovery_attempts
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
@@ -1967,7 +2010,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         owner_process_start_time: "gone"
       )
 
-      store.resolve_expired_discovery_for_rollover!(
+      store.resolve_inactive_discovery_for_rollover!(
         "pr-7-stable",
         occurrence_id: aggregate.fetch("occurrence_id"),
         now: T0 + 11,
@@ -1997,7 +2040,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       stale = assert_raises(
         Hive::RefactorPatrol::JobStore::InconsistentRecord
       ) do
-        store.resolve_expired_discovery_for_rollover!(
+        store.resolve_inactive_discovery_for_rollover!(
           "pr-7-stable", occurrence_id: "occ-other", now: T0 + 11,
           claim_liveness_resolver: ->(_claim) { :resolved }
         )
@@ -2007,7 +2050,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       unresolved = assert_raises(
         Hive::RefactorPatrol::JobStore::InconsistentRecord
       ) do
-        store.resolve_expired_discovery_for_rollover!(
+        store.resolve_inactive_discovery_for_rollover!(
           "pr-7-stable", occurrence_id: occurrence_id, now: T0 + 11,
           claim_liveness_resolver: ->(_claim) { raise "probe failed" }
         )
@@ -2021,7 +2064,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         invalid = assert_raises(
           Hive::RefactorPatrol::JobStore::InconsistentRecord
         ) do
-          store.resolve_expired_discovery_for_rollover!(
+          store.resolve_inactive_discovery_for_rollover!(
             "pr-7-stable", occurrence_id: occurrence_id, now: T0 + 11,
             claim_liveness_resolver: ->(_claim) { :resolved }
           )
@@ -2094,7 +2137,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       )
       store.prepare_effect!(uncertain, now: T0 + 1)
       store.mark_dispatch_uncertain!(uncertain, now: T0 + 1)
-      store.resolve_expired_discovery_for_rollover!(
+      store.resolve_inactive_discovery_for_rollover!(
         "pr-7-stable",
         occurrence_id: aggregate.fetch("occurrence_id"),
         now: T0 + 11,

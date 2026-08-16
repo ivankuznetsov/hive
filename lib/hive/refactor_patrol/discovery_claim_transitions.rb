@@ -8,7 +8,8 @@ module Hive
     # exact reconciliation against JobStore attempts.
     class DiscoveryClaimTransitions
       def initialize(context:, owner_pid:, owner_process_start_time:,
-                     lease_sec:, claim_resolver:, reservation_error:,
+                     lease_sec:, claim_resolver:, claim_liveness_resolver: nil,
+                     reservation_error:,
                      claim_operation: "discovery-claim",
                      operation_prefix: "discovery-")
         @context = context
@@ -16,22 +17,25 @@ module Hive
         @owner_process_start_time = owner_process_start_time
         @lease_sec = lease_sec
         @claim_resolver = claim_resolver
+        @claim_liveness_resolver = claim_liveness_resolver
         @reservation_error = reservation_error
         @claim_operation = claim_operation
         @operation_prefix = operation_prefix
       end
 
       def claim(entry:, store:, capture:, aggregate:, analysis_sha:, now:)
+        resolution = claim_resolution(aggregate, now)
+        return unless resolution
+        resolver, allow_unexpired_recovery = resolution
+
         return claim_direct(
           store,
           aggregate.fetch("job_id"),
           analysis_sha: analysis_sha,
           now: now,
-          resolver: @claim_resolver
+          resolver: resolver,
+          allow_unexpired_recovery: allow_unexpired_recovery
         ) unless @context.gateway_supported?(store)
-
-        resolver = claim_resolver(aggregate, now)
-        return unless resolver
 
         generation = next_generation(aggregate)
         job_id = aggregate.fetch("job_id")
@@ -74,6 +78,7 @@ module Hive
             analysis_sha: analysis_sha,
             now: now,
             resolver: resolver,
+            allow_unexpired_recovery: allow_unexpired_recovery,
             transition: transition(
               intent,
               operation: @claim_operation
@@ -280,7 +285,7 @@ module Hive
       private
 
       def claim_direct(store, job_id, analysis_sha:, now:, resolver:,
-                       transition: nil)
+                       allow_unexpired_recovery:, transition: nil)
         store.claim_discovery!(
           job_id,
           owner: @context.owner,
@@ -290,6 +295,7 @@ module Hive
           claim_resolver: resolver,
           owner_pid: @owner_pid,
           owner_process_start_time: @owner_process_start_time,
+          allow_unexpired_recovery: allow_unexpired_recovery,
           transition: transition
         )
       end
@@ -327,18 +333,18 @@ module Hive
         )
       end
 
-      def claim_resolver(aggregate, now)
+      def claim_resolution(aggregate, now)
         active = aggregate.fetch("attempts").reverse_each.find do |attempt|
           attempt["kind"] == JobStore::DISCOVERY_ATTEMPT_KIND &&
             @context.active_attempt?(attempt)
         end
-        return @claim_resolver unless active &&
-                                      Time.iso8601(
-                                        active.fetch("expires_at")
-                                      ) <= now
+        return [ @claim_resolver, false ] unless active
+
+        expired = Time.iso8601(active.fetch("expires_at")) <= now
+        probe = expired ? @claim_resolver : @claim_liveness_resolver
 
         resolved = begin
-          @claim_resolver&.call(
+          probe&.call(
             JSON.parse(JSON.generate(active))
           )
         rescue StandardError
@@ -346,7 +352,7 @@ module Hive
         end
         return unless resolved == :resolved
 
-        ->(_claim) { :resolved }
+        [ expired ? ->(_claim) { :resolved } : @claim_resolver, !expired ]
       end
 
       def next_generation(aggregate)

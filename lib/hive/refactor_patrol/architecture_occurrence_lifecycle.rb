@@ -107,7 +107,7 @@ module Hive
         successor = successor_capture(provisional, now: now)
         return aggregate if @dry_run
 
-        store.resolve_expired_discovery_for_rollover!(
+        store.resolve_inactive_discovery_for_rollover!(
           aggregate.fetch("job_id"),
           occurrence_id: provisional.occurrence_id,
           now: now,

@@ -132,6 +132,7 @@ module Hive
             owner_process_start_time: @owner_process_start_time,
             lease_sec: @lease_sec,
             claim_resolver: @claim_resolver,
+            claim_liveness_resolver: @claim_liveness_resolver,
             reservation_error: ReservationBlocked,
             occurrence_lifecycle: @occurrence_lifecycle
           )
@@ -162,7 +163,10 @@ module Hive
             next [ entry.fetch("name"), [] ]
           end
           discovery = if discovery_available?(entry)
-            store.claimable_jobs(now: now)
+            store.claimable_jobs(
+              now: now,
+              claim_liveness_resolver: @claim_liveness_resolver
+            )
           else
             []
           end
@@ -767,7 +771,6 @@ module Hive
             )
         end
         if discovery
-          return true if Time.iso8601(discovery.fetch("expires_at")) > now
           return true if @dry_run
 
           resolved = begin

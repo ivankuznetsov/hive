@@ -656,6 +656,41 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_restart_reclaims_a_dead_discovery_child_before_its_lease_expires
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      dead = store.claim_discovery!(
+        "job-7", owner: "daemon-crashed", analysis_sha: "head",
+        now: T0, lease_sec: 7200, owner_pid: 4242,
+        owner_process_start_time: "boot-dead"
+      )
+      store.attach_discovery_process!(
+        dead, pid: 4242, process_start_time: "boot-dead", pgid: 4242,
+        now: T0 + 1, lease_sec: 7200
+      )
+      probes = []
+      scheduler = scheduler(
+        entry, store,
+        claim_resolver: ->(_claim) { :resolved },
+        claim_liveness_resolver: lambda do |claim|
+          probes << claim
+          :resolved
+        end
+      )
+
+      candidate = scheduler.candidates(now: T0 + 60).fetch(0)
+      dispatch = scheduler.reserve(candidate, now: T0 + 60)
+
+      assert_equal "job-7", dispatch.dig(:dispatch_token, :job_id)
+      assert_equal dead.fetch(:generation) + 1,
+                   dispatch.dig(:dispatch_token, :generation)
+      assert probes.any? { |claim| claim["pid"] == 4242 }
+      attempts = store.read_job("job-7").fetch("attempts")
+      assert_equal "superseded", attempts[-2].fetch("state")
+      assert_equal "inactive_claim_resolved", attempts[-2].fetch("outcome")
+    end
+  end
+
   def test_spawn_transition_renews_discovery_lease_from_verified_child_start
     with_project do |_dir, entry, store|
       enqueue(store)
@@ -1967,7 +2002,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_saturated_occurrence_rolls_over_a_provably_expired_claim
+  def test_saturated_occurrence_rolls_over_a_provably_inactive_claim
     with_project do |_dir, entry, store|
       enqueue(store)
       predecessor = store.occurrence_capture("job-7")
@@ -1976,7 +2011,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         owner: "daemon-crashed",
         analysis_sha: "head",
         now: T0,
-        lease_sec: 60,
+        lease_sec: 7200,
         owner_pid: 4242,
         owner_process_start_time: "boot-dead"
       )

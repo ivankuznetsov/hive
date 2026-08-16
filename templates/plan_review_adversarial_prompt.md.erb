@@ -26,6 +26,11 @@ not clearance authority.
 For each finding, set `anchor_digest` to the lowercase SHA-256 of the selected
 inclusive line range after removing each line terminator and joining the lines
 with a single `\n`; `path` must be exactly `plan.md`.
+<% if host_computed_anchors %>
+This confined route has no hashing tool. Set `anchor_digest` to 64 lowercase
+zeroes for each otherwise valid finding; Hive will replace it from the cited
+line range before validating the result.
+<% end %>
 
 Use exactly this JSON shape (JSON has no comments):
 

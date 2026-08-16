@@ -54,7 +54,9 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       prompt = nil
       runner = lambda do |output_path:, request:, **kwargs|
         prompt = kwargs.fetch(:prompt)
-        File.write(output_path, JSON.generate(valid_result(request)))
+        payload = valid_result(request)
+        payload.fetch("findings").first.fetch("evidence")["anchor_digest"] = "0" * 64
+        File.write(output_path, JSON.generate(payload))
         { "status" => "ok", "actual_route" => request.reviewer }
       end
       adapter = Hive::PlanReview::Adapters::CeDocReview.new(
@@ -68,7 +70,10 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       assert_equal "success", result.outcome
       assert_includes prompt, "Review the immutable executable-plan copy"
       assert_includes prompt, "do not require an external skill or subagent"
+      assert_includes prompt, "Hive will replace it from the cited"
       refute_includes prompt, "Invoke `"
+      assert_equal Digest::SHA256.hexdigest("# Plan"),
+                   result.findings.first["evidence"].fetch("anchor_digest")
     end
   end
 
@@ -237,7 +242,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
-  def test_production_runner_attests_served_model_only_when_the_agent_reports_one
+  def test_production_runner_attests_the_explicitly_launched_model_and_detects_a_served_override
     with_runner do |runner, request, output_path|
       payload = valid_result(request)
       replacement = lambda do |_task, expected_output:, **|
@@ -268,8 +273,25 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
         )
       end
 
-      refute silent.fetch("actual_route").key?("model")
-      refute silent.fetch("actual_route").key?("family")
+      assert_equal request.reviewer.fetch("model"), silent.dig("actual_route", "model")
+      assert_equal request.reviewer.fetch("family"), silent.dig("actual_route", "family")
+    end
+
+    with_runner do |runner, request, output_path|
+      payload = valid_result(request)
+      replacement = lambda do |_task, expected_output:, **|
+        File.write(expected_output, JSON.generate(payload))
+        { status: :ok, usage: { model: "unexpected-model" } }
+      end
+      overridden = nil
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
+        overridden = runner.call(
+          prompt: "review", cwd: request.output_directory, output_path:, request:
+        )
+      end
+
+      assert_equal "unexpected-model", overridden.dig("actual_route", "model")
+      refute overridden.fetch("actual_route").key?("family")
     end
   end
 

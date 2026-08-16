@@ -86,6 +86,18 @@ module Hive
         end
       end
 
+      # Daemon admission must serialize occurrence recovery/reservation with
+      # the full worker cycle without waiting inside a scheduler tick. The
+      # acquired flag distinguishes contention from a block returning nil.
+      def try_with_cycle_admission
+        acquired = false
+        value = @cycle_directory.with_lock("cycle.lock", nonblock: true) do
+          acquired = true
+          yield
+        end
+        [ acquired, value ]
+      end
+
       def configure_effect_gateway!(capture:, evidence_store:, config_loader:,
                                     capability_checker:, module_execution: nil,
                                     gateway_factory: nil)

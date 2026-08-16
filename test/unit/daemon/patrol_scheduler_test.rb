@@ -131,6 +131,28 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_live_cycle_blocks_recovery_and_reservation_admission
+    with_tmp_dir do |dir|
+      write_state(dir, "last_scanned_sha" => "old")
+      entry = project_entry(dir)
+      state = Hive::Patrol::StateStore.new(dir)
+      state.reserve_occurrence!(reservation_capture(entry), now: T0)
+      sched = scheduler(entry, enabled_cfg)
+
+      state.with_cycle_lock do
+        assert_empty sched.candidates(now: T0),
+                     "scheduler recovery must not adopt a live worker occurrence"
+      end
+
+      candidate = sched.candidates(now: T0).fetch(0)
+      state.with_cycle_lock do
+        assert_nil sched.reserve(candidate, now: T0),
+                   "reservation must lose to a cycle that starts after selection"
+      end
+      refute sched.pending?("p1")
+    end
+  end
+
   def test_candidate_boundary_preserves_identity_and_reservation_rechecks_ownership
     with_tmp_dir do |dir|
       write_state(dir, "last_scanned_sha" => "old")
@@ -734,6 +756,9 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       ) do |**|
         raise RuntimeError, "masking persistence error"
       end
+      masking_store.define_singleton_method(:try_with_cycle_admission) do |&block|
+        [ true, block.call ]
+      end
       factories = [
         ->(_candidate) { raise original },
         ->(_candidate) { masking_store }
@@ -805,6 +830,9 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       store = Object.new
       store.define_singleton_method(:occurrence_capture) { |_occurrence_id| capture }
       store.define_singleton_method(:reserve_occurrence!) { |_capture, now:| now }
+      store.define_singleton_method(:try_with_cycle_admission) do |&block|
+        [ true, block.call ]
+      end
       sched = Hive::Daemon::PatrolScheduler.new(
         registry: -> { [ entry ] },
         migration_ownership: ->(*) { true },
@@ -975,6 +1003,9 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
 
       failure = nil
       true
+    end
+    store.define_singleton_method(:try_with_cycle_admission) do |&block|
+      [ true, block.call ]
     end
     store
   end

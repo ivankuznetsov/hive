@@ -180,32 +180,35 @@ module Hive
         return nil unless reservation_owner?(snapshot)
 
         state = state_store(entry)
-        capture = if candidate[:recovery_occurrence_id]
-          state.occurrence_capture(candidate.fetch(:recovery_occurrence_id))
-        else
-          interval = cfg.dig("patrol", "poll_interval_sec") || 600
-          base_id = schedule_reservation_id(entry, now, interval)
-          state.reserve_attempt_occurrence!(
-            base_id,
-            window_started_at: schedule_window(now, interval),
-            now: now
-          ) do |generation|
-            capture_reservation(
-              entry, snapshot, now,
-              poll_interval_sec: interval,
-              attempt_generation: generation,
-              selection_input: candidate.fetch(:selection_input),
-              selection: candidate.fetch(:selection)
-            )
+        cycle_admitted, capture = state.try_with_cycle_admission do
+          selected = if candidate[:recovery_occurrence_id]
+            state.occurrence_capture(candidate.fetch(:recovery_occurrence_id))
+          else
+            interval = cfg.dig("patrol", "poll_interval_sec") || 600
+            base_id = schedule_reservation_id(entry, now, interval)
+            state.reserve_attempt_occurrence!(
+              base_id,
+              window_started_at: schedule_window(now, interval),
+              now: now
+            ) do |generation|
+              capture_reservation(
+                entry, snapshot, now,
+                poll_interval_sec: interval,
+                attempt_generation: generation,
+                selection_input: candidate.fetch(:selection_input),
+                selection: candidate.fetch(:selection)
+              )
+            end
           end
+          if selected && candidate[:recovery_occurrence_id]
+            state.reserve_occurrence!(selected, now: now)
+          end
+          selected
         end
+        return nil unless cycle_admitted
         return nil unless capture &&
                           capture.owner == snapshot.fetch("owner") &&
                           capture.owner_epoch == snapshot.fetch("epoch")
-
-        if candidate[:recovery_occurrence_id]
-          state.reserve_occurrence!(capture, now: now)
-        end
         @pending[project] = {
           started_at: now,
           entry: entry,
@@ -439,11 +442,18 @@ module Hive
         ].join(":")
       end
 
-      def recover_projections(entry, now:)
+      def recover_projections(entry, now:, store: nil, admitted: false)
         project = entry.fetch("name")
-        store = nil
         occurrence_id = nil
-        store = state_store(entry)
+        store ||= state_store(entry)
+        unless admitted
+          cycle_admitted, result = store.try_with_cycle_admission do
+            recover_projections(entry, now: now, store: store, admitted: true)
+          end
+          return false unless cycle_admitted
+
+          return result
+        end
         backoff = store.recovery_backoff(now: now)
         return false if backoff.fetch("blocked")
 

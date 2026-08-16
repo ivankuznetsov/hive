@@ -406,7 +406,8 @@ module Hive
             # MessageExtractor does not surface as a final message — so without
             # scanning the raw line the limit text never reaches handle_exit and
             # the run is misreported as a generic failure (exit_code=1).
-            if limit_text.nil? && !sensitive_payload && Hive::AgentLimit.limit_reached?(line)
+            if limit_text.nil? && !sensitive_payload && provider_limit_candidate?(json) &&
+               Hive::AgentLimit.limit_reached?(line)
               detail = json && (json["message"] || (json["error"].is_a?(Hash) ? json["error"]["message"] : nil))
               limit_text = (detail || line).to_s.strip
             end
@@ -1493,6 +1494,19 @@ module Hive
 
     def parse_json_line(line)
       Hive::Agent::MessageExtractor.parse_json_line(line)
+    end
+
+    def provider_limit_candidate?(event)
+      return true unless event.is_a?(Hash)
+
+      case event["type"]
+      when "error", "turn.failed", "rate_limit_event"
+        true
+      when "result"
+        event["is_error"] == true || event["subtype"].to_s.start_with?("error")
+      else
+        false
+      end
     end
 
     def log_path

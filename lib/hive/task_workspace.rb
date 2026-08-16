@@ -145,3 +145,4 @@ module Hive
 end
 
 require "hive/task_workspace/snapshot"
+require "hive/task_workspace/semantic_snapshot"

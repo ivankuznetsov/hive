@@ -1,6 +1,7 @@
 require "test_helper"
 require "open3"
 require "tmpdir"
+require "hive/commands/task"
 require_relative "../../../test/support/workflow_helpers"
 require_relative "../support/outcome_evidence_helper"
 
@@ -1230,7 +1231,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal "application/json", response.media_type
     document = JSON.parse(response.body)
     schemer = JSONSchemer.schema(
-      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace")))
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace", version: 1)))
     )
     assert_empty schemer.validate(document).to_a
     assert_equal @project, document.dig("task", "project")
@@ -1244,6 +1245,37 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     post "/logout"
     get "/tasks/#{@project}/#{@slug}.json"
+    assert_redirected_to "/login"
+  end
+
+  test "explicit semantic workspace route is v2 while the existing JSON route stays v1" do
+    get "/tasks/#{@project}/#{@slug}/workspace.json"
+
+    assert_response :success
+    semantic = response.parsed_body
+    v2 = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace", version: 2)))
+    )
+    assert_empty v2.validate(semantic).to_a
+    assert_equal 2, semantic.fetch("schema_version")
+    refute semantic.key?("panels")
+
+    native_out, native_err = capture_io do
+      Hive::Commands::Task.new(@slug, project: @project, json: true).call
+    end
+    assert_empty native_err
+    native = JSON.parse(native_out)
+    %w[task headline action result applicability usage evidence diagnostic].each do |key|
+      assert_equal semantic.fetch(key), native.fetch(key),
+                   "Web and native semantic projection drifted at #{key}"
+    end
+
+    get "/tasks/#{@project}/#{@slug}.json"
+    assert_response :success
+    assert_equal 1, response.parsed_body.fetch("schema_version")
+
+    post "/logout"
+    get "/tasks/#{@project}/#{@slug}/workspace.json"
     assert_redirected_to "/login"
   end
 

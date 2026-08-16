@@ -70,7 +70,7 @@ class PlanReviewClearanceTest < Minitest::Test
     refute result.execution_allowed
   end
 
-  def test_blocked_coverage_stops_clearance_with_a_waiver_action
+  def test_optional_failed_coverage_degrades_without_blocking_clearance
     result = Hive::PlanReview::Clearance.evaluate(
       level: "mandatory",
       coverage: complete_coverage + [
@@ -81,11 +81,11 @@ class PlanReviewClearanceTest < Minitest::Test
       revision_complete: true, verification_complete: true
     )
 
-    assert_equal "blocked", result.state
-    assert_equal "blocked", result.outcome
-    assert_equal "security", result.blockers.first.fetch("coverage")
-    assert_match(/waive named coverage/, result.required_action)
-    refute result.execution_allowed
+    assert_equal "degraded_cleared", result.state
+    assert_equal "degraded_cleared", result.outcome
+    assert_empty result.blockers
+    assert_equal "partial_coverage", result.degradation_reason
+    assert result.execution_allowed
   end
 
   private

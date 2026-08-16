@@ -40,7 +40,7 @@ module Hive
             profile: profile,
             expected_output: output_path,
             cfg: @cfg,
-            routing_arguments: Hive::Stages::Base.model_routing_arguments(
+            **Hive::Stages::Base.model_launch_arguments(
               @cfg || {}, "review_reviewers", profile,
               current: Hive::Stages::Base.model_routing_current(spec)
             ),

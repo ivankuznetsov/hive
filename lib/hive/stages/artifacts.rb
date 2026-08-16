@@ -732,7 +732,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "artifacts") || Hive::Config::DEFAULTS.dig("timeout_sec", "artifacts"),
           log_label: "artifacts",
           profile: profile,
-          routing_arguments: Hive::Stages::Base.model_routing_arguments(
+          **Hive::Stages::Base.model_launch_arguments(
             cfg, "artifacts", profile,
             current: Hive::Stages::Base.model_routing_current(cfg["artifacts"])
           ),

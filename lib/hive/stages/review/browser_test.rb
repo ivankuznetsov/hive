@@ -131,7 +131,7 @@ module Hive
             log_label: "review-browser-pass#{format('%02d', ctx.pass)}-attempt#{format('%02d', attempt)}",
             profile: profile,
             expected_output: result_path,
-            routing_arguments: Hive::Stages::Base.model_routing_arguments(
+            **Hive::Stages::Base.model_launch_arguments(
               cfg, "review_browser", profile,
               current: Hive::Stages::Base.model_routing_current(
                 cfg.dig("review", "browser_test")

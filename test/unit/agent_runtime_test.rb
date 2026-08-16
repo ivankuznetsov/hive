@@ -454,7 +454,15 @@ class AgentRuntimeTest < Minitest::Test
 
     assert_equal original, result
     assert_equal :ok, observation.status
-    assert_equal({ input: 0, output: 9, cached: 2, model: "small" }, observation.usage)
+    assert_equal(
+      {
+        input: 0, output: 9, cached: 2, cache_read: nil,
+        cache_write: nil, reasoning: nil, input_includes_cache_read: nil,
+        input_includes_cache_write: nil, output_includes_reasoning: nil,
+        model: "small"
+      },
+      observation.usage
+    )
     assert_includes observation.diagnostic, "[REDACTED:generic_api_key]"
   end
 
@@ -475,7 +483,15 @@ class AgentRuntimeTest < Minitest::Test
     observation = Hive::AgentRuntime.observe(profile, result)
 
     assert_equal :failed, observation.status
-    assert_equal({ input: 0, output: 2, cached: 3, model: "legacy" }, observation.usage)
+    assert_equal(
+      {
+        input: 0, output: 2, cached: 3, cache_read: nil,
+        cache_write: nil, reasoning: nil, input_includes_cache_read: nil,
+        input_includes_cache_write: nil, output_includes_reasoning: nil,
+        model: "legacy"
+      },
+      observation.usage
+    )
     assert_includes observation.diagnostic, "[REDACTED:generic_api_key]"
     assert_nil Hive::AgentRuntime.observe(profile, nil).usage
   end
@@ -488,7 +504,12 @@ class AgentRuntimeTest < Minitest::Test
     )
 
     assert_equal(
-      { input: 4, output: 5, cached: 0, model: "provider/model" },
+      {
+        input: 4, output: 5, cached: 0, cache_read: nil,
+        cache_write: nil, reasoning: nil, input_includes_cache_read: nil,
+        input_includes_cache_write: nil, output_includes_reasoning: nil,
+        model: "provider/model"
+      },
       Hive::AgentRuntime.extract_usage(profile, { "type" => "usage" })
     )
   end

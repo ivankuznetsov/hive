@@ -663,6 +663,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
     visit "/tasks/#{@project}/#{folder.basename}"
     assert_selector "form[id='qa-form-1']", wait: 5
     wait_for_live_status
+    find("details.intervene summary").click
+    find("#intervene-form textarea[name='message']").fill_in with: "Answer for Q1 only"
 
     # The agent answers Q1 and asks Q2 — the open set changes [1] → [2].
     folder.join("brainstorm.md").write(
@@ -676,24 +678,26 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_selector "form[id='qa-form-1']", count: 0
     assert_selector "form[id^='qa-form-']", count: 1
     assert_selector ".qa-question", text: /Deadline/
+    assert_equal "", find("#intervene-form textarea[name='message']", visible: :all).value
   end
 
-  test "degraded Q&A controls remain disabled across a pushed morph refresh" do
+  test "checkpoint-less Q&A remains enabled across a pushed morph refresh" do
     folder = move_to_brainstorm(create_task!(@project, "Focus probe"))
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
     sign_in!
     visit "/tasks/#{@project}/#{folder.basename}"
 
-    assert_field "Answer to question 1", disabled: true, wait: 5
+    field = find_field("Answer to question 1", disabled: false, wait: 5)
     wait_for_live_status
+    field.fill_in with: "typing slowly"
     # Change the task's OWN visible context without changing the bound question,
     # then force a broadcast → morph. Waiting for that updated context proves the
-    # morph actually landed before we assert the safety state survives.
+    # morph actually landed before we assert the bound answer remains usable.
     idea_path = folder.join("idea.md")
     idea_path.write(idea_path.read.gsub("Focus probe", "Context refreshed"))
     create_task!(@project, "Refresh trigger")
     assert_selector ".idea-text", text: /Context refreshed/, wait: 10
-    assert_field "Answer to question 1", disabled: true, with: ""
+    assert_field "Answer to question 1", disabled: false, with: "typing slowly"
   end
 
   test "pasting an image attaches it like the TUI" do

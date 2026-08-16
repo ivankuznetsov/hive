@@ -41,7 +41,7 @@ class Tasks::BaseController < ApplicationController
     raise Hive::Error, "archived tasks are read-only"
   end
 
-  def task_workspace_builder(questions_count: nil, questions: nil, daemon_enabled: nil)
+  def task_workspace_builder(questions: nil, daemon_enabled: nil)
     Hive::TaskWorkspace::Builder.new(
       task: @task, native_task: @native_task, project: @project.name,
       status_availability: @status_availability,
@@ -50,7 +50,6 @@ class Tasks::BaseController < ApplicationController
       dependency_context: StatusBroadcaster.dependency_context_snapshot&.fetch(:context),
       publication_cache: publication_cache_for_current_credential,
       cursor_codec: task_workspace_cursor_codec,
-      questions_count: questions_count,
       questions: questions,
       daemon_enabled: daemon_enabled.nil? ? @project.daemon_enabled? : daemon_enabled,
       archive: @task_source.present?

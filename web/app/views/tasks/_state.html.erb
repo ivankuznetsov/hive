@@ -113,7 +113,7 @@
                 would render as a first-line indent. %>
             <p class="qa-question"><span class="qa-number">Q<%= question.fetch("n") %></span><%= question.fetch("text") %></p>
             <%= text_area_tag "answers[#{question.fetch("binding")}]", "", placeholder: "Your answer…",
-                  disabled: !@status_fresh || !@workspace_action_evidence_current,
+                  disabled: !@answer_input_enabled,
                   data: {
                     question_number: question.fetch("n"),
                     action: "input->answers#recordField select->answers#recordField"
@@ -121,7 +121,7 @@
                   aria: { label: "Answer to question #{question.fetch("n")}" } %>
           </div>
         <% end %>
-        <p><%= f.submit "Send answers", disabled: !@status_fresh || !@workspace_action_evidence_current,
+        <p><%= f.submit "Send answers", disabled: !@answer_input_enabled,
               data: { turbo_submits_with: "Sending…" } %></p>
       <% end %>
     </section>
@@ -137,10 +137,13 @@
             id: "intervene-form" do |f| %>
         <%= hidden_field_tag :binding, questions.first.fetch("binding") %>
         <%= f.text_area :message, required: true,
-              disabled: !@status_fresh || !@workspace_action_evidence_current,
-              data: { action: "input->answers#recordField select->answers#recordField" },
+              disabled: !@answer_input_enabled,
+              data: {
+                action: "input->answers#recordField select->answers#recordField",
+                draft_key: questions.first.fetch("binding")
+              },
               placeholder: "Written verbatim as the answer to Q#{questions.first.fetch("n")}…" %>
-        <p><%= f.submit "Send", disabled: !@status_fresh || !@workspace_action_evidence_current,
+        <p><%= f.submit "Send", disabled: !@answer_input_enabled,
               data: { turbo_submits_with: "Sending…" } %></p>
       <% end %>
     </details>

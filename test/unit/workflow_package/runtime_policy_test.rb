@@ -1040,12 +1040,14 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       package = File.join(dir, "package")
       FileUtils.mkdir_p([ task, package ])
 
+      unsupported_profile = Object.new
+      unsupported_profile.define_singleton_method(:name) { :unsupported }
       error = assert_raises(Hive::ConfigError) do
         Hive::WorkflowPackage::RuntimePolicy.compile_actor(
           "read-only",
           task_folder: task,
           package_root: package,
-          profile: Hive::AgentProfiles.lookup(:pi),
+          profile: unsupported_profile,
           prepare: false
         )
       end
@@ -1358,6 +1360,75 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     assert_nil result
   end
 
+  def test_scoped_pi_actor_is_wrapped_in_bubblewrap_with_read_only_tools_and_auth
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      runtime = File.join(dir, "pi-runtime")
+      executable = File.join(runtime, "pi")
+      home = File.join(dir, "home")
+      auth = File.join(home, ".pi", "agent", "auth.json")
+      output = File.join(task, "draft.md")
+      FileUtils.mkdir_p([ task, package, File.join(runtime, "theme"), File.dirname(auth) ])
+      File.write(executable, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, executable)
+      File.write(File.join(runtime, "theme", "dark.json"), "{}")
+      File.write(File.join(runtime, "theme", "light.json"), "{}")
+      File.write(auth, '{"openrouter":{"type":"api_key","key":"fixture"}}')
+
+      policy = with_available_pi_sandbox do
+        with_env("HOME" => home, "HIVE_PI_BIN" => executable) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            {
+              "preset" => "scoped",
+              "tools" => [ "Read", "LS", "Grep", "Glob", "Edit(./draft.md)" ]
+            },
+            task_folder: task,
+            package_root: package,
+            profile: Hive::AgentProfiles.lookup(:pi),
+            managed_outputs: [ output ]
+          )
+        end
+      end
+
+      assert_equal "/usr/bin/bwrap", policy.command_prefix.first
+      assert_includes policy.command_prefix.each_cons(3).to_a,
+                      [ "--ro-bind", File.realpath(runtime), "/pi-runtime" ]
+      assert_includes policy.command_prefix.each_cons(3).to_a,
+                      [ "--ro-bind", File.realpath(auth), "/runtime-home/.pi/agent/auth.json" ]
+      assert_equal "/runtime-home", policy.environment.fetch("HOME")
+      assert_equal "/runtime-home/.pi/agent",
+                   policy.environment.fetch("PI_CODING_AGENT_DIR")
+      assert_equal "/pi-runtime/pi", policy.executable
+      tools_index = policy.cli_flags.index("--tools")
+      assert_equal "read,ls,grep,find", policy.cli_flags.fetch(tools_index + 1)
+      assert_includes policy.cli_flags, "--no-extensions"
+      assert_equal [ "draft.md" ], policy.output_paths.keys
+    ensure
+      policy&.cleanup!
+    end
+  end
+
+  def test_scoped_pi_actor_rejects_agent_network_tools
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+
+      error = with_available_pi_sandbox do
+        assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            { "preset" => "scoped", "tools" => [ "Read", "WebSearch" ] },
+            task_folder: task,
+            package_root: package,
+            profile: Hive::AgentProfiles.lookup(:pi)
+          )
+        end
+      end
+      assert_includes error.message, "cannot enforce managed network tools"
+    end
+  end
+
   def test_scoped_grok_actor_rejects_missing_auth_and_supports_read_only_web_mode
     with_tmp_dir do |dir|
       task = File.join(dir, "task")
@@ -1534,6 +1605,18 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
 
   def with_available_grok_sandbox
     sandbox = Hive::WorkflowPackage::RuntimePolicy::GROK_SANDBOX_PATH
+    original_file = File.method(:file?)
+    original_executable = File.method(:executable?)
+    file_check = ->(path) { path == sandbox || original_file.call(path) }
+    executable_check = ->(path) { path == sandbox || original_executable.call(path) }
+
+    with_replaced_singleton_method(File, :file?, file_check) do
+      with_replaced_singleton_method(File, :executable?, executable_check) { yield }
+    end
+  end
+
+  def with_available_pi_sandbox
+    sandbox = Hive::WorkflowPackage::RuntimePolicy::PI_SANDBOX_PATH
     original_file = File.method(:file?)
     original_executable = File.method(:executable?)
     file_check = ->(path) { path == sandbox || original_file.call(path) }

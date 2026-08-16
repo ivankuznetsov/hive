@@ -30,8 +30,14 @@ module Hive
         PORTABLE_FILE_TOOLS + PORTABLE_NETWORK_TOOLS + PORTABLE_HOST_OUTPUT_TOOLS
       ).freeze
       GROK_SANDBOX_PATH = "/usr/bin/bwrap".freeze
+      PI_SANDBOX_PATH = "/usr/bin/bwrap".freeze
+      PI_RUNTIME_MOUNT = "/pi-runtime".freeze
+      PI_TOOL_NAMES = {
+        "Read" => "read", "LS" => "ls", "Grep" => "grep", "Glob" => "find"
+      }.freeze
       CODEX_MANAGED_PERMISSION_PROFILE = "hive-managed".freeze
       CODEX_DOCTOR_TIMEOUT_SEC = 30
+      PI_RESOLVE_TIMEOUT_SEC = 30
 
       Policy = Data.define(
         :permission_mode, :allowed_tools, :disallowed_tools, :directories,
@@ -274,7 +280,7 @@ module Hive
 
       def self.compile_portable_actor(parsed_spec, scope:, task_root:, directories:,
                                       profile:, environment:, managed_outputs:, prepare:)
-        unless %i[codex grok opencode].include?(profile.name)
+        unless %i[codex pi grok opencode].include?(profile.name)
           raise Hive::ConfigError,
                 "runner #{profile.name.inspect} cannot enforce managed workflow policy"
         end
@@ -324,6 +330,12 @@ module Hive
           compile_grok_actor(
             scope, task_root: task_root, directories: directories, profile: profile,
             environment: environment, outputs: outputs, runtime_root: runtime_root, schema: schema,
+            tool_names: tool_names
+          )
+        when :pi
+          compile_pi_actor(
+            scope, task_root: task_root, directories: directories, profile: profile,
+            environment: environment, outputs: outputs, runtime_root: runtime_root,
             tool_names: tool_names
           )
         when :opencode
@@ -467,6 +479,49 @@ module Hive
         )
       end
 
+      def self.compile_pi_actor(scope, task_root:, directories:, profile:, environment:,
+                                outputs:, runtime_root:, tool_names:)
+        unless File.file?(PI_SANDBOX_PATH) && File.executable?(PI_SANDBOX_PATH)
+          raise Hive::ConfigError, "runner :pi requires bubblewrap for managed workflow isolation"
+        end
+        network_tools = tool_names & PORTABLE_NETWORK_TOOLS
+        unless network_tools.empty?
+          raise Hive::ConfigError,
+                "runner :pi cannot enforce managed network tools #{network_tools.sort.inspect}"
+        end
+
+        executable = pi_executable(profile)
+        auth_path = pi_auth_path
+        unless File.file?(auth_path)
+          raise Hive::ConfigError, "runner :pi managed workflow auth file is unavailable"
+        end
+
+        runtime_home = runtime_root || Dir.mktmpdir("hive-managed-pi-")
+        FileUtils.mkdir_p(File.join(runtime_home, ".pi", "agent"), mode: 0o700)
+        visible_tools = tool_names - PORTABLE_HOST_OUTPUT_TOOLS
+        pi_tools = visible_tools.filter_map { |name| PI_TOOL_NAMES[name] }.uniq
+        flags = [
+          "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files"
+        ]
+        flags.concat(pi_tools.empty? ? [ "--no-tools" ] : [ "--tools", pi_tools.join(",") ])
+        pi_environment = environment.merge(
+          "HOME" => "/runtime-home",
+          "PI_CODING_AGENT_DIR" => "/runtime-home/.pi/agent",
+          "PATH" => "#{PI_RUNTIME_MOUNT}:/usr/bin"
+        ).freeze
+        prefix = pi_bwrap_prefix(
+          executable: executable, auth_path: auth_path, runtime_home: runtime_home,
+          directories: directories, cwd: task_root
+        )
+
+        portable_policy(
+          scope, task_root: task_root, directories: directories,
+          environment: pi_environment, outputs: outputs, runtime_root: runtime_home,
+          cli_flags: flags, executable: File.join(PI_RUNTIME_MOUNT, File.basename(executable)),
+          command_prefix: prefix
+        )
+      end
+
       def self.portable_policy(scope, task_root:, directories:, environment:, outputs:, runtime_root:,
                                cli_flags:, executable:, command_prefix: [])
         Policy.new(
@@ -606,6 +661,44 @@ module Hive
         root
       end
 
+      def self.pi_executable(profile)
+        configured = resolve_profile_executable(profile)
+        return configured if pi_runtime_root?(File.dirname(configured))
+
+        mise = find_executable("mise")
+        raise Hive::ConfigError, "runner :pi reported an unavailable managed executable" unless mise
+
+        stdout, _stderr, status = capture3_bounded(
+          mise, "which", "pi", timeout_sec: PI_RESOLVE_TIMEOUT_SEC,
+          environment: { "MISE_QUIET" => "1" }
+        )
+        candidate = stdout.to_s.strip
+        unless status.success? && File.absolute_path?(candidate) &&
+               File.file?(candidate) && File.executable?(candidate) &&
+               pi_runtime_root?(File.dirname(candidate))
+          raise Hive::ConfigError, "runner :pi reported an unavailable managed executable"
+        end
+        File.realpath(candidate)
+      rescue Timeout::Error
+        raise Hive::ConfigError,
+              "runner :pi managed executable probe timed out after #{PI_RESOLVE_TIMEOUT_SEC}s"
+      rescue Errno::ENOENT, Errno::EACCES
+        raise Hive::ConfigError, "runner :pi reported an unavailable managed executable"
+      end
+
+      def self.pi_runtime_root?(root)
+        File.file?(File.join(root, "theme", "dark.json")) &&
+          File.file?(File.join(root, "theme", "light.json"))
+      end
+
+      def self.pi_auth_path
+        configured = ENV.fetch("PI_CODING_AGENT_DIR", "").to_s
+        root = configured.empty? ? File.join(ENV.fetch("HOME", Dir.home), ".pi", "agent") : configured
+        File.realpath(File.join(File.expand_path(root), "auth.json"))
+      rescue Errno::ENOENT, Errno::EACCES
+        File.join(File.expand_path(root || "."), "auth.json")
+      end
+
       def self.resolve_profile_executable(profile)
         find_executable(profile.bin) ||
           raise(Hive::ConfigError, "runner #{profile.name.inspect} executable is unavailable")
@@ -703,6 +796,48 @@ module Hive
           "--chdir", cwd,
           "--"
         ])
+      end
+
+      def self.pi_bwrap_prefix(executable:, auth_path:, runtime_home:, directories:, cwd:)
+        parent_dirs = sandbox_parent_dirs(directories + [ cwd ])
+        runtime_mount = PI_RUNTIME_MOUNT
+        prefix = [
+          PI_SANDBOX_PATH,
+          "--die-with-parent", "--new-session", "--unshare-all", "--share-net",
+          "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+          "--ro-bind", "/usr", "/usr",
+          "--symlink", "usr/bin", "/bin", "--symlink", "usr/bin", "/sbin",
+          "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64",
+          "--ro-bind", File.dirname(executable), runtime_mount,
+          "--dir", "/etc", "--ro-bind", "/etc/ssl", "/etc/ssl",
+          "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
+          "--ro-bind", "/etc/hosts", "/etc/hosts",
+          "--bind", runtime_home, "/runtime-home",
+          "--ro-bind", auth_path, "/runtime-home/.pi/agent/auth.json"
+        ]
+        parent_dirs.each { |path| prefix.concat([ "--dir", path ]) }
+        directories.uniq.each { |path| prefix.concat([ "--ro-bind", path, path ]) }
+        prefix.concat([
+          "--setenv", "HOME", "/runtime-home",
+          "--setenv", "PI_CODING_AGENT_DIR", "/runtime-home/.pi/agent",
+          "--setenv", "PATH", "#{runtime_mount}:/usr/bin",
+          "--chdir", cwd,
+          "--"
+        ])
+      end
+
+      def self.sandbox_parent_dirs(paths)
+        paths.flat_map do |path|
+          parents = []
+          cursor = File.dirname(path)
+          while cursor != File.dirname(cursor)
+            parents << cursor
+            cursor = File.dirname(cursor)
+          end
+          parents
+        end.uniq.reject do |path|
+          %w[/tmp /usr /etc /proc /dev /runtime-home].include?(path)
+        end.sort_by { |path| [ path.count(File::SEPARATOR), path ] }
       end
 
       def self.workflow_escalation_reasons(workflow)

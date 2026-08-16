@@ -131,8 +131,8 @@ manifest hiding that actor surface behind a narrower disclosure is rejected.
 Bounded actors admit only on profiles that enforce the bound. Claude uses its
 native tool rules. Codex and Grok may also execute read-only actors through the
 portable managed-output adapter: Codex gets a generated named filesystem
-profile plus ephemeral user-config/rules isolation, Grok gets a bubblewrap
-mount namespace, both receive a strict JSON output schema, and Hive alone
+profile plus ephemeral user-config/rules isolation, while Pi and Grok get
+bubblewrap mount namespaces. All receive a strict JSON output contract, and Hive alone
 writes the path-qualified `Edit(...)` targets. Hive validates the complete
 response before writing, rolls back already-published companion files on a
 later publication failure, and publishes the requested stage/state artifact
@@ -157,6 +157,12 @@ named filesystem profile only the resolved declared targets, without mounting
 the task or package root. Targets must remain under a descriptor-declared root,
 must exist at launch, and must not resolve outside that root through a symlink;
 other portable runners still reject path-qualified reads they cannot enforce.
+Pi's namespace mounts only declared read roots plus its immutable runtime and
+mode-0600 auth file, exposes read-only Pi tools, disables extensions, skills,
+prompt templates, context files, and agent web tools, and keeps the writable
+runtime home disposable. The namespace shares the network only because the Pi
+process must reach its configured model provider; no shell or web tool is
+available to the model.
 When a launch is built from typed model/effort selection, its private spawn log
 and `agent_start` event record only the normalized model, requested/effective
 effort, pin state, and effort-support state. They never serialize the provider

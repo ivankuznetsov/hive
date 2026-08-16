@@ -5,6 +5,49 @@ require "hive/managed_directory"
 class ManagedDirectoryTest < Minitest::Test
   include HiveTestHelper
 
+  def test_atomic_write_temporary_target_recognizes_only_writer_owned_names
+    assert_equal "record.json",
+                 Hive::ManagedDirectory.atomic_write_temporary_target(
+                   ".record.json.tmp.123.#{'a' * 12}"
+                 )
+    assert_nil Hive::ManagedDirectory.atomic_write_temporary_target(
+      ".record.json.tmp.0.#{'a' * 12}"
+    )
+    assert_nil Hive::ManagedDirectory.atomic_write_temporary_target(
+      ".record.json.tmp.123.#{'A' * 12}"
+    )
+    assert_nil Hive::ManagedDirectory.atomic_write_temporary_target(
+      "record.json.tmp.123.#{'a' * 12}"
+    )
+  end
+
+  def test_atomic_write_temporary_name_round_trips_through_classifier
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(
+        root: root, label: "test state"
+      )
+      native = directory.instance_variable_get(:@native)
+      original = native.method(:open_file)
+      temporary = nil
+
+      with_replaced_singleton_method(
+        native,
+        :open_file,
+        lambda do |parent, name, flags, mode: nil|
+          temporary = name if name.start_with?(".record.json.tmp.")
+          original.call(parent, name, flags, mode: mode)
+        end
+      ) do
+        directory.atomic_write("record.json", "payload")
+      end
+
+      assert_equal "record.json",
+                   Hive::ManagedDirectory.atomic_write_temporary_target(
+                     temporary
+                   )
+    end
+  end
+
   def test_prepares_private_directories_and_reads_atomic_writes
     with_tmp_dir do |anchor|
       root = File.join(anchor, "state", "evidence")

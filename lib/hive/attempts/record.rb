@@ -3,6 +3,7 @@ require "json"
 require "time"
 require "hive/attempts/capability"
 require "hive/attempts/output_reference"
+require "hive/billing_evidence"
 require "hive/stringify_keys"
 
 module Hive
@@ -47,10 +48,8 @@ module Hive
         route_id provider_account_id adapter launch_binding_id model effort
       ].freeze
       ROUTE_BILLING_KEYS = %w[billing_route billing_evidence_source].freeze
-      BILLING_ROUTES = %w[subscription api unknown].freeze
-      BILLING_EVIDENCE_SOURCES = %w[
-        provider_account_config agent_profile_contract unavailable
-      ].freeze
+      BILLING_ROUTES = Hive::BillingEvidence::ROUTES
+      BILLING_EVIDENCE_SOURCES = Hive::BillingEvidence::SOURCES
       CIRCUIT_GENERATION_KEYS = %w[scope journal_epoch observed_generation].freeze
       SCOPE_KEYS = %w[kind provider_account_id model].freeze
       PROBE_BINDING_KEYS = %w[

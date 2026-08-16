@@ -1,4 +1,5 @@
 require "hive"
+require "hive/billing_evidence"
 require "hive/canonical_json"
 
 module Hive
@@ -15,11 +16,9 @@ module Hive
     QUALITY_RANK = QUALITY_LEVELS.each_with_index.to_h.freeze
     TOOL_CAPABILITIES = %w[browser filesystem mcp shell web].freeze
     PERMISSION_CAPABILITIES = %w[network read write].freeze
-    BILLING_ROUTES = %w[subscription api unknown].freeze
-    BILLING_EVIDENCE_SOURCES = %w[
-      provider_account_config agent_profile_contract unavailable
-    ].freeze
-    DIRECT_SUBSCRIPTION_ADAPTERS = %w[claude codex grok].freeze
+    BILLING_ROUTES = Hive::BillingEvidence::ROUTES
+    BILLING_EVIDENCE_SOURCES = Hive::BillingEvidence::SOURCES
+    DIRECT_SUBSCRIPTION_ADAPTERS = Hive::BillingEvidence::DIRECT_SUBSCRIPTION_ADAPTERS
 
     ACCOUNT_HEALTH_CLASSES = %w[
       authentication

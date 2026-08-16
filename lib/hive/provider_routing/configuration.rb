@@ -266,12 +266,7 @@ module Hive
             return [ value, "provider_account_config" ]
           end
 
-          if DIRECT_SUBSCRIPTION_ADAPTERS.include?(profile.name.to_s) &&
-             profile.billing_semantics.to_s == "subscription_backed"
-            return [ "subscription", "agent_profile_contract" ]
-          end
-
-          [ "unknown", "unavailable" ]
+          Hive::BillingEvidence.for_profile(profile)
         end
 
         def normalize_capabilities(raw, path)

@@ -23,7 +23,7 @@ module Hive
         read_unavailable = false
         attempts.each do |attempt|
           response = exact_usage(attempt)
-          unless truthy(response[:available])
+          unless response[:available] == true
             read_unavailable = true
             diagnostics << diagnostic(
               "usage_store_unavailable", attempt_id: attempt["attempt_id"],
@@ -356,10 +356,6 @@ module Hive
         { "source" => "task_usage", "reason" => reason }.merge(
           details.reject { |_, value| value.nil? }.transform_keys(&:to_s)
         )
-      end
-
-      def truthy(value)
-        value == true
       end
 
       def stringify(value)

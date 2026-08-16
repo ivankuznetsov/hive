@@ -1,4 +1,5 @@
 require "time"
+require "hive/billing_evidence"
 require "hive/task_activity"
 
 module Hive
@@ -13,7 +14,7 @@ module Hive
     UNITS = %w[usd tokens launches seconds turns requests].freeze
     ENFORCEMENTS = %w[controller provider_cli provider_account advisory unenforced].freeze
     BILLING_SEMANTICS = %w[api_billed subscription_backed not_applicable unknown].freeze
-    BILLING_ROUTES = %w[subscription api unknown].freeze
+    BILLING_ROUTES = Hive::BillingEvidence::ROUTES
 
     attr_reader :session_id, :started_at
 

@@ -17,6 +17,7 @@ require "hive/usage_db"
 require "hive/worktree"
 require "hive/attempts/context"
 require "hive/agent_observation"
+require "hive/billing_evidence"
 require "hive/context_provenance"
 require "hive/task_activity"
 require "hive/brainstorm_parser"
@@ -1431,14 +1432,7 @@ module Hive
           return [ context.billing_route, context.billing_evidence_source ]
         end
 
-        profile_name = profile.name.to_sym
-        if DIRECT_PROVIDER_IDENTITIES.key?(profile_name) &&
-           profile.respond_to?(:billing_semantics) &&
-           profile.billing_semantics.to_s == "subscription_backed"
-          return [ "subscription", "agent_profile_contract" ]
-        end
-
-        [ "unknown", "unavailable" ]
+        Hive::BillingEvidence.for_profile(profile)
       end
 
       def execution_identity(profile, model)

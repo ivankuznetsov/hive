@@ -539,11 +539,12 @@ module Hive
       }.compact
 
       reported_usage = if resource_exhaustion || output_completed
+        metered_usage = token_meter.usage
         last_usage ? last_usage.merge(
-          input: token_meter.usage[:input],
-          output: token_meter.usage[:output],
-          model: token_meter.usage[:model] || last_usage[:model]
-        ) : token_meter.usage
+          input: metered_usage[:input],
+          output: metered_usage[:output],
+          model: metered_usage[:model] || last_usage[:model]
+        ) : metered_usage
       else
         last_usage
       end

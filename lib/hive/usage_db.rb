@@ -1,6 +1,7 @@
 require "fileutils"
 require "securerandom"
 require "time"
+require "hive/billing_evidence"
 require "hive/paths"
 
 module Hive
@@ -14,10 +15,8 @@ module Hive
     AGENTS = %i[claude codex pi grok opencode].freeze
     BUCKETS = %i[today 7d 30d all].freeze
     SCHEMA_VERSION = 4
-    BILLING_ROUTES = %w[subscription api unknown].freeze
-    BILLING_EVIDENCE_SOURCES = %w[
-      provider_account_config agent_profile_contract unavailable
-    ].freeze
+    BILLING_ROUTES = Hive::BillingEvidence::ROUTES
+    BILLING_EVIDENCE_SOURCES = Hive::BillingEvidence::SOURCES
     BUSY_TIMEOUT_MS = 5_000
     LEGACY_SCHEMA_SQL = <<~SQL.freeze
       CREATE TABLE IF NOT EXISTS token_usage (
@@ -145,6 +144,7 @@ module Hive
       end
       with_database(create: true) do |db|
         ensure_schema!(db)
+        normalized_session_id = blank_to_nil(session_id)
         attributes = [
           SecureRandom.uuid, agent.to_s, blank_to_nil(model),
           requested_backend, requested_model, actual_backend, actual_model,
@@ -156,14 +156,14 @@ module Hive
           availability(input), availability(output), availability(cached),
           availability(cache_read), availability(cache_write),
           availability(reasoning), availability(reported_cost),
-          blank_to_nil(attempt_id), blank_to_nil(session_id),
+          blank_to_nil(attempt_id), normalized_session_id,
           task_generation.nil? ? nil : Integer(task_generation), blank_to_nil(source),
           normalized_billing_route, normalized_billing_source,
           nullable_boolean(input_includes_cache_read),
           nullable_boolean(input_includes_cache_write),
           nullable_boolean(output_includes_reasoning)
         ]
-        if attributes[27]
+        if normalized_session_id
           db.execute(SESSION_UPSERT_SQL, attributes)
           raise "session usage identity conflict" if db.changes.zero?
         else

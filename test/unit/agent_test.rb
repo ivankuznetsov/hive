@@ -1292,7 +1292,15 @@ class AgentTest < Minitest::Test
 
       result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
 
-      assert_equal({ input: 100, output: 50, cached: 50, model: "claude-opus-4-7" }, result[:usage])
+      assert_equal(
+        {
+          input: 100, output: 50, cached: 50,
+          cache_read: 20, cache_write: 30, reasoning: nil,
+          input_includes_cache_read: false, input_includes_cache_write: false,
+          output_includes_reasoning: nil, model: "claude-opus-4-7"
+        },
+        result[:usage]
+      )
       assert_equal "claude-opus-4-7", result[:model]
       assert_equal :waiting, result[:status]
     end
@@ -1535,7 +1543,15 @@ class AgentTest < Minitest::Test
       assert_equal :ok, result.fetch(:status)
       assert result.fetch(:output_completed)
       assert_nil result.fetch(:resource_exhaustion)
-      assert_equal({ input: 27, output: 4_439, cached: 15_554, model: nil }, result.fetch(:usage))
+      assert_equal(
+        {
+          input: 27, output: 4_439, cached: nil,
+          cache_read: 15_554, cache_write: nil, reasoning: nil,
+          input_includes_cache_read: false, input_includes_cache_write: nil,
+          output_includes_reasoning: nil, model: nil
+        },
+        result.fetch(:usage)
+      )
     end
   end
 

@@ -136,9 +136,14 @@ module Hive
             capability_checker: method(:effect_capability_allowed?),
             module_execution: @module_execution
           )
+          launch_budget = Hive::Patrol::LaunchBudget.new(
+            project_root, cfg: cfg, project_name: entry.fetch("name")
+          )
+          fixer = build_fixer(project_root, cfg, state, launch_budget)
+          recover_pending_fix_attempts!(state, fixer, capture)
           state.recover_pending_fingerprint_effects!
         end
-        launch_budget = Hive::Patrol::LaunchBudget.new(
+        launch_budget ||= Hive::Patrol::LaunchBudget.new(
           project_root, cfg: cfg, project_name: entry.fetch("name")
         )
         dismissed = @dismissals_factory.call(project_root, state).reconcile
@@ -187,7 +192,6 @@ module Hive
         pr_results = []
         fix_results = []
         unless @dry_run
-          fixer = build_fixer(project_root, cfg, state, launch_budget)
           pr_opener = if @pr_opener_factory
             @pr_opener_factory.call(project_root, cfg, state)
           else
@@ -544,6 +548,47 @@ module Hive
           { "patch_id" => patch.id.to_s }
         end
         patch || patch_from_effect_outcome(state, finding, result.outcome)
+      end
+
+      def recover_pending_fix_attempts!(state, fixer, capture)
+        pending = state.pending_attempt_effects(capture.occurrence_id)
+        return true if pending.empty?
+
+        fingerprints = pending.map(&:last)
+        reconciliations = state.reconcile_attempts(fingerprints)
+        findings = state.findings.group_by { |finding| finding.fingerprint.to_s }
+        pending.each do |intent, fingerprint|
+          reconciliation = reconciliations.fetch(fingerprint)
+          case reconciliation.fetch("status")
+          when "matched"
+            state.settle_effect!(
+              intent,
+              status: "reconciled",
+              outcome: reconciliation.fetch("outcome", {}),
+              now: @clock.call
+            )
+          when "absent"
+            matching = findings.fetch(fingerprint, [])
+            unless matching.one?
+              raise Hive::ConfigError,
+                    "patrol interrupted attempt finding is unavailable"
+            end
+            patch = fixer.recover_interrupted_attempt(matching.fetch(0))
+            state.settle_effect!(
+              intent,
+              status: "failed",
+              outcome: { "patch_id" => patch.id.to_s },
+              now: @clock.call
+            )
+          else
+            raise Hive::ConfigError,
+                  "patrol interrupted attempt recovery is ambiguous"
+          end
+        end
+        true
+      rescue KeyError, TypeError
+        raise Hive::ConfigError,
+              "patrol interrupted attempt recovery is malformed"
       end
 
       def patch_from_effect_outcome(state, finding, outcome)

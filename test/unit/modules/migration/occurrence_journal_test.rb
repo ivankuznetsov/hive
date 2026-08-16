@@ -56,6 +56,21 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     end
   end
 
+  def test_terminal_effects_reports_only_fully_settled_occurrences
+    with_journal do |journal|
+      intent = effect_intent
+      assert journal.terminal_effects?(intent.occurrence_id)
+
+      journal.prepare_effect!(intent, now: NOW)
+      refute journal.terminal_effects?(intent.occurrence_id)
+
+      journal.deny_effect!(
+        intent, outcome: { "reason" => "revoked" }, now: NOW + 1
+      )
+      assert journal.terminal_effects?(intent.occurrence_id)
+    end
+  end
+
   def test_recovery_active_is_one_view_for_reserved_and_pending_projection
     with_journal do |journal|
       occurrence_id = patrol_capture.occurrence_id

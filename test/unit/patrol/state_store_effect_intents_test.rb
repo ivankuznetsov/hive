@@ -1074,6 +1074,98 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
         { "status" => "matched", "outcome" => { "patch_id" => "only" } },
         store.reconcile_attempt("fingerprint-1")
       )
+      assert_equal(
+        {
+          "fingerprint-1" => {
+            "status" => "matched", "outcome" => { "patch_id" => "only" }
+          },
+          "fingerprint-2" => { "status" => "absent", "outcome" => {} }
+        },
+        store.reconcile_attempts(%w[fingerprint-1 fingerprint-2])
+      )
+    end
+  end
+
+  def test_pending_attempt_effects_owns_and_validates_journal_selection
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      store.reserve_occurrence!(capture)
+      fingerprint = "a" * 64
+      intent = Hive::Modules::Migration::EffectIntent.build(
+        module_name: "patrol",
+        occurrence_id: capture.occurrence_id,
+        authority: capture.owner,
+        owner_epoch: capture.owner_epoch,
+        sink: "attempt",
+        target: "attempts/#{fingerprint}",
+        idempotency_key: "#{capture.occurrence_id}:attempt:#{fingerprint}",
+        capability: "repository_write",
+        created_at: capture.recorded_at
+      )
+      store.prepare_effect!(intent)
+      unrelated = effect_intent
+      store.prepare_effect!(unrelated)
+
+      assert_equal [ [ intent.to_h, fingerprint ] ],
+                   store.pending_attempt_effects(capture.occurrence_id).map {
+                     |candidate, value| [ candidate.to_h, value ]
+                   }
+      assert_equal "prepared", store.effect_state(unrelated).fetch("state")
+    end
+
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      store.reserve_occurrence!(capture)
+      malformed = Hive::Modules::Migration::EffectIntent.build(
+        module_name: "patrol",
+        occurrence_id: capture.occurrence_id,
+        authority: capture.owner,
+        owner_epoch: capture.owner_epoch,
+        sink: "attempt",
+        target: "attempts/not-a-fingerprint",
+        idempotency_key: "#{capture.occurrence_id}:attempt:malformed",
+        capability: "repository_write",
+        created_at: capture.recorded_at
+      )
+      store.prepare_effect!(malformed)
+
+      error = assert_raises(Hive::ConfigError) do
+        store.pending_attempt_effects(capture.occurrence_id)
+      end
+      assert_equal "patrol interrupted attempt identity is malformed",
+                   error.message
+    end
+  end
+
+  def test_attempt_patch_write_has_no_nested_effect_crash_window
+    with_tmp_dir do |root|
+      store = configured_store(root, File.join(root, "evidence"))
+      patch = {
+        "id" => "patch-1",
+        "fingerprint" => "fingerprint-1",
+        "passed" => false
+      }
+
+      assert_raises(IOError) do
+        store.perform_cycle_effect!(
+          sink: "attempt",
+          target: "attempts/fingerprint-1",
+          idempotency_key: "reservation-1:attempt:fingerprint-1",
+          capability: "repository_write",
+          reconcile: ->(_intent) { store.reconcile_attempt("fingerprint-1") }
+        ) do
+          store.write_patch("patch-1", patch)
+          raise IOError, "crash after patch write"
+        end
+      end
+
+      occurrence = store.occurrence(capture.occurrence_id)
+      assert_equal 1, occurrence.fetch("effects").size
+      assert_equal [ "attempt" ], occurrence.fetch("effects").values.map {
+        |cell| cell.fetch("semantic").fetch("sink")
+      }
+      assert_equal "matched", store.reconcile_attempt("fingerprint-1").fetch("status")
+      refute store.terminal_effects?(capture.occurrence_id)
     end
   end
 

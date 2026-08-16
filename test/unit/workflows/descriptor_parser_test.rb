@@ -1563,6 +1563,13 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       [ { "kind" => "document", "primary_artifact" => "nested/result.md" }, "bare filename" ],
       [ { "kind" => "document", "primary_artifact" => "..\\result.md" }, "bare filename" ],
       [
+        {
+          "kind" => "document", "primary_artifact" => "result.md",
+          "capabilities" => "supporting_artifacts"
+        },
+        "capabilities must be an array"
+      ],
+      [
         { "kind" => "document", "primary_artifact" => "result.md", "capabilities" => [ "shell" ] },
         "capability"
       ]

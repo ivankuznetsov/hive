@@ -33,6 +33,61 @@ class WorkflowTest < Minitest::Test
     end
   end
 
+  def test_result_value_rejects_unknown_shapes_capabilities_and_provenance
+    invalid = [
+      { kind: :unknown },
+      { kind: :change, capabilities: "worktree" },
+      { kind: :change, capabilities: %i[worktree worktree] },
+      { kind: :change, capabilities: [ :telepathy ] },
+      { kind: :change, provenance: :guessed }
+    ]
+
+    invalid.each do |arguments|
+      assert_raises(ArgumentError) { Hive::Workflow::Result.new(**arguments) }
+    end
+  end
+
+  def test_declared_result_must_match_runtime_stage_semantics
+    plain = Hive::Workflow::Stage.new(
+      name: "done", index: 1, state_file: "done.md", kind: :inert
+    )
+    assert_raises(ArgumentError) do
+      Hive::Workflow.new(id: :invalid, stages: [ plain ], result: Object.new)
+    end
+
+    change = Hive::Workflow::Stage.new(
+      name: "execute", index: 1, state_file: "task.md", kind: :agent,
+      workspace: :worktree, handoff: :draft_pr
+    )
+    missing = Hive::Workflow::Result.new(kind: :change)
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(id: :missing, stages: [ change ], result: missing)
+    end
+    assert_match(/must include/, error.message)
+
+    document = Hive::Workflow::Result.new(
+      kind: :document, primary_artifact: "task.md",
+      capabilities: %i[worktree diff publication]
+    )
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(id: :wrong_kind, stages: [ change ], result: document)
+    end
+    assert_match(/kind must be :change/, error.message)
+
+    deliverable = Hive::Workflow::Stage.new(
+      name: "report", index: 1, state_file: "report.md", kind: :agent,
+      deliverable: "final.md"
+    )
+    mismatch = Hive::Workflow::Result.new(
+      kind: :document, primary_artifact: "other.md",
+      capabilities: [ :supporting_artifacts ]
+    )
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(id: :mismatch, stages: [ deliverable ], result: mismatch)
+    end
+    assert_match(/must match terminal deliverable/, error.message)
+  end
+
   def test_stage_dir_joins_index_and_name
     stage = Hive::Workflow::Stage.new(name: "execute", index: 4, state_file: "task.md")
 

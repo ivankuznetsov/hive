@@ -119,5 +119,32 @@ class ProviderRoutingValueObjectsTest < Minitest::Test
         :normalize_time, "not-a-time"
       )
     end
+
+    account_args = {
+      id: "codex-primary", adapter: "codex", launch_binding: "default",
+      models: [ "gpt-5.6-sol" ], max_concurrent: 1, cooldown_sec: {}
+    }
+    assert_raises(ArgumentError) do
+      Hive::ProviderRouting::Account.new(**account_args, billing_route: "invoice")
+    end
+    assert_raises(ArgumentError) do
+      Hive::ProviderRouting::Account.new(
+        **account_args, billing_evidence_source: "log_guess"
+      )
+    end
+
+    route_args = {
+      id: "codex-primary/gpt-5.6-sol", account: "codex-primary",
+      adapter: "codex", launch_binding: "default", model: "gpt-5.6-sol",
+      effort: nil, order: 0, capabilities: {}
+    }
+    assert_raises(ArgumentError) do
+      Hive::ProviderRouting::Route.new(**route_args, billing_route: "invoice")
+    end
+    assert_raises(ArgumentError) do
+      Hive::ProviderRouting::Route.new(
+        **route_args, billing_evidence_source: "log_guess"
+      )
+    end
   end
 end

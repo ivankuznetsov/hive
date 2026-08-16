@@ -44,4 +44,28 @@ class TaskWorkspaceCorrelatedLogTest < Minitest::Test
       assert_nil Hive::TaskWorkspace::CorrelatedLog.new(root: root).read(reference)
     end
   end
+
+  def test_rejects_an_invalid_root_and_bounds_partial_or_malformed_tails
+    assert_raises(ArgumentError) do
+      Hive::TaskWorkspace::CorrelatedLog.new(root: "/definitely/missing/attempt-root")
+    end
+
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, "logs"))
+      text = "discarded line\n" + ("x" * (Hive::TaskWorkspace::CorrelatedLog::TAIL_BYTES + 32))
+      text_path = File.join(root, "logs", "large.log")
+      File.binwrite(text_path, text)
+      text_reference = Hive::OutputReference.build(text_path, root: root)
+      text_log = Hive::TaskWorkspace::CorrelatedLog.new(root: root).read(text_reference)
+      assert_operator text_log.fetch("tail").bytesize,
+                      :<=, Hive::TaskWorkspace::CorrelatedLog::TAIL_BYTES
+      refute_includes text_log.fetch("tail"), "discarded line"
+
+      frames_path = File.join(root, "logs", "malformed.frames")
+      File.binwrite(frames_path, "{not-json}\n")
+      frames_reference = Hive::OutputReference.build(frames_path, root: root)
+      frames_log = Hive::TaskWorkspace::CorrelatedLog.new(root: root).read(frames_reference)
+      assert_equal "", frames_log.fetch("tail")
+    end
+  end
 end

@@ -197,6 +197,52 @@ class TaskWorkspaceUsageTest < Minitest::Test
                  opencode.dig("api_equivalent", "rate_basis", :source_url))
   end
 
+  def test_truncation_conflicts_and_fallback_callers_degrade_coverage
+    attempts = attempts_panel
+    attempts.fetch("records").last.fetch("sessions") <<
+      session_binding("session-failed", outcome: "succeeded")
+    reader = lambda do |**|
+      {
+        available: true, sessions: [], unattributed_count: 0,
+        truncated: true, unattributed_truncated: true
+      }
+    end
+    usage = Hive::TaskWorkspace::Usage.new(
+      attempts_panel: attempts, usage_reader: reader, pricing: unavailable_pricing
+    )
+    envelope = usage.call
+    reasons = envelope.fetch("diagnostics").map { |row| row.fetch("reason") }
+    assert_includes reasons, "session_bound_to_multiple_attempts"
+    assert_includes reasons, "usage_sessions_truncated"
+    assert_includes reasons, "unattributed_usage_truncated"
+
+    usage.instance_variable_set(
+      :@usage_reader,
+      ->(**) { { available: true, sessions: [], unattributed_count: 0 } }
+    )
+    response = usage.send(:exact_usage, attempts.fetch("records").first)
+    assert response.fetch(:available)
+  end
+
+  def test_pricing_and_invalid_token_values_fail_closed
+    pricing = Object.new
+    pricing.define_singleton_method(:estimate) { |*| raise ArgumentError, "bad pricing" }
+    reader = lambda do |attempt_id:, **|
+      id = attempt_id == "attempt-failed" ? "session-failed" : "session-retry"
+      { available: true, sessions: [ usage_row(id, input: "bad") ], unattributed_count: 0 }
+    end
+
+    envelope = Hive::TaskWorkspace::Usage.new(
+      attempts_panel: attempts_panel, usage_reader: reader, pricing: pricing
+    ).call
+
+    assert_equal "partial", envelope.fetch("coverage")
+    assert_nil envelope.dig("sessions", 0, "input")
+    assert_equal "unavailable", envelope.dig("sessions", 0, "api_equivalent", "coverage")
+    assert_equal [ "pricing" ],
+                 envelope.dig("sessions", 0, "api_equivalent", "missing_dimensions")
+  end
+
   private
 
   def without_http

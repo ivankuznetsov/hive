@@ -576,4 +576,40 @@ class UsageDbTest < Minitest::Test
   def test_iso8601_returns_original_text_when_parse_fails
     assert_equal "not-a-time", Hive::UsageDb.iso8601("not-a-time")
   end
+
+  def test_usage_identity_deadlines_and_boolean_evidence_fail_closed
+    with_usage_db do
+      _out, err = capture_io do
+        refute Hive::UsageDb.record!(
+          agent: "codex", harness: "opencode", model: "gpt",
+          project_slug: "project", task_slug: "task", stage: "4-execute",
+          started_at: Time.utc(2026, 8, 17), ended_at: Time.utc(2026, 8, 17),
+          input: 1, output: 1, cached: 0
+        )
+      end
+      assert_match(/harness must match/, err)
+
+      invalid_deadline = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt", deadline: "bad", monotonic_clock: -> { 1.0 }
+      )
+      assert_equal "deadline_exhausted", invalid_deadline.fetch(:reason)
+
+      record(
+        attempt_id: "attempt", session_id: "session", task_generation: 1
+      )
+      future_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+      default_clock = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt", task_generation: 1, deadline: future_deadline
+      )
+      assert default_clock.fetch(:available)
+
+      assert_equal 2_000,
+                   Hive::UsageDb.send(:deadline_busy_timeout, 3.0, -> { 1.0 })
+      assert_equal 1,
+                   Hive::UsageDb.send(:deadline_busy_timeout, "bad", -> { 1.0 })
+      assert_raises(ArgumentError) do
+        Hive::UsageDb.send(:nullable_boolean, "yes")
+      end
+    end
+  end
 end

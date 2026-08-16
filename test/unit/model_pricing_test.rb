@@ -199,7 +199,166 @@ class ModelPricingTest < Minitest::Test
     end
   end
 
+  def test_catalog_and_unexpected_calculation_failures_have_distinct_outcomes
+    catalog_failure = Hive::ModelPricing.new
+    catalog_failure.define_singleton_method(:calculate) do |*|
+      raise Hive::ModelPricing::CatalogError, "invalid catalog"
+    end
+    assert_raises(Hive::ModelPricing::CatalogError) do
+      catalog_failure.estimate(
+        session(
+          provider: "openai", model: "gpt-5.6-sol",
+          pricing_dimensions: openai_dimensions
+        )
+      )
+    end
+
+    usage_failure = Hive::ModelPricing.new
+    usage_failure.define_singleton_method(:calculate) { |*| raise "unexpected" }
+    result = usage_failure.estimate(
+      session(
+        provider: "openai", model: "gpt-5.6-sol",
+        pricing_dimensions: openai_dimensions
+      )
+    )
+    assert_equal "unavailable", result.fetch(:coverage)
+    assert_equal [ "usage" ], result.fetch(:missing_dimensions)
+
+    assert_raises(Hive::ModelPricing::CatalogError) do
+      Hive::ModelPricing.new(catalog_path: "/definitely/missing/pricing.yml")
+    end
+  end
+
+  def test_catalog_validation_rejects_untrusted_rate_and_modifier_shapes
+    mutations = [
+      ->(card) { card["rates"]["unknown"] = "1" },
+      ->(card) { card["required_dimensions"] << "region" },
+      ->(card) { card["modifiers"]["batch"] = {} },
+      ->(card) { card["modifiers"]["long_context"]["unknown"] = "1" },
+      ->(card) { card["source_url"] = "https://[" },
+      ->(card) { card["effective_from"] = "not-a-time" },
+      ->(card) { card["rates"]["input"] = 1 }
+    ]
+
+    mutations.each do |mutation|
+      catalog = catalog_copy
+      catalog["cards"] = [ catalog.fetch("cards").first ]
+      mutation.call(catalog.fetch("cards").first)
+      assert_raises(Hive::ModelPricing::CatalogError) do
+        Hive::ModelPricing.new(catalog: catalog)
+      end
+    end
+  end
+
+  def test_overlapping_alias_intervals_are_rejected
+    catalog = catalog_copy
+    left = catalog.fetch("cards").first
+    left["effective_until"] = "2026-08-20T00:00:00Z"
+    right = Marshal.load(Marshal.dump(left))
+    right["effective_from"] = "2026-08-17T00:00:00Z"
+    right["effective_until"] = "2026-08-19T00:00:00Z"
+    catalog["cards"] = [ left, right ]
+
+    assert_raises(Hive::ModelPricing::CatalogError) do
+      Hive::ModelPricing.new(catalog: catalog)
+    end
+  end
+
+  def test_unknown_usage_inclusion_and_request_dimensions_are_reported
+    result = @pricing.estimate(
+      session(
+        provider: "openai", model: "gpt-5.6-sol", input: 100, output: 20,
+        cache_read: 10, cache_write: 5, reasoning: 2,
+        input_includes_cache_read: nil, input_includes_cache_write: nil,
+        output_includes_reasoning: nil, pricing_dimensions: openai_dimensions
+      )
+    )
+    assert_equal "partial", result.fetch(:coverage)
+    assert_includes result.fetch(:missing_dimensions), "input_includes_cache_read"
+    assert_includes result.fetch(:missing_dimensions), "input_includes_cache_write"
+    assert_includes result.fetch(:missing_dimensions), "output_includes_reasoning"
+
+    separate_reasoning = @pricing.estimate(
+      session(
+        provider: "openai", model: "gpt-5.6-sol", output: 20, reasoning: 2,
+        output_includes_reasoning: false, pricing_dimensions: openai_dimensions
+      )
+    )
+    assert_equal 22, separate_reasoning.dig(:quantities, :output)
+
+    missing_input = @pricing.estimate(
+      session(
+        provider: "openai", model: "gpt-5.6-sol", input: nil,
+        pricing_dimensions: openai_dimensions
+      )
+    )
+    assert_includes missing_input.fetch(:missing_dimensions), "input"
+
+    invalid_time = @pricing.estimate(
+      session(
+        provider: "openai", model: "gpt-5.6-sol", started_at: "bad",
+        pricing_dimensions: openai_dimensions
+      )
+    )
+    assert_equal [ "session_time" ], invalid_time.fetch(:missing_dimensions)
+  end
+
+  def test_invalid_usage_and_unpriced_provider_modifiers_fail_closed
+    invalid_usage = @pricing.estimate(
+      session(
+        provider: "openai", model: "gpt-5.6-sol", input: 1, cache_read: 2,
+        input_includes_cache_read: true, pricing_dimensions: openai_dimensions
+      )
+    )
+    assert_equal "unavailable", invalid_usage.fetch(:coverage)
+    assert_equal [ "usage" ], invalid_usage.fetch(:missing_dimensions)
+
+    xai_catalog = catalog_copy
+    xai_catalog["cards"] = [ xai_catalog.fetch("cards").last ]
+    xai = Hive::ModelPricing.new(catalog: xai_catalog)
+    cache_semantics = xai.estimate(
+      session(
+        provider: "xai", model: "grok-4.6", cache_write: 10,
+        pricing_dimensions: xai_dimensions
+      )
+    )
+    assert_includes cache_semantics.fetch(:missing_dimensions), "cache_write_semantics"
+
+    anthropic_catalog = catalog_copy
+    anthropic_catalog["cards"] = [
+      anthropic_catalog.fetch("cards").find do |card|
+        card["canonical_model"] == "claude-sonnet-4-6"
+      end
+    ]
+    anthropic = Hive::ModelPricing.new(catalog: anthropic_catalog)
+    anthropic.instance_variable_get(:@catalog)
+             .fetch("cards").first.fetch("modifiers").delete("inference_geo_us")
+    missing_geo_rate = anthropic.estimate(
+      session(
+        provider: "anthropic", model: "claude-sonnet-4-6",
+        pricing_dimensions: anthropic_dimensions.merge("inference_geo" => "us")
+      )
+    )
+    assert_includes missing_geo_rate.fetch(:missing_dimensions), "inference_geo"
+
+    unsupported_geo = @pricing.estimate(
+      session(
+        provider: "anthropic", model: "claude-sonnet-4-6",
+        pricing_dimensions: anthropic_dimensions.merge("inference_geo" => "mars")
+      )
+    )
+    assert_includes unsupported_geo.fetch(:missing_dimensions), "inference_geo"
+  end
+
   private
+
+  def catalog_copy
+    Marshal.load(
+      Marshal.dump(
+        YAML.safe_load(File.read(Hive::ModelPricing::CATALOG_PATH), aliases: false)
+      )
+    )
+  end
 
   def catalog_with_first_card(**changes)
     catalog = YAML.safe_load(File.read(Hive::ModelPricing::CATALOG_PATH), aliases: false)

@@ -3,6 +3,7 @@ require "hive/task_workspace/artifacts"
 require "hive/task_workspace/attempts"
 require "hive/task_workspace/jsonl_reader"
 require "hive/task_workspace/resources"
+require "hive/task_workspace/semantic_snapshot"
 
 class TaskWorkspaceCoreCoverageGapsTest < Minitest::Test
   include HiveTestHelper
@@ -305,6 +306,35 @@ class TaskWorkspaceCoreCoverageGapsTest < Minitest::Test
                   "billing_semantics" => "not_applicable", "configured" => "bad" } ]
     ).fetch("records").find { |row| row["record_kind"] == "guard" }
     assert_nil invalid_number.fetch("configured")
+
+    fallback_resources = Hive::TaskWorkspace::Resources.new(
+      attempts_panel: { "records" => [], "diagnostics" => [], "truncated" => false },
+      usage_reader: ->(**) { { available: false } }
+    )
+    fallback_resources.instance_variable_set(
+      :@usage_reader,
+      ->(**) { { available: false, reason: "fallback" } }
+    )
+    fallback = fallback_resources.send(
+      :usage_for,
+      {
+        "attempt_id" => "attempt", "task_generation" => 1,
+        "project_slug" => "project", "task_slug" => "task"
+      }
+    )
+    assert_equal "unavailable", fallback.fetch("state")
+  end
+
+  def test_semantic_snapshot_validates_applicability_time_and_decimal_values
+    snapshot = semantic_snapshot(
+      usage: { "coverage" => "complete", "subtotal" => BigDecimal("0.125") }
+    )
+    assert_equal "0.125", snapshot.dig("usage", "subtotal")
+
+    assert_raises(ArgumentError) do
+      semantic_snapshot(applicability: semantic_applicability.merge("diff" => nil))
+    end
+    assert_raises(ArgumentError) { semantic_snapshot(generated_at: "bad") }
   end
 
   private
@@ -331,6 +361,23 @@ class TaskWorkspaceCoreCoverageGapsTest < Minitest::Test
       status: { state: "current", freshness: "fresh", diagnostics: [] },
       decision: { posture: "wait", action: {} }, panels: {}, operator: operator
     )
+  end
+
+  def semantic_snapshot(generated_at: NOW, usage: { "coverage" => "complete" },
+                        applicability: semantic_applicability)
+    Hive::TaskWorkspace::SemanticSnapshot.new(
+      generated_at: generated_at,
+      task: { "project" => "hive", "slug" => "task" },
+      status: { "state" => "current" },
+      headline: { "state" => "current" }, action: { "enabled" => false },
+      result: { "kind" => "document", "primary" => nil, "supporting" => [] },
+      applicability: applicability, usage: usage, evidence: {}, diagnostic: {}
+    ).to_h
+  end
+
+  def semantic_applicability
+    %w[worktree diff publication media dependencies supporting_artifacts]
+      .to_h { |name| [ name, false ] }
   end
 
   def resource_panel(usage_reader:, guards:, observation: nil)

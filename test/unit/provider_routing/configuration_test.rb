@@ -105,6 +105,17 @@ class ProviderRoutingConfigurationTest < Minitest::Test
     ).routes.fetch(0)
     assert_equal "api", selected.billing_route
     assert_equal "provider_account_config", selected.billing_evidence_source
+
+    error = assert_raises(Hive::ConfigError) do
+      normalize.call(
+        "invalid-billing",
+        account(
+          "codex", binding: "default", models: %w[gpt-5.6-sol],
+          billing_route: "invoice"
+        )
+      )
+    end
+    assert_match(/billing_route must be subscription, api, or unknown/, error.message)
   end
 
   def test_provider_and_exact_pins_never_cross_account_boundaries

@@ -46,6 +46,11 @@ module Hive
       ROUTE_KEYS = %w[
         route_id provider_account_id adapter launch_binding_id model effort
       ].freeze
+      ROUTE_BILLING_KEYS = %w[billing_route billing_evidence_source].freeze
+      BILLING_ROUTES = %w[subscription api unknown].freeze
+      BILLING_EVIDENCE_SOURCES = %w[
+        provider_account_config agent_profile_contract unavailable
+      ].freeze
       CIRCUIT_GENERATION_KEYS = %w[scope journal_epoch observed_generation].freeze
       SCOPE_KEYS = %w[kind provider_account_id model].freeze
       PROBE_BINDING_KEYS = %w[
@@ -461,12 +466,29 @@ module Hive
         end
 
         def validate_route!(route, error_class: InvalidRecord)
-          validate_exact_keys!(route, ROUTE_KEYS, "provider route", error_class)
+          unless route.is_a?(Hash) && (ROUTE_KEYS - route.keys).empty? &&
+                 (route.keys - ROUTE_KEYS - ROUTE_BILLING_KEYS).empty?
+            raise error_class, "provider route has invalid fields"
+          end
           %w[route_id provider_account_id adapter launch_binding_id model].each do |key|
             validate_identifier!(route[key], "provider route #{key.tr('_', ' ')}", error_class)
           end
           unless route["effort"].nil?
             validate_identifier!(route["effort"], "provider route effort", error_class)
+          end
+          billing_values = ROUTE_BILLING_KEYS.map { |key| route[key] }
+          unless billing_values.all?(&:nil?) || billing_values.none?(&:nil?)
+            raise error_class, "provider route billing evidence must be complete"
+          end
+          if billing_values.none?(&:nil?)
+            unless BILLING_ROUTES.include?(route["billing_route"])
+              raise error_class, "provider route billing route is invalid"
+            end
+            unless BILLING_EVIDENCE_SOURCES.include?(
+              route["billing_evidence_source"]
+            )
+              raise error_class, "provider route billing evidence source is invalid"
+            end
           end
           route
         end

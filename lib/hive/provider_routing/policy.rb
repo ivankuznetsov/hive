@@ -22,6 +22,16 @@ module Hive
 
         def explicit(stage:, routes:, requirements:, pin:, account_policy:)
           ordered = Array(routes).sort_by { |route| [ route.order, route.id ] }
+          normalized_accounts = ProviderRouting.deep_copy(account_policy)
+          ordered.each do |route|
+            account = normalized_accounts[route.account] || normalized_accounts[route.account.to_sym]
+            next unless account.is_a?(Hash)
+            next if route.billing_route == "unknown" &&
+                    route.billing_evidence_source == "unavailable"
+
+            account["billing_route"] ||= route.billing_route
+            account["billing_evidence_source"] ||= route.billing_evidence_source
+          end
           payload = {
             "schema" => POLICY_SCHEMA,
             "mode" => "explicit",
@@ -29,7 +39,7 @@ module Hive
             "routes" => ordered.map(&:to_h),
             "requirements" => requirements.to_h,
             "pin" => pin&.to_h,
-            "accounts" => account_policy
+            "accounts" => normalized_accounts
           }
           new(
             mode: :explicit,
@@ -37,7 +47,7 @@ module Hive
             routes: ordered,
             requirements: requirements,
             pin: pin,
-            account_policy: account_policy,
+            account_policy: normalized_accounts,
             digest: ProviderRouting.digest(payload)
           )
         end

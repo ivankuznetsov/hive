@@ -8,7 +8,7 @@ module Hive
   module ProviderRouting
     class Configuration
       ACCOUNT_FIELDS = %w[
-        adapter launch_binding models max_concurrent cooldown_sec
+        adapter launch_binding models max_concurrent cooldown_sec billing_route
       ].freeze
       ROUTING_FIELDS = %w[pool required pin].freeze
       ROUTE_FIELDS = %w[provider model effort capabilities].freeze
@@ -90,13 +90,18 @@ module Hive
             models = model_list(account["models"], "#{path}.models")
             maximum = positive_integer(account["max_concurrent"], "#{path}.max_concurrent")
             cooldowns = cooldowns(account["cooldown_sec"], "#{path}.cooldown_sec")
+            billing_route, billing_evidence_source = billing_evidence(
+              account["billing_route"], profile: Hive::AgentProfiles.lookup(adapter), path: path
+            )
             normalized[id] = Account.new(
               id: id,
               adapter: adapter,
               launch_binding: binding,
               models: models,
               max_concurrent: maximum,
-              cooldown_sec: cooldowns
+              cooldown_sec: cooldowns,
+              billing_route: billing_route,
+              billing_evidence_source: billing_evidence_source
             )
           end
 
@@ -172,7 +177,9 @@ module Hive
                 "launch_binding" => account.launch_binding,
                 "models" => account.models,
                 "max_concurrent" => account.max_concurrent,
-                "cooldown_sec" => account.cooldown_sec
+                "cooldown_sec" => account.cooldown_sec,
+                "billing_route" => account.billing_route,
+                "billing_evidence_source" => account.billing_evidence_source
               }
             ]
           end
@@ -243,8 +250,28 @@ module Hive
             effort: resolution.effort,
             order: order,
             capabilities: capabilities,
-            model_routing: resolution
+            model_routing: resolution,
+            billing_route: account.billing_route,
+            billing_evidence_source: account.billing_evidence_source
           )
+        end
+
+        def billing_evidence(raw, profile:, path:)
+          unless raw.nil?
+            value = nonempty_string(raw, "#{path}.billing_route")
+            unless BILLING_ROUTES.include?(value)
+              raise ConfigError,
+                    "#{path}.billing_route must be subscription, api, or unknown"
+            end
+            return [ value, "provider_account_config" ]
+          end
+
+          if DIRECT_SUBSCRIPTION_ADAPTERS.include?(profile.name.to_s) &&
+             profile.billing_semantics.to_s == "subscription_backed"
+            return [ "subscription", "agent_profile_contract" ]
+          end
+
+          [ "unknown", "unavailable" ]
         end
 
         def normalize_capabilities(raw, path)

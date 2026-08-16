@@ -354,4 +354,59 @@ class StagesBaseUsageTest < Minitest::Test
 
     assert_match(/usage record failed: db locked/, err)
   end
+
+  def test_record_usage_keeps_harness_admission_and_observed_route_separate
+    task = Struct.new(:project_name, :slug, :stage_index, :stage_name, :folder).new(
+      "alpha", "slug", 4, "execute", "/tmp/slug"
+    )
+    profile = Struct.new(:name, :billing_semantics).new(:opencode, :unknown)
+    context = Hive::Attempts::Context.send(
+      :new,
+      attempt_id: "attempt-1", task_generation: 3,
+      ownership_generation: "owner-3", project: "alpha", task_slug: "slug",
+      intended_stage: "4-execute",
+      routing: {
+        "mode" => "explicit",
+        "route" => {
+          "provider_account_id" => "anthropic-subscription",
+          "adapter" => "opencode", "launch_binding_id" => "default",
+          "model" => "anthropic/claude-requested", "effort" => nil,
+          "billing_route" => "subscription",
+          "billing_evidence_source" => "provider_account_config"
+        }
+      }
+    )
+    recorded = nil
+    result = {
+      model: "anthropic/claude-actual",
+      requested_opencode_route: "anthropic/claude-requested",
+      actual_opencode_route: "anthropic/claude-actual",
+      route_resolution_status: :resolved_differently,
+      usage: {
+        input: nil, output: 0, cached: nil,
+        cache_read: nil, cache_write: 0, reasoning: nil,
+        input_includes_cache_read: false,
+        input_includes_cache_write: false,
+        output_includes_reasoning: nil,
+        provider_reported_cost: 0.0
+      }
+    }
+
+    with_replaced_singleton_method(
+      Hive::UsageDb, :record!, ->(**attributes) { recorded = attributes; true }
+    ) do
+      Hive::Stages::Base.record_usage(
+        task, profile, result, Time.utc(2026, 8, 12),
+        context: context, session_id: "session-1"
+      )
+    end
+
+    assert_equal "opencode", recorded.fetch(:harness)
+    assert_equal "subscription", recorded.fetch(:billing_route)
+    assert_equal "provider_account_config", recorded.fetch(:billing_evidence_source)
+    assert_equal "anthropic/claude-requested", recorded.fetch(:requested_route)
+    assert_equal "anthropic/claude-actual", recorded.fetch(:actual_route)
+    assert_equal false, recorded.fetch(:input_includes_cache_read)
+    assert_equal 0.0, recorded.fetch(:provider_reported_cost)
+  end
 end

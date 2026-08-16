@@ -30,6 +30,9 @@ class AgentCliRuntimeOpenCodeResultParserTest < Minitest::Test
     assert_equal 0, outcome.usage.cache_write
     assert_equal 0, outcome.usage.reasoning
     assert_equal 0.0, outcome.usage.cost
+    assert_equal 0.0, outcome.usage.provider_reported_cost
+    assert_includes outcome.usage.to_h, :cost
+    refute_includes outcome.usage.to_h, :provider_reported_cost
     assert_equal 2, outcome.usage.cached
     assert_nil outcome.diagnostic
   end

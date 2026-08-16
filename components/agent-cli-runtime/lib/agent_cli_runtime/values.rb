@@ -445,17 +445,35 @@ module AgentCliRuntime
   end
 
   NormalizedUsage = Data.define(
-    :input, :output, :cache_read, :cache_write, :reasoning, :cost
+    :input, :output, :cache_read, :cache_write, :reasoning,
+    :input_includes_cache_read, :input_includes_cache_write,
+    :output_includes_reasoning, :cost
   ) do
     def initialize(input: nil, output: nil, cache_read: nil, cache_write: nil,
-                   reasoning: nil, cost: nil)
+                   reasoning: nil, input_includes_cache_read: nil,
+                   input_includes_cache_write: nil,
+                   output_includes_reasoning: nil,
+                   provider_reported_cost: nil, cost: nil)
+      if !provider_reported_cost.nil? && !cost.nil? && provider_reported_cost != cost
+        raise ArgumentError, "provider_reported_cost and cost disagree"
+      end
       super(
         input: number(input, :input, integer: true),
         output: number(output, :output, integer: true),
         cache_read: number(cache_read, :cache_read, integer: true),
         cache_write: number(cache_write, :cache_write, integer: true),
         reasoning: number(reasoning, :reasoning, integer: true),
-        cost: number(cost, :cost, integer: false)
+        input_includes_cache_read:
+          boolean(input_includes_cache_read, :input_includes_cache_read),
+        input_includes_cache_write:
+          boolean(input_includes_cache_write, :input_includes_cache_write),
+        output_includes_reasoning:
+          boolean(output_includes_reasoning, :output_includes_reasoning),
+        cost: number(
+          provider_reported_cost.nil? ? cost : provider_reported_cost,
+          :provider_reported_cost,
+          integer: false
+        )
       )
     end
 
@@ -464,6 +482,8 @@ module AgentCliRuntime
 
       cache_read + cache_write
     end
+
+    alias provider_reported_cost cost
 
     private
 
@@ -476,6 +496,14 @@ module AgentCliRuntime
       end
 
       value
+    end
+
+
+    def boolean(value, label)
+      return nil if value.nil?
+      return value if value == true || value == false
+
+      raise ArgumentError, "#{label} must be true, false, or nil"
     end
   end
 

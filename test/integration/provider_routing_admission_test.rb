@@ -99,6 +99,9 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     assert_equal "codex", result.attempt["provider"]
     assert_equal "account-a", result.attempt["routing"].dig("route", "provider_account_id")
     assert_equal "binding-a", result.attempt["routing"].dig("route", "launch_binding_id")
+    assert_equal "subscription", result.attempt["routing"].dig("route", "billing_route")
+    assert_equal "agent_profile_contract",
+                 result.attempt["routing"].dig("route", "billing_evidence_source")
     assert_equal policy.digest, result.attempt["routing"].fetch("policy_digest")
     assert_equal 2, result.attempt["routing"].fetch("circuit_generations").length
     assert_empty result.attempt["routing"].fetch("probe_bindings")
@@ -386,6 +389,8 @@ class ProviderRoutingAdmissionTest < Minitest::Test
       model: model,
       effort: "high",
       order: order,
+      billing_route: "subscription",
+      billing_evidence_source: "agent_profile_contract",
       capabilities: {
         "context" => "large", "quality" => "high",
         "tools" => %w[shell], "permissions" => %w[read]

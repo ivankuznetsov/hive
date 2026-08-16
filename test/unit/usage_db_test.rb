@@ -130,6 +130,43 @@ class UsageDbTest < Minitest::Test
     end
   end
 
+  def test_session_persists_billing_and_disjoint_usage_evidence_without_guessing
+    with_usage_db do
+      Hive::UsageDb.record!(
+        agent: "opencode", harness: "opencode",
+        model: "anthropic/claude-sonnet-4-5",
+        requested_route: "anthropic/claude-sonnet-4-5",
+        actual_route: "anthropic/claude-sonnet-4-5-20250929",
+        billing_route: "subscription",
+        billing_evidence_source: "provider_account_config",
+        project_slug: "alpha", task_slug: "task-a", stage: "4-execute",
+        started_at: Time.utc(2026, 8, 12, 12),
+        ended_at: Time.utc(2026, 8, 12, 12, 1),
+        input: nil, output: 0, cached: nil,
+        cache_read: nil, cache_write: 0, reasoning: nil,
+        input_includes_cache_read: false,
+        input_includes_cache_write: false,
+        output_includes_reasoning: nil,
+        provider_reported_cost: 0.0,
+        attempt_id: "attempt-1", session_id: "session-1",
+        task_generation: 3, source: "runtime_receipt"
+      )
+
+      session = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt-1", task_generation: 3
+      ).fetch(:sessions).fetch(0)
+      assert_equal "opencode", session.fetch(:harness)
+      assert_equal "subscription", session.fetch(:billing_route)
+      assert_equal "provider_account_config", session.fetch(:billing_evidence_source)
+      assert_equal false, session.fetch(:input_includes_cache_read)
+      assert_equal false, session.fetch(:input_includes_cache_write)
+      assert_nil session[:output_includes_reasoning]
+      assert_equal 0.0, session.fetch(:provider_reported_cost)
+      assert_equal 0, session.fetch(:cache_write)
+      assert_equal false, session.fetch(:cache_read_available)
+    end
+  end
+
   def test_aggregate_preserves_unknown_usage_in_agent_and_total_buckets
     with_usage_db do
       now = Time.utc(2026, 8, 12, 12)

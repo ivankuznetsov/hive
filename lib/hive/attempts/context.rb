@@ -208,6 +208,10 @@ module Hive
       def launch_binding_id = admitted_route&.fetch("launch_binding_id", nil)
       def model = admitted_route&.fetch("model", nil)
       def effort = admitted_route&.fetch("effort", nil)
+      def billing_route = admitted_route&.fetch("billing_route", "unknown") || "unknown"
+      def billing_evidence_source
+        admitted_route&.fetch("billing_evidence_source", "unavailable") || "unavailable"
+      end
 
       def publish_provider_signal(signal)
         return false unless explicit_routing? && @evidence_writer

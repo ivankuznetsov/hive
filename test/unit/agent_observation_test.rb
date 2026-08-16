@@ -107,9 +107,67 @@ class AgentObservationTest < Minitest::Test
     assert_equal "gpt-requested", start.dig(:payload, "requested_model")
     assert_equal "gpt-actual", finish.dig(:payload, "actual_model")
     assert_equal "succeeded", finish.dig(:payload, "outcome")
-    assert_equal({ "input" => 10, "output" => 4, "cached" => 2 },
-                 finish.dig(:payload, "usage"))
+    assert_equal 10, finish.dig(:payload, "usage", "input")
+    assert_equal 4, finish.dig(:payload, "usage", "output")
+    assert_equal 2, finish.dig(:payload, "usage", "cached")
+    assert_nil finish.dig(:payload, "usage", "cache_read")
     assert_equal "session_finished", activity.operations.fetch(0).fetch(:kind)
+  end
+
+  def test_separates_admitted_billing_evidence_from_observed_execution_identity
+    activity = Activity.new
+    observation = Hive::AgentObservation.new(
+      task: task, context: context, session_id: "session-evidence", role: "execute",
+      provider: "opencode", requested_provider: "anthropic",
+      requested_model: "claude-requested", requested_effort: "high",
+      billing_route: "subscription",
+      billing_evidence_source: "provider_account_config",
+      timeout_sec: 90, guards: guards, activity: activity, clock: -> { NOW }
+    )
+
+    assert observation.start!
+    assert observation.finish!(
+      status: :ok,
+      actual_provider: "anthropic",
+      actual_model: "claude-actual",
+      execution_identity_source: "sanitized_export",
+      usage: {
+        input: nil, output: 0, cached: nil,
+        cache_read: nil, cache_write: 0, reasoning: nil,
+        input_includes_cache_read: false,
+        input_includes_cache_write: false,
+        output_includes_reasoning: nil,
+        provider_reported_cost: 0.0
+      }
+    )
+
+    started = activity.records.first.fetch(:payload)
+    finished = activity.records.last.fetch(:payload)
+    assert_equal "opencode", started.fetch("harness")
+    assert_equal(
+      {
+        "requested_provider" => "anthropic",
+        "requested_model" => "claude-requested",
+        "billing_route" => "subscription",
+        "billing_evidence_source" => "provider_account_config"
+      },
+      started.fetch("admitted_launch")
+    )
+    assert_equal(
+      {
+        "actual_provider" => "anthropic",
+        "actual_model" => "claude-actual",
+        "evidence_source" => "sanitized_export"
+      },
+      finished.fetch("observed_execution")
+    )
+    assert_nil finished.dig("usage", "input")
+    assert_equal 0, finished.dig("usage", "output")
+    assert_nil finished.dig("usage", "cache_read")
+    assert_equal 0, finished.dig("usage", "cache_write")
+    assert_equal false, finished.dig("usage", "input_includes_cache_read")
+    assert_equal 0.0, finished.dig("usage", "provider_reported_cost")
+    refute_includes finished.to_s, "credential"
   end
 
   def test_exception_timeout_and_resource_exhaustion_are_distinct_terminal_facts

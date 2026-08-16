@@ -1,0 +1,72 @@
+schema: hive-model-pricing
+schema_version: 1
+checked_at: "2026-08-16"
+currency: USD
+unit: usd_per_million_tokens
+cards:
+  - provider: openai
+    canonical_model: gpt-5.6-sol
+    aliases: [gpt-5.6]
+    effective_from: "2026-08-16T00:00:00Z"
+    effective_until:
+    lifecycle: active
+    source_url: https://developers.openai.com/api/docs/models/gpt-5.6-sol
+    rates: {input: "5", cache_read: "0.50", cache_write: "6.25", output: "30"}
+    required_dimensions: [service_tier, context_tokens, server_tool_usage]
+    modifiers:
+      standard_service_tier: standard
+      long_context: {threshold_tokens: 272001, input: "2", cache_read: "2", cache_write: "2", output: "1.5"}
+  - provider: openai
+    canonical_model: gpt-5.6-terra
+    aliases: []
+    effective_from: "2026-08-16T00:00:00Z"
+    effective_until:
+    lifecycle: active
+    source_url: https://developers.openai.com/api/docs/models/gpt-5.6-terra
+    rates: {input: "2", cache_read: "0.20", cache_write: "2.50", output: "12"}
+    required_dimensions: [service_tier, context_tokens, server_tool_usage]
+    modifiers:
+      standard_service_tier: standard
+      long_context: {threshold_tokens: 272001, input: "2", cache_read: "2", cache_write: "2", output: "1.5"}
+  - provider: anthropic
+    canonical_model: claude-opus-4-6
+    aliases: []
+    effective_from: "2026-08-16T00:00:00Z"
+    effective_until:
+    lifecycle: active
+    source_url: https://platform.claude.com/docs/en/about-claude/pricing
+    rates: {input: "5", cache_read: "0.50", cache_write_5m: "6.25", cache_write_1h: "10", output: "25"}
+    required_dimensions: [service_tier, inference_geo, server_tool_usage]
+    modifiers: {standard_service_tier: standard, standard_inference_geo: global, inference_geo_us: "1.1"}
+  - provider: anthropic
+    canonical_model: claude-sonnet-4-6
+    aliases: []
+    effective_from: "2026-08-16T00:00:00Z"
+    effective_until:
+    lifecycle: active
+    source_url: https://platform.claude.com/docs/en/about-claude/pricing
+    rates: {input: "3", cache_read: "0.30", cache_write_5m: "3.75", cache_write_1h: "6", output: "15"}
+    required_dimensions: [service_tier, inference_geo, server_tool_usage]
+    modifiers: {standard_service_tier: standard, standard_inference_geo: global, inference_geo_us: "1.1"}
+  - provider: anthropic
+    canonical_model: claude-sonnet-4-5-20250929
+    aliases: [claude-sonnet-4-5]
+    effective_from: "2026-08-16T00:00:00Z"
+    effective_until:
+    lifecycle: active
+    source_url: https://platform.claude.com/docs/en/about-claude/pricing
+    rates: {input: "3", cache_read: "0.30", cache_write_5m: "3.75", cache_write_1h: "6", output: "15"}
+    required_dimensions: [service_tier, inference_geo, server_tool_usage]
+    modifiers: {standard_service_tier: standard, standard_inference_geo: global, inference_geo_us: "1.1"}
+  - provider: xai
+    canonical_model: grok-4.6
+    aliases: []
+    effective_from: "2026-08-16T00:00:00Z"
+    effective_until:
+    lifecycle: active
+    source_url: https://docs.x.ai/developers/pricing
+    rates: {input: "2", cache_read: "0.50", output: "6"}
+    required_dimensions: [service_tier, context_tokens, server_tool_usage]
+    modifiers:
+      standard_service_tier: standard
+      long_context: {threshold_tokens: 200000, input: "2", cache_read: "2", output: "2"}

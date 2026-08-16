@@ -1549,6 +1549,8 @@ module Hive
           cost: usage[:cost],
           requested_route: result[:requested_opencode_route],
           actual_route: result[:actual_opencode_route],
+          actual_provider: result[:actual_provider],
+          actual_model: result[:actual_model],
           billing_route: billing_route,
           billing_evidence_source: billing_evidence_source,
           attempt_id: context&.attempt_id,

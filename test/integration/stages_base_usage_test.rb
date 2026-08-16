@@ -381,6 +381,8 @@ class StagesBaseUsageTest < Minitest::Test
       model: "anthropic/claude-actual",
       requested_opencode_route: "anthropic/claude-requested",
       actual_opencode_route: "anthropic/claude-actual",
+      actual_provider: "anthropic",
+      actual_model: "claude-actual",
       route_resolution_status: :resolved_differently,
       usage: {
         input: nil, output: 0, cached: nil,
@@ -406,6 +408,8 @@ class StagesBaseUsageTest < Minitest::Test
     assert_equal "provider_account_config", recorded.fetch(:billing_evidence_source)
     assert_equal "anthropic/claude-requested", recorded.fetch(:requested_route)
     assert_equal "anthropic/claude-actual", recorded.fetch(:actual_route)
+    assert_equal "anthropic", recorded.fetch(:actual_provider)
+    assert_equal "claude-actual", recorded.fetch(:actual_model)
     assert_equal false, recorded.fetch(:input_includes_cache_read)
     assert_equal 0.0, recorded.fetch(:provider_reported_cost)
   end

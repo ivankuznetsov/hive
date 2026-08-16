@@ -121,6 +121,7 @@ module Hive
 
     def record!(agent:, model:, project_slug:, task_slug:, stage:, started_at:, ended_at:,
                 input:, output:, cached:, requested_route: nil, actual_route: nil,
+                actual_provider: nil, actual_model: nil,
                 cache_read: nil, cache_write: nil, reasoning: nil, cost: nil,
                 provider_reported_cost: nil, harness: nil,
                 billing_route: "unknown", billing_evidence_source: "unavailable",
@@ -128,7 +129,9 @@ module Hive
                 output_includes_reasoning: nil,
                 attempt_id: nil, session_id: nil, task_generation: nil, source: nil)
       requested_backend, requested_model = split_route(requested_route)
-      actual_backend, actual_model = split_route(actual_route)
+      actual_backend, routed_actual_model = split_route(actual_route)
+      actual_backend ||= blank_to_nil(actual_provider)
+      actual_model = routed_actual_model || blank_to_nil(actual_model)
       normalized_billing_route = billing_value(
         billing_route, BILLING_ROUTES, "billing route"
       )

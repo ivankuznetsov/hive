@@ -35,6 +35,7 @@ Gem::Specification.new do |spec|
     "bin/hive-babysitter-stub-git",
     "bin/hv",
     "config/agent-skills.yml",
+    "config/model-pricing.v1.yml",
     "config/honeycomb-security-lint/*.yml",
     "config/honeycomb-security-lint/**/*",
     "skills/**/*",

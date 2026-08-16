@@ -167,6 +167,29 @@ class UsageDbTest < Minitest::Test
     end
   end
 
+  def test_session_persists_observed_direct_provider_identity_without_route_inference
+    with_usage_db do
+      Hive::UsageDb.record!(
+        agent: "codex", harness: "codex", model: "gpt-5.6-sol",
+        actual_provider: "openai", actual_model: "gpt-5.6-sol",
+        billing_route: "subscription",
+        billing_evidence_source: "agent_profile_contract",
+        project_slug: "alpha", task_slug: "task-a", stage: "4-execute",
+        started_at: Time.utc(2026, 8, 16, 12), ended_at: Time.utc(2026, 8, 16, 12, 1),
+        input: 10, output: 5, cached: 0,
+        attempt_id: "attempt-direct", session_id: "session-direct",
+        task_generation: 4, source: "runtime_receipt"
+      )
+
+      session = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt-direct", task_generation: 4
+      ).fetch(:sessions).fetch(0)
+      assert_equal "openai", session.fetch(:actual_backend)
+      assert_equal "gpt-5.6-sol", session.fetch(:actual_model)
+      assert_equal "codex", session.fetch(:harness)
+    end
+  end
+
   def test_aggregate_preserves_unknown_usage_in_agent_and_total_buckets
     with_usage_db do
       now = Time.utc(2026, 8, 12, 12)

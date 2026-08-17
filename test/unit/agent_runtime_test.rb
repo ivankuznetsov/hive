@@ -531,6 +531,28 @@ class AgentRuntimeTest < Minitest::Test
     assert_nil Hive::AgentRuntime.extract_usage(profile, { "type" => "usage" })
   end
 
+  def test_extracts_a_refused_pi_turn_as_a_provider_error
+    error = Hive::AgentRuntime.extract_provider_error(
+      Hive::AgentProfiles.lookup(:pi), PI_REFUSED_TURN
+    )
+
+    refute_nil error, "a refused pi turn must reach Hive as a provider error"
+    assert_equal :pi, error[:provider]
+    assert_equal 402, error[:status_code]
+    assert_includes error[:message], "Prompt tokens limit exceeded"
+  end
+
+  def test_completed_pi_turn_is_not_a_provider_error
+    event = {
+      "type" => "message_end",
+      "message" => { "stopReason" => "stop", "provider" => "openrouter" }
+    }
+
+    assert_nil Hive::AgentRuntime.extract_provider_error(
+      Hive::AgentProfiles.lookup(:pi), event
+    )
+  end
+
   private
 
   def compile(profile, **kwargs)
@@ -560,4 +582,20 @@ class AgentRuntimeTest < Minitest::Test
     assert_equal false, error.evidence.supported
     assert_equal :custom, error.evidence.provider if error.evidence.provider == :custom
   end
+
+  # A pi turn that OpenRouter refused for spend. pi leaves the envelope type
+  # alone and reports the refusal through stopReason/errorMessage, then exits
+  # zero — so this seam is the only place the failure is visible.
+  PI_REFUSED_TURN = {
+    "type" => "message_start",
+    "message" => {
+      "role" => "assistant",
+      "content" => [],
+      "provider" => "openrouter",
+      "model" => "deepseek/deepseek-v4-pro",
+      "stopReason" => "error",
+      "errorMessage" =>
+        "402: {\"message\":\"Prompt tokens limit exceeded: 25770 > 8471.\",\"code\":402}"
+    }
+  }.freeze
 end

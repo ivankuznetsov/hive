@@ -254,6 +254,18 @@ module Hive
       nil
     end
 
+    # nil unless the profile recognizes a provider refusal in this event. The
+    # profile owns its CLI's shape, so Hive never has to know which key a given
+    # provider hides a failed turn behind.
+    def extract_provider_error(profile, event)
+      public_profile = runtime_profile(profile)
+      return nil unless public_profile
+
+      AgentCliRuntime.extract_provider_error(public_profile, event)
+    rescue StandardError
+      nil
+    end
+
     def observe(profile, result)
       if result.is_a?(Hash) &&
          result[:normalized_outcome].is_a?(NormalizedOutcome)

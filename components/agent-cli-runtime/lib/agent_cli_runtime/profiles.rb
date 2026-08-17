@@ -226,6 +226,7 @@ module AgentCliRuntime
       model_argument_builder: ->(model) { [ "--model", model ] },
       launcher_identity: "pi-coding-agent/v1",
       usage_extractor: UsageExtractors::PI,
+      error_extractor: ErrorExtractors::PI,
       credential_environment_keys: PI_CREDENTIAL_ENVIRONMENT_KEYS,
       configuration_environment_key: "PI_CODING_AGENT_DIR",
       default_configuration_directory: ".pi/agent",

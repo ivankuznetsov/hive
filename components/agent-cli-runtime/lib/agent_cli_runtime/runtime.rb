@@ -107,6 +107,23 @@ module AgentCliRuntime
       end
     end
 
+    # A provider refusal seen mid-stream, normalized to
+    # {provider:, status_code:, message:}, or nil when the event is clean.
+    # Callers use this to tell a provider-side stop (quota, credit ceiling,
+    # rate limit) apart from an agent that genuinely produced nothing: several
+    # CLIs report the former on the stream and still exit zero.
+    def extract_provider_error(profile, event)
+      resolved = Profiles.resolve(profile)
+      text = resolved.extract_error_event(event)
+      return nil if text.nil? || text.to_s.strip.empty?
+
+      {
+        provider: resolved.name,
+        status_code: status_code_from(text),
+        message: Redactor.diagnostic(text)
+      }.freeze
+    end
+
     def observe(profile, result)
       resolved = Profiles.resolve(profile)
       raw = result.is_a?(Hash) ? result : {}
@@ -266,6 +283,16 @@ module AgentCliRuntime
       values.empty? ? nil : values.join(",")
     end
     private_class_method :tool_csv
+
+    # Providers prefix the status onto the text ("402: {...}") or carry it in
+    # the embedded payload. Either is enough to classify without matching on
+    # human-readable wording, which differs per provider and changes freely.
+    def status_code_from(text)
+      value = text[/\A\s*(\d{3})\s*:/, 1] || text[/"code"\s*:\s*(\d{3})\b/, 1]
+      code = value.to_i
+      code.between?(100, 599) ? code : nil
+    end
+    private_class_method :status_code_from
 
     def normalize_usage(usage)
       return nil unless usage.is_a?(Hash)

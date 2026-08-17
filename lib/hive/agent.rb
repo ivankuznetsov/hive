@@ -406,10 +406,19 @@ module Hive
             # MessageExtractor does not surface as a final message — so without
             # scanning the raw line the limit text never reaches handle_exit and
             # the run is misreported as a generic failure (exit_code=1).
-            if limit_text.nil? && !sensitive_payload && provider_limit_candidate?(json) &&
-               Hive::AgentLimit.limit_reached?(line)
-              detail = json && (json["message"] || (json["error"].is_a?(Hash) ? json["error"]["message"] : nil))
-              limit_text = (detail || line).to_s.strip
+            # Ask the profile first: it owns its CLI's shape. pi keeps the
+            # envelope type ("message_start") and moves a refused turn into
+            # stopReason/errorMessage, so the type-based scan below never sees
+            # it — the run then reads as a clean exit 0 that produced nothing,
+            # and a quota wall gets misreported as invalid agent output.
+            if limit_text.nil? && !sensitive_payload
+              provider_error = Hive::AgentRuntime.extract_provider_error(@profile, json)
+              if provider_error && provider_limit_status?(provider_error)
+                limit_text = provider_error[:message].to_s.strip
+              elsif provider_limit_candidate?(json) && Hive::AgentLimit.limit_reached?(line)
+                detail = json && (json["message"] || (json["error"].is_a?(Hash) ? json["error"]["message"] : nil))
+                limit_text = (detail || line).to_s.strip
+              end
             end
             turn_started = claude_turn_started?(json)
             if turn_started
@@ -1507,6 +1516,17 @@ module Hive
 
     def parse_json_line(line)
       Hive::Agent::MessageExtractor.parse_json_line(line)
+    end
+
+    # A refusal the provider itself attributed to spend or pacing. The status
+    # code is authoritative and provider-independent; the wording check keeps
+    # providers that describe a limit without setting a status.
+    PROVIDER_LIMIT_STATUS_CODES = [ 402, 429 ].freeze
+
+    def provider_limit_status?(provider_error)
+      return true if PROVIDER_LIMIT_STATUS_CODES.include?(provider_error[:status_code])
+
+      Hive::AgentLimit.limit_reached?(provider_error[:message].to_s)
     end
 
     def provider_limit_candidate?(event)

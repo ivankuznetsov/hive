@@ -8,6 +8,7 @@ end
 
 require "agent_cli_runtime/redactor"
 require "agent_cli_runtime/usage_extractors"
+require "agent_cli_runtime/error_extractors"
 require "agent_cli_runtime/opencode/result_parser"
 require "agent_cli_runtime/profile"
 require "agent_cli_runtime/profiles"
@@ -35,6 +36,10 @@ module AgentCliRuntime
 
   def extract_usage(profile, event)
     Runtime.extract_usage(profile, event)
+  end
+
+  def extract_provider_error(profile, event)
+    Runtime.extract_provider_error(profile, event)
   end
 
   def observe(profile, result)

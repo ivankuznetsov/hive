@@ -30,6 +30,65 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     end
   end
 
+  def test_pi_receipt_compiles_controller_scoped_producer_tools
+    Dir.mktmpdir("hive-capture-toolkit-pi") do |root|
+      source = File.join(root, "source")
+      writable = File.join(root, "outcome-evidence", "work", "generation", "attempt")
+      FileUtils.mkdir_p([ source, writable ])
+      policy = Object.new
+      policy.define_singleton_method(:cleanup!) { true }
+      compiled = nil
+      compile = lambda do |**kwargs|
+        compiled = kwargs
+        policy
+      end
+      toolkit = Hive::Artifacts::CaptureToolkit.new(hive_executable: "/opt/hive/bin/hive")
+
+      receipt = with_replaced_singleton_method(
+        Hive::WorkflowPackage::RuntimePolicy, :compile_pi_evidence_actor, compile
+      ) do
+        toolkit.prepare!(
+          kinds: %w[document terminal], task_root: root, source_root: source,
+          source_sha: "a" * 40, writable_root: writable,
+          producer_profile: Hive::AgentProfiles.lookup(:pi)
+        )
+      end
+
+      assert_same policy, toolkit.producer_runtime_policy
+      assert_equal File.realpath(source), compiled.fetch(:task_folder)
+      assert_equal File.realpath(root), compiled.fetch(:package_root)
+      assert_equal File.realpath(writable), compiled.fetch(:writable_root)
+      assert_equal false, compiled.fetch(:browser)
+      assert_equal "evidence_write", receipt.dig("producer_interface", "document")
+      assert_equal "evidence_terminal", receipt.dig("producer_interface", "terminal")
+      refute receipt.dig("producer_interface").key?("browser")
+      toolkit.close
+      assert_nil toolkit.producer_runtime_policy
+    end
+  end
+
+  def test_managed_capture_rejects_an_unsupported_producer
+    Dir.mktmpdir("hive-capture-toolkit-unsupported") do |root|
+      source = File.join(root, "source")
+      writable = File.join(root, "outcome-evidence", "work", "generation", "attempt")
+      FileUtils.mkdir_p([ source, writable ])
+      profile = Struct.new(:name).new(:unsupported)
+      toolkit = Hive::Artifacts::CaptureToolkit.new
+
+      error = assert_raises(Hive::ConfigError) do
+        toolkit.prepare!(
+          kinds: [ "terminal" ], task_root: root, source_root: source,
+          source_sha: "a" * 40, writable_root: writable,
+          producer_profile: profile
+        )
+      end
+
+      assert_includes error.message, "does not support producer :unsupported"
+      mailbox = toolkit.launch_environment.fetch("HIVE_EVIDENCE_CAPTURE_MAILBOX")
+      refute File.exist?(mailbox)
+    end
+  end
+
   def test_visual_receipt_uses_only_managed_agent_browser_and_media_preflight
     Dir.mktmpdir("hive-capture-toolkit-generic") do |root|
     entry = FakeBrowser.new(

@@ -33,7 +33,7 @@ module Hive
 
             profile = Hive::AgentProfiles.lookup(request.reviewer.fetch("provider"), cfg: @cfg)
             scope = Hive::PlanReview::WorkspaceScope.launch_kwargs(
-              profile:, workspace: cwd, role: request.kind
+              profile:, workspace: cwd, role: request.kind, output_path:
             )
             manifest = custody_manifest(cwd, output_path)
             snapshot = Hive::ArtifactFirewall.capture(manifest)
@@ -96,11 +96,13 @@ module Hive
             actual = {
               "provider" => request.reviewer["provider"],
               "route" => request.reviewer["route"],
-              "effort" => request.reviewer["effort"]
+              "effort" => request.reviewer["effort"],
+              "model" => request.reviewer["model"],
+              "family" => request.reviewer["family"]
             }
             unless served_model.empty?
               actual["model"] = served_model
-              actual["family"] = request.reviewer["family"] if served_model == request.reviewer["model"]
+              actual.delete("family") unless served_model == request.reviewer["model"]
             end
             {
               "status" => status,
@@ -142,6 +144,7 @@ module Hive
         end
 
         def call(request)
+          runner_result = nil
           validate_snapshot!(request)
           capability = capability_for(request)
           if capability.fetch("status") != "present"
@@ -192,6 +195,7 @@ module Hive
           end
           validate_output!(output_path, disposable)
           bytes = File.binread(output_path, ResultParser::MAX_BYTES + 1)
+          bytes = normalize_pi_result(bytes, snapshot_bytes, request)
           parsed = ResultParser.parse(
             bytes,
             expected: {
@@ -222,7 +226,11 @@ module Hive
             route_receipt: route_receipt(request)
           )
         rescue StaleObservation, InvalidRecord, Hive::ConfigError => e
-          result("terminal_failure", diagnostic: e.message)
+          actual = runner_result.is_a?(Hash) ? runner_result["actual_route"] : nil
+          result(
+            "terminal_failure", diagnostic: e.message,
+            route_receipt: route_receipt(request, actual:)
+          )
         rescue SystemCallError, IOError => e
           result("terminal_failure", diagnostic: "plan review adapter filesystem failure: #{e.message}")
         end
@@ -231,6 +239,12 @@ module Hive
 
         def capability_for(request)
           return { "status" => "present", "diagnostic" => nil } if request.kind == "adversarial"
+          if request.reviewer.fetch("provider") == "pi"
+            return {
+              "status" => "present", "diagnostic" => nil,
+              "invocation" => nil
+            }
+          end
 
           contract = @capability_resolver.call(CAPABILITY, request.reviewer.fetch("provider"))
           stringify(@capability_probe.call(
@@ -295,8 +309,39 @@ module Hive
             attempt_id: request.attempt_id,
             plan_digest: request.plan_digest,
             policy_fingerprint: request.policy_fingerprint,
+            host_computed_anchors: request.reviewer.fetch("provider") == "pi",
+            host_output_mode: request.reviewer.fetch("provider") == "pi",
+            output_basename: OUTPUT_BASENAME,
             verification_findings_json: JSON.pretty_generate(request.verification_findings)
           )
+        end
+
+        def normalize_pi_result(bytes, snapshot_bytes, request)
+          return bytes unless request.reviewer.fetch("provider") == "pi"
+
+          data = JSON.parse(bytes)
+          data["residual_evidence"] = [] unless request.kind == "verification"
+          findings = data["findings"]
+          return bytes unless findings.is_a?(Array)
+
+          lines = snapshot_bytes.to_s.lines(chomp: true)
+          findings.each do |entry|
+            evidence = entry.is_a?(Hash) ? entry["evidence"] : nil
+            next unless evidence.is_a?(Hash) && evidence["path"] == "plan.md"
+
+            start_line = evidence["start_line"]
+            end_line = evidence["end_line"]
+            next unless start_line.is_a?(Integer) && end_line.is_a?(Integer) &&
+                        start_line.positive? && end_line >= start_line
+
+            anchored = lines[(start_line - 1)..(end_line - 1)]
+            next unless anchored&.length == end_line - start_line + 1
+
+            evidence["anchor_digest"] = Digest::SHA256.hexdigest(anchored.join("\n").b)
+          end
+          JSON.generate(data)
+        rescue JSON::ParserError
+          bytes
         end
 
         def validate_output!(path, disposable)

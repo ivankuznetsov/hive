@@ -400,6 +400,12 @@ class AgentProfilesTest < Minitest::Test
     assert_equal "/ce-code-review", grok.format_skill_invocation("ce-code-review")
   end
 
+  def test_pi_profile_extracts_its_terminal_agent_event
+    pi = Hive::AgentProfiles.lookup(:pi)
+
+    assert_equal :pi_agent_end, pi.structured_output_protocol
+  end
+
   def test_grok_profile_verifies_native_plugin_skills
     Dir.mktmpdir do |home|
       grok_home = File.join(home, ".grok")

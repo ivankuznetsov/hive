@@ -130,6 +130,66 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  def test_stage_local_pi_model_is_pinned_without_top_level_models_map
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      spec = make_spec(
+        "agent" => "pi",
+        "model" => "openrouter/deepseek/deepseek-v4-pro:xhigh",
+        "effort" => "xhigh"
+      )
+      reviewer = Hive::Reviewers::Agent.new(spec, ctx, cfg: {})
+      captured = nil
+      spawn = lambda do |_task, **options|
+        captured = options
+        { status: :ok }
+      end
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        assert reviewer.run!.ok?
+      end
+
+      assert_equal "openrouter/deepseek/deepseek-v4-pro:xhigh", captured.fetch(:model)
+      assert_equal "xhigh", captured.fetch(:effort)
+      refute captured.key?(:routing_arguments)
+    end
+  end
+
+  def test_top_level_models_route_overrides_stage_local_reviewer_model
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      spec = make_spec(
+        "agent" => "pi",
+        "model" => "openrouter/deepseek/deepseek-v4-pro:xhigh"
+      )
+      cfg = {
+        "models" => {
+          "review_reviewers" => {
+            "model" => "openrouter/deepseek/deepseek-v4-pro:high"
+          }
+        }
+      }
+      reviewer = Hive::Reviewers::Agent.new(spec, ctx, cfg: cfg)
+      captured = nil
+      spawn = lambda do |_task, **options|
+        captured = options
+        { status: :ok }
+      end
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        assert reviewer.run!.ok?
+      end
+
+      routing = captured.fetch(:routing_arguments)
+      assert_equal "openrouter/deepseek/deepseek-v4-pro:high", routing.model
+      assert_equal [ "--model", "openrouter/deepseek/deepseek-v4-pro:high" ],
+                   routing.native_arguments
+      refute captured.key?(:model)
+    end
+  end
+
   # A8 fail-closed, REAL adapter path: a non-yolo permissions scope on a
   # reviewer whose runner can't enforce tool scoping (codex) must raise
   # Hive::ConfigError from the ACTUAL Reviewers::Agent#run! →

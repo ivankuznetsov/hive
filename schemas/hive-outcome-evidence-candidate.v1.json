@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-outcome-evidence-candidate.v1.json",
+  "title": "Hive Outcome Evidence Candidate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "task", "project", "generation",
+    "attempt_id", "evidence", "producer", "recorded_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-outcome-evidence-candidate" },
+    "schema_version": { "const": 1 },
+    "task": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "generation": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "attempt_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "evidence": {
+      "type": "array", "minItems": 1, "maxItems": 1024,
+      "items": { "type": "object" }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["context_id", "agent", "model", "effort"],
+      "properties": {
+        "context_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+        "agent": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+        "model": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "effort": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "recorded_at": { "type": "string", "format": "date-time", "maxLength": 64 }
+  }
+}

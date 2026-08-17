@@ -19,7 +19,6 @@ module Hive
         level = Hive::PlanReview.level!(level)
         rows = normalize(coverage)
         required = rows.select { |row| row.fetch("required") }
-        required += rows.reject { |row| row.fetch("required") } if level == "mandatory"
         required = required.uniq { |row| row.fetch("name") }
         missing = required.reject { |row| %w[completed waived].include?(row.fetch("status")) }
         core_complete = CORE.all? do |name|

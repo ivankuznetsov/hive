@@ -87,13 +87,18 @@ class ArtifactsTerminalRecorderTest < Minitest::Test
       cast = File.join(root, "proof.cast")
       review = File.join(root, "proof.txt")
       pid_file = File.join(root, "descendant.pid")
+      ready_file = File.join(root, "descendant.ready")
       child = <<~RUBY
+        Signal.trap("HUP", "IGNORE")
+        Signal.trap("TERM", "IGNORE")
         Process.setsid
+        File.write(#{ready_file.inspect}, "ready")
         sleep 30
       RUBY
       command = <<~RUBY
         pid = Process.spawn(#{RbConfig.ruby.inspect}, "-e", #{child.inspect},
                             out: File::NULL, err: File::NULL, close_others: true)
+        sleep 0.01 until File.exist?(#{ready_file.inspect})
         File.write(#{pid_file.inspect}, pid.to_s)
       RUBY
       recorder = Hive::Artifacts::TerminalRecorder.new(
@@ -107,6 +112,26 @@ class ArtifactsTerminalRecorderTest < Minitest::Test
       assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
       refute_path_exists cast
       refute_path_exists review
+    end
+  end
+
+  def test_adopted_zombie_descendants_are_reaped_without_invalidating_the_capture
+    Dir.mktmpdir("hive-terminal-recorder-zombies") do |root|
+      cast = File.join(root, "proof.cast")
+      review = File.join(root, "proof.txt")
+      command = <<~RUBY
+        20.times { fork { sleep 0.001; exit! 0 } }
+        exit! 0
+      RUBY
+
+      result = Hive::Artifacts::TerminalRecorder.new(
+        argv: [ RbConfig.ruby, "-e", command ], cwd: root,
+        cast_path: cast, review_path: review, timeout_seconds: 5
+      ).record!
+
+      assert_equal 0, result.fetch("exit_status")
+      assert_path_exists cast
+      assert_path_exists review
     end
   end
 

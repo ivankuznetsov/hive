@@ -231,7 +231,7 @@ module Hive
             log_label: "babysitter-pr-#{number}",
             profile: profile,
             cfg: @cfg,
-            routing_arguments: Hive::Stages::Base.model_routing_arguments(
+            **Hive::Stages::Base.model_launch_arguments(
               @cfg, "babysitter", profile,
               current: Hive::Stages::Base.model_routing_current(@cfg["babysitter"])
             ),

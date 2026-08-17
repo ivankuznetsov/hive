@@ -13,7 +13,7 @@ module Hive
   class AgentProfile
     PROMPT_STYLES = AgentCliRuntime::Profile::PROMPT_STYLES
     ROUTING_ARGUMENT_PLACEMENTS = %i[global subcommand].freeze
-    STRUCTURED_OUTPUT_PROTOCOLS = %i[grok_end].freeze
+    STRUCTURED_OUTPUT_PROTOCOLS = %i[grok_end pi_agent_end].freeze
     BILLING_SEMANTICS = %i[unknown subscription_backed api_billed].freeze
     WORKSPACE_WRITE_PERMISSION_MODE =
       AgentCliRuntime::Profile::WORKSPACE_WRITE_PERMISSION_MODE

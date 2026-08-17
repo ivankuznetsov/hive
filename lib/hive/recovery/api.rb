@@ -71,6 +71,7 @@ module Hive
 
       def complete_recovery_operation(operation, result, now:)
         return unless operation
+        return if operation.respond_to?(:complete?) && operation.complete?
 
         row = normalized_recovery_result(result)
         operation.complete!(
@@ -79,6 +80,8 @@ module Hive
             "outcome" => row["status"], "retry_at" => row["next_eligible_at"]
           }
         )
+      rescue Hive::TaskActivity::Conflict
+        operation.restore_authoritative!
       end
 
       def record_recovery_observation(activity, observation, result, now:)

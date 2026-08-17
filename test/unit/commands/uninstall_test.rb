@@ -1,4 +1,6 @@
 require "test_helper"
+# Uninstall requires the babysit command lazily inside `stop_foreground_babysitter`,
+# so the constant is only present here if this file loads it.
 require "hive/commands/babysit"
 require "hive/commands/uninstall"
 require "hive/user_service"

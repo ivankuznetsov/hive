@@ -74,7 +74,8 @@ class StagesArtifactsPromptTest < Minitest::Test
       )
       reviewer = Hive::Stages::Artifacts.render_role_prompt(
         "artifacts_reviewer_prompt.md.erb", task,
-        requirement_json: "{}", evidence_json: "[]", review_context_json: "{}"
+        requirement_json: "{}", evidence_json: "[]", review_context_json: "{}",
+        repair_json: "{}"
       )
 
       assert_includes inference, "fresh read-only context"
@@ -102,7 +103,7 @@ class StagesArtifactsPromptTest < Minitest::Test
       assert_match(/preserves the last evidence/, producer)
       assert_includes producer, "same controller-issued path for both roles"
       assert_match(/Never edit\s+the worktree/, producer)
-      assert_includes reviewer, "third fresh"
+      assert_includes reviewer, "fresh, read-only"
       assert_includes reviewer, "video remains the user-facing proof"
       assert_includes reviewer, "`task.md`, `plan.md` when present"
       assert_includes reviewer, "controller-materialized exact diff"
@@ -111,6 +112,7 @@ class StagesArtifactsPromptTest < Minitest::Test
       assert_includes reviewer, "do not echo or calculate"
       refute_includes reviewer, "`review_scope_hashes`"
       assert_includes reviewer, "accepted`, `revise`, or `blocked"
+      assert_includes reviewer, "Reserve enough output for the final JSON"
       [ inference, producer, reviewer ].each { |prompt| assert_includes prompt, "untrusted data" }
     end
   end

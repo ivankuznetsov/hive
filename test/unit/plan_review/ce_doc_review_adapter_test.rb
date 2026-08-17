@@ -41,6 +41,90 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_pi_primary_uses_the_built_in_direct_review_contract_without_skill_probe
+    with_request do |request, _plan_path|
+      pi_request = request.with(
+        reviewer: request.reviewer.merge(
+          "provider" => "pi",
+          "model" => "openrouter/deepseek/deepseek-v4-pro:xhigh",
+          "family" => "deepseek",
+          "route" => "pi-openrouter"
+        )
+      )
+      prompt = nil
+      runner = lambda do |output_path:, request:, **kwargs|
+        prompt = kwargs.fetch(:prompt)
+        payload = valid_result(request)
+        payload.fetch("findings").first.fetch("evidence")["anchor_digest"] = "0" * 64
+        payload["residual_evidence"] = [ { "unexpected" => "initial review residue" } ]
+        File.write(output_path, JSON.generate(payload))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+      adapter = Hive::PlanReview::Adapters::CeDocReview.new(
+        runner:,
+        capability_probe: ->(**) { flunk "Pi direct review must not probe a host skill" },
+        capability_resolver: ->(*) { flunk "Pi direct review must not resolve a host skill" }
+      )
+
+      result = adapter.call(pi_request)
+
+      assert_equal "success", result.outcome
+      assert_includes prompt, "Review the immutable executable-plan copy"
+      assert_includes prompt, "do not require an external skill or subagent"
+      assert_includes prompt, "Hive will replace it from the cited"
+      assert_includes prompt, 'files["hive-plan-review-result.json"]'
+      assert_includes prompt, "never the absolute path"
+      refute_includes prompt, "Invoke `"
+      assert_equal Digest::SHA256.hexdigest("# Plan"),
+                   result.findings.first["evidence"].fetch("anchor_digest")
+      assert_empty result.residual_evidence
+    end
+  end
+
+  def test_parser_failure_preserves_the_actual_reviewer_route
+    with_request do |request, _plan_path|
+      runner = lambda do |output_path:, request:, **|
+        payload = valid_result(request)
+        payload["coverage"] = "invalid"
+        File.write(output_path, JSON.generate(payload))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+
+      result = adapter_for(runner).call(request)
+
+      assert_equal "terminal_failure", result.outcome
+      assert_equal request.reviewer, result.route_receipt.fetch("actual")
+      assert_equal "different_model_family", result.route_receipt.fetch("independence_reason")
+    end
+  end
+
+  def test_pi_anchor_rewrite_defers_unparsable_output_to_the_result_parser
+    with_request do |request, _plan_path|
+      pi_request = request.with(
+        reviewer: request.reviewer.merge(
+          "provider" => "pi",
+          "model" => "openrouter/deepseek/deepseek-v4-pro:xhigh",
+          "family" => "deepseek",
+          "route" => "pi-openrouter"
+        )
+      )
+      runner = lambda do |output_path:, request:, **|
+        File.write(output_path, "{not json")
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+      adapter = Hive::PlanReview::Adapters::CeDocReview.new(
+        runner:,
+        capability_probe: ->(**) { flunk "Pi direct review must not probe a host skill" },
+        capability_resolver: ->(*) { flunk "Pi direct review must not resolve a host skill" }
+      )
+
+      result = adapter.call(pi_request)
+
+      assert_equal "terminal_failure", result.outcome
+      assert_includes result.diagnostic, "not valid JSON"
+    end
+  end
+
   def test_route_receipt_normalizes_model_family_before_attesting_independence
     with_request do |request, _plan_path|
       runner = lambda do |output_path:, request:, **|
@@ -206,7 +290,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
-  def test_production_runner_attests_served_model_only_when_the_agent_reports_one
+  def test_production_runner_attests_the_explicitly_launched_model_and_detects_a_served_override
     with_runner do |runner, request, output_path|
       payload = valid_result(request)
       replacement = lambda do |_task, expected_output:, **|
@@ -237,8 +321,25 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
         )
       end
 
-      refute silent.fetch("actual_route").key?("model")
-      refute silent.fetch("actual_route").key?("family")
+      assert_equal request.reviewer.fetch("model"), silent.dig("actual_route", "model")
+      assert_equal request.reviewer.fetch("family"), silent.dig("actual_route", "family")
+    end
+
+    with_runner do |runner, request, output_path|
+      payload = valid_result(request)
+      replacement = lambda do |_task, expected_output:, **|
+        File.write(expected_output, JSON.generate(payload))
+        { status: :ok, usage: { model: "unexpected-model" } }
+      end
+      overridden = nil
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
+        overridden = runner.call(
+          prompt: "review", cwd: request.output_directory, output_path:, request:
+        )
+      end
+
+      assert_equal "unexpected-model", overridden.dig("actual_route", "model")
+      refute overridden.fetch("actual_route").key?("family")
     end
   end
 

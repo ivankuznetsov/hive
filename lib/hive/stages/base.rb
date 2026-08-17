@@ -213,6 +213,33 @@ module Hive
         )
       end
 
+      # Build the complete model/effort kwargs for one non-durable spawn.
+      #
+      # `model_routing_arguments` intentionally returns nil when the project
+      # has no top-level `models:` map: in that mode the per-stage values are
+      # legacy/current controls, not routed controls. Callers used to pass
+      # only that nil `routing_arguments` value, which silently discarded an
+      # explicit `review.reviewers[].model`, `review.triage.model`, and other
+      # stage-local pins. Pi then fell back to its unrelated global default
+      # model while Hive labelled the spawn with the configured reviewer
+      # name.
+      #
+      # Preserve the routing precedence when `models:` is active; otherwise
+      # return the stage-local model/effort through spawn_agent's existing
+      # legacy identity path. Provider selection remains owned by `profile`.
+      def model_launch_arguments(cfg, stage, profile, current: {})
+        normalized_current = model_routing_current(current)
+        routing = model_routing_arguments(
+          cfg, stage, profile, current: normalized_current
+        )
+        return { routing_arguments: routing } if routing
+
+        {
+          model: normalized_current[:model],
+          effort: normalized_current[:effort]
+        }.compact
+      end
+
       def model_routing_current(block)
         return Hive::ModelRouting::EMPTY_MODELS unless block.is_a?(Hash)
 

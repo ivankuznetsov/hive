@@ -83,6 +83,90 @@ class HivePatrolValidatorTest < Minitest::Test
       assert_equal false, result["passed"]
       assert_equal 124, result["commands"].first["exit_code"]
       assert_equal true, result["commands"].first["timed_out"]
+      assert_equal "wall_clock", result["commands"].first["timeout_reason"]
+    end
+  end
+
+  def test_idle_output_timeout_kills_a_silent_command_before_the_wall_clock
+    with_tmp_dir do |dir|
+      validator = Hive::Patrol::Validator.new(
+        { "test" => "ruby -e 'sleep 30'" },
+        timeout_sec: 30,
+        idle_timeout_sec: 0.15
+      )
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = validator.validate(dir)
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      command = result["commands"].first
+      assert_equal false, result["passed"]
+      assert_equal true, command["timed_out"]
+      assert_equal "idle_output", command["timeout_reason"]
+      assert_equal 124, command["exit_code"]
+      assert_operator elapsed, :<, 10
+    end
+  end
+
+  def test_progressing_output_defers_the_idle_deadline
+    with_tmp_dir do |dir|
+      validator = Hive::Patrol::Validator.new(
+        { "test" => "ruby -e '8.times { puts :tick; $stdout.flush; sleep 0.1 }'" },
+        timeout_sec: 30,
+        idle_timeout_sec: 0.5
+      )
+
+      result = validator.validate(dir)
+      command = result["commands"].first
+
+      assert_equal true, result["passed"], command.inspect
+      assert_nil command["timeout_reason"]
+    end
+  end
+
+  def test_stderr_output_also_counts_as_activity
+    with_tmp_dir do |dir|
+      validator = Hive::Patrol::Validator.new(
+        { "test" => "ruby -e '8.times { $stderr.puts :tick; $stderr.flush; sleep 0.1 }'" },
+        timeout_sec: 30,
+        idle_timeout_sec: 0.5
+      )
+
+      result = validator.validate(dir)
+
+      assert_equal true, result["passed"], result["commands"].first.inspect
+    end
+  end
+
+  def test_wall_clock_still_bounds_a_command_that_keeps_printing
+    with_tmp_dir do |dir|
+      validator = Hive::Patrol::Validator.new(
+        { "test" => "ruby -e 'loop { puts :tick; $stdout.flush; sleep 0.05 }'" },
+        timeout_sec: 0.4,
+        idle_timeout_sec: 30
+      )
+
+      result = validator.validate(dir)
+      command = result["commands"].first
+
+      assert_equal false, result["passed"]
+      assert_equal true, command["timed_out"]
+      assert_equal "wall_clock", command["timeout_reason"]
+    end
+  end
+
+  def test_non_positive_idle_timeout_disables_the_idle_deadline
+    with_tmp_dir do |dir|
+      validator = Hive::Patrol::Validator.new(
+        { "test" => "ruby -e 'sleep 0.3'" },
+        timeout_sec: 30,
+        idle_timeout_sec: 0
+      )
+
+      result = validator.validate(dir)
+
+      assert_equal true, result["passed"], result["commands"].first.inspect
+      assert_nil result["commands"].first["timeout_reason"]
     end
   end
 

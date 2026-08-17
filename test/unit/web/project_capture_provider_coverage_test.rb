@@ -281,6 +281,32 @@ class WebProjectCaptureProviderCoverageTest < Minitest::Test
     end
   end
 
+  # A descendant can be reaped between the liveness probe and the state read,
+  # which is a disappearance rather than a leak. Unreadable state is different:
+  # custody cannot prove the process is gone, so it must fail closed.
+  def test_descendant_liveness_treats_disappearance_and_unreadable_state_differently
+    subject = provider
+    target = { pid: 4321, start_time: "1", depth: 1 }
+    alive = ->(_target) { true }
+
+    missing = with_replaced_singleton_method(Hive::ProcessKill, :captured_process_alive?, alive) do
+      with_replaced_singleton_method(File, :foreach, ->(_path) { raise Errno::ENOENT }) do
+        subject.send(:live_descendant?, target)
+      end
+    end
+    refute missing
+
+    provider_error = error_class
+    [ Errno::EACCES, Errno::EIO ].each do |failure|
+      error = with_replaced_singleton_method(Hive::ProcessKill, :captured_process_alive?, alive) do
+        with_replaced_singleton_method(File, :foreach, ->(_path) { raise failure }) do
+          assert_raises(provider_error) { subject.send(:live_descendant?, target) }
+        end
+      end
+      assert_match(/process state is unavailable/, error.message)
+    end
+  end
+
   def test_process_target_and_wait_status_fail_closed_on_identity_loss
     subject = provider
     error = with_replaced_singleton_method(

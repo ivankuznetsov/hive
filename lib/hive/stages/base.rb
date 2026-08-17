@@ -905,12 +905,25 @@ module Hive
         %i[error review_error review_ci_stale review_stale].include?(name)
       end
 
+      # A marker holds only the most recent failure: the next run overwrites
+      # it, taking its diagnostic with it. The reason code alone does not
+      # distinguish causes — one 7-artifacts task failed 25 times under
+      # `outcome_evidence_invalid` for three unrelated reasons, and only the
+      # last was still recoverable. events.jsonl is append-only, so carrying
+      # the diagnostic here preserves each failure's cause for later reading.
+      MAX_EVENT_DIAGNOSTIC_BYTES = 200
+
       def marker_event_message(marker)
         attrs = marker.attrs
         detail = attrs["reason"] || attrs["phase"] || attrs["attempts"] || attrs["pass"]
-        return "#{marker.name} #{detail}" if detail
-
-        marker.name.to_s
+        diagnostic = attrs["diagnostic"].to_s.strip
+        parts = [ marker.name.to_s ]
+        parts << detail if detail
+        unless diagnostic.empty?
+          bounded = diagnostic.byteslice(0, MAX_EVENT_DIAGNOSTIC_BYTES).to_s.scrub
+          parts << "diagnostic=#{bounded}"
+        end
+        parts.join(" ")
       end
 
       # Stage_exit message includes reason / phase / pass when present so

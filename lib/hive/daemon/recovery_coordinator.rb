@@ -141,9 +141,31 @@ module Hive
         end
       end
 
-      def assessment(row, now: Time.now.utc)
+      # Automatic retry pacing. The flat window came from AgentLimit, which is
+      # sized for a provider quota wall — right for "you are rate limited",
+      # wrong for a locally orphaned agent, which sat idle for an hour over a
+      # failure that could retry in seconds. The ladder starts short and only
+      # reaches the provider-sized window after repeated failure; it never
+      # exceeds it, so nothing is paced more slowly than before.
+      RETRY_BACKOFF_SEC = [ 5, 10, 60, 300, 900 ].freeze
+
+      # A deliberate human retry is not the automatic sweep. The cooldown
+      # paces Hive's own retries; gating an operator on it leaves a task idle
+      # for an hour with a person standing over it. Safety checks still apply
+      # to these — those are about worktree state, not pacing.
+      OPERATOR_REQUESTORS = %w[action cli bot web].freeze
+
+      def retry_delay_sec(retry_count)
+        ceiling = Hive::AgentLimit.retry_cooldown_sec
+        index = retry_count.to_i
+        return ceiling if index.negative? || index >= RETRY_BACKOFF_SEC.length
+
+        [ RETRY_BACKOFF_SEC[index], ceiling ].min
+      end
+
+      def assessment(row, now: Time.now.utc, retry_count: 0)
         observed_at = value(row, :state_file_mtime)
-        eligible_at = observed_at && observed_at + Hive::AgentLimit.retry_cooldown_sec
+        eligible_at = observed_at && observed_at + retry_delay_sec(retry_count)
         safe, safety_reason = @safety.call(row)
         {
           due: !eligible_at.nil? && now.utc >= eligible_at,
@@ -164,7 +186,8 @@ module Hive
         now = now.utc
         failure_origin = marker_attrs(row)["reason"].to_s
         retry_count = durable_retry_count(row)
-        assessment = assessment(row, now: now)
+        assessment = assessment(row, now: now, retry_count: retry_count)
+        operator_request = OPERATOR_REQUESTORS.include?(requestor.to_s)
         unless assessment[:retry_at]
           return receipt(
             "unavailable", failure_origin: failure_origin, owner: "hive",
@@ -173,12 +196,13 @@ module Hive
             retry_count: retry_count
           )
         end
-        unless assessment[:due]
+        unless assessment[:due] || operator_request
           return receipt(
             "cooldown", failure_origin: failure_origin, owner: "scheduler",
             next_eligible_at: assessment[:retry_at].utc.iso8601(6),
             reason: "shared_cooldown",
-            remediation: "retry remains available after the shared one-hour cooldown",
+            remediation: "retry remains available after the shared cooldown, " \
+                         "or immediately on an explicit operator retry",
             retry_count: retry_count, provider_hint: provider_hint(row)
           )
         end

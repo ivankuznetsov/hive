@@ -1323,10 +1323,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "operator", disposition.fetch(:owner)
   end
 
+  # Retry pacing is a backoff ladder now, so a failure has to be inside the
+  # current step to be in cooldown. A ten-minute-old marker error is due —
+  # it used to wait the provider-sized hour for a local fault.
   def test_error_retry_publishes_scheduler_owned_cooldown_disposition
     snapshot = FakeOperationalSnapshot.new
     dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
-    observed = row(marker: "review_error", action: "recover_review")
+    first_step = Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.first
+    observed = row(marker: "review_error", action: "recover_review", mtime: T0 - 1)
 
     dispatcher.send(:handle_row, observed, now: T0)
 
@@ -1334,7 +1338,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     disposition = snapshot.calls.last.last
     assert_equal :retry_cooldown, disposition.fetch(:decision)
     assert_equal "scheduler", disposition.fetch(:owner)
-    assert_equal (T0 - 600 + Hive::AgentLimit.retry_cooldown_sec).iso8601(6),
+    assert_equal (T0 - 1 + first_step).iso8601(6),
                  disposition.fetch(:retry_at)
     assert_equal false, disposition.fetch(:retry_due)
     assert_equal true, disposition.fetch(:retry_safe)

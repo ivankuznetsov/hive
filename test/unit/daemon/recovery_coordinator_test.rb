@@ -81,15 +81,47 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  # The cooldown paces Hive's own retry sweep. First failure waits the first
+  # backoff step, not the provider-sized hour.
   def test_request_before_cooldown_returns_cooldown_without_writing
-    with_fixture(mtime: NOW - 3599) do |coordinator, row, state_home|
+    with_fixture(mtime: NOW - 1) do |coordinator, row, state_home|
       receipt = coordinator.request(
-        row: row, requestor: "web", request_id: "too-early", now: NOW
+        row: row, requestor: "healer", request_id: "too-early", now: NOW
       )
 
       assert_equal "cooldown", receipt.status
-      assert_equal (NOW + 1).iso8601(6), receipt.next_eligible_at
+      assert_equal (NOW + 4).iso8601(6), receipt.next_eligible_at
       assert_empty Q.pending(state_home: state_home)
+    end
+  end
+
+  # A person asking for a retry is not the automatic sweep. Leaving a task
+  # idle for a cooldown with an operator standing over it is the behaviour
+  # this bypass exists to remove; the safety checks below it still apply.
+  def test_an_operator_retry_is_not_held_by_the_cooldown
+    %w[action cli bot web].each do |requestor|
+      with_fixture(mtime: NOW - 1) do |coordinator, row, state_home|
+        receipt = coordinator.request(
+          row: row, requestor: requestor, request_id: "manual-#{requestor}", now: NOW
+        )
+
+        refute_equal "cooldown", receipt.status,
+                     "#{requestor} must not be held by the automatic cooldown"
+        refute_empty Q.pending(state_home: state_home), requestor
+      end
+    end
+  end
+
+  # The ladder starts short and only reaches the provider-sized window after
+  # repeated failure; it never exceeds it.
+  def test_backoff_climbs_and_is_capped_at_the_provider_window
+    with_fixture do |coordinator, _row, _state_home|
+      steps = (0..6).map { |count| coordinator.retry_delay_sec(count) }
+
+      assert_equal [ 5, 10, 60, 300, 900 ], steps.first(5)
+      ceiling = Hive::AgentLimit.retry_cooldown_sec
+      assert_equal [ ceiling, ceiling ], steps.last(2)
+      assert steps.each_cons(2).all? { |a, b| b >= a }, "backoff must not decrease"
     end
   end
 
@@ -857,7 +889,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
-  def test_provider_and_marker_recovery_charge_once_with_the_same_due_time
+  def test_provider_and_marker_recovery_charge_once_but_pace_differently
     provider = nil
     with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, state_home|
       coordinator.request_admission_failure(
@@ -890,7 +922,20 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
 
     assert_equal({ count: 1, retry_count: 1 }, provider.except(:due_at))
-    assert_equal provider, marker
+    assert_equal({ count: 1, retry_count: 1 }, marker.except(:due_at))
+
+    # Both charge exactly once, but they no longer share a due time. A
+    # provider refusal is paced by the provider-sized window because that is
+    # how long the quota actually lasts; a marker failure is a local fault and
+    # starts at the first backoff step instead of idling for an hour.
+    assert_equal(
+      (NOW + Hive::AgentLimit.retry_cooldown_sec).iso8601(6),
+      provider.fetch(:due_at)
+    )
+    assert_equal(
+      (NOW + Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.first).iso8601(6),
+      marker.fetch(:due_at)
+    )
   end
 
   def test_existing_recovery_records_no_route_without_a_second_charge

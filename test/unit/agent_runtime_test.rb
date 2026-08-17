@@ -537,6 +537,36 @@ class AgentRuntimeTest < Minitest::Test
     assert_nil Hive::AgentRuntime.extract_usage(profile, { "type" => "usage" })
   end
 
+  def test_legacy_usage_extraction_keeps_a_fraction_of_a_cent_charge
+    profile = LegacyUsageProfile.new(
+      name: :legacy, launcher_identity: "legacy/v1",
+      usage: { "provider_reported_cost" => 0.0004 }
+    )
+
+    assert_equal(
+      0.0004,
+      Hive::AgentRuntime.extract_usage(
+        profile, { "type" => "usage" }
+      )[:provider_reported_cost]
+    )
+  end
+
+  def test_legacy_usage_extraction_drops_an_unusable_reported_cost
+    [ -1, Float::INFINITY, Float::NAN, "0.5" ].each do |cost|
+      profile = LegacyUsageProfile.new(
+        name: :legacy, launcher_identity: "legacy/v1",
+        usage: { provider_reported_cost: cost }
+      )
+
+      assert_nil(
+        Hive::AgentRuntime.extract_usage(
+          profile, { "type" => "usage" }
+        )[:provider_reported_cost],
+        "expected #{cost.inspect} to be rejected as a charge"
+      )
+    end
+  end
+
   def test_extracts_a_refused_pi_turn_as_a_provider_error
     error = Hive::AgentRuntime.extract_provider_error(
       Hive::AgentProfiles.lookup(:pi), PI_REFUSED_TURN

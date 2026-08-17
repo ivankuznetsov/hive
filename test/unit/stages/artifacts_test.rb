@@ -646,6 +646,46 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_empty_reviewer_output_gets_one_fresh_bounded_retry
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      prompts = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        if prompts.length == 1
+          raise Hive::Stages::Artifacts::RoleOutputError,
+                "reviewer output is missing or oversized"
+        end
+
+        {
+          actor: { "context_id" => "reviewer-2", "agent" => "pi" },
+          output: {
+            "verdicts" => [
+              {
+                "target_id" => "claim-flow", "verdict" => "accepted",
+                "reason" => "The retained document proves the requested flow."
+              }
+            ]
+          }
+        }
+      end
+
+      reviewer = Hive::Stages::Artifacts.run_reviewer!(
+        task: task, cfg: {}, identity: outcome_identity,
+        requirement: { "claims" => [], "exclusions" => [] }, evidence: [],
+        review_context: {}
+      )
+
+      assert_equal "reviewer-2", reviewer.dig(:actor, "context_id")
+      assert_equal 2, prompts.length
+      assert_includes prompts.last, "reviewer output is missing or oversized"
+      assert_includes prompts.last, "return the verdict JSON immediately"
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
   def test_targeted_recapture_preserves_accepted_hashes_and_reviews_the_full_package
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)

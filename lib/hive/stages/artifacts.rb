@@ -23,6 +23,7 @@ module Hive
 
       EVIDENCE_ROLES = %w[inference producer reviewer].freeze
       MAX_INFERENCE_ATTEMPTS = 2
+      MAX_REVIEWER_ATTEMPTS = 2
       class RoleOutputError < Hive::Artifacts::OutcomeEvidence::StoreError; end
       DEFAULT_REVIEW_CAPABILITIES = {
         "proof_kinds" => Hive::Artifacts::OutcomeEvidence::Proof::KINDS,
@@ -192,21 +193,11 @@ module Hive
           end
           evidence = merge_candidate_evidence!(prior, replacements, revision)
 
-          reviewer_prompt = render_role_prompt(
-            "artifacts_reviewer_prompt.md.erb", task,
-            requirement_json: JSON.pretty_generate(requirement),
-            evidence_json: JSON.pretty_generate(evidence),
-            review_context_json: JSON.pretty_generate(review_context)
-          )
-          reviewer = run_role!(
-            role: "reviewer", task: task, cfg: cfg, prompt: reviewer_prompt,
-            identity: identity
+          reviewer = run_reviewer!(
+            task: task, cfg: cfg, identity: identity, requirement: requirement,
+            evidence: evidence, review_context: review_context
           )
           reviewer_output = reviewer.fetch(:output)
-          unless reviewer_output.keys == [ "verdicts" ]
-            raise Hive::Artifacts::OutcomeEvidence::StoreError,
-                  "reviewer output must contain only verdicts"
-          end
           review = reviewer_output.merge(
             "reviewer" => reviewer.fetch(:actor),
             "review_scope_hashes" => representation_hashes(evidence)
@@ -284,6 +275,37 @@ module Hive
             inference: inference.fetch(:actor),
             reviewer_capabilities: reviewer_capabilities(cfg)
           )
+        end
+      end
+
+      def run_reviewer!(task:, cfg:, identity:, requirement:, evidence:, review_context:)
+        repair = nil
+        MAX_REVIEWER_ATTEMPTS.times do |index|
+          reviewer_prompt = render_role_prompt(
+            "artifacts_reviewer_prompt.md.erb", task,
+            requirement_json: JSON.pretty_generate(requirement),
+            evidence_json: JSON.pretty_generate(evidence),
+            review_context_json: JSON.pretty_generate(review_context),
+            repair_json: JSON.pretty_generate(repair || {})
+          )
+          begin
+            reviewer = run_role!(
+              role: "reviewer", task: task, cfg: cfg, prompt: reviewer_prompt,
+              identity: identity
+            )
+            unless reviewer.fetch(:output).keys == [ "verdicts" ]
+              raise RoleOutputError, "reviewer output must contain only verdicts"
+            end
+
+            return reviewer
+          rescue RoleOutputError => e
+            raise if index + 1 >= MAX_REVIEWER_ATTEMPTS
+
+            repair = {
+              "validation_error" => e.message.to_s.byteslice(0, 1024).to_s.scrub,
+              "instruction" => "Inspect the same retained evidence and return the verdict JSON immediately."
+            }
+          end
         end
       end
 

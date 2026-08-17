@@ -232,6 +232,43 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     end
   end
 
+  def test_retained_candidate_with_producer_can_resume_until_attempt_is_recorded
+    with_store do |store, task, _controller|
+      generation = store.open_generation!(**requirement_input).fetch("generation")
+      producer = actor("producer-resume")
+      retained = store.retain_candidate!(
+        generation: generation, attempt_id: "attempt-resume",
+        evidence: [ document_evidence(task) ], producer: producer
+      )
+
+      pending = store.pending_candidate(generation: generation)
+      assert_equal "attempt-resume", pending.fetch("attempt_id")
+      assert_equal producer.merge("model" => "provider-default", "effort" => "default"),
+                   pending.fetch("producer")
+      assert_equal retained, pending.fetch("evidence")
+
+      hashes = retained.flat_map do |entry|
+        entry.fetch("representations").map { |representation| representation.fetch("sha256") }
+      end
+      store.append_attempt!(
+        generation: generation, attempt_id: "attempt-resume", status: "accepted",
+        evidence: retained, producer: producer,
+        review: {
+          "reviewer" => actor("reviewer-resume"),
+          "review_scope_hashes" => hashes,
+          "verdicts" => %w[claim-a claim-b].map do |id|
+            {
+              "target_id" => id, "verdict" => "accepted",
+              "reason" => "The retained document verifies this bounded outcome directly."
+            }
+          end
+        }
+      )
+
+      assert_nil store.pending_candidate(generation: generation)
+    end
+  end
+
   def test_open_generation_is_idempotent_and_keeps_the_original_inference
     with_store do |store, _task, _controller|
       first = store.open_generation!(**requirement_input)
@@ -421,6 +458,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
   def test_registered_schemas_are_strict
     schemas = %w[
       hive-outcome-evidence-requirement
+      hive-outcome-evidence-candidate
       hive-outcome-evidence-attempt
       hive-outcome-evidence-current
     ].to_h do |name|

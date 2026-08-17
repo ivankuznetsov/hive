@@ -28,6 +28,7 @@ module Hive
         BLOCK_REASONS = %w[capability_blocked review_blocked recaptures_exhausted].freeze
         SCHEMAS = {
           requirement: "hive-outcome-evidence-requirement",
+          candidate: "hive-outcome-evidence-candidate",
           attempt: "hive-outcome-evidence-attempt",
           current: "hive-outcome-evidence-current"
         }.freeze
@@ -162,7 +163,7 @@ module Hive
           )
         end
 
-        def retain_candidate!(generation:, attempt_id:, evidence:)
+        def retain_candidate!(generation:, attempt_id:, evidence:, producer: nil)
           generation = validate_digest!(generation, "generation")
           attempt_id = validate_id!(attempt_id, "attempt ID")
           requirement = read_document(
@@ -191,11 +192,76 @@ module Hive
             )
           end
           Hive::AtomicFile.fsync_directory(attempt_root)
+          record_candidate!(
+            generation: generation, attempt_id: attempt_id,
+            evidence: entries, producer: producer
+          ) if producer
           entries
         rescue StoreError, SystemCallError
           FileUtils.remove_entry_secure(attempt_root) if
             attempt_root_created && attempt_root && File.directory?(attempt_root)
           raise
+        end
+
+        def record_candidate!(generation:, attempt_id:, evidence:, producer:)
+          generation = validate_digest!(generation, "generation")
+          attempt_id = validate_id!(attempt_id, "attempt ID")
+          requirement = requirement(generation: generation)
+          entries = canonical_candidate_evidence!(
+            requirement: requirement, generation: generation,
+            attempt_id: attempt_id, evidence: evidence
+          )
+          canonical_producer = producer.to_h.transform_keys(&:to_s)
+          canonical_producer["model"] ||= "provider-default"
+          canonical_producer["effort"] ||= "default"
+          document = {
+            "schema" => SCHEMAS.fetch(:candidate),
+            "schema_version" => 1,
+            "task" => @task.slug.to_s,
+            "project" => @project,
+            "generation" => generation,
+            "attempt_id" => attempt_id,
+            "evidence" => entries,
+            "producer" => canonical_producer,
+            "recorded_at" => iso_time(@clock.call)
+          }
+          write_once(
+            candidate_path(generation, attempt_id), document,
+            schema: SCHEMAS.fetch(:candidate), label: "outcome-evidence candidate"
+          )
+        end
+
+        def pending_candidate(generation:)
+          generation = validate_digest!(generation, "generation")
+          recorded = attempts(generation: generation).map { |attempt| attempt.fetch("attempt_id") }
+          directory = File.join(generation_root(generation), "retained")
+          candidates = Dir.children(directory).filter_map do |attempt_id|
+            validate_id!(attempt_id, "attempt ID")
+            next if recorded.include?(attempt_id)
+
+            path = candidate_path(generation, attempt_id)
+            next unless File.file?(path)
+
+            candidate = read_document(
+              path, schema: SCHEMAS.fetch(:candidate), label: "outcome-evidence candidate"
+            )
+            requirement = requirement(generation: generation)
+            expected = [ @task.slug.to_s, @project, generation, attempt_id ]
+            unless candidate.values_at("task", "project", "generation", "attempt_id") == expected
+              raise StoreError, "outcome-evidence candidate contradicts its custody path"
+            end
+            canonical = canonical_candidate_evidence!(
+              requirement: requirement, generation: generation,
+              attempt_id: attempt_id, evidence: candidate.fetch("evidence")
+            )
+            unless canonical == candidate.fetch("evidence")
+              raise StoreError, "retained outcome-evidence candidate is not canonical"
+            end
+            candidate
+          end
+          candidates.max_by { |candidate| candidate.fetch("recorded_at") }
+        rescue Errno::ENOENT
+          nil
         end
 
         def publish_current!(generation:, attempt_id:)
@@ -662,6 +728,10 @@ module Hive
           File.join(generation_root(generation), "attempts", "#{attempt_id}.json")
         end
 
+        def candidate_path(generation, attempt_id)
+          File.join(generation_root(generation), "retained", attempt_id, "candidate.json")
+        end
+
         def current_path
           File.join(root, "current.json")
         end
@@ -894,6 +964,25 @@ module Hive
           end
           unless canonical_review == review
             raise StoreError, "retained outcome-evidence review is not canonical"
+          end
+        end
+
+        def canonical_candidate_evidence!(requirement:, generation:, attempt_id:, evidence:)
+          relative_root = Pathname.new(
+            File.join(generation_root(generation), "retained", attempt_id)
+          ).relative_path_from(Pathname.new(@task.folder)).to_s
+          Array(evidence).map do |entry|
+            canonical = Proof.admit!(
+              entry, task_folder: @task.folder,
+              expected_head: requirement.dig("implementation", "implementation_head")
+            )
+            Array(canonical.fetch("representations")).each do |representation|
+              path = representation.fetch("path")
+              unless path.start_with?("#{relative_root}/entry-")
+                raise StoreError, "outcome-evidence candidate escaped its custody root"
+              end
+            end
+            canonical
           end
         end
 

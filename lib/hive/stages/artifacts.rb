@@ -132,63 +132,72 @@ module Hive
           end
 
           revision = revision_guidance(requirement, prior)
-          attempt_number = history.length + 1
-          attempt_id = format("attempt-%02d-%s", attempt_number, SecureRandom.hex(8))
-          writable_root = File.join(
-            task.folder, "outcome-evidence", "work", generation, attempt_id
-          )
-          writable_relative_root = Pathname.new(writable_root)
-            .relative_path_from(Pathname.new(task.folder)).to_s
-          capture_tools = begin
-            capture_toolkit.prepare!(
-              kinds: requirement.fetch("claims").map { |claim| claim.fetch("proof_kind") },
-              task_root: task.folder,
-              source_root: task.worktree_path || task.project_root,
-              source_sha: identity.fetch("implementation_head"),
-              writable_root: writable_root,
-              producer_profile: producer_profile
+          pending = store.pending_candidate(generation: generation) if
+            store.respond_to?(:pending_candidate)
+          if pending
+            attempt_id = pending.fetch("attempt_id")
+            producer = { actor: pending.fetch("producer") }
+            replacements = pending.fetch("evidence")
+          else
+            attempt_number = history.length + 1
+            attempt_id = format("attempt-%02d-%s", attempt_number, SecureRandom.hex(8))
+            writable_root = File.join(
+              task.folder, "outcome-evidence", "work", generation, attempt_id
             )
-          rescue Hive::ConfigError => e
-            pointer = store.publish_blocked!(
-              generation: generation, reason: "capability_blocked",
-              failed_targets: revision.any? ? revision.map { |item| item.fetch("target_id") } :
-                requirement.fetch("claims").map { |claim| claim.fetch("id") },
-              reviewer_reasons: [ e.message ],
-              attempt_ids: history.map { |item| item.fetch("attempt_id") }
-            )
-            publish_blocked_marker!(task, pointer)
-            return { commit: "error", status: :error }
-          end
-          producer = nil
-          replacements = begin
-            producer_prompt = render_role_prompt(
-              "artifacts_producer_prompt.md.erb", task,
-              requirement_json: JSON.pretty_generate(requirement),
-              prior_evidence_json: JSON.pretty_generate(prior ? prior.fetch("evidence") : []),
-              revision_json: JSON.pretty_generate(revision),
-              capture_tools_json: JSON.pretty_generate(capture_tools),
-              writable_root: writable_root,
-              writable_relative_root: writable_relative_root
-            )
-            producer = run_role!(
-              role: "producer", task: task, cfg: cfg, prompt: producer_prompt,
-              identity: identity, writable_root: writable_root,
-              launch_environment: capture_toolkit.launch_environment,
-              producer_add_dirs: capture_toolkit.producer_add_dirs,
-              producer_permission_arguments: capture_toolkit.producer_permission_arguments,
-              producer_runtime_policy: capture_toolkit.producer_runtime_policy
-            )
-            candidate = Array(producer.fetch(:output).fetch("evidence"))
-            capture_toolkit.verify_captures!(candidate)
-            ensure_producer_paths!(task, writable_root, candidate)
-            store.retain_candidate!(
-              generation: generation, attempt_id: attempt_id, evidence: candidate
-            )
-          ensure
-            begin
-              capture_toolkit.close if capture_toolkit.respond_to?(:close)
+            writable_relative_root = Pathname.new(writable_root)
+              .relative_path_from(Pathname.new(task.folder)).to_s
+            capture_tools = begin
+              capture_toolkit.prepare!(
+                kinds: requirement.fetch("claims").map { |claim| claim.fetch("proof_kind") },
+                task_root: task.folder,
+                source_root: task.worktree_path || task.project_root,
+                source_sha: identity.fetch("implementation_head"),
+                writable_root: writable_root,
+                producer_profile: producer_profile
+              )
+            rescue Hive::ConfigError => e
+              pointer = store.publish_blocked!(
+                generation: generation, reason: "capability_blocked",
+                failed_targets: revision.any? ? revision.map { |item| item.fetch("target_id") } :
+                  requirement.fetch("claims").map { |claim| claim.fetch("id") },
+                reviewer_reasons: [ e.message ],
+                attempt_ids: history.map { |item| item.fetch("attempt_id") }
+              )
+              publish_blocked_marker!(task, pointer)
+              return { commit: "error", status: :error }
+            end
+            producer = nil
+            replacements = begin
+              producer_prompt = render_role_prompt(
+                "artifacts_producer_prompt.md.erb", task,
+                requirement_json: JSON.pretty_generate(requirement),
+                prior_evidence_json: JSON.pretty_generate(prior ? prior.fetch("evidence") : []),
+                revision_json: JSON.pretty_generate(revision),
+                capture_tools_json: JSON.pretty_generate(capture_tools),
+                writable_root: writable_root,
+                writable_relative_root: writable_relative_root
+              )
+              producer = run_role!(
+                role: "producer", task: task, cfg: cfg, prompt: producer_prompt,
+                identity: identity, writable_root: writable_root,
+                launch_environment: capture_toolkit.launch_environment,
+                producer_add_dirs: capture_toolkit.producer_add_dirs,
+                producer_permission_arguments: capture_toolkit.producer_permission_arguments,
+                producer_runtime_policy: capture_toolkit.producer_runtime_policy
+              )
+              candidate = Array(producer.fetch(:output).fetch("evidence"))
+              capture_toolkit.verify_captures!(candidate)
+              ensure_producer_paths!(task, writable_root, candidate)
+              store.retain_candidate!(
+                generation: generation, attempt_id: attempt_id, evidence: candidate,
+                producer: producer.fetch(:actor)
+              )
             ensure
-              remove_producer_work!(task, writable_root)
+              begin
+                capture_toolkit.close if capture_toolkit.respond_to?(:close)
+              ensure
+                remove_producer_work!(task, writable_root)
+              end
             end
           end
           evidence = merge_candidate_evidence!(prior, replacements, revision)

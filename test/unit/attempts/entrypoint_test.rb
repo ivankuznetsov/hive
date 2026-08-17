@@ -81,6 +81,36 @@ class AttemptsEntrypointTest < Minitest::Test
     assert_includes error.message, "attempt_lost"
   end
 
+  # Superseding needs a predecessor to inherit generation, routing policy, and
+  # outputs from. A loss deferral that carries no attempt has nothing to
+  # inherit, so the operator's run defers rather than minting an orphan
+  # successor that would race the daemon's.
+  def test_operator_dispatch_defers_when_the_lost_attempt_is_missing
+    task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
+    deferred = Hive::Attempts::DispatchResult.new(
+      status: :deferred, attempt: nil, receipt: nil,
+      attach_descriptor: nil, reason: "attempt_lost"
+    )
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) { |**_kwargs| deferred }
+    dispatcher.define_singleton_method(:dispatch_successor) do |**_kwargs|
+      flunk "a loss deferral without a predecessor must not mint a successor"
+    end
+    config = Hive::Config.merge_defaults({})
+
+    error = assert_raises(Hive::ConcurrentRunError) do
+      Hive::Attempts::Entrypoint.new(
+        store: Object.new, dispatcher: dispatcher,
+        config_loader: ->(_root) { config }
+      ).dispatch(
+        task: task, intended_stage: "4-execute", argv: [ "hive", "run", "/tmp/task" ],
+        request_id: "request-1"
+      )
+    end
+
+    assert_includes error.message, "attempt_lost"
+  end
+
   # A deferral for any other reason keeps its existing meaning.
   def test_operator_dispatch_still_defers_on_non_loss_reasons
     task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")

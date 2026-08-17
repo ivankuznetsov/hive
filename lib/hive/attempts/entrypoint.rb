@@ -49,13 +49,6 @@ module Hive
           interactive: interactive,
           now: now
         )
-        if result.status == :deferred && result.reason == "attempt_lost" && interactive
-          result = supersede_lost_attempt(
-            dispatcher: dispatcher, lost: result.attempt, task: task, cfg: cfg,
-            intended_stage: intended_stage, argv: argv, request_id: request_id,
-            provider: provider, interactive: interactive, now: now
-          )
-        end
         if result.status == :deferred
           raise Hive::ConcurrentRunError,
                 "durable attempt deferred for #{task.slug}: #{result.reason}"
@@ -82,35 +75,6 @@ module Hive
       end
 
       private
-
-      # An operator asking for a run is the manual retry of last resort: it must
-      # not be trapped behind a lost attempt waiting for the daemon to mint a
-      # successor. The daemon reaches the same place via `dispatch_request`; this
-      # gives the CLI the identical route rather than a bypass, so the successor
-      # still carries the predecessor's generation, frozen routing policy, and
-      # inherited outputs.
-      def supersede_lost_attempt(dispatcher:, lost:, task:, cfg:, intended_stage:,
-                                 argv:, request_id:, provider:, interactive:, now:)
-        return deferred_lost(lost) unless lost
-        dispatcher.dispatch_successor(
-          predecessor: lost,
-          task: task,
-          project: project_name_for(task),
-          argv: argv,
-          request_id: request_id,
-          provider: provider || provider_for(cfg, intended_stage),
-          routing_policy: routing_policy_for(cfg, intended_stage),
-          interactive: interactive,
-          now: now
-        )
-      end
-
-      def deferred_lost(lost)
-        DispatchResult.new(
-          status: :deferred, attempt: lost, receipt: nil,
-          attach_descriptor: nil, reason: "attempt_lost"
-        )
-      end
 
       def request_admission_recovery(result:, task:, argv:, request_id:, store:, now:)
         coordinator = @recovery_coordinator || Hive::Daemon::RecoveryCoordinator.new(

@@ -631,9 +631,11 @@ class AttemptsDispatcherTest < Minitest::Test
       first = dispatch(dispatcher, task, request_id: "request-one")
       lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
 
+      # An ordinary dispatch adopts the loss rather than deferring behind it:
+      # nothing else mints the successor, so deferring parks the task forever.
       ordinary = dispatch(dispatcher, task, request_id: "request-two")
-      assert_equal "attempt_lost", ordinary.reason
-      assert_equal lost.attempt_id, ordinary.attempt.attempt_id
+      assert_equal :accepted, ordinary.status
+      assert_equal lost.attempt_id, ordinary.attempt["predecessor_attempt_id"]
     end
 
     with_dispatcher do |dispatcher, _launcher, task|
@@ -926,10 +928,13 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal :terminal_replay, replay.status
       assert_equal failed.receipt, replay.receipt
       assert_equal :accepted, retry_result.status
-      assert_equal "attempt_lost", blocked.reason
-      assert_equal :accepted, successor.status
-      assert_equal lost.attempt_id, successor.attempt["predecessor_attempt_id"]
-      assert_equal 1, successor.attempt["retry_charge"]
+      # The ordinary dispatch adopts the loss, so it becomes the successor...
+      assert_equal :accepted, blocked.status
+      assert_equal lost.attempt_id, blocked.attempt["predecessor_attempt_id"]
+      # ...and an explicit second successor for the same loss spawns nothing
+      # new, which is what keeps adoption from racing anything.
+      assert_equal :existing_live, successor.status
+      assert_equal blocked.attempt.attempt_id, successor.attempt.attempt_id
     end
   end
 

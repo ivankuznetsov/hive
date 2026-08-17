@@ -48,13 +48,29 @@ module Hive
         generation = normalize_generation(
           generation, task: task, project: project, intended_stage: intended_stage
         )
-        admit(
+        policy = routing_policy || resolve_routing_policy(task, intended_stage)
+        result = admit(
           task: task, generation: generation, argv: argv, request_id: request_id,
           provider: provider, interactive: interactive,
           predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
           successor_of: nil, now: now, admission_view: admission_view,
-          routing_policy: routing_policy || resolve_routing_policy(task, intended_stage)
+          routing_policy: policy
+        )
+        return result unless superseding_loss?(result)
+
+        # A lost attempt blocks admission until an explicit successor exists,
+        # but nothing mints that successor on its own: the daemon's recovery
+        # request carries no predecessor, and an operator's `hive run` carries
+        # none either. Left alone the task re-blocks every tick, forever. Adopt
+        # the loss as the predecessor so lineage, generation, frozen routing
+        # policy, and inherited outputs are all preserved. Racing successors
+        # are not a concern — admission is serialized, and a second one is
+        # refused by the `successor_exists` gate inside `admit`.
+        dispatch_successor(
+          predecessor: result.attempt, task: task, project: project, argv: argv,
+          request_id: request_id, provider: provider, interactive: interactive,
+          now: now, admission_view: admission_view, routing_policy: policy
         )
       end
 
@@ -452,6 +468,14 @@ module Hive
 
         require "hive/stages/brainstorm"
         Hive::Stages::Brainstorm.artifact_valid?(task.state_file)
+      end
+
+      # Only an unresolved loss is adoptable; every other deferral keeps its
+      # meaning (capacity, successor_exists, invalid_predecessor).
+      def superseding_loss?(result)
+        result.status == :deferred &&
+          result.reason == "attempt_lost" &&
+          !result.attempt.nil?
       end
 
       def coding_brainstorm?(task)

@@ -755,7 +755,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     )
   end
 
-  def test_post_clear_dispatch_failure_uses_durable_hourly_pacing
+  def test_post_clear_dispatch_failure_uses_the_shared_retry_ladder
     with_fixture do |coordinator, row, state_home|
       coordinator.request(
         row: row, requestor: "healer", request_id: "recover-spawn-failure", now: NOW
@@ -764,12 +764,13 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       coordinator.resume(request: request, row: row, now: NOW)
       cleared = Q.fetch(request.request_id, state_home: state_home)
 
+      step = coordinator.retry_delay_sec(cleared.recovery["retry_count"].to_i)
       deferred = coordinator.defer_dispatch_failure(cleared, now: NOW + 5)
       early = coordinator.resume(request: cleared, row: row, now: NOW + 6)
-      due = coordinator.resume(request: cleared, row: row, now: NOW + 3_605)
+      due = coordinator.resume(request: cleared, row: row, now: NOW + 5 + step + 1)
 
       assert_equal "cooldown", deferred.status
-      assert_equal (NOW + 3_605).iso8601(6), deferred.next_eligible_at
+      assert_equal (NOW + 5 + step).iso8601(6), deferred.next_eligible_at
       assert_equal "cooldown", early.status
       assert_equal "queued", due.status
       assert_equal "cleared", due.phase
@@ -889,7 +890,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
-  def test_provider_and_marker_recovery_charge_once_but_pace_differently
+  def test_provider_and_marker_recovery_charge_once_with_the_same_due_time
     provider = nil
     with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, state_home|
       coordinator.request_admission_failure(
@@ -924,18 +925,9 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     assert_equal({ count: 1, retry_count: 1 }, provider.except(:due_at))
     assert_equal({ count: 1, retry_count: 1 }, marker.except(:due_at))
 
-    # Both charge exactly once, but they no longer share a due time. A
-    # provider refusal is paced by the provider-sized window because that is
-    # how long the quota actually lasts; a marker failure is a local fault and
-    # starts at the first backoff step instead of idling for an hour.
-    assert_equal(
-      (NOW + Hive::AgentLimit.retry_cooldown_sec).iso8601(6),
-      provider.fetch(:due_at)
-    )
-    assert_equal(
-      (NOW + Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.first).iso8601(6),
-      marker.fetch(:due_at)
-    )
+    # One ladder means one due time: a provider refusal and a marker
+    # failure at the same charge are paced identically.
+    assert_equal provider, marker
   end
 
   def test_existing_recovery_records_no_route_without_a_second_charge

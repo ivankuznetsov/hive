@@ -141,13 +141,11 @@ module Hive
         end
       end
 
-      # Automatic retry pacing. The flat window came from AgentLimit, which is
-      # sized for a provider quota wall — right for "you are rate limited",
-      # wrong for a locally orphaned agent, which sat idle for an hour over a
-      # failure that could retry in seconds. The ladder starts short and only
-      # reaches the provider-sized window after repeated failure; it never
-      # exceeds it, so nothing is paced more slowly than before.
-      RETRY_BACKOFF_SEC = [ 5, 10, 60, 300, 900 ].freeze
+      # The single retry ladder. Every retry in Hive is paced by this, so
+      # there is one concept to reason about rather than a provider window
+      # and a separate marker window that happened to disagree. Steps climb
+      # and then hold; the last step is the ceiling.
+      RETRY_BACKOFF_SEC = [ 5, 10, 60, 300, 900, 3600 ].freeze
 
       # A deliberate human retry is not the automatic sweep. The cooldown
       # paces Hive's own retries; gating an operator on it leaves a task idle
@@ -156,11 +154,16 @@ module Hive
       OPERATOR_REQUESTORS = %w[action cli bot web].freeze
 
       def retry_delay_sec(retry_count)
-        ceiling = Hive::AgentLimit.retry_cooldown_sec
         index = retry_count.to_i
-        return ceiling if index.negative? || index >= RETRY_BACKOFF_SEC.length
+        return RETRY_BACKOFF_SEC.first if index.negative?
 
-        [ RETRY_BACKOFF_SEC[index], ceiling ].min
+        RETRY_BACKOFF_SEC[[ index, RETRY_BACKOFF_SEC.length - 1 ].min]
+      end
+
+      # Requests carry their own charge; a request without one is its first.
+      def request_retry_delay_sec(request)
+        recovery = request.respond_to?(:recovery) ? request.recovery : nil
+        retry_delay_sec(recovery.is_a?(Hash) ? recovery["retry_count"].to_i : 0)
       end
 
       def assessment(row, now: Time.now.utc, retry_count: 0)
@@ -481,7 +484,7 @@ module Hive
             "expected_post_clear_progress_fingerprint" => generation.progress_token,
             "dispatch_generation" => generation.task_generation,
             "failure_origin" => decision.reason,
-            "next_eligible_at" => (now + Hive::AgentLimit.retry_cooldown_sec).iso8601(6),
+            "next_eligible_at" => (now + request_retry_delay_sec(request)).iso8601(6),
             "owner" => operator_blocked ? "operator" : "scheduler",
             "blocked_reason" => operator_blocked ? "health_state_unavailable" : nil,
             "blocked_remediation" => operator_blocked ?
@@ -550,7 +553,7 @@ module Hive
           }
           unless decision.capacity_saturated?
             changes["next_eligible_at"] =
-              (now.utc + Hive::AgentLimit.retry_cooldown_sec).iso8601(6)
+              (now.utc + request_retry_delay_sec(request)).iso8601(6)
           end
           transitioned = @request_queue.update_recovery!(
             current.request_id, expected_phase: recovery["phase"], changes: changes,
@@ -775,7 +778,7 @@ module Hive
             request.request_id,
             expected_phase: "cleared",
             changes: {
-              "next_eligible_at" => (now + Hive::AgentLimit.retry_cooldown_sec).iso8601(6),
+              "next_eligible_at" => (now + request_retry_delay_sec(request)).iso8601(6),
               "owner" => "scheduler",
               "blocked_reason" => nil,
               "blocked_remediation" => nil

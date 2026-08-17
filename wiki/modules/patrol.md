@@ -201,6 +201,26 @@ its default human review surface, with an explicit
 `issue_filing.enabled: false` opt-out; neither system can consume the other's
 state as proof of completion.
 
+## Agent identity resolution
+
+Ordinary patrol reads `patrol.agent` (default `claude`); its review/fix
+launches take model/effort from the `models.patrol_review`/`models.patrol_fix`
+routing registry (parent key `models.patrol`), falling back to the global
+provider block (e.g. `claude.model`) when no routing entry is active —
+`patrol.model` feeds routing *validation* only, not the launch argv.
+Architecture patrol is different: `Hive::RefactorPatrol::AgentIdentity`
+resolves its review identity as a child of the **execute** identity
+(`refactor_patrol.agent`/`model`/`effort` override; omitted fields inherit
+from `execute.*`), and auto-fix inherits from review
+(`refactor_patrol.auto_fix.*` override). A project that pins
+`execute.agent: codex` therefore runs all architecture patrol agents on codex
+unless `refactor_patrol.agent` is set. On a provider *switch* with no explicit
+`model`, the profile's concrete default model comes from the provider's own
+settings (for Claude: `model` in `.claude/settings.json`), which fails closed
+via `normalize_model(concrete: true)` if that value is not a plain model
+identifier (e.g. `claude-fable-5[1m]`) — so an agent override should carry an
+explicit `model:`.
+
 ## Daemon triggers
 
 Patrol is **opt-in**. A project with **no patrol section at all** (or a patrol section that omits `mode:`) resolves to `enabled: false` — [[modules/config]] only derives mode knobs when `mode:` is **explicitly present** in the raw config. `medium` is the default offered by the `hive init` *prompt* (which writes an explicit `mode: "medium"` into the rendered template), never a config-resolution default, so legacy projects without a patrol block are never silently enabled.

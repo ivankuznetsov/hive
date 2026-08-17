@@ -59,4 +59,24 @@ class AgentObservationCoverageGapsTest < Minitest::Test
       refute observation.available?
     end
   end
+
+  def test_billing_and_usage_evidence_are_closed_values
+    assert_raises(ArgumentError) do
+      Hive::AgentObservation.new(
+        task: Task.new("task"), context: Context.new("task", "attempt"),
+        session_id: "session", role: "agent", provider: "codex",
+        billing_route: "invoice", timeout_sec: 1, guards: [],
+        activity: FailingActivity.new
+      )
+    end
+
+    observation = Hive::AgentObservation.new(
+      task: Task.new("task"), context: Context.new("task", "attempt"),
+      session_id: "session", role: "agent", provider: "codex",
+      timeout_sec: 1, guards: [], activity: FailingActivity.new
+    )
+    assert_raises(ArgumentError) { observation.send(:optional_boolean, "yes") }
+    assert_equal [ "openai", "gpt-5.6-sol" ],
+                 observation.send(:split_route, "openai/gpt-5.6-sol")
+  end
 end

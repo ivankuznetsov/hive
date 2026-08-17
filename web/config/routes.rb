@@ -51,6 +51,7 @@ Rails.application.routes.draw do
   # Task pages are addressed by project name + task slug, mirroring the CLI.
   scope "tasks/:project/:slug", constraints: { slug: /[a-z][a-z0-9-]{0,62}[a-z0-9]/, project: %r{[^/]+} } do
     get  "" => "tasks#show", as: :task
+    get  "workspace" => "tasks/workspaces#show", as: :task_workspace
     get  "diff" => "tasks/diffs#show", as: :task_diff
     get  "publication" => "tasks/publications#show", as: :task_publication
     post "publication" => "tasks/publications#create"

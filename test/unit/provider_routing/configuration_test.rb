@@ -59,6 +59,65 @@ class ProviderRoutingConfigurationTest < Minitest::Test
                  configuration.routes.map { |candidate| candidate.model_routing.provenance[:effort].kind }
   end
 
+  def test_billing_route_is_closed_and_evidenced_without_inferring_from_ambiguous_harnesses
+    normalize = lambda do |id, value|
+      Hive::ProviderRouting::Configuration.normalize_accounts(
+        { id => value }, source: "global providers"
+      ).fetch(id)
+    end
+    accounts = {
+      "codex-api" => normalize.call(
+        "codex-api",
+        account(
+          "codex", binding: "default", models: %w[gpt-5.6-sol],
+          billing_route: "api"
+        )
+      ),
+      "codex-subscription" => normalize.call(
+        "codex-subscription",
+        account("codex", binding: "default", models: %w[gpt-5.6-terra])
+      ),
+      "pi-ambiguous" => normalize.call(
+        "pi-ambiguous",
+        account("pi", binding: "default", models: %w[provider/model])
+      )
+    }
+
+    assert_equal "api", accounts.fetch("codex-api").billing_route
+    assert_equal "provider_account_config",
+                 accounts.fetch("codex-api").billing_evidence_source
+    assert_equal "subscription", accounts.fetch("codex-subscription").billing_route
+    assert_equal "agent_profile_contract",
+                 accounts.fetch("codex-subscription").billing_evidence_source
+    assert_equal "unknown", accounts.fetch("pi-ambiguous").billing_route
+    assert_equal "unavailable", accounts.fetch("pi-ambiguous").billing_evidence_source
+
+    cfg = Hive::Config.merge_defaults(
+      "execute" => {
+        "routing" => {
+          "pool" => [ route("codex-api", model: "gpt-5.6-sol") ]
+        }
+      }
+    )
+    cfg[Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY] = accounts
+    selected = Hive::ProviderRouting::Configuration.from(
+      cfg: cfg, stage_name: "execute"
+    ).routes.fetch(0)
+    assert_equal "api", selected.billing_route
+    assert_equal "provider_account_config", selected.billing_evidence_source
+
+    error = assert_raises(Hive::ConfigError) do
+      normalize.call(
+        "invalid-billing",
+        account(
+          "codex", binding: "default", models: %w[gpt-5.6-sol],
+          billing_route: "invoice"
+        )
+      )
+    end
+    assert_match(/billing_route must be subscription, api, or unknown/, error.message)
+  end
+
   def test_provider_and_exact_pins_never_cross_account_boundaries
     provider_policy = configuration_for(
       pool: [
@@ -543,13 +602,15 @@ class ProviderRoutingConfigurationTest < Minitest::Test
     cfg
   end
 
-  def account(adapter, binding:, models:)
+  def account(adapter, binding:, models:, billing_route: nil)
     {
       "adapter" => adapter,
       "launch_binding" => binding,
       "models" => models,
       "max_concurrent" => 2
-    }
+    }.tap do |value|
+      value["billing_route"] = billing_route if billing_route
+    end
   end
 
   def route(provider, model:, effort: "high", quality: "high",

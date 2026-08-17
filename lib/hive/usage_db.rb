@@ -1,6 +1,7 @@
 require "fileutils"
 require "securerandom"
 require "time"
+require "hive/billing_evidence"
 require "hive/paths"
 
 module Hive
@@ -13,7 +14,9 @@ module Hive
   module UsageDb
     AGENTS = %i[claude codex pi grok opencode].freeze
     BUCKETS = %i[today 7d 30d all].freeze
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
+    BILLING_ROUTES = Hive::BillingEvidence::ROUTES
+    BILLING_EVIDENCE_SOURCES = Hive::BillingEvidence::SOURCES
     BUSY_TIMEOUT_MS = 5_000
     LEGACY_SCHEMA_SQL = <<~SQL.freeze
       CREATE TABLE IF NOT EXISTS token_usage (
@@ -64,7 +67,12 @@ module Hive
         attempt_id      TEXT,
         session_id      TEXT,
         task_generation INTEGER,
-        source          TEXT
+        source          TEXT,
+        billing_route   TEXT,
+        billing_evidence_source TEXT,
+        input_includes_cache_read INTEGER,
+        input_includes_cache_write INTEGER,
+        output_includes_reasoning INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_token_usage_started_at ON token_usage(started_at);
       CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_slug, started_at);
@@ -92,7 +100,12 @@ module Hive
       "attempt_id" => "TEXT",
       "session_id" => "TEXT",
       "task_generation" => "INTEGER",
-      "source" => "TEXT"
+      "source" => "TEXT",
+      "billing_route" => "TEXT",
+      "billing_evidence_source" => "TEXT",
+      "input_includes_cache_read" => "INTEGER",
+      "input_includes_cache_write" => "INTEGER",
+      "output_includes_reasoning" => "INTEGER"
     }.freeze
 
     module_function
@@ -107,12 +120,31 @@ module Hive
 
     def record!(agent:, model:, project_slug:, task_slug:, stage:, started_at:, ended_at:,
                 input:, output:, cached:, requested_route: nil, actual_route: nil,
+                actual_provider: nil, actual_model: nil,
                 cache_read: nil, cache_write: nil, reasoning: nil, cost: nil,
+                provider_reported_cost: nil, harness: nil,
+                billing_route: "unknown", billing_evidence_source: "unavailable",
+                input_includes_cache_read: nil, input_includes_cache_write: nil,
+                output_includes_reasoning: nil,
                 attempt_id: nil, session_id: nil, task_generation: nil, source: nil)
       requested_backend, requested_model = split_route(requested_route)
-      actual_backend, actual_model = split_route(actual_route)
+      actual_backend, routed_actual_model = split_route(actual_route)
+      actual_backend ||= blank_to_nil(actual_provider)
+      actual_model = routed_actual_model || blank_to_nil(actual_model)
+      normalized_billing_route = billing_value(
+        billing_route, BILLING_ROUTES, "billing route"
+      )
+      normalized_billing_source = billing_value(
+        billing_evidence_source, BILLING_EVIDENCE_SOURCES,
+        "billing evidence source"
+      )
+      reported_cost = provider_reported_cost.nil? ? cost : provider_reported_cost
+      if !harness.nil? && harness.to_s != agent.to_s
+        raise ArgumentError, "harness must match the usage agent"
+      end
       with_database(create: true) do |db|
         ensure_schema!(db)
+        normalized_session_id = blank_to_nil(session_id)
         attributes = [
           SecureRandom.uuid, agent.to_s, blank_to_nil(model),
           requested_backend, requested_model, actual_backend, actual_model,
@@ -120,14 +152,18 @@ module Hive
           iso8601(started_at), ended_at.nil? ? nil : iso8601(ended_at),
           integer(input), integer(output), integer(cached),
           nullable_number(cache_read), nullable_number(cache_write),
-          nullable_number(reasoning), nullable_number(cost),
+          nullable_number(reasoning), nullable_number(reported_cost),
           availability(input), availability(output), availability(cached),
           availability(cache_read), availability(cache_write),
-          availability(reasoning), availability(cost),
-          blank_to_nil(attempt_id), blank_to_nil(session_id),
-          task_generation.nil? ? nil : Integer(task_generation), blank_to_nil(source)
+          availability(reasoning), availability(reported_cost),
+          blank_to_nil(attempt_id), normalized_session_id,
+          task_generation.nil? ? nil : Integer(task_generation), blank_to_nil(source),
+          normalized_billing_route, normalized_billing_source,
+          nullable_boolean(input_includes_cache_read),
+          nullable_boolean(input_includes_cache_write),
+          nullable_boolean(output_includes_reasoning)
         ]
-        if attributes[27]
+        if normalized_session_id
           db.execute(SESSION_UPSERT_SQL, attributes)
           raise "session usage identity conflict" if db.changes.zero?
         else
@@ -148,8 +184,10 @@ module Hive
         input, output, cached, cache_read, cache_write, reasoning, cost,
         input_available, output_available, cached_available,
         cache_read_available, cache_write_available, reasoning_available, cost_available,
-        attempt_id, session_id, task_generation, source
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        attempt_id, session_id, task_generation, source,
+        billing_route, billing_evidence_source,
+        input_includes_cache_read, input_includes_cache_write, output_includes_reasoning
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     SQL
     SESSION_UPSERT_SQL = <<~SQL.freeze
       #{INSERT_SQL.strip}
@@ -191,18 +229,57 @@ module Hive
         cache_write_available = MAX(token_usage.cache_write_available, excluded.cache_write_available),
         reasoning_available = MAX(token_usage.reasoning_available, excluded.reasoning_available),
         cost_available = MAX(token_usage.cost_available, excluded.cost_available),
+        billing_route = CASE
+          WHEN token_usage.billing_route IS NULL OR token_usage.billing_route = 'unknown'
+          THEN excluded.billing_route ELSE token_usage.billing_route END,
+        billing_evidence_source = CASE
+          WHEN token_usage.billing_route IS NULL OR token_usage.billing_route = 'unknown'
+          THEN excluded.billing_evidence_source ELSE token_usage.billing_evidence_source END,
+        input_includes_cache_read = COALESCE(
+          token_usage.input_includes_cache_read, excluded.input_includes_cache_read
+        ),
+        input_includes_cache_write = COALESCE(
+          token_usage.input_includes_cache_write, excluded.input_includes_cache_write
+        ),
+        output_includes_reasoning = COALESCE(
+          token_usage.output_includes_reasoning, excluded.output_includes_reasoning
+        ),
         source = COALESCE(excluded.source, token_usage.source)
       WHERE token_usage.attempt_id = excluded.attempt_id
         AND token_usage.task_generation = excluded.task_generation
+        AND (token_usage.billing_route IS NULL OR token_usage.billing_route = 'unknown' OR
+             excluded.billing_route = 'unknown' OR token_usage.billing_route = excluded.billing_route)
+        AND (token_usage.input_includes_cache_read IS NULL OR
+             excluded.input_includes_cache_read IS NULL OR
+             token_usage.input_includes_cache_read = excluded.input_includes_cache_read)
+        AND (token_usage.input_includes_cache_write IS NULL OR
+             excluded.input_includes_cache_write IS NULL OR
+             token_usage.input_includes_cache_write = excluded.input_includes_cache_write)
+        AND (token_usage.output_includes_reasoning IS NULL OR
+             excluded.output_includes_reasoning IS NULL OR
+             token_usage.output_includes_reasoning = excluded.output_includes_reasoning)
     SQL
 
     def exact_attempt(attempt_id:, task_generation: nil, project_slug: nil,
-                      task_slug: nil, legacy_limit: 100)
+                      task_slug: nil, legacy_limit: 100, session_limit: 100,
+                      deadline: nil,
+                      monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
+      session_limit = positive_limit(session_limit, "session_limit")
+      legacy_limit = positive_limit(legacy_limit, "legacy_limit")
+      return unavailable_exact("deadline_exhausted") if
+        deadline_exhausted?(deadline, monotonic_clock)
+
       db_path = path
       return unavailable_exact("store_missing") unless File.file?(db_path)
 
-      with_database(create: false) do |db|
+      with_database(
+        create: false,
+        busy_timeout_ms: deadline_busy_timeout(deadline, monotonic_clock)
+      ) do |db|
         ensure_schema!(db)
+        raise IOError, "usage read deadline exhausted" if
+          deadline_exhausted?(deadline, monotonic_clock)
+
         clauses = [ "attempt_id = ?" ]
         binds = [ attempt_id.to_s ]
         unless task_generation.nil?
@@ -215,11 +292,14 @@ module Hive
           "requested_backend, requested_model, actual_backend, actual_model, " \
           "cache_read, cache_write, reasoning, cost, input_available, output_available, " \
           "cached_available, cache_read_available, cache_write_available, " \
-          "reasoning_available, cost_available " \
-          "FROM token_usage WHERE #{clauses.join(' AND ')} ORDER BY session_id, started_at",
-          binds
+          "reasoning_available, cost_available, billing_route, billing_evidence_source, " \
+          "input_includes_cache_read, input_includes_cache_write, output_includes_reasoning " \
+          "FROM token_usage WHERE #{clauses.join(' AND ')} " \
+          "ORDER BY session_id, started_at LIMIT ?",
+          binds + [ session_limit + 1 ]
         )
-        sessions = rows.map { |row| exact_row(row) }
+        sessions_truncated = rows.length > session_limit
+        sessions = rows.first(session_limit).map { |row| exact_row(row) }
         legacy_clauses = [ "attempt_id IS NULL" ]
         legacy_binds = []
         unless blank?(project_slug)
@@ -236,23 +316,31 @@ module Hive
           "requested_backend, requested_model, actual_backend, actual_model, " \
           "cache_read, cache_write, reasoning, cost, input_available, output_available, " \
           "cached_available, cache_read_available, cache_write_available, " \
-          "reasoning_available, cost_available " \
+          "reasoning_available, cost_available, billing_route, billing_evidence_source, " \
+          "input_includes_cache_read, input_includes_cache_write, output_includes_reasoning " \
           "FROM token_usage WHERE #{legacy_clauses.join(' AND ')} " \
           "ORDER BY started_at DESC LIMIT ?",
-          legacy_binds + [ Integer(legacy_limit) ]
+          legacy_binds + [ legacy_limit ]
         ).map { |row| exact_row(row) }
+        unattributed_count = db.get_first_value(
+          "SELECT COUNT(*) FROM (SELECT 1 FROM token_usage " \
+          "WHERE #{legacy_clauses.join(' AND ')} LIMIT ?)",
+          legacy_binds + [ legacy_limit + 1 ]
+        ).to_i
         {
           available: true,
           sessions: sessions,
           totals: sum_usage(sessions),
           unattributed: unattributed_rows,
-          unattributed_count: db.get_first_value(
-            "SELECT COUNT(*) FROM token_usage WHERE #{legacy_clauses.join(' AND ')}",
-            legacy_binds
-          ).to_i
+          unattributed_count: [ unattributed_count, legacy_limit ].min,
+          unattributed_truncated: unattributed_count > legacy_limit,
+          truncated: sessions_truncated
         }
       end
     rescue StandardError => e
+      return unavailable_exact("deadline_exhausted") if
+        deadline_exhausted?(deadline, monotonic_clock)
+
       warn "[hive] exact attempt usage failed: #{e.class}: #{e.message}"
       unavailable_exact("read_failed")
     end
@@ -351,7 +439,8 @@ module Hive
         version > SCHEMA_VERSION
       columns = schema_columns(db)
       return if version == SCHEMA_VERSION &&
-        columns.include?("session_id") && columns.include?("input_available")
+        columns.include?("session_id") && columns.include?("input_available") &&
+        columns.include?("billing_route")
 
       db.transaction(:immediate) do
         db.execute_batch(LEGACY_SCHEMA_SQL)
@@ -441,16 +530,38 @@ module Hive
       }
     end
 
-    def with_database(create:)
+    def with_database(create:, busy_timeout_ms: BUSY_TIMEOUT_MS)
       require "sqlite3"
 
       db_path = path
       FileUtils.mkdir_p(File.dirname(db_path)) if create
       db = SQLite3::Database.new(db_path)
-      db.busy_timeout(BUSY_TIMEOUT_MS)
+      db.busy_timeout(Integer(busy_timeout_ms))
       yield db
     ensure
       db&.close
+    end
+
+    def positive_limit(value, name)
+      limit = Integer(value)
+      raise ArgumentError, "#{name} must be positive" unless limit.positive?
+
+      limit
+    end
+
+    def deadline_exhausted?(deadline, monotonic_clock)
+      !deadline.nil? && monotonic_clock.call >= Float(deadline)
+    rescue ArgumentError, TypeError
+      true
+    end
+
+    def deadline_busy_timeout(deadline, monotonic_clock)
+      return BUSY_TIMEOUT_MS if deadline.nil?
+
+      remaining_ms = ((Float(deadline) - monotonic_clock.call) * 1000).ceil
+      [ [ remaining_ms, 1 ].max, BUSY_TIMEOUT_MS ].min
+    rescue ArgumentError, TypeError
+      1
     end
 
     def schema_columns(db)
@@ -465,7 +576,13 @@ module Hive
         attempt_id: row[11], task_generation: row[12], source: row[13],
         requested_backend: row[14], requested_model: row[15],
         actual_backend: row[16], actual_model: row[17],
-        cache_read: row[18], cache_write: row[19], reasoning: row[20], cost: row[21]
+        cache_read: row[18], cache_write: row[19], reasoning: row[20], cost: row[21],
+        provider_reported_cost: row[21], harness: row[1],
+        billing_route: row[29] || "unknown",
+        billing_evidence_source: row[30] || "unavailable",
+        input_includes_cache_read: nullable_boolean_value(row[31]),
+        input_includes_cache_write: nullable_boolean_value(row[32]),
+        output_includes_reasoning: nullable_boolean_value(row[33])
       }
       mark_unavailable!(result, :input, row[22])
       mark_unavailable!(result, :output, row[23])
@@ -528,6 +645,26 @@ module Hive
 
     def availability(value)
       value.nil? ? 0 : 1
+    end
+
+    def nullable_boolean(value)
+      return nil if value.nil?
+      return value ? 1 : 0 if value == true || value == false
+
+      raise ArgumentError, "usage inclusion evidence must be true, false, or nil"
+    end
+
+    def nullable_boolean_value(value)
+      return nil if value.nil?
+
+      integer(value) == 1
+    end
+
+    def billing_value(value, allowed, label)
+      normalized = value.to_s
+      raise ArgumentError, "#{label} is invalid" unless allowed.include?(normalized)
+
+      normalized
     end
 
     def split_route(route)

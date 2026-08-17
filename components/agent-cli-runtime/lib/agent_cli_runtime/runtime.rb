@@ -270,18 +270,31 @@ module AgentCliRuntime
     def normalize_usage(usage)
       return nil unless usage.is_a?(Hash)
 
-      input = usage.key?(:input) ? usage[:input] : usage["input"]
-      output = usage.key?(:output) ? usage[:output] : usage["output"]
-      cached = usage.key?(:cached) ? usage[:cached] : usage["cached"]
-      model = usage.key?(:model) ? usage[:model] : usage["model"]
+      value = ->(key) { usage.key?(key) ? usage[key] : usage[key.to_s] }
       {
-        input: [ input.to_i, 0 ].max,
-        output: [ output.to_i, 0 ].max,
-        cached: [ cached.to_i, 0 ].max,
-        model: model&.to_s&.dup&.freeze
+        input: normalized_count(value.call(:input)),
+        output: normalized_count(value.call(:output)),
+        cached: normalized_count(value.call(:cached)),
+        cache_read: normalized_count(value.call(:cache_read)),
+        cache_write: normalized_count(value.call(:cache_write)),
+        reasoning: normalized_count(value.call(:reasoning)),
+        input_includes_cache_read: normalized_boolean(value.call(:input_includes_cache_read)),
+        input_includes_cache_write: normalized_boolean(value.call(:input_includes_cache_write)),
+        output_includes_reasoning: normalized_boolean(value.call(:output_includes_reasoning)),
+        model: value.call(:model)&.to_s&.dup&.freeze
       }.freeze
     end
     private_class_method :normalize_usage
+
+    def normalized_count(value)
+      value.nil? ? nil : [ value.to_i, 0 ].max
+    end
+    private_class_method :normalized_count
+
+    def normalized_boolean(value)
+      value if value == true || value == false
+    end
+    private_class_method :normalized_boolean
 
     def unsupported!(profile, capability, diagnostic)
       evidence = unsupported_evidence(profile, capability, diagnostic)

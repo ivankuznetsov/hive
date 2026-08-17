@@ -201,6 +201,99 @@ class TaskWorkspaceBuilderCoverageGapsTest < Minitest::Test
     end
   end
 
+  def test_semantic_budget_compacts_usage_and_primary_then_stops
+    with_fixture do |_root, task, native|
+      subject = builder(task, native)
+      values = {
+        result: {
+          "supporting" => [ { "content" => "supporting", "truncated" => false } ],
+          "primary" => { "content" => "primary", "truncated" => false }
+        },
+        usage: { "groups" => [ { "stage" => "4-execute" } ] }
+      }
+      attempts = 0
+      replacement = lambda do |**arguments|
+        attempts += 1
+        if attempts <= 3
+          raise ArgumentError, "semantic workspace snapshot exceeds workspace_bytes limit"
+        end
+
+        Struct.new(:payload) { def to_h = payload }.new(arguments)
+      end
+      with_replaced_singleton_method(
+        Hive::TaskWorkspace::SemanticSnapshot, :new, replacement
+      ) do
+        compacted = subject.send(:semantic_snapshot_with_budget, **values)
+        assert_empty compacted.dig(:usage, "groups")
+        assert compacted.dig(:usage, "details_truncated")
+        assert_nil compacted.dig(:result, "primary", "content")
+        assert compacted.dig(:result, "primary", "truncated")
+      end
+
+      always_too_large = lambda do |**|
+        raise ArgumentError, "semantic workspace snapshot exceeds workspace_bytes limit"
+      end
+      with_replaced_singleton_method(
+        Hive::TaskWorkspace::SemanticSnapshot, :new, always_too_large
+      ) do
+        assert_raises(ArgumentError) do
+          subject.send(
+            :semantic_snapshot_with_budget,
+            result: {
+              "supporting" => [], "primary" => { "content" => "primary" }
+            },
+            usage: { "groups" => [] }
+          )
+        end
+      end
+    end
+  end
+
+  def test_semantic_usage_log_and_evidence_fail_closed_at_their_boundaries
+    with_fixture do |_root, task, native|
+      subject = builder(task, native)
+      with_replaced_singleton_method(
+        Hive::TaskWorkspace::Usage, :new, ->(**) { raise IOError, "usage failed" }
+      ) do
+        usage = subject.send(:semantic_usage, {})
+        assert_equal "unavailable", usage.fetch("coverage")
+        assert_equal [ "usage" ], usage.dig("api_equivalent", "missing_dimensions")
+      end
+
+      subject.instance_variable_set(
+        :@attempt_store,
+        Object.new.tap { |store| store.define_singleton_method(:fetch) { |*| raise IOError } }
+      )
+      projection = { "identity" => { "attempt_id" => "attempt" } }
+      assert_nil subject.send(:correlated_log_reference, projection)
+
+      task.values.merge!(
+        "pr_url" => "https://github.com/acme/demo/pull/1",
+        "depends_on" => "task-1", "worktree_path" => native.folder
+      )
+      evidence = subject.send(
+        :semantic_evidence,
+        {
+          "worktree" => true, "diff" => true, "publication" => true,
+          "media" => false, "dependencies" => true,
+          "supporting_artifacts" => false
+        }
+      )
+      assert_equal "current", evidence.dig("worktree", "state")
+      assert_equal "current", evidence.dig("diff", "state")
+      assert_equal "current", evidence.dig("publication", "state")
+      assert_equal "current", evidence.dig("dependencies", "state")
+
+      original = File.method(:directory?)
+      with_replaced_singleton_method(
+        File, :directory?,
+        ->(path) { path == native.folder ? raise(Errno::EACCES) : original.call(path) }
+      ) do
+        refute subject.send(:actual_worktree_evidence?)
+      end
+    end
+  end
+
   private
 
   def with_fixture(task_class: Task)

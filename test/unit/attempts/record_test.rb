@@ -138,6 +138,31 @@ class AttemptsRecordTest < Minitest::Test
     assert_raises(Hive::Attempts::InvalidRecord) { Hive::Attempts::Record.new(candidate) }
   end
 
+  def test_explicit_route_rejects_partial_or_unknown_billing_evidence
+    base = Hive::Attempts::Record.launching(
+      **identity.merge(routing: explicit_routing), now: NOW, launch_timeout_sec: 30
+    ).to_h
+    mutations = [
+      ->(route) { route["billing_route"] = "api" },
+      lambda do |route|
+        route["billing_route"] = "invoice"
+        route["billing_evidence_source"] = "provider_account_config"
+      end,
+      lambda do |route|
+        route["billing_route"] = "api"
+        route["billing_evidence_source"] = "log_guess"
+      end
+    ]
+
+    mutations.each do |mutation|
+      candidate = Marshal.load(Marshal.dump(base))
+      mutation.call(candidate.dig("routing", "route"))
+      assert_raises(Hive::Attempts::InvalidRecord) do
+        Hive::Attempts::Record.new(candidate)
+      end
+    end
+  end
+
   def test_validate_rejects_unknown_state_and_terminal_fields_on_live_record
     invalid = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
     invalid["state"] = "maybe"

@@ -193,7 +193,10 @@ module Hive
             effort: entry.fetch("effort"),
             order: entry.fetch("order"),
             capabilities: ProviderRouting.deep_copy(entry.fetch("capabilities")),
-            model_routing: nil
+            model_routing: nil,
+            billing_route: account.fetch("billing_route", "unknown"),
+            billing_evidence_source:
+              account.fetch("billing_evidence_source", "unavailable")
           )
         end
         invalid! unless routes.map(&:id).uniq.length == routes.length

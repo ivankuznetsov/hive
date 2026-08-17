@@ -1277,6 +1277,27 @@ module Hive
       ).call
     end
 
+    desc "task TARGET", "Inspect one task through the semantic read-only workspace"
+    long_desc <<~DESC
+      Resolves one exact task from registered projects and emits the same
+      hive-task-workspace v2 semantic document as the authenticated Web
+      workspace route. This command is read-only and does not expand the
+      fleet-wide `hive status --json` contract.
+
+      Example:
+        hive task TASK-SLUG --project PROJECT --json
+        hive task TASK-SLUG --project PROJECT --log
+    DESC
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :log, type: :boolean, default: false,
+                 desc: "read the current receipt-correlated diagnostic log tail"
+    def task(target)
+      require "hive/commands/task"
+      Hive::Commands::Task.new(
+        target, project: options[:project], json: options[:json], log: options[:log]
+      ).call
+    end
+
     desc "circuits [ACTION]", "Inspect or administer provider-account/model circuits"
     long_desc <<~DESC
       `hive circuits` (or `hive circuits inspect`) renders the sanitized,

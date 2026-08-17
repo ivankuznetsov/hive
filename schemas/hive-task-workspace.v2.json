@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:task-workspace:v2",
+  "title": "Hive semantic task workspace (v2)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "generated_at", "task", "status",
+    "headline", "action", "result", "applicability", "usage",
+    "evidence", "diagnostic"
+  ],
+  "properties": {
+    "schema": { "const": "hive-task-workspace" },
+    "schema_version": { "const": 2 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "task": { "$ref": "#/$defs/Task" },
+    "status": { "$ref": "#/$defs/Status" },
+    "headline": { "$ref": "#/$defs/Headline" },
+    "action": { "$ref": "#/$defs/Action" },
+    "result": { "$ref": "#/$defs/Result" },
+    "applicability": { "$ref": "#/$defs/Applicability" },
+    "usage": { "$ref": "#/$defs/Usage" },
+    "evidence": { "$ref": "#/$defs/EvidenceMap" },
+    "diagnostic": { "$ref": "#/$defs/Diagnostic" }
+  },
+  "$defs": {
+    "SafeString": {
+      "type": "string",
+      "maxLength": 524288,
+      "pattern": "^(?!/)(?!\\\\)(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$))[\\s\\S]*$"
+    },
+    "StringOrNull": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/SafeString" }]
+    },
+    "DateTimeOrNull": {
+      "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }]
+    },
+    "SafeValue": {
+      "oneOf": [
+        { "type": "null" }, { "type": "boolean" }, { "type": "number" },
+        { "$ref": "#/$defs/SafeString" }, { "$ref": "#/$defs/SafeArray" },
+        { "$ref": "#/$defs/SafeObject" }
+      ]
+    },
+    "SafeArray": {
+      "type": "array", "maxItems": 2000,
+      "items": { "$ref": "#/$defs/SafeValue" }
+    },
+    "SafeObject": {
+      "type": "object", "maxProperties": 100,
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "capability", "capability_token", "observation_token", "raw_argv",
+            "argv", "prompt", "prompts", "credential", "credentials",
+            "secret", "secrets", "provider_reported_cost"
+          ]
+        }
+      },
+      "additionalProperties": { "$ref": "#/$defs/SafeValue" }
+    },
+    "Task": {
+      "type": "object", "additionalProperties": false,
+      "required": ["project", "slug", "id", "stage", "generation", "workflow", "archived"],
+      "properties": {
+        "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "id": { "type": ["integer", "string", "null"] },
+        "stage": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "generation": { "type": ["integer", "string", "null"] },
+        "workflow": { "type": ["string", "null"], "maxLength": 255 },
+        "archived": { "type": "boolean" }
+      }
+    },
+    "Status": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "freshness", "observed_at"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["current", "stale", "partial", "missing", "conflicting", "unavailable", "estimated", "exhausted", "retry-after"]
+        },
+        "freshness": { "type": "string", "enum": ["fresh", "stale", "partial", "unavailable"] },
+        "observed_at": { "$ref": "#/$defs/DateTimeOrNull" }
+      }
+    },
+    "Headline": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "label", "explanation"],
+      "properties": {
+        "state": { "$ref": "#/$defs/SafeString" },
+        "label": { "$ref": "#/$defs/SafeString" },
+        "explanation": { "$ref": "#/$defs/SafeString" }
+      }
+    },
+    "Action": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "label", "enabled", "reason"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/StringOrNull" },
+        "label": { "$ref": "#/$defs/StringOrNull" },
+        "enabled": { "type": "boolean" },
+        "reason": { "$ref": "#/$defs/StringOrNull" }
+      }
+    },
+    "Artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "reference", "content", "bytes", "truncated", "binary"],
+      "properties": {
+        "name": { "$ref": "#/$defs/SafeString" },
+        "reference": { "$ref": "#/$defs/SafeString" },
+        "content": { "$ref": "#/$defs/StringOrNull" },
+        "bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "binary": { "type": "boolean" }
+      }
+    },
+    "Result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "declared_primary", "primary", "supporting", "warning"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["document", "change"] },
+        "declared_primary": { "$ref": "#/$defs/StringOrNull" },
+        "primary": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Artifact" }] },
+        "supporting": {
+          "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/Artifact" }
+        },
+        "warning": { "$ref": "#/$defs/StringOrNull" }
+      }
+    },
+    "Applicability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["worktree", "diff", "publication", "media", "dependencies", "supporting_artifacts"],
+      "properties": {
+        "worktree": { "type": "boolean" }, "diff": { "type": "boolean" },
+        "publication": { "type": "boolean" }, "media": { "type": "boolean" },
+        "dependencies": { "type": "boolean" }, "supporting_artifacts": { "type": "boolean" }
+      }
+    },
+    "TokenSummary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input", "output", "input_output", "complete"],
+      "properties": {
+        "input": { "type": "integer", "minimum": 0 },
+        "output": { "type": "integer", "minimum": 0 },
+        "input_output": { "type": "integer", "minimum": 0 },
+        "complete": { "type": "boolean" }
+      }
+    },
+    "ApiEquivalent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["coverage", "subtotal_usd", "observed_subtotal_usd", "currency"],
+      "properties": {
+        "coverage": { "type": "string", "enum": ["complete", "partial", "pending", "unavailable"] },
+        "subtotal_usd": { "type": ["string", "null"], "pattern": "^[0-9]+(?:\\.[0-9]+)?$" },
+        "observed_subtotal_usd": { "type": ["string", "null"], "pattern": "^[0-9]+(?:\\.[0-9]+)?$" },
+        "priced_sessions_count": { "type": "integer", "minimum": 0 },
+        "unpriced_sessions_count": { "type": "integer", "minimum": 0 },
+        "missing_dimensions": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/SafeString" } },
+        "currency": { "const": "USD" }
+      }
+    },
+    "Usage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["coverage", "tokens", "harnesses", "actual_providers", "actual_models", "billing_route", "api_equivalent", "groups"],
+      "properties": {
+        "coverage": { "type": "string", "enum": ["complete", "partial", "pending", "unavailable"] },
+        "observed_subtotal": { "type": "boolean" },
+        "details_truncated": { "type": "boolean" },
+        "sessions_count": { "type": "integer", "minimum": 0 },
+        "metered_sessions_count": { "type": "integer", "minimum": 0 },
+        "unmetered_sessions_count": { "type": "integer", "minimum": 0 },
+        "live_sessions_count": { "type": "integer", "minimum": 0 },
+        "excluded_attributed_sessions_count": { "type": "integer", "minimum": 0 },
+        "unattributed_legacy_count": { "type": ["integer", "null"], "minimum": 0 },
+        "tokens": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/TokenSummary" }] },
+        "harnesses": { "type": "array", "items": { "$ref": "#/$defs/SafeString" }, "maxItems": 100 },
+        "actual_providers": { "type": "array", "items": { "$ref": "#/$defs/SafeString" }, "maxItems": 100 },
+        "actual_models": { "type": "array", "items": { "$ref": "#/$defs/SafeString" }, "maxItems": 100 },
+        "billing_routes": { "type": "array", "items": { "type": "string", "enum": ["subscription", "api", "unknown"] }, "maxItems": 3 },
+        "billing_route": { "type": "string", "enum": ["subscription", "api", "mixed", "unknown"] },
+        "api_equivalent": { "$ref": "#/$defs/ApiEquivalent" },
+        "groups": { "$ref": "#/$defs/SafeArray" }
+      }
+    },
+    "Evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["applicable", "state"],
+      "properties": {
+        "applicable": { "type": "boolean" },
+        "state": { "type": "string", "enum": ["current", "missing", "partial", "unavailable", "not_applicable"] }
+      }
+    },
+    "EvidenceMap": {
+      "type": "object", "additionalProperties": false,
+      "required": ["worktree", "diff", "publication", "media", "dependencies", "supporting_artifacts"],
+      "properties": {
+        "worktree": { "$ref": "#/$defs/Evidence" }, "diff": { "$ref": "#/$defs/Evidence" },
+        "publication": { "$ref": "#/$defs/Evidence" }, "media": { "$ref": "#/$defs/Evidence" },
+        "dependencies": { "$ref": "#/$defs/Evidence" },
+        "supporting_artifacts": { "$ref": "#/$defs/Evidence" }
+      }
+    },
+    "LogLocator": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "quality", "reference"],
+      "properties": {
+        "state": { "type": "string", "enum": ["current", "unavailable"] },
+        "quality": { "$ref": "#/$defs/StringOrNull" },
+        "reference": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/SafeObject" }] }
+      }
+    },
+    "Diagnostic": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "summary", "log"],
+      "properties": {
+        "state": { "type": "string", "enum": ["current", "unavailable", "not_applicable"] },
+        "summary": { "$ref": "#/$defs/StringOrNull" },
+        "log": { "$ref": "#/$defs/LogLocator" }
+      }
+    }
+  }
+}

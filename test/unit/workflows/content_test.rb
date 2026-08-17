@@ -25,6 +25,16 @@ class WorkflowsContentTest < Minitest::Test
     assert descriptor.stages.frozen?
   end
 
+  def test_descriptor_explicitly_declares_article_as_the_document_result
+    result = descriptor.result
+
+    assert_equal :document, result.kind
+    assert_equal "article.md", result.primary_artifact
+    assert_equal [ :supporting_artifacts ], result.capabilities
+    assert_equal :declared, result.provenance
+    assert_equal "article.md", descriptor.stages.last.deliverable
+  end
+
   def test_descriptor_uses_expected_state_files_and_stage_kinds
     expected = {
       "inbox" => [ "idea.md", :inert ],

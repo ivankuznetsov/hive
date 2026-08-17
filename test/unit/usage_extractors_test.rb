@@ -23,7 +23,15 @@ class UsageExtractorsTest < Minitest::Test
       "modelUsage" => {}
     ))
 
-    assert_equal({ input: 0, output: 0, cached: 0, model: nil }, result)
+    assert_equal(
+      {
+        input: 0, output: 0, cached: 0, cache_read: 0, cache_write: 0,
+        reasoning: nil, input_includes_cache_read: false,
+        input_includes_cache_write: false, output_includes_reasoning: nil,
+        model: nil
+      },
+      result
+    )
   end
 
   def test_claude_result_with_non_zero_usage
@@ -40,7 +48,15 @@ class UsageExtractorsTest < Minitest::Test
       }
     ))
 
-    assert_equal({ input: 123, output: 45, cached: 13, model: "claude-opus-4-7[1m]" }, result)
+    assert_equal(
+      {
+        input: 123, output: 45, cached: 13, cache_read: 6, cache_write: 7,
+        reasoning: nil, input_includes_cache_read: false,
+        input_includes_cache_write: false, output_includes_reasoning: nil,
+        model: "claude-opus-4-7[1m]"
+      },
+      result
+    )
   end
 
   def test_claude_stream_event_extracts_partial_usage
@@ -56,7 +72,15 @@ class UsageExtractorsTest < Minitest::Test
       }
     ))
 
-    assert_equal({ input: 3, output: 2, cached: 5, model: nil }, result)
+    assert_equal(
+      {
+        input: 3, output: 2, cached: 5, cache_read: 1, cache_write: 4,
+        reasoning: nil, input_includes_cache_read: false,
+        input_includes_cache_write: false, output_includes_reasoning: nil,
+        model: nil
+      },
+      result
+    )
   end
 
   def test_claude_message_start_extracts_nested_message_usage
@@ -75,7 +99,15 @@ class UsageExtractorsTest < Minitest::Test
       }
     ))
 
-    assert_equal({ input: 30, output: 4, cached: 70, model: "claude-opus-4-8" }, result)
+    assert_equal(
+      {
+        input: 30, output: 4, cached: nil, cache_read: 70, cache_write: nil,
+        reasoning: nil, input_includes_cache_read: false,
+        input_includes_cache_write: nil, output_includes_reasoning: nil,
+        model: "claude-opus-4-8"
+      },
+      result
+    )
   end
 
   def test_non_usage_lines_return_nil
@@ -98,7 +130,15 @@ class UsageExtractorsTest < Minitest::Test
       }
     ))
 
-    assert_equal({ input: 1000, output: 200, cached: 300, model: "gpt-5-codex" }, result)
+    assert_equal(
+      {
+        input: 1000, output: 200, cached: 300, cache_read: nil,
+        cache_write: nil, reasoning: nil, input_includes_cache_read: nil,
+        input_includes_cache_write: nil, output_includes_reasoning: nil,
+        model: "gpt-5-codex"
+      },
+      result
+    )
   end
 
   def test_codex_final_event_without_usage_remains_unknown
@@ -118,7 +158,15 @@ class UsageExtractorsTest < Minitest::Test
       "model" => "pi-model"
     ))
 
-    assert_equal({ input: 40, output: 20, cached: 10, model: "pi-model" }, result)
+    assert_equal(
+      {
+        input: 40, output: 20, cached: nil, cache_read: 10,
+        cache_write: nil, reasoning: nil, input_includes_cache_read: nil,
+        input_includes_cache_write: nil, output_includes_reasoning: nil,
+        model: "pi-model"
+      },
+      result
+    )
   end
 
   def test_pi_final_event_without_usage_remains_unknown

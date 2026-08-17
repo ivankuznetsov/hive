@@ -181,11 +181,61 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
     )
     grok = AgentCliRuntime.extract_usage(:grok, "type" => "end")
 
-    assert_equal({ input: 12, output: 3, cached: 5, model: "claude-sonnet" }, claude)
-    assert_equal({ input: 7, output: 4, cached: 0, model: nil }, codex)
-    assert_equal({ input: 8, output: 2, cached: 0, model: nil }, pi)
+    assert_equal(
+      {
+        input: 12, output: 3, cached: nil,
+        cache_read: 5, cache_write: nil, reasoning: nil,
+        input_includes_cache_read: false,
+        input_includes_cache_write: nil,
+        output_includes_reasoning: nil,
+        model: "claude-sonnet"
+      },
+      claude
+    )
+    assert_equal(
+      {
+        input: 7, output: 4, cached: nil,
+        cache_read: nil, cache_write: nil, reasoning: nil,
+        input_includes_cache_read: nil,
+        input_includes_cache_write: nil,
+        output_includes_reasoning: nil,
+        model: nil
+      },
+      codex
+    )
+    assert_equal(
+      {
+        input: 8, output: 2, cached: nil,
+        cache_read: nil, cache_write: nil, reasoning: nil,
+        input_includes_cache_read: nil,
+        input_includes_cache_write: nil,
+        output_includes_reasoning: nil,
+        model: nil
+      },
+      pi
+    )
     assert_nil grok
     assert_predicate claude, :frozen?
+  end
+
+  def test_usage_extractors_preserve_zero_and_observed_inclusion_semantics
+    codex = AgentCliRuntime.extract_usage(
+      :codex,
+      "type" => "turn.completed",
+      "usage" => {
+        "input_tokens" => 20,
+        "output_tokens" => 8,
+        "prompt_tokens_details" => { "cached_tokens" => 0 },
+        "completion_tokens_details" => { "reasoning_tokens" => 3 }
+      }
+    )
+
+    assert_equal 0, codex.fetch(:cache_read)
+    assert_equal 3, codex.fetch(:reasoning)
+    assert_equal true, codex.fetch(:input_includes_cache_read)
+    assert_equal true, codex.fetch(:output_includes_reasoning)
+    assert_nil codex.fetch(:cache_write)
+    assert_nil codex.fetch(:cached)
   end
 
   def test_terminal_events_without_usage_do_not_invent_zero_token_usage

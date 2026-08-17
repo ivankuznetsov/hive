@@ -130,6 +130,66 @@ class UsageDbTest < Minitest::Test
     end
   end
 
+  def test_session_persists_billing_and_disjoint_usage_evidence_without_guessing
+    with_usage_db do
+      Hive::UsageDb.record!(
+        agent: "opencode", harness: "opencode",
+        model: "anthropic/claude-sonnet-4-5",
+        requested_route: "anthropic/claude-sonnet-4-5",
+        actual_route: "anthropic/claude-sonnet-4-5-20250929",
+        billing_route: "subscription",
+        billing_evidence_source: "provider_account_config",
+        project_slug: "alpha", task_slug: "task-a", stage: "4-execute",
+        started_at: Time.utc(2026, 8, 12, 12),
+        ended_at: Time.utc(2026, 8, 12, 12, 1),
+        input: nil, output: 0, cached: nil,
+        cache_read: nil, cache_write: 0, reasoning: nil,
+        input_includes_cache_read: false,
+        input_includes_cache_write: false,
+        output_includes_reasoning: nil,
+        provider_reported_cost: 0.0,
+        attempt_id: "attempt-1", session_id: "session-1",
+        task_generation: 3, source: "runtime_receipt"
+      )
+
+      session = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt-1", task_generation: 3
+      ).fetch(:sessions).fetch(0)
+      assert_equal "opencode", session.fetch(:harness)
+      assert_equal "subscription", session.fetch(:billing_route)
+      assert_equal "provider_account_config", session.fetch(:billing_evidence_source)
+      assert_equal false, session.fetch(:input_includes_cache_read)
+      assert_equal false, session.fetch(:input_includes_cache_write)
+      assert_nil session[:output_includes_reasoning]
+      assert_equal 0.0, session.fetch(:provider_reported_cost)
+      assert_equal 0, session.fetch(:cache_write)
+      assert_equal false, session.fetch(:cache_read_available)
+    end
+  end
+
+  def test_session_persists_observed_direct_provider_identity_without_route_inference
+    with_usage_db do
+      Hive::UsageDb.record!(
+        agent: "codex", harness: "codex", model: "gpt-5.6-sol",
+        actual_provider: "openai", actual_model: "gpt-5.6-sol",
+        billing_route: "subscription",
+        billing_evidence_source: "agent_profile_contract",
+        project_slug: "alpha", task_slug: "task-a", stage: "4-execute",
+        started_at: Time.utc(2026, 8, 16, 12), ended_at: Time.utc(2026, 8, 16, 12, 1),
+        input: 10, output: 5, cached: 0,
+        attempt_id: "attempt-direct", session_id: "session-direct",
+        task_generation: 4, source: "runtime_receipt"
+      )
+
+      session = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt-direct", task_generation: 4
+      ).fetch(:sessions).fetch(0)
+      assert_equal "openai", session.fetch(:actual_backend)
+      assert_equal "gpt-5.6-sol", session.fetch(:actual_model)
+      assert_equal "codex", session.fetch(:harness)
+    end
+  end
+
   def test_aggregate_preserves_unknown_usage_in_agent_and_total_buckets
     with_usage_db do
       now = Time.utc(2026, 8, 12, 12)
@@ -412,6 +472,32 @@ class UsageDbTest < Minitest::Test
     end
   end
 
+  def test_exact_attempt_caps_session_rows_and_honors_an_expired_deadline
+    with_usage_db do
+      common = {
+        project_slug: "alpha", task_slug: "task-a", attempt_id: "attempt-1",
+        task_generation: 3
+      }
+      record(**common, session_id: "session-1", input: 10)
+      record(**common, session_id: "session-2", input: 20)
+
+      exact = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt-1", task_generation: 3, session_limit: 1
+      )
+
+      assert exact.fetch(:available)
+      assert exact.fetch(:truncated)
+      assert_equal 1, exact.fetch(:sessions).length
+
+      expired = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt-1", deadline: 9.0,
+        monotonic_clock: -> { 10.0 }
+      )
+      refute expired.fetch(:available)
+      assert_equal "deadline_exhausted", expired.fetch(:reason)
+    end
+  end
+
   def test_aggregate_returns_patrol_bucket_for_patrol_stage_rows
     with_usage_db do
       now = Time.utc(2026, 5, 24, 12)
@@ -489,5 +575,41 @@ class UsageDbTest < Minitest::Test
 
   def test_iso8601_returns_original_text_when_parse_fails
     assert_equal "not-a-time", Hive::UsageDb.iso8601("not-a-time")
+  end
+
+  def test_usage_identity_deadlines_and_boolean_evidence_fail_closed
+    with_usage_db do
+      _out, err = capture_io do
+        refute Hive::UsageDb.record!(
+          agent: "codex", harness: "opencode", model: "gpt",
+          project_slug: "project", task_slug: "task", stage: "4-execute",
+          started_at: Time.utc(2026, 8, 17), ended_at: Time.utc(2026, 8, 17),
+          input: 1, output: 1, cached: 0
+        )
+      end
+      assert_match(/harness must match/, err)
+
+      invalid_deadline = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt", deadline: "bad", monotonic_clock: -> { 1.0 }
+      )
+      assert_equal "deadline_exhausted", invalid_deadline.fetch(:reason)
+
+      record(
+        attempt_id: "attempt", session_id: "session", task_generation: 1
+      )
+      future_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+      default_clock = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt", task_generation: 1, deadline: future_deadline
+      )
+      assert default_clock.fetch(:available)
+
+      assert_equal 2_000,
+                   Hive::UsageDb.send(:deadline_busy_timeout, 3.0, -> { 1.0 })
+      assert_equal 1,
+                   Hive::UsageDb.send(:deadline_busy_timeout, "bad", -> { 1.0 })
+      assert_raises(ArgumentError) do
+        Hive::UsageDb.send(:nullable_boolean, "yes")
+      end
+    end
   end
 end

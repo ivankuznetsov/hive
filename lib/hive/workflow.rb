@@ -1,7 +1,7 @@
 require "hive/work_ledger"
 
 module Hive
-  Workflow = Data.define(:id, :stages, :archive_visibility_retention_days)
+  Workflow = Data.define(:id, :stages, :archive_visibility_retention_days, :result)
 
   # Reopened (not redefined) so the nested Stage/AdvanceVerb constants resolve as
   # Workflow::Stage — Data.define's block can't host constant declarations.
@@ -26,15 +26,84 @@ module Hive
     MAPPING_ROLES = %w[planning development reviewer].freeze
     TERMINAL_OUTCOME_SAFE_SLUG = /\A[a-z0-9]+(?:-[a-z0-9]+)*\z/
     MAX_TERMINAL_OUTCOME_LENGTH = 40
+    RESULT_KINDS = %i[document change].freeze
+    RESULT_CAPABILITIES = %i[
+      worktree diff publication media dependencies supporting_artifacts
+    ].freeze
+    RESULT_PROVENANCES = %i[
+      declared workspace_handoff terminal_deliverable
+      completing_outcome_artifact terminal_state_file
+    ].freeze
+
+    Result = Data.define(:kind, :primary_artifact, :capabilities, :provenance) do
+      def initialize(kind:, primary_artifact: nil, capabilities: [], provenance: :declared)
+        unless RESULT_KINDS.include?(kind)
+          raise ArgumentError, "result kind #{kind.inspect} must be one of #{RESULT_KINDS.inspect}"
+        end
+        unless capabilities.is_a?(Array) && capabilities.all? { |capability| capability.is_a?(Symbol) }
+          raise ArgumentError, "result capabilities must be an array of capability names"
+        end
+        unless capabilities.uniq.length == capabilities.length
+          raise ArgumentError, "result capabilities must be unique"
+        end
+        unknown = capabilities - RESULT_CAPABILITIES
+        unless unknown.empty?
+          raise ArgumentError,
+                "result capability #{unknown.first.inspect} must be one of #{RESULT_CAPABILITIES.inspect}"
+        end
+        unless RESULT_PROVENANCES.include?(provenance)
+          raise ArgumentError,
+                "result provenance #{provenance.inspect} must be one of #{RESULT_PROVENANCES.inspect}"
+        end
+
+        case kind
+        when :document
+          unless self.class.safe_primary_artifact?(primary_artifact)
+            raise ArgumentError,
+                  "result primary_artifact #{primary_artifact.inspect} must be a bare filename inside the task folder"
+          end
+        when :change
+          unless primary_artifact.nil?
+            raise ArgumentError, "result primary_artifact must be omitted for kind :change"
+          end
+        end
+
+        ordered_capabilities = RESULT_CAPABILITIES.select { |capability| capabilities.include?(capability) }
+        primary_artifact = primary_artifact.dup.freeze if primary_artifact
+        super(
+          kind: kind,
+          primary_artifact: primary_artifact,
+          capabilities: ordered_capabilities.freeze,
+          provenance: provenance
+        )
+      end
+
+      def declared? = provenance == :declared
+      def inferred? = !declared?
+
+      def self.safe_primary_artifact?(value)
+        value.is_a?(String) && !value.empty? && !value.include?("\0") &&
+          !value.include?("/") && !value.include?("\\") && ![ ".", ".." ].include?(value)
+      end
+    end
 
     def initialize(id:, stages:,
-                   archive_visibility_retention_days: DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS)
+                   archive_visibility_retention_days: DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS,
+                   result: nil)
       retention = normalize_archive_visibility_retention(
         archive_visibility_retention_days, workflow_id: id
       )
       # Shallow freeze: the element Stages stay shared with the caller, which is
       # safe only because Stage is itself frozen. This dup does NOT deep-copy.
-      super(id: id, stages: stages.dup.freeze, archive_visibility_retention_days: retention)
+      frozen_stages = stages.dup.freeze
+      normalized_result = frozen_stages.empty? ? result : normalize_result(
+        result, frozen_stages, workflow_id: id
+      )
+      super(
+        id: id, stages: frozen_stages,
+        archive_visibility_retention_days: retention,
+        result: normalized_result
+      )
       validate_structure!
     end
 
@@ -218,6 +287,90 @@ module Hive
       raise ArgumentError,
             "workflow #{workflow_id.inspect} field archive_visibility_retention_days received #{value.inspect}; " \
             "expected a positive integer or `never`"
+    end
+
+    def normalize_result(value, workflow_stages, workflow_id:)
+      if value
+        unless value.is_a?(Result)
+          raise ArgumentError,
+                "workflow #{workflow_id.inspect} result must be a Workflow::Result value"
+        end
+        validate_result_against_stages!(value, workflow_stages, workflow_id: workflow_id)
+        return value
+      end
+
+      infer_result(workflow_stages)
+    end
+
+    def infer_result(workflow_stages)
+      terminal = workflow_stages.last
+      runtime_capabilities = inferred_runtime_capabilities(workflow_stages)
+      if runtime_capabilities.any?
+        return Result.new(
+          kind: :change,
+          capabilities: runtime_capabilities + [ :supporting_artifacts ],
+          provenance: :workspace_handoff
+        )
+      end
+
+      if terminal.respond_to?(:deliverable) && terminal.deliverable
+        return inferred_document(terminal.deliverable, provenance: :terminal_deliverable)
+      end
+
+      completing_outcome = if terminal.respond_to?(:outcomes) && terminal.outcomes
+        terminal.outcomes.values.find do |outcome|
+          outcome.is_a?(Outcome) && outcome.complete
+        end
+      end
+      completing_artifact = completing_outcome&.artifact
+      if completing_artifact
+        return inferred_document(
+          completing_artifact, provenance: :completing_outcome_artifact
+        )
+      end
+
+      inferred_document(terminal.state_file, provenance: :terminal_state_file)
+    end
+
+    def inferred_document(primary_artifact, provenance:)
+      Result.new(
+        kind: :document,
+        primary_artifact: primary_artifact,
+        capabilities: [ :supporting_artifacts ],
+        provenance: provenance
+      )
+    end
+
+    def inferred_runtime_capabilities(workflow_stages)
+      capabilities = []
+      if workflow_stages.any? { |stage| stage.respond_to?(:workspace) && stage.workspace == :worktree }
+        capabilities.concat(%i[worktree diff])
+      end
+      if workflow_stages.any? { |stage| stage.respond_to?(:handoff) && stage.handoff == :draft_pr }
+        capabilities << :publication
+      end
+      RESULT_CAPABILITIES.select { |capability| capabilities.include?(capability) }
+    end
+
+    def validate_result_against_stages!(value, workflow_stages, workflow_id:)
+      terminal = workflow_stages.last
+      required_capabilities = inferred_runtime_capabilities(workflow_stages)
+      missing = required_capabilities - value.capabilities
+      unless missing.empty?
+        raise ArgumentError,
+              "workflow #{workflow_id.inspect} result capabilities must include #{missing.inspect} " \
+              "for its terminal workspace/handoff"
+      end
+      if required_capabilities.any? && value.kind != :change
+        raise ArgumentError,
+              "workflow #{workflow_id.inspect} result kind must be :change for its terminal workspace/handoff"
+      end
+      return unless value.kind == :document && terminal.respond_to?(:deliverable) && terminal.deliverable
+      return if value.primary_artifact == terminal.deliverable
+
+      raise ArgumentError,
+            "workflow #{workflow_id.inspect} result primary_artifact must match terminal deliverable " \
+            "#{terminal.deliverable.inspect}"
     end
 
     # Turn five runtime-stranding modes — empty list, gapped/unordered indices,

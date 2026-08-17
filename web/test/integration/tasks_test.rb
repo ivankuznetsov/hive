@@ -1,6 +1,7 @@
 require "test_helper"
 require "open3"
 require "tmpdir"
+require "hive/commands/task"
 require_relative "../../../test/support/workflow_helpers"
 require_relative "../support/outcome_evidence_helper"
 
@@ -236,15 +237,13 @@ class TasksTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "task state renders implementation ownership as pending without mutating legacy state" do
+  test "task state keeps implementation lifecycle evidence out of normal HTML without mutating state" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
 
     get "/tasks/#{@project}/#{@slug}"
 
     assert_response :success
-    assert_select "details.implementation-identity", 1
-    assert_select "details.implementation-identity summary", text: /generation 0/
-    assert_select "details.implementation-identity", text: /Pending execute capture/
+    assert_select "details.implementation-identity", 0
     refute folder.join("events.jsonl").exist?
     refute folder.join("task-projection.json").exist?
   end
@@ -381,12 +380,11 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     get "/tasks/#{@project}/#{@slug}"
     assert_response :success
-    names = css_select("details[data-artifact-name]").map { |d| d["data-artifact-name"] }
-    assert_equal "artifact.md", names.first,
-                 "from finalize on, the run's deliverable is what the page is opened for"
-    assert css_select("details[data-artifact-name='artifact.md']").first["open"],
-           "the leading artifact must render expanded"
-    assert_includes names, "idea.md", "the chronological story still follows"
+    assert_select "#workspace-primary-result[data-primary-artifact='artifact.md']", 1
+    assert_select "#workspace-primary-result .markdown h1", text: "Deliverable"
+    assert_select "#workspace-supporting-artifacts details[data-artifact-name='idea.md']", 1
+    assert_select "#workspace-supporting-artifacts details[open]", 0,
+                  "supporting evidence stays collapsed"
   end
 
   test "a non-coding workflow renders its own stage artifacts, derived from the descriptor" do
@@ -401,11 +399,68 @@ class TasksTest < ActionDispatch::IntegrationTest
 
       get "/tasks/#{project}/#{slug}"
       assert_response :success
-      names = css_select("details[data-artifact-name]").map { |d| d["data-artifact-name"] }
-      assert_includes names, "research.md",
-                      "a non-coding stage artifact (research.md) must render — ARTIFACT_ORDER never lists it"
-      assert_equal "idea.md", names.first, "content workflow still reads idea-first"
+      assert_select "#workspace-primary-result[data-primary-artifact='research.md']", 1,
+                    "the current stage artifact is primary before the final deliverable exists"
+      assert_select "#workspace-supporting-artifacts details[data-artifact-name='idea.md']", 1
+      assert_select "#workspace-diff", 0
+      assert_select "#workspace-publication", 0
+      assert_select "#workspace-dependencies", 0
     end
+  end
+
+  test "a declared primary outside stage state files leads the task page" do
+    project = create_hive_project!("declared-primary-app")
+    project_root = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project)
+    workflows = File.join(project_root, ".hive-state", "workflows")
+    FileUtils.mkdir_p(File.join(workflows, "declared-primary-fixture"))
+    File.write(
+      File.join(workflows, "declared-primary-fixture", "research.md"),
+      "Research the task.\n"
+    )
+    File.write(
+      File.join(workflows, "declared-primary-fixture", "done.md"),
+      "Write the final article.\n"
+    )
+    File.write(File.join(workflows, "declared-primary-fixture.yml"), <<~YAML)
+      id: declared-primary-fixture
+      result:
+        kind: document
+        primary_artifact: article.md
+        capabilities: [supporting_artifacts]
+      stages:
+        - name: inbox
+          kind: terminal
+          state_file: idea.md
+        - name: research
+          kind: agent
+          state_file: research.md
+          instruction: declared-primary-fixture/research.md
+        - name: done
+          kind: agent
+          state_file: done.md
+          instruction: declared-primary-fixture/done.md
+          deliverable: article.md
+    YAML
+    Hive::Workflows::Project.reset!
+
+    slug = "declared-primary-260816-aaaa"
+    folder = stage_dir(project, "2-research").join(slug)
+    folder.mkpath
+    folder.join("idea.md").write("# Idea\n")
+    folder.join("research.md").write("# Research\n")
+    folder.join("article.md").write("# Final article\n")
+    Hive::TaskMeta.write(
+      folder.to_s, id: 1, slug: slug, display_name: nil,
+      workflow: "declared-primary-fixture"
+    )
+
+    get task_path(project, slug)
+
+    assert_response :success
+    assert_select "#workspace-primary-result[data-primary-artifact='article.md']", 1
+    assert_select "#workspace-primary-result .markdown h1", text: "Final article"
+  ensure
+    Hive::Workflows::Project.reset!
   end
 
   test "earlier stages keep the chronological order, idea first" do
@@ -413,22 +468,169 @@ class TasksTest < ActionDispatch::IntegrationTest
     folder.join("artifact.md").write("# Early\n")
 
     get "/tasks/#{@project}/#{@slug}"
-    names = css_select("details[data-artifact-name]").map { |d| d["data-artifact-name"] }
-    assert_equal "idea.md", names.first, "working stages read top-to-bottom as a story"
+    assert_select "#workspace-primary-result[data-primary-artifact='idea.md']", 1
+    assert_select "#workspace-supporting-artifacts details[data-artifact-name='artifact.md']", 1
   end
 
-  test "the log renders after the artifacts" do
+  test "normal tasks do not render an unrelated newest log" do
     log_dir = stage_dir(@project, "1-inbox").join("..", "..", "logs", @slug)
     log_dir.mkpath
     log_dir.join("stage-20260611T000000Z.log").write("one line\n")
 
     get "/tasks/#{@project}/#{@slug}"
     assert_response :success
-    artifacts_at = response.body.index("<h2>Artifacts</h2>")
-    log_at = response.body.index("<h2>Log</h2>")
-    refute_nil artifacts_at
-    refute_nil log_at
-    assert_operator artifacts_at, :<, log_at, "the log is an appendix — artifacts come first"
+    assert_select "#workspace-primary-result", 1
+    assert_select "#workspace-diagnostic", 0
+    assert_select "turbo-frame[id^='task-log-']", 0
+    refute_includes response.body, "stage-20260611T000000Z.log"
+  end
+
+  test "diagnostic log affordance reads only the receipt-correlated reference" do
+    root = Dir.mktmpdir("hive-web-correlated-log")
+    previous_root = ENV["HIVE_ATTEMPT_STORE_ROOT"]
+    ENV["HIVE_ATTEMPT_STORE_ROOT"] = root
+    store = Hive::Attempts::Store.new(root: root)
+    writer = store.log_archive.open_writer("receipt-attempt")
+    writer.append("stderr", "exact receipt failure\n")
+    writer.close
+    reference = Hive::OutputReference.build(
+      store.log_archive.hot_path("receipt-attempt"), root: store.root
+    )
+    newest_dir = stage_dir(@project, "1-inbox").join("..", "..", "logs", @slug)
+    newest_dir.mkpath
+    newest_dir.join("newer-unrelated.log").write("wrong newest failure\n")
+    original = Hive::TaskWorkspace::Builder.instance_method(:semantic)
+    replacement = lambda do
+      original.bind_call(self).tap do |value|
+        value["headline"] = {
+          "state" => "needs_attention", "label" => "Needs recovery",
+          "explanation" => "Execution failed"
+        }
+        value["diagnostic"] = {
+          "state" => "current", "summary" => "Execution failed",
+          "log" => {
+            "state" => "current", "quality" => "receipt_correlated",
+            "reference" => reference
+          }
+        }
+      end
+    end
+
+    with_replaced_instance_method(Hive::TaskWorkspace::Builder, :semantic, replacement) do
+      get task_path(@project, @slug)
+      assert_response :success
+      assert_select "#workspace-diagnostic", text: /Execution failed/
+      assert_select "details[data-workspace-disclosure-key='diagnostic-log']", 1
+      assert_select "turbo-frame[data-diagnostic-log-src*='reference_sha256=#{reference.fetch('sha256')}']", 1
+      assert_select "turbo-frame[data-diagnostic-log-src][src]", 0,
+                    "the normal page must not load raw log content before disclosure"
+      first_frame_id = css_select("turbo-frame[data-diagnostic-log-src]").sole["id"]
+
+      get task_log_path(
+        @project, @slug, reference_sha256: reference.fetch("sha256")
+      )
+      assert_response :success
+      assert_select "turbo-frame##{first_frame_id}", 1,
+                    "the lazy response must target the digest-bound frame"
+      assert_includes response.body, "exact receipt failure"
+      refute_includes response.body, "wrong newest failure"
+
+      replacement_reference = reference.merge("sha256" => "b" * 64)
+      later = lambda do
+        original.bind_call(self).tap do |value|
+          value["diagnostic"] = {
+            "state" => "current", "summary" => "A later failure",
+            "log" => {
+              "state" => "current", "quality" => "receipt_correlated",
+              "reference" => replacement_reference
+            }
+          }
+        end
+      end
+      with_replaced_instance_method(Hive::TaskWorkspace::Builder, :semantic, later) do
+        get task_path(@project, @slug)
+        replacement_frame_id = css_select(
+          "turbo-frame[data-diagnostic-log-src]"
+        ).sole["id"]
+        refute_equal first_frame_id, replacement_frame_id,
+                     "a new receipt digest must replace the permanent log frame"
+      end
+
+      get task_log_path(@project, @slug, reference_sha256: "0" * 64)
+      assert_response :success
+      assert_includes response.body, "No log yet"
+      refute_includes response.body, "wrong newest failure"
+    end
+  ensure
+    writer&.close unless writer&.closed?
+    ENV["HIVE_ATTEMPT_STORE_ROOT"] = previous_root
+    FileUtils.rm_rf(root) if root
+  end
+
+  test "usage summary and one stable disclosure render semantic coverage without provider cost" do
+    original = Hive::TaskWorkspace::Builder.instance_method(:semantic)
+    replacement = lambda do
+      original.bind_call(self).tap do |value|
+        value["usage"] = {
+          "coverage" => "partial", "observed_subtotal" => true,
+          "sessions_count" => 1, "metered_sessions_count" => 1,
+          "unmetered_sessions_count" => 0, "live_sessions_count" => 0,
+          "excluded_attributed_sessions_count" => 0, "unattributed_legacy_count" => nil,
+          "tokens" => {
+            "input" => 1200, "output" => 300, "input_output" => 1500,
+            "complete" => true
+          },
+          "harnesses" => [ "opencode" ], "actual_providers" => [ "openai" ],
+          "actual_models" => [ "gpt-5.6-sol" ], "billing_routes" => [ "api" ],
+          "billing_route" => "api",
+          "api_equivalent" => {
+            "coverage" => "partial", "subtotal_usd" => nil,
+            "observed_subtotal_usd" => "0.0123", "priced_sessions_count" => 1,
+            "unpriced_sessions_count" => 0, "missing_dimensions" => [ "context_tokens" ],
+            "currency" => "USD"
+          },
+          "groups" => [
+            {
+              "stage" => "4-execute", "outcome" => "succeeded",
+              "sessions" => [
+                {
+                  "session_id" => "private-session-id", "attempt_id" => "private-attempt-id",
+                  "harness" => "opencode", "actual_provider" => "openai",
+                  "actual_model" => "gpt-5.6-sol", "billing_route" => "api",
+                  "billing_evidence_source" => "configured_provider_account",
+                  "input" => 1200, "output" => 300, "cache_read" => 200,
+                  "cache_write" => 0, "reasoning" => 25,
+                  "api_equivalent" => {
+                    "coverage" => "partial", "subtotal_usd" => nil,
+                    "observed_subtotal_usd" => "0.0123",
+                    "missing_dimensions" => [ "context_tokens" ],
+                    "rate_basis" => {
+                      "source_url" => "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+                      "checked_at" => "2026-08-16"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      end
+    end
+
+    with_replaced_instance_method(Hive::TaskWorkspace::Builder, :semantic, replacement) do
+      get task_path(@project, @slug)
+    end
+
+    assert_response :success
+    assert_select "#workspace-usage", text: /1,500 known input \+ output tokens/
+    assert_select "#workspace-usage", text: /\$0\.0123 observed.*Partial coverage/m
+    assert_select "#workspace-usage", text: /opencode.*openai.*gpt-5\.6-sol.*API/m
+    assert_select "details[data-workspace-disclosure-key='usage-details']", 1
+    assert_select ".usage-group", text: /Execute.*Succeeded.*Cache read \/ write.*200 \/ 0/m
+    assert_select "a[href='https://developers.openai.com/api/docs/models/gpt-5.6-sol']", 1
+    refute_includes response.body, "private-session-id"
+    refute_includes response.body, "private-attempt-id"
+    refute_includes response.body, "provider_reported_cost"
   end
 
   test "md artifacts render as sanitized markdown, not raw text" do
@@ -747,7 +949,7 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     get "/tasks/#{@project}/#{@slug}"
     assert_response :success
-    assert_select ".state-banner-error", { count: 1, text: /REVIEW_ERROR|triage/ },
+    assert_select "#workspace-diagnostic", { count: 1, text: /REVIEW_ERROR|triage/ },
                   "the red state must say WHY, not just need recovery"
     assert_select ".task-actions form[action=?] button", "/tasks/#{@project}/#{@slug}/recover",
                   text: "Retry stage", count: 1
@@ -802,8 +1004,9 @@ class TasksTest < ActionDispatch::IntegrationTest
     with_replaced_singleton_method(StatusBroadcaster, :snapshot_with_version, replacement) do
       get "/tasks/#{@project}/#{@slug}"
       assert_response :success
-      assert_select ".recovery-lifecycle[role=status][aria-live=polite][data-recovery-status=queued]",
-                    text: /Recovery queued.*request recovery-1.*origin merge_conflict/
+      assert_select "#workspace-diagnostic", text: /REVIEW_ERROR|triage/
+      assert_select ".recovery-lifecycle", 0
+      refute_includes response.body, "request recovery-1"
       assert_select ".task-actions form[action=?] button[disabled]",
                     "/tasks/#{@project}/#{@slug}/recover",
                     text: "Retry stage",
@@ -818,8 +1021,8 @@ class TasksTest < ActionDispatch::IntegrationTest
       )
       get "/tasks/#{@project}/#{@slug}"
       assert_response :success
-      assert_select ".recovery-lifecycle[data-recovery-status=terminal]",
-                    text: /Completed.*attempt attempt-1.*succeeded/
+      assert_select ".recovery-lifecycle", 0
+      refute_includes response.body, "attempt attempt-1"
       assert_select ".task-actions form[action=?]",
                     "/tasks/#{@project}/#{@slug}/recover",
                     count: 0
@@ -1230,7 +1433,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal "application/json", response.media_type
     document = JSON.parse(response.body)
     schemer = JSONSchemer.schema(
-      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace")))
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace", version: 1)))
     )
     assert_empty schemer.validate(document).to_a
     assert_equal @project, document.dig("task", "project")
@@ -1247,26 +1450,78 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_redirected_to "/login"
   end
 
-  test "task HTML composes the same normalized workspace with correctly owned evidence frames" do
-    get task_path(@project, @slug, format: :json)
-    workspace = response.parsed_body
+  test "legacy task json does not construct semantic pricing or presentation" do
+    replacement = -> { raise "semantic v2 must not run for the v1 compatibility route" }
+
+    with_replaced_instance_method(Hive::TaskWorkspace::Builder, :semantic, replacement) do
+      get task_path(@project, @slug, format: :json)
+    end
+
+    assert_response :success
+    assert_equal 1, response.parsed_body.fetch("schema_version")
+    assert response.parsed_body.key?("panels")
+  end
+
+  test "explicit semantic workspace route is v2 while the existing JSON route stays v1" do
+    get "/tasks/#{@project}/#{@slug}/workspace.json"
+
+    assert_response :success
+    semantic = response.parsed_body
+    v2 = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace", version: 2)))
+    )
+    assert_empty v2.validate(semantic).to_a
+    assert_equal 2, semantic.fetch("schema_version")
+    refute semantic.key?("panels")
+
+    native_out, native_err = capture_io do
+      Hive::Commands::Task.new(@slug, project: @project, json: true).call
+    end
+    assert_empty native_err
+    native = JSON.parse(native_out)
+    %w[task headline action result applicability usage evidence diagnostic].each do |key|
+      assert_equal semantic.fetch(key), native.fetch(key),
+                   "Web and native semantic projection drifted at #{key}"
+    end
+
+    get "/tasks/#{@project}/#{@slug}.json"
+    assert_response :success
+    assert_equal 1, response.parsed_body.fetch("schema_version")
+
+    post "/logout"
+    get "/tasks/#{@project}/#{@slug}/workspace.json"
+    assert_redirected_to "/login"
+  end
+
+  test "task HTML composes semantic v2 first and omits raw lifecycle panels" do
+    get task_workspace_path(@project, @slug, format: :json)
+    semantic = response.parsed_body
 
     get task_path(@project, @slug)
 
     assert_response :success
     assert_select "#status-stream-owner[data-controller~='task-workspace']", 1
     assert_select "#workspace-summary-heading",
-                  text: workspace.dig("decision", "posture").humanize
-    %w[attempts provenance timeline dependencies artifacts publication].each do |panel|
-      assert_select "#workspace-#{panel}", 1, "#{panel} must be represented exactly once"
+                  text: semantic.dig("headline", "label")
+    assert_select "#workspace-usage", 1
+    assert_select "#workspace-primary-result[data-primary-artifact=?]",
+                  semantic.dig("result", "primary", "reference")
+    %w[attempts provenance timeline artifacts].each do |panel|
+      assert_select "#workspace-#{panel}", 0, "#{panel} must stay on v1/audit routes"
     end
     assert_select "turbo-frame[id^='task-diff-'][data-turbo-permanent]", 1
     assert_select "turbo-frame[id^='task-publication-'][refresh='morph']", 1
     assert_select "turbo-frame[id^='task-publication-'][data-turbo-permanent]", count: 0
     assert_select "turbo-frame[id^='task-publication-'][src]", count: 0
-    assert_select "turbo-frame[id^='task-timeline-inspection-'][data-turbo-permanent]", 1
-    assert_select ".workspace-table-scroll[role='region'][tabindex='0']", minimum: 1
+    assert_select "turbo-frame[id^='task-timeline-inspection-']", 0
     assert_select "#task-workspace-announcement[role='status'][aria-live='polite']", 1
+    assert_operator response.body.index('id="workspace-summary"'), :<,
+                    response.body.index('id="workspace-usage"')
+    assert_operator response.body.index('id="workspace-usage"'), :<,
+                    response.body.index('id="workspace-primary-result"')
+    refute_includes response.body, "provider_reported_cost"
+    refute_includes response.body, "agent_start"
+    refute_includes response.body, "agent_end"
     refute_includes response.body, stage_dir(@project, "1-inbox").to_s
   end
 
@@ -1278,7 +1533,7 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "#workspace-publication.workspace-state-unavailable", text: /Unavailable/i
-    assert_select "#workspace-artifacts details[data-artifact-name='idea.md']", 1
+    assert_select "#workspace-primary-result[data-primary-artifact='idea.md']", 1
     assert_select ".advanced form", minimum: 1
   ensure
     Task.define_method(:publication, original) if original
@@ -1306,10 +1561,8 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     get task_path(@project, @slug)
     assert_response :success
-    assert_select "#workspace-timeline > ol.timeline-list", 1,
-                  "the current timeline must remain outside drill-down navigation"
-    assert_select "#workspace-timeline a[data-turbo-frame^='task-timeline-inspection-']",
-                  minimum: 1
+    assert_select "#workspace-timeline", 0,
+                  "raw chronology belongs only to the audit endpoint"
 
     get "/tasks/#{@project}/#{@slug}/timeline.json"
     assert_response :success

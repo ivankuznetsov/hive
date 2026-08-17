@@ -6,7 +6,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
   include HiveTestHelper
 
   SECRET = "workspace-builder-cursor-secret-at-least-thirty-two-bytes".freeze
-  NativeTask = Data.define(:folder, :project_root, :slug, :id)
+  NativeTask = Data.define(:folder, :project_root, :slug, :id, :workflow)
 
   class WebTask
     def initialize(attributes, artifact_panel:, publication_panel:)
@@ -36,7 +36,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     with_fixture do |native, task|
       snapshot = builder(native, task, questions: 2).call
       schemer = JSONSchemer.schema(
-        JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace")))
+        JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace", version: 1)))
       )
 
       assert_empty schemer.validate(snapshot).to_a
@@ -200,13 +200,174 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     end
   end
 
+  def test_semantic_v2_keeps_action_authority_independent_from_usage_and_omits_coding_audit_noise
+    with_fixture do |native, task|
+      task.instance_variable_get(:@attributes)["worktree_path"] = "/derived/not-observed"
+      snapshot = builder(native, task, questions: 0, usage_available: false).semantic
+
+      assert_equal 2, snapshot.fetch("schema_version")
+      assert_equal "document", snapshot.dig("result", "kind")
+      assert_equal "artifact.md", snapshot.dig("result", "primary", "reference")
+      assert_equal "unavailable", snapshot.dig("usage", "coverage")
+      assert snapshot.dig("action", "enabled"),
+             "optional usage loss must not disable a fresh canonical task action"
+      refute snapshot.dig("applicability", "worktree")
+      refute snapshot.dig("applicability", "publication")
+      refute_includes snapshot.to_s, "/derived/not-observed"
+      refute snapshot.key?("panels")
+      refute_includes snapshot.to_s, "attempt-1"
+      refute_includes snapshot.to_s, "stage_transition"
+    end
+  end
+
+  def test_semantic_v2_uses_the_exact_attempt_receipt_log_reference
+    reference = {
+      "path" => "logs/attempt-1.frames", "size" => 17, "sha256" => "a" * 64
+    }
+    with_fixture(log_reference: reference) do |native, task|
+      attributes = task.instance_variable_get(:@attributes)
+      attributes["action"] = "recover_execute"
+      attributes["action_label"] = "Needs recovery"
+      attributes["diagnostic"] = { "summary" => "Execution failed" }
+
+      snapshot = builder(native, task, questions: 0).semantic
+
+      assert_equal "receipt_correlated", snapshot.dig("diagnostic", "log", "quality")
+      assert_equal reference, snapshot.dig("diagnostic", "log", "reference")
+      refute_includes snapshot.to_s, "newer-unrelated.log"
+      refute snapshot.to_s.include?("provider_reported_cost")
+    end
+  end
+
+  def test_semantic_v2_does_not_complete_an_active_terminal_agent_stage
+    with_fixture do |native, task|
+      native.workflow.stages = [
+        Hive::Workflow::Stage.new(
+          name: "done", index: 6, state_file: "artifact.md", kind: :agent
+        )
+      ]
+      attributes = task.instance_variable_get(:@attributes)
+      attributes["stage"] = "6-done"
+      attributes["action"] = Hive::Schemas::TaskActionKind::AGENT_RUNNING
+      attributes["action_label"] = "Agent running"
+
+      active = builder(native, task, questions: 0).semantic
+      refute_equal "completed", active.dig("headline", "state")
+      refute active.dig("task", "archived")
+
+      attributes["action"] = Hive::Schemas::TaskActionKind::ARCHIVED
+      attributes["action_label"] = "Archived"
+      completed = builder(native, task, questions: 0).semantic
+      assert_equal "completed", completed.dig("headline", "state")
+      assert completed.dig("task", "archived")
+      refute completed.dig("action", "enabled")
+    end
+  end
+
+  def test_semantic_v2_compacts_supporting_content_before_exceeding_its_document_budget
+    with_fixture(artifact: "# Primary\n#{"p" * 6_000}") do |native, task|
+      task.instance_variable_get(:@artifact_panel).fetch("records") << {
+        "name" => "notes.md", "reference" => "notes.md",
+        "content" => "n" * 12_000, "bytes" => 12_000,
+        "truncated" => false, "invalid_encoding" => false,
+        "binary" => false, "diagnostics" => []
+      }
+
+      snapshot = builder(
+        native, task, questions: 0,
+        limits: Hive::TaskWorkspace::Limits.new(workspace_bytes: 16_000)
+      ).semantic
+
+      assert_nil snapshot.dig("result", "supporting", 0, "content")
+      assert snapshot.dig("result", "supporting", 0, "truncated")
+      assert_match(/Primary/, snapshot.dig("result", "primary", "content"))
+    end
+  end
+
+  def test_semantic_v2_projects_coding_capabilities_without_workflow_id_branching
+    result = Hive::Workflow::Result.new(
+      kind: :change,
+      capabilities: %i[worktree diff publication media dependencies supporting_artifacts]
+    )
+    with_fixture(result: result) do |native, task|
+      snapshot = builder(native, task, questions: 0).semantic
+
+      assert_equal "change", snapshot.dig("result", "kind")
+      assert snapshot.dig("applicability", "worktree")
+      assert snapshot.dig("applicability", "diff")
+      assert snapshot.dig("applicability", "publication")
+      assert snapshot.dig("applicability", "media")
+      assert snapshot.dig("applicability", "dependencies")
+    end
+  end
+
+  def test_semantic_v2_fails_actions_closed_on_stale_authority_but_not_missing_usage
+    with_fixture do |native, task|
+      fresh = builder(native, task, questions: 0, usage_available: false).semantic
+      stale = builder(
+        native, task, questions: 0, usage_available: false,
+        status_availability: "degraded"
+      ).semantic
+
+      assert fresh.dig("action", "enabled")
+      refute stale.dig("action", "enabled")
+      assert_equal "unavailable", stale.dig("usage", "coverage")
+    end
+  end
+
+  def test_semantic_v2_warns_when_a_completed_document_is_missing_its_declared_primary
+    result = Hive::Workflow::Result.new(
+      kind: :document, primary_artifact: "final.md",
+      capabilities: [ :supporting_artifacts ]
+    )
+    with_fixture(result: result) do |native, task|
+      attributes = task.instance_variable_get(:@attributes)
+      attributes["action"] = Hive::Schemas::TaskActionKind::ARCHIVED
+      attributes["action_label"] = "Archived"
+
+      snapshot = builder(native, task, questions: 0).semantic
+
+      assert_equal "artifact.md", snapshot.dig("result", "primary", "reference")
+      assert_match(/final\.md.*unavailable/, snapshot.dig("result", "warning"))
+      assert_equal "completed", snapshot.dig("headline", "state")
+    end
+  end
+
+  def test_v1_and_v2_share_exact_usage_reads
+    calls = 0
+    usage_reader = lambda do |**|
+      calls += 1
+      { available: true, sessions: [], unattributed_count: 0 }
+    end
+    with_fixture do |native, task|
+      projector = builder(
+        native, task, questions: 0, usage_reader: usage_reader,
+        usage_session: true
+      )
+
+      projector.call
+      projector.semantic
+
+      assert_equal 1, calls,
+                   "one HTML request must reuse its exact attempt usage read"
+    end
+  end
+
   private
 
-  def with_fixture(artifact: "# Artifact\n", material_events: 1)
+  def with_fixture(artifact: "# Artifact\n", material_events: 1, log_reference: nil,
+                   result: nil)
     with_tmp_dir do |root|
       task_root = File.join(root, "task")
       FileUtils.mkdir_p(task_root)
-      native = NativeTask.new(task_root, root, "task-260812-abcd", 42)
+      workflow = Struct.new(:result, :stages).new(
+        result || Hive::Workflow::Result.new(
+          kind: :document, primary_artifact: "artifact.md",
+          capabilities: [ :supporting_artifacts ]
+        ),
+        []
+      )
+      native = NativeTask.new(task_root, root, "task-260812-abcd", 42, workflow)
       task = WebTask.new(
         {
           "slug" => native.slug, "id" => 42, "stage" => "4-execute",
@@ -229,16 +390,19 @@ class TaskWorkspaceBuilderTest < Minitest::Test
         publication_panel: Hive::TaskWorkspace.unavailable_panel("publication")
       )
       @material_events = material_events
+      @log_reference = log_reference
       yield native, task
     ensure
       @material_events = nil
+      @log_reference = nil
     end
   end
 
   def builder(native, task, questions:, limits: Hive::TaskWorkspace::Limits.new,
               status_availability: "fresh", status_error: nil,
               projection_state: "current", projection_diagnostics: [],
-              projection_truncated: false, usage_available: true, questions_payload: nil)
+              projection_truncated: false, usage_available: true,
+              usage_reader: nil, usage_session: false, questions_payload: nil)
     questions_payload ||= Array.new(questions) do |index|
       {
         "n" => index + 1, "text" => "Question #{index + 1}?",
@@ -257,6 +421,23 @@ class TaskWorkspaceBuilderTest < Minitest::Test
         "payload" => {
           "activity_kind" => "stage_transition", "operation_id" => "op-#{index}",
           "correlation_id" => "correlation-#{index}"
+        }
+      }
+    end
+    if usage_session
+      events << {
+        "schema" => "hive-task-journal-event", "schema_version" => 1,
+        "event_id" => "session-finished", "event_type" => "activity_recorded",
+        "occurred_at" => "2026-08-12T12:00:01Z",
+        "observed_at" => "2026-08-12T12:00:01Z",
+        "stage" => "4-execute", "attempt_id" => "attempt-1",
+        "task_generation" => 3, "provenance" => { "source" => "stage_service" },
+        "payload" => {
+          "activity_kind" => "session_finished", "session_id" => "session-1",
+          "role" => "implementer", "provider" => "codex",
+          "started_at" => "2026-08-12T12:00:00Z",
+          "ended_at" => "2026-08-12T12:00:01Z", "outcome" => "succeeded",
+          "live" => false, "usage" => {}
         }
       }
     end
@@ -282,7 +463,9 @@ class TaskWorkspaceBuilderTest < Minitest::Test
       "intended_stage" => "4-execute", "task_input_epoch" => 3,
       "ownership_generation" => "owner-3", "provider" => "codex",
       "state" => "running", "outcome" => nil,
-      "accepted_at" => "2026-08-12T12:00:00Z"
+      "accepted_at" => "2026-08-12T12:00:00Z",
+      "log_reference" => @log_reference,
+      "receipt" => @log_reference && { "log_reference" => @log_reference }
     }
     Hive::TaskWorkspace::Builder.new(
       task: task, native_task: native, project: "demo",
@@ -298,7 +481,8 @@ class TaskWorkspaceBuilderTest < Minitest::Test
           )
         end
       end.new(nil),
-      usage_reader: ->(**) { { available: usage_available, sessions: [], unattributed_count: 0 } },
+      usage_reader: usage_reader ||
+        ->(**) { { available: usage_available, sessions: [], unattributed_count: 0 } },
       current_context_observation: {
         "observed_at" => "2026-08-12T12:00:00Z",
         "repository" => nil, "wiki" => nil

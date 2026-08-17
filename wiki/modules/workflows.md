@@ -1,13 +1,13 @@
 ---
 title: Hive::Workflows
 type: module
-source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/terminal_outcome.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb
+source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/terminal_outcome.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/task_workspace/builder.rb
 created: 2026-04-26
-updated: 2026-08-13
-tags: [module, workflow, verbs, selection, human-stage, outcomes, terminal-outcomes, registry, archive, retention]
+updated: 2026-08-16
+tags: [module, workflow, result, verbs, selection, human-stage, outcomes, terminal-outcomes, registry, archive, retention]
 ---
 
-**TLDR**: The coding, content, bench, and project-authored workflows are described as ordered `Hive::Workflow` value objects whose stages carry directory names, state files, incoming advance verbs, runner metadata, optional instruction files, optional permission specs, per-stage agent/model/effort overrides, council reviewer configs, terminal deliverables, and an archive visibility retention policy. `Hive::Workflows::Registry.default` still returns the coding descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for built-in, runtime/test, and active-project registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` / `kind: :council` as fallbacks for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`. Coding's descriptor now uses runtime primitive kinds (`:execute`, `:review_council`, `:finalize`) for the worktree-coupled stages; the old `:marker` descriptor kind is retired.
+**TLDR**: The coding, content, bench, and project-authored workflows are described as ordered `Hive::Workflow` value objects. Every workflow also resolves one typed `Workflow::Result`: `document` names a task-root primary artifact, while `change` declares the delivery capabilities that make worktree, diff, publication, media, dependency, and supporting-artifact evidence meaningful. Authored descriptors can declare that result explicitly; safe legacy workflows infer it from workspace/handoff, terminal deliverable, completing outcome artifact, or terminal state file. The same result contract drives Web and native semantic task inspection without branching on workflow IDs. Stages continue to carry directory names, state files, incoming advance verbs, runner metadata, permissions, agent/model/effort overrides, council configs, terminal deliverables, and archive visibility policy.
 
 ## Descriptor and registry
 
@@ -83,6 +83,47 @@ Applying a managed workflow configuration preserves the source descriptor's
 retention value. Hive's built-in `coding`, `content`, and `bench` descriptors
 and both local scaffolds explicitly declare `3`; legacy and externally managed
 descriptors may omit it and receive the same value.
+
+## Workflow result contract
+
+`Hive::Workflow::Result` is the workflow-owned description of what the task is
+trying to deliver. It is independent of stage names and Web panels:
+
+- `kind: document` requires one safe bare `primary_artifact` filename inside
+  the task folder. A declared terminal `deliverable` must match it.
+- `kind: change` has no primary-artifact filename. It describes a repository
+  change whose applicable evidence comes from capabilities.
+- `capabilities` is a unique subset of `worktree`, `diff`, `publication`,
+  `media`, `dependencies`, and `supporting_artifacts`. A workflow using
+  `workspace: worktree` and `handoff: draft_pr` must declare the corresponding
+  change capabilities; contradictory document declarations fail at load time.
+- `provenance` records whether the result was declared or safely inferred. It
+  is descriptor/runtime context, not proof that the result exists.
+
+Project-authored YAML accepts a closed top-level shape:
+
+```yaml
+result:
+  kind: document
+  primary_artifact: architecture.md
+  capabilities: [supporting_artifacts]
+```
+
+Older descriptors remain compatible. Inference chooses, in order, a
+worktree/draft-PR change result, terminal `deliverable`, a completing human
+outcome artifact, then the terminal `state_file`. The inferred document gets
+supporting-artifact capability only; it does not acquire coding-only worktree
+or publication expectations. Built-in coding declares a change result with
+all delivery capabilities, while built-in content declares `article.md` as its
+document result.
+
+`Hive::TaskWorkspace::Builder#semantic` consumes this normalized value. It
+opens the declared primary artifact when present, falls back to the current
+stage artifact while work is in progress, warns when a completed task is
+missing its declared deliverable, and emits only applicable evidence. Web and
+`hive task TARGET --project NAME --json` therefore use the same workflow
+meaning without `coding`, `architecture`, or `writing` conditionals in the
+view.
 
 The one compatibility exception is an exact semantic match for the project-local
 `bench.yml` shipped before `bench` became built in. Hive temporarily keeps that

@@ -6,7 +6,7 @@ module Hive
     class Resources
       def initialize(attempts_panel:, usage_reader: Hive::UsageDb, limits: Limits.new)
         @attempts_panel = attempts_panel
-        @usage_reader = usage_reader
+        @usage_reader = BoundedUsageReader.wrap(usage_reader, limits: limits)
         @limits = limits
       end
 
@@ -16,15 +16,22 @@ module Hive
         usage_records = attempts.map { |attempt| usage_for(attempt) }
         diagnostics = Array(@attempts_panel["diagnostics"]).dup
         unavailable = usage_records.select { |record| record["state"] == "unavailable" }
+        degraded = usage_records.select { |record| %w[unavailable partial].include?(record["state"]) }
         unavailable.each do |record|
           diagnostics << {
             "source" => "usage_db", "reason" => "usage_unavailable",
             "attempt_id" => record["attempt_id"]
           }
         end
+        usage_records.select { |record| record["truncated"] == true }.each do |record|
+          diagnostics << {
+            "source" => "usage_db", "reason" => "usage_truncated",
+            "attempt_id" => record["attempt_id"]
+          }
+        end
         state = if attempts.empty?
           "missing"
-        elsif unavailable.any? || @attempts_panel["truncated"] == true
+        elsif degraded.any? || @attempts_panel["truncated"] == true
           "partial"
         elsif guards.any? { |guard| %w[exhausted retry-after].include?(guard["state"]) }
           guards.any? { |guard| guard["state"] == "exhausted" } ? "exhausted" : "retry-after"
@@ -115,10 +122,14 @@ module Hive
           }
         end.sort_by { |row| row["session_id"] }
         if sessions.empty?
+          truncated = response[:truncated] == true || response[:unattributed_truncated] == true
           return {
             "record_kind" => "usage", "attempt_id" => attempt["attempt_id"],
-            "state" => "missing", "sessions" => [], "totals" => nil,
-            "unattributed_count" => response[:unattributed_count]
+            "state" => truncated ? "partial" : "missing",
+            "sessions" => [], "totals" => nil,
+            "unattributed_count" => response[:unattributed_count],
+            "unattributed_truncated" => response[:unattributed_truncated] == true,
+            "truncated" => truncated
           }
         end
         totals = sessions.each_with_object(
@@ -127,10 +138,14 @@ module Hive
           %w[input output cached].each { |key| sum[key] += row[key] }
           sum["tokens"] += row["input"] + row["output"]
         end
+        truncated = response[:truncated] == true || response[:unattributed_truncated] == true
         {
           "record_kind" => "usage", "attempt_id" => attempt["attempt_id"],
-          "state" => "current", "sessions" => sessions, "totals" => totals,
-          "unattributed_count" => response[:unattributed_count]
+          "state" => truncated ? "partial" : "current",
+          "sessions" => sessions, "totals" => totals,
+          "unattributed_count" => response[:unattributed_count],
+          "unattributed_truncated" => response[:unattributed_truncated] == true,
+          "truncated" => truncated
         }
       rescue StandardError
         {

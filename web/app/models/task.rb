@@ -7,7 +7,10 @@ require "hive/plan_review/store"
 require "hive/web/environment"
 require "hive/task_workspace/artifacts"
 require "hive/task_workspace/publication"
+require "hive/task_workspace/correlated_log"
 require "hive/artifacts/outcome_evidence/store"
+require "hive/attempts/store"
+require "hive/output_reference"
 
 class Task
   include TaskMutations
@@ -65,6 +68,7 @@ class Task
     Pathname.new(Hive::Schemas.schema_path("hive-artifact-capture", version: 2))
   )
   DIFF_TIMEOUT_SEC = Integer(Hive::Web::Environment.value("HIVE_WEB_DIFF_TIMEOUT_SEC"))
+  EXACT_LOG_MAX_BYTES = Hive::TaskWorkspace::CorrelatedLog::MAX_BYTES
   RECOVERY_ACTIONS = %w[recover_execute recover_review error].freeze
   RECOVERY_LABELS = {
     "queued" => "Recovery queued",
@@ -467,7 +471,26 @@ class Task
     { "path" => path, "tail" => lines.join }
   end
 
+  # Read only the integrity-bearing log selected by semantic v2. The
+  # reference stays server-side; the browser sends back only its digest and
+  # the controller re-resolves the current semantic document before calling
+  # this seam. Large or changed files fail inert instead of becoming an
+  # unbounded request-time read.
+  def correlated_log(reference)
+    store = attempt_store_for_read
+    Hive::TaskWorkspace::CorrelatedLog.new(root: store.root).read(reference)
+  rescue Hive::Error, SystemCallError, IOError, ArgumentError, TypeError
+    nil
+  end
+
   private
+
+  def attempt_store_for_read
+    root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
+    return Hive::Attempts::Store.new(create_directories: false) if root.empty?
+
+    Hive::Attempts::Store.new(root: root, create_directories: false)
+  end
 
   def safe_plan_review_artifacts(store, references)
     references.sort.filter_map do |name, reference|
@@ -582,7 +605,8 @@ class Task
   def generic_artifact_order
     Hive::Workflows::Project.synchronize do
       Hive::Workflows::Project.load!(project.path)
-      Hive::Workflows::Registry.fetch(self["workflow"].to_sym).stages.map(&:state_file).uniq
+      workflow = Hive::Workflows::Registry.fetch(self["workflow"].to_sym)
+      [ workflow.result.primary_artifact, *workflow.stages.map(&:state_file) ].compact.uniq
     end
   rescue Hive::Workflows::UnknownWorkflow
     ARTIFACT_ORDER

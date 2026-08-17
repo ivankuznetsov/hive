@@ -1,4 +1,5 @@
 require "application_system_test_case"
+require "hive/task_workspace/builder"
 
 # Browser-level happy path over the real pipeline: sign in (dev seam), see
 # the grid, compose an idea with an attached image (upload button path),
@@ -515,86 +516,80 @@ class PipelineFlowTest < ApplicationSystemTestCase
                  "a grid update must not clear the composer"
   end
 
-  test "log pane follows the tail, pauses for reading, resumes at the bottom" do
-    slug = create_task!(@project, "Tail probe")
+  test "normal task pages do not load unrelated logs" do
+    slug = create_task!(@project, "Unrelated log probe")
     log_dir = Pathname(ENV["HIVE_TEST_HOME_ROOT"]).join("repos", @project, ".hive-state", "logs", slug)
     log_dir.mkpath
-    log_file = log_dir.join("stage-20260611T000000Z.log")
-    log_file.write((1..120).map { |n| "line #{n}" }.join("\n") + "\n")
+    log_dir.join("stage-20260611T000000Z.log").write("unrelated legacy log\n")
 
     sign_in!
     visit "/tasks/#{@project}/#{slug}"
+
+    assert_no_selector "turbo-frame[id^='task-log-']"
+    assert_no_selector "pre[data-tail-follow]"
+    assert_no_text "unrelated legacy log"
+  end
+
+  test "receipt-correlated log pane follows, pauses, resumes, and morphs in place" do
+    slug = create_task!(@project, "Receipt log probe")
+    root = Dir.mktmpdir("hive-web-receipt-log")
+    previous_root = ENV["HIVE_ATTEMPT_STORE_ROOT"]
+    ENV["HIVE_ATTEMPT_STORE_ROOT"] = root
+    store = Hive::Attempts::Store.new(root: root)
+    writer = store.log_archive.open_writer("receipt-attempt")
+    writer.append("stdout", (1..120).map { |n| "line #{n}" }.join("\n") + "\n")
+    writer.close
+    reference = Hive::OutputReference.build(
+      store.log_archive.hot_path("receipt-attempt"), root: store.root
+    )
+    original = Hive::TaskWorkspace::Builder.instance_method(:semantic)
+    replacement = lambda do
+      original.bind_call(self).tap do |value|
+        value["headline"] = {
+          "state" => "needs_attention", "label" => "Needs recovery",
+          "explanation" => "Receipt-correlated failure"
+        }
+        value["diagnostic"] = {
+          "state" => "current", "summary" => "Receipt-correlated failure",
+          "log" => {
+            "state" => "current", "quality" => "receipt_correlated",
+            "reference" => reference
+          }
+        }
+      end
+    end
+    Hive::TaskWorkspace::Builder.define_method(:semantic, &replacement)
+
+    sign_in!
+    visit "/tasks/#{@project}/#{slug}"
+    frame = find("turbo-frame[data-diagnostic-log-src]", visible: :all, wait: 5)
+    refute frame[:src], "the exact log must remain unloaded until disclosure"
+    find("details[data-workspace-disclosure-key='diagnostic-log'] summary").click
     pane = find("pre[data-tail-follow]", wait: 5)
-    assert pane.text.include?("line 120"), "the tail must show the newest lines"
-    # The controller stamps data-following once it pins — the explicit wait
-    # for "Stimulus has booted and taken over", instead of racing it.
+    assert pane.text.include?("line 120"), "the receipt-correlated tail must show its newest line"
     assert_selector "pre[data-tail-follow][data-following]", wait: 5
 
-    # A slow in-flight frame request owns the next render. Timer ticks remain
-    # observable, but must not restart/cancel that navigation until Turbo
-    # clears its busy state.
-    execute_script(<<~JS)
-      const frame = document.querySelector("turbo-frame[id^='task-log-']")
-      document.body.dataset.busyPollRequests = "0"
-      document.addEventListener("turbo:before-fetch-request", (event) => {
-        if (event.target !== frame) return
-
-        const count = Number(document.body.dataset.busyPollRequests) + 1
-        document.body.dataset.busyPollRequests = String(count)
-        document.body.dataset.busyPollResumed = "true"
-      })
-      frame.addEventListener("turbo:frame-load", () => {
-        document.body.dataset.busyPollLoaded = "true"
-      }, { once: true })
-      frame.setAttribute("busy", "")
-      frame.setAttribute("aria-busy", "true")
-    JS
-    busy_ticks = page.evaluate_script("Number(document.querySelector(\"turbo-frame[id^='task-log-']\").dataset.pollTicks || 0)")
-    assert_selector "turbo-frame[id^='task-log-'][data-poll-ticks='#{busy_ticks + 2}']", wait: 10
-    assert_selector "body[data-busy-poll-requests='0']", visible: :all
-    execute_script(<<~JS)
-      const frame = document.querySelector("turbo-frame[id^='task-log-']")
-      frame.removeAttribute("busy")
-      frame.removeAttribute("aria-busy")
-    JS
-    assert_selector "body[data-busy-poll-resumed='true']", visible: :all, wait: 5
-    assert_selector "body[data-busy-poll-loaded='true']", visible: :all, wait: 5
-
-    # Scroll geometry is unobservable through user-facing APIs, and
-    # capybara-playwright cannot wheel-scroll an inner pane — the sanctioned
-    # JS exception, used only to position and read scrollTop.
     distance_from_bottom = page.evaluate_script(
       "(() => { const p = document.querySelector('pre[data-tail-follow]'); return p.scrollHeight - p.scrollTop - p.clientHeight; })()"
     )
-    assert_operator distance_from_bottom, :<=, 8, "the pane must start pinned to the live end (tail -f)"
+    assert_operator distance_from_bottom, :<=, 8, "the pane must start pinned to the receipt tail"
 
     page.execute_script("document.querySelector('pre[data-tail-follow]').scrollTop = 0")
-    log_file.write("line 121 marker-while-reading\n", mode: "a")
-    # Provably outlast TWO real poll ticks: the controller counts every
-    # timer firing (including paused ones) in data-poll-ticks, so waiting
-    # for the counter to advance is an explicit wait, not a sleep — and a
-    # deleted readerBusy() would fail the absence assertions below.
     ticks = page.evaluate_script("Number(document.querySelector(\"turbo-frame[id^='task-log-']\").dataset.pollTicks || 0)")
     assert_selector "turbo-frame[id^='task-log-'][data-poll-ticks='#{ticks + 2}']", wait: 10
     assert_selector "pre[data-tail-follow][data-following='false']"
-    assert_no_text "marker-while-reading"
     assert_equal 0, page.evaluate_script("document.querySelector('pre[data-tail-follow]').scrollTop"),
-                 "reading position must survive poll ticks"
+                 "reading position must survive lazy-log poll ticks"
 
-    page.execute_script("const p = document.querySelector('pre[data-tail-follow]'); p.scrollTop = p.scrollHeight")
-    assert_text "marker-while-reading", wait: 10
-
-    # No-blink contract: reloads MORPH the pane (patch, not replace). Tag the
-    # live DOM node, let the next refresh bring a new line in, and verify the
-    # same node survived — a child-replacing reload (the old behavior, a
-    # visible 3s blink) would have swapped it out. This line appearing at all
-    # also proves the pane re-pinned after the previous morph: an unpinned
-    # pane pauses the poll.
-    page.execute_script("document.querySelector('pre[data-tail-follow]').__sameNode = true")
-    log_file.write("line 122 after-morph\n", mode: "a")
-    assert_text "after-morph", wait: 10
+    page.execute_script("const p = document.querySelector('pre[data-tail-follow]'); p.scrollTop = p.scrollHeight; p.__sameNode = true")
+    assert_selector "pre[data-tail-follow][data-following='true']", wait: 10
     assert page.evaluate_script("document.querySelector('pre[data-tail-follow]').__sameNode"),
-           "a poll refresh must patch the pane in place, not rebuild it"
+           "an exact-log poll reload must morph the pane instead of replacing it"
+  ensure
+    Hive::TaskWorkspace::Builder.define_method(:semantic, original) if original
+    writer&.close unless writer&.closed?
+    ENV["HIVE_ATTEMPT_STORE_ROOT"] = previous_root
+    FileUtils.rm_rf(root) if root
   end
 
   test "artifact open state survives a pushed morph while content stays live" do

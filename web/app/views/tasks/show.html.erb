@@ -5,11 +5,11 @@
      data-task-workspace-key-value="<%= stable_dom_id("task-workspace", @project.name, @task["slug"]) %>"
      data-task-workspace-signature-value="<%= stable_dom_id(
        "workspace-material",
-       @workspace.dig("decision", "posture"),
-       @workspace.dig("decision", "reason"),
-       @workspace.dig("status", "state"),
-       @workspace.dig("panels", "attempts", "current_attempt_id"),
-       @workspace.dig("panels", "resources", "state")
+       @semantic_workspace.dig("headline", "state"),
+       @semantic_workspace.dig("headline", "explanation"),
+       @semantic_workspace.dig("action", "kind"),
+       @semantic_workspace.dig("result", "primary", "reference"),
+       @semantic_workspace.dig("usage", "coverage")
      ) %>">
 <div class="task-header">
   <h1><%= @task.title %></h1>
@@ -33,9 +33,6 @@
       error: @status_error %>
 <%= render "tasks/state" %>
 
-<%= render "tasks/plan_review", plan_review: @plan_review, task: @task,
-      status_fresh: @status_fresh, task_source: @task_source if @plan_review %>
-
 <% if (closure = @task["closure"]).is_a?(Hash) && closure["schema"] == Hive::TaskClosure::SCHEMA %>
   <section class="task-closure" aria-labelledby="task-closure-title">
     <h2 id="task-closure-title">Closure evidence</h2>
@@ -53,46 +50,50 @@
   </section>
 <% end %>
 
+<%= render "tasks/plan_review", plan_review: @plan_review, task: @task,
+      status_fresh: @status_fresh, task_source: @task_source if @plan_review %>
+
 <%= render "tasks/outcome_evidence", evidence: @outcome_evidence, project: @project, task: @task %>
 
 <div class="task-workspace" aria-label="Task evidence workspace">
   <div class="task-workspace-grid">
-    <%= render "tasks/attempts", workspace: @workspace %>
-    <%= render "tasks/provenance", workspace: @workspace %>
-    <%= render "tasks/timeline", workspace: @workspace %>
-    <%= render "tasks/dependencies", workspace: @workspace %>
+    <% if @semantic_workspace.dig("applicability", "supporting_artifacts") ||
+          @semantic_workspace.dig("evidence", "supporting_artifacts", "state") == "current" %>
+      <%= render "tasks/supporting_artifacts", result: @semantic_workspace.fetch("result") %>
+    <% end %>
 
-    <div class="workspace-wide workspace-change-grid" aria-label="Change and publication evidence">
-      <%= render "tasks/diff_frame",
-            project: @project, task: @task, task_source: @task_source %>
-      <%= turbo_frame_tag stable_dom_id("task-publication", @project.name, @task.slug),
-            refresh: "morph" do %>
-        <%= render "tasks/publication",
-              publication: @workspace.dig("panels", "publication"),
-              refresh_available: @publication_refresh_available,
-              refresh_notice: nil %>
-      <% end %>
-    </div>
+    <% if @semantic_workspace.dig("applicability", "dependencies") ||
+          @semantic_workspace.dig("evidence", "dependencies", "state") == "current" %>
+      <%= render "tasks/dependencies", workspace: @workspace %>
+    <% end %>
 
-    <div class="workspace-wide">
-      <%= render "tasks/media", media: @media, project: @project, task: @task %>
-      <%= render "tasks/artifacts", artifact_panel: @artifact_panel %>
-    </div>
-
-    <% if @log %>
-      <section class="workspace-panel workspace-wide" aria-label="Log">
-        <h2>Log</h2>
-        <%# data-turbo-permanent: page morphs must never touch the frame — Turbo
-            would otherwise reload the operator-owned tail on every push. %>
-        <%= turbo_frame_tag stable_dom_id("task-log", @project.name, @task.slug),
-              src: task_log_path(@project.name, @task["slug"], source: @task_source),
-              refresh: "morph",
-              data: (@task_source ?
-                { turbo_permanent: true } :
-                { controller: "poll", poll_interval_value: 3000, turbo_permanent: true }) do %>
-          <div class="log-pane"><pre>Loading log…</pre></div>
+    <% show_diff = @semantic_workspace.dig("applicability", "diff") ||
+                   @semantic_workspace.dig("evidence", "diff", "state") == "current" %>
+    <% show_publication = @semantic_workspace.dig("applicability", "publication") ||
+                          @semantic_workspace.dig("evidence", "publication", "state") == "current" %>
+    <% if show_diff || show_publication %>
+      <div class="workspace-wide workspace-change-grid" aria-label="Change and publication evidence">
+        <% if show_diff %>
+          <%= render "tasks/diff_frame",
+                project: @project, task: @task, task_source: @task_source %>
         <% end %>
-      </section>
+        <% if show_publication %>
+          <%= turbo_frame_tag stable_dom_id("task-publication", @project.name, @task.slug),
+                refresh: "morph" do %>
+            <%= render "tasks/publication",
+                  publication: @workspace.dig("panels", "publication"),
+                  refresh_available: @publication_refresh_available,
+                  refresh_notice: nil %>
+          <% end %>
+        <% end %>
+      </div>
+    <% end %>
+
+    <% if @semantic_workspace.dig("applicability", "media") ||
+          @semantic_workspace.dig("evidence", "media", "state") == "current" %>
+      <div class="workspace-wide">
+        <%= render "tasks/media", media: @media, project: @project, task: @task %>
+      </div>
     <% end %>
   </div>
 </div>

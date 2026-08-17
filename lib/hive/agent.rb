@@ -539,7 +539,16 @@ module Hive
         remedy: structured_failure[:remedy]
       }.compact
 
-      reported_usage = resource_exhaustion || output_completed ? token_meter.usage : last_usage
+      reported_usage = if resource_exhaustion || output_completed
+        metered_usage = token_meter.usage
+        last_usage ? last_usage.merge(
+          input: metered_usage[:input],
+          output: metered_usage[:output],
+          model: metered_usage[:model] || last_usage[:model]
+        ) : metered_usage
+      else
+        last_usage
+      end
       result = {
         pid: pid,
         pgid: pgid,
@@ -983,7 +992,11 @@ module Hive
         cache_read: usage.cache_read,
         cache_write: usage.cache_write,
         reasoning: usage.reasoning,
-        cost: usage.cost,
+        input_includes_cache_read: usage.input_includes_cache_read,
+        input_includes_cache_write: usage.input_includes_cache_write,
+        output_includes_reasoning: usage.output_includes_reasoning,
+        provider_reported_cost: usage.provider_reported_cost,
+        cost: usage.provider_reported_cost,
         model: outcome.identity.actual&.to_s
       }.freeze
     end

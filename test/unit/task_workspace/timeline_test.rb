@@ -250,7 +250,7 @@ class TaskWorkspaceTimelineTest < Minitest::Test
       panels: { "timeline" => panel }
     ).to_h
     schemer = JSONSchemer.schema(
-      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace")))
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace", version: 1)))
     )
     assert schemer.valid?(document), schemer.validate(document).to_a.inspect
   end

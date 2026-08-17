@@ -208,7 +208,10 @@ module AgentCliRuntime
             cache_read: numeric(cache, "read", integer: true),
             cache_write: numeric(cache, "write", integer: true),
             reasoning: numeric(tokens, "reasoning", integer: true),
-            cost: numeric(assistant, "cost", integer: false)
+            input_includes_cache_read: cache.key?("read") ? true : nil,
+            input_includes_cache_write: cache.key?("write") ? true : nil,
+            output_includes_reasoning: tokens.key?("reasoning") ? false : nil,
+            provider_reported_cost: numeric(assistant, "cost", integer: false)
           )
         }.freeze
       rescue JSON::ParserError => e
@@ -231,7 +234,10 @@ module AgentCliRuntime
             cache_read: required_numeric(cache, "read", integer: true),
             cache_write: required_numeric(cache, "write", integer: true),
             reasoning: required_numeric(tokens, "reasoning", integer: true),
-            cost: required_numeric(part, "cost", integer: false)
+            input_includes_cache_read: true,
+            input_includes_cache_write: true,
+            output_includes_reasoning: false,
+            provider_reported_cost: required_numeric(part, "cost", integer: false)
           )
         }.freeze
       rescue ArgumentError => e

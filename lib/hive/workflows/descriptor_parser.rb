@@ -13,7 +13,9 @@ module Hive
     # mid-flight) stay as arguments because they vary within a single parse.
     class DescriptorParser
       SAFE_SLUG = /\A[a-z0-9][a-z0-9-]*\z/
-      TOP_LEVEL_KEYS = %w[id archive_visibility_retention_days stages x-hive].freeze
+      TOP_LEVEL_KEYS = %w[id archive_visibility_retention_days result stages x-hive].freeze
+      RESULT_KEYS = %w[kind primary_artifact capabilities].freeze
+      RESULT_KINDS = { "document" => :document, "change" => :change }.freeze
       STAGE_KEYS = %w[
         name
         kind
@@ -104,8 +106,9 @@ module Hive
         validate_workspace_handoff!(stages)
         validate_terminal_outcomes!(stages)
         validate_deliverable_position!(stages)
+        result = parse_result(descriptor["result"]) if descriptor.key?("result")
 
-        build_workflow(id, stages, archive_visibility_retention_days)
+        build_workflow(id, stages, archive_visibility_retention_days, result)
       end
 
       private
@@ -232,14 +235,59 @@ module Hive
       # Wrapping the whole parse body (as before) would mislabel an unrelated
       # wrong-kwarg bug in a future Stage.new/Workflow.new signature change as a
       # descriptor error, hiding a genuine code bug from the maintainer.
-      def build_workflow(id, stages, archive_visibility_retention_days)
+      def build_workflow(id, stages, archive_visibility_retention_days, result)
         Hive::Workflow.new(
           id: id.to_sym,
           stages: stages,
-          archive_visibility_retention_days: archive_visibility_retention_days
+          archive_visibility_retention_days: archive_visibility_retention_days,
+          result: result
         )
       rescue ArgumentError => e
         raise descriptor_error(e.message)
+      end
+
+      def parse_result(data)
+        result = stringify_hash(data, label: "result")
+        reject_unknown_keys!(result, RESULT_KEYS, label: "result")
+        raw_kind = required_string(result["kind"], label: "result kind")
+        kind = RESULT_KINDS[raw_kind]
+        unless kind
+          raise descriptor_error(
+            "result kind #{raw_kind.inspect} must be one of #{RESULT_KINDS.keys.inspect}"
+          )
+        end
+        capabilities = parse_result_capabilities(result["capabilities"])
+        primary_artifact = optional_string(
+          result["primary_artifact"], label: "result primary_artifact"
+        )
+
+        Hive::Workflow::Result.new(
+          kind: kind,
+          primary_artifact: primary_artifact,
+          capabilities: capabilities,
+          provenance: :declared
+        )
+      rescue ArgumentError => e
+        raise descriptor_error(e.message)
+      end
+
+      def parse_result_capabilities(data)
+        return [] if data.nil?
+        unless data.is_a?(Array)
+          raise descriptor_error("result capabilities must be an array")
+        end
+
+        data.map.with_index do |value, index|
+          raw = required_string(value, label: "result capability #{index + 1}")
+          capability = Hive::Workflow::RESULT_CAPABILITIES.find { |candidate| candidate.to_s == raw }
+          unless capability
+            raise descriptor_error(
+              "result capability #{raw.inspect} must be one of " \
+              "#{Hive::Workflow::RESULT_CAPABILITIES.map(&:to_s).inspect}"
+            )
+          end
+          capability
+        end
       end
 
       def parse_archive_visibility_retention(descriptor, id:)

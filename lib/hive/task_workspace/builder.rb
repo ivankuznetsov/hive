@@ -11,7 +11,9 @@ require "hive/task_workspace/jsonl_reader"
 require "hive/task_workspace/provenance"
 require "hive/task_workspace/publication"
 require "hive/task_workspace/resources"
+require "hive/task_workspace/semantic_snapshot"
 require "hive/task_workspace/timeline"
+require "hive/task_workspace/usage"
 
 module Hive
   module TaskWorkspace
@@ -52,7 +54,7 @@ module Hive
         @attempt_store = attempt_store
         @event_reader = event_reader
         @journal_reader = journal_reader
-        @usage_reader = usage_reader
+        @usage_reader = BoundedUsageReader.wrap(usage_reader, limits: @limits)
         @current_context_observation = current_context_observation
         @questions = questions
         @daemon_enabled = daemon_enabled == true
@@ -63,12 +65,7 @@ module Hive
       def call
         read = projection_read
         projection = projection_hash(read)
-        attempts = panel("attempts") do
-          Attempts.new(
-            projection: projection, attempt_store: attempt_store,
-            activities: read.journal_records, limits: @limits
-          ).call
-        end
+        attempts = attempts_panel(read: read, projection: projection)
         resources = panel("resources") do
           Resources.new(
             attempts_panel: attempts, usage_reader: @usage_reader, limits: @limits
@@ -85,7 +82,7 @@ module Hive
           dependency_panel(publication)
         end
         timeline = timeline_panel(read: read)
-        artifacts = panel("artifacts") { artifact_panel }
+        artifacts = artifacts_panel
         panels = {
           "provenance" => provenance, "attempts" => attempts,
           "resources" => resources, "timeline" => timeline,
@@ -117,6 +114,32 @@ module Hive
         )
       end
 
+      # Concise, workflow-aware read model used by operator HTML and native
+      # task inspection. The v1 audit snapshot above remains unchanged.
+      def semantic
+        read = projection_read
+        projection = projection_hash(read)
+        attempts = attempts_panel(read: read, projection: projection)
+        artifacts = artifacts_panel
+        usage = semantic_usage(attempts)
+        status = status_payload(read)
+        result = semantic_result(artifacts)
+        applicability = semantic_applicability(result)
+
+        semantic_snapshot_with_budget(
+          generated_at: now,
+          task: semantic_task(projection),
+          status: status.slice("state", "freshness", "observed_at"),
+          headline: semantic_headline(status),
+          action: semantic_action(status),
+          result: result,
+          applicability: applicability,
+          usage: usage,
+          evidence: semantic_evidence(applicability),
+          diagnostic: semantic_diagnostic(projection)
+        )
+      end
+
       # Used by the authenticated cursor endpoint. It reuses the same bounded
       # projection/event source policy but does not construct unrelated panels.
       def timeline(cursor: nil, raw_cursor: nil)
@@ -124,6 +147,297 @@ module Hive
       end
 
       private
+
+      def attempts_panel(read:, projection:)
+        @attempts_panel ||= panel("attempts") do
+          Attempts.new(
+            projection: projection, attempt_store: attempt_store,
+            activities: read.journal_records, limits: @limits
+          ).call
+        end
+      end
+
+      def artifacts_panel
+        @artifacts_panel ||= panel("artifacts") { artifact_panel }
+      end
+
+      def semantic_snapshot_with_budget(**values)
+        compaction = 0
+        loop do
+          return SemanticSnapshot.new(**values, limits: @limits).to_h
+        rescue ArgumentError => e
+          raise unless e.message.include?("workspace_bytes")
+
+          case compaction
+          when 0
+            values.fetch(:result)["supporting"].each do |artifact|
+              artifact["content"] = nil
+              artifact["truncated"] = true
+            end
+          when 1
+            values.fetch(:usage)["groups"] = []
+            values.fetch(:usage)["details_truncated"] = true
+          when 2
+            primary = values.dig(:result, "primary")
+            raise unless primary
+
+            primary["content"] = nil
+            primary["truncated"] = true
+          else
+            raise
+          end
+          compaction += 1
+        end
+      end
+
+      def semantic_task(projection)
+        {
+          "project" => @project,
+          "slug" => task_value("slug"),
+          "id" => task_value("id"),
+          "stage" => task_value("stage"),
+          "generation" => projection.dig("identity", "task_generation") ||
+            task_value("condition_task_generation") || task_value("task_generation"),
+          "workflow" => task_value("workflow") ||
+            (@native_task.workflow.id if @native_task.workflow.respond_to?(:id)),
+          "archived" => @archive ||
+            task_value("action").to_s == Hive::Schemas::TaskActionKind::ARCHIVED
+        }
+      end
+
+      def semantic_result(artifacts)
+        contract = @native_task.workflow.result
+        records = Array(artifacts["records"]).map { |record| semantic_artifact(record) }
+        declared = contract.primary_artifact
+        primary = records.find { |record| record["reference"] == declared }
+        primary ||= current_stage_artifact(records)
+        primary ||= records.first
+        warning = if declared && primary&.fetch("reference", nil) != declared && semantic_completed?
+          "Declared primary artifact #{declared} is unavailable for this completed task."
+        end
+        {
+          "kind" => contract.kind.to_s,
+          "declared_primary" => declared,
+          "primary" => primary,
+          "supporting" => records.reject { |record| primary && record["reference"] == primary["reference"] },
+          "warning" => warning
+        }
+      end
+
+      def semantic_artifact(record)
+        row = record.to_h.transform_keys(&:to_s)
+        {
+          "name" => row["name"].to_s,
+          "reference" => row["reference"].to_s,
+          "content" => row["content"],
+          "bytes" => row["bytes"],
+          "truncated" => row["truncated"] == true,
+          "binary" => row["binary"] == true
+        }
+      end
+
+      def current_stage_artifact(records)
+        stage = @native_task.workflow.stage_for_dir(task_value("stage").to_s) ||
+                @native_task.workflow.stage_named(@native_task.stage_name.to_s)
+        reference = stage&.state_file
+        records.find { |record| record["reference"] == reference }
+      rescue StandardError
+        nil
+      end
+
+      def semantic_applicability(result)
+        capabilities = @native_task.workflow.result.capabilities.map(&:to_s)
+        actual_worktree = actual_worktree_evidence?
+        actual_publication = !task_value("pr_url").to_s.empty?
+        actual_dependencies = !task_value("depends_on").to_s.empty?
+        supporting = result.fetch("supporting").any?
+        {
+          "worktree" => capabilities.include?("worktree") || actual_worktree,
+          "diff" => capabilities.include?("diff") || actual_worktree,
+          "publication" => capabilities.include?("publication") || actual_publication,
+          "media" => capabilities.include?("media"),
+          "dependencies" => capabilities.include?("dependencies") || actual_dependencies,
+          "supporting_artifacts" => capabilities.include?("supporting_artifacts") || supporting
+        }
+      end
+
+      def semantic_usage(attempts)
+        value = Usage.new(
+          attempts_panel: attempts, usage_reader: @usage_reader, limits: @limits
+        ).call
+        value = deep_stringify(value)
+        value.delete("sessions")
+        value.delete("diagnostics")
+        remove_key!(value, "provider_reported_cost")
+        value
+      rescue StandardError
+        {
+          "coverage" => "unavailable", "tokens" => nil,
+          "harnesses" => [], "actual_providers" => [], "actual_models" => [],
+          "billing_routes" => [], "billing_route" => "unknown",
+          "api_equivalent" => {
+            "coverage" => "unavailable", "subtotal_usd" => nil,
+            "observed_subtotal_usd" => nil, "priced_sessions_count" => 0,
+            "unpriced_sessions_count" => 0,
+            "missing_dimensions" => [ "usage" ], "currency" => "USD"
+          },
+          "groups" => []
+        }
+      end
+
+      def semantic_action(status)
+        kind = task_value("action")&.to_s
+        enabled = status["freshness"] == "fresh" && status["state"] == "current" &&
+                  !@archive && !semantic_completed? && semantic_actionable?(kind)
+        {
+          "kind" => kind,
+          "label" => task_value("action_label")&.to_s,
+          "enabled" => enabled,
+          "reason" => semantic_action_reason(enabled, status)
+        }
+      end
+
+      def semantic_actionable?(kind)
+        return false if kind.to_s.empty?
+        return false if %w[
+          agent_working agent_running archived blocked error held idle complete manual_steering
+        ].include?(kind)
+
+        true
+      end
+
+      def semantic_action_reason(enabled, status)
+        return nil if enabled
+        return "Archived and completed tasks are read-only." if @archive || semantic_completed?
+        return "Refresh canonical task status before acting." unless
+          status["freshness"] == "fresh" && status["state"] == "current"
+
+        "The canonical task state has no operator action."
+      end
+
+      def semantic_headline(status)
+        if @archive || semantic_completed?
+          return {
+            "state" => "completed", "label" => "Completed",
+            "explanation" => "This task is complete and read-only."
+          }
+        end
+        summary = semantic_diagnostic_summary
+        if summary
+          return {
+            "state" => "needs_attention",
+            "label" => task_value("action_label")&.to_s || "Needs attention",
+            "explanation" => summary
+          }
+        end
+        if status["freshness"] != "fresh" || status["state"] != "current"
+          return {
+            "state" => "unavailable", "label" => "Current state unavailable",
+            "explanation" => "Canonical task status is stale or incomplete."
+          }
+        end
+        {
+          "state" => task_value("action")&.to_s || "current",
+          "label" => task_value("action_label")&.to_s || "Current task",
+          "explanation" => "Canonical workflow status is current."
+        }
+      end
+
+      def semantic_diagnostic(projection)
+        summary = semantic_diagnostic_summary
+        return {
+          "state" => "not_applicable", "summary" => nil,
+          "log" => { "state" => "unavailable", "quality" => nil, "reference" => nil }
+        } unless summary
+
+        reference = correlated_log_reference(projection)
+        {
+          "state" => "current", "summary" => summary,
+          "log" => {
+            "state" => reference ? "current" : "unavailable",
+            "quality" => reference ? "receipt_correlated" : nil,
+            "reference" => reference
+          }
+        }
+      end
+
+      def semantic_diagnostic_summary
+        diagnostic = task_value("diagnostic")
+        value = diagnostic.is_a?(Hash) ? diagnostic["summary"] || diagnostic[:summary] : nil
+        text = operator_text(value, 4 * 1024, nil_if_empty: true)
+        recovery = task_value("action").to_s.start_with?("recover_") ||
+                   task_value("action").to_s == "error"
+        recovery ? (text || task_value("action_label")&.to_s) : text
+      end
+
+      def correlated_log_reference(projection)
+        attempt_id = projection.dig("identity", "attempt_id").to_s
+        return nil if attempt_id.empty?
+
+        record = attempt_store.fetch(attempt_id)
+        receipt = raw_value(record, "receipt")
+        reference = raw_value(receipt, "log_reference") || raw_value(record, "log_reference")
+        return nil unless reference.is_a?(Hash)
+
+        value = deep_stringify(reference)
+        TaskWorkspace.safe_value!(value)
+      rescue StandardError
+        nil
+      end
+
+      def semantic_evidence(applicability)
+        applicability.to_h do |name, applicable|
+          state = if !applicable
+            "not_applicable"
+          elsif name == "publication" && !task_value("pr_url").to_s.empty?
+            "current"
+          elsif %w[worktree diff].include?(name) && actual_worktree_evidence?
+            "current"
+          elsif name == "dependencies" && !task_value("depends_on").to_s.empty?
+            "current"
+          else
+            "missing"
+          end
+          [ name, { "applicable" => applicable, "state" => state } ]
+        end
+      end
+
+      def actual_worktree_evidence?
+        path = task_value("worktree_path").to_s
+        !path.empty? && File.directory?(path)
+      rescue SystemCallError
+        false
+      end
+
+      def semantic_completed?
+        @archive || task_value("action").to_s == Hive::Schemas::TaskActionKind::ARCHIVED
+      end
+
+      def raw_value(value, key)
+        value.respond_to?(:[]) ? value[key] : nil
+      end
+
+      def deep_stringify(value)
+        case value
+        when Hash
+          value.to_h { |key, child| [ key.to_s, deep_stringify(child) ] }
+        when Array
+          value.map { |child| deep_stringify(child) }
+        else
+          value
+        end
+      end
+
+      def remove_key!(value, forbidden)
+        case value
+        when Hash
+          value.delete(forbidden)
+          value.each_value { |child| remove_key!(child, forbidden) }
+        when Array
+          value.each { |child| remove_key!(child, forbidden) }
+        end
+        value
+      end
 
       def projection_read
         @projection_read ||= begin

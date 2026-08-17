@@ -86,6 +86,30 @@ module ApplicationHelper
     sanitize(renderer.render(body), tags: MARKDOWN_TAGS, attributes: MARKDOWN_ATTRS)
   end
 
+  # Primary work products add navigation after the existing renderer has
+  # escaped and sanitized the agent-authored Markdown. IDs are derived only
+  # from sanitized heading text, and duplicate headings receive a stable
+  # ordinal suffix. Four H2 sections is the point where an outline earns its
+  # place; short documents still get linkable headings without extra chrome.
+  def render_markdown_document(text)
+    fragment = Nokogiri::HTML.fragment(render_markdown(text))
+    occurrences = Hash.new(0)
+    outline = []
+
+    fragment.css("h1, h2, h3, h4, h5, h6").each do |heading|
+      base = heading.text.to_s.parameterize.presence || "section"
+      occurrences[base] += 1
+      anchor = occurrences[base] == 1 ? base : "#{base}-#{occurrences[base]}"
+      heading["id"] = anchor
+      outline << { id: anchor, label: heading.text.to_s.strip } if heading.name == "h2"
+    end
+
+    {
+      html: fragment.to_html.html_safe,
+      outline: outline.length >= 4 ? outline.freeze : [].freeze
+    }.freeze
+  end
+
   # Color the JSONL log tail by event class so errors jump out of the noise.
   def log_line_class(line)
     if /"type"\s*:\s*"(error|turn\.failed)"|"error"\s*:/.match?(line)

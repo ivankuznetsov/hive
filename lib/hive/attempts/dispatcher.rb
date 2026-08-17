@@ -773,7 +773,9 @@ module Hive
             "adapter" => route.adapter,
             "launch_binding_id" => route.launch_binding,
             "model" => route.model,
-            "effort" => route.effort
+            "effort" => route.effort,
+            "billing_route" => route.billing_route,
+            "billing_evidence_source" => route.billing_evidence_source
           },
           "circuit_generations" => decision.circuit_generations,
           "probe_bindings" => Array(probe_bindings).map(&:to_h)

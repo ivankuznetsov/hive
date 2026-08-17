@@ -2625,7 +2625,9 @@ class SchemaFilesTest < Minitest::Test
       "route" => {
         "route_id" => "route-1", "provider_account_id" => "codex-account-a",
         "adapter" => "codex", "launch_binding_id" => "codex-home-a",
-        "model" => "gpt-5.6-sol", "effort" => "high"
+        "model" => "gpt-5.6-sol", "effort" => "high",
+        "billing_route" => "subscription",
+        "billing_evidence_source" => "agent_profile_contract"
       },
       "circuit_generations" => [
         {

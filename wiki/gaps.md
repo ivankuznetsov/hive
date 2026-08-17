@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-14
+updated: 2026-08-16
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -106,6 +106,21 @@ and source-catalog ownership proof gap.
   not a durable DAG or publication authority.
 
 See [[modules/task_workspace]].
+
+## Operator-first task view Screenote evidence (2026-08-16)
+
+Local Chromium checks cover the architecture, Hive/OpenCode, and
+TopGreenDeals task surfaces at desktop and mobile sizes. They prove that the
+primary result and usage summary remain visible, exact correlated logs appear
+only for the task that needs diagnosis, raw attempts/provenance/timeline and
+raw lifecycle noise stay out of the normal view, and the pages do not overflow
+horizontally.
+
+Publishing those six captures to Screenote remains unverified on this host:
+`~/.config/hive/screenote.json` is absent and no Screenote connector is
+available to the agent. Retain this gap until a configured Screenote client
+reruns and uploads the six captures, then returns durable review URLs. This
+publication gap does not weaken the local browser acceptance evidence.
 
 ## Provider-routing trusted captures (updated 2026-08-11)
 

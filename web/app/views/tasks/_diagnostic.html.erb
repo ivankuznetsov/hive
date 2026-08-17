@@ -1,0 +1,35 @@
+<% if diagnostic.fetch("state") == "current" %>
+  <% log = diagnostic.fetch("log") %>
+  <section id="workspace-diagnostic" class="workspace-panel workspace-wide workspace-state-current"
+           aria-labelledby="workspace-diagnostic-heading">
+    <div class="workspace-panel-heading">
+      <div>
+        <p class="workspace-eyebrow">Diagnosis</p>
+        <h2 id="workspace-diagnostic-heading">Task needs attention</h2>
+        <p><%= diagnostic.fetch("summary") %></p>
+      </div>
+    </div>
+    <% if log["state"] == "current" && log["reference"].is_a?(Hash) %>
+      <% reference_sha256 = log.dig("reference", "sha256") %>
+      <% log_url = task_log_path(@project.name, @task.slug,
+           source: @task_source, reference_sha256: reference_sha256) %>
+      <details class="diagnostic-log" data-workspace-disclosure-key="diagnostic-log"
+               data-action="toggle->task-workspace#loadDiagnosticLog">
+        <summary>Show correlated log</summary>
+        <%= turbo_frame_tag stable_dom_id(
+              "task-log", @project.name, @task.slug, reference_sha256
+            ),
+              refresh: "morph",
+              data: {
+                controller: "poll", poll_interval_value: 3000,
+                poll_wait_for_content_value: true,
+                turbo_permanent: true, diagnostic_log_src: log_url
+              } do %>
+          <div class="log-pane"><p class="muted">Open this disclosure to load the correlated log.</p></div>
+        <% end %>
+      </details>
+    <% else %>
+      <p class="muted">No receipt-correlated log is available for this diagnostic.</p>
+    <% end %>
+  </section>
+<% end %>

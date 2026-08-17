@@ -17,6 +17,8 @@ class WorkflowPackageValidatorTest < Minitest::Test
 
       assert result.valid?, result.diagnostics.map(&:message).join("\n")
       assert_equal :demo, result.workflow.id
+      assert_equal :terminal_state_file, result.workflow.result.provenance
+      assert_equal "done.md", result.workflow.result.primary_artifact
       assert_equal manifest.digest, result.manifest_digest
     end
   end

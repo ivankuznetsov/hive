@@ -17,6 +17,7 @@ require "hive/usage_db"
 require "hive/worktree"
 require "hive/attempts/context"
 require "hive/agent_observation"
+require "hive/billing_evidence"
 require "hive/context_provenance"
 require "hive/task_activity"
 require "hive/brainstorm_parser"
@@ -33,6 +34,9 @@ module Hive
         HIVE_EVIDENCE_APP_PORT HIVE_EVIDENCE_BROWSER_ORIGIN
         HIVE_EVIDENCE_WEB_HIVE_HOME HIVE_EVIDENCE_CAPTURE_MAILBOX
       ].freeze
+      DIRECT_PROVIDER_IDENTITIES = {
+        claude: "anthropic", codex: "openai", grok: "xai"
+      }.freeze
 
       module_function
 
@@ -1038,11 +1042,23 @@ module Hive
 
         started_at = Time.now.utc.iso8601
         effective_status_mode = runtime_policy&.host_outputs? ? :exit_code_only : status_mode
+        requested_identity = requested_model(
+          context, routing_arguments, launch_arguments, model
+        )
+        requested_provider, requested_model_identity = execution_identity(
+          profile, requested_identity
+        )
+        billing_route, billing_evidence_source = billing_launch_evidence(
+          context, profile
+        )
         observation = session_observation(
           task: task, context: context, profile: profile,
           role: log_label || task.stage_name,
-          requested_model: requested_model(context, routing_arguments, launch_arguments, model),
+          requested_provider: requested_provider,
+          requested_model: requested_model_identity,
           requested_effort: requested_effort(context, routing_arguments, launch_arguments, effort),
+          billing_route: billing_route,
+          billing_evidence_source: billing_evidence_source,
           timeout_sec: timeout_sec,
           guards: runtime_resource_guards(
             resource_guards, profile: profile, max_budget_usd: max_budget_usd,
@@ -1082,6 +1098,7 @@ module Hive
             ).run!
             agent_result[:hive_observation_id] = observation.session_id if
               agent_result.is_a?(Hash) && profile.name == :opencode
+            enrich_execution_identity!(agent_result, profile)
             if agent_result[:status] == :ok && runtime_policy&.host_outputs?
               begin
                 runtime_policy.materialize_outputs!(agent_result)
@@ -1423,13 +1440,56 @@ module Hive
       end
 
       def session_observation(task:, context:, profile:, role:, requested_model:,
-                              requested_effort:, timeout_sec:, guards:)
+                              requested_effort:, timeout_sec:, guards:,
+                              requested_provider: nil, billing_route: "unknown",
+                              billing_evidence_source: "unavailable")
         Hive::AgentObservation.new(
           task: task, context: context, session_id: SecureRandom.uuid,
           role: role, provider: profile.name.to_s,
+          requested_provider: requested_provider,
           requested_model: requested_model, requested_effort: requested_effort,
+          billing_route: billing_route,
+          billing_evidence_source: billing_evidence_source,
           timeout_sec: timeout_sec, guards: guards
         )
+      end
+
+      def billing_launch_evidence(context, profile)
+        if context&.explicit_routing?
+          return [ context.billing_route, context.billing_evidence_source ]
+        end
+
+        Hive::BillingEvidence.for_profile(profile)
+      end
+
+      def execution_identity(profile, model)
+        value = model.to_s
+        profile_name = profile.name.to_sym
+        if %i[opencode pi].include?(profile_name) && value.include?("/")
+          return value.split("/", 2)
+        end
+
+        [ DIRECT_PROVIDER_IDENTITIES[profile_name], value.empty? ? nil : value ]
+      end
+
+      def enrich_execution_identity!(result, profile)
+        return result unless result.is_a?(Hash)
+
+        route = result[:actual_opencode_route]
+        model = route || result[:model] || result.dig(:usage, :model)
+        provider, actual_model = execution_identity(profile, model)
+        result[:actual_provider] ||= provider
+        result[:actual_model] ||= actual_model
+        result[:execution_identity_source] ||=
+          if route
+            "sanitized_export"
+          elsif model
+            DIRECT_PROVIDER_IDENTITIES.key?(profile.name.to_sym) ?
+              "provider_usage_event_and_profile_contract" : "provider_usage_event"
+          else
+            "unavailable"
+          end
+        result
       end
 
       def start_session_observation!(observation)
@@ -1486,8 +1546,10 @@ module Hive
         usage = result && result[:usage]
         return unless usage
 
+        billing_route, billing_evidence_source = billing_launch_evidence(context, profile)
         Hive::UsageDb.record!(
           agent: profile.name.to_s,
+          harness: profile.name.to_s,
           model: usage[:model] || result[:model],
           project_slug: usage_project_slug(task),
           task_slug: usage_task_slug(task),
@@ -1500,9 +1562,18 @@ module Hive
           cache_read: usage[:cache_read],
           cache_write: usage[:cache_write],
           reasoning: usage[:reasoning],
+          input_includes_cache_read: usage[:input_includes_cache_read],
+          input_includes_cache_write: usage[:input_includes_cache_write],
+          output_includes_reasoning: usage[:output_includes_reasoning],
+          provider_reported_cost:
+            usage[:provider_reported_cost].nil? ? usage[:cost] : usage[:provider_reported_cost],
           cost: usage[:cost],
           requested_route: result[:requested_opencode_route],
           actual_route: result[:actual_opencode_route],
+          actual_provider: result[:actual_provider],
+          actual_model: result[:actual_model],
+          billing_route: billing_route,
+          billing_evidence_source: billing_evidence_source,
           attempt_id: context&.attempt_id,
           session_id: context ? session_id : nil,
           task_generation: context&.task_generation,

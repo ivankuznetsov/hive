@@ -9,6 +9,13 @@ class WorkflowPackageSourceSnapshotTest < Minitest::Test
   def test_snapshots_only_referenced_instructions_and_declared_assets
     with_source_tree do |workflows, authored, descriptor, metadata|
       File.write(File.join(authored, "unused.txt"), "ignored\n")
+      File.write(
+        descriptor,
+        File.read(descriptor).sub(
+          "id: demo\n",
+          "id: demo\nresult:\n  kind: document\n  primary_artifact: done.md\n"
+        )
+      )
 
       snapshot = Snapshot.capture(
         name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
@@ -19,6 +26,10 @@ class WorkflowPackageSourceSnapshotTest < Minitest::Test
       assert_equal [ "external/reviewer" ], snapshot.external_skills
       refute_includes snapshot.files.values.map(&:bytes).join, "ignored"
       rewritten = YAML.safe_load(snapshot.files.fetch("workflow.yml").bytes)
+      assert_equal(
+        { "kind" => "document", "primary_artifact" => "done.md" },
+        rewritten.fetch("result")
+      )
       assert_equal "instructions/work.md", rewritten.dig("stages", 1, "instruction")
     end
   end

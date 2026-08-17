@@ -1,9 +1,9 @@
 ---
 title: CLI Surface
 type: api
-source: bin/hive, bin/hive-e2e, bin/hv, lib/hive/cli.rb, lib/hive/cli_argv_policy.rb, lib/hive/commands/answer.rb, schemas/hive-answer.v1.json
+source: bin/hive, bin/hive-e2e, bin/hv, lib/hive/cli.rb, lib/hive/cli_argv_policy.rb, lib/hive/commands/answer.rb, lib/hive/commands/task.rb, schemas/hive-answer.v1.json, schemas/hive-task-workspace.v2.json
 created: 2026-04-25
-updated: 2026-08-14
+updated: 2026-08-16
 tags: [cli, api, skills, agents, operational, provisioning, brainstorm, plan-review]
 ---
 
@@ -101,6 +101,7 @@ contracts retain their established unversioned or schema-less shapes.
 | `hive workflow commit ID` | Validate and commit a populated owner-authored workflow under the shared Hive state commit lock | `Hive::Commands::Workflow` | [[commands/workflow]] |
 | `hive generate-name TARGET [--project NAME] [--stage STAGE]` | Generate and persist a short display title for a task; target resolves by path, slug, or numeric id | `Hive::Commands::GenerateName` | [[commands/generate-name]] |
 | `hive status [--operational [--json] \| --full \| --diagnose SLUG ...]` | Default/`--operational` is the concise closed-state human view; `--operational --json` emits `hive-operational-status.v4` with a required nullable exact routing decision; bare `--json` emits complete `hive-status.v7`; `--full` retains the detailed table. Diagnosis keeps its existing bounded read/write surface. | `Hive::Commands::Status` | [[commands/status]] |
+| `hive task TARGET [--project NAME] [--json]` | Resolve one registered task and emit the same bounded semantic `hive-task-workspace` v2 projection used by normal Web HTML: canonical headline/action, workflow result, primary artifact, applicable evidence, exact usage/API-equivalent coverage, and correlated diagnostic-log reference. Read-only; no provider-health or billing-invoice claim. | `Hive::Commands::Task` | [[commands/task]] |
 | `hive answer TARGET [--project NAME] [--binding TOKEN] [--json]` | Without a binding, inventory every coding-brainstorm slot in physical document order without a write or task lock. With a fresh opaque binding, read one final literal answer from stdin and atomically write only that exact slot under identity, stage, generation, and fingerprint checks. Never recommends or dispatches. | `Hive::Commands::Answer` | [[commands/answer]] |
 | `hive circuits [list\|inspect\|block\|unblock\|reset] [--provider ACCOUNT] [--model MODEL] [--json]` | Inspect the bounded sanitized routing/circuit/capacity projection, or perform one reason-required, `--yes`-approved, generation-fenced provider-account/exact-model health mutation. Corrupt reset uses the complete fresh repair token. Never mutates task/recovery state; JSON is `hive-circuits.v1`. | `Hive::Commands::Circuits` | [[commands/circuits]] |
 | `hive watch TARGET... [--project NAME] [--until settled\|completion] [--json-lines]` | Resolve at most 100 tasks once and emit only semantic initial/transition/warning/final events until a terminal condition, timeout, or event cap. Read-only; global `--json` is rejected. | `Hive::Commands::Watch` | [[commands/watch]] |

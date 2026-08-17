@@ -1,0 +1,76 @@
+<% api_equivalent = usage.fetch("api_equivalent") %>
+<% price = api_equivalent["subtotal_usd"] || api_equivalent["observed_subtotal_usd"] %>
+<% price_label = case api_equivalent.fetch("coverage")
+                 when "complete" then price ? number_to_currency(price.to_d, precision: 4, strip_insignificant_zeros: true) : "Unavailable"
+                 when "partial" then price ? "#{number_to_currency(price.to_d, precision: 4, strip_insignificant_zeros: true)} observed" : "Partial — no priced subtotal"
+                 when "pending" then "Pending"
+                 else "Unavailable"
+                 end %>
+<% billing_label = case usage.fetch("billing_route")
+                   when "mixed" then "Subscription + API"
+                   when "api" then "API"
+                   when "subscription" then "Subscription"
+                   else "Unknown"
+                   end %>
+
+<section id="workspace-usage" class="workspace-panel workspace-wide usage-summary workspace-state-<%= usage.fetch("coverage") %>"
+         aria-labelledby="workspace-usage-heading">
+  <div class="workspace-panel-heading">
+    <div>
+      <p class="workspace-eyebrow">Known task usage</p>
+      <h2 id="workspace-usage-heading">
+        <% if usage["tokens"] %>
+          <%= number_with_delimiter(usage.dig("tokens", "input_output")) %> known input + output tokens
+        <% else %>
+          Token usage unavailable
+        <% end %>
+      </h2>
+      <p class="muted">API-equivalent estimate · <strong><%= price_label %></strong> · <%= api_equivalent.fetch("coverage").humanize %> coverage</p>
+    </div>
+    <span class="workspace-state-label"><%= usage.fetch("coverage").humanize %></span>
+  </div>
+
+  <dl class="usage-summary-facts workspace-facts">
+    <div><dt>Harnesses</dt><dd><%= Array(usage["harnesses"]).presence&.join(", ") || "Unavailable" %></dd></div>
+    <div><dt>Provider / model</dt><dd><%= ([*usage["actual_providers"], *usage["actual_models"]].presence || ["Unavailable"]).join(" · ") %></dd></div>
+    <div><dt>Billing route</dt><dd><%= billing_label %></dd></div>
+    <div><dt>Sessions covered</dt><dd><%= usage["metered_sessions_count"] || 0 %> of <%= usage["sessions_count"] || 0 %></dd></div>
+  </dl>
+
+  <details class="usage-details" data-workspace-disclosure-key="usage-details">
+    <summary>Show details</summary>
+    <% if Array(usage["groups"]).empty? %>
+      <p class="workspace-empty">No exactly attributed session detail is available.</p>
+    <% else %>
+      <div class="usage-groups">
+        <% Array(usage["groups"]).each do |group| %>
+          <section class="usage-group" aria-label="<%= [group["stage"], group["outcome"]].compact.join(" — ") %>">
+            <h3><%= group["stage"].presence&.sub(/\A\d+-/, "")&.humanize || "Stage unavailable" %> · <%= group["outcome"].presence&.humanize || "Outcome unavailable" %></h3>
+            <ol class="usage-session-list">
+              <% Array(group["sessions"]).each_with_index do |session, index| %>
+                <% estimate = session.fetch("api_equivalent") %>
+                <% subtotal = estimate["subtotal_usd"] || estimate["observed_subtotal_usd"] %>
+                <li>
+                  <h4>Session <%= index + 1 %></h4>
+                  <dl class="workspace-facts workspace-facts-compact">
+                    <div><dt>Harness</dt><dd><%= session["harness"].presence || "Unavailable" %></dd></div>
+                    <div><dt>Provider / model</dt><dd><%= [session["actual_provider"], session["actual_model"]].compact_blank.join(" · ").presence || "Unavailable" %></dd></div>
+                    <div><dt>Billing</dt><dd><%= session.fetch("billing_route").humanize %> · <%= session.fetch("billing_evidence_source").to_s.humanize %></dd></div>
+                    <div><dt>Input / output</dt><dd><%= session["input"] || "Unavailable" %> / <%= session["output"] || "Unavailable" %></dd></div>
+                    <div><dt>Cache read / write</dt><dd><%= session["cache_read"] || "Unavailable" %> / <%= session["cache_write"] || "Unavailable" %></dd></div>
+                    <div><dt>Reasoning</dt><dd><%= session["reasoning"] || "Unavailable" %></dd></div>
+                    <div><dt>API-equivalent subtotal</dt><dd><%= subtotal ? number_to_currency(subtotal.to_d, precision: 6, strip_insignificant_zeros: true) : "Unavailable" %> · <%= estimate.fetch("coverage").humanize %></dd></div>
+                    <div><dt>Rate basis</dt><dd><% if estimate.dig("rate_basis", "source_url") %><%= link_to "Official rate card", estimate.dig("rate_basis", "source_url"), rel: "noopener noreferrer", target: "_blank" %> · checked <%= estimate.dig("rate_basis", "checked_at") %><% else %>Unavailable<% end %></dd></div>
+                  </dl>
+                  <% if Array(estimate["missing_dimensions"]).any? %>
+                    <p class="muted">Unpriced dimensions: <%= estimate.fetch("missing_dimensions").map(&:humanize).join(", ") %></p>
+                  <% end %>
+                </li>
+              <% end %>
+            </ol>
+          </section>
+        <% end %>
+      </div>
+    <% end %>
+  </details>
+</section>

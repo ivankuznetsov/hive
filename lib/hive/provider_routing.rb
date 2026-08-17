@@ -1,4 +1,5 @@
 require "hive"
+require "hive/billing_evidence"
 require "hive/canonical_json"
 
 module Hive
@@ -15,6 +16,9 @@ module Hive
     QUALITY_RANK = QUALITY_LEVELS.each_with_index.to_h.freeze
     TOOL_CAPABILITIES = %w[browser filesystem mcp shell web].freeze
     PERMISSION_CAPABILITIES = %w[network read write].freeze
+    BILLING_ROUTES = Hive::BillingEvidence::ROUTES
+    BILLING_EVIDENCE_SOURCES = Hive::BillingEvidence::SOURCES
+    DIRECT_SUBSCRIPTION_ADAPTERS = Hive::BillingEvidence::DIRECT_SUBSCRIPTION_ADAPTERS
 
     ACCOUNT_HEALTH_CLASSES = %w[
       authentication
@@ -62,16 +66,28 @@ module Hive
     }.freeze
 
     Account = Data.define(
-      :id, :adapter, :launch_binding, :models, :max_concurrent, :cooldown_sec
+      :id, :adapter, :launch_binding, :models, :max_concurrent, :cooldown_sec,
+      :billing_route, :billing_evidence_source
     ) do
-      def initialize(id:, adapter:, launch_binding:, models:, max_concurrent:, cooldown_sec:)
+      def initialize(id:, adapter:, launch_binding:, models:, max_concurrent:, cooldown_sec:,
+                     billing_route: "unknown", billing_evidence_source: "unavailable")
+        normalized_billing_route = billing_route.to_s
+        normalized_billing_source = billing_evidence_source.to_s
+        unless BILLING_ROUTES.include?(normalized_billing_route)
+          raise ArgumentError, "invalid provider billing route"
+        end
+        unless BILLING_EVIDENCE_SOURCES.include?(normalized_billing_source)
+          raise ArgumentError, "invalid provider billing evidence source"
+        end
         super(
           id: ProviderRouting.frozen_string(id),
           adapter: ProviderRouting.frozen_string(adapter),
           launch_binding: ProviderRouting.frozen_string(launch_binding),
           models: ProviderRouting.deep_freeze(Array(models).map(&:to_s)),
           max_concurrent: Integer(max_concurrent),
-          cooldown_sec: ProviderRouting.deep_freeze(cooldown_sec.to_h)
+          cooldown_sec: ProviderRouting.deep_freeze(cooldown_sec.to_h),
+          billing_route: ProviderRouting.frozen_string(normalized_billing_route),
+          billing_evidence_source: ProviderRouting.frozen_string(normalized_billing_source)
         )
         freeze
       end

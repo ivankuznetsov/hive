@@ -141,7 +141,7 @@ module Hive
       "hive-task-closure" => 1,
       # Bounded, read-only detail projection shared by authenticated Web HTML
       # and JSON. It is intentionally independent from fleet-wide status v7.
-      "hive-task-workspace" => 1,
+      "hive-task-workspace" => 2,
       # Forward-only controller and agent context provenance receipts.
       "hive-context-receipt" => 1,
       # Project-local daemon ledger for task-bound merged-PR reconciliation.

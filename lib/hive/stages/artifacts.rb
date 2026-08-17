@@ -294,13 +294,17 @@ module Hive
           role, task: task, cfg: cfg, profile: profile, actor_cfg: actor_cfg,
           writable_root: writable_root
         )
+        launch_cfg = evidence_role_launch_config(cfg, actor_cfg)
         context = Hive::Attempts::Context.current
-        routing = unless context&.explicit_routing?
-          Hive::Stages::Base.model_routing_arguments(
+        launch_arguments = if context&.explicit_routing?
+          { routing_arguments: nil }
+        else
+          Hive::Stages::Base.model_launch_arguments(
             cfg, "artifacts", profile,
-            current: Hive::Stages::Base.model_routing_current(actor_cfg)
+            current: Hive::Stages::Base.model_routing_current(launch_cfg)
           )
         end
+        routing = launch_arguments[:routing_arguments]
         launch_dirs = if role == "producer" && profile.workspace_write_supported?
           [ writable_root, *producer_add_dirs ].compact.uniq
         else
@@ -320,8 +324,7 @@ module Hive
             timeout_sec: cfg.dig("timeout_sec", "artifacts") || Hive::Config::DEFAULTS.dig("timeout_sec", "artifacts"),
             log_label: "artifacts-#{role}-#{context_id}", profile: profile,
             status_mode: :exit_code_only, cfg: cfg,
-            model: actor_cfg["model"], effort: actor_cfg["effort"],
-            routing_arguments: routing,
+            **launch_arguments,
             permission_arguments: permission_arguments,
             isolate_environment: true,
             launch_environment: launch_environment,
@@ -370,10 +373,10 @@ module Hive
             "context_id" => context_id,
             "agent" => profile.name.to_s,
             "model" => effective_actor_value(
-              context, routing, actor_cfg, :model, "provider-default"
+              context, routing, launch_cfg, :model, "provider-default"
             ),
             "effort" => effective_actor_value(
-              context, routing, actor_cfg, :effort, "default"
+              context, routing, launch_cfg, :effort, "default"
             )
           },
           output: parse_role_output!(result[:final_message], role)
@@ -576,6 +579,17 @@ module Hive
       def evidence_role_config(cfg, role)
         value = cfg.dig("artifacts", "evidence", role)
         value.is_a?(Hash) ? value : {}
+      end
+
+      def evidence_role_launch_config(cfg, actor_cfg)
+        launch = actor_cfg.slice("model", "effort")
+        stage_agent = cfg.dig("artifacts", "agent")
+        role_agent = actor_cfg["agent"]
+        if role_agent.nil? || role_agent.to_s == stage_agent.to_s
+          launch["model"] ||= cfg.dig("artifacts", "model")
+          launch["effort"] ||= cfg.dig("artifacts", "effort")
+        end
+        launch
       end
 
       def parse_role_output!(source, role)

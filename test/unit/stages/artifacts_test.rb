@@ -790,6 +790,60 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_role_inherits_stage_local_model_when_it_uses_the_stage_agent
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = { "implementation_head" => "a" * 40 }
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      captured = nil
+      spawn = lambda do |_task, agent_custody:, **kwargs|
+        captured = kwargs
+        agent_custody.call do
+          {
+            status: :ok, final_message: '{"claims":[],"exclusions":[]}',
+            final_message_truncated: false
+          }
+        end
+      end
+      cfg = {
+        "artifacts" => {
+          "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "xhigh",
+          "evidence" => { "inference" => { "permissions" => "read-only" } }
+        }
+      }
+
+      with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Identity, :new, ->(**) { resolver }
+      ) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          result = Hive::Stages::Artifacts.run_role!(
+            role: "inference", task: task, cfg: cfg, prompt: "infer", identity: identity
+          )
+
+          assert_equal "gpt-5.6-sol", captured.fetch(:model)
+          assert_equal "xhigh", captured.fetch(:effort)
+          assert_equal "gpt-5.6-sol", result.dig(:actor, "model")
+          assert_equal "xhigh", result.dig(:actor, "effort")
+        end
+      end
+    end
+  end
+
+  def test_role_agent_override_does_not_inherit_an_incompatible_stage_model
+    cfg = {
+      "artifacts" => {
+        "agent" => "pi", "model" => "openrouter/deepseek/deepseek-v4-pro:xhigh",
+        "effort" => "xhigh"
+      }
+    }
+
+    launch = Hive::Stages::Artifacts.evidence_role_launch_config(
+      cfg, { "agent" => "codex" }
+    )
+
+    assert_equal({}, launch)
+  end
+
   def test_role_custody_excludes_controller_session_activity_from_the_agent_interval
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)

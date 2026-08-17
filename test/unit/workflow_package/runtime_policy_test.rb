@@ -1469,6 +1469,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       executable = File.join(runtime, "pi")
       home = File.join(dir, "home")
       auth = File.join(home, ".pi", "agent", "auth.json")
+      models = File.join(home, ".pi", "agent", "models.json")
       output = File.join(task, "draft.md")
       FileUtils.mkdir_p([ task, package, File.join(runtime, "theme"), File.dirname(auth) ])
       File.write(executable, "#!/bin/sh\n")
@@ -1476,6 +1477,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       File.write(File.join(runtime, "theme", "dark.json"), "{}")
       File.write(File.join(runtime, "theme", "light.json"), "{}")
       File.write(auth, '{"openrouter":{"type":"api_key","key":"fixture"}}')
+      File.write(models, '{"providers":{"openrouter":{"modelOverrides":{}}}}')
 
       policy = with_available_pi_sandbox do
         with_env("HOME" => home, "HIVE_PI_BIN" => executable) do
@@ -1497,6 +1499,8 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
                       [ "--ro-bind", File.realpath(runtime), "/pi-runtime" ]
       assert_includes policy.command_prefix.each_cons(3).to_a,
                       [ "--ro-bind", File.realpath(auth), "/runtime-home/.pi/agent/auth.json" ]
+      assert_includes policy.command_prefix.each_cons(3).to_a,
+                      [ "--ro-bind", File.realpath(models), "/runtime-home/.pi/agent/models.json" ]
       assert_equal "/runtime-home", policy.environment.fetch("HOME")
       assert_equal "/runtime-home/.pi/agent",
                    policy.environment.fetch("PI_CODING_AGENT_DIR")
@@ -1544,6 +1548,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       executable = File.join(runtime, "pi")
       home = File.join(dir, "home")
       auth = File.join(home, ".pi", "agent", "auth.json")
+      models = File.join(home, ".pi", "agent", "models.json")
       hive_root = File.join(dir, "hive")
       hive_executable = File.join(hive_root, "bin", "hive")
       FileUtils.mkdir_p(
@@ -1555,6 +1560,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       File.write(File.join(runtime, "theme", "dark.json"), "{}")
       File.write(File.join(runtime, "theme", "light.json"), "{}")
       File.write(auth, '{"openrouter":{"type":"api_key","key":"fixture"}}')
+      File.write(models, '{"providers":{"openrouter":{"modelOverrides":{}}}}')
       File.write(hive_executable, "#!/usr/bin/env ruby\n")
       FileUtils.chmod(0o755, hive_executable)
 
@@ -1582,6 +1588,8 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       assert_includes mounts, [ "--ro-bind", File.realpath(source), File.realpath(source) ]
       assert_includes mounts, [ "--ro-bind", File.realpath(task), File.realpath(task) ]
       assert_includes mounts, [ "--ro-bind", File.realpath(hive_root), "/hive-runtime" ]
+      assert_includes mounts,
+                      [ "--ro-bind", File.realpath(models), "/runtime-home/.pi/agent/models.json" ]
       assert_includes mounts, [ "--bind", File.realpath(mailbox), File.realpath(mailbox) ]
       assert_includes mounts, [ "--bind", File.realpath(writable), File.realpath(writable) ]
       assert_equal Gem.path.select { |path| File.directory?(path) }.map { |path| File.realpath(path) }

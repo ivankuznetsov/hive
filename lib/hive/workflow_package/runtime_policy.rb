@@ -970,6 +970,12 @@ module Hive
           "--bind", runtime_home, "/runtime-home",
           "--ro-bind", auth_path, "/runtime-home/.pi/agent/auth.json"
         ]
+        models_path = File.join(File.dirname(auth_path), "models.json")
+        if File.file?(models_path)
+          prefix.concat(
+            [ "--ro-bind", File.realpath(models_path), "/runtime-home/.pi/agent/models.json" ]
+          )
+        end
         parent_dirs.each { |path| prefix.concat([ "--dir", path ]) }
         directories.uniq.each { |path| prefix.concat([ "--ro-bind", path, path ]) }
         readonly_mounts.each do |host, guest|

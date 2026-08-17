@@ -1297,7 +1297,7 @@ class AgentTest < Minitest::Test
           input: 100, output: 50, cached: 50,
           cache_read: 20, cache_write: 30, reasoning: nil,
           input_includes_cache_read: false, input_includes_cache_write: false,
-          output_includes_reasoning: nil, model: "claude-opus-4-7"
+          output_includes_reasoning: nil, model: "claude-opus-4-7", provider_reported_cost: nil
         },
         result[:usage]
       )
@@ -1548,7 +1548,7 @@ class AgentTest < Minitest::Test
           input: 27, output: 4_439, cached: nil,
           cache_read: 15_554, cache_write: nil, reasoning: nil,
           input_includes_cache_read: false, input_includes_cache_write: nil,
-          output_includes_reasoning: nil, model: nil
+          output_includes_reasoning: nil, model: nil, provider_reported_cost: nil
         },
         result.fetch(:usage)
       )

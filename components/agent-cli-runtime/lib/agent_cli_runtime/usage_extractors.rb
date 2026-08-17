@@ -92,8 +92,27 @@ module AgentCliRuntime
             usage, "output_includes_reasoning",
             inferred_reasoning_inclusion(provider, reasoning)
           ),
-        model: model || model_from_usage(usage) || model_from(event)
+        model: model || model_from_usage(usage) || model_from(event),
+        provider_reported_cost: reported_cost(usage)
       }
+    end
+
+    # A charge the provider itself reported for this turn, in USD. This is an
+    # observed amount, not an estimate from the pricing catalog, and it is the
+    # only cost available for a model the catalog does not carry — an
+    # OpenRouter-routed model, for one. OpenRouter sends a per-category
+    # breakdown carrying a total; other providers may send a scalar.
+    def reported_cost(usage)
+      value = usage["cost"] || usage["total_cost"] || usage["totalCost"]
+      value = value["total"] || value["total_cost"] if value.is_a?(Hash)
+      return nil unless value.is_a?(Numeric) || value.is_a?(String)
+
+      cost = begin
+        Float(value)
+      rescue ArgumentError, TypeError
+        nil
+      end
+      cost if cost && cost >= 0 && cost.finite?
     end
 
     def aggregate_cached_tokens(usage)

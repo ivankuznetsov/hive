@@ -465,7 +465,7 @@ class AgentRuntimeTest < Minitest::Test
         input: 0, output: 9, cached: 2, cache_read: nil,
         cache_write: nil, reasoning: nil, input_includes_cache_read: nil,
         input_includes_cache_write: nil, output_includes_reasoning: nil,
-        model: "small"
+        model: "small", provider_reported_cost: nil
       },
       observation.usage
     )
@@ -494,7 +494,7 @@ class AgentRuntimeTest < Minitest::Test
         input: 0, output: 2, cached: 3, cache_read: nil,
         cache_write: nil, reasoning: nil, input_includes_cache_read: nil,
         input_includes_cache_write: nil, output_includes_reasoning: nil,
-        model: "legacy"
+        model: "legacy", provider_reported_cost: nil
       },
       observation.usage
     )
@@ -514,7 +514,7 @@ class AgentRuntimeTest < Minitest::Test
         input: 4, output: 5, cached: 0, cache_read: nil,
         cache_write: nil, reasoning: nil, input_includes_cache_read: nil,
         input_includes_cache_write: nil, output_includes_reasoning: nil,
-        model: "provider/model"
+        model: "provider/model", provider_reported_cost: nil
       },
       Hive::AgentRuntime.extract_usage(profile, { "type" => "usage" })
     )

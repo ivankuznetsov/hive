@@ -188,7 +188,7 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
         input_includes_cache_read: false,
         input_includes_cache_write: nil,
         output_includes_reasoning: nil,
-        model: "claude-sonnet"
+        model: "claude-sonnet", provider_reported_cost: nil
       },
       claude
     )
@@ -199,7 +199,7 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
         input_includes_cache_read: nil,
         input_includes_cache_write: nil,
         output_includes_reasoning: nil,
-        model: nil
+        model: nil, provider_reported_cost: nil
       },
       codex
     )
@@ -210,7 +210,7 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
         input_includes_cache_read: nil,
         input_includes_cache_write: nil,
         output_includes_reasoning: nil,
-        model: nil
+        model: nil, provider_reported_cost: nil
       },
       pi
     )

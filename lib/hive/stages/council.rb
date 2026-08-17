@@ -42,6 +42,24 @@ module Hive
             next_round(task.folder, stage)
           end
         loop do
+          # Enforce the budget BEFORE spawning reviewers. The check below runs
+          # after a full round, which bounds one invocation but not a re-run:
+          # `round` is re-derived from the triage files already on disk, so a
+          # stage resumed past its budget paid for another complete reviewer
+          # round before noticing. One council reached round 11 against
+          # max_rounds 3 that way — eight rounds of reviewers bought nothing,
+          # and the operator never saw the waiting marker that should have
+          # asked them nine rounds earlier.
+          if round > stage.council.max_rounds
+            terminal = stage.council.on_max_rounds == :complete ? :complete : :waiting
+            attrs = { reason: "max_rounds", round: round }
+            latest = latest_triage_path(task.folder, stage)
+            attrs[:triage] = latest if latest
+            Hive::Markers.set(output_path, terminal, **attrs)
+            marker = Hive::Markers.current(output_path)
+            return { commit: action_for(marker.name), status: marker.name }
+          end
+
           # Include pid/started for parity with the agent runner's working
           # marker (Hive::Agent#run!), so `hive status` can show which runner
           # owns an in-flight council rather than just the phase/round.
@@ -142,6 +160,16 @@ module Hive
           File.basename(path, ".md")[/-(\d+)\z/, 1]&.to_i
         end
         rounds.max.to_i + 1
+      end
+
+      # The highest-numbered triage already on disk, so a council stopped at
+      # its budget still points the operator at the most recent verdict rather
+      # than at nothing.
+      def latest_triage_path(task_folder, stage)
+        triage_output = stage.council.triage_output || Hive::Workflow::DEFAULT_TRIAGE_OUTPUT
+        dir = File.dirname(triage_output)
+        pattern = File.join(task_folder, dir, "#{triage_basename(stage)}-*.md")
+        Dir.glob(pattern).max_by { |path| File.basename(path, ".md")[/-(\d+)\z/, 1].to_i }
       end
 
       def triage_basename(stage)

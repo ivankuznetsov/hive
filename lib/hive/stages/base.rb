@@ -916,7 +916,11 @@ module Hive
       def marker_event_message(marker)
         attrs = marker.attrs
         detail = attrs["reason"] || attrs["phase"] || attrs["attempts"] || attrs["pass"]
-        diagnostic = attrs["diagnostic"].to_s.strip
+        # Stages disagree on the key: the artifacts stage writes `diagnostic`,
+        # the council writes `message`. Reading only one of them left every
+        # council_failed in the event log as a bare reason code with no way to
+        # tell a crashed reviewer from a failed revise.
+        diagnostic = (attrs["diagnostic"] || attrs["message"]).to_s.strip
         parts = [ marker.name.to_s ]
         parts << detail if detail
         unless diagnostic.empty?

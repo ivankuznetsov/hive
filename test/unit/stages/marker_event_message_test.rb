@@ -37,6 +37,19 @@ class MarkerEventMessageTest < Minitest::Test
     refute_equal missing, verdict
   end
 
+  # Stages disagree on the key: artifacts writes `diagnostic`, the council
+  # writes `message`. Reading only one left every council_failed as a bare
+  # reason code, with no way to tell a crashed reviewer from a failed revise.
+  def test_a_council_message_is_carried_like_a_diagnostic
+    result = marker_message(:error, {
+      "reason" => "council_failed",
+      "message" => "council reviewer grok-doc-review failed: exited 1"
+    })
+
+    assert_includes result, "council_failed"
+    assert_includes result, "council reviewer grok-doc-review failed"
+  end
+
   def test_a_marker_without_a_diagnostic_is_unchanged
     assert_equal "error outcome_evidence_invalid",
                  marker_message(:error, { "reason" => "outcome_evidence_invalid" })

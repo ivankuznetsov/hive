@@ -1506,7 +1506,7 @@ class StagesArtifactsTest < Minitest::Test
       claude = Hive::AgentProfiles.lookup(:claude)
       codex = Hive::AgentProfiles.lookup(:codex)
       no_scope = Object.new
-      no_scope.define_singleton_method(:name) { :pi }
+      no_scope.define_singleton_method(:name) { :unsupported }
       no_scope.define_singleton_method(:workspace_write_supported?) { false }
       no_scope.define_singleton_method(:read_only_supported?) { false }
 
@@ -1577,6 +1577,40 @@ class StagesArtifactsTest < Minitest::Test
         { "claims" => [ "claim-receipt" ], "summary" => "old" },
         { "claims" => [ "claim-flow" ], "summary" => "new" }
       ], merged
+    end
+  end
+
+  def test_pi_read_only_roles_use_the_portable_runtime_sandbox
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      worktree = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree)
+      task.define_singleton_method(:worktree_path) { worktree }
+      profile = Hive::AgentProfiles.lookup(:pi)
+      policy = Struct.new(:permission_mode, :allowed_tools, :disallowed_tools).new(
+        nil, %w[Read LS Grep Glob], %w[Edit Write Bash]
+      )
+      captured = nil
+      compile = lambda do |spec, **kwargs|
+        captured = { spec: spec, **kwargs }
+        policy
+      end
+
+      security = with_replaced_singleton_method(
+        Hive::WorkflowPackage::RuntimePolicy, :compile_actor, compile
+      ) do
+        Hive::Stages::Artifacts.role_security_kwargs(
+          "inference", task: task, cfg: {}, profile: profile, actor_cfg: {}
+        )
+      end
+
+      assert_equal "read-only", captured.fetch(:spec)
+      assert_equal worktree, captured.fetch(:task_folder)
+      assert_equal task.folder, captured.fetch(:package_root)
+      assert_same profile, captured.fetch(:profile)
+      assert_same policy, security.fetch(:runtime_policy)
+      assert_equal %w[Read LS Grep Glob], security.fetch(:allowed_tools)
+      assert_equal %w[Edit Write Bash], security.fetch(:disallowed_tools)
     end
   end
 

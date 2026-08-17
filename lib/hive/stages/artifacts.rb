@@ -434,11 +434,24 @@ module Hive
           raise Hive::ConfigError, "artifacts.evidence.#{role} permissions cannot exceed read-only"
         end
         if role != "producer" && profile.name != :claude
-          unless profile.read_only_supported?
-            raise Hive::ConfigError,
-                  "outcome-evidence #{role} agent #{profile.name.inspect} cannot enforce read-only source access"
+          if profile.read_only_supported?
+            return { permission_mode: Hive::AgentProfile::READ_ONLY_PERMISSION_MODE }
           end
-          return { permission_mode: Hive::AgentProfile::READ_ONLY_PERMISSION_MODE }
+
+          require "hive/workflow_package/runtime_policy"
+          source_root = task.worktree_path || task.project_root
+          runtime_policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            spec,
+            task_folder: source_root,
+            package_root: task.folder,
+            profile: profile
+          )
+          return Hive::Stages::Base.tool_scope_kwargs(
+            permission_mode: runtime_policy.permission_mode,
+            allowed_tools: runtime_policy.allowed_tools,
+            disallowed_tools: runtime_policy.disallowed_tools,
+            runtime_policy: runtime_policy
+          )
         end
 
         scope = Hive::Stages::Base.stage_permission_scope(

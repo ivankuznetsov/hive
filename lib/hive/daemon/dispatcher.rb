@@ -3304,7 +3304,6 @@ module Hive
       end
 
       def daemon_enabled_projects_for(rows)
-
         Array(rows).each_with_object({}) do |row, enabled|
           project = row.project.to_s
           enabled[project] = true if project_enabled?(project)

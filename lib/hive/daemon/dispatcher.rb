@@ -148,8 +148,7 @@ module Hive
           attempt_dispatcher: @attempt_dispatcher,
           lost_outcome_store: @lost_outcome_store,
           lost_outcome_processor: @lost_outcome_processor,
-          auto_retry_enabled: auto_retry_enabled?,
-          project_auto_retry_enabled: ->(project) { project_enabled?(project) },
+          project_daemon_enabled: ->(project) { project_enabled?(project) },
           recovery_coordinator: @recovery_coordinator,
           admission_open: -> { admission_open? }
         )
@@ -415,7 +414,7 @@ module Hive
             rows_eligible_for_error_recovery(result.rows),
             now: now,
             legacy_layout_projects: @legacy_layout_projects,
-            auto_retry_projects: enabled_auto_retry_projects(result.rows)
+            daemon_enabled_projects: daemon_enabled_projects_for(result.rows)
           )
         rescue StandardError => e
           @logger.event(:fatal,
@@ -1212,7 +1211,7 @@ module Hive
           )
           return
         end
-        if auto_retry_error_row?(row)
+        if retryable_error_row?(row)
           assessment = @stale_agent_healer.retry_assessment(row, now: now)
           decision, owner, reason = retry_disposition(row, assessment)
           @logger.event(
@@ -1339,7 +1338,7 @@ module Hive
 
       def merge_reconciliation_blocks_recovery?(row)
         return false unless @merge_watcher
-        return false unless auto_retry_error_row?(row)
+        return false unless retryable_error_row?(row)
 
         @merge_watcher.recovery_blocked?(
           project: row.project, slug: row.slug
@@ -1724,7 +1723,7 @@ module Hive
       def operational_recovery_snapshot(queue_state: operational_queue_state)
         {
           "coordinator" => {
-            "enabled" => auto_retry_enabled?,
+            "enabled" => true,
             "receipts" => durable_recovery_receipts(queue_state: queue_state)
           }
         }
@@ -3266,17 +3265,10 @@ module Hive
         @external_active_agent_counts.fetch(project, 0)
       end
 
-      # Recovery is not optional. A configuration switch that turns it off
-      # only produces tasks that sit in an error marker until a human notices,
-      # which is a worse failure than a wasted retry.
-      def auto_retry_enabled?
-        true
-      end
-
       # Every error marker is retryable. Exempting a class of error does not
       # make it safe, it makes it stuck: the exempt reason still needs the
       # same retry, just performed by hand at an unpredictable delay.
-      def auto_retry_error_row?(row)
+      def retryable_error_row?(row)
         %w[error review_error].include?(row.marker.to_s)
       end
 
@@ -3311,8 +3303,7 @@ module Hive
         ]
       end
 
-      def enabled_auto_retry_projects(rows)
-        return {} unless auto_retry_enabled?
+      def daemon_enabled_projects_for(rows)
 
         Array(rows).each_with_object({}) do |row, enabled|
           project = row.project.to_s
@@ -3357,8 +3348,7 @@ module Hive
           attempt_dispatcher: @attempt_dispatcher,
           lost_outcome_store: @lost_outcome_store,
           lost_outcome_processor: @lost_outcome_processor,
-          auto_retry_enabled: daemon_cfg.fetch("auto_retry", {}).fetch("enabled", true) == true,
-          project_auto_retry_enabled: ->(project) { project_enabled?(project) },
+          project_daemon_enabled: ->(project) { project_enabled?(project) },
           recovery_coordinator: @recovery_coordinator,
           admission_open: -> { admission_open? }
         )

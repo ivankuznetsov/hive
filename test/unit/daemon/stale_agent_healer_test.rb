@@ -185,8 +185,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
     with_error_marker(project: "held") do |row, _state_file|
       build_healer(
-        project_auto_retry_enabled: ->(project) { project != "held" }
-      ).heal([ row ], now: NOW, auto_retry_projects: { "other" => true })
+        project_daemon_enabled: ->(project) { project != "held" }
+      ).heal([ row ], now: NOW, daemon_enabled_projects: { "other" => true })
       assert_empty @coordinator.requests
     end
   end
@@ -199,7 +199,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       recovery_coordinator: @coordinator
     )
     assert healer.instance_variable_get(
-      :@project_auto_retry_enabled
+      :@project_daemon_enabled
     ).call("any-project")
 
     with_error_marker do |row, _state_file|
@@ -774,14 +774,12 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   def build_healer(controller: @controller,
                    recovery_coordinator: @coordinator,
-                   auto_retry_enabled: true,
-                   project_auto_retry_enabled: ->(_project) { true })
+                   project_daemon_enabled: ->(_project) { true })
     Hive::Daemon::StaleAgentHealer.new(
       controller: controller,
       logger: @logger,
       grace_sec: 300,
-      auto_retry_enabled: auto_retry_enabled,
-      project_auto_retry_enabled: project_auto_retry_enabled,
+      project_daemon_enabled: project_daemon_enabled,
       recovery_coordinator: recovery_coordinator
     )
   end

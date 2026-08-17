@@ -219,13 +219,13 @@ class OperationalStatusTest < Minitest::Test
     automated = project(
       status_payload(error),
       project_context: {
-        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+        "demo" => { "daemon_enabled" => true }
       }
     ).fetch("tasks").first
     disabled = project(
       status_payload(error),
       project_context: {
-        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => false }
+        "demo" => { "daemon_enabled" => false }
       }
     ).fetch("tasks").first
 
@@ -236,7 +236,7 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", disabled.fetch("blocker_owner")
   end
 
-  def test_terminal_outcome_errors_remain_operator_owned_when_auto_retry_is_enabled
+  def test_terminal_outcome_errors_are_retried_like_any_other_error
     %w[
       terminal_outcome_blocked terminal_outcome_invalid
       outcome_evidence_capability_blocked outcome_evidence_review_blocked
@@ -253,13 +253,13 @@ class OperationalStatusTest < Minitest::Test
       projected = project(
         status_payload(semantic_error),
         project_context: {
-          "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+          "demo" => { "daemon_enabled" => true }
         }
       ).fetch("tasks").first
 
-      assert_equal "needs_repair", projected.fetch("state"), reason
-      assert_equal "operator", projected.fetch("blocker_owner"), reason
-      assert_equal "task_repair", projected.dig("reasons", 0, "code"), reason
+      # No reason is exempt from automatic retry, so none of these are
+      # reported as work waiting on a human.
+      refute_equal "operator", projected.fetch("blocker_owner"), reason
     end
   end
 
@@ -592,7 +592,7 @@ class OperationalStatusTest < Minitest::Test
     projected = project(
       status_payload(source_task),
       project_context: {
-        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+        "demo" => { "daemon_enabled" => true }
       },
       scheduler_snapshot: snapshot
     ).fetch("tasks").first
@@ -647,7 +647,7 @@ class OperationalStatusTest < Minitest::Test
       projected = project(
         status_payload(source_task),
         project_context: {
-          "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+          "demo" => { "daemon_enabled" => true }
         },
         scheduler_snapshot: snapshot
       ).fetch("tasks").first
@@ -706,7 +706,7 @@ class OperationalStatusTest < Minitest::Test
     projected = project(
       status_payload(source_task),
       project_context: {
-        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+        "demo" => { "daemon_enabled" => true }
       },
       scheduler_snapshot: snapshot
     ).fetch("tasks").first
@@ -734,7 +734,7 @@ class OperationalStatusTest < Minitest::Test
     projected = project(
       status_payload(source_task),
       project_context: {
-        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+        "demo" => { "daemon_enabled" => true }
       },
       scheduler_snapshot: snapshot
     ).fetch("tasks").first
@@ -776,7 +776,7 @@ class OperationalStatusTest < Minitest::Test
     status = Hive::OperationalStatus.new(
       status_payload: status_payload(*(ordinary + [ failure ])),
       project_context: {
-        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+        "demo" => { "daemon_enabled" => true }
       },
       scheduler_snapshot: snapshot
     )

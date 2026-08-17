@@ -3546,7 +3546,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def test_boot_healer_uses_the_live_per_project_retry_gate
     dispatcher, = make_dispatcher(project_enabled: false)
     healer = dispatcher.instance_variable_get(:@stale_agent_healer)
-    gate = healer.instance_variable_get(:@project_auto_retry_enabled)
+    gate = healer.instance_variable_get(:@project_daemon_enabled)
 
     assert_equal false, gate.call("disabled-project")
   end
@@ -3576,7 +3576,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                 "reload_config! must rebuild the healer so new daemon.agent_marker_grace_sec binds"
     assert_equal 60, rebuilt.instance_variable_get(:@grace_sec),
                  "rebuilt healer must carry the reloaded grace value"
-    gate = rebuilt.instance_variable_get(:@project_auto_retry_enabled)
+    gate = rebuilt.instance_variable_get(:@project_daemon_enabled)
     assert_equal true, gate.call("enabled-project"),
                  "the rebuilt healer must retain the live per-project gate"
     healer_admission = rebuilt.instance_variable_get(:@admission_open)
@@ -3593,14 +3593,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
            "the reloaded name backfiller must share the daemon's live shutdown gate"
   end
 
-  def test_reload_config_applies_auto_retry_kill_switch_to_universal_healer
+  def test_reload_config_rebuilds_the_universal_healer
     dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
     original_healer = dispatcher.instance_variable_get(:@stale_agent_healer)
 
     new_cfg = {
       "agent_marker_grace_sec" => 60,
-      "edit_debounce_sec" => 30,
-      "auto_retry" => { "enabled" => false }
+      "edit_debounce_sec" => 30
     }
     original = Hive::Config.method(:load_global_daemon)
     Hive::Config.define_singleton_method(:load_global_daemon) { new_cfg }
@@ -3613,7 +3612,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
     rebuilt = dispatcher.instance_variable_get(:@stale_agent_healer)
     refute_same original_healer, rebuilt,
                 "reload_config! must rebuild the universal healer"
-    assert_equal false, rebuilt.auto_retry_enabled?
   end
 
 def test_run_forever_reloads_ticks_and_shuts_down_cleanly
@@ -4478,26 +4476,19 @@ def test_reload_config_error_logs_and_keeps_previous_config
          "an invalid reload must not emit a success event"
 end
 
-def test_late_reload_loader_failure_never_splits_auto_retry_policy
-  [ false, true ].each do |previously_enabled|
+def test_late_reload_loader_failure_never_splits_daemon_config
+  [ 30, 60 ].each do |previous_debounce|
     dispatcher, _sup, controller, logger, _mw = make_dispatcher
-    previous_daemon = {
-      "edit_debounce_sec" => 30,
-      "auto_retry" => { "enabled" => previously_enabled }
-    }
+    previous_daemon = { "edit_debounce_sec" => previous_debounce }
     previous_config = dispatcher.instance_variable_get(:@config)
     previous_config["daemon"] = previous_daemon
     dispatcher.instance_variable_set(:@daemon_cfg, previous_daemon)
     previous_healer = Hive::Daemon::StaleAgentHealer.new(
       controller: controller,
-      logger: logger,
-      auto_retry_enabled: previously_enabled
+      logger: logger
     )
     dispatcher.instance_variable_set(:@stale_agent_healer, previous_healer)
-    requested_daemon = {
-      "edit_debounce_sec" => 45,
-      "auto_retry" => { "enabled" => !previously_enabled }
-    }
+    requested_daemon = { "edit_debounce_sec" => previous_debounce + 15 }
 
     with_replaced_singleton_method(
       Hive::Config, :load_global_daemon, -> { requested_daemon }
@@ -4517,9 +4508,9 @@ def test_late_reload_loader_failure_never_splits_auto_retry_policy
     assert_same previous_daemon, dispatcher.instance_variable_get(:@daemon_cfg)
     assert_same previous_config, dispatcher.instance_variable_get(:@config)
     assert_same previous_healer, dispatcher.instance_variable_get(:@stale_agent_healer)
-    assert_equal previously_enabled,
-                 previous_healer.auto_retry_enabled?,
-                 "failed #{previously_enabled ? 'disable' : 'enable'} reload must retain one coherent policy"
+    assert_equal previous_debounce,
+                 dispatcher.instance_variable_get(:@daemon_cfg)["edit_debounce_sec"],
+                 "a failed reload must retain one coherent config, not a half-applied one"
     refute logger.events.any? { |name, _attrs| name == :config_reloaded }
     assert logger.events.any? { |name, attrs|
       name == :fatal && attrs[:message].include?("answer digest is invalid")

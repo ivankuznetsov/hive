@@ -6,6 +6,108 @@ class AttemptsEntrypointTest < Minitest::Test
 
   FakeTask = Struct.new(:slug, :project_root, :project_name, keyword_init: true)
 
+  # A lost attempt otherwise blocks admission until the daemon mints a
+  # successor. An operator running `hive run` is the manual retry of last
+  # resort and must never be trapped behind that wait.
+  def test_operator_dispatch_supersedes_a_lost_attempt_instead_of_deferring
+    task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
+    lost = Struct.new(:attempt_id).new("lost-1")
+    successor = Struct.new(:attempt_id).new("attempt-2")
+    deferred = Hive::Attempts::DispatchResult.new(
+      status: :deferred, attempt: lost, receipt: nil,
+      attach_descriptor: nil, reason: "attempt_lost"
+    )
+    accepted = Hive::Attempts::DispatchResult.new(
+      status: :accepted, attempt: successor, receipt: nil,
+      attach_descriptor: { "attempt_id" => "attempt-2" }, reason: nil
+    )
+    dispatcher = Object.new
+    successor_calls = []
+    dispatcher.define_singleton_method(:dispatch) { |**_kwargs| deferred }
+    dispatcher.define_singleton_method(:dispatch_successor) do |**kwargs|
+      successor_calls << kwargs
+      accepted
+    end
+    client = Object.new
+    client.define_singleton_method(:attach) do |id|
+      Hive::Attempts::ClientResult.new(
+        status: :terminal, exit_status: 0, outcome: "succeeded",
+        receipt: {}, attempt_id: id
+      )
+    end
+    config = Hive::Config.merge_defaults({})
+
+    value = Hive::Attempts::Entrypoint.new(
+      store: Object.new, dispatcher: dispatcher, client: client,
+      config_loader: ->(_root) { config }
+    ).dispatch(
+      task: task, intended_stage: "4-execute", argv: [ "hive", "run", "/tmp/task" ],
+      request_id: "request-1"
+    )
+
+    assert_equal "attempt-2", value.attempt_id
+    assert_equal 1, successor_calls.length
+    assert_same lost, successor_calls.first.fetch(:predecessor)
+    assert_equal "demo", successor_calls.first.fetch(:project)
+    assert_equal true, successor_calls.first.fetch(:interactive)
+  end
+
+  # The daemon owns its own recovery route via dispatch_request; it must not
+  # also self-supersede here, or a lost attempt would race two successors.
+  def test_noninteractive_dispatch_still_defers_on_a_lost_attempt
+    task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
+    lost = Struct.new(:attempt_id).new("lost-1")
+    deferred = Hive::Attempts::DispatchResult.new(
+      status: :deferred, attempt: lost, receipt: nil,
+      attach_descriptor: nil, reason: "attempt_lost"
+    )
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) { |**_kwargs| deferred }
+    dispatcher.define_singleton_method(:dispatch_successor) do |**_kwargs|
+      flunk "a non-interactive dispatch must not mint its own successor"
+    end
+    config = Hive::Config.merge_defaults({})
+
+    error = assert_raises(Hive::ConcurrentRunError) do
+      Hive::Attempts::Entrypoint.new(
+        store: Object.new, dispatcher: dispatcher,
+        config_loader: ->(_root) { config }
+      ).dispatch(
+        task: task, intended_stage: "4-execute", argv: [ "hive", "run", "/tmp/task" ],
+        request_id: "request-1", interactive: false
+      )
+    end
+
+    assert_includes error.message, "attempt_lost"
+  end
+
+  # A deferral for any other reason keeps its existing meaning.
+  def test_operator_dispatch_still_defers_on_non_loss_reasons
+    task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
+    deferred = Hive::Attempts::DispatchResult.new(
+      status: :deferred, attempt: nil, receipt: nil,
+      attach_descriptor: nil, reason: "capacity"
+    )
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) { |**_kwargs| deferred }
+    dispatcher.define_singleton_method(:dispatch_successor) do |**_kwargs|
+      flunk "capacity deferral must not be superseded"
+    end
+    config = Hive::Config.merge_defaults({})
+
+    error = assert_raises(Hive::ConcurrentRunError) do
+      Hive::Attempts::Entrypoint.new(
+        store: Object.new, dispatcher: dispatcher,
+        config_loader: ->(_root) { config }
+      ).dispatch(
+        task: task, intended_stage: "4-execute", argv: [ "hive", "run", "/tmp/task" ],
+        request_id: "request-1"
+      )
+    end
+
+    assert_includes error.message, "capacity"
+  end
+
   def test_state_home_falls_back_when_an_injected_store_has_no_root
     entrypoint = Hive::Attempts::Entrypoint.new(store: Object.new)
 

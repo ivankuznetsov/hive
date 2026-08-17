@@ -60,7 +60,7 @@ step and submits eligible `ERROR` / `REVIEW_ERROR` observations to
 marker-age cooldown, rejects live ownership or unsafe current-work evidence,
 persists the canonical task/marker/generation identity, and owns the guarded
 clear plus restart replay. Set
-`daemon.auto_retry.enabled: false` to disable automatic coordinator submissions;
+`daemon.auto_retry.enabled` is accepted but inert — automatic retry is unconditional;
 explicit operator recovery through the shared API remains available.
 The deterministic v5 request does not expire behind admission gates; a crash
 before or after clear resumes its persisted phase, while stale identity is
@@ -165,7 +165,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 |-----|---------|---------|
 | `poll_interval_sec` | 30 | Backstop cadence for full status scans. Min 5. |
 | `fast_poll_sec` | 1 | Cheap wake cadence for child reaps and state-file/stage-dir mtime probes between full scans. Min 1. |
-| `auto_retry.enabled` | `true` | Global kill switch for automatic `ERROR` / `REVIEW_ERROR` retries. `false` leaves those markers parked for operator recovery while stale in-flight ownership reconciliation remains active. |
+| `auto_retry.enabled` | — | **Inert.** Retired as a kill switch: `ERROR` / `REVIEW_ERROR` retries are unconditional and follow one backoff ladder. The key is still shape-validated so a typo fails loudly, but setting it changes nothing. Pause a project with `daemon.enabled: false` instead. |
 | `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |
 | `pr_merge_poll_interval_sec` | 300 | Durable per-candidate merge reconciliation cadence. Min 60 to respect GitHub rate limits; failure counts remain uncapped and backoff is persisted. |
 | `max_concurrent_runs` | 3 | Global cap. Raise carefully — multiplies cost ceiling. |

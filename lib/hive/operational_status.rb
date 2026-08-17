@@ -843,16 +843,12 @@ module Hive
       daemon_enabled?(project["name"]) && row["workflow"] == "coding" && row["stage"] == CODING_PLAN_STAGE
     end
 
+    # Every error marker is retried; there is no exempt reason and no switch
+    # to disable it. This predicate exists to predict the daemon, so it must
+    # not carry conditions the daemon no longer applies.
     def automatic_error_retry?(project, row)
       daemon_enabled?(project["name"]) &&
-        auto_retry_enabled?(project["name"]) &&
-        %w[error review_error].include?(row["marker"].to_s) &&
-        !Hive::TerminalOutcome.semantic_error?(row["attrs"])
-    end
-
-    def auto_retry_enabled?(project_name)
-      @project_context.dig(project_name, "auto_retry_enabled") == true ||
-        @project_context.dig(project_name, :auto_retry_enabled) == true
+        %w[error review_error].include?(row["marker"].to_s)
     end
 
     def reasons_for(project, row)

@@ -3314,6 +3314,9 @@ module Hive
               "daemon.auto_retry in #{describe_source(source_path)} must be a hash; " \
               "got #{auto_retry.inspect} (#{auto_retry.class})"
       end
+      # Accepted but inert: automatic retry is unconditional, so this key no
+      # longer switches anything. The shape is still validated so a typo in an
+      # existing config fails loudly rather than looking meaningful.
       auto_retry_enabled = auto_retry && auto_retry["enabled"]
       unless auto_retry_enabled.nil? || auto_retry_enabled == true || auto_retry_enabled == false
         raise ConfigError,

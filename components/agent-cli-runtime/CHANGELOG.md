@@ -15,6 +15,11 @@
 - Default every other profile to the previously assumed shapes — dedicated
   `error`, `turn.failed`, and `rate_limit_event` events plus failed `result`
   events — so no existing profile changes behaviour.
+- Read usage from the assistant message and accept the bare
+  `input`/`output`/`cacheRead`/`cacheWrite` spellings, so a provider reporting
+  usage there is metered instead of silently recording nothing. The bare
+  spellings are matched last, leaving a provider that reports explicit
+  `*_tokens` keys with its existing reading.
 
 ## 0.2.0 - 2026-08-15
 

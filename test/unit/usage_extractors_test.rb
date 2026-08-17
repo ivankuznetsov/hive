@@ -174,4 +174,47 @@ class UsageExtractorsTest < Minitest::Test
 
     assert_nil result
   end
+
+  # Verbatim shape from a real pi run: usage sits on the assistant message and
+  # uses bare input/output/cacheRead spellings. The extractor previously read
+  # neither, so every pi run in the usage database was unmetered — zero rows
+  # against thousands for claude, codex and grok.
+  def test_pi_reports_usage_from_the_assistant_message
+    result = PI.call(event(
+      "type" => "message_end",
+      "message" => {
+        "role" => "assistant",
+        "provider" => "openrouter",
+        "model" => "deepseek/deepseek-v4-pro",
+        "usage" => {
+          "input" => 14_206, "output" => 759,
+          "cacheRead" => 148_864, "cacheWrite" => 0,
+          "totalTokens" => 163_829
+        },
+        "stopReason" => "stop"
+      }
+    ))
+
+    refute_nil result, "pi usage must be read from the assistant message"
+    assert_equal 14_206, result.fetch(:input)
+    assert_equal 759, result.fetch(:output)
+    assert_equal 148_864, result.fetch(:cache_read)
+    assert_equal 0, result.fetch(:cache_write)
+    assert_equal "deepseek/deepseek-v4-pro", result.fetch(:model)
+  end
+
+  # The bare spellings are matched last, so a provider that reports explicit
+  # *_tokens keys keeps its own reading even when both are present.
+  def test_explicit_token_keys_still_win_over_the_bare_spellings
+    result = CLAUDE.call(event(
+      "type" => "result",
+      "usage" => {
+        "input_tokens" => 11, "output_tokens" => 22,
+        "input" => 999, "output" => 888
+      }
+    ))
+
+    assert_equal 11, result.fetch(:input)
+    assert_equal 22, result.fetch(:output)
+  end
 end

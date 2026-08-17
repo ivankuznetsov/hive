@@ -40,6 +40,9 @@ module AgentCliRuntime
         event["token_usage"],
         event.dig("event", "usage"),
         event.dig("event", "message", "usage"),
+        # pi reports usage on the assistant message itself, not under an
+        # "event" envelope. Without this every pi run is unmetered.
+        event.dig("message", "usage"),
         event.dig("info", "usage"),
         event.dig("info", "total_token_usage"),
         event.dig("response", "usage"),
@@ -60,12 +63,15 @@ module AgentCliRuntime
         "reasoning_tokens", "reasoningTokens"
       )
       {
+        # The bare "input"/"output" spellings are pi's and are matched last,
+        # so a provider using an explicit *_tokens key keeps its own reading.
         input: optional_token_count(
-          usage, "input_tokens", "inputTokens", "prompt_tokens", "promptTokens"
+          usage, "input_tokens", "inputTokens", "prompt_tokens", "promptTokens",
+          "input"
         ),
         output: optional_token_count(
           usage, "output_tokens", "outputTokens", "completion_tokens",
-          "completionTokens"
+          "completionTokens", "output"
         ),
         cached: aggregate_cached || complete_cached(cache_read, cache_write),
         cache_read: cache_read,
@@ -104,13 +110,13 @@ module AgentCliRuntime
         nested_hash(usage, "prompt_tokens_details"), "cached_tokens", "cachedTokens"
       ) || optional_token_count(
         nested_hash(usage, "input_tokens_details"), "cached_tokens", "cachedTokens"
-      )
+      ) || optional_token_count(usage, "cacheRead")
     end
 
     def cache_write_tokens(usage)
       optional_token_count(
         usage, "cache_creation_input_tokens", "cacheCreationInputTokens",
-        "cache_write_input_tokens", "cacheWriteInputTokens"
+        "cache_write_input_tokens", "cacheWriteInputTokens", "cacheWrite"
       )
     end
 

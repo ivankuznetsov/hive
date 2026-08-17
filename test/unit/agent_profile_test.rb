@@ -1075,6 +1075,33 @@ class AgentProfileTest < Minitest::Test
     assert_nil profile.extract_usage_event({ "type" => "result" })
   end
 
+  # Provider error shape lives with the provider, so Hive's profile is a pure
+  # pass-through here — the runtime profile decides what counts as a refusal.
+  def test_error_extraction_delegates_to_the_runtime_profile
+    runtime_class = Class.new(AgentCliRuntime::Profile) do
+      def extract_error_event(event)
+        event["errorMessage"]
+      end
+    end
+    runtime = runtime_class.new(
+      name: :custom,
+      bin_default: "custom-agent",
+      headless_flag: "-p",
+      version_flag: "--version"
+    )
+    profile = Hive::AgentProfile.new(
+      runtime_profile: runtime,
+      skill_syntax_format: "/%{skill}"
+    )
+
+    assert_equal(
+      "402: Prompt tokens limit exceeded",
+      profile.extract_error_event(
+        { "errorMessage" => "402: Prompt tokens limit exceeded" }
+      )
+    )
+  end
+
   def test_runtime_adapter_contains_usage_extractor_failures
     runtime_class = Class.new(AgentCliRuntime::Profile) do
       def extract_usage_event(_event)

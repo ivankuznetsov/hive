@@ -25,4 +25,11 @@ Notably `AgentLimit::LIMIT_PATTERNS` would not have matched this text either:
 the word is plural, and no pattern covers 402. Classifying on the provider's
 own status code avoids depending on wording that varies per provider.
 
-See [[modules/agents]].
+Packaging note: this ships as `agent-cli-runtime` 0.2.1, a patch on the already
+published 0.2.x line, so `hive.gemspec` keeps `~> 0.2.0` and installed Hive
+resolves the new bytes without a constraint change. Both lockfiles still carry
+the version — `web/Gemfile` resolves `hive-cli` and `agent-cli-runtime` as path
+gems too, and the web jobs run `bundle install` frozen, so relocking only the
+root fails web setup outright.
+
+See [[modules/agents]] and [[dependencies]].

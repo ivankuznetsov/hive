@@ -2235,6 +2235,28 @@ class AgentTest < Minitest::Test
     end
   end
 
+  # The profile extractor only speaks JSON events. A CLI that prints its quota
+  # wall as a bare line leaves `extract_provider_error` with nothing to read, so
+  # the raw-line fallback is what has to catch it — otherwise a plain-text limit
+  # regresses to a generic exit_code=1 the moment provider extraction is added.
+  def test_captures_usage_limit_from_a_plain_text_stream_line
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] =
+        "You've hit your usage limit. Visit .../usage to purchase more credits."
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_match(/usage limit/i, result[:limit_text].to_s,
+                   "a non-JSON limit line must still reach limit_text")
+      assert_equal :error, result[:status]
+      assert_match(/\Alimits reached for claude:/, result[:error_message].to_s)
+      assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs["reason"]
+    end
+  end
+
   def test_does_not_classify_limit_language_inside_successful_command_output
     with_tmp_dir do |dir|
       task = make_task(dir)

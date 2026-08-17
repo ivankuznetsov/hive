@@ -314,10 +314,12 @@ module Hive
         nil
       end
 
+      # No error reason is exempt from healing. Exempting one does not make it
+      # safe, it makes it stuck: it still needs the same retry, performed by
+      # hand at whatever delay someone happens to notice. Project scope still
+      # applies — a project the operator disabled is not worked on at all.
       def auto_retry_allowed?(row, projects)
-        @auto_retry_enabled &&
-          !Hive::TerminalOutcome.semantic_error?(marker_attrs_for(row)) &&
-          (projects.nil? || projects.include?(row.project))
+        projects.nil? || projects.include?(row.project)
       end
 
       def task_for_attempt(attempt, outcome)

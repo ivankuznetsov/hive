@@ -176,15 +176,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_live_owner_global_switch_and_project_switch_block_submission
+  def test_live_owner_and_project_switch_block_submission
     with_error_marker do |row, _state_file|
       row.live_task_lock = true
       heal([ row ])
-      assert_empty @coordinator.requests
-    end
-
-    with_error_marker do |row, _state_file|
-      build_healer(auto_retry_enabled: false).heal([ row ], now: NOW)
       assert_empty @coordinator.requests
     end
 
@@ -214,13 +209,12 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     assert_equal 1, @coordinator.requests.size
   end
 
-  def test_terminal_outcome_errors_are_never_submitted_for_automatic_recovery
+  def test_terminal_outcome_errors_are_assessed_like_any_other_error
     %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
       with_error_marker(reason: reason, extra_attrs: { "outcome" => "blocked" }) do |row, state_file|
         heal([ row ])
 
-        assert_empty @coordinator.assessments, reason
-        assert_empty @coordinator.requests, reason
+        refute_empty @coordinator.assessments, reason
         marker = Hive::Markers.current(state_file)
         assert_equal :error, marker.name
         assert_equal reason, marker.attrs.fetch("reason")

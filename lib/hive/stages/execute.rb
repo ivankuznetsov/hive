@@ -426,11 +426,12 @@ module Hive
         # into the spawn. Resolve that same closed routing cell here instead of
         # leaving route-required profiles such as OpenCode with a nil model.
         if identity.nil?
-          launch_arguments[:routing_arguments] =
-            Hive::Stages::Base.model_routing_arguments(
+          launch_arguments.merge!(
+            Hive::Stages::Base.model_launch_arguments(
               cfg, "execute_implementation", profile,
               current: Hive::Stages::Base.model_routing_current(cfg["execute"])
             )
+          )
         end
         # 4-execute's lifecycle contract is "stage runner writes
         # EXECUTE_COMPLETE after a clean spawn" (see run_pass below),

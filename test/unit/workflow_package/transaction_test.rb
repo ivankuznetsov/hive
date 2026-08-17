@@ -1,6 +1,9 @@
 require "test_helper"
 require "json"
 require "hive/workflow_package/transaction"
+# Transaction does not pull in the lock, so the mutation-lock test below only
+# resolves the constant when this file loads it.
+require "hive/workflow_package/mutation_lock"
 
 class WorkflowPackageTransactionTest < Minitest::Test
   include HiveTestHelper

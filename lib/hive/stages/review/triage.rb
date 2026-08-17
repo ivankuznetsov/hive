@@ -110,7 +110,7 @@ module Hive
             log_label: "review-triage-pass#{format('%02d', ctx.pass)}",
             profile: profile,
             expected_output: escalations,
-            routing_arguments: Hive::Stages::Base.model_routing_arguments(
+            **Hive::Stages::Base.model_launch_arguments(
               cfg, "review_triage", profile,
               current: Hive::Stages::Base.model_routing_current(
                 cfg.dig("review", "triage")

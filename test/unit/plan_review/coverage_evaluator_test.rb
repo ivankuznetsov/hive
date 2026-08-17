@@ -27,13 +27,21 @@ class PlanReviewCoverageEvaluatorTest < Minitest::Test
     assert_equal "review_unavailable", unavailable.degradation_reason
   end
 
-  def test_mandatory_requires_every_requested_item_or_named_waiver
-    missing = Hive::PlanReview::CoverageEvaluator.evaluate(
+  def test_mandatory_blocks_required_failures_but_degrades_for_optional_failures
+    optional = Hive::PlanReview::CoverageEvaluator.evaluate(
       level: "mandatory",
       coverage: [
         row("whole_document", true, "completed"),
         row("adversarial", true, "completed"),
         row("security", false, "failed")
+      ]
+    )
+    required = Hive::PlanReview::CoverageEvaluator.evaluate(
+      level: "mandatory",
+      coverage: [
+        row("whole_document", true, "completed"),
+        row("adversarial", true, "completed"),
+        row("security", true, "failed")
       ]
     )
     waived = Hive::PlanReview::CoverageEvaluator.evaluate(
@@ -45,8 +53,10 @@ class PlanReviewCoverageEvaluatorTest < Minitest::Test
       ]
     )
 
-    assert missing.blocked?
-    assert_equal "security", missing.blockers.first.fetch("coverage")
+    assert optional.degraded?
+    assert_equal "partial_coverage", optional.degradation_reason
+    assert required.blocked?
+    assert_equal "security", required.blockers.first.fetch("coverage")
     assert waived.complete?
   end
 

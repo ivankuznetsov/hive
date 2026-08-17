@@ -600,6 +600,171 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_malformed_inference_gets_one_fresh_bounded_repair
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = outcome_identity
+      prompts = []
+      store = Object.new
+      store.define_singleton_method(:open_generation!) do |**input|
+        { "generation" => "c" * 64, "inference" => input.fetch(:inference) }
+      end
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        if prompts.length == 1
+          raise Hive::Stages::Artifacts::RoleOutputError,
+                "inference output is invalid JSON: unexpected character: 'All' at line 1 column 1"
+        end
+
+        {
+          actor: { "context_id" => "inference-2", "agent" => "pi" },
+          output: {
+            "claims" => [
+              {
+                "id" => "claim-flow",
+                "statement" => "A buyer can finish checkout and see confirmation.",
+                "proof_kind" => "document", "changed_paths" => [ "app/checkout.rb" ]
+              }
+            ],
+            "exclusions" => []
+          }
+        }
+      end
+
+      requirement = Hive::Stages::Artifacts.infer_requirement!(
+        task: task, cfg: {}, identity: identity, store: store, review_context: {}
+      )
+
+      assert_equal "c" * 64, requirement.fetch("generation")
+      assert_equal 2, prompts.length
+      assert_includes prompts.last, "inference output is invalid JSON"
+      assert_includes prompts.last, '"previous_output": null'
+      assert_equal "inference-2", requirement.dig("inference", "context_id")
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
+  def test_empty_reviewer_output_gets_one_fresh_bounded_retry
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      prompts = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        if prompts.length == 1
+          raise Hive::Stages::Artifacts::RoleOutputError,
+                "reviewer output is missing or oversized"
+        end
+
+        {
+          actor: { "context_id" => "reviewer-2", "agent" => "pi" },
+          output: {
+            "verdicts" => [
+              {
+                "target_id" => "claim-flow", "verdict" => "accepted",
+                "reason" => "The retained document proves the requested flow."
+              }
+            ]
+          }
+        }
+      end
+
+      reviewer = Hive::Stages::Artifacts.run_reviewer!(
+        task: task, cfg: {}, identity: outcome_identity,
+        requirement: { "claims" => [], "exclusions" => [] }, evidence: [],
+        review_context: {}
+      )
+
+      assert_equal "reviewer-2", reviewer.dig(:actor, "context_id")
+      assert_equal 2, prompts.length
+      assert_includes prompts.last, "reviewer output is missing or oversized"
+      assert_includes prompts.last, "return the verdict JSON immediately"
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
+  def test_retained_pending_candidate_skips_producer_and_resumes_review
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = outcome_identity
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      generation = "c" * 64
+      evidence = [
+        {
+          "kind" => "document", "summary" => "The retained document proves the flow.",
+          "claims" => [ "claim-flow" ],
+          "representations" => [
+            { "sha256" => "d" * 64 }, { "sha256" => "e" * 64 }
+          ]
+        }
+      ]
+      requirement = {
+        "generation" => generation,
+        "claims" => [
+          {
+            "id" => "claim-flow", "proof_kind" => "document",
+            "statement" => "A buyer can finish checkout and see confirmation.",
+            "changed_paths" => [ "app/checkout.rb" ]
+          }
+        ],
+        "exclusions" => [],
+        "inference" => { "context_id" => "inference-1", "agent" => "pi" }
+      }
+      appended = nil
+      store = Object.new
+      store.define_singleton_method(:accepted_for_identity?) { |_| false }
+      store.define_singleton_method(:blocked_for_identity?) { |_| false }
+      store.define_singleton_method(:requirement_for_identity) { |_| requirement }
+      store.define_singleton_method(:accepted?) { |generation:| false }
+      store.define_singleton_method(:attempts) { |generation:| [] }
+      store.define_singleton_method(:pending_candidate) do |generation:|
+        {
+          "attempt_id" => "attempt-resume",
+          "producer" => { "context_id" => "producer-1", "agent" => "pi" },
+          "evidence" => evidence
+        }
+      end
+      store.define_singleton_method(:append_attempt!) do |**input|
+        appended = input
+        { "attempt_id" => input.fetch(:attempt_id), "status" => input.fetch(:status) }
+      end
+      store.define_singleton_method(:publish_current!) do |generation:, attempt_id:|
+        { "generation" => generation, "attempt_id" => attempt_id }
+      end
+
+      roles = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |role:, **|
+        roles << role
+        {
+          actor: { "context_id" => "reviewer-1", "agent" => "pi" },
+          output: {
+            "verdicts" => [
+              {
+                "target_id" => "claim-flow", "verdict" => "accepted",
+                "reason" => "The retained document proves the requested checkout flow."
+              }
+            ]
+          }
+        }
+      end
+
+      result = Hive::Stages::Artifacts.run_outcome_evidence!(
+        task, {}, identity_resolver: resolver, store: store
+      )
+
+      assert_equal({ commit: "artifacts_collected", status: :complete }, result)
+      assert_equal [ "reviewer" ], roles
+      assert_equal "attempt-resume", appended.fetch(:attempt_id)
+      assert_equal evidence, appended.fetch(:evidence)
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
   def test_targeted_recapture_preserves_accepted_hashes_and_reviews_the_full_package
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
@@ -788,6 +953,60 @@ class StagesArtifactsTest < Minitest::Test
         end
       end
     end
+  end
+
+  def test_role_inherits_stage_local_model_when_it_uses_the_stage_agent
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = { "implementation_head" => "a" * 40 }
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      captured = nil
+      spawn = lambda do |_task, agent_custody:, **kwargs|
+        captured = kwargs
+        agent_custody.call do
+          {
+            status: :ok, final_message: '{"claims":[],"exclusions":[]}',
+            final_message_truncated: false
+          }
+        end
+      end
+      cfg = {
+        "artifacts" => {
+          "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "xhigh",
+          "evidence" => { "inference" => { "permissions" => "read-only" } }
+        }
+      }
+
+      with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Identity, :new, ->(**) { resolver }
+      ) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          result = Hive::Stages::Artifacts.run_role!(
+            role: "inference", task: task, cfg: cfg, prompt: "infer", identity: identity
+          )
+
+          assert_equal "gpt-5.6-sol", captured.fetch(:model)
+          assert_equal "xhigh", captured.fetch(:effort)
+          assert_equal "gpt-5.6-sol", result.dig(:actor, "model")
+          assert_equal "xhigh", result.dig(:actor, "effort")
+        end
+      end
+    end
+  end
+
+  def test_role_agent_override_does_not_inherit_an_incompatible_stage_model
+    cfg = {
+      "artifacts" => {
+        "agent" => "pi", "model" => "openrouter/deepseek/deepseek-v4-pro:xhigh",
+        "effort" => "xhigh"
+      }
+    }
+
+    launch = Hive::Stages::Artifacts.evidence_role_launch_config(
+      cfg, { "agent" => "codex" }
+    )
+
+    assert_equal({}, launch)
   end
 
   def test_role_custody_excludes_controller_session_activity_from_the_agent_interval
@@ -1013,6 +1232,37 @@ class StagesArtifactsTest < Minitest::Test
         )
       end
       assert_match(/managed agent-browser capture boundary/, error.message)
+    end
+  end
+
+  def test_pi_producer_uses_the_controller_compiled_evidence_runtime
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      evidence = File.join(task.folder, "outcome-evidence", "work", "generation", "attempt")
+      FileUtils.mkdir_p(evidence)
+      pi = Hive::AgentProfiles.lookup(:pi)
+      policy = Struct.new(
+        :permission_mode, :allowed_tools, :disallowed_tools, :directories,
+        keyword_init: true
+      ).new(
+        permission_mode: nil, allowed_tools: %w[Read LS Grep Glob],
+        disallowed_tools: %w[Bash Write Edit], directories: [ task.folder ]
+      )
+
+      assert_equal pi, Hive::Stages::Artifacts.preflight_producer!(
+        { "artifacts" => { "evidence" => { "producer" => { "agent" => "pi" } } } },
+        [ { "proof_kind" => "terminal" } ]
+      )
+      kwargs = Hive::Stages::Artifacts.role_security_kwargs(
+        "producer", task: task, cfg: {}, profile: pi,
+        actor_cfg: { "agent" => "pi" }, writable_root: evidence,
+        producer_runtime_policy: policy
+      )
+
+      assert_same policy, kwargs.fetch(:runtime_policy)
+      assert_equal %w[Read LS Grep Glob], kwargs.fetch(:allowed_tools)
+      assert_includes kwargs.fetch(:disallowed_tools), "Bash"
+      assert_includes kwargs.fetch(:disallowed_tools), "Write"
     end
   end
 
@@ -1506,7 +1756,7 @@ class StagesArtifactsTest < Minitest::Test
       claude = Hive::AgentProfiles.lookup(:claude)
       codex = Hive::AgentProfiles.lookup(:codex)
       no_scope = Object.new
-      no_scope.define_singleton_method(:name) { :pi }
+      no_scope.define_singleton_method(:name) { :unsupported }
       no_scope.define_singleton_method(:workspace_write_supported?) { false }
       no_scope.define_singleton_method(:read_only_supported?) { false }
 
@@ -1580,6 +1830,40 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_pi_read_only_roles_use_the_portable_runtime_sandbox
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      worktree = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree)
+      task.define_singleton_method(:worktree_path) { worktree }
+      profile = Hive::AgentProfiles.lookup(:pi)
+      policy = Struct.new(:permission_mode, :allowed_tools, :disallowed_tools).new(
+        nil, %w[Read LS Grep Glob], %w[Edit Write Bash]
+      )
+      captured = nil
+      compile = lambda do |spec, **kwargs|
+        captured = { spec: spec, **kwargs }
+        policy
+      end
+
+      security = with_replaced_singleton_method(
+        Hive::WorkflowPackage::RuntimePolicy, :compile_actor, compile
+      ) do
+        Hive::Stages::Artifacts.role_security_kwargs(
+          "inference", task: task, cfg: {}, profile: profile, actor_cfg: {}
+        )
+      end
+
+      assert_equal "read-only", captured.fetch(:spec)
+      assert_equal worktree, captured.fetch(:task_folder)
+      assert_equal task.folder, captured.fetch(:package_root)
+      assert_same profile, captured.fetch(:profile)
+      assert_same policy, security.fetch(:runtime_policy)
+      assert_equal %w[Read LS Grep Glob], security.fetch(:allowed_tools)
+      assert_equal %w[Edit Write Bash], security.fetch(:disallowed_tools)
+    end
+  end
+
   def test_role_json_producer_paths_and_cleanup_roots_are_bounded
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
@@ -1588,6 +1872,27 @@ class StagesArtifactsTest < Minitest::Test
       end
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         Hive::Stages::Artifacts.parse_role_output!("{", "inference")
+      end
+      fenced = <<~OUTPUT
+        Evidence for `./bin/verify` captured successfully.
+
+        ```json
+        {"evidence":[]}
+        ```
+      OUTPUT
+      assert_equal(
+        { "evidence" => [] },
+        Hive::Stages::Artifacts.parse_role_output!(fenced, "producer")
+      )
+      assert_raises(Hive::Stages::Artifacts::RoleOutputError) do
+        Hive::Stages::Artifacts.parse_role_output!(
+          "```json\n{\"evidence\":[]}\n```\ntrailing prose", "producer"
+        )
+      end
+      assert_raises(Hive::Stages::Artifacts::RoleOutputError) do
+        Hive::Stages::Artifacts.parse_role_output!(
+          "```json\n{\"evidence\":[]}\n```\n```json\n{}\n```", "producer"
+        )
       end
 
       writable_root = File.join(task.folder, "outcome-evidence", "work", "generation", "attempt")

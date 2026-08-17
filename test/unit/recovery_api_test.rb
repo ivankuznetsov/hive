@@ -105,6 +105,65 @@ class HiveRecoveryAPITest < Minitest::Test
     assert_equal Time.utc(2026, 8, 12, 12), seen_clock.call
   end
 
+  def test_recover_reuses_one_completed_intent_when_cooldown_becomes_queued
+    observation_row = {
+      "folder" => "/tmp/demo/.hive-state/stages/7-artifacts/task",
+      "slug" => "task", "stage" => "7-artifacts", "marker" => "ERROR",
+      "state_file_mtime" => Time.utc(2026, 8, 17),
+      "attempt_id" => "attempt-1", "task_generation" => 2
+    }
+    outcomes = %w[cooldown queued]
+    completions = []
+    records = []
+    operation = Object.new
+    operation.define_singleton_method(:complete?) { completions.any? }
+    operation.define_singleton_method(:complete!) { |**args| completions << args }
+    activity = Object.new
+    activity.define_singleton_method(:begin_operation) { |**| operation }
+    activity.define_singleton_method(:record) { |**args| records << args }
+    coordinator = Object.new
+    coordinator.define_singleton_method(:observation_token_for) { |_| "a" * 64 }
+    coordinator.define_singleton_method(:request) do |**|
+      status = outcomes.shift
+      Hive::Daemon::RecoveryCoordinator::Receipt.new(
+        status: status, request_id: status == "queued" ? "request-1" : nil,
+        attempt_id: nil, phase: status == "queued" ? "admitted" : nil,
+        failure_origin: "outcome_evidence_invalid",
+        next_eligible_at: "2026-08-17T01:47:29Z", owner: "scheduler",
+        reason: nil, remediation: nil, retry_count: status == "queued" ? 1 : 0,
+        provider_hint: nil
+      )
+    end
+
+    with_replaced_singleton_method(Hive::Recovery::API, :activity_for, ->(*) { activity }) do
+      2.times do |index|
+        Hive::Recovery::API.recover!(
+          row: observation_row, coordinator: coordinator,
+          now: Time.utc(2026, 8, 17, 1, index)
+        )
+      end
+    end
+
+    assert_equal 1, completions.length
+    assert_equal %w[cooldown queued], records.map { |entry| entry.dig(:payload, "outcome") }
+  end
+
+  def test_complete_recovery_operation_repairs_a_conflicting_legacy_receipt
+    restored = false
+    operation = Object.new
+    operation.define_singleton_method(:complete?) { false }
+    operation.define_singleton_method(:complete!) do |**|
+      raise Hive::TaskActivity::Conflict, "existing cooldown event"
+    end
+    operation.define_singleton_method(:restore_authoritative!) { restored = true }
+
+    Hive::Recovery::API.complete_recovery_operation(
+      operation, { "status" => "queued" }, now: Time.utc(2026, 8, 17, 1, 48)
+    )
+
+    assert restored
+  end
+
   def test_recovery_activity_append_failure_is_non_fatal
     observation = Hive::Recovery::API.observation(
       { "folder" => "/tmp/task", "state_file" => "/tmp/task/task.md", "slug" => "task" }

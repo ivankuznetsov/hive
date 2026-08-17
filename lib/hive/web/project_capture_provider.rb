@@ -592,7 +592,7 @@ module Hive
 
         descendants = supervisor_descendants
         leftover_processes = status && descendants.any? do |target|
-          target.fetch(:pid) != provider_pid
+          target.fetch(:pid) != provider_pid && live_descendant?(target)
         end
         cleanup_deadline = monotonic_now + CUSTODY_TERM_GRACE_SEC + CUSTODY_KILL_GRACE_SEC
         status, cleanup_failed = terminate_supervised_tree!(
@@ -731,6 +731,25 @@ module Hive
           current = confirmation[target.fetch(:pid)]
           current && current.fetch(:start_time) == target.fetch(:start_time)
         end
+      end
+
+      # Subreaper custody deliberately adopts grandchildren, including shells'
+      # already-exited process substitutions. A zombie needs reaping but is no
+      # longer running work; keep live detached descendants fail-closed while
+      # avoiding a false leak verdict for confirmed zombies.
+      def live_descendant?(target)
+        return false unless Hive::ProcessKill.captured_process_alive?(target)
+
+        state = File.foreach("/proc/#{target.fetch(:pid)}/status").find do |line|
+          line.start_with?("State:")
+        end
+        raise ProviderError, "provider process state is unavailable" unless state
+
+        !state.match?(/\AState:\s+Z\b/)
+      rescue Errno::ENOENT
+        false
+      rescue Errno::EACCES, Errno::EIO
+        raise ProviderError, "provider process state is unavailable"
       end
 
       def linux_descendant_snapshot(root_pid)

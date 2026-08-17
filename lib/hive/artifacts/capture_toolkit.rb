@@ -32,7 +32,7 @@ module Hive
       CAPTURE_NAME = /\A[a-z][a-z0-9_-]{0,63}\z/
 
       attr_reader :launch_environment, :producer_add_dirs,
-                  :producer_permission_arguments
+                  :producer_permission_arguments, :producer_runtime_policy
 
       def initialize(browser_bundle: nil, tool_resolver: nil, hive_executable: nil,
                      web_server_factory: nil, browser_command_runner: nil,
@@ -48,6 +48,7 @@ module Hive
         @launch_environment = {}
         @producer_add_dirs = []
         @producer_permission_arguments = nil
+        @producer_runtime_policy = nil
         @browser_close = nil
         @browser_daemon = nil
         @browser_socket_root = nil
@@ -92,11 +93,10 @@ module Hive
           } : nil,
           "media" => {}
         }
-        managed = required & CAPTURE_KINDS
-        return receipt if managed.empty?
-
         producer_profile ||= Hive::AgentProfiles.lookup(:codex)
-        codex_runtime_roots = Array(@codex_runtime_resolver.call(producer_profile))
+        managed = required & CAPTURE_KINDS
+        return receipt if managed.empty? && producer_profile.name != :pi
+
         extra_read_paths = []
 
         if (required & VISUAL_KINDS).any?
@@ -173,13 +173,34 @@ module Hive
         ).start!
         @launch_environment["HIVE_EVIDENCE_CAPTURE_MAILBOX"] = @capture_mailbox.root
         @producer_add_dirs = [ @capture_mailbox.root ]
-        @producer_permission_arguments = codex_permission_arguments(
-          task_root: task_root, source_root: source_root,
-          writable_root: writable_root, mailbox_root: @capture_mailbox.root,
-          extra_read_paths: extra_read_paths,
-          codex_runtime_roots: codex_runtime_roots,
-          hive_runtime_paths: hive_runtime_paths
-        )
+        case producer_profile.name
+        when :codex
+          codex_runtime_roots = Array(@codex_runtime_resolver.call(producer_profile))
+          @producer_permission_arguments = codex_permission_arguments(
+            task_root: task_root, source_root: source_root,
+            writable_root: writable_root, mailbox_root: @capture_mailbox.root,
+            extra_read_paths: extra_read_paths,
+            codex_runtime_roots: codex_runtime_roots,
+            hive_runtime_paths: hive_runtime_paths
+          )
+        when :pi
+          @producer_runtime_policy =
+            Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+              task_folder: source_root, package_root: task_root,
+              profile: producer_profile, environment: @launch_environment,
+              mailbox_root: @capture_mailbox.root, writable_root: writable_root,
+              hive_executable: @hive_executable,
+              browser: (required & VISUAL_KINDS).any?
+            )
+          receipt["producer_interface"] = {
+            "document" => "evidence_write",
+            "terminal" => required.include?("terminal") ? "evidence_terminal" : nil,
+            "browser" => (required & VISUAL_KINDS).any? ? "evidence_browser" : nil
+          }.compact
+        else
+          raise Hive::ConfigError,
+                "managed capture evidence does not support producer #{producer_profile.name.inspect}"
+        end
         receipt
       rescue Hive::Artifacts::CaptureProxy::ProxyError => e
         close_after_prepare_error
@@ -259,6 +280,8 @@ module Hive
                 @browser_socket_root = nil
                 @producer_add_dirs = []
                 @producer_permission_arguments = nil
+                @producer_runtime_policy&.cleanup!
+                @producer_runtime_policy = nil
               end
             end
           end

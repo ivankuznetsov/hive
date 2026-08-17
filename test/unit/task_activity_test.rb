@@ -197,6 +197,78 @@ class TaskActivityTest < Minitest::Test
     end
   end
 
+  def test_conflicting_committed_receipt_restores_the_authoritative_event
+    with_activity do |activity, dir|
+      operation = activity.begin_operation(
+        kind: "retry_requested", operation_id: "recovery:task-1",
+        source: "recovery_service", reason: "recovery requested",
+        precondition: "error", expected_postcondition: "evaluated"
+      )
+      operation.complete!(
+        result: { "status" => "cooldown" },
+        payload: { "outcome" => "cooldown", "retry_at" => "2026-08-17T01:00:00Z" },
+        occurred_at: NOW
+      )
+
+      assert_raises(Hive::TaskActivity::Conflict) do
+        operation.complete!(
+          result: { "status" => "queued" },
+          payload: { "outcome" => "queued", "retry_at" => "2026-08-17T01:00:00Z" },
+          occurred_at: NOW + 60
+        )
+      end
+      assert operation.committed?
+
+      operation.restore_authoritative!
+
+      assert operation.complete?
+      assert_equal "cooldown", operation.receipt.dig("record_payload", "outcome")
+      assert_equal 1, File.readlines(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME)).length
+    end
+  end
+
+  def test_restore_authoritative_refuses_when_the_journal_does_not_corroborate
+    with_activity do |activity, dir|
+      operation = activity.begin_operation(
+        kind: "retry_requested", operation_id: "recovery:task-2",
+        source: "recovery_service", reason: "recovery requested",
+        precondition: "error", expected_postcondition: "evaluated"
+      )
+
+      error = assert_raises(Hive::TaskActivity::Conflict) { operation.restore_authoritative! }
+
+      assert_match(/authoritative activity does not match operation recovery:task-2/, error.message)
+      refute operation.complete?
+      refute File.exist?(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME))
+    end
+  end
+
+  def test_restore_authoritative_refuses_when_the_journal_cannot_be_read
+    with_activity do |activity, dir|
+      operation = activity.begin_operation(
+        kind: "retry_requested", operation_id: "recovery:task-3",
+        source: "recovery_service", reason: "recovery requested",
+        precondition: "error", expected_postcondition: "evaluated"
+      )
+      operation.complete!(
+        result: { "status" => "cooldown" }, payload: { "outcome" => "cooldown" }, occurred_at: NOW
+      )
+      assert_raises(Hive::TaskActivity::Conflict) do
+        operation.complete!(
+          result: { "status" => "queued" }, payload: { "outcome" => "queued" }, occurred_at: NOW + 60
+        )
+      end
+      journal = File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME)
+      File.write(journal, "{not json\n", mode: "a")
+
+      error = assert_raises(Hive::TaskActivity::Conflict) { operation.restore_authoritative! }
+
+      assert_match(/authoritative activity recovery failed/, error.message)
+      assert operation.committed?
+      refute operation.complete?
+    end
+  end
+
   def test_pending_reconciliation_never_invents_success_and_appends_ambiguity_gap
     with_activity do |activity, dir|
       not_committed = activity.begin_operation(

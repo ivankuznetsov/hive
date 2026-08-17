@@ -2235,6 +2235,33 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_does_not_classify_limit_language_inside_successful_command_output
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "item.completed",
+        "item" => {
+          "type" => "command_execution",
+          "aggregated_output" => "documentation says usage limit reached",
+          "exit_code" => 0,
+          "status" => "completed"
+        }
+      )
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5
+      ).run!
+
+      assert_nil result[:limit_text]
+      refute_match(/limits reached/, result[:error_message].to_s)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "exit_code", marker.attrs["reason"]
+    end
+  end
+
   def test_output_file_mode_classifies_limits_before_missing_expected_output
     with_tmp_dir do |dir|
       task = make_task(dir)

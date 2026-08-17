@@ -60,6 +60,47 @@ class AgentMessageExtractorTest < Minitest::Test
     )
   end
 
+  def test_pi_terminal_output_extracts_the_last_assistant_text_only_for_pi
+    event = {
+      "type" => "agent_end",
+      "messages" => [
+        { "role" => "assistant", "content" => [ { "type" => "text", "text" => "draft" } ] },
+        { "role" => "toolResult", "content" => [ { "type" => "text", "text" => "tool data" } ] },
+        {
+          "role" => "assistant",
+          "content" => [
+            { "type" => "thinking", "thinking" => "private reasoning" },
+            { "type" => "text", "text" => '{"files":{"result.md":"done\\n"}}' }
+          ]
+        }
+      ]
+    }
+
+    assert_nil Hive::Agent::MessageExtractor.extract(event)
+    refute Hive::Agent::MessageExtractor.sensitive_payload_event?(event)
+    assert_equal(
+      '{"files":{"result.md":"done\\n"}}',
+      Hive::Agent::MessageExtractor.extract(event, structured_output_protocol: :pi_agent_end)
+    )
+    assert Hive::Agent::MessageExtractor.sensitive_payload_event?(
+      event,
+      structured_output_protocol: :pi_agent_end
+    )
+  end
+
+  def test_strict_pi_terminal_output_invalidates_a_missing_assistant_message
+    accumulator = Hive::Agent::MessageExtractor::Accumulator.new(
+      max_bytes: 256,
+      structured_output_protocol: :pi_agent_end,
+      require_terminal_structured_output: true
+    )
+
+    accumulator.observe({ "type" => "agent_end", "messages" => [] })
+
+    assert_nil accumulator.value
+    assert_equal :structured_invalid, accumulator.source
+  end
+
   def test_strict_grok_terminal_output_invalidates_the_preceding_stream
     accumulator = Hive::Agent::MessageExtractor::Accumulator.new(
       max_bytes: 256,

@@ -161,6 +161,19 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
         assert_equal "served-model", result.dig("actual_route", "model")
       end
 
+      timed_out_complete = lambda do |_task, **kwargs|
+        File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
+        { status: :timeout, timed_out: true }
+      end
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, timed_out_complete) do
+        result = runner.call(
+          prompt: "revise", workspace:, output_path: output,
+          planner_identity:, timeout_sec: 60
+        )
+        assert_equal "success", result.fetch("status")
+        assert_includes result.fetch("diagnostic"), "salvaged complete candidate"
+      end
+
       capture_error = ->(_manifest) { raise Hive::ArtifactFirewall::Error, "capture failed" }
       with_replaced_singleton_method(Hive::ArtifactFirewall, :capture, capture_error) do
         result = runner.call(

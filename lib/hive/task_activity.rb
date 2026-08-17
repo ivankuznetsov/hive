@@ -99,6 +99,10 @@ module Hive
       Digest::SHA256.hexdigest(Hive::TaskWorkspace.canonical_json(value))
     end
 
+    def self.safe_error(error)
+      Hive::SecretPatterns.redact(error.message.to_s)[0, 4_096]
+    end
+
     def initialize(task_folder:, task:, workflow:, stage:, attempt_id:, task_generation:,
                    ownership_generation: nil, commit_generation: nil, writer: nil,
                    attempt_store: nil, clock: -> { Time.now.utc })
@@ -217,6 +221,7 @@ module Hive
     end
 
     def operation_time = @clock.call
+    def attempt_store = @writer.respond_to?(:attempt_store) ? @writer.attempt_store : nil
 
     # Reconcile bounded, task-local operation receipts. The resolver may
     # return :not_committed, :ambiguous, or a hash with status: :committed and
@@ -461,9 +466,7 @@ module Hive
       raise InvalidActivity, "activity payload exceeds #{MAX_ACTIVITY_BYTES} bytes"
     end
 
-    def safe_error(error)
-      Hive::SecretPatterns.redact(error.message.to_s)[0, 4_096]
-    end
+    def safe_error(error) = Hive::TaskActivity.safe_error(error)
 
     public
 
@@ -563,6 +566,7 @@ module Hive
       end
 
       def operation_id = receipt.fetch("operation_id")
+      def complete? = receipt["state"] == "complete"
       def terminal? = %w[complete aborted gap].include?(receipt["state"])
       def committed? = receipt["state"] == "committed_pending_activity"
 
@@ -638,6 +642,38 @@ module Hive
         true
       end
 
+      # A pre-v0.7.3 caller could overwrite a completed receipt before an
+      # idempotent journal replay exposed the conflicting result. The journal
+      # is the authoritative boundary, so reconstruct the receipt from that
+      # exact event instead of deleting either durable record or inventing a
+      # second event for the same operation id.
+      def restore_authoritative!
+        path = File.join(@activity.task_folder, Hive::TaskJournal::JOURNAL_BASENAME)
+        events = Hive::TaskProjection.read_journal(
+          path, attempt_store: @activity.attempt_store
+        ).select do |event|
+          event.dig("payload", "idempotency_key") == operation_id
+        end
+        unless events.length == 1 && authoritative_event_matches?(events.first)
+          raise Conflict, "authoritative activity does not match operation #{operation_id}"
+        end
+
+        event = events.first
+        payload = event.fetch("payload")
+        update!(
+          "state" => "complete",
+          "event_id" => event.fetch("event_id"),
+          "committed_at" => event.fetch("occurred_at"),
+          "result_fingerprint" => payload.fetch("result_fingerprint"),
+          "record_reason" => event.fetch("reason"),
+          "record_correlation_id" => payload["correlation_id"] || operation_id,
+          "record_payload" => payload.reject { |key, _| authoritative_payload_key?(key) },
+          "record_evidence" => event.fetch("evidence", [])
+        )
+      rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error, KeyError => e
+        raise Conflict, "authoritative activity recovery failed: #{Hive::TaskActivity.safe_error(e)}"
+      end
+
       def abort!(reason:)
         update!(
           "state" => "aborted", "resolved_at" => normalize_time(@activity.operation_time),
@@ -678,6 +714,32 @@ module Hive
       end
 
       private
+
+      def authoritative_event_matches?(event)
+        payload = event.fetch("payload", {})
+        event["event_type"] == "activity_recorded" &&
+          event["task"] == receipt["task"] &&
+          event["workflow"] == receipt["workflow"] &&
+          event["stage"] == receipt["stage"] &&
+          event["attempt_id"] == receipt["attempt_id"] &&
+          event["task_generation"] == receipt["task_generation"] &&
+          event["ownership_generation"] == receipt["ownership_generation"] &&
+          event["commit_generation"] == receipt["commit_generation"] &&
+          event["reason"] == receipt["reason"] &&
+          event.dig("provenance", "source") == receipt["source"] &&
+          payload["activity_kind"] == receipt["activity_kind"] &&
+          payload["operation_id"] == operation_id &&
+          payload["precondition_fingerprint"] == receipt["precondition_fingerprint"] &&
+          payload["expected_postcondition_fingerprint"] == receipt["expected_postcondition_fingerprint"] &&
+          payload["result_fingerprint"].to_s.match?(/\A[0-9a-f]{64}\z/)
+      end
+
+      def authoritative_payload_key?(key)
+        %w[
+          activity_kind operation_id correlation_id supersedes_event_id idempotency_key
+          precondition_fingerprint expected_postcondition_fingerprint result_fingerprint
+        ].include?(key)
+      end
 
       def directory
         File.join(@activity.task_folder, OPERATION_DIRECTORY)

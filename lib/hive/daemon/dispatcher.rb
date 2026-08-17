@@ -1212,24 +1212,6 @@ module Hive
           )
           return
         end
-        if %w[error review_error].include?(row.marker.to_s) &&
-           Hive::TerminalOutcome.semantic_error?(row.marker_attrs)
-          @logger.event(
-            :skipped,
-            project: row.project,
-            slug: row.slug,
-            stage: row.stage,
-            action: row.action,
-            reason: "semantic_terminal_error"
-          )
-          observe_operational_disposition(
-            row,
-            decision: :semantic_terminal_error,
-            owner: "operator",
-            reason: "terminal outcome errors require an explicit guarded retry"
-          )
-          return
-        end
         if auto_retry_error_row?(row)
           assessment = @stale_agent_healer.retry_assessment(row, now: now)
           decision, owner, reason = retry_disposition(row, assessment)
@@ -3284,14 +3266,18 @@ module Hive
         @external_active_agent_counts.fetch(project, 0)
       end
 
+      # Recovery is not optional. A configuration switch that turns it off
+      # only produces tasks that sit in an error marker until a human notices,
+      # which is a worse failure than a wasted retry.
       def auto_retry_enabled?
-        @daemon_cfg.fetch("auto_retry", {}).fetch("enabled", true) == true
+        true
       end
 
+      # Every error marker is retryable. Exempting a class of error does not
+      # make it safe, it makes it stuck: the exempt reason still needs the
+      # same retry, just performed by hand at an unpredictable delay.
       def auto_retry_error_row?(row)
-        auto_retry_enabled? &&
-          !Hive::TerminalOutcome.semantic_error?(row.marker_attrs) &&
-          %w[error review_error].include?(row.marker.to_s)
+        %w[error review_error].include?(row.marker.to_s)
       end
 
       def retry_disposition(row, assessment)

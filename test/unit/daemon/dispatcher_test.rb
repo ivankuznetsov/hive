@@ -1359,13 +1359,19 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal true, disposition.fetch(:retry_safe)
   end
 
-  def test_terminal_outcome_errors_bypass_automatic_retry_assessment
+  # Exempting a class of error from automatic retry does not make it safe, it
+  # makes it stuck: the exempt reason still needs the same retry, performed by
+  # hand at whatever delay a human happens to notice it. Every error marker is
+  # assessed now, and the assessment decides — not the reason string.
+  def test_terminal_outcome_errors_are_assessed_for_automatic_retry
     %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
       snapshot = FakeOperationalSnapshot.new
-      dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
+      dispatcher, _supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
       healer = dispatcher.instance_variable_get(:@stale_agent_healer)
-      healer.define_singleton_method(:retry_assessment) do |*_args, **_kwargs|
-        raise "semantic terminal errors must not be assessed automatically"
+      assessed = []
+      healer.define_singleton_method(:retry_assessment) do |assessed_row, **_kwargs|
+        assessed << assessed_row.marker_attrs["reason"]
+        { due: false, retry_at: nil, safe: true, safety_reason: nil }
       end
       observed = row(
         marker: "error",
@@ -1376,10 +1382,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
       dispatcher.send(:handle_row, observed, now: T0)
 
-      assert_empty supervisor.spawned
-      disposition = snapshot.calls.last.last
-      assert_equal :semantic_terminal_error, disposition.fetch(:decision)
-      assert_equal "operator", disposition.fetch(:owner)
+      assert_equal [ reason ], assessed,
+                   "#{reason} must be assessed for retry, not parked for an operator"
+      refute_equal :semantic_terminal_error,
+                   snapshot.calls.last.last.fetch(:decision)
     end
   end
 

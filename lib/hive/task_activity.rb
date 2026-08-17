@@ -99,6 +99,10 @@ module Hive
       Digest::SHA256.hexdigest(Hive::TaskWorkspace.canonical_json(value))
     end
 
+    def self.safe_error(error)
+      Hive::SecretPatterns.redact(error.message.to_s)[0, 4_096]
+    end
+
     def initialize(task_folder:, task:, workflow:, stage:, attempt_id:, task_generation:,
                    ownership_generation: nil, commit_generation: nil, writer: nil,
                    attempt_store: nil, clock: -> { Time.now.utc })
@@ -462,9 +466,7 @@ module Hive
       raise InvalidActivity, "activity payload exceeds #{MAX_ACTIVITY_BYTES} bytes"
     end
 
-    def safe_error(error)
-      Hive::SecretPatterns.redact(error.message.to_s)[0, 4_096]
-    end
+    def safe_error(error) = Hive::TaskActivity.safe_error(error)
 
     public
 
@@ -669,7 +671,7 @@ module Hive
           "record_evidence" => event.fetch("evidence", [])
         )
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error, KeyError => e
-        raise Conflict, "authoritative activity recovery failed: #{safe_error(e)}"
+        raise Conflict, "authoritative activity recovery failed: #{Hive::TaskActivity.safe_error(e)}"
       end
 
       def abort!(reason:)

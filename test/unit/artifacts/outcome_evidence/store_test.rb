@@ -269,6 +269,47 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     end
   end
 
+  def test_pending_candidate_rejects_contradictory_noncanonical_and_escaped_custody
+    mutations = {
+      contradictory: ->(document, _source) { document["project"] = "other-project" },
+      noncanonical: ->(document, _source) do
+        document.dig("evidence", 0, "claims").reverse!
+      end,
+      escaped: ->(document, source) do
+        document.dig("evidence", 0, "representations", 0)["path"] =
+          source.dig("representations", 0, "path")
+      end
+    }
+    expected = {
+      contradictory: /contradicts its custody path/,
+      noncanonical: /candidate is not canonical/,
+      escaped: /escaped its custody root/
+    }
+
+    mutations.each do |name, mutate|
+      with_store do |store, task, _controller|
+        generation = store.open_generation!(**requirement_input).fetch("generation")
+        source = document_evidence(task)
+        store.retain_candidate!(
+          generation: generation, attempt_id: "attempt-#{name}",
+          evidence: [ source ], producer: actor("producer-#{name}")
+        )
+        path = File.join(
+          task.folder, "outcome-evidence", "generations", generation,
+          "retained", "attempt-#{name}", "candidate.json"
+        )
+        document = JSON.parse(File.read(path))
+        mutate.call(document, source)
+        File.write(path, JSON.generate(document) << "\n")
+
+        error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          store.pending_candidate(generation: generation)
+        end
+        assert_match expected.fetch(name), error.message
+      end
+    end
+  end
+
   def test_open_generation_is_idempotent_and_keeps_the_original_inference
     with_store do |store, _task, _controller|
       first = store.open_generation!(**requirement_input)

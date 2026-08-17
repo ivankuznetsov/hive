@@ -686,6 +686,85 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_retained_pending_candidate_skips_producer_and_resumes_review
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = outcome_identity
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      generation = "c" * 64
+      evidence = [
+        {
+          "kind" => "document", "summary" => "The retained document proves the flow.",
+          "claims" => [ "claim-flow" ],
+          "representations" => [
+            { "sha256" => "d" * 64 }, { "sha256" => "e" * 64 }
+          ]
+        }
+      ]
+      requirement = {
+        "generation" => generation,
+        "claims" => [
+          {
+            "id" => "claim-flow", "proof_kind" => "document",
+            "statement" => "A buyer can finish checkout and see confirmation.",
+            "changed_paths" => [ "app/checkout.rb" ]
+          }
+        ],
+        "exclusions" => [],
+        "inference" => { "context_id" => "inference-1", "agent" => "pi" }
+      }
+      appended = nil
+      store = Object.new
+      store.define_singleton_method(:accepted_for_identity?) { |_| false }
+      store.define_singleton_method(:blocked_for_identity?) { |_| false }
+      store.define_singleton_method(:requirement_for_identity) { |_| requirement }
+      store.define_singleton_method(:accepted?) { |generation:| false }
+      store.define_singleton_method(:attempts) { |generation:| [] }
+      store.define_singleton_method(:pending_candidate) do |generation:|
+        {
+          "attempt_id" => "attempt-resume",
+          "producer" => { "context_id" => "producer-1", "agent" => "pi" },
+          "evidence" => evidence
+        }
+      end
+      store.define_singleton_method(:append_attempt!) do |**input|
+        appended = input
+        { "attempt_id" => input.fetch(:attempt_id), "status" => input.fetch(:status) }
+      end
+      store.define_singleton_method(:publish_current!) do |generation:, attempt_id:|
+        { "generation" => generation, "attempt_id" => attempt_id }
+      end
+
+      roles = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |role:, **|
+        roles << role
+        {
+          actor: { "context_id" => "reviewer-1", "agent" => "pi" },
+          output: {
+            "verdicts" => [
+              {
+                "target_id" => "claim-flow", "verdict" => "accepted",
+                "reason" => "The retained document proves the requested checkout flow."
+              }
+            ]
+          }
+        }
+      end
+
+      result = Hive::Stages::Artifacts.run_outcome_evidence!(
+        task, {}, identity_resolver: resolver, store: store
+      )
+
+      assert_equal({ commit: "artifacts_collected", status: :complete }, result)
+      assert_equal [ "reviewer" ], roles
+      assert_equal "attempt-resume", appended.fetch(:attempt_id)
+      assert_equal evidence, appended.fetch(:evidence)
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
   def test_targeted_recapture_preserves_accepted_hashes_and_reviews_the_full_package
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)

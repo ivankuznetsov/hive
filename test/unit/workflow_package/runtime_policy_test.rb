@@ -1599,6 +1599,139 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
+  def test_pi_evidence_actor_rejects_wrong_profile_missing_sandbox_and_unconfined_roots
+    wrong = Struct.new(:name).new(:codex)
+    error = assert_raises(Hive::ConfigError) do
+      Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+        task_folder: "/missing", package_root: "/missing", profile: wrong,
+        environment: {}, mailbox_root: "/missing", writable_root: "/missing",
+        hive_executable: "/missing"
+      )
+    end
+    assert_includes error.message, "requires the Pi agent"
+
+    sandbox = Hive::WorkflowPackage::RuntimePolicy::PI_SANDBOX_PATH
+    original_file = File.method(:file?)
+    file_check = ->(path) { path == sandbox ? false : original_file.call(path) }
+    error = with_replaced_singleton_method(File, :file?, file_check) do
+      assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+          task_folder: "/missing", package_root: "/missing",
+          profile: Hive::AgentProfiles.lookup(:pi), environment: {},
+          mailbox_root: "/missing", writable_root: "/missing",
+          hive_executable: "/missing"
+        )
+      end
+    end
+    assert_includes error.message, "requires bubblewrap"
+
+    with_tmp_dir do |dir|
+      source = File.join(dir, "source")
+      task = File.join(dir, "task")
+      mailbox = File.join(dir, "mailbox")
+      outside = File.join(dir, "outside")
+      FileUtils.mkdir_p([ source, task, mailbox, outside ])
+      error = with_available_pi_sandbox do
+        assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+            task_folder: source, package_root: task,
+            profile: Hive::AgentProfiles.lookup(:pi), environment: {},
+            mailbox_root: mailbox, writable_root: outside,
+            hive_executable: "/missing"
+          )
+        end
+      end
+      assert_includes error.message, "unavailable or unconfined"
+    end
+  end
+
+  def test_pi_evidence_actor_rejects_missing_auth_and_malformed_environment
+    with_tmp_dir do |dir|
+      source = File.join(dir, "source")
+      task = File.join(dir, "task")
+      mailbox = File.join(dir, "mailbox")
+      writable = File.join(task, "work")
+      runtime = pi_runtime_fixture(File.join(dir, "pi-runtime"))
+      executable = File.join(runtime, "pi")
+      home = File.join(dir, "home")
+      hive_executable = executable_fixture(File.join(dir, "hive", "bin", "hive"))
+      FileUtils.mkdir_p([ source, mailbox, writable, home ])
+
+      error = with_available_pi_sandbox do
+        with_env("HOME" => home, "HIVE_PI_BIN" => executable) do
+          assert_raises(Hive::ConfigError) do
+            Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+              task_folder: source, package_root: task,
+              profile: Hive::AgentProfiles.lookup(:pi), environment: {},
+              mailbox_root: mailbox, writable_root: writable,
+              hive_executable: hive_executable
+            )
+          end
+        end
+      end
+      assert_includes error.message, "auth file is unavailable"
+
+      auth = File.join(home, ".pi", "agent", "auth.json")
+      FileUtils.mkdir_p(File.dirname(auth))
+      File.write(auth, "{}")
+      error = with_available_pi_sandbox do
+        with_env("HOME" => home, "HIVE_PI_BIN" => executable) do
+          assert_raises(Hive::ConfigError) do
+            Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+              task_folder: source, package_root: task,
+              profile: Hive::AgentProfiles.lookup(:pi),
+              environment: { "NOT_CONTROLLER_OWNED" => "value" },
+              mailbox_root: mailbox, writable_root: writable,
+              hive_executable: hive_executable
+            )
+          end
+        end
+      end
+      assert_includes error.message, "environment is malformed"
+    end
+  end
+
+  def test_pi_evidence_actor_cleans_a_partially_removed_runtime
+    with_tmp_dir do |dir|
+      source = File.join(dir, "source")
+      task = File.join(dir, "task")
+      mailbox = File.join(dir, "mailbox")
+      writable = File.join(task, "work")
+      runtime = pi_runtime_fixture(File.join(dir, "pi-runtime"))
+      executable = File.join(runtime, "pi")
+      home = File.join(dir, "home")
+      auth = File.join(home, ".pi", "agent", "auth.json")
+      hive_executable = executable_fixture(File.join(dir, "hive", "bin", "hive"))
+      FileUtils.mkdir_p([ source, mailbox, writable, File.dirname(auth) ])
+      File.write(auth, "{}")
+      failed_write = lambda do |path, _content, mode:|
+        FileUtils.remove_entry_secure(File.dirname(path))
+        raise Hive::ConfigError, "synthetic extension write failure"
+      end
+
+      error = with_available_pi_sandbox do
+        with_env("HOME" => home, "HIVE_PI_BIN" => executable) do
+          with_replaced_singleton_method(Hive::AtomicFile, :write, failed_write) do
+            assert_raises(Hive::ConfigError) do
+              Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+                task_folder: source, package_root: task,
+                profile: Hive::AgentProfiles.lookup(:pi), environment: {},
+                mailbox_root: mailbox, writable_root: writable,
+                hive_executable: hive_executable
+              )
+            end
+          end
+        end
+      end
+      assert_includes error.message, "synthetic extension write failure"
+      refute_includes Hive::WorkflowPackage::RuntimePolicy.pi_evidence_extension(
+        source_root: source, task_root: task, writable_root: writable,
+        task_relative_write_root: "work", hive_executable: "/hive/bin/hive",
+        browser: false
+      ), 'name: "evidence_browser"'
+    end
+  end
+
   def test_scoped_grok_actor_rejects_missing_auth_and_supports_read_only_web_mode
     with_tmp_dir do |dir|
       task = File.join(dir, "task")

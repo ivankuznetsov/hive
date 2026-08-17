@@ -306,9 +306,6 @@ module Hive
         hive_executable = File.realpath(hive_executable)
         hive_root = File.realpath(File.dirname(File.dirname(hive_executable)))
         hive_relative = Pathname.new(hive_executable).relative_path_from(Pathname.new(hive_root)).to_s
-        if hive_relative.start_with?("../")
-          raise Hive::ConfigError, "managed Pi evidence Hive runtime is unconfined"
-        end
         gem_paths = Gem.path.select { |path| File.directory?(path) }.map { |path| File.realpath(path) }
         gem_mounts = gem_paths.reject do |path|
           path == "/usr" || path.start_with?("/usr/")

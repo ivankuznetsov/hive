@@ -23,6 +23,7 @@ module Hive
 
       EVIDENCE_ROLES = %w[inference producer reviewer].freeze
       MAX_INFERENCE_ATTEMPTS = 2
+      class RoleOutputError < Hive::Artifacts::OutcomeEvidence::StoreError; end
       DEFAULT_REVIEW_CAPABILITIES = {
         "proof_kinds" => Hive::Artifacts::OutcomeEvidence::Proof::KINDS,
         "temporal_video" => true
@@ -245,10 +246,20 @@ module Hive
             review_context_json: JSON.pretty_generate(review_context),
             repair_json: JSON.pretty_generate(repair || {})
           )
-          inference = run_role!(
-            role: "inference", task: task, cfg: cfg, prompt: prompt,
-            identity: identity
-          )
+          begin
+            inference = run_role!(
+              role: "inference", task: task, cfg: cfg, prompt: prompt,
+              identity: identity
+            )
+          rescue RoleOutputError => e
+            raise if index + 1 >= MAX_INFERENCE_ATTEMPTS
+
+            repair = {
+              "validation_error" => e.message.to_s.byteslice(0, 1024).to_s.scrub,
+              "previous_output" => nil
+            }
+            next
+          end
           proposal = inference.fetch(:output)
           begin
             Hive::Artifacts::OutcomeEvidence::Contract.requirement!(
@@ -595,16 +606,16 @@ module Hive
       def parse_role_output!(source, role)
         text = source.to_s
         if text.empty? || text.bytesize > Hive::Artifacts::OutcomeEvidence::Store::MAX_DOCUMENT_BYTES
-          raise Hive::Artifacts::OutcomeEvidence::StoreError, "#{role} output is missing or oversized"
+          raise RoleOutputError, "#{role} output is missing or oversized"
         end
         value = JSON.parse(
           text, object_class: Hive::Artifacts::OutcomeEvidence::Document::StrictHash,
           allow_duplicate_key: false
         )
-        raise Hive::Artifacts::OutcomeEvidence::StoreError, "#{role} output must be one exact JSON object" unless value.is_a?(Hash)
+        raise RoleOutputError, "#{role} output must be one exact JSON object" unless value.is_a?(Hash)
         value
       rescue JSON::ParserError => e
-        raise Hive::Artifacts::OutcomeEvidence::StoreError, "#{role} output is invalid JSON: #{e.message}"
+        raise RoleOutputError, "#{role} output is invalid JSON: #{e.message}"
       end
 
       def ensure_producer_paths!(task, writable_root, evidence)

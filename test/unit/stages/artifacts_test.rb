@@ -600,6 +600,52 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_malformed_inference_gets_one_fresh_bounded_repair
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = outcome_identity
+      prompts = []
+      store = Object.new
+      store.define_singleton_method(:open_generation!) do |**input|
+        { "generation" => "c" * 64, "inference" => input.fetch(:inference) }
+      end
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        if prompts.length == 1
+          raise Hive::Stages::Artifacts::RoleOutputError,
+                "inference output is invalid JSON: unexpected character: 'All' at line 1 column 1"
+        end
+
+        {
+          actor: { "context_id" => "inference-2", "agent" => "pi" },
+          output: {
+            "claims" => [
+              {
+                "id" => "claim-flow",
+                "statement" => "A buyer can finish checkout and see confirmation.",
+                "proof_kind" => "document", "changed_paths" => [ "app/checkout.rb" ]
+              }
+            ],
+            "exclusions" => []
+          }
+        }
+      end
+
+      requirement = Hive::Stages::Artifacts.infer_requirement!(
+        task: task, cfg: {}, identity: identity, store: store, review_context: {}
+      )
+
+      assert_equal "c" * 64, requirement.fetch("generation")
+      assert_equal 2, prompts.length
+      assert_includes prompts.last, "inference output is invalid JSON"
+      assert_includes prompts.last, '"previous_output": null'
+      assert_equal "inference-2", requirement.dig("inference", "context_id")
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
   def test_targeted_recapture_preserves_accepted_hashes_and_reviews_the_full_package
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)

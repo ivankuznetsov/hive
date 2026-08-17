@@ -1584,6 +1584,8 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       assert_includes mounts, [ "--ro-bind", File.realpath(hive_root), "/hive-runtime" ]
       assert_includes mounts, [ "--bind", File.realpath(mailbox), File.realpath(mailbox) ]
       assert_includes mounts, [ "--bind", File.realpath(writable), File.realpath(writable) ]
+      assert_equal Gem.path.select { |path| File.directory?(path) }.map { |path| File.realpath(path) }
+                   .join(File::PATH_SEPARATOR), policy.environment.fetch("GEM_PATH")
       extension = File.read(File.join(policy.cleanup_paths.fetch(0), "evidence-tools.ts"))
       assert_includes extension, "read path escapes the frozen source and task roots"
       assert_includes extension, 'name: "evidence_write"'

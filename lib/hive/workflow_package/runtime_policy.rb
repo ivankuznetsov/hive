@@ -309,6 +309,10 @@ module Hive
         if hive_relative.start_with?("../")
           raise Hive::ConfigError, "managed Pi evidence Hive runtime is unconfined"
         end
+        gem_paths = Gem.path.select { |path| File.directory?(path) }.map { |path| File.realpath(path) }
+        gem_mounts = gem_paths.reject do |path|
+          path == "/usr" || path.start_with?("/usr/")
+        end.to_h { |path| [ path, path ] }
 
         runtime_home = Dir.mktmpdir("hive-managed-pi-evidence-")
         FileUtils.mkdir_p(File.join(runtime_home, ".pi", "agent"), mode: 0o700)
@@ -344,12 +348,13 @@ module Hive
         child_environment = actor_environment({}).merge(evidence_environment).merge(
           "HOME" => "/runtime-home",
           "PI_CODING_AGENT_DIR" => "/runtime-home/.pi/agent",
+          "GEM_PATH" => gem_paths.join(File::PATH_SEPARATOR),
           "PATH" => "#{PI_RUNTIME_MOUNT}:/usr/bin"
         ).freeze
         prefix = pi_bwrap_prefix(
           executable: executable, auth_path: auth_path, runtime_home: runtime_home,
           directories: [ source_root, task_root ], cwd: source_root,
-          readonly_mounts: { hive_root => "/hive-runtime" },
+          readonly_mounts: { hive_root => "/hive-runtime", **gem_mounts },
           writable_directories: [ mailbox_root, writable_root ]
         )
 

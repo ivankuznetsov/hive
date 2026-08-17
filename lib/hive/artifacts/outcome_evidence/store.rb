@@ -823,7 +823,10 @@ module Hive
             Hive::AtomicFile.fsync_directory(File.dirname(path))
           rescue Errno::EEXIST
             existing = begin
-              File.open(path, File::RDONLY | File::NOFOLLOW, &:read)
+              File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
+                file.binmode
+                file.read
+              end
             rescue Errno::ELOOP
               raise StoreError, "exact implementation diff must be a regular file"
             end

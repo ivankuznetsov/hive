@@ -157,11 +157,11 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       assert system("git", "init", "-q", repository)
       assert system("git", "-C", repository, "config", "user.email", "hive@example.test")
       assert system("git", "-C", repository, "config", "user.name", "Hive Test")
-      File.write(File.join(repository, "feature.txt"), ("a" * 300_000) + "\n")
+      File.write(File.join(repository, "feature.txt"), "foundation — base\n" + ("a" * 300_000) + "\n")
       assert system("git", "-C", repository, "add", "feature.txt")
       assert system("git", "-C", repository, "commit", "-qm", "base")
       base = IO.popen([ "git", "-C", repository, "rev-parse", "HEAD" ], &:read).strip
-      File.write(File.join(repository, "feature.txt"), ("b" * 300_000) + "\n")
+      File.write(File.join(repository, "feature.txt"), "foundation — head\n" + ("b" * 300_000) + "\n")
       assert system("git", "-C", repository, "commit", "-qam", "head")
       head = IO.popen([ "git", "-C", repository, "rev-parse", "HEAD" ], &:read).strip
       changed = [ "feature.txt" ]
@@ -186,6 +186,9 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       assert_includes File.read(path), "+#{'b' * 100}"
       assert_equal Digest::SHA256.file(path).hexdigest, receipt.fetch("sha256")
       assert_equal receipt, store.review_context_for_identity(frozen_identity)
+      assert_equal receipt, store.materialize_review_context!(
+        identity: frozen_identity, source_root: repository
+      )
 
       File.write(path, "tampered\n")
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do

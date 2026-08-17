@@ -631,9 +631,9 @@ module Hive
         )
       rescue JSON::ParserError => original_error
         fenced = text.match(
-          /\A(?<preamble>[^`]*)```json[ \t]*\r?\n(?<json>.*?)\r?\n```[ \t]*(?:\r?\n)?\z/m
+          /\A(?<preamble>.*?)```json[ \t]*\r?\n(?<json>.*?)\r?\n```[ \t]*(?:\r?\n)?\z/m
         )
-        raise original_error unless fenced
+        raise original_error unless fenced && !fenced[:preamble].include?("```")
 
         JSON.parse(
           fenced[:json], object_class: Hive::Artifacts::OutcomeEvidence::Document::StrictHash,

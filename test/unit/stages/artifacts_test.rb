@@ -1755,7 +1755,7 @@ class StagesArtifactsTest < Minitest::Test
         Hive::Stages::Artifacts.parse_role_output!("{", "inference")
       end
       fenced = <<~OUTPUT
-        Evidence captured successfully.
+        Evidence for `./bin/verify` captured successfully.
 
         ```json
         {"evidence":[]}

@@ -374,6 +374,11 @@ class OutcomeEvidenceContractTest < Minitest::Test
       contract.verdicts!(overlong)
     end
     assert_match(/review verdict reason must be a meaningful bounded explanation/, error.message)
+
+    missing = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      contract.verdicts!({})
+    end
+    assert_equal "review output is missing verdicts", missing.message
   end
 
   private

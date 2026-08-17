@@ -2516,6 +2516,67 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     end
   end
 
+  # A patch/finding/state file is recreated by the next scan, so an intent
+  # that died before its receipt must never keep an occurrence from
+  # finalizing. One stranded patch note used to deadlock its occurrence
+  # forever: it could not settle, so the occurrence could not finalize, so it
+  # could not retire, so patrol re-ran it every cycle and held a dispatch slot.
+  def test_a_stranded_local_effect_does_not_block_finalizing
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      record = {
+        "effects" => {
+          "intent-committed" => {
+            "state" => "committed",
+            "semantic" => { "sink" => "state", "target" => "patches/patch-ok" }
+          },
+          "intent-stranded-patch" => {
+            "state" => "prepared",
+            "semantic" => { "sink" => "state", "target" => "patches/patch-stuck" }
+          },
+          "intent-stranded-finding" => {
+            "state" => "dispatch_uncertain",
+            "semantic" => { "sink" => "finding", "target" => "findings/f-1" }
+          }
+        }
+      }
+
+      journal.send(:abandon_regenerable_effects!, record)
+
+      assert_equal [ "intent-committed" ], record.fetch("effects").keys,
+                   "regenerable sinks must be abandoned rather than block the occurrence"
+    end
+  end
+
+  # The journal exists to stop an unrepeatable action happening twice. Those
+  # must still block, or an interrupted run could open the same PR again.
+  def test_a_stranded_external_effect_still_blocks
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      record = {
+        "effects" => {
+          "intent-pr" => {
+            "state" => "prepared",
+            "semantic" => { "sink" => "pull_request", "target" => "pulls/7" }
+          },
+          "intent-branch" => {
+            "state" => "prepared",
+            "semantic" => { "sink" => "branch", "target" => "heads/fix" }
+          },
+          "intent-handoff" => {
+            "state" => "prepared",
+            "semantic" => { "sink" => "review_handoff", "target" => "handoff/1" }
+          }
+        }
+      }
+
+      journal.send(:abandon_regenerable_effects!, record)
+
+      assert_equal 3, record.fetch("effects").size,
+                   "unrepeatable sinks must keep blocking finalization"
+    end
+  end
+
   private
 
   def occurrence_journal(root)

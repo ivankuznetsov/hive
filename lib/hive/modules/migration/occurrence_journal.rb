@@ -311,6 +311,7 @@ module Hive
               next record
             end
 
+            abandon_regenerable_effects!(record)
             assert_terminal_effects!(record, capture)
             record["phase"] = "finalized"
             record["final_capture"] = capture.to_h
@@ -642,6 +643,31 @@ module Hive
             id: event.fetch("event_id"),
             bytes: event_bytes
           )
+        end
+
+        # Sinks whose product the next scan simply recreates: patch, finding
+        # and state files are derived from the repository, not from anything
+        # the journal is uniquely holding. An intent that died before its
+        # receipt therefore describes work that either landed (and will be
+        # rewritten identically) or never happened (and will be redone).
+        #
+        # Only externally visible sinks — pull_request, branch, review_handoff
+        # — are unrepeatable, and those still block: opening the same PR twice
+        # is the harm the journal exists to prevent.
+        REGENERABLE_SINKS = %w[state finding].freeze
+
+        # A stranded local effect must never keep an occurrence from
+        # finalizing. Before this, one prepared patch note deadlocked its
+        # occurrence permanently: it could not settle (no recovery path
+        # covered that sink), so the occurrence could not finalize, so it
+        # could not retire, so patrol re-ran it every cycle forever and held
+        # a dispatch slot the whole time.
+        def abandon_regenerable_effects!(record)
+          record.fetch("effects").delete_if do |_intent_id, cell|
+            next false if TERMINAL_STATES.include?(cell.fetch("state"))
+
+            REGENERABLE_SINKS.include?(cell.dig("semantic", "sink").to_s)
+          end
         end
 
         def assert_terminal_effects!(record, capture)

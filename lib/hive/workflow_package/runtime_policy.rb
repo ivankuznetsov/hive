@@ -1091,7 +1091,7 @@ module Hive
             pi.registerTool(defineTool({
               name: "evidence_terminal",
               label: "Capture terminal evidence",
-              description: "Record one exact argv command through Hive's controller-owned PTY capture boundary.",
+              description: "Record one exact target command through Hive's controller-owned PTY capture boundary. Pass only the target command argv; this tool adds the Hive evidence-terminal prefix.",
               parameters: Type.Object({
                 name: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,63}$" }),
                 argv: Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), {

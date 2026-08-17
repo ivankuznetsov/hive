@@ -1754,6 +1754,27 @@ class StagesArtifactsTest < Minitest::Test
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         Hive::Stages::Artifacts.parse_role_output!("{", "inference")
       end
+      fenced = <<~OUTPUT
+        Evidence captured successfully.
+
+        ```json
+        {"evidence":[]}
+        ```
+      OUTPUT
+      assert_equal(
+        { "evidence" => [] },
+        Hive::Stages::Artifacts.parse_role_output!(fenced, "producer")
+      )
+      assert_raises(Hive::Stages::Artifacts::RoleOutputError) do
+        Hive::Stages::Artifacts.parse_role_output!(
+          "```json\n{\"evidence\":[]}\n```\ntrailing prose", "producer"
+        )
+      end
+      assert_raises(Hive::Stages::Artifacts::RoleOutputError) do
+        Hive::Stages::Artifacts.parse_role_output!(
+          "```json\n{\"evidence\":[]}\n```\n```json\n{}\n```", "producer"
+        )
+      end
 
       writable_root = File.join(task.folder, "outcome-evidence", "work", "generation", "attempt")
       FileUtils.mkdir_p(writable_root)

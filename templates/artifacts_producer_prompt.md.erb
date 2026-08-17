@@ -67,9 +67,13 @@ start the changed project's application on the exact `app_endpoint` port
 without detaching it. Hive closes the named browser session, then cleans the
 producer process group, managed Web runtime, proxy, and evidence workspace.
 
-For terminal proof, invoke the exact `terminal.argv_prefix`, replace `<name>`,
-append the command argv, and use the emitted `.cast` original plus `.txt` review.
-Hive executes it controller-side without a shell and returns both descriptors.
+For terminal proof, call the controller-supplied `evidence_terminal` tool with
+the safe capture `name` and only the target command `argv` (the part after `--`
+in `terminal.argv_prefix`). Do not put `/usr/bin/ruby`, the Hive executable,
+`evidence terminal`, the capture name, `--json`, or `--` inside `argv`; the tool
+adds that controller prefix itself. Use the emitted `.cast` original plus `.txt`
+review. Hive executes it controller-side without a shell and returns both
+descriptors.
 Do not look for
 asciinema, VHS, or a terminal GIF encoder.
 The recorder intentionally inherits only locale/terminal variables. If a probe

@@ -617,14 +617,28 @@ module Hive
         if text.empty? || text.bytesize > Hive::Artifacts::OutcomeEvidence::Store::MAX_DOCUMENT_BYTES
           raise RoleOutputError, "#{role} output is missing or oversized"
         end
-        value = JSON.parse(
-          text, object_class: Hive::Artifacts::OutcomeEvidence::Document::StrictHash,
-          allow_duplicate_key: false
-        )
+        value = parse_role_json(text)
         raise RoleOutputError, "#{role} output must be one exact JSON object" unless value.is_a?(Hash)
         value
       rescue JSON::ParserError => e
         raise RoleOutputError, "#{role} output is invalid JSON: #{e.message}"
+      end
+
+      def parse_role_json(text)
+        JSON.parse(
+          text, object_class: Hive::Artifacts::OutcomeEvidence::Document::StrictHash,
+          allow_duplicate_key: false
+        )
+      rescue JSON::ParserError => original_error
+        fenced = text.match(
+          /\A(?<preamble>[^`]*)```json[ \t]*\r?\n(?<json>.*?)\r?\n```[ \t]*(?:\r?\n)?\z/m
+        )
+        raise original_error unless fenced
+
+        JSON.parse(
+          fenced[:json], object_class: Hive::Artifacts::OutcomeEvidence::Document::StrictHash,
+          allow_duplicate_key: false
+        )
       end
 
       def ensure_producer_paths!(task, writable_root, evidence)

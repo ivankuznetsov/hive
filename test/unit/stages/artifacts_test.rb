@@ -1116,6 +1116,37 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_pi_producer_uses_the_controller_compiled_evidence_runtime
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      evidence = File.join(task.folder, "outcome-evidence", "work", "generation", "attempt")
+      FileUtils.mkdir_p(evidence)
+      pi = Hive::AgentProfiles.lookup(:pi)
+      policy = Struct.new(
+        :permission_mode, :allowed_tools, :disallowed_tools, :directories,
+        keyword_init: true
+      ).new(
+        permission_mode: nil, allowed_tools: %w[Read LS Grep Glob],
+        disallowed_tools: %w[Bash Write Edit], directories: [ task.folder ]
+      )
+
+      assert_equal pi, Hive::Stages::Artifacts.preflight_producer!(
+        { "artifacts" => { "evidence" => { "producer" => { "agent" => "pi" } } } },
+        [ { "proof_kind" => "terminal" } ]
+      )
+      kwargs = Hive::Stages::Artifacts.role_security_kwargs(
+        "producer", task: task, cfg: {}, profile: pi,
+        actor_cfg: { "agent" => "pi" }, writable_root: evidence,
+        producer_runtime_policy: policy
+      )
+
+      assert_same policy, kwargs.fetch(:runtime_policy)
+      assert_equal %w[Read LS Grep Glob], kwargs.fetch(:allowed_tools)
+      assert_includes kwargs.fetch(:disallowed_tools), "Bash"
+      assert_includes kwargs.fetch(:disallowed_tools), "Write"
+    end
+  end
+
   def test_run_touches_state_and_translates_controller_errors_to_a_durable_marker
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)

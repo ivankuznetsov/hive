@@ -174,7 +174,8 @@ module Hive
               identity: identity, writable_root: writable_root,
               launch_environment: capture_toolkit.launch_environment,
               producer_add_dirs: capture_toolkit.producer_add_dirs,
-              producer_permission_arguments: capture_toolkit.producer_permission_arguments
+              producer_permission_arguments: capture_toolkit.producer_permission_arguments,
+              producer_runtime_policy: capture_toolkit.producer_runtime_policy
             )
             candidate = Array(producer.fetch(:output).fetch("evidence"))
             capture_toolkit.verify_captures!(candidate)
@@ -288,7 +289,7 @@ module Hive
 
       def run_role!(role:, task:, cfg:, prompt:, identity:, writable_root: nil,
                     launch_environment: nil, producer_add_dirs: [],
-                    producer_permission_arguments: nil)
+                    producer_permission_arguments: nil, producer_runtime_policy: nil)
         role = role.to_s
         raise Hive::ConfigError, "unknown outcome-evidence role #{role.inspect}" unless EVIDENCE_ROLES.include?(role)
 
@@ -303,7 +304,7 @@ module Hive
         agent_custody = Hive::ArtifactFirewall::AgentCustody.new(manifest)
         security = role_security_kwargs(
           role, task: task, cfg: cfg, profile: profile, actor_cfg: actor_cfg,
-          writable_root: writable_root
+          writable_root: writable_root, producer_runtime_policy: producer_runtime_policy
         )
         launch_cfg = evidence_role_launch_config(cfg, actor_cfg)
         context = Hive::Attempts::Context.current
@@ -416,7 +417,7 @@ module Hive
       end
 
       def role_security_kwargs(role, task:, cfg:, profile:, actor_cfg:,
-                               writable_root: nil)
+                               writable_root: nil, producer_runtime_policy: nil)
         if role == "producer"
           unless writable_root
             raise Hive::ConfigError,
@@ -424,6 +425,14 @@ module Hive
           end
           if profile.workspace_write_supported?
             return { permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE }
+          end
+          if profile.name == :pi && producer_runtime_policy
+            return Hive::Stages::Base.tool_scope_kwargs(
+              permission_mode: producer_runtime_policy.permission_mode,
+              allowed_tools: producer_runtime_policy.allowed_tools,
+              disallowed_tools: producer_runtime_policy.disallowed_tools,
+              runtime_policy: producer_runtime_policy
+            )
           end
           unless profile.name == :claude
             raise Hive::ConfigError,
@@ -505,12 +514,12 @@ module Hive
         )
         required = Array(claims).map { |claim| claim.fetch("proof_kind") }.uniq
         unsupported = required - [ "document" ]
-        if unsupported.any? && profile.name != :codex
+        if unsupported.any? && !%i[codex pi].include?(profile.name)
           raise Hive::ConfigError,
                 "artifacts evidence producer #{profile.name.inspect} cannot use the managed " \
-                "agent-browser capture boundary; configure the Codex producer"
+                "agent-browser capture boundary; configure a Codex or Pi producer"
         end
-        if unsupported.any? &&
+        if unsupported.any? && profile.name == :codex &&
            (!profile.workspace_write_supported? || !profile.add_dir_flag)
           raise Hive::ConfigError,
                 "artifacts evidence producer #{profile.name.inspect} cannot safely produce " \

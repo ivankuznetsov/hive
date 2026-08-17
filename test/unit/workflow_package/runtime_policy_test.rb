@@ -1534,6 +1534,69 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
+  def test_pi_evidence_actor_exposes_only_controller_scoped_capture_tools
+    with_tmp_dir do |dir|
+      source = File.join(dir, "source")
+      task = File.join(dir, "task")
+      mailbox = File.join(dir, "mailbox")
+      writable = File.join(task, "outcome-evidence", "work", "generation", "attempt")
+      runtime = File.join(dir, "pi-runtime")
+      executable = File.join(runtime, "pi")
+      home = File.join(dir, "home")
+      auth = File.join(home, ".pi", "agent", "auth.json")
+      hive_root = File.join(dir, "hive")
+      hive_executable = File.join(hive_root, "bin", "hive")
+      FileUtils.mkdir_p(
+        [ source, mailbox, writable, File.join(runtime, "theme"),
+          File.dirname(auth), File.dirname(hive_executable) ]
+      )
+      File.write(executable, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, executable)
+      File.write(File.join(runtime, "theme", "dark.json"), "{}")
+      File.write(File.join(runtime, "theme", "light.json"), "{}")
+      File.write(auth, '{"openrouter":{"type":"api_key","key":"fixture"}}')
+      File.write(hive_executable, "#!/usr/bin/env ruby\n")
+      FileUtils.chmod(0o755, hive_executable)
+
+      policy = with_available_pi_sandbox do
+        with_env("HOME" => home, "HIVE_PI_BIN" => executable) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+            task_folder: source, package_root: task,
+            profile: Hive::AgentProfiles.lookup(:pi),
+            environment: {
+              "HIVE_EVIDENCE_CAPTURE_MAILBOX" => mailbox,
+              "HIVE_EVIDENCE_WRITE_ROOT" => writable
+            },
+            mailbox_root: mailbox, writable_root: writable,
+            hive_executable: hive_executable, browser: true
+          )
+        end
+      end
+
+      tools_index = policy.cli_flags.index("--tools")
+      assert_equal "read,ls,grep,find,evidence_write,evidence_terminal,evidence_browser",
+                   policy.cli_flags.fetch(tools_index + 1)
+      assert_includes policy.cli_flags, "--no-builtin-tools"
+      refute_includes policy.cli_flags, "bash"
+      mounts = policy.command_prefix.each_cons(3).to_a
+      assert_includes mounts, [ "--ro-bind", File.realpath(source), File.realpath(source) ]
+      assert_includes mounts, [ "--ro-bind", File.realpath(task), File.realpath(task) ]
+      assert_includes mounts, [ "--ro-bind", File.realpath(hive_root), "/hive-runtime" ]
+      assert_includes mounts, [ "--bind", File.realpath(mailbox), File.realpath(mailbox) ]
+      assert_includes mounts, [ "--bind", File.realpath(writable), File.realpath(writable) ]
+      extension = File.read(File.join(policy.cleanup_paths.fetch(0), "evidence-tools.ts"))
+      assert_includes extension, "read path escapes the frozen source and task roots"
+      assert_includes extension, 'name: "evidence_write"'
+      assert_includes extension, 'name: "evidence_terminal"'
+      assert_includes extension, 'name: "evidence_browser"'
+      refute_includes extension, "createBashTool"
+      refute_includes extension, "createWriteTool"
+      assert_equal writable, policy.environment.fetch("HIVE_EVIDENCE_WRITE_ROOT")
+    ensure
+      policy&.cleanup!
+    end
+  end
+
   def test_scoped_grok_actor_rejects_missing_auth_and_supports_read_only_web_mode
     with_tmp_dir do |dir|
       task = File.join(dir, "task")

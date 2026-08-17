@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.2.1 - 2026-08-17
+
+- Add per-profile provider-error extraction so a refusal a CLI reports on its
+  event stream is distinguishable from an agent that genuinely produced
+  nothing. `extract_provider_error` returns the provider, the HTTP status when
+  the provider supplied one, and the redacted provider text.
+- Add the `pi` extractor for turns that keep the envelope type and carry the
+  refusal in `stopReason`/`errorMessage`, which no event-type match observes.
+  Such turns previously reached the caller as a clean run with empty content
+  while the process exited zero.
+- Default every other profile to the previously assumed shapes — dedicated
+  `error`, `turn.failed`, and `rate_limit_event` events plus failed `result`
+  events — so no existing profile changes behaviour.
+
 ## 0.2.0 - 2026-08-15
 
 - Add OpenCode `1.18.16+` as a fifth immutable built-in profile with exact

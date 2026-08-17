@@ -2277,12 +2277,11 @@ module Hive
           return
         end
 
-        # C4 from PR #241 ce-code-review: gate on project_enabled? so a
-        # disabled project's queued requests don't dispatch. The
-        # auto-advance path (handle_row) already does this; the
-        # request path must mirror to keep the single-dispatcher
-        # invariant honest.
-        unless project_enabled?(req.project)
+        # A disabled project suppresses autonomous work, but an operator's
+        # freshness-bound `hive act workflow.retry` remains an explicit
+        # one-shot instruction. Let only that recovery request reach the
+        # coordinator; ordinary queued and healer requests stay blocked.
+        unless project_enabled?(req.project) || explicit_action_recovery?(req)
           log_dispatch_request_once(
             :dispatch_request_blocked,
             request_id: req.request_id, project: req.project,
@@ -2384,6 +2383,11 @@ module Hive
       # must honor the same status-row hold as automatic dispatch.
       def dependency_gated_request?(req)
         req.argv[1] != "markers"
+      end
+
+      def explicit_action_recovery?(request)
+        request.requestor.to_s == "action" && request.trigger.to_s == "recovery" &&
+          request.recovery.is_a?(Hash)
       end
 
       # Host-global maintenance request (project == "__global__"): not tied to

@@ -6641,6 +6641,40 @@ end
     end
   end
 
+  def test_explicit_action_recovery_runs_when_autonomous_project_dispatch_is_disabled
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+      observed = row(
+        stage: "4-execute", marker: "error", action: "error",
+        marker_attrs: { "reason" => "timeout", "marker_id" => "marker-1" }
+      )
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [ observed ], dispatch_request_state_home: state_home,
+        recovery_coordinator: coordinator, project_enabled: false
+      )
+      Q.write_request!(
+        project: "p1", slug: "s1",
+        argv: %w[hive run s1 --stage 4-execute --project p1 --json],
+        requestor: "action", trigger: "recovery", request_id: "ACTION-RECOVERY",
+        task_generation: "c" * 64, task_id: 1, expected_stage: "4-execute",
+        expected_marker_name: "error", expected_marker_id: "marker-1",
+        recovery: dispatcher_recovery, state_home: state_home, now: T0
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      assert_equal 1, coordinator.resumes.length
+      assert_empty sup.spawned
+      refute logger.events.any? { |name, attrs|
+        name == :dispatch_request_blocked && attrs[:reason] == "project_disabled"
+      }
+    end
+  end
+
   # R-01 from PR #241 ce-code-review: a spawn failure (Errno::EAGAIN
   # under fork-exhaustion, or any other StandardError raised by
   # dispatch_request!) must not abort the rest of the pending queue.

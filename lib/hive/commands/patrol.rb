@@ -11,6 +11,7 @@ require "hive/patrol/candidate_selector"
 require "hive/patrol/dismissals"
 require "hive/patrol/fingerprint"
 require "hive/patrol/finding_registry"
+require "hive/patrol/shutdown"
 require "hive/patrol/finding_query"
 require "hive/patrol/fixer"
 require "hive/patrol/feature_batch"
@@ -77,6 +78,10 @@ module Hive
       def call
         return list_findings if @list
 
+        # The daemon SIGTERMs this child on shutdown and SIGKILLs it once the
+        # grace window expires. Honour the signal so a restart stops between
+        # units of work instead of mid-agent.
+        Hive::Patrol::Shutdown.install_trap!
         emit(run_cycle)
       rescue Hive::Error => e
         emit_error(e)
@@ -201,6 +206,10 @@ module Hive
           prs_opened = 0
           candidates.each do |finding|
             break if prs_opened >= max_prs || fixes.size >= max_attempts
+            # Before the attempt, so no effect has been prepared for this
+            # finding. Stopping here leaves the candidate untouched for the
+            # next cycle rather than stranding a half-dispatched effect.
+            break if Hive::Patrol::Shutdown.requested?
 
             patch = perform_fix_attempt(
               state, fixer, finding, capture

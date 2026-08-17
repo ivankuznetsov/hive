@@ -686,6 +686,47 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_overlong_verdict_reason_gets_one_repair_round_before_the_append
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      prompts = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        # 1920 bytes, over the contract's 1024-byte statement cap. Without
+        # in-loop validation this only fails inside append_attempt!, which
+        # runs after run_reviewer! returns — so the reviewer never gets told.
+        reason = if prompts.length == 1
+          "The retained document proves the requested flow. " * 40
+        else
+          "The retained document proves the requested flow."
+        end
+
+        {
+          actor: { "context_id" => "reviewer-#{prompts.length}", "agent" => "pi" },
+          output: {
+            "verdicts" => [
+              { "target_id" => "claim-flow", "verdict" => "accepted", "reason" => reason }
+            ]
+          }
+        }
+      end
+
+      reviewer = Hive::Stages::Artifacts.run_reviewer!(
+        task: task, cfg: {}, identity: outcome_identity,
+        requirement: { "claims" => [], "exclusions" => [] }, evidence: [],
+        review_context: {}
+      )
+
+      assert_equal "reviewer-2", reviewer.dig(:actor, "context_id")
+      assert_equal 2, prompts.length
+      assert_includes prompts.last,
+                      "review verdict reason must be a meaningful bounded explanation"
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
   def test_retained_pending_candidate_skips_producer_and_resumes_review
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)

@@ -345,6 +345,37 @@ class OutcomeEvidenceContractTest < Minitest::Test
     end
   end
 
+  def test_verdicts_validate_without_persisting_so_a_reviewer_can_be_repaired
+    contract = Hive::Artifacts::OutcomeEvidence::Contract
+    bounded = {
+      "verdicts" => [
+        {
+          "target_id" => "claim-flow", "verdict" => "accepted",
+          "reason" => "The retained document proves the requested flow."
+        }
+      ]
+    }
+
+    verdicts = contract.verdicts!(bounded)
+    assert_equal 1, verdicts.length
+    assert_equal "claim-flow", verdicts.first.fetch("target_id")
+
+    # 1500 bytes, past the 1024-byte statement cap.
+    overlong = {
+      "verdicts" => [
+        {
+          "target_id" => "claim-flow", "verdict" => "accepted",
+          "reason" => "word " * 300
+        }
+      ]
+    }
+
+    error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      contract.verdicts!(overlong)
+    end
+    assert_match(/review verdict reason must be a meaningful bounded explanation/, error.message)
+  end
+
   private
 
   def claim(id, statement, proof_kind, paths)

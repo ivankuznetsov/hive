@@ -305,9 +305,15 @@ module Hive
             unless reviewer.fetch(:output).keys == [ "verdicts" ]
               raise RoleOutputError, "reviewer output must contain only verdicts"
             end
+            # Check the verdict contract here as well as during the append.
+            # append_attempt! runs after this loop returns, so a violation it
+            # raises escapes the repair channel entirely and ends the stage —
+            # yet an over-long or vague reason is exactly what one more
+            # reviewer turn fixes. Validation only; nothing is persisted.
+            Hive::Artifacts::OutcomeEvidence::Contract.verdicts!(reviewer.fetch(:output))
 
             return reviewer
-          rescue RoleOutputError => e
+          rescue Hive::Artifacts::OutcomeEvidence::StoreError => e
             raise if index + 1 >= MAX_REVIEWER_ATTEMPTS
 
             repair = {

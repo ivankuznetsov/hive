@@ -293,20 +293,40 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
-  def test_standard_total_unavailability_degrades_but_mandatory_blocks
-    [ [ standard_plan, "degraded_cleared", "review_unavailable" ],
-      [ mandatory_plan, "blocked", nil ] ].each do |plan, state, degradation|
-      with_task(plan) do |task, cfg|
-        adapter = FakeAdapter.new do |_request|
-          Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported")
-        end
-        projection = orchestrator(task, cfg, adapter:).advance!
-
-        assert_equal state, projection.record.state
-        degradation ? assert_equal(degradation, projection.record["degradation_reason"]) :
-          assert_nil(projection.record["degradation_reason"])
-        assert_equal %w[primary adversarial], adapter.calls.map(&:kind)
+  def test_standard_total_unavailability_degrades
+    with_task(standard_plan) do |task, cfg|
+      adapter = FakeAdapter.new do |_request|
+        Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported")
       end
+      projection = orchestrator(task, cfg, adapter:).advance!
+
+      assert_equal "degraded_cleared", projection.record.state
+      assert_equal "review_unavailable", projection.record["degradation_reason"]
+      assert_equal %w[primary adversarial], adapter.calls.map(&:kind)
+    end
+  end
+
+  # A mandatory review that could not launch any reviewer has learned nothing
+  # about the plan, so it must not cache a verdict. Reviewer routes are not
+  # part of the review identity, so a terminal `blocked` here would replay
+  # forever even after the reviewer was fixed. Instead the legs are reset and
+  # the review retries itself once capability returns.
+  def test_mandatory_total_unavailability_resets_instead_of_caching_a_verdict
+    with_task(mandatory_plan) do |task, cfg|
+      adapter = FakeAdapter.new do |_request|
+        Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported")
+      end
+      projection = orchestrator(task, cfg, adapter:).advance!
+      record = projection.record
+
+      refute_equal "blocked", record.state
+      assert_equal "reviewing", record.state
+      refute record.execution_allowed?
+      assert_empty record["blockers"]
+      assert_includes record["required_action"], "restore reviewer capability"
+      assert record["routes"].any? { |route| route["recovery_reset"] == true },
+             "the failed legs must be reset so the next run probes capability again"
+      assert_equal %w[primary adversarial], adapter.calls.map(&:kind)
     end
   end
 

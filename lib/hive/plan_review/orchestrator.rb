@@ -138,6 +138,8 @@ module Hive
           adapter_outcomes: outcomes
         )
         if record.effective_level == "mandatory" && initial_coverage.blocked?
+          return reset_for_capability(record) if capability_only_block?(outcomes)
+
           return terminal(
             record, state: "blocked", outcome: "blocked",
             blockers: initial_coverage.blockers,
@@ -296,6 +298,50 @@ module Hive
           )
         )
         @store.publish_current!(projection, expected_version: current&.version)
+      end
+
+      # "unsupported" means the reviewer could not be launched at all — no
+      # skill, no route, a provider hive would not run. That is a statement
+      # about our tooling, not a judgment about the plan, and it changes the
+      # moment a skill is installed, a route is corrected, or a gem ships.
+      #
+      # Terminalising it cached a capability gap as if it were a verdict. The
+      # review is keyed by (task_generation, plan_digest, policy_fingerprint),
+      # and reviewer routes are in none of those, so fixing the reviewer left
+      # the stale `blocked` replaying forever and the task parked on "waive
+      # named coverage or restore required reviewer capability" — with no way
+      # to act on the second half of that sentence.
+      def capability_only_block?(outcomes)
+        observed = Array(outcomes).map(&:to_s)
+        observed.any? && observed.all? { |outcome| outcome == "unsupported" }
+      end
+
+      # Reuse the same recovery_reset an operator's `request-review` appends:
+      # it starts a fresh attempt series for the role, so the next run probes
+      # capability again instead of replaying the old refusal. Doing it here
+      # means restoring the reviewer is enough — no operator action required
+      # to un-park a review that was never about the plan.
+      def reset_for_capability(record)
+        routes = record["routes"]
+        latest = %w[primary adversarial].filter_map { |role| latest_route(record, role) }
+        reset = latest.map do |route|
+          route.slice(
+            "role", "requested", "actual", "capability_result",
+            "independence_verified", "independence_reason"
+          ).merge(
+            "outcome" => "retryable_failure", "retry_at" => nil,
+            "recovery_reset" => true
+          )
+        end
+        Projection.new(
+          publish(
+            record,
+            "routes" => routes + reset,
+            "state" => "reviewing", "outcome" => nil, "blockers" => [],
+            "required_action" => "restore reviewer capability; the review retries on its own",
+            "execution_allowed" => false
+          )
+        )
       end
 
       def ensure_leg(record, role, plan_bytes, requested: nil, merge_coverage: true,

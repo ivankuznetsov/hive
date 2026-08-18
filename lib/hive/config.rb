@@ -126,7 +126,11 @@ module Hive
           ".github/workflows/**", "config/**", "db/migrate/**", "packaging/**",
           "Gemfile", "Gemfile.lock", "hive.gemspec", "install.sh"
         ],
-        "attempts" => { "max_transient" => 2, "timeout_sec" => 900 },
+        # 900s killed real reviews mid-thought: a reviewer reading a 33KB plan
+        # was cut off and recorded as exit_code=1, which reads like a defect in
+        # the reviewer rather than our own stopwatch. This cap exists to stop a
+        # runaway agent, not to bound how long legitimate review may take.
+        "attempts" => { "max_transient" => 2, "timeout_sec" => 1800 },
         "coverage" => { "required" => %w[whole_document adversarial], "optional" => [] },
         "adapter" => "ce_doc_review",
         "reviewers" => {

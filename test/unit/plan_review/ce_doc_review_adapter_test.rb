@@ -5,6 +5,19 @@ require "hive/stages/base"
 class PlanReviewCeDocReviewAdapterTest < Minitest::Test
   include HiveTestHelper
 
+  # Hive journals the review attempt while the reviewer runs, so anchoring its
+  # own bookkeeping made every review fail with "reviewer modified protected
+  # artifacts" for writes the reviewer never made.
+  def test_custody_manifest_does_not_anchor_hive_written_journals
+    anchored = Hive::ArtifactFirewall::ORCHESTRATOR_OWNED -
+      Hive::PlanReview::Adapters::CeDocReview::HiveRunner::ORCHESTRATOR_JOURNALS
+
+    refute_includes anchored, "task-journal.jsonl"
+    refute_includes anchored, "task-projection.json"
+    # The reviewer's actual input must still be protected.
+    assert_includes anchored, "plan.md"
+  end
+
   def test_success_uses_disposable_plan_and_validates_machine_output
     with_request do |request, plan_path|
       original = File.binread(plan_path)

@@ -251,6 +251,14 @@ module AgentCliRuntime
       headless_flag: "-p",
       prompt_style: :headless_flag_value,
       permission_skip_flag: "--always-approve",
+      # Grok confines the filesystem natively, the same shape codex uses.
+      # `workspace` limits writes to the working directory, `read-only`
+      # forbids them entirely; both are built-in profiles (custom ones extend
+      # them from ~/.grok/sandbox.toml). `--always-approve` suppresses the
+      # interactive approval prompt, which a headless reviewer can never answer
+      # — the sandbox, not the prompt, is what actually bounds the agent.
+      workspace_write_flags: [ "--sandbox", "workspace", "--always-approve" ],
+      read_only_flags: [ "--sandbox", "read-only", "--always-approve" ],
       output_format_flags: [ "--output-format", "streaming-json" ],
       version_flag: "--version",
       min_version: "0.2.90",

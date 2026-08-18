@@ -86,13 +86,35 @@ class PlanReviewWorkspaceScopeTest < Minitest::Test
     end
   end
 
+  # opencode declares no sandbox flags and has no bespoke confinement branch,
+  # so it is the current example of a provider hive must refuse. grok used to
+  # sit here; it now confines natively via `--sandbox workspace`.
   def test_provider_without_an_enforceable_scope_is_rejected
     error = assert_raises(Hive::ConfigError) do
       Hive::PlanReview::WorkspaceScope.launch_kwargs(
-        profile: Hive::AgentProfiles.lookup(:grok), workspace: "/tmp/review", role: "adversarial"
+        profile: Hive::AgentProfiles.lookup(:opencode), workspace: "/tmp/review", role: "adversarial"
       )
     end
 
     assert_includes error.message, "cannot enforce disposable workspace confinement"
+  end
+
+  # grok confines the filesystem natively, the same way codex does, so it must
+  # be admitted on capability rather than excluded by a hardcoded allowlist.
+  def test_grok_is_admitted_through_native_sandbox_flags
+    profile = Hive::AgentProfiles.lookup(:grok)
+
+    assert profile.workspace_write_supported?,
+           "grok declares --sandbox flags, so workspace write must be supported"
+    assert Hive::PlanReview::WorkspaceScope.supported?(profile)
+
+    kwargs = Hive::PlanReview::WorkspaceScope.launch_kwargs(
+      profile:, workspace: "/tmp/review", role: "adversarial"
+    )
+
+    assert_equal Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE,
+                 kwargs.fetch(:permission_mode)
+    assert_equal [ "--sandbox", "workspace", "--always-approve" ],
+                 profile.permission_flags(kwargs.fetch(:permission_mode))
   end
 end

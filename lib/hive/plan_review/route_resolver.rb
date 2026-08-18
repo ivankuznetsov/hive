@@ -2,7 +2,6 @@ require "hive/agent_profiles"
 require "hive/agent_runtime"
 require "hive/model_routing"
 require "hive/plan_review"
-require "hive/plan_review/workspace_scope"
 require "hive/secret_patterns"
 
 module Hive
@@ -150,14 +149,11 @@ module Hive
         [ primary, *fallbacks ]
       end
 
+      # Confinement no longer gates who may review — WorkspaceScope.supported?
+      # admits every provider — so the only thing that can refuse one here is
+      # failing to prepare its runtime at all, and the diagnostic says so.
       def default_probe(candidate)
         profile = Hive::AgentProfiles.lookup(candidate.fetch("provider"))
-        unless WorkspaceScope.supported?(profile)
-          return {
-            "status" => "unsupported",
-            "diagnostic" => "provider cannot enforce disposable workspace confinement"
-          }
-        end
         result = Hive::AgentRuntime.prepare!(profile)
         {
           "status" => "present",

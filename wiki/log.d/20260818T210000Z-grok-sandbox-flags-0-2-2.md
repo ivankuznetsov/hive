@@ -45,4 +45,22 @@ Note for anyone dogfooding: installed Hive loads this gem from
 `components/`, so an unreleased component edit has no runtime effect until the
 gem is rebuilt.
 
+## A release re-resolves two lockfiles, not one
+
+The path gem is checked out by both `Gemfile.lock` (`remote:
+components/agent-cli-runtime`) and `web/Gemfile.lock` (`remote:
+../components/agent-cli-runtime`). Bumping `version.rb` without re-resolving
+**both** leaves the stale one unsatisfiable: the web CI jobs run
+`ruby/setup-ruby` with `bundler-cache: true` and `working-directory: web`,
+which installs frozen, so the pin has to match the version on disk exactly.
+
+The 0.2.2 bump moved only the root lockfile, and all three web jobs died in
+setup — before a single test ran, with no test output to read.
+
+`test_every_lockfile_pins_the_released_component_version` now pins the
+invariant. It reads the version from `version.rb` **on disk** rather than
+`AgentCliRuntime::VERSION`, because `test_helper` → `hive` loads the gem from
+the installed `~/.local/share/gem/...` copy; the in-process constant is
+whatever is installed locally, not what this checkout declares.
+
 See [[dependencies]], [[modules/plan-review]].

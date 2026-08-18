@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.2 - 2026-08-18
+
+- Declare Grok's filesystem sandbox flags, so a caller asking for confined
+  execution gets it instead of being told Grok cannot confine. `--sandbox
+  workspace` limits writes to the working directory and `--sandbox read-only`
+  forbids them, both built-in profiles that custom ones extend from
+  `~/.grok/sandbox.toml`; `--always-approve` suppresses the approval prompt a
+  headless run can never answer, leaving the sandbox — not the prompt — as the
+  boundary. Only the Grok profile changes.
+
 ## 0.2.1 - 2026-08-17
 
 - Add per-profile provider-error extraction so a refusal a CLI reports on its

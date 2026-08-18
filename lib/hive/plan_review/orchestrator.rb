@@ -66,7 +66,7 @@ module Hive
            policy_configuration_fresh?(current)
           return Projection.new(current) if current.execution_allowed?
 
-          return resume_review(current, File.binread(plan_path))
+          return resume_review(current, plan_text(plan_path))
         end
 
         signals = PlanSignals.analyze(
@@ -89,7 +89,7 @@ module Hive
            current.policy_fingerprint == policy.policy_fingerprint
           return Projection.new(current) if current.execution_allowed?
 
-          return resume_review(current, File.binread(plan_path))
+          return resume_review(current, plan_text(plan_path))
         end
 
         review_id = Identity.logical(
@@ -102,9 +102,25 @@ module Hive
         return terminal(record, state: "skipped", outcome: "skipped") if
           record.effective_level == "skip"
 
-        resume_review(record, File.binread(plan_path))
+        resume_review(record, plan_text(plan_path))
       rescue StaleObservation
         Projection.load(task_folder: @task.folder)
+      end
+
+      # plan.md is a UTF-8 document, but binread hands back ASCII-8BIT. The
+      # bytes flow into reviewer prompt construction, so the first plan
+      # containing any non-ASCII character — an em dash, an arrow, a curly
+      # quote — blew up the whole plan-review stage with
+      # `Encoding::CompatibilityError: incompatible character encodings:
+      # UTF-8 and BINARY`. PlanSignals.analyze already reads the same file
+      # the right way; this matches it so both agree on what plan.md says.
+      def plan_text(path)
+        bytes = File.binread(path)
+        text = bytes.dup.force_encoding(Encoding::UTF_8)
+        # A plan that is not valid UTF-8 is left as bytes rather than
+        # silently mangled: PlanSignals independently rejects it as
+        # `invalid_utf8`, which is the error the operator should see.
+        text.valid_encoding? ? text : bytes
       end
 
       def resume_review(record, original_plan_bytes)

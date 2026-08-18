@@ -2,7 +2,44 @@ require "test_helper"
 require "hive/config"
 require "hive/plan_review/orchestrator"
 
+require "tmpdir"
+
 class PlanReviewOrchestratorTest < Minitest::Test
+  # A plan containing any non-ASCII character (em dash, arrow, curly quote)
+  # used to crash the whole plan-review stage with
+  # `Encoding::CompatibilityError: incompatible character encodings: UTF-8 and
+  # BINARY`, because plan.md was binread and handed to prompt construction as
+  # ASCII-8BIT. Every webmail.sh plan task died this way 23 times overnight.
+  def test_plan_text_returns_utf8_for_a_plan_with_non_ascii
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "plan.md")
+      File.write(path, "# Plan\n\nUse the port — not the vendor → adapter.\n")
+      orchestrator = Hive::PlanReview::Orchestrator.allocate
+
+      text = orchestrator.send(:plan_text, path)
+
+      assert_equal Encoding::UTF_8, text.encoding
+      assert text.valid_encoding?
+      assert_includes text, "—"
+      # The real failure mode: concatenating with a UTF-8 prompt template.
+      assert_equal "prompt: #{text}", "prompt: " + text
+    end
+  end
+
+  # Invalid UTF-8 must not be silently mangled; PlanSignals reports it as
+  # invalid_utf8, which is the error the operator should actually see.
+  def test_plan_text_leaves_invalid_utf8_as_bytes
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "plan.md")
+      File.binwrite(path, "# Plan\n\xC3\x28 bad\n")
+      orchestrator = Hive::PlanReview::Orchestrator.allocate
+
+      text = orchestrator.send(:plan_text, path)
+
+      refute text.dup.force_encoding(Encoding::UTF_8).valid_encoding?
+    end
+  end
+
   Workflow = Struct.new(:id, keyword_init: true)
   Task = Struct.new(
     :folder, :project_root, :slug, :id, :workflow, :meta_yml_path,

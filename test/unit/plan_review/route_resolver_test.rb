@@ -228,18 +228,19 @@ class PlanReviewRouteResolverTest < Minitest::Test
     assert_includes error.message, "observed plan review route provider must be non-empty"
   end
 
-  # The real probe refuses a provider that cannot confine writes before it ever
-  # prepares a runtime, so an unconfinable reviewer can never be launched.
-  # opencode is the current example; grok used to sit here until it started
-  # confining natively via `--sandbox workspace`.
-  def test_default_probe_refuses_a_provider_that_cannot_confine_the_workspace
+  # Confinement no longer gates the probe — reviewers need the repo, and the
+  # ArtifactFirewall is what guards the protected artifacts. What still
+  # refuses a provider is failing to prepare its runtime at all, and the
+  # diagnostic must name that real reason rather than a policy verdict.
+  def test_default_probe_refuses_a_provider_whose_runtime_cannot_be_prepared
     observation = Hive::PlanReview::RouteResolver.default_probe(
       candidate("opencode", "claude-sonnet-4.5", "anthropic")
     )
 
     assert_equal "unsupported", observation.fetch("status")
-    assert_includes observation.fetch("diagnostic"),
+    refute_includes observation.fetch("diagnostic"),
                     "cannot enforce disposable workspace confinement"
+    assert_includes observation.fetch("diagnostic"), "opencode"
   end
 
   private

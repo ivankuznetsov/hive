@@ -15,18 +15,24 @@ class PlanReviewWorkspaceScopeTest < Minitest::Test
     assert_nil scope.fetch(:disallowed_tools)
   end
 
-  def test_claude_gets_absolute_read_and_edit_rules_for_only_the_disposable_workspace
+  # Reads and search are no longer clipped to the temp dir — a reviewer has to
+  # reach the repository — but edits still point only at the disposable
+  # workspace, and the ArtifactFirewall still guards the protected artifacts.
+  def test_claude_can_reach_the_repo_while_edits_stay_in_the_workspace
     workspace = File.expand_path("/tmp/review")
     scope = Hive::PlanReview::WorkspaceScope.launch_kwargs(
       profile: Hive::AgentProfiles.lookup(:claude), workspace:, role: "planner_revision"
     )
+    allowed = scope.fetch(:allowed_tools).join(" ")
 
     assert_equal Hive::PermissionScope::SCOPED_PERMISSION_MODE,
                  scope.fetch(:permission_mode)
-    assert_equal [ "Read(//tmp/review/**)", "Edit(//tmp/review/**)" ],
-                 scope.fetch(:allowed_tools)
-    assert_includes scope.fetch(:disallowed_tools), "Bash"
-    refute_includes scope.fetch(:allowed_tools).join(" "), "bypassPermissions"
+    # Shell is required: the finding format needs SHA-256, and without it a
+    # completed review cannot be emitted at all.
+    assert_includes allowed, "Bash"
+    refute_includes Array(scope.fetch(:disallowed_tools)), "Bash"
+    assert_includes allowed, "Edit(//tmp/review/**)"
+    refute_includes allowed, "bypassPermissions"
   end
 
   def test_pi_reuses_managed_bubblewrap_with_one_host_output
@@ -57,8 +63,10 @@ class PlanReviewWorkspaceScopeTest < Minitest::Test
       end
 
       assert_same policy, scope.fetch(:runtime_policy)
-      assert_equal [ "Read", "Edit(hive-plan-review-result.json)" ],
-                   observed.first.fetch("tools")
+      assert_equal(
+        Hive::PlanReview::WorkspaceScope::REVIEW_TOOLS + [ "Edit(#{workspace}/**)" ],
+        observed.first.fetch("tools")
+      )
       assert_equal workspace, observed.last.fetch(:task_folder)
       assert_equal workspace, observed.last.fetch(:package_root)
       assert_equal [ output_path ], observed.last.fetch(:managed_outputs)
@@ -86,17 +94,26 @@ class PlanReviewWorkspaceScopeTest < Minitest::Test
     end
   end
 
-  # opencode declares no sandbox flags and has no bespoke confinement branch,
-  # so it is the current example of a provider hive must refuse. grok used to
-  # sit here; it now confines natively via `--sandbox workspace`.
-  def test_provider_without_an_enforceable_scope_is_rejected
-    error = assert_raises(Hive::ConfigError) do
-      Hive::PlanReview::WorkspaceScope.launch_kwargs(
-        profile: Hive::AgentProfiles.lookup(:opencode), workspace: "/tmp/review", role: "adversarial"
-      )
-    end
+  # Confinement no longer decides who may review: a reviewer needs the repo,
+  # and the ArtifactFirewall — not an empty temp dir — is what guards the
+  # protected artifacts. No provider is refused for lacking a sandbox.
+  def test_no_provider_is_refused_for_lacking_confinement
+    %i[opencode claude pi grok codex].each do |name|
+      profile = Hive::AgentProfiles.lookup(name)
 
-    assert_includes error.message, "cannot enforce disposable workspace confinement"
+      assert Hive::PlanReview::WorkspaceScope.supported?(profile),
+             "#{name} must not be refused for confinement"
+    end
+  end
+
+  # The reviewer must be able to read the code, search it, shell out (the
+  # finding format needs SHA-256), and fetch referenced docs.
+  def test_reviewers_get_the_tools_review_actually_requires
+    tools = Hive::PlanReview::WorkspaceScope::REVIEW_TOOLS
+
+    %w[Read Grep Glob Bash WebFetch WebSearch].each do |tool|
+      assert_includes tools, tool
+    end
   end
 
   # grok confines the filesystem natively, the same way codex does, so it must

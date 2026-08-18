@@ -43,7 +43,10 @@ module Hive
               result = Hive::Stages::Base.spawn_agent(
                 @task,
                 prompt:,
-                add_dirs: [ cwd ],
+                # The repository too, not just the disposable workspace: a
+                # reviewer that cannot read the code, wiki, or contracts the
+                # plan refers to can only check the document against itself.
+                add_dirs: [ cwd, request.project_root ].compact.uniq,
                 cwd:,
                 max_budget_usd: @cfg.dig("budget_usd", "plan"),
                 timeout_sec: request.timeout_sec,

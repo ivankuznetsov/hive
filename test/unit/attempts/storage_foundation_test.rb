@@ -228,6 +228,50 @@ class AttemptsStorageFoundationTest < Minitest::Test
     end
   end
 
+  # A launch that never produced an agent spent nothing, so it must not spend
+  # a daily slot. Without this, a night of failed handoffs exhausts the day's
+  # budget and locks out the runs that would have succeeded.
+  def test_unstarted_loss_refunds_its_daily_slot
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      index = store.decision_index
+      lost = lost_record(store, attempt_id: "never-ran", request_id: "request-never-ran")
+
+      assert_nil lost["started_at"], "fixture must never have reached running"
+      index.record_acceptance(lost)
+      assert_equal 1, index.daily_count(project: "demo", date: NOW.to_date)
+
+      2.times { index.refund_unstarted(lost) }
+
+      assert_equal 0, index.daily_count(project: "demo", date: NOW.to_date)
+    end
+  end
+
+  # A loss after the agent started keeps its charge: the tokens are already
+  # spent, and the daily cap is a spend bound.
+  def test_loss_after_starting_is_not_refunded
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      index = store.decision_index
+      launching = store.create_launching(
+        **identity(attempt_id: "ran-then-lost", request_id: "request-ran-then-lost"),
+        launch_timeout_sec: 30, now: NOW
+      )
+      claimed = store.claim(
+        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+      running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+      lost = store.mark_lost(running, reason: "owner_gone", now: NOW + 3)
+
+      refute_nil lost["started_at"], "fixture must have reached running"
+      index.record_acceptance(lost)
+
+      assert_raises(Hive::Attempts::StoreError) { index.refund_unstarted(lost) }
+      assert_equal 1, index.daily_count(project: "demo", date: NOW.to_date)
+    end
+  end
+
   def test_live_capacity_reservations_are_bounded_idempotent_and_identity_checked
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))

@@ -311,9 +311,19 @@ module Hive
       # the stale `blocked` replaying forever and the task parked on "waive
       # named coverage or restore required reviewer capability" — with no way
       # to act on the second half of that sentence.
+      # The test is whether any leg produced a *verdict*, not whether every leg
+      # failed the same way. A run can mix an `unsupported` primary with an
+      # adversarial refused for `same_model_family`: different causes, both
+      # about our configuration rather than the plan, and both fixed by
+      # changing routes. Caching either as "blocked" is caching an answer we
+      # never got.
+      VERDICT_OUTCOMES = (
+        Adapters::Base::SUCCESS_OUTCOMES + %w[terminal_failure]
+      ).freeze
+
       def capability_only_block?(outcomes)
         observed = Array(outcomes).map(&:to_s)
-        observed.any? && observed.all? { |outcome| outcome == "unsupported" }
+        observed.any? && observed.none? { |outcome| VERDICT_OUTCOMES.include?(outcome) }
       end
 
       # Reuse the same recovery_reset an operator's `request-review` appends:

@@ -523,6 +523,9 @@ class AttemptsStorageFoundationTest < Minitest::Test
         source, attempt_id: "succeeded", request_id: "succeeded-request"
       )
       assert_raises(Hive::Attempts::StoreError) { index.refund_tempfail(succeeded) }
+      # A live attempt has not finished losing yet, so its charge is not free
+      # to give back even though it never reached running.
+      assert_raises(Hive::Attempts::StoreError) { index.refund_unstarted(launching) }
 
       tempfail = terminal_record(
         source,

@@ -3,6 +3,8 @@ require "hive/stages/plan"
 require "hive/task_meta"
 
 class HiveStagesPlanTest < Minitest::Test
+  include HiveTestHelper
+
   FakeTask = Struct.new(:folder, :slug, keyword_init: true)
   Marker = Struct.new(:name)
 
@@ -64,6 +66,22 @@ class HiveStagesPlanTest < Minitest::Test
       assert_nil Hive::TaskMeta.read(dir)[:depends_on]
     end
   end
+
+  # Adoption only saves an operator a copy, so a meta.yml that refuses the
+  # rewrite must stay silent rather than fail the plan stage: admission still
+  # reports plan_dependency_mismatch and still says what to do about it.
+  def test_meta_rewrite_failure_does_not_fail_the_plan_stage
+    with_planned_task(plan_doc("rails-task")) do |task, dir|
+      raising = ->(*) { raise "meta.yml is held by another writer" }
+
+      with_replaced_singleton_method(Hive::TaskMeta, :rewrite, raising) do
+        assert_nil Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+      end
+
+      assert_nil Hive::TaskMeta.read(dir)[:depends_on]
+    end
+  end
+
   def test_action_for_known_markers
     assert_equal "draft_updated", Hive::Stages::Plan.action_for(:waiting)
     assert_equal "complete", Hive::Stages::Plan.action_for(:complete)

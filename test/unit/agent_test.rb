@@ -2471,6 +2471,65 @@ class AgentTest < Minitest::Test
     end
   end
 
+  # A provider failure in :state_file_marker mode must leave a durable ERROR
+  # marker behind, not just a failed result hash: the owning stage rereads the
+  # marker to decide its retry, and an unmarked zero-exit turn reads as success.
+  def test_state_file_marker_records_a_provider_error_marker
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = {
+        timed_out: false,
+        exit_code: 0,
+        final_message: "",
+        provider_error: {
+          kind: :provider_error,
+          provider: :pi,
+          status_code: 502,
+          message: "Upstream error from DigitalOcean: stream failed"
+        }
+      }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "provider_error", marker.attrs.fetch("reason")
+      assert_equal "pi", marker.attrs.fetch("provider")
+      assert_equal "502", marker.attrs.fetch("status_code")
+      assert_equal "Upstream error from DigitalOcean: stream failed",
+                   marker.attrs.fetch("message")
+      assert_equal :error, result[:status]
+      assert_equal "provider_error", result[:error_reason]
+    end
+  end
+
+  # An empty errorMessage still has to produce a readable marker: the stage and
+  # the operator both read this text, so it must never render as a blank reason.
+  def test_state_file_marker_provider_error_falls_back_to_a_generic_message
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = {
+        timed_out: false,
+        exit_code: 0,
+        final_message: "",
+        provider_error: { kind: :provider_error, provider: :pi, message: "" }
+      }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "provider reported a failed turn", marker.attrs.fetch("message")
+      refute marker.attrs.key?("status_code"),
+             "a missing status code must be compacted out of the marker"
+      assert_equal "provider reported a failed turn", result[:error_message]
+    end
+  end
+
   def test_pi_zero_exit_typed_quota_failure_keeps_limits_classification
     with_tmp_dir do |dir|
       task = make_task(dir)

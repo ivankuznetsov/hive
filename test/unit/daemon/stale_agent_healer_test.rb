@@ -160,6 +160,47 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  # A live holder means someone else already owns the task; losing the lock race
+  # is an ordinary outcome, so the healer yields silently and leaves the wait
+  # marker for the next tick rather than logging a failure.
+  def test_attributed_execute_dirty_wait_yields_to_a_live_lock_holder
+    lock_error = Hive::ConcurrentRunError.new(
+      "busy", holder: { "attempt_id" => "attempt-live" }
+    )
+
+    with_attributed_dirty_execute_waiting_row do |row, state_file|
+      with_replaced_singleton_method(
+        Hive::Lock, :with_task_lock, ->(*, **) { raise lock_error }
+      ) do
+        @healer.heal([ row ], now: NOW)
+      end
+
+      assert_equal :execute_waiting, Hive::Markers.current(state_file).name
+      assert_empty @logger.events.select { |name, _attributes|
+        %i[marker_healed marker_heal_failed].include?(name)
+      }, "a lost lock race is not a heal failure"
+    end
+  end
+
+  # Any other lock or marker fault is a real failure: it must be logged and the
+  # wait marker left untouched, so the operator sees why the upgrade never ran.
+  def test_attributed_execute_dirty_wait_logs_unexpected_heal_failures
+    with_attributed_dirty_execute_waiting_row do |row, state_file|
+      with_replaced_singleton_method(
+        Hive::Lock, :with_task_lock, ->(*, **) { raise Errno::ENOSPC, "marker write" }
+      ) do
+        @healer.heal([ row ], now: NOW)
+      end
+
+      assert_equal :execute_waiting, Hive::Markers.current(state_file).name
+      failure = @logger.events.find { |name, _attributes| name == :marker_heal_failed }
+      refute_nil failure, "an unexpected fault must be logged"
+      assert_equal "execute_dirty_worktree", failure.last.fetch(:reason)
+      assert_match(/ENOSPC/, failure.last.fetch(:error))
+      assert_empty @logger.events.select { |name, _attributes| name == :marker_healed }
+    end
+  end
+
   def test_unattributed_execute_dirty_wait_remains_a_human_pause
     with_marker_file do |state_file|
       attrs = { "reason" => "dirty_worktree" }
@@ -850,6 +891,30 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       state_file = File.join(dir, "task.md")
       File.write(state_file, "# task\n\n<!-- AGENT_WORKING -->\n")
       yield state_file
+    end
+  end
+
+  # An attributed dirty-worktree execute wait: the one shape the legacy bridge
+  # upgrades. Yields the row plus its state file so failure paths can assert the
+  # marker survived untouched.
+  def with_attributed_dirty_execute_waiting_row
+    with_marker_file do |state_file|
+      attrs = {
+        "reason" => "dirty_worktree",
+        "attempt_id" => "attempt-pi-1"
+      }
+      Hive::Markers.set(state_file, :execute_waiting, attrs)
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "4-execute",
+        workflow: "coding",
+        marker: "execute_waiting",
+        marker_attrs: attrs,
+        action: "needs_input",
+        live_task_lock: false
+      )
+      yield row, state_file
     end
   end
 

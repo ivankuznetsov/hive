@@ -1439,6 +1439,44 @@ class RefactorPatrolCommandTest < Minitest::Test
     )
   end
 
+  def test_scheduled_slice_reviews_only_the_claimed_feature_at_the_pinned_sha
+    with_refactor_patrol_project do |repo|
+      with_tmp_dir do |worktree_root|
+        entry = Hive::Config.find_project("demo")
+        sha = IO.popen([ "git", "-C", repo, "rev-parse", "HEAD" ], &:read).strip
+        reviewer = FakeReviewer.new({})
+        observed = []
+        cfg = Hive::Config.load(repo).merge("worktree_root" => worktree_root)
+        command = Hive::Commands::RefactorPatrol.new(
+          "demo", json: true, project_entry: entry,
+          scheduled_slice: {
+            "id" => "claim-1", "project_id" => entry.fetch("project_id"),
+            "analysis_sha" => sha, "feature_id" => "checkout",
+            "sweep_generation" => 0
+          },
+          config_loader: ->(_path) { cfg },
+          mapper_factory: lambda do |root, _cfg, _state|
+            observed << [
+              root,
+              IO.popen([ "git", "-C", root, "rev-parse", "HEAD" ], &:read).strip
+            ]
+            FakeMapper.new([ feature("billing"), feature("checkout") ])
+          end,
+          reviewer_factory: ->(*) { reviewer }
+        )
+
+        payload = nil
+        capture_io { payload = command.call }
+
+        assert_equal [ "checkout" ], reviewer.seen_feature_ids
+        assert_equal sha, payload.fetch("last_scanned_sha")
+        assert_equal [ "checkout" ], payload.fetch("feature_results").map { |item| item.fetch("feature_id") }
+        refute_equal repo, observed.fetch(0).fetch(0)
+        assert_equal sha, observed.fetch(0).fetch(1)
+      end
+    end
+  end
+
   def test_default_manifest_resolver_receives_authoritative_project_context
     with_refactor_patrol_project do |repo|
       entry = Hive::Config.find_project("demo")

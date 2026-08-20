@@ -167,18 +167,29 @@ per child, checkpoints each completed slice, and resumes the remainder in a
 later child. On-demand discovery processes its complete supplied scope under
 the run-wide thesis and wall-clock bounds; it cannot silently report a partial
 scope as complete.
-Before each ordinary or architecture review/fix spawn, Hive writes an
-unmetered reservation under the registered project name, and one lock on that
-same counter serializes the agent lifetime while checking the shared
-mode-derived UTC-day launch allowance (`36/18/8/2` for
-ultrapatrol/high/medium/low). Metered, unmetered, and controller-abandoned
-launches count equally. There are no Patrol token budgets, token admission
-checks, multipliers, or Patrol-specific USD allowances; token totals remain
-telemetry. Ordinary incomplete or errored discovery keeps its 60-second retry.
+Scheduled current-main Architecture reviews use an engine-specific,
+mode-derived UTC-day allowance (`16/8/4/2` for
+ultrapatrol/high/medium/low). Hive atomically reserves each launch under the
+stable registry project ID immediately before the provider spawn. The
+Architecture lane is independent from ordinary Patrol; merged-PR discovery,
+actions, fix workflow stages, and publication do not consume it. There are no
+Patrol token budgets, token admission checks, multipliers, or Patrol-specific
+USD allowances; token totals remain telemetry. Ordinary incomplete or errored
+discovery keeps its 60-second retry.
 A discovery error whose structured `resource_exhaustion.reason` is
 `daily_agent_spawn_limit` waits until the next UTC day. Provider-originated
 `token_limit` or `turn_limit` results retain checkpoint evidence and use the
 fixed one-hour cooldown shared by actions.
+
+The module's scheduled-discovery hook is a distinct current-main producer, not
+a relabeled merged-PR JobStore candidate. Every claim fetches current `main`,
+maps the current architecture/documentation feature IDs, selects one ID after
+the durable stable cursor, and pins that exact SHA for one review launch.
+Removed IDs are skipped and new IDs enter the ordered map. Completion requires
+an exact-SHA, complete feature result; Hive persists an immutable enumerable
+scheduled-result aggregate, publishes its dispositions to the fix-admission
+outbox, and only then advances the cursor. Replay after a crash converges on
+the same project/SHA/feature occurrence even when claim timestamps differ.
 The read-only runner accepts either bare JSON or exactly one `json` code fence.
 Plain-text rationale may precede or follow that single fence, but another fence
 remains invalid so there is only one canonical structured result. The third

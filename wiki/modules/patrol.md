@@ -28,7 +28,7 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree and observed proof so the standard review daemon can run reviewers/triage/fix/browser flow. Mandatory and optional calls use the same fingerprint-locked exact reconciliation, so a retry after rename/fsync ambiguity reuses the matching task and rejects PR/head identity conflicts. Staging/quarantine renames use the shared best-effort directory-fsync policy. |
 | `Hive::Patrol::AgentLaunch` | `lib/hive/patrol/agent_launch.rb` | Builds the provider-specific Patrol launch envelope shared by ordinary review and fix. Active exact or coarse `models:` routes win; otherwise a Claude-backed launch carries the project-wide `claude.model` / `claude.effort` pin instead of falling through to Claude Code's interactive default. Claude uses a verified minimal review/fix tool set and caps reviews at four completed turns; the fourth is emergency JSON finalization only. No prompt or token estimate participates in launch admission. |
 | `Hive::Patrol::ReviewErrorDetails` | `lib/hive/patrol/review_error_details.rb` | Converts an agent resource-exhaustion result into the shared durable review-error detail envelope used by ordinary and architecture patrol. |
-| `Hive::Patrol::LaunchBudget` | `lib/hive/patrol/launch_budget.rb` | Owns the project-keyed full-agent-lifetime lock, the shared mode-derived UTC-day launch allowance, and UsageDb recording for ordinary review/fix and architecture review/fix. Metered and unmetered rows both count as launches. Usage-store failure blocks new launches because the durable count cannot be proven, while token volume never affects admission. |
+| `Hive::Patrol::LaunchBudget` | `lib/hive/patrol/launch_budget.rb` | Owns the strict stable-project/UTC-date/engine scheduled-discovery ledger plus best-effort UsageDb telemetry. It atomically reserves one ordinary or Architecture slice before provider spawn, persists lane-specific provider holds, and never charges fix/workflow/post-merge work. UsageDb supplies only one-time attributable legacy seeding; token volume never affects admission. |
 | `Hive::Patrol::Dismissals` | `lib/hive/patrol/dismissals.rb` | Reconciles closed-unmerged patrol PRs into `dismissed.json` so the same finding is not immediately re-filed. Retryable publication entries match only their exact receipted PR URL and remain retryable while that PR is open. |
 | `Hive::Patrol::BaseStateStore` | `lib/hive/patrol/base_state_store.rb` | Shared JSON lifecycle for ordinary patrol and architecture patrol's legacy reporting state: directory creation, state/fingerprint/dismissal files, run artifacts, and tolerant reads. It delegates atomic replacement to `Hive::AtomicFile` while preserving the stores' prior no-fsync behavior. |
 | `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Defines the ordinary-patrol collections, is the sole ordinary `EffectGateway` composition root, and exposes the ordinary product recovery API over the shared occurrence journal. Its full-cycle lock is also the nonblocking daemon admission fence: recovery and reservation cannot adopt a manual worker's occurrence, while a manual mutating cycle refuses an already-reserved daemon occurrence. Read-only dry runs do not allocate journal occurrences. Feature maps use one digest-bound batch effect whose local writes can be reconciled or replayed after a partial failure, so repository size does not consume the occurrence effect budget. Fingerprint writes require the configured gateway and persist the exact canonical set/delete operation in the occurrence intent. Before any fingerprint read or suppression decision, recovery walks every recovery-active predecessor capture, reconciles or retry-safely redispatches that exact operation, and rejects multiple nonterminal predecessors for one fingerprint. It also projects typed publication outbox entries into one immutable fingerprint binding, writing the binding before tuple acknowledgement so crash-before-ack replay is an exact no-op. Fingerprints retain PR mapping only; the removed effect-intent maps are not a parallel retry authority. |
@@ -218,33 +218,40 @@ Patrol's read-only `--list` and `--show` queries remain available so prior
 evidence is not hidden, and ordinary recovery can finish projecting an already
 reserved receipt without starting a new repository scan.
 
-`patrol.mode` controls cadence and the shared project-wide UTC-day launch
-allowance: ultrapatrol 36, high 18, medium 8, and low 2. `off` disables ordinary
-scheduling; the default eight-launch value still protects separately enabled
-Architecture Patrol. An explicit `max_agent_spawns_per_day` overrides the
-derived value. Every ordinary or architecture review/fix child consumes one
-slot, including launches whose provider reports no tokens. There are no Patrol
-token budgets, token admission checks, multipliers, or Patrol-specific native
-USD clamps. UsageDb token totals remain telemetry, while its Patrol launch rows
-provide the durable daily count. The gate writes an unmetered reservation under
-the registered project name before the provider child starts, then updates the
-same row with final telemetry; controller loss therefore cannot reopen a slot.
-The counter lock uses the same project name, so matching checkout basenames do
-not couple unrelated projects.
+`patrol.mode` controls cadence and two independent per-project, per-engine
+UTC-day scheduled-discovery allowances: ordinary and Architecture Patrol each
+receive 16 launches in `ultrapatrol`, 8 in `high`, 4 in `medium`, and 2 in
+`low`. `off` disables ordinary scheduling; separately enabled Architecture
+Patrol retains the default four-launch lane. The retired
+`max_agent_spawns_per_day` key is accepted only as inert legacy config and does
+not alter either lane. There are no Patrol token budgets or token admission
+checks. UsageDb remains telemetry; a strict owner-private allowance ledger next
+to UsageDb is admission authority and is keyed by stable registry `project_id`,
+UTC date, and engine. Per-date shards retain clock-rollback evidence without
+making each launch rewrite the complete history. The ledger records an atomic reservation immediately before each
+scheduled discovery provider spawn, so controller loss cannot reopen a slot.
+Manual and daemon-scheduled discovery share the same engine lane.
 
 Ordinary review batching is bounded by `max_features_per_cycle` and remaining
-daily launch capacity; a shipping cycle reserves as much of that capacity as
-possible for `max_fix_attempts_per_cycle` while still allowing one review.
-Fixes remain bounded by `max_fix_attempts_per_cycle` and `max_prs_per_cycle`.
-Daily launch exhaustion parks ordinary and Architecture Patrol until the next
-UTC day. Architecture Patrol retains its checkpoint/receipts and uses a fixed
-one-hour retry for provider `token_limit`, `turn_limit`, or project-lock
-`agent_in_flight` discovery results. Lock contention therefore cannot consume a
-new journal claim every minute while ordinary Patrol owns the shared agent
-slot. Other retryable discovery uses 60 seconds, while actions use the shared one-hour cooldown. When
+ordinary discovery capacity. Fix, admission, validation, review, publish,
+merged-PR Architecture discovery, and Architecture actions do not consume
+scheduled-discovery allowance. Daily exhaustion parks only the exhausted lane
+until the next UTC day. Provider retry deadlines are durable per lane, survive
+daemon restart and UTC rollover, and do not block the other Patrol engine or
+standard workflows. When
 a later review fails, the SHA-bound cursor
 advances past only the proven-clean prefix; the failed feature and remaining
 suffix stay pinned for retry.
+
+Scheduled Architecture Patrol is no longer sourced from merged-PR JobStore
+rows. Each schedule claim fetches and maps current `main`, selects one stable
+architecture feature ID after its durable cursor, and runs exactly one review
+launch at that pinned SHA. Removed IDs are skipped and newly mapped IDs join the
+ordered cursor. A successful exact-SHA result is persisted as an enumerable
+scheduled-result aggregate and offered to the fix-admission outbox before the
+cursor advances. A coverage-pass generation distinguishes later same-SHA
+sweeps, while crash replay within one pass converges on the same occurrence.
+Merged-PR jobs and actions remain a separate post-merge authority.
 
 Architecture discovery leases are crash fences, not mandatory restart delays.
 Candidate selection read-only probes an attached worker's PID, process start

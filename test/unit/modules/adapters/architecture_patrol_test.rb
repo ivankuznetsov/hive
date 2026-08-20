@@ -53,6 +53,30 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
     def cancel(*args, **options) = @cancelled = [ args, options ]
   end
 
+  class FakeScheduledProducer
+    attr_reader :claimed_at, :completed, :released
+
+    def initialize(claim = nil, complete: true)
+      @claim = claim
+      @complete_result = complete
+    end
+
+    def claim(now:)
+      @claimed_at = now
+      @claim
+    end
+
+    def complete(**options)
+      @completed = options
+      @complete_result
+    end
+
+    def release(**options)
+      @released = options
+      true
+    end
+  end
+
   def test_first_party_package_is_strictly_validated
     result = Hive::ModulePackage::Validator.validate!(
       File.expand_path("../../../../modules/architecture-patrol", __dir__),
@@ -115,10 +139,11 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
   def test_permission_denial_precedes_claim_and_engine
     with_project(owner: "module") do |project|
       scheduler = FakeScheduler.new([ candidate ])
+      producer = FakeScheduledProducer.new(scheduled_claim)
       commands = []
       denied = configuration(shadow: false)
-      denied.grants["github_mutations"] = [ "pull_requests" ]
-      adapter = adapter_for(scheduler, commands: commands)
+      denied.grants["repository_write"] = false
+      adapter = adapter_for(scheduler, producer: producer, commands: commands)
 
       assert_raises(Hive::Modules::CapabilityDenied) do
         adapter.call(
@@ -127,7 +152,35 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
         )
       end
       assert_nil scheduler.reserved
+      assert_nil producer.claimed_at
       assert_empty commands
+    end
+  end
+
+  def test_scheduled_discovery_claims_current_main_slice_without_github_mutation_permission
+    with_project(owner: "module") do |project|
+      scheduler = FakeScheduler.new([ candidate ])
+      producer = FakeScheduledProducer.new(scheduled_claim)
+      commands = []
+      allowed = configuration(shadow: false)
+      allowed.grants["github_mutations"] = []
+      allowed.grants["network_hosts"] = []
+      adapter = adapter_for(
+        scheduler, producer: producer, commands: commands,
+        result: scheduled_result
+      )
+
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "scheduled-discovery", event: schedule_event,
+        configuration: allowed
+      )
+
+      name, options = commands.fetch(0)
+      assert_equal "demo", name
+      assert_equal scheduled_claim, options.fetch(:scheduled_slice)
+      assert_nil scheduler.reserved, "scheduled discovery is independent of merged-PR jobs"
+      assert_equal scheduled_claim.fetch("id"), producer.completed.fetch(:claim_id)
+      assert_nil producer.released
     end
   end
 
@@ -193,19 +246,23 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
     end
   end
 
-  def test_retry_result_and_engine_exception_preserve_scheduler_lifecycle
+  def test_retry_result_and_engine_exception_release_scheduled_slice
     with_project(owner: "module") do |project|
-      retrying = FakeScheduler.new([ candidate ], complete_status: :retry)
-      adapter = adapter_for(retrying)
+      retrying = FakeScheduledProducer.new(scheduled_claim)
+      adapter = adapter_for(
+        FakeScheduler.new([ candidate ]), producer: retrying,
+        result: scheduled_result.merge("review_complete" => false)
+      )
       assert_equal 1, adapter.call(
         project: project, hook_id: "scheduled-discovery", event: schedule_event,
         configuration: configuration(shadow: false)
       )
+      assert_equal scheduled_claim.fetch("id"), retrying.released.fetch(:claim_id)
 
-      failing = FakeScheduler.new([ candidate ])
+      failing = FakeScheduledProducer.new(scheduled_claim)
       adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
         command_factory: ->(*) { RaisingCommand.new },
-        scheduler_factory: ->(**) { failing }, shadow_sink: ->(_record) { }
+        scheduled_producer_factory: ->(*) { failing }, shadow_sink: ->(_record) { }
       )
       error = assert_raises(RuntimeError) do
         adapter.call(
@@ -214,7 +271,59 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
         )
       end
       assert_equal "engine failed", error.message
-      assert_equal "module_hook_error", failing.cancelled.fetch(1).fetch(:reason)
+      assert_equal scheduled_claim.fetch("id"), failing.released.fetch(:claim_id)
+    end
+  end
+
+  def test_scheduled_completion_loss_is_not_reported_as_success
+    with_project(owner: "module") do |project|
+      producer = FakeScheduledProducer.new(scheduled_claim, complete: false)
+      adapter = adapter_for(
+        FakeScheduler.new([]), producer: producer, result: scheduled_result
+      )
+
+      assert_equal 1, adapter.call(
+        project: project, hook_id: "scheduled-discovery", event: schedule_event,
+        configuration: configuration(shadow: false)
+      )
+      assert producer.completed
+    end
+  end
+
+  def test_scheduled_provider_retry_parks_only_architecture_and_survives_adapter_restart
+    with_project(owner: "module") do |project|
+      retry_at = NOW + 1800
+      result = scheduled_result.merge(
+        "review_complete" => false,
+        "review_errors" => [ {
+          "details" => { "resource_exhaustion" => {
+            "reason" => "provider_quota", "retry_at" => retry_at.iso8601
+          } }
+        } ]
+      )
+      first = FakeScheduledProducer.new(scheduled_claim)
+      assert_equal 1, adapter_for(
+        FakeScheduler.new([]), producer: first, result: result
+      ).call(
+        project: project, hook_id: "scheduled-discovery", event: schedule_event,
+        configuration: configuration(shadow: false)
+      )
+
+      parked = FakeScheduledProducer.new(scheduled_claim)
+      restarted = adapter_for(FakeScheduler.new([]), producer: parked)
+      assert_equal 0, restarted.call(
+        project: project, hook_id: "scheduled-discovery", event: schedule_event,
+        configuration: configuration(shadow: false)
+      )
+      assert_nil parked.claimed_at
+
+      cfg = Hive::Config.load(project.fetch("path"))
+      ordinary = Hive::Patrol::LaunchBudget.new(
+        project.fetch("path"), cfg: cfg,
+        project_id: project.fetch("project_id"), project_name: project.fetch("name"),
+        engine: :ordinary, clock: -> { NOW }
+      )
+      assert_equal 4, ordinary.remaining_launches
     end
   end
 
@@ -227,7 +336,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
         project: project, hook_id: "scheduled-discovery", event: schedule_event,
         configuration: configuration(shadow: true)
       )
-      assert_equal "not_due", shadow.fetch(0).fetch("rationale")
+      assert_equal "due", shadow.fetch(0).fetch("rationale")
       assert_nil scheduler.reserved
 
       assert_raises(Hive::ConfigError) do
@@ -290,9 +399,9 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
         project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
       )).fetch(0)
       record = JSON.parse(File.binread(file))
-      assert_equal "job-7", record.dig("module_decision", "job_id")
-      assert_equal "discovery", record.dig("module_decision", "phase")
-      assert_equal "due", record.dig("module_decision", "rationale")
+      assert_nil record.dig("module_decision", "job_id")
+      assert_nil record.dig("module_decision", "phase")
+      assert_equal "not_due", record.dig("module_decision", "rationale")
       refute record.fetch("comparable")
     end
   end
@@ -355,7 +464,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
     end
   end
 
-  def test_default_command_and_scheduler_factories_forward_to_legacy_components
+  def test_default_command_and_scheduler_factories_forward_merged_jobs_to_legacy_components
     with_project(owner: "module") do |project|
       scheduler = FakeScheduler.new([ candidate ])
       calls = []
@@ -373,7 +482,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       begin
         adapter = Hive::Modules::Adapters::ArchitecturePatrol.new
         assert_equal 0, adapter.call(
-          project: project, hook_id: "scheduled-discovery", event: schedule_event,
+          project: project, hook_id: "merged-pr-discovery", event: merged_event,
           configuration: configuration(shadow: false)
         )
       ensure
@@ -521,22 +630,26 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
 
   private
 
-  def adapter_for(scheduler, commands: [], shadow: [])
+  def adapter_for(scheduler, producer: FakeScheduledProducer.new, commands: [], shadow: [],
+                  result: { "ok" => true })
     Hive::Modules::Adapters::ArchitecturePatrol.new(
       command_factory: lambda do |name, options|
         commands << [ name, options ]
-        FakeCommand.new
+        FakeCommand.new(result)
       end,
       scheduler_factory: lambda do |**options|
         options.fetch(:registry).call
         scheduler
       end,
+      scheduled_producer_factory: ->(*) { producer },
       shadow_sink: ->(record) { shadow << record }
     )
   end
 
   def with_project(owner: "legacy")
     with_tmp_dir do |root|
+      previous_usage_path = Hive::UsageDb.path
+      Hive::UsageDb.path = File.join(root, "usage.db")
       state = File.join(root, ".hive-state")
       FileUtils.mkdir_p(state)
       File.write(
@@ -553,6 +666,8 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       }
       write_migration_state(project, owner)
       yield(project)
+    ensure
+      Hive::UsageDb.path = previous_usage_path
     end
   end
 
@@ -589,6 +704,26 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       job_id: "job-7", action_phase: :discovery,
       manifest_path: "/project/manifest.json",
       source: { "manifest_checksum" => DIGEST }
+    }
+  end
+
+  def scheduled_claim
+    {
+      "id" => "scheduled-claim", "project_id" => "project-1",
+      "analysis_sha" => "1" * 40, "feature_id" => "feature-a",
+      "sweep_generation" => 0, "map_digest" => "a" * 64,
+      "claimed_at" => NOW.iso8601(6), "owner_pid" => Process.pid,
+      "owner_process_start_time" => "start"
+    }
+  end
+
+  def scheduled_result
+    {
+      "schema" => "hive-refactor-patrol", "schema_version" => 4,
+      "ok" => true, "review_complete" => true,
+      "last_scanned_sha" => scheduled_claim.fetch("analysis_sha"),
+      "review_errors" => [], "feature_results" => [],
+      "fix" => [], "discuss" => [], "dismiss" => []
     }
   end
 

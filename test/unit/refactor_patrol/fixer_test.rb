@@ -1346,27 +1346,25 @@ class RefactorPatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_default_agent_runner_refuses_an_exhausted_launch_budget
+  def test_default_agent_runner_does_not_admit_fixes_through_discovery_budget
     with_tmp_dir do |dir|
+      recorded = []
       budget = Object.new
-      budget.define_singleton_method(:acquire) { |**| false }
-      budget.define_singleton_method(:exhaustion_message) { "daily launch limit reached" }
-      budget.define_singleton_method(:resource_exhaustion) do
-        { reason: "daily_agent_spawn_limit", limit: 8, observed: 8 }
-      end
+      budget.define_singleton_method(:acquire) { |**| flunk("fix must not request discovery admission") }
+      budget.define_singleton_method(:record!) { |**options| recorded << options }
       subject = Hive::RefactorPatrol::Fixer.new(dir, cfg: cfg(dir), launch_budget: budget)
+      agent = Object.new
+      agent.define_singleton_method(:run!) { { status: :ok, usage: {} } }
 
-      result = subject.send(
-        :run_agent, prompt: "isolate policy", worktree_path: dir,
-        run_dir: File.join(dir, "runs", "fix")
-      )
+      result = with_replaced_singleton_method(Hive::Agent, :new, ->(**) { agent }) do
+        subject.send(
+          :run_agent, prompt: "isolate policy", worktree_path: dir,
+          run_dir: File.join(dir, "runs", "fix")
+        )
+      end
 
-      assert_equal :error, result.fetch(:status)
-      assert_equal "daily launch limit reached", result.fetch(:error_message)
-      assert_equal(
-        { reason: "daily_agent_spawn_limit", limit: 8, observed: 8 },
-        result.fetch(:resource_exhaustion)
-      )
+      assert_equal :ok, result.fetch(:status)
+      assert_equal "refactor-patrol-fix", recorded.fetch(0).fetch(:stage)
     end
   end
 

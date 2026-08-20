@@ -889,23 +889,23 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_daily_launch_limit_skips_discovery_candidates_until_the_next_utc_day
+  def test_scheduled_discovery_exhaustion_does_not_block_post_merge_candidates
     old_path = Hive::UsageDb.path
     with_project do |dir, entry, store|
       Hive::UsageDb.path = File.join(dir, "usage.db")
-      8.times do
+      8.times do |index|
+        stage = index.even? ? "patrol-review" : "refactor-patrol-review"
         Hive::UsageDb.record!(
           agent: "codex", model: nil, project_slug: entry.fetch("name"),
-          task_slug: "patrol-review", stage: "patrol-review",
+          task_slug: stage, stage: stage,
           started_at: T0, ended_at: T0, input: 1, output: 1, cached: 0
         )
       end
       enqueue(store)
       scheduler = scheduler(entry, store)
 
-      assert_empty scheduler.candidates(now: T0)
       assert_equal [ "job-7" ],
-                   scheduler.candidates(now: T0 + 43_200).map { |item| item.fetch(:job_id) }
+                   scheduler.candidates(now: T0).map { |item| item.fetch(:job_id) }
     end
   ensure
     Hive::UsageDb.path = old_path

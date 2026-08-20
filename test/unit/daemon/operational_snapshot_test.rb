@@ -82,7 +82,15 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         initial_hidden_archived_task_count: 2,
         final_hidden_archived_task_count: 2,
         controller: { "limits" => { "global" => 2 }, "in_flight" => 2 },
-        queue: { "pending" => 1 }, recoveries: {}, now: T0 + 1
+        queue: { "pending" => 1 },
+        discovery_allowances: {
+          "utc_date" => "2026-07-20",
+          "projects" => [ { "project_id" => "project-1", "lanes" => {
+            "ordinary" => { "used" => 1, "remaining" => 3 },
+            "architecture" => { "used" => 2, "remaining" => 2 }
+          } } ]
+        },
+        recoveries: {}, now: T0 + 1
       )
 
       snapshot = reader.read(now: T0 + 2)
@@ -97,6 +105,9 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assert_equal "route-decision-1",
                    snapshot.dig("tasks", 0, "disposition", "routing", "decision_id")
       assert_equal 2, snapshot.dig("attempt_storage", "hot", "records")
+      assert_equal 3,
+                   snapshot.dig("discovery_allowances", "projects", 0,
+                                "lanes", "ordinary", "remaining")
       assert_equal "complete", snapshot.dig("attempt_storage", "layout", "migration")
       assert_equal 2, snapshot.fetch("hidden_archived_task_count")
       assert_equal 0o700, File.stat(File.dirname(path)).mode & 0o777

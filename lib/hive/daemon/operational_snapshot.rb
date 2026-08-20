@@ -120,7 +120,11 @@ module Hive
           @tick_sequence += 1
           @started_at = now.utc
           @observations = {}
-          @store.write(base_record(phase: "started", now: now).merge("tasks" => []))
+          @store.write(
+            base_record(phase: "started", now: now).merge(
+              "discovery_allowances" => nil, "tasks" => []
+            )
+          )
           tick_sequence
         end
 
@@ -134,6 +138,7 @@ module Hive
             base_record(phase: "complete", now: now).merge(
               "reason" => nil,
               "capacity" => {}, "queue" => {},
+              "discovery_allowances" => {},
               "provider_holds" => [], "recoveries" => {},
               "tasks" => []
             )
@@ -159,6 +164,7 @@ module Hive
               "reason" => reason.to_s,
               "capacity" => nil,
               "queue" => nil,
+              "discovery_allowances" => nil,
               "provider_holds" => [],
               "recoveries" => {},
               "tasks" => []
@@ -167,6 +173,7 @@ module Hive
         end
 
         def complete(initial_rows:, final_rows:, controller:, queue:, recoveries:,
+                     discovery_allowances: {},
                      initial_hidden_archived_task_count: 0,
                      final_hidden_archived_task_count: 0,
                      now: Time.now.utc)
@@ -197,6 +204,7 @@ module Hive
               "hidden_archived_task_count" => final_hidden_archived_task_count,
               "capacity" => controller || {},
               "queue" => queue || {},
+              "discovery_allowances" => discovery_allowances || {},
               "provider_holds" => holds,
               "recoveries" => recoveries || {},
               "tasks" => tasks
@@ -212,7 +220,8 @@ module Hive
           @store.write(
             base_record(phase: "complete", now: now).merge(
               "reason" => nil,
-              "capacity" => {}, "queue" => {}, "provider_holds" => [],
+              "capacity" => {}, "queue" => {}, "discovery_allowances" => {},
+              "provider_holds" => [],
               "recoveries" => {}, "tasks" => [],
               "shutdown" => {
                 "admission_closed" => admission_closed == true,
@@ -635,6 +644,7 @@ module Hive
             "tick_sequence" => base["tick_sequence"],
             "capacity" => nil,
             "queue" => nil,
+            "discovery_allowances" => nil,
             "provider_holds" => [],
             "tasks" => []
           )

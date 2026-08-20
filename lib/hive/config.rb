@@ -505,10 +505,10 @@ module Hive
         # fix/validate loops. At the cap the controller removes `rework` from
         # the semantic gate's allowed routes.
         "max_rework_cycles" => 2,
-        # Shared by ordinary and Architecture Patrol. Modes derive a concrete
-        # UTC-day allowance when explicitly selected; medium is the fallback
-        # for direct/synthetic configs and architecture-only projects.
-        "max_agent_spawns_per_day" => 8,
+        # Independent ceiling for each scheduled discovery engine. This is a
+        # closed mode-derived projection; legacy shared launch overrides are
+        # accepted as inert input but never alter discovery admission.
+        "scheduled_discovery_launches_per_engine_per_day" => 4,
         # Open ready (non-draft) PRs by default so the babysitter — which
         # skips draft PRs — picks them up. Set `draft_prs: true` per project
         # to revert to draft PRs that need a manual "ready" toggle first.
@@ -1116,7 +1116,11 @@ module Hive
       return unless PATROL_MODES.include?(mode)
 
       PATROL_MODE_KNOBS.fetch(mode).each do |key, value|
-        patrol[key] = value if !nested_key?(data, "patrol", key) || patrol[key].nil?
+        if key == "scheduled_discovery_launches_per_engine_per_day"
+          patrol[key] = value
+        elsif !nested_key?(data, "patrol", key) || patrol[key].nil?
+          patrol[key] = value
+        end
       end
       patrol["mode"] = mode
     end
@@ -3500,24 +3504,24 @@ module Hive
       "ultrapatrol" => {
         "trigger" => "timer",
         "poll_interval_sec" => 1800,
-        "max_agent_spawns_per_day" => 36,
+        "scheduled_discovery_launches_per_engine_per_day" => 16,
         "enabled" => true
       },
       "high" => {
         "trigger" => "timer",
         "poll_interval_sec" => 7200,
-        "max_agent_spawns_per_day" => 18,
+        "scheduled_discovery_launches_per_engine_per_day" => 8,
         "enabled" => true
       },
       "medium" => {
         "trigger" => "timer",
         "poll_interval_sec" => 14_400,
-        "max_agent_spawns_per_day" => 8,
+        "scheduled_discovery_launches_per_engine_per_day" => 4,
         "enabled" => true
       },
       "low" => {
         "trigger" => "new_commits",
-        "max_agent_spawns_per_day" => 2,
+        "scheduled_discovery_launches_per_engine_per_day" => 2,
         "enabled" => true
       },
       "off" => {
@@ -3534,7 +3538,7 @@ module Hive
       [ "max_fix_attempts_per_cycle", 1 ],
       [ "max_prs_per_cycle", 1 ],
       [ "max_rework_cycles", 0 ],
-      [ "max_agent_spawns_per_day", 2 ]
+      [ "scheduled_discovery_launches_per_engine_per_day", 2 ]
     ].freeze
 
     def validate_patrol!(cfg, source_path)

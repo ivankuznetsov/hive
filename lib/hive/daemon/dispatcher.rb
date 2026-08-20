@@ -1682,6 +1682,7 @@ module Hive
           final_hidden_archived_task_count: verification.hidden_archived_task_count,
           controller: @controller.operational_snapshot(now: completed_at),
           queue: operational_queue_snapshot(now: completed_at, queue_state: queue_state),
+          discovery_allowances: operational_discovery_allowance_snapshot(now: completed_at),
           recoveries: operational_recovery_snapshot(queue_state: queue_state),
           now: completed_at
         )
@@ -1694,6 +1695,14 @@ module Hive
 
       def operational_snapshot_now
         Time.now.utc
+      end
+
+      def operational_discovery_allowance_snapshot(now:)
+        return {} unless @patrol_scheduler&.respond_to?(:discovery_allowance_snapshot)
+
+        @patrol_scheduler.discovery_allowance_snapshot(now: now)
+      rescue StandardError => e
+        { "status" => "unavailable", "reason" => e.class.name }
       end
 
       def publish_operational_snapshot(method, phase:, **attributes)

@@ -166,6 +166,35 @@ module Hive
         drained
       end
 
+      def discovery_allowance_snapshot(now: Time.now.utc)
+        observed = now.utc
+        projects = @registry.call.map do |entry|
+          cfg = @config_loader.call(entry.fetch("path"))
+          lanes = %i[ordinary architecture].to_h do |engine|
+            snapshot = Hive::Patrol::LaunchBudget.new(
+              entry.fetch("path"), cfg: cfg,
+              project_id: entry.fetch("project_id"),
+              project_name: entry.fetch("name"), engine: engine,
+              clock: -> { observed }
+            ).allowance_snapshot
+            [ engine.to_s, snapshot.transform_keys(&:to_s) ]
+          end
+          {
+            "project" => entry.fetch("name"),
+            "project_id" => entry.fetch("project_id"),
+            "mode" => cfg.dig("patrol", "mode"),
+            "lanes" => lanes
+          }
+        rescue Hive::ConfigError, KeyError => e
+          {
+            "project" => entry["name"].to_s,
+            "project_id" => entry["project_id"].to_s,
+            "status" => "unavailable", "reason" => e.class.name
+          }
+        end
+        { "utc_date" => observed.strftime("%Y-%m-%d"), "projects" => projects }
+      end
+
       def reserve(candidate, now: Time.now)
         project = candidate.fetch(:project)
         entry = candidate.fetch(:migration_entry)
@@ -240,17 +269,22 @@ module Hive
         end
         if exit_code == Hive::ExitCodes::SUCCESS
           @failures.delete(project)
+          allowance_budget(pending.fetch(:entry), now).clear_park! if pending
         else
           count = @failures.dig(project, :count).to_i + 1
           interval = FAILURE_BACKOFF_SCHEDULE[
             [ count - 1, FAILURE_BACKOFF_SCHEDULE.size - 1 ].min
           ]
+          exhaustions = patrol_resource_exhaustions(envelope)
           interval = Hive::Patrol::LaunchBudget.resource_exhaustion_backoff_sec(
-            patrol_resource_exhaustion_reasons(envelope),
+            exhaustions.map { |item| item.fetch("reason") },
             now: now,
             fallback: interval
           )
           @failures[project] = { count: count, next_eligible_at: now + interval }
+          persist_provider_hold(
+            pending.fetch(:entry), exhaustions, now: now, fallback: interval
+          ) if pending
         end
       end
 
@@ -278,21 +312,23 @@ module Hive
       private
 
       def launch_capacity_available?(entry, cfg, now)
-        budget = Hive::Patrol::LaunchBudget.new(
-          entry.fetch("path"), cfg: cfg, project_name: entry.fetch("name"),
-          clock: -> { now }
-        )
+        budget = allowance_budget(entry, now, cfg: cfg)
         return true if budget.remaining_launches.positive?
 
-        reason = budget.resource_exhaustion&.fetch(:reason, nil)
-        delay = Hive::Patrol::LaunchBudget.resource_exhaustion_backoff_sec(
-          [ reason ].compact, now: now, fallback: FAILURE_BACKOFF_SCHEDULE.first
-        )
-        @next_check_at[entry.fetch("name")] = now + delay
+        exhaustion = budget.resource_exhaustion || {}
+        retry_at = parse_retry_time(exhaustion["retry_at"] || exhaustion[:retry_at])
+        deadline = retry_at || begin
+          reason = exhaustion["reason"] || exhaustion[:reason]
+          delay = Hive::Patrol::LaunchBudget.resource_exhaustion_backoff_sec(
+            [ reason ].compact, now: now, fallback: FAILURE_BACKOFF_SCHEDULE.first
+          )
+          now + delay
+        end
+        @next_check_at[entry.fetch("name")] = deadline
         false
       end
 
-      def patrol_resource_exhaustion_reasons(envelope)
+      def patrol_resource_exhaustions(envelope)
         return [] unless envelope.is_a?(Hash)
 
         errors = envelope["review_errors"] || envelope[:review_errors]
@@ -302,9 +338,49 @@ module Hive
           details = error["details"] || error[:details]
           exhaustion = details.is_a?(Hash) &&
                        (details["resource_exhaustion"] || details[:resource_exhaustion])
-          exhaustion.is_a?(Hash) &&
-            (exhaustion["reason"] || exhaustion[:reason]).to_s
+          next unless exhaustion.is_a?(Hash)
+
+          exhaustion.transform_keys(&:to_s).tap do |item|
+            item["reason"] = item.fetch("reason", "").to_s
+          end
         end
+      end
+
+      def allowance_budget(entry, now, cfg: nil)
+        Hive::Patrol::LaunchBudget.new(
+          entry.fetch("path"), cfg: cfg || @config_loader.call(entry.fetch("path")),
+          project_id: entry.fetch("project_id"),
+          project_name: entry.fetch("name"), engine: :ordinary,
+          clock: -> { now }
+        )
+      end
+
+      def persist_provider_hold(entry, exhaustions, now:, fallback:)
+        exhaustion = exhaustions.find do |item|
+          reason = item.fetch("reason")
+          !reason.empty? && reason != "daily_agent_spawn_limit" &&
+            reason != "legacy_attribution_ambiguous"
+        end
+        return unless exhaustion
+
+        retry_at = parse_retry_time(exhaustion["retry_at"] || exhaustion["retry_after"])
+        retry_at ||= now + Integer(exhaustion["retry_after_sec"] || fallback)
+        allowance_budget(entry, now).park!(
+          retry_at: retry_at, reason: exhaustion.fetch("reason")
+        )
+      rescue ArgumentError, TypeError
+        allowance_budget(entry, now).park!(
+          retry_at: now + fallback, reason: exhaustion.fetch("reason")
+        )
+      end
+
+      def parse_retry_time(value)
+        return value.utc if value.respond_to?(:utc)
+        return nil if value.to_s.empty?
+
+        Time.iso8601(value.to_s).utc
+      rescue ArgumentError
+        nil
       end
 
       def backed_off?(project, now)

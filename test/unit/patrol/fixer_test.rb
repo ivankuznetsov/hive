@@ -1947,14 +1947,12 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_run_agent_wrapper_refuses_an_exhausted_launch_budget
+  def test_run_agent_wrapper_does_not_admit_fixes_through_discovery_budget
     with_tmp_git_repo do |repo|
+      recorded = []
       budget = Object.new
-      budget.define_singleton_method(:acquire) { |**| false }
-      budget.define_singleton_method(:exhaustion_message) { "daily launch limit reached" }
-      budget.define_singleton_method(:resource_exhaustion) do
-        { reason: "daily_agent_spawn_limit", limit: 8, observed: 8 }
-      end
+      budget.define_singleton_method(:acquire) { |**| flunk("fix must not request discovery admission") }
+      budget.define_singleton_method(:record!) { |**options| recorded << options }
       fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), launch_budget: budget)
       profile = Struct.new(:name, :initial_context_tokens) do
         def require_cli_capability!(name)
@@ -1963,14 +1961,17 @@ class HivePatrolFixerTest < Minitest::Test
           [ "--safe-mode", "--disable-slash-commands" ]
         end
       end.new(:claude, 20_000)
+      agent = Object.new
+      agent.define_singleton_method(:run!) { { status: :ok, usage: {} } }
 
       result = with_replaced_singleton_method(Hive::AgentProfiles, :lookup, ->(*) { profile }) do
-        fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
+        with_replaced_singleton_method(Hive::Agent, :new, ->(**) { agent }) do
+          fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
+        end
       end
 
-      assert_equal :error, result.fetch(:status)
-      assert_equal "daily launch limit reached", result.fetch(:error_message)
-      assert_equal "daily_agent_spawn_limit", result.dig(:resource_exhaustion, :reason)
+      assert_equal :ok, result.fetch(:status)
+      assert_equal "patrol-fix", recorded.fetch(0).fetch(:stage)
     end
   end
 
@@ -2036,15 +2037,9 @@ class HivePatrolFixerTest < Minitest::Test
       profiles_lookup = Hive::AgentProfiles.method(:lookup)
       agent_new = Hive::Agent.method(:new)
       usage_record = Hive::UsageDb.method(:record!)
-      record_calls = 0
       profiles_singleton.define_method(:lookup) { |*| Struct.new(:name).new("claude") }
       agent_singleton.define_method(:new) { |*| fake_agent }
-      usage_singleton.define_method(:record!) do |**args|
-        record_calls += 1
-        raise "db locked" if record_calls == 2
-
-        usage_record.call(**args)
-      end
+      usage_singleton.define_method(:record!) { |**| raise "db locked" }
 
       result = nil
       _out, err = capture_io do

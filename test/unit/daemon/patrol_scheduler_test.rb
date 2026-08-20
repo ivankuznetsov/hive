@@ -519,6 +519,60 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     Hive::UsageDb.path = old_path
   end
 
+  def test_provider_retry_hold_survives_scheduler_restart_without_parking_architecture
+    old_path = Hive::UsageDb.path
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = File.join(dir, "usage.db")
+      entry = project_entry(dir)
+      cfg = enabled_cfg
+      write_state(dir, "last_scanned_sha" => "old")
+      first = scheduler(entry, cfg)
+      assert_equal 1, first.tick(now: T0).size
+      retry_at = T0 + 3600
+      first.complete(
+        project: "p1", exit_code: 1, now: T0 + 10,
+        envelope: {
+          "review_errors" => [ {
+            "details" => { "resource_exhaustion" => {
+              "reason" => "provider_quota", "retry_at" => retry_at.iso8601
+            } }
+          } ]
+        }
+      )
+
+      restarted = scheduler(entry, cfg)
+      assert_empty restarted.tick(now: T0 + 20)
+      architecture = Hive::Patrol::LaunchBudget.new(
+        dir, cfg: cfg, project_id: entry.fetch("project_id"),
+        project_name: entry.fetch("name"), engine: :architecture,
+        clock: -> { T0 + 20 }
+      )
+      assert_equal 4, architecture.remaining_launches
+      assert_equal 1, restarted.tick(now: retry_at).size
+    end
+  ensure
+    Hive::UsageDb.path = old_path
+  end
+
+  def test_operational_snapshot_projects_both_discovery_lanes
+    old_path = Hive::UsageDb.path
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = File.join(dir, "usage.db")
+      entry = project_entry(dir)
+      view = scheduler(entry, enabled_cfg).discovery_allowance_snapshot(now: T0)
+
+      assert_equal "2026-05-28", view.fetch("utc_date")
+      project = view.fetch("projects").fetch(0)
+      assert_equal entry.values_at("name", "project_id"),
+                   project.values_at("project", "project_id")
+      assert_equal %w[architecture ordinary], project.fetch("lanes").keys.sort
+      assert_equal 4, project.dig("lanes", "ordinary", "remaining")
+      assert_equal 4, project.dig("lanes", "architecture", "remaining")
+    end
+  ensure
+    Hive::UsageDb.path = old_path
+  end
+
   # Finding U2/poll_interval_sec: the new_commits trigger must run its
   # `git rev-parse` due-check on the slow patrol cadence, not every
   # daemon tick. Without the throttle the scheduler shelled out to git on

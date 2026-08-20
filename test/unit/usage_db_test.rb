@@ -560,6 +560,37 @@ class UsageDbTest < Minitest::Test
     end
   end
 
+  def test_patrol_discovery_seed_attributes_reviews_and_excludes_non_discovery_rows
+    with_usage_db do
+      now = Time.utc(2026, 8, 20, 12)
+      rows = [
+        [ "patrol-review", nil ],
+        [ "refactor-patrol-review-unmetered", "patrol_discovery_launch" ],
+        [ "patrol-fix", nil ],
+        [ "refactor-patrol-review", "patrol_non_discovery_launch" ],
+        [ "patrol-unclassified", nil ]
+      ]
+      rows.each_with_index do |(stage, source), index|
+        Hive::UsageDb.record!(
+          agent: "codex", model: nil, project_slug: "alpha", task_slug: stage,
+          stage: stage, started_at: now + index, ended_at: now + index,
+          input: 0, output: 0, cached: 0, source: source
+        )
+      end
+
+      seed = Hive::UsageDb.patrol_discovery_seed(
+        scope: { project_slug: "alpha" }, date: "2026-08-20"
+      )
+      assert seed.fetch(:available)
+      assert_equal({ count: 1, ambiguous: 1 }, seed.fetch(:ordinary))
+      assert_equal({ count: 1, ambiguous: 0 }, seed.fetch(:architecture))
+      other = Hive::UsageDb.patrol_discovery_seed(
+        scope: { project_slug: "beta" }, date: "2026-08-20"
+      )
+      assert_equal 0, other.dig(:ordinary, :count)
+    end
+  end
+
   def test_aggregate_with_broken_path_warns_and_returns_zero_tree
     with_tmp_dir do |dir|
       Hive::UsageDb.path = dir

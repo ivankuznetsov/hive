@@ -139,7 +139,6 @@ module Hive
           )
         @claim_maintenance_transitions =
           Hive::RefactorPatrol::ClaimMaintenanceTransitions.new
-        @launch_deferred_until = {}
         @events = []
         @schemers = SUPPORTED_REPORT_SCHEMA_VERSIONS.to_h do |version|
           [ version, JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol", version: version))) ]
@@ -172,11 +171,10 @@ module Hive
           else
             []
           end
-          discovery = if claimable.any? && discovery_launch_available?(entry, now)
-            claimable
-          else
-            []
-          end
+          # JobStore discovery is merged-PR/post-merge work. Its claim and
+          # provider backoff remain authoritative, but it never consults the
+          # independent scheduled-architecture daily allowance.
+          discovery = claimable
           work = discovery.map { |job| { aggregate: job, phase: :discovery } } +
                  store.actionable_jobs(now: now).map { |job| { aggregate: job, phase: :action } }
           [ entry.fetch("name"), work ]
@@ -622,29 +620,6 @@ module Hive
       def discovery_available?(entry)
         cfg = entry.fetch("_refactor_patrol_cfg")
         cfg.dig("refactor_patrol", "enabled") == true
-      end
-
-      def discovery_launch_available?(entry, now)
-        project = entry.fetch("name")
-        deadline = @launch_deferred_until[project]
-        return false if deadline && now < deadline
-
-        budget = Hive::Patrol::LaunchBudget.new(
-          entry.fetch("path"), cfg: entry.fetch("_refactor_patrol_cfg"),
-          project_name: entry.fetch("name"),
-          clock: -> { now }
-        )
-        if budget.remaining_launches.positive?
-          @launch_deferred_until.delete(project)
-          return true
-        end
-
-        reason = budget.resource_exhaustion&.fetch(:reason, nil)
-        delay = Hive::Patrol::LaunchBudget.resource_exhaustion_backoff_sec(
-          [ reason ].compact, now: now, fallback: RETRY_BACKOFF_SEC
-        )
-        @launch_deferred_until[project] = now + delay
-        false
       end
 
       def result_path_for(entry, job_id, phase)

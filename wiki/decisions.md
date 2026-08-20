@@ -763,7 +763,7 @@ status returns to its released v0.6.9 v1 shape without `job_store_resets`, while
 retaining later valid fields such as the `binary_drift: unreadable` state. This
 decision supersedes ADR-041.
 
-## ADR-043: Architecture Patrol uses categorical routes and one daily launch allowance
+## ADR-043: Architecture Patrol uses categorical routes and independent discovery allowances
 
 **Status:** Active
 
@@ -780,24 +780,23 @@ explicit `fix`, `discuss`, or `dismiss` route plus categorical route reasons and
 `architecture_effects`. Verified, sufficiently confident, unblocked work may
 `fix`; strategic or safety decisions `discuss`; unverifiable or inadmissible
 work `dismiss`es. Numerical leverage and thresholds are deleted. Ordinary and
-Architecture Patrol share one project-wide agent lock and one mode-derived
-UTC-day launch allowance: 36/18/8/2 for ultrapatrol/high/medium/low. Metered and
-unmetered review/fix launches count equally. Hive writes an unmetered
-reservation under the registered project name before the provider child starts
-and updates the same row on completion, so controller loss does not reopen the
-slot and same-basename projects remain independent. Explicit overrides must be
-at least 2 so review cannot permanently starve fix work. Token totals are telemetry only;
-there is no Patrol token budget or token-based admission. Architecture JobStore
-starts fresh at v4 and never reads or rewrites v3. `hive update` runs fleet
-migration that deletes retired token/per-cycle/specialized quota keys while
-preserving an explicit `max_agent_spawns_per_day` override.
+Architecture Patrol have independent scheduled-discovery lanes under the
+stable registry project ID. Each lane receives 16/8/4/2 launches for
+ultrapatrol/high/medium/low; the legacy shared override is inert. Hive writes
+an atomic reservation to a strict UTC-date ledger immediately before a
+scheduled provider child starts, so controller loss does not reopen the slot
+and neither engine can starve the other. Fix, remediation, review, publication,
+and post-merge work do not consume discovery capacity. Token totals are
+telemetry only; there is no Patrol token budget or token-based admission.
+Architecture JobStore starts fresh at v4 and never reads or rewrites v3.
 
 **Consequences:** Existing v3 JobStore bytes remain recoverable as files but
 have no runtime continuity. `discuss` creates an issue action; `fix` is PR-first
 with a dormant deterministic-nonfixable issue fallback; `dismiss` creates no
 action. Ordinary transient discovery retries after 60 seconds; provider
-`token_limit`/`turn_limit` discovery and action retries use one fixed hour;
-Hive daily launch exhaustion sleeps until the next UTC day. Wall-clock, turn,
+provider discovery retry deadlines are durable per engine and may cross UTC
+midnight; Hive daily launch exhaustion sleeps until the next UTC day for only
+the exhausted lane. Wall-clock, turn,
 feature/fix/PR, process-custody, and daemon concurrency bounds remain. This
 decision supersedes ADR-042.
 

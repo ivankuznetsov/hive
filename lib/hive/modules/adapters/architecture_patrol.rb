@@ -8,6 +8,8 @@ require "hive/modules/migration/patrols"
 require "hive/modules/migration/shadow_comparator"
 require "hive/refactor_patrol/state_store"
 require "hive/refactor_patrol/decision_projection"
+require "hive/refactor_patrol/scheduled_slice_producer"
+require "hive/patrol/launch_budget"
 
 module Hive
   module Modules
@@ -24,12 +26,16 @@ module Hive
         }.freeze
 
         def initialize(command_factory: nil, scheduler_factory: nil,
+                       scheduled_producer_factory: nil,
                        state_store_factory: nil, shadow_sink: nil)
           @command_factory = command_factory || lambda do |project, options|
             Hive::Commands::RefactorPatrol.new(project, **options)
           end
           @scheduler_factory = scheduler_factory || lambda do |**options|
             Hive::Daemon::RefactorPatrolScheduler.new(**options)
+          end
+          @scheduled_producer_factory = scheduled_producer_factory || lambda do |entry, cfg|
+            Hive::RefactorPatrol::ScheduledSliceProducer.new(entry: entry, cfg: cfg)
           end
           @state_store_factory = state_store_factory
           @shadow_sink = shadow_sink
@@ -66,6 +72,11 @@ module Hive
           end
           require_observation_capabilities!(context)
           cfg = effective_config(project)
+          if hook_id == "scheduled-discovery"
+            return shadow(project, configuration, event, "due") if mode == :shadow
+
+            return dispatch_scheduled(project, cfg, configuration, context, event)
+          end
           scheduler = @scheduler_factory.call(
             registry: -> { [ project ] }, config_loader: ->(_path) { cfg },
             dry_run: mode == :shadow || configuration.settings.fetch("dry_run"),
@@ -86,6 +97,78 @@ module Hive
 
           require_mutation_capabilities!(context) unless configuration.settings.fetch("dry_run")
           run_candidate(project, cfg, configuration, context, scheduler, candidate, event)
+        end
+
+        def dispatch_scheduled(project, cfg, configuration, context, event)
+          return 0 unless scheduled_budget(project, cfg, event).remaining_launches.positive?
+
+          require_scheduled_mutation_capabilities!(context) unless configuration.settings.fetch("dry_run")
+          producer = @scheduled_producer_factory.call(project, cfg)
+          claim = producer.claim(now: event_time(event))
+          return 0 unless claim
+
+          options = {
+            json: true, dry_run: configuration.settings.fetch("dry_run"),
+            project_entry: project, config_loader: ->(_path) { cfg },
+            capability_context: context, scheduled_slice: claim,
+            module_execution: {
+              "module" => "architecture-patrol",
+              "generation" => configuration.generation.fetch("source_commit"),
+              "configuration_digest" => configuration.digest
+            }
+          }
+          envelope = @command_factory.call(project.fetch("name"), options).call
+          successful = envelope.is_a?(Hash) && envelope["ok"] == true &&
+                       envelope["review_complete"] == true &&
+                       envelope["last_scanned_sha"] == claim.fetch("analysis_sha") &&
+                       Array(envelope["review_errors"]).empty?
+          if successful
+            completed = producer.complete(
+              claim_id: claim.fetch("id"), result: envelope,
+              now: event_time(event)
+            )
+            return 1 unless completed
+
+            scheduled_budget(project, cfg, event).clear_park!
+            0
+          else
+            producer.release(claim_id: claim.fetch("id"), now: event_time(event))
+            persist_scheduled_provider_hold(project, cfg, event, envelope)
+            1
+          end
+        rescue StandardError
+          producer&.release(claim_id: claim.fetch("id"), now: event_time(event)) if claim
+          raise
+        end
+
+        def persist_scheduled_provider_hold(project, cfg, event, envelope)
+          exhaustion = Array(envelope && envelope["review_errors"]).filter_map do |error|
+            error.dig("details", "resource_exhaustion") if error.is_a?(Hash)
+          end.find do |item|
+            item.is_a?(Hash) && !%w[daily_agent_spawn_limit legacy_attribution_ambiguous]
+              .include?(item["reason"].to_s)
+          end
+          return unless exhaustion
+
+          now = event_time(event)
+          retry_at = begin
+            Time.iso8601(exhaustion["retry_at"] || exhaustion["retry_after"])
+          rescue ArgumentError, TypeError
+            now + (exhaustion["retry_after_sec"] || 3600).to_i.clamp(1, 86_400)
+          end
+          scheduled_budget(project, cfg, event).park!(
+            retry_at: retry_at, reason: exhaustion.fetch("reason").to_s
+          )
+        end
+
+        def scheduled_budget(project, cfg, event)
+          now = event_time(event)
+          Hive::Patrol::LaunchBudget.new(
+            project.fetch("path"), cfg: cfg,
+            project_id: project.fetch("project_id"),
+            project_name: project.fetch("name"), engine: :architecture,
+            clock: -> { now }
+          )
         end
 
         def state_store_for(project)
@@ -155,6 +238,11 @@ module Hive
           context.require_github_mutation!("pull_requests")
           context.require_external_command!("gh")
           context.require_network_host!("api.github.com")
+        end
+
+        def require_scheduled_mutation_capabilities!(context)
+          context.require_repository_write!
+          context.require_filesystem_write!(".hive-state/refactor_patrol/**")
         end
 
         def effective_config(project)

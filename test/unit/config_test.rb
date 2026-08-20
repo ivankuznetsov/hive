@@ -996,6 +996,7 @@ class ConfigTest < Minitest::Test
 
       assert_equal false, cfg.dig("patrol", "enabled")
       assert_equal 11, cfg.dig("patrol", "max_agent_spawns_per_day")
+      assert_equal 4, cfg.dig("patrol", "scheduled_discovery_launches_per_engine_per_day")
       assert_equal true, cfg.dig("refactor_patrol", "enabled")
       assert_equal true, cfg.dig("refactor_patrol", "auto_fix", "enabled")
       assert_equal "codex", cfg.dig("refactor_patrol", "auto_fix", "agent")
@@ -1307,11 +1308,11 @@ class ConfigTest < Minitest::Test
 
   def test_load_resolves_patrol_frequency_modes
     cases = {
-      "ultrapatrol" => [ "timer", 1800, true, 36 ],
-      "high" => [ "timer", 7200, true, 18 ],
-      "medium" => [ "timer", 14_400, true, 8 ],
+      "ultrapatrol" => [ "timer", 1800, true, 16 ],
+      "high" => [ "timer", 7200, true, 8 ],
+      "medium" => [ "timer", 14_400, true, 4 ],
       "low" => [ "new_commits", 600, true, 2 ],
-      "off" => [ "continuous", 600, false, 8 ]
+      "off" => [ "continuous", 600, false, 4 ]
     }
 
     cases.each do |mode, (trigger, poll_interval_sec, enabled, max_spawns)|
@@ -1338,7 +1339,8 @@ class ConfigTest < Minitest::Test
                      "#{mode} must not change the PR cap"
         assert_equal 6, cfg.dig("patrol", "max_fix_attempts_per_cycle"),
                      "#{mode} must not change the fix-attempt cap"
-        assert_equal max_spawns, cfg.dig("patrol", "max_agent_spawns_per_day")
+        assert_equal max_spawns,
+                     cfg.dig("patrol", "scheduled_discovery_launches_per_engine_per_day")
         refute cfg.fetch("patrol").key?("max_tokens_per_agent")
         assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix"),
                      "#{mode} must not change the confidence gate"
@@ -1346,7 +1348,7 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_keeps_explicit_patrol_knob_over_mode_derived_value
+  def test_load_keeps_frequency_override_but_legacy_shared_allowance_is_inert
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
@@ -1363,6 +1365,7 @@ class ConfigTest < Minitest::Test
       assert_equal "timer", cfg.dig("patrol", "trigger")
       assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
       assert_equal 13, cfg.dig("patrol", "max_agent_spawns_per_day")
+      assert_equal 4, cfg.dig("patrol", "scheduled_discovery_launches_per_engine_per_day")
     end
   end
 
@@ -1372,13 +1375,13 @@ class ConfigTest < Minitest::Test
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
         patrol:
           mode: high
-          max_agent_spawns_per_day:
+          scheduled_discovery_launches_per_engine_per_day:
       YAML
 
       cfg = Hive::Config.load(dir)
 
       assert_equal "high", cfg.dig("patrol", "mode")
-      assert_equal 18, cfg.dig("patrol", "max_agent_spawns_per_day")
+      assert_equal 8, cfg.dig("patrol", "scheduled_discovery_launches_per_engine_per_day")
     end
   end
 
@@ -1468,8 +1471,8 @@ class ConfigTest < Minitest::Test
       "max_features_per_cycle: 0",
       "max_fixes_per_feature_per_cycle: 0",
       "max_fix_attempts_per_cycle: 0",
-      "max_agent_spawns_per_day: 1",
-      "max_agent_spawns_per_day: 0",
+      "scheduled_discovery_launches_per_engine_per_day: 1",
+      "scheduled_discovery_launches_per_engine_per_day: 0",
       "poll_interval_sec: 30",
       "commands: []",
       "commands:\n    test: ''",

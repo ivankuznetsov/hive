@@ -61,6 +61,7 @@ module Hive
                      heartbeat_resolver: Hive::RefactorPatrol::ClaimLivenessResolver.new,
                      project_entry: nil, capability_context: nil,
                      occurrence_id: nil, module_execution: nil,
+                     scheduled_slice: nil,
                      config_loader: ->(path) { Hive::Config.load(path) })
         @project = project
         @json = json
@@ -111,6 +112,8 @@ module Hive
         @capability_context = capability_context
         @occurrence_id = occurrence_id
         @module_execution = module_execution
+        @scheduled_slice = scheduled_slice
+        @feature_hint = @scheduled_slice.fetch("feature_id") if @scheduled_slice
         @config_loader = config_loader
         @architecture_intake_transitions =
           Hive::RefactorPatrol::ArchitectureIntakeTransitions.new(
@@ -152,7 +155,9 @@ module Hive
           entry, cfg, aggregate: @job_store.read_job(@manifest.fetch("job_id"))
         )
         launch_budget = Hive::Patrol::LaunchBudget.new(
-          project_root, cfg: cfg, project_name: entry.fetch("name")
+          project_root, cfg: cfg, project_id: entry.fetch("project_id"),
+          project_name: entry.fetch("name"), engine: :architecture,
+          charge_discovery: false
         )
         runner = build_action_runner(project_root, cfg, launch_budget, entry: entry)
         result = with_claim_heartbeat(@manifest.fetch("job_id")) do
@@ -172,7 +177,12 @@ module Hive
         if @existing_lifecycle
           return [ lifecycle_payload(entry, project_root, @existing_lifecycle), lifecycle_theses(@existing_lifecycle) ]
         end
-        analysis_root = pr_mode? ? materialize_analysis_worktree!(project_root, cfg) : project_root
+        analysis_root = if pr_mode? || scheduled_mode?
+          prepare_scheduled_checkout! if scheduled_mode?
+          materialize_analysis_worktree!(project_root, cfg)
+        else
+          project_root
+        end
         state = Hive::RefactorPatrol::StateStore.new(
           project_root, hive_state_path: entry.fetch("hive_state_path")
         )
@@ -187,7 +197,9 @@ module Hive
         existing_suppressions = prior_suppressions
         pending_features = features.reject { |feature| completed.key?(feature.id.to_s) }
         launch_budget = Hive::Patrol::LaunchBudget.new(
-          project_root, cfg: cfg, project_name: entry.fetch("name")
+          project_root, cfg: cfg, project_id: entry.fetch("project_id"),
+          project_name: entry.fetch("name"), engine: :architecture,
+          charge_discovery: !pr_mode?
         )
         review_features = if pr_mode? && !@dry_run
           pending_features.first(DURABLE_DISCOVERY_FEATURE_SLICE)
@@ -221,7 +233,7 @@ module Hive
             )
           end
         end
-        assert_analysis_worktree! if pr_mode?
+        assert_analysis_worktree! if pr_mode? || scheduled_mode?
         unyielded = new_theses.reject do |thesis|
           yielded_thesis_ids[[ thesis.feature_id.to_s, thesis.id.to_s ]]
         end
@@ -247,7 +259,7 @@ module Hive
           entry, project_root, cfg, state, reported_features, theses, suppressed,
           reviewer, feature_results: feature_results, complete: scope_complete
         )
-        cleanup_analysis_worktree! if pr_mode?
+        cleanup_analysis_worktree! if pr_mode? || scheduled_mode?
         checkpoint_manual_discovery!(payload) if @manual_claim_token
         [ payload, theses ]
       ensure
@@ -359,7 +371,13 @@ module Hive
           feature_results: feature_results, complete: complete
         ) if pr_mode?
 
-        scanned_sha = @dry_run ? current_default_sha(project_root, cfg) : state.state["last_scanned_sha"].to_s
+        scanned_sha = if scheduled_mode?
+          @scheduled_slice.fetch("analysis_sha")
+        elsif @dry_run
+          current_default_sha(project_root, cfg)
+        else
+          state.state["last_scanned_sha"].to_s
+        end
         @reporter.envelope(
           project: entry.fetch("name"),
           project_root: project_root,
@@ -424,6 +442,10 @@ module Hive
 
       def update_scan_state(state, project_root, cfg, reviewer, complete:)
         now_iso = Time.now.utc.iso8601
+        if scheduled_mode?
+          state.update_state("last_run_at" => now_iso)
+          return
+        end
         incomplete = complete != true
         errored = reviewer.respond_to?(:review_errors) && Array(reviewer.review_errors).any?
         if incomplete || errored
@@ -1125,6 +1147,10 @@ module Hive
         !@pr.nil? || !@job_manifest.nil?
       end
 
+      def scheduled_mode?
+        !@scheduled_slice.nil?
+      end
+
       def query_mode?
         @list_jobs || !@show_job.nil?
       end
@@ -1215,7 +1241,11 @@ module Hive
       end
 
       def analysis_worktree_key
-        job_id = @manifest.fetch("job_id")
+        job_id = if scheduled_mode?
+          "scheduled-#{@scheduled_slice.fetch('id')}"
+        else
+          @manifest.fetch("job_id")
+        end
         return job_id unless @dry_run
 
         @analysis_worktree_key ||= "#{job_id}-dry-run-#{Process.pid}-#{SecureRandom.hex(6)}"
@@ -1261,6 +1291,18 @@ module Hive
 
       def ephemeral_discovery?
         @dry_run || pr_mode?
+      end
+
+      def prepare_scheduled_checkout!
+        unless @scheduled_slice.is_a?(Hash) &&
+               @scheduled_slice.fetch("project_id") == @project_entry.fetch("project_id").to_s &&
+               /\A[0-9a-f]{40,64}\z/.match?(@scheduled_slice.fetch("analysis_sha").to_s) &&
+               !@scheduled_slice.fetch("feature_id").to_s.empty?
+          raise Hive::ConfigError, "scheduled Architecture Patrol slice is invalid"
+        end
+        @checkout_snapshot = { "analysis_sha" => @scheduled_slice.fetch("analysis_sha") }
+      rescue KeyError
+        raise Hive::ConfigError, "scheduled Architecture Patrol slice is invalid"
       end
 
       def emit(payload, theses)

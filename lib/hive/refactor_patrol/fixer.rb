@@ -532,15 +532,6 @@ module Hive
         profile = fix_profile
         launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, role: :fix)
         started_at = Time.now.utc
-        unless @launch_budget.acquire(profile: profile, stage: STAGE, started_at: started_at)
-          exhaustion = @launch_budget.resource_exhaustion if
-            @launch_budget.respond_to?(:resource_exhaustion)
-          return {
-            status: :error,
-            error_message: @launch_budget.exhaustion_message,
-            resource_exhaustion: exhaustion
-          }.compact
-        end
         result = nil
         begin
           result = Hive::Agent.new(

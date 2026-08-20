@@ -139,7 +139,8 @@ module Hive
           state.recover_pending_fingerprint_effects!
         end
         launch_budget = Hive::Patrol::LaunchBudget.new(
-          project_root, cfg: cfg, project_name: entry.fetch("name")
+          project_root, cfg: cfg, project_id: entry.fetch("project_id"),
+          project_name: entry.fetch("name"), engine: :ordinary
         )
         dismissed = @dismissals_factory.call(project_root, state).reconcile
         target_sha = sweep_target_sha(project_root, cfg, state)
@@ -489,19 +490,10 @@ module Hive
         Hive::Patrol::Fixer.new(root, cfg: cfg, state: state, launch_budget: launch_budget)
       end
 
-      # Keep one review moving while reserving the rest of today's allowance
-      # for fixes. Unused fix headroom becomes review capacity on a later
-      # scheduled cycle, so neither side can permanently starve.
-      def review_launch_limit(cfg, launch_budget)
-        remaining = launch_budget.remaining_launches
-        return 0 if remaining.zero?
-        return remaining if @dry_run
-
-        fix_reserve = [
-          cfg.dig("patrol", "max_fix_attempts_per_cycle").to_i,
-          remaining - 1
-        ].min
-        remaining - fix_reserve
+      # The allowance counts discovery launches only. Remediation is owned by
+      # workflow concurrency, so all ordinary headroom is available to review.
+      def review_launch_limit(_cfg, launch_budget)
+        launch_budget.remaining_launches
       end
 
       def ensure_validation_configured!(cfg)

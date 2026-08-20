@@ -1,7 +1,7 @@
 schema: "hive-module/v1"
 name: "architecture-patrol"
 version: "0.1.0"
-description: "First-party merged-PR Architecture Patrol adapter"
+description: "First-party current-main and merged-PR Architecture Patrol adapter"
 type: "architecture-patrol"
 author:
   name: "Hive"
@@ -87,6 +87,6 @@ templates:
 docs:
   - "README.md"
 files:
-  "README.md": "fb5361c458d7fb24f1fc9e89877608e56a44c2437b5e7d551ab18a000149958e"
-  "templates/refactor-patrol.yml": "5d8d1ede3cfe2854281b285d46191bc96a228e50ad745b667610e20d9cab653a"
-release_sha256: "3e0a266ed9f19eac7ed09b5a9916eb4952a7118d9a463c8b66cf4b243b07645a"
+  "README.md": "ececda34faa53626eed7eef2c3c84f4cc5f77a697c955d5fb0c1d70fa38ef9f6"
+  "templates/refactor-patrol.yml": "dc64ee66282374b8cc39c4769c005c1649982739e91fb4686cc0ffa04ebaac42"
+release_sha256: "2035bba347f77a8077bdb0510b8eda52acb5d0967a5bb47ee2745322d8f8ef5e"

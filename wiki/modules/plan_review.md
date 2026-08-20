@@ -69,7 +69,11 @@ Reviewers receive the repository root plus search, shell, and network access so
 they can verify a plan against code, wiki context, history, and referenced
 contracts instead of checking only the document against itself. The disposable
 directory remains the declared review-output workspace. Codex and Grok retain
-their native workspace-write sandboxes; Claude receives exact file-tool scope.
+their native workspace-write sandboxes; Codex also receives
+`--skip-git-repo-check` because the disposable workspace is intentionally not
+a checkout. That flag bypasses only Codex's repository-shape preflight; its
+workspace-write sandbox and Hive's artifact custody remain active. Claude
+receives exact file-tool scope.
 Pi cannot combine its managed read-only wrapper with the required shell and
 network access, so plan review launches Pi directly under the same
 ArtifactFirewall detection-and-restore boundary used by Hive's other native

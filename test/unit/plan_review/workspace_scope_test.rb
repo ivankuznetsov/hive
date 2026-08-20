@@ -13,6 +13,11 @@ class PlanReviewWorkspaceScopeTest < Minitest::Test
                  scope.fetch(:permission_mode)
     assert_nil scope.fetch(:allowed_tools)
     assert_nil scope.fetch(:disallowed_tools)
+    assert_equal [
+      "--sandbox", "workspace-write", "-c", 'approval_policy="never"',
+      "--ephemeral", "--ignore-user-config", "--ignore-rules",
+      "--skip-git-repo-check"
+    ], scope.fetch(:permission_arguments)
   end
 
   # Reads and search are no longer clipped to the temp dir — a reviewer has to
@@ -87,6 +92,7 @@ class PlanReviewWorkspaceScopeTest < Minitest::Test
 
     assert_equal Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE,
                  kwargs.fetch(:permission_mode)
+    refute kwargs.key?(:permission_arguments)
     assert_equal [ "--sandbox", "workspace", "--always-approve" ],
                  profile.permission_flags(kwargs.fetch(:permission_mode))
   end

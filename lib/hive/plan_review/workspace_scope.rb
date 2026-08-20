@@ -38,7 +38,7 @@ module Hive
       def supported?(_profile) = true
 
       def launch_kwargs(profile:, workspace:, role:, output_path: nil)
-        return workspace_write_kwargs if profile.workspace_write_supported?
+        return workspace_write_kwargs(profile) if profile.workspace_write_supported?
 
         # Pi's managed-workflow wrapper is deliberately read-only and cannot
         # expose Bash or network access. Those are both required here: the
@@ -65,13 +65,23 @@ module Hive
 
       # codex and grok carry a real filesystem sandbox, which already confines
       # writes to the working directory while leaving reads, shell and network
-      # intact. Nothing to add.
-      def workspace_write_kwargs
-        {
+      # intact. Codex additionally refuses to start from the disposable review
+      # directory because it is intentionally not a git checkout. The plan
+      # copy and result have their own ArtifactFirewall custody, so bypass only
+      # that repository-shape preflight while keeping workspace-write active.
+      def workspace_write_kwargs(profile)
+        kwargs = {
           permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE,
           allowed_tools: nil,
           disallowed_tools: nil
         }
+        return kwargs unless profile.name == :codex
+
+        kwargs.merge(
+          permission_arguments: profile.permission_flags(
+            Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE
+          ) + [ "--skip-git-repo-check" ]
+        )
       end
 
       def unrestricted_kwargs

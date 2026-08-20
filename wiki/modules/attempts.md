@@ -58,10 +58,13 @@ Task-projection cache validation and journal replay use
 validation because their lifecycle fields can
 change. Immutable permanent proofs take a narrower validated read of the exact
 identity, generation, state, outcome, lease, and lineage fields consumed by the
-projection. Full `Store#fetch` continues to validate receipts, diagnostics, and
-every output reference for consumers that use those domains. This prevents a
-status scan from repeatedly walking cumulative inherited-output arrays while
-preserving fail-closed binding validation.
+projection. New permanent proofs publish that subset as a separate immutable
+point-addressed sidecar; older proofs fall back to the full document and can be
+backfilled without changing it. Full `Store#fetch` continues to validate
+receipts, diagnostics, and every output reference for consumers that use those
+domains. This prevents a status scan from repeatedly reading or walking
+cumulative inherited-output arrays while preserving fail-closed binding
+validation.
 
 The component catalog keeps this admission slice as a guarded reference
 `candidate`. Its facade, result contracts, focused clean-process load, and

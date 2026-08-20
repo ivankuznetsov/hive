@@ -8,7 +8,11 @@ module Hive
     # point-addressed and exposes no enumeration API.
     class PermanentProofStore
       MAX_RECORD_BYTES = 4 * 1024 * 1024
+      MAX_PROJECTION_BINDING_BYTES = 4 * 1024
       KIND = "attempt".freeze
+      PROJECTION_BINDING_KIND = "attempt-projection-binding".freeze
+      PROJECTION_BINDING_SCHEMA = "hive-attempt-projection-binding".freeze
+      PROJECTION_BINDING_SCHEMA_VERSION = 1
       PROJECTION_BINDING_KEYS = %w[
         accepted_at attempt_id intended_stage lease_version outcome
         ownership_generation predecessor_attempt_id state task_id
@@ -40,6 +44,11 @@ module Hive
       # validated read needed by the projection cache.
       def fetch_projection_binding(attempt_id)
         id = attempt_id_key(attempt_id)
+        binding_bytes = @storage.read(
+          PROJECTION_BINDING_KIND, key(id), max_bytes: MAX_PROJECTION_BINDING_BYTES
+        )
+        return parse_projection_binding_document(binding_bytes, expected_attempt_id: id) if binding_bytes
+
         bytes = @storage.read(KIND, key(id), max_bytes: MAX_RECORD_BYTES)
         bytes && parse_projection_binding(bytes, expected_attempt_id: id)
       end
@@ -53,7 +62,7 @@ module Hive
         bytes = JSON.generate(record.to_h) + "\n"
         raise StoreError, "permanent attempt proof is too large" if bytes.bytesize > MAX_RECORD_BYTES
 
-        @storage.synchronize(KIND, key(id)) do
+        published = @storage.synchronize(KIND, key(id)) do
           current = @storage.read(KIND, key(id), max_bytes: MAX_RECORD_BYTES)
           if current
             existing = parse(current, expected_attempt_id: id)
@@ -72,10 +81,36 @@ module Hive
           )
           record
         end
+        publish_projection_binding(id, record.to_h)
+        published
       end
 
       def path_for(attempt_id)
         @storage.path_for(KIND, key(attempt_id_key(attempt_id)))
+      end
+
+      def projection_binding_path_for(attempt_id)
+        @storage.path_for(
+          PROJECTION_BINDING_KIND, key(attempt_id_key(attempt_id))
+        )
+      end
+
+      # Forward-compatible repair for proofs created before compact binding
+      # sidecars existed. It validates the binding directly from the immutable
+      # full proof and publishes only that subset; full Record consumers remain
+      # unchanged.
+      def backfill_projection_binding(attempt_id)
+        id = attempt_id_key(attempt_id)
+        current = @storage.read(
+          PROJECTION_BINDING_KIND, key(id), max_bytes: MAX_PROJECTION_BINDING_BYTES
+        )
+        return parse_projection_binding_document(current, expected_attempt_id: id) if current
+
+        bytes = @storage.read(KIND, key(id), max_bytes: MAX_RECORD_BYTES)
+        return nil unless bytes
+
+        binding = parse_projection_binding(bytes, expected_attempt_id: id)
+        publish_projection_binding(id, binding)
       end
 
       private
@@ -110,18 +145,77 @@ module Hive
                data["schema"] == Record::SCHEMA && data["schema_version"] == Record::SCHEMA_VERSION
           raise InvalidRecord, "attempt record has invalid schema"
         end
-        unless data["attempt_id"] == expected_attempt_id &&
-               Record::FINAL_STATES.include?(data["state"])
-          raise InvalidRecord, "permanent attempt proof key or final state is invalid"
-        end
-
-        validate_projection_binding!(data)
+        validate_projection_binding!(data, expected_attempt_id: expected_attempt_id)
         data.slice(*PROJECTION_BINDING_KEYS).freeze
       rescue JSON::ParserError, InvalidRecord => error
         raise StoreError, "permanent attempt proof is unreadable: #{error.message}"
       end
 
-      def validate_projection_binding!(data)
+      def parse_projection_binding_document(bytes, expected_attempt_id:)
+        if bytes.bytesize > MAX_PROJECTION_BINDING_BYTES
+          raise InvalidRecord, "permanent attempt projection binding is too large"
+        end
+
+        document = JSON.parse(bytes)
+        unless document.is_a?(Hash) && document.keys.sort == %w[binding schema schema_version] &&
+               document["schema"] == PROJECTION_BINDING_SCHEMA &&
+               document["schema_version"] == PROJECTION_BINDING_SCHEMA_VERSION
+          raise InvalidRecord, "attempt projection binding has invalid schema"
+        end
+        binding = document["binding"]
+        unless binding.is_a?(Hash) && binding.keys.sort == PROJECTION_BINDING_KEYS.sort
+          raise InvalidRecord, "attempt projection binding has invalid fields"
+        end
+
+        validate_projection_binding!(binding, expected_attempt_id: expected_attempt_id)
+        binding.freeze
+      rescue JSON::ParserError, InvalidRecord => error
+        raise StoreError, "permanent attempt projection binding is unreadable: #{error.message}"
+      end
+
+      def publish_projection_binding(attempt_id, data)
+        binding = data.slice(*PROJECTION_BINDING_KEYS)
+        validate_projection_binding!(binding, expected_attempt_id: attempt_id)
+        document = {
+          "schema" => PROJECTION_BINDING_SCHEMA,
+          "schema_version" => PROJECTION_BINDING_SCHEMA_VERSION,
+          "binding" => binding
+        }
+        bytes = JSON.generate(document) + "\n"
+        if bytes.bytesize > MAX_PROJECTION_BINDING_BYTES
+          raise StoreError, "permanent attempt projection binding is too large"
+        end
+
+        @storage.synchronize(PROJECTION_BINDING_KIND, key(attempt_id)) do
+          current = @storage.read(
+            PROJECTION_BINDING_KIND, key(attempt_id), max_bytes: MAX_PROJECTION_BINDING_BYTES
+          )
+          if current
+            existing = parse_projection_binding_document(
+              current, expected_attempt_id: attempt_id
+            )
+            unless existing == binding
+              raise StoreError, "permanent attempt projection binding conflicts with immutable proof"
+            end
+            next existing
+          end
+
+          @storage.write(
+            PROJECTION_BINDING_KIND,
+            key(attempt_id),
+            bytes,
+            expected_bytes: nil,
+            max_existing_bytes: MAX_PROJECTION_BINDING_BYTES
+          )
+          binding.freeze
+        end
+      end
+
+      def validate_projection_binding!(data, expected_attempt_id:)
+        unless data["attempt_id"] == expected_attempt_id &&
+               Record::FINAL_STATES.include?(data["state"])
+          raise InvalidRecord, "permanent attempt proof key or final state is invalid"
+        end
         %w[attempt_id task_slug intended_stage ownership_generation accepted_at].each do |name|
           value = data[name]
           unless value.is_a?(String) && !value.empty?

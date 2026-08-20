@@ -71,6 +71,7 @@ class AttemptsStorageFoundationTest < Minitest::Test
         source, attempt_id: "projection-proof", request_id: "projection-request"
       )
       store.permanent_proofs.publish(terminal)
+      File.unlink(store.permanent_proofs.projection_binding_path_for(terminal.attempt_id))
 
       replacement = ->(*) { raise "full record validation must not run" }
       binding = with_replaced_singleton_method(
@@ -85,6 +86,13 @@ class AttemptsStorageFoundationTest < Minitest::Test
       assert_equal terminal.outcome, binding.fetch("outcome")
       assert_equal Hive::Attempts::PermanentProofStore::PROJECTION_BINDING_KEYS.sort,
                    binding.keys.sort
+
+      backfilled = store.permanent_proofs.backfill_projection_binding(terminal.attempt_id)
+      assert_equal binding, backfilled
+      assert File.file?(store.permanent_proofs.projection_binding_path_for(terminal.attempt_id))
+
+      File.binwrite(store.permanent_proofs.path_for(terminal.attempt_id), "{")
+      assert_equal binding, store.fetch_projection_binding(terminal.attempt_id)
     end
   end
 
@@ -485,6 +493,8 @@ class AttemptsStorageFoundationTest < Minitest::Test
       )
       proof.publish(terminal)
       path = proof.path_for(terminal.attempt_id)
+      binding_path = proof.projection_binding_path_for(terminal.attempt_id)
+      File.unlink(binding_path)
       File.binwrite(path, JSON.generate(launching.to_h) + "\n")
       assert_raises(Hive::Attempts::StoreError) { proof.fetch(terminal.attempt_id) }
       assert_raises(Hive::Attempts::StoreError) do

@@ -96,6 +96,103 @@ class AttemptsStorageFoundationTest < Minitest::Test
     end
   end
 
+  def test_projection_binding_rejects_malformed_oversized_and_conflicting_sidecars
+    with_tmp_dir do |root|
+      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
+      proof = Hive::Attempts::PermanentProofStore.new(root: File.join(root, "proof"))
+      terminal = terminal_record(
+        source, attempt_id: "binding-proof", request_id: "binding-request"
+      )
+      binding = terminal.to_h.slice(
+        *Hive::Attempts::PermanentProofStore::PROJECTION_BINDING_KEYS
+      )
+
+      invalid_full_record = terminal.to_h.except("schema")
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.send(
+          :parse_projection_binding, JSON.generate(invalid_full_record),
+          expected_attempt_id: terminal.attempt_id
+        )
+      end
+
+      too_large = "{" + (" " * Hive::Attempts::PermanentProofStore::MAX_PROJECTION_BINDING_BYTES) + "}"
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.send(
+          :parse_projection_binding_document, too_large,
+          expected_attempt_id: terminal.attempt_id
+        )
+      end
+
+      invalid_documents = [
+        { "schema" => "wrong", "schema_version" => 1, "binding" => binding },
+        {
+          "schema" => Hive::Attempts::PermanentProofStore::PROJECTION_BINDING_SCHEMA,
+          "schema_version" => 1,
+          "binding" => binding.except("task_slug")
+        }
+      ]
+      invalid_documents.each do |document|
+        assert_raises(Hive::Attempts::StoreError) do
+          proof.send(
+            :parse_projection_binding_document, JSON.generate(document),
+            expected_attempt_id: terminal.attempt_id
+          )
+        end
+      end
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.send(
+          :parse_projection_binding_document, "{",
+          expected_attempt_id: terminal.attempt_id
+        )
+      end
+
+      oversized_binding = binding.merge(
+        "task_slug" => "x" * Hive::Attempts::PermanentProofStore::MAX_PROJECTION_BINDING_BYTES
+      )
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.send(:publish_projection_binding, terminal.attempt_id, oversized_binding)
+      end
+
+      proof.publish(terminal)
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.send(
+          :publish_projection_binding, terminal.attempt_id,
+          binding.merge("task_slug" => "changed-task")
+        )
+      end
+    end
+  end
+
+  def test_projection_binding_validates_each_immutable_field_family
+    with_tmp_dir do |root|
+      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
+      proof = Hive::Attempts::PermanentProofStore.new(root: File.join(root, "proof"))
+      terminal = terminal_record(
+        source, attempt_id: "binding-validation", request_id: "binding-request"
+      )
+      binding = terminal.to_h.slice(
+        *Hive::Attempts::PermanentProofStore::PROJECTION_BINDING_KEYS
+      )
+
+      invalid_bindings = [
+        binding.merge("task_slug" => ""),
+        binding.merge("task_input_epoch" => -1),
+        binding.merge("predecessor_attempt_id" => 1),
+        binding.merge("task_id" => []),
+        binding.merge("outcome" => nil),
+        binding.merge("state" => "lost", "outcome" => "completed")
+      ]
+      invalid_bindings.each do |invalid|
+        assert_raises(Hive::Attempts::InvalidRecord) do
+          proof.send(
+            :validate_projection_binding!, invalid,
+            expected_attempt_id: terminal.attempt_id
+          )
+        end
+      end
+    end
+  end
+
   def test_hot_record_wins_during_interrupted_proof_promotion
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)

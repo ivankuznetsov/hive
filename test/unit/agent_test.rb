@@ -1768,6 +1768,46 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_model_output_limit_sets_structured_error_marker_for_state_file_agents
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5
+      )
+      result = {
+        resource_exhaustion: {
+          reason: "model_output_limit", observed: 8_192, limit: nil
+        }
+      }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, result.fetch(:status)
+      assert_equal "model_output_limit", marker.attrs.fetch("reason")
+      assert_equal "8192", marker.attrs.fetch("observed_output_tokens")
+      assert_equal "raise_model_max_tokens_or_lower_reasoning_effort",
+                   marker.attrs.fetch("remedy")
+    end
+  end
+
+  def test_unknown_resource_exhaustion_reason_fails_closed
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5
+      )
+      detail = { reason: "future_limit", observed: 1, limit: 1 }
+
+      assert_raises(Hive::AgentError) do
+        agent.handle_exit(resource_exhaustion: detail)
+      end
+      assert_raises(Hive::AgentError) do
+        agent.send(:resource_exhaustion_marker_attrs, detail)
+      end
+    end
+  end
+
   def test_profile_without_usage_extractor_returns_no_usage
     with_tmp_dir do |dir|
       task = make_task(dir)

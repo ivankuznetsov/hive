@@ -79,4 +79,24 @@ class AgentObservationCoverageGapsTest < Minitest::Test
     assert_equal [ "openai", "gpt-5.6-sol" ],
                  observation.send(:split_route, "openai/gpt-5.6-sol")
   end
+
+  def test_resource_observation_maps_turn_limits_and_ignores_unknown_reasons
+    observation = Hive::AgentObservation.new(
+      task: Task.new("task"), context: Context.new("task", "attempt"),
+      session_id: "session", role: "agent", provider: "codex",
+      timeout_sec: 1, guards: [], activity: FailingActivity.new
+    )
+
+    turn_limit = observation.send(
+      :resource_observation,
+      resource_exhaustion: { reason: "turn_limit", limit: 3, observed: 3 }
+    )
+    assert_equal "turn_limit", turn_limit.fetch("kind")
+    assert_equal "turns", turn_limit.fetch("unit")
+
+    assert_nil observation.send(
+      :resource_observation,
+      resource_exhaustion: { reason: "future_limit" }
+    )
+  end
 end

@@ -76,7 +76,11 @@ ArtifactFirewall detection-and-restore boundary used by Hive's other native
 stages. The reviewed input and authority records are protected anchors, so
 findings cannot be minted against a reviewer-mutated copy. Pi writes the normal
 adapter JSON file directly; the managed host-output wrapper is not used for
-this full-access review route.
+this full-access review route. Review history is partitioned across bounded
+firewall manifests once it exceeds the firewall's per-manifest 128-anchor
+limit. Every historical authority file remains captured and restorable; a
+long-lived task therefore does not lose custody or fail before reviewer launch
+merely because it accumulated many attempts.
 
 The default adversarial request is native Grok Build, model `grok-4.6`, effort
 `high`. Every route records requested and actual provider, model, model family,

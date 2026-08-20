@@ -35,10 +35,10 @@ module Hive
             scope = Hive::PlanReview::WorkspaceScope.launch_kwargs(
               profile:, workspace: cwd, role: request.kind, output_path:
             )
-            manifest = custody_manifest(cwd, output_path)
-            snapshot = Hive::ArtifactFirewall.capture(manifest)
+            manifests = custody_manifests(cwd, output_path)
+            snapshots = manifests.map { |manifest| Hive::ArtifactFirewall.capture(manifest) }
             result = nil
-            report = nil
+            reports = []
             begin
               result = Hive::Stages::Base.spawn_agent(
                 @task,
@@ -60,12 +60,15 @@ module Hive
                 **scope
               )
             ensure
-              report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+              reports = manifests.zip(snapshots).reverse_each.map do |manifest, snapshot|
+                Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+              end
             end
-            if report.tampered?
+            tampered = reports.flat_map(&:tampered_labels).uniq
+            unless tampered.empty?
               return {
                 "status" => "terminal_failure",
-                "diagnostic" => "reviewer modified protected artifacts: #{report.tampered_labels.join(', ')}"
+                "diagnostic" => "reviewer modified protected artifacts: #{tampered.join(', ')}"
               }
             end
             normalize_result(result, request)
@@ -129,28 +132,43 @@ module Hive
           # anchored below.
           ORCHESTRATOR_JOURNALS = %w[task-journal.jsonl task-projection.json].freeze
 
-          def custody_manifest(workspace, output_path)
+          # Review history is append-only and can outgrow the firewall's
+          # deliberately small per-manifest admission bound. Keeping every
+          # record in one manifest made the 129th protected path fail before
+          # the reviewer launched (`protected_anchors exceeds 128 entries`).
+          # Partitioning preserves exact per-file capture and restoration
+          # without weakening the global firewall limit or dropping old
+          # review authority from custody.
+          def custody_manifests(workspace, output_path)
             anchored = Hive::ArtifactFirewall::ORCHESTRATOR_OWNED - ORCHESTRATOR_JOURNALS
-            protected = anchored.to_h do |name|
+            core = anchored.to_h do |name|
               [ name, File.join(@task.folder, name) ]
             end
-            protected["meta.yml"] = @task.meta_yml_path
-            protected["review-input"] = File.join(workspace, "plan.md")
+            core["meta.yml"] = @task.meta_yml_path
+            core["review-input"] = File.join(workspace, "plan.md")
+            manifests = [ Hive::ArtifactFirewall::Manifest.new(
+              root: @task.folder, protected_anchors: core,
+              permitted_writable_roots: [ workspace ],
+              required_outputs: { "review-result" => output_path }
+            ) ]
+
             review_root = File.join(@task.folder, "plan-review")
             if File.directory?(review_root) && !File.symlink?(review_root)
-              Dir.glob(File.join(review_root, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
+              history = Dir.glob(File.join(review_root, "**", "*"), File::FNM_DOTMATCH).sort.filter_map do |path|
                 next if %w[. ..].include?(File.basename(path))
                 next unless File.file?(path) || File.symlink?(path)
 
                 relative = path.delete_prefix("#{review_root}/")
-                protected["plan-review/#{relative}"] = path
+                [ "plan-review/#{relative}", path ]
+              end
+              history.each_slice(Hive::ArtifactFirewall::MAX_ENTRIES) do |entries|
+                manifests << Hive::ArtifactFirewall::Manifest.new(
+                  root: @task.folder, protected_anchors: entries.to_h,
+                  permitted_writable_roots: [ workspace ]
+                )
               end
             end
-            Hive::ArtifactFirewall::Manifest.new(
-              root: @task.folder, protected_anchors: protected,
-              permitted_writable_roots: [ workspace ],
-              required_outputs: { "review-result" => output_path }
-            )
+            manifests.freeze
           end
         end
 

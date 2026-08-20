@@ -275,6 +275,39 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_production_runner_batches_large_review_history_without_dropping_custody
+    with_runner do |runner, request, output_path|
+      review_root = File.join(request.project_root, "plan-review", "reviews", "historical")
+      FileUtils.mkdir_p(review_root)
+      paths = (Hive::ArtifactFirewall::MAX_ENTRIES + 5).times.map do |index|
+        path = File.join(review_root, format("record-%03d.json", index))
+        File.write(path, "original #{index}\n")
+        path
+      end
+      target = paths.last
+      launched = false
+      payload = valid_result(request)
+      replacement = lambda do |_task, expected_output:, **|
+        launched = true
+        File.write(target, "forged\n")
+        File.write(expected_output, JSON.generate(payload))
+        { status: :ok, usage: { model: request.reviewer.fetch("model") } }
+      end
+
+      observed = nil
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
+        observed = runner.call(
+          prompt: "review", cwd: request.output_directory, output_path:, request:
+        )
+      end
+
+      assert launched, "large histories must reach the reviewer instead of failing manifest admission"
+      assert_equal "terminal_failure", observed.fetch("status")
+      assert_includes observed.fetch("diagnostic"), "record-132.json"
+      assert_equal "original 132\n", File.read(target)
+    end
+  end
+
   def test_production_runner_maps_agent_results_onto_transport_status
     cases = {
       "ok" => { status: :ok, usage: { model: "gpt-5.6-sol" } },

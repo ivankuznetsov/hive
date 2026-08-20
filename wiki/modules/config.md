@@ -358,6 +358,7 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
     "max_features_per_cycle" => 12,
     "max_fixes_per_feature_per_cycle" => 1,
     "max_fix_attempts_per_cycle" => 6,
+    "max_rework_cycles" => 2,
     "max_prs_per_cycle" => 3,
     "max_agent_spawns_per_day" => 8,
     "draft_prs" => false,
@@ -428,7 +429,11 @@ fail; fleet mode injects the coalescing restart request instead.
 `patrol.max_features_per_cycle` defaults to 12, is validated as an integer at
 least one, bounds each ordinary-patrol reviewer batch, and is likewise not
 changed by `patrol.mode`; `max_fix_attempts_per_cycle` separately bounds fix
-attempts. Ordinary component mapping defaults to four owned and four context files; its reviewer
+attempts. `patrol.max_rework_cycles` defaults to 2 and is a non-negative
+integer. It bounds completed independent Patrol Fix review decisions: once the
+cap is reached, `rework` is removed from the allowed prompt and strict report
+parser rather than accepted and discarded after the model returns. Ordinary
+component mapping defaults to four owned and four context files; its reviewer
 initially receives only up to four owned files selected under a 32 KiB source
 budget. Architecture mapping retains its wider six-owned and six-context
 logical component, then applies the

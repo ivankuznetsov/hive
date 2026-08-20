@@ -171,7 +171,12 @@ class PatrolFixProjectionTest < Minitest::Test
         "route" => route, "rationale" => "Current semantic decision.",
         "evidence" => [ "bounded evidence" ], "blocker_owner" => "#{stage}_gate",
         "head_revision" => "b" * 40
-      }
+      }.tap do |payload|
+        payload.merge!(
+          "diff_digest" => "c" * 64,
+          "fix_receipt_id" => "fix-1", "validation_receipt_id" => "validation-1"
+        ) if stage == "review"
+      end
     }
   end
 
@@ -182,7 +187,10 @@ class PatrolFixProjectionTest < Minitest::Test
       "task" => { "slug" => "repair-login-260820-abcd", "generation" => 1 },
       "evidence_revision" => { "generation" => 1, "digest" => "a" * 64 },
       "recorded_at" => "2026-08-20T12:01:00Z",
-      "payload" => { "outcome_receipt_id" => outcome_receipt_id, "operator" => "cli:test" }
+      "payload" => {
+        "outcome_receipt_id" => outcome_receipt_id, "operator" => "cli:test",
+        "carried_receipts" => []
+      }
     }
   end
 

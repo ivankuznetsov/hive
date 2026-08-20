@@ -38,7 +38,7 @@ module Hive
                    idempotency_key:, input_fingerprint:, attachments: [],
                    depends_on: nil, base_branch: nil, initial_marker: nil,
                    git_ops: nil, task_id_provider: nil, before_lookup: nil,
-                   before_candidate: nil)
+                   before_candidate: nil, candidate_writer: nil)
       @project_root = File.expand_path(project_root)
       @hive_state = File.expand_path(hive_state)
       @workflow_info = workflow_info
@@ -55,6 +55,7 @@ module Hive
       @task_id_provider = task_id_provider || -> { Hive::TaskCounter.next_or_nil }
       @before_lookup = before_lookup
       @before_candidate = before_candidate
+      @candidate_writer = candidate_writer
     end
 
     def call
@@ -178,6 +179,7 @@ module Hive
         )
       end
       copy_attachments!(task_dir)
+      @candidate_writer&.call(task_dir)
       validate_stable_authored_workflow!
       write_task_meta!(task_dir, stable_selection: stable_selection)
     rescue Errno::EEXIST

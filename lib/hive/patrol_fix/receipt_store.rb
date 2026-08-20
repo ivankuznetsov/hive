@@ -153,7 +153,9 @@ module Hive
 
       def validate_decision!(stage, payload, label)
         invalid!("decision receipts are only valid for inbox or review") unless DECISION_ROUTES.key?(stage)
-        exact_keys!(payload, %w[route rationale evidence blocker_owner head_revision], "#{label}.payload")
+        fields = %w[route rationale evidence blocker_owner head_revision]
+        fields += %w[diff_digest fix_receipt_id validation_receipt_id] if stage == "review"
+        exact_keys!(payload, fields, "#{label}.payload")
         invalid!("#{label}.payload.route is invalid for #{stage}") unless
           DECISION_ROUTES.fetch(stage).include?(payload["route"])
         string!(payload.fetch("rationale"), "#{label}.payload.rationale", max: MAX_TEXT_BYTES)
@@ -161,6 +163,12 @@ module Hive
                       max: MAX_LIST, item_max: MAX_TEXT_BYTES)
         string!(payload.fetch("blocker_owner"), "#{label}.payload.blocker_owner", max: 128)
         string!(payload.fetch("head_revision"), "#{label}.payload.head_revision", max: 40, pattern: REVISION)
+        return unless stage == "review"
+
+        string!(payload.fetch("diff_digest"), "#{label}.payload.diff_digest", max: 64, pattern: DIGEST)
+        %w[fix_receipt_id validation_receipt_id].each do |key|
+          string!(payload.fetch(key), "#{label}.payload.#{key}", max: 128)
+        end
       end
 
       def terminal_key(receipt)
@@ -227,9 +235,14 @@ module Hive
 
       def validate_reopen!(stage, payload, label)
         invalid!("reopen receipts are only valid for inbox or review") unless DECISION_ROUTES.key?(stage)
-        exact_keys!(payload, %w[outcome_receipt_id operator], "#{label}.payload")
+        exact_keys!(payload, %w[outcome_receipt_id operator carried_receipts], "#{label}.payload")
         string!(payload.fetch("outcome_receipt_id"), "#{label}.payload.outcome_receipt_id", max: 128)
         string!(payload.fetch("operator"), "#{label}.payload.operator", max: 256)
+        carried = array!(payload.fetch("carried_receipts"), "#{label}.payload.carried_receipts", min: 0, max: 2)
+        carried.each_with_index do |receipt_id, index|
+          string!(receipt_id, "#{label}.payload.carried_receipts[#{index}]", max: 128)
+        end
+        invalid!("#{label}.payload.carried_receipts must be unique") unless carried.uniq == carried
       end
 
       def read_bytes

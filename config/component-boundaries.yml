@@ -247,6 +247,9 @@ components:
         - Hive::PatrolFix::WorktreeReceipt
         - Hive::PatrolFix::ValidationReceipt
         - Hive::PatrolFix::StageTransition
+        - Hive::PatrolFix::ReviewReceipt
+        - Hive::PatrolFix::Transition
+        - Hive::PatrolFix::SuccessorMaterializer
       errors:
         - Hive::PatrolFix::AdmissionStore::Error
         - Hive::PatrolFix::SourceSnapshot::InvalidSnapshot
@@ -256,6 +259,9 @@ components:
         - Hive::PatrolFix::FixReport::InvalidReport
         - Hive::PatrolFix::WorktreeReceipt::InvalidWorktree
         - Hive::PatrolFix::StageTransition::InvalidTransition
+        - Hive::PatrolFix::ReviewReceipt::InvalidReport
+        - Hive::PatrolFix::Transition::InvalidTransition
+        - Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor
     owned_paths:
       - lib/hive/patrol_fix.rb
       - lib/hive/patrol_fix/task_manifest.rb
@@ -273,6 +279,9 @@ components:
       - lib/hive/patrol_fix/worktree_receipt.rb
       - lib/hive/patrol_fix/validation_receipt.rb
       - lib/hive/patrol_fix/stage_transition.rb
+      - lib/hive/patrol_fix/review_receipt.rb
+      - lib/hive/patrol_fix/transition.rb
+      - lib/hive/patrol_fix/successor_materializer.rb
       - schemas/hive-patrol-fix-decision.v1.json
       - schemas/hive-patrol-fix-task-manifest.v1.json
       - schemas/hive-patrol-fix-receipt.v1.json
@@ -285,13 +294,16 @@ components:
       - "Semantic admission snapshots and revalidates the bounded candidate set without holding a durable store lock across provider reasoning"
       - "Local fix generations bind exact evidence, base, owned worktree, branch, clean committed head, and bounded diff without remote authentication or publication"
       - "Validation records only deliberate controller or structured agent-selected commands; reproduction prose is never an executable input"
+      - "Independent review binds the current evidence, fix diff, validation receipt, and worktree head before a closed semantic route becomes durable"
+      - "Rework and reopen advance generation under a stable replayable intent; rework invalidates validation while review reopen explicitly carries its unchanged receipt ids"
+      - "Escalation creates exactly one linked coding task through TaskCapture and reciprocal controller-owned relation bytes without a GitHub issue effect"
     schema_contracts:
       - "Manifest, decision, receipt, and projection contracts are versioned, bounded, and reject unknown fields"
       - "Source provenance includes source engine, identity, target revision, evidence, affected code, reproduction guidance, discovery run, and semantic lineage"
       - "Source snapshots, outbox records, and admission records are canonical, size bounded, digest bound, and reject secret-like material"
     lock_contracts:
       - "Manifest replacement is atomic and receipts append under a task-local journal lock"
-      - "The common operational action acquires the task lock and revalidates its observation token before appending a reopen receipt"
+      - "The common operational action acquires the stable slug lock then task lock, revalidates its observation token, and advances generation before a reopen receipt"
       - "Patrol-fix moves also hold a stable slug lock outside the moving task folder and journal intent before move plus committed reconciliation afterward"
       - "Admission records use per-occurrence locks; cross-occurrence task materialization is serialized without holding a source lock"
     component_dependencies:
@@ -309,6 +321,7 @@ components:
       - hive/task_meta
       - hive/workflow_package/canonical_json
       - hive/worktree
+      - hive/workflows/registry
     internal_collaborators:
       - Hive::AtomicFile
       - Hive::AgentGitGate
@@ -317,6 +330,7 @@ components:
       - Hive::Task
       - Hive::TaskCapture
       - Hive::Worktree
+      - Hive::Workflows::Registry
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
@@ -329,8 +343,9 @@ components:
       - lib/hive/stages/patrol_fix/inbox.rb
       - lib/hive/stages/patrol_fix/fix.rb
       - lib/hive/stages/patrol_fix/validate.rb
-    mutation_authority: "Strict task-local manifest replacement, append-only decision/fix/validation/publication/reopen receipts, and stable receipt-gated stage-transition journals only."
-    recovery_surface: "Projects a generation-guarded reopen eligibility consumed only by the common operational-action controller; no scheduler, adapter, or remote-effect authority."
+      - lib/hive/stages/patrol_fix/review.rb
+    mutation_authority: "Strict task-local manifest replacement, append-only decision/fix/validation/publication/reopen receipts, stable receipt-gated stage/route-transition journals, and reciprocal coding-successor relations only."
+    recovery_surface: "Projects generation-guarded reopen eligibility, replays incomplete route actions, and reconciles exactly one linked coding successor; no scheduler, adapter, issue, or remote-publication authority."
     wiki_page: wiki/modules/patrol.md
     focused_tests:
       - test/unit/patrol_fix/task_manifest_test.rb
@@ -340,6 +355,9 @@ components:
       - test/unit/patrol_fix/worktree_receipt_test.rb
       - test/unit/patrol_fix/validation_receipt_test.rb
       - test/unit/patrol_fix/stage_transition_test.rb
+      - test/unit/patrol_fix/review_receipt_test.rb
+      - test/unit/patrol_fix/transition_test.rb
+      - test/unit/patrol_fix/successor_materializer_test.rb
     migration_exceptions: []
 
   - id: patrol-effects

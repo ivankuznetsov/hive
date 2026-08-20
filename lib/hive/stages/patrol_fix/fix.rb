@@ -21,8 +21,7 @@ module Hive
         def run!(task, cfg = {}, agent_runner: method(:launch_agent), worktree_root: nil)
           manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
           receipts = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
-          decision = receipt!(receipts, manifest, "decision", "inbox")
-          raise Hive::StageError, "fix requires a current inbox fix decision" unless decision.dig("payload", "route") == "fix"
+          decision, rework = fix_authorization(receipts, manifest)
           existing = current(receipts, manifest, "fix", "fix")
           return complete(existing) if existing
 
@@ -30,11 +29,21 @@ module Hive
             task_folder: task.folder, project_root: task.project_root, slug: task.slug,
             worktree_root: worktree_root
           )
-          owner = custody.prepare!(
-            generation: manifest.dig("task", "generation"),
-            evidence_digest: manifest.dig("evidence_revision", "digest"),
-            base_revision: decision.dig("payload", "head_revision")
-          )
+          owner = if rework
+            custody.read.tap do |current_owner|
+              custody.validate!(current_owner)
+              unless current_owner.fetch("generation") == manifest.dig("task", "generation") &&
+                     current_owner.fetch("evidence_digest") == manifest.dig("evidence_revision", "digest")
+                raise Hive::StageError, "rework custody does not bind the current generation"
+              end
+            end
+          else
+            custody.prepare!(
+              generation: manifest.dig("task", "generation"),
+              evidence_digest: manifest.dig("evidence_revision", "digest"),
+              base_revision: decision.dig("payload", "head_revision")
+            )
+          end
           output = File.join(task.folder, REPORT_FILENAME)
           run = agent_runner.call(
             task: task, cfg: cfg || {}, manifest: manifest, owner: owner,
@@ -118,6 +127,21 @@ module Hive
           store.read_all.find { |r| r["kind"] == kind && r["stage"] == stage && r["task"] == manifest["task"] && r["evidence_revision"] == manifest["evidence_revision"] }
         end
         private_class_method :current
+        def fix_authorization(store, manifest)
+          inbox = current(store, manifest, "decision", "inbox")
+          return [ inbox, false ] if inbox&.dig("payload", "route") == "fix"
+
+          reopen = current(store, manifest, "reopen", "review")
+          prior = store.read_all.find do |row|
+            row["receipt_id"] == reopen&.dig("payload", "outcome_receipt_id")
+          end
+          if reopen&.dig("payload", "operator") == "controller:review" &&
+             prior&.dig("payload", "route") == "rework"
+            return [ prior, true ]
+          end
+          raise Hive::StageError, "fix requires a current inbox fix or controller rework authorization"
+        end
+        private_class_method :fix_authorization
         def receipt!(store, manifest, kind, stage) = current(store, manifest, kind, stage) || raise(Hive::StageError, "missing current #{stage} #{kind} receipt")
         private_class_method :receipt!
         def complete(receipt) = { status: :complete, commit: "patrol-fix fix complete", receipt: receipt }

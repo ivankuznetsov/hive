@@ -73,6 +73,31 @@ class PatrolFixWorktreeReceiptTest < Minitest::Test
     end
   end
 
+  def test_rework_rotates_generation_ownership_without_discarding_the_owned_worktree
+    Dir.mktmpdir do |dir|
+      repo = initialize_repo(File.join(dir, "repo"))
+      task = File.join(dir, "state", "stages", "4-review", "repair-one")
+      FileUtils.mkdir_p(task)
+      base = git(repo, "rev-parse", "HEAD").strip
+      store = Hive::PatrolFix::WorktreeReceipt.new(
+        task_folder: task, project_root: repo, slug: "repair-one",
+        worktree_root: File.join(dir, "worktrees")
+      )
+      first = store.prepare!(generation: 1, evidence_digest: "a" * 64, base_revision: base)
+
+      second = store.rotate!(generation: 2, evidence_digest: "b" * 64)
+
+      assert_equal first.fetch("worktree"), second.fetch("worktree")
+      assert_equal first.fetch("branch"), second.fetch("branch")
+      assert_equal 2, second.fetch("generation")
+      archive = File.join(task, "patrol-fix-worktrees", "generation-1.json")
+      assert_equal first, JSON.parse(File.read(archive))
+      assert_equal second, store.prepare!(
+        generation: 2, evidence_digest: "b" * 64, base_revision: base
+      )
+    end
+  end
+
   private
 
   def initialize_repo(path)

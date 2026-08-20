@@ -10,10 +10,17 @@ module Hive
       STAGE_FILES = {
         "inbox" => "hive/stages/patrol_fix/inbox",
         "fix" => "hive/stages/patrol_fix/fix",
-        "validate" => "hive/stages/patrol_fix/validate"
+        "validate" => "hive/stages/patrol_fix/validate",
+        "review" => "hive/stages/patrol_fix/review"
       }.freeze
 
       def run!(task, cfg = nil, **kwargs)
+        if defined?(Hive::PatrolFix::Transition)
+          Hive::PatrolFix::Transition.new(task).reconcile!
+        else
+          require "hive/patrol_fix/transition"
+          Hive::PatrolFix::Transition.new(task).reconcile!
+        end
         load_handler(task.stage_name)
         handler = handlers[task.stage_name]
         unless handler
@@ -48,7 +55,9 @@ module Hive
         return if handlers.key?(stage.to_s)
 
         require file
-        constant = { "inbox" => :Inbox, "fix" => :Fix, "validate" => :Validate }.fetch(stage.to_s)
+        constant = {
+          "inbox" => :Inbox, "fix" => :Fix, "validate" => :Validate, "review" => :Review
+        }.fetch(stage.to_s)
         handlers[stage.to_s] = Hive::Stages::PatrolFix.const_get(constant).method(:run!)
       end
       private_class_method :load_handler

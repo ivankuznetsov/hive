@@ -501,6 +501,10 @@ module Hive
         "max_fixes_per_feature_per_cycle" => 1,
         "max_fix_attempts_per_cycle" => 6,
         "max_prs_per_cycle" => 3,
+        # The lightweight Patrol Fix reviewer may request two complete
+        # fix/validate loops. At the cap the controller removes `rework` from
+        # the semantic gate's allowed routes.
+        "max_rework_cycles" => 2,
         # Shared by ordinary and Architecture Patrol. Modes derive a concrete
         # UTC-day allowance when explicitly selected; medium is the fallback
         # for direct/synthetic configs and architecture-only projects.
@@ -3529,6 +3533,7 @@ module Hive
       [ "max_fixes_per_feature_per_cycle", 1 ],
       [ "max_fix_attempts_per_cycle", 1 ],
       [ "max_prs_per_cycle", 1 ],
+      [ "max_rework_cycles", 0 ],
       [ "max_agent_spawns_per_day", 2 ]
     ].freeze
 

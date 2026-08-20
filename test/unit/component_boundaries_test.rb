@@ -239,11 +239,14 @@ class ComponentBoundariesTest < Minitest::Test
       Hive::PatrolFix::InboxReport
       Hive::PatrolFix::Projection
       Hive::PatrolFix::ReceiptStore
+      Hive::PatrolFix::ReviewReceipt
       Hive::PatrolFix::SemanticAdmission
       Hive::PatrolFix::SourceSnapshot
       Hive::PatrolFix::StageTransition
+      Hive::PatrolFix::SuccessorMaterializer
       Hive::PatrolFix::TaskManifest
       Hive::PatrolFix::TaskMaterializer
+      Hive::PatrolFix::Transition
       Hive::PatrolFix::ValidationReceipt
       Hive::PatrolFix::WorktreeReceipt
     ], patrol_fix.dig("public_contract", "values").sort

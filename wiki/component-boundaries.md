@@ -91,10 +91,12 @@ qualification proof.
 
 `Patrol Fix Workflow Core` owns strict source snapshots, admission occurrences,
 task manifests, reports, exact local worktree generations, validation receipts,
-stable transition journals, projections, semantic admission, and idempotent task
-materialization. It depends downward on the Safe Agent Git Gate for closed,
-read-only worktree identity and diff verification; it has no remote publication
-authority. Source-owned ordinary and Architecture adapters translate into
+stable stage and route-transition journals, strict independent-review decisions,
+exactly-once coding-successor relations, projections, semantic admission, and
+idempotent task materialization. It depends downward on the Safe Agent Git Gate
+for closed, read-only worktree identity and diff verification and on lower-level
+Task Capture for standard coding successors; it has no issue or remote
+publication authority. Source-owned ordinary and Architecture adapters translate into
 the core without a reverse dependency. Admission persists an exact candidate
 digest, releases its lock while a provider reasons, rejects stale decisions,
 records materialization intent before task capture, binds the task before
@@ -116,6 +118,19 @@ redacted bytes, and never executes reproduction prose. Receipt-backed
 advances journal intent under a stable slug lock outside the moving task folder,
 shared by stage execution and evidence-generation updates, so intent-before-move
 and moved-before-acknowledgement retries reconcile without generation drift.
+
+Independent Review receives only a controller-resolved exact manifest,
+generation, evidence digest, clean worktree HEAD/diff, fix receipt, and
+validation receipt, with all repository/finding bytes delimited as untrusted
+data. Its strict receipt is durable before routing. Rework and operator reopen
+advance generation under the same stable slug lock before another decision can
+occupy the unique stage/generation tuple. Rework rotates and reuses worktree
+custody but never carries validation; a review-stage operator reopen may carry
+the unchanged fix/validation receipt IDs explicitly. The default cap allows two
+completed rework cycles, after which `rework` is absent from the prompt/parser.
+Escalation keeps the origin parked and uses lower-level Task Capture to create or
+reconcile one reciprocal standard coding task; replay repairs either link and
+never calls a GitHub issue gateway.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
 eleven ready components currently has the named non-Hive adopter and independent

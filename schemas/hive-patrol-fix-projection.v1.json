@@ -20,7 +20,7 @@
     "outcome": {"anyOf": [{"$ref": "#/$defs/outcome"}, {"type": "null"}]},
     "blocker_owner": {"type": ["string", "null"], "maxLength": 128},
     "validation": {"anyOf": [{"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/validationPayload"}, {"type": "null"}]},
-    "review": {"anyOf": [{"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/decisionPayload"}, {"type": "null"}]},
+    "review": {"anyOf": [{"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/reviewDecisionPayload"}, {"type": "null"}]},
     "publication": {"anyOf": [{"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/publicationPayload"}, {"type": "null"}]},
     "archived": {"type": "boolean"},
     "diagnostic": {"anyOf": [{"$ref": "#/$defs/diagnostic"}, {"type": "null"}]},
@@ -33,7 +33,10 @@
       "properties": {
         "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
         "stage": {"enum": ["inbox", "review"]},
-        "payload": {"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/decisionPayload"}
+        "payload": {"anyOf": [
+          {"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/decisionPayload"},
+          {"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/reviewDecisionPayload"}
+        ]}
       }
     },
     "outcome": {

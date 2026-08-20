@@ -39,6 +39,23 @@ class TaskCaptureTest < Minitest::Test
     end
   end
 
+  def test_controller_candidate_writer_adds_typed_artifact_only_during_creation
+    with_initialized_project do |project_root|
+      writes = 0
+      writer = lambda do |folder|
+        writes += 1
+        File.write(File.join(folder, "controller-relation.json"), "{}")
+      end
+      first = build_capture(project_root, candidate_writer: writer).call
+      replay = build_capture(project_root, candidate_writer: writer).call
+
+      assert first.created
+      refute replay.created
+      assert_equal 1, writes
+      assert_equal "{}", File.read(File.join(first.folder, "controller-relation.json"))
+    end
+  end
+
   private
 
   def with_initialized_project
@@ -52,7 +69,8 @@ class TaskCaptureTest < Minitest::Test
     end
   end
 
-  def build_capture(project_root, fingerprint: "a" * 64, slug: "patrol-fix-task")
+  def build_capture(project_root, fingerprint: "a" * 64, slug: "patrol-fix-task",
+                    candidate_writer: nil)
     descriptor = Hive::Workflows::Registry.default
     Hive::TaskCapture.new(
       project_root: project_root,
@@ -67,7 +85,8 @@ class TaskCaptureTest < Minitest::Test
       slug: slug,
       state_bytes: "---\nslug: #{slug}\n---\n\n# #{slug}\n\n<!-- WAITING -->\n",
       idempotency_key: "patrol-fix:capture:one",
-      input_fingerprint: fingerprint
+      input_fingerprint: fingerprint,
+      candidate_writer: candidate_writer
     )
   end
 end

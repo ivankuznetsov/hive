@@ -6,6 +6,7 @@ require "hive/artifact_firewall"
 require "hive/patrol_fix/inbox_report"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/runner"
+require "hive/patrol_fix/successor_materializer"
 require "hive/patrol_fix/task_manifest"
 require "hive/stages/base"
 require "hive/stages/managed_agent_custody"
@@ -24,11 +25,11 @@ module Hive
           "patrol-fix-transition.jsonl", "handoff.yml", "pr.md"
         ].freeze
 
-        def run!(task, cfg = {}, agent_runner: method(:launch_agent))
+        def run!(task, cfg = {}, agent_runner: method(:launch_agent), successor_materializer: nil)
           manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
           store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
           existing = current_decision(store, manifest)
-          return result_for(existing) if existing
+          return finish_route(task, existing, successor_materializer) if existing
 
           head = git_read!(task.project_root, :head_oid).strip
           before_status = source_status(task)
@@ -48,7 +49,7 @@ module Hive
 
           report = Hive::PatrolFix::InboxReport.read(output_path)
           receipt = store.append!(decision_receipt(manifest, report, head))
-          result_for(receipt)
+          finish_route(task, receipt, successor_materializer)
         rescue Hive::AgentGitGate::Error => e
           raise Hive::StageError, e.message
         end
@@ -155,6 +156,17 @@ module Hive
           }
         end
         private_class_method :result_for
+
+        def finish_route(task, receipt, successor)
+          result = result_for(receipt)
+          return result unless receipt.dig("payload", "route") == "escalate"
+
+          materializer = successor || Hive::PatrolFix::SuccessorMaterializer.new(task)
+          linked = materializer.respond_to?(:call) ? materializer.call(receipt) :
+            raise(ArgumentError, "successor materializer must be callable")
+          result.merge(successor: linked)
+        end
+        private_class_method :finish_route
 
         def validate_agent_run!(run)
           unless run.is_a?(Hash) && run[:status] == :ok

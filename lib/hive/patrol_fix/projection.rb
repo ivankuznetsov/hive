@@ -33,8 +33,15 @@ module Hive
       def project(manifest, receipts)
         current = receipts.select { |receipt| current_receipt?(receipt, manifest) }
         decision = current_decision(current)
-        last_decision = current.reverse.find { |receipt| receipt["kind"] == "decision" }
+        last_decision = receipts.reverse.find { |receipt| receipt["kind"] == "decision" }
         validation = current.reverse.find { |receipt| receipt["kind"] == "validation" }
+        if validation.nil?
+          carried = current.reverse.find do |receipt|
+            receipt["kind"] == "reopen" && receipt["stage"] == "review"
+          end
+          validation_id = Array(carried&.dig("payload", "carried_receipts"))[1]
+          validation = receipts.find { |receipt| receipt["receipt_id"] == validation_id }
+        end
         fix = current.reverse.find { |receipt| receipt["kind"] == "fix" }
         publication = current.reverse.find { |receipt| receipt["kind"] == "publication" }
         outcome = parked_outcome(decision)
@@ -60,7 +67,7 @@ module Hive
           "outcome" => outcome,
           "blocker_owner" => outcome&.fetch("blocker_owner", nil),
           "validation" => validation&.fetch("payload", nil),
-          "review" => decision && decision["stage"] == "review" ? decision.fetch("payload") : nil,
+          "review" => last_decision && last_decision["stage"] == "review" ? last_decision.fetch("payload") : nil,
           "publication" => publication&.fetch("payload", nil),
           "archived" => done && publication && state == "current" ? true : false,
           "diagnostic" => diagnostic,
@@ -125,6 +132,7 @@ module Hive
         when "1-inbox" then decision&.dig("payload", "route") == "fix"
         when "2-fix" then !fix.nil?
         when "3-validate" then !validation.nil?
+        when "4-review" then decision&.dig("payload", "route") == "publish"
         else false
         end
         return action("advance", runnable: true, reopen: false) if ready

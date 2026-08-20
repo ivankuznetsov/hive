@@ -83,4 +83,60 @@ class PatrolFixStageTransitionTest < Minitest::Test
       end
     end
   end
+
+  def test_run_rebinds_commit_and_report_to_the_controller_moved_folder
+    PatrolFixStageFixture.with_task(stage: "4-review") do |task, _root, _manifest|
+      destination = File.join(task.hive_state_path, "stages", "2-fix", task.slug)
+      command = Hive::Commands::Run.new(task.folder, quiet: true)
+      runs = 0
+      committed = nil
+      reported = nil
+      command.define_singleton_method(:perform_rebase) { |*| Object.new }
+      command.define_singleton_method(:pick_runner) do |_task|
+        lambda do |_current, _cfg|
+          runs += 1
+          FileUtils.mkdir_p(File.dirname(destination))
+          File.rename(task.folder, destination)
+          { moved_task_folder: destination, status: :complete, commit: nil }
+        end
+      end
+      command.define_singleton_method(:terminal_state_snapshot) { |_| nil }
+      command.define_singleton_method(:legacy_completed_at_before_run) { |*| nil }
+      command.define_singleton_method(:commit_after) { |current, *| committed = current }
+      command.define_singleton_method(:report) { |current, _result| reported = current }
+
+      original = Hive::DependencySnapshot.method(:enforce_admission!)
+      Hive::DependencySnapshot.define_singleton_method(:enforce_admission!) { |*| true }
+      begin
+        command.send(:run_task, task)
+      ensure
+        Hive::DependencySnapshot.define_singleton_method(:enforce_admission!, original)
+      end
+
+      assert_equal 1, runs
+      assert_equal destination, committed.folder
+      assert_equal destination, reported.folder
+      assert_equal "fix", reported.stage_name
+      assert File.file?(File.join(destination, "events.jsonl"))
+      refute File.exist?(task.folder)
+    end
+  end
+
+  def test_stage_event_rescue_uses_destination_when_route_commit_raises_after_move
+    PatrolFixStageFixture.with_task(stage: "4-review") do |task, _root, _manifest|
+      destination = File.join(task.hive_state_path, "stages", "2-fix", task.slug)
+
+      error = assert_raises(RuntimeError) do
+        Hive::Stages::Base.with_stage_events(task) do
+          FileUtils.mkdir_p(File.dirname(destination))
+          File.rename(task.folder, destination)
+          raise "lost route commit acknowledgement"
+        end
+      end
+
+      assert_equal "lost route commit acknowledgement", error.message
+      assert File.file?(File.join(destination, "events.jsonl"))
+      refute File.exist?(task.folder)
+    end
+  end
 end

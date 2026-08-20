@@ -26,7 +26,9 @@ module Hive
         expected = identity(generation, evidence_digest, base_revision)
         if File.exist?(@path) || File.symlink?(@path)
           current = read
-          invalid!("worktree ownership conflicts with the current generation") unless current == expected
+          reusable = current.values_at("generation", "evidence_digest", "base_revision") ==
+            [ generation, evidence_digest, base_revision ]
+          invalid!("worktree ownership conflicts with the current generation") unless reusable
           validate!(current)
           return current
         end
@@ -35,6 +37,29 @@ module Hive
         Hive::AtomicFile.write(@path, Hive::PatrolFix.canonical_json(expected), mode: 0o600)
         expected.freeze
       rescue Hive::WorktreeError, Hive::AgentGitGate::Error => e
+        invalid!(e.message)
+      end
+
+      # A rework generation retains the exact owned checkout and branch. The
+      # previous controller receipt is archived byte-for-byte before the
+      # current pointer rotates, so a crash never makes custody ambiguous.
+      def rotate!(generation:, evidence_digest:)
+        current = read
+        validate!(current)
+        invalid!("worktree ownership generation must advance by one") unless
+          generation == current.fetch("generation") + 1
+        invalid!("worktree evidence digest is invalid") unless evidence_digest.to_s.match?(DIGEST)
+        archive_dir = File.join(@task_folder, "patrol-fix-worktrees")
+        ensure_archive_dir!(archive_dir)
+        archive = File.join(archive_dir, "generation-#{current.fetch('generation')}.json")
+        write_exact_or_match!(archive, current, "archived worktree ownership")
+        candidate = current.merge(
+          "generation" => generation, "evidence_digest" => evidence_digest
+        )
+        Hive::AtomicFile.write(@path, Hive::PatrolFix.canonical_json(candidate), mode: 0o600)
+        Hive::AtomicFile.fsync_directory(@task_folder)
+        candidate.freeze
+      rescue Hive::AgentGitGate::Error => e
         invalid!(e.message)
       end
 
@@ -106,6 +131,29 @@ module Hive
       end
 
       private
+
+      def ensure_archive_dir!(path)
+        stat = File.lstat(path)
+        invalid!("worktree ownership archive must be a directory") unless stat.directory? && !stat.symlink?
+      rescue Errno::ENOENT
+        Dir.mkdir(path, 0o700)
+        Hive::AtomicFile.fsync_directory(@task_folder)
+      rescue SystemCallError, IOError => e
+        invalid!("worktree ownership archive is unavailable: #{e.message}")
+      end
+
+      def write_exact_or_match!(path, document, label)
+        body = Hive::PatrolFix.canonical_json(document)
+        if File.exist?(path) || File.symlink?(path)
+          invalid!("#{label} must not be a symlink") if File.symlink?(path)
+          invalid!("#{label} conflicts with retained bytes") unless File.binread(path) == body
+          return
+        end
+        Hive::AtomicFile.write(path, body, mode: 0o600)
+        Hive::AtomicFile.fsync_directory(File.dirname(path))
+      rescue SystemCallError, IOError => e
+        invalid!("#{label} is unavailable: #{e.message}")
+      end
 
       def identity(generation, digest, base)
         invalid!("generation is invalid") unless generation.is_a?(Integer) && generation.positive?

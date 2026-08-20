@@ -46,6 +46,38 @@ class PatrolFixInboxStageTest < Minitest::Test
     end
   end
 
+  def test_persisted_escalation_replay_finishes_exactly_once_successor_materialization
+    with_task do |task, _manifest|
+      calls = []
+      successor = lambda do |receipt|
+        calls << receipt.fetch("receipt_id")
+        { slug: "repair-one-coding-abcd1234" }
+      end
+      runner = lambda do |**kwargs|
+        File.write(kwargs.fetch(:output_path), JSON.generate(
+          "schema" => "hive-patrol-fix-inbox-report", "schema_version" => 1,
+          "route" => "escalate", "rationale" => "Needs a broader product decision.",
+          "evidence" => [ "Repair crosses the bounded finding." ],
+          "blocker_owner" => "coding_workflow"
+        ))
+        { status: :ok, custody: :clean }
+      end
+
+      first = Hive::Stages::PatrolFix::Inbox.run!(
+        task, {}, agent_runner: runner, successor_materializer: successor
+      )
+      replay = Hive::Stages::PatrolFix::Inbox.run!(
+        task, {}, agent_runner: ->(**) { flunk "persisted decision must not respawn" },
+        successor_materializer: successor
+      )
+
+      assert_equal :parked, first.fetch(:status)
+      assert_equal first.fetch(:receipt), replay.fetch(:receipt)
+      assert_equal 2, calls.length
+      assert_equal 1, calls.uniq.length
+    end
+  end
+
   private
 
   def with_task

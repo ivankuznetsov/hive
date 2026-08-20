@@ -904,6 +904,7 @@ class ConfigTest < Minitest::Test
       assert_equal 1, cfg.dig("patrol", "max_fixes_per_feature_per_cycle")
       assert_equal 6, cfg.dig("patrol", "max_fix_attempts_per_cycle")
       assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle")
+      assert_equal 2, cfg.dig("patrol", "max_rework_cycles")
       assert_equal false, cfg.dig("patrol", "draft_prs")
       assert_equal true, cfg.dig("patrol", "review_prs")
       assert_equal [], cfg.dig("patrol", "include")

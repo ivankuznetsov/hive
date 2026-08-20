@@ -70,11 +70,15 @@ class PatrolFixTaskActionTest < Minitest::Test
   end
 
   def test_common_operational_reopen_is_generation_guarded_and_appends_one_receipt
-    with_task("review") do |task, receipts|
-      receipts.append!(decision_receipt(route: "blocked", stage: "review", id: "decision-1"))
+    with_task("inbox") do |task, receipts|
+      receipts.append!(decision_receipt(route: "blocked", stage: "inbox", id: "decision-1"))
       fresh = Hive::OperationalAction.descriptor_for_task(task, project: "demo")
       assert_equal "patrol_fix.reopen", fresh.fetch("action_id")
-      Hive::OperationalAction::Executor.new.send(
+      factory = lambda do |current|
+        Hive::PatrolFix::Transition.new(current, commit: ->(**) { :committed })
+      end
+      executor = Hive::OperationalAction::Executor.new(patrol_fix_transition_factory: factory)
+      executor.send(
         :execute_patrol_fix_reopen,
         task,
         project_name: "demo",
@@ -83,10 +87,18 @@ class PatrolFixTaskActionTest < Minitest::Test
         observation_token: fresh.fetch("observation_token")
       )
 
-      projection = Hive::PatrolFix::Projection.new(task_folder: task.folder, stage: "4-review").to_h
+      projection = Hive::PatrolFix::Projection.new(task_folder: task.folder, stage: "1-inbox").to_h
       assert_nil projection.fetch("outcome")
       assert_equal "ready", projection.dig("action", "kind")
+      assert_equal 2, projection.fetch("task_generation")
       assert_equal %w[decision reopen], receipts.read_all.map { |receipt| receipt.fetch("kind") }
+      assert_raises(Hive::StaleOperationalObservation) do
+        executor.send(
+          :execute_patrol_fix_reopen, task, project_name: "demo",
+          action_id: fresh.fetch("action_id"), target: fresh.fetch("target"),
+          observation_token: fresh.fetch("observation_token")
+        )
+      end
     end
   end
 
@@ -165,7 +177,12 @@ class PatrolFixTaskActionTest < Minitest::Test
         "route" => route, "rationale" => "Current semantic decision.",
         "evidence" => [ "bounded evidence" ], "blocker_owner" => "#{stage}_gate",
         "head_revision" => "b" * 40
-      }
+      }.tap do |payload|
+        payload.merge!(
+          "diff_digest" => "c" * 64,
+          "fix_receipt_id" => "fix-1", "validation_receipt_id" => "validation-1"
+        ) if stage == "review"
+      end
     }
   end
 

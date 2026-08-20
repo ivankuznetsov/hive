@@ -1,9 +1,9 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/modules/migration/occurrence_*.rb, lib/hive/modules/migration/patrol_*.rb, lib/hive/modules/migration/shadow_*.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/modules/migration/occurrence_*.rb, lib/hive/modules/migration/patrol_*.rb, lib/hive/modules/migration/shadow_*.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-08-14
+updated: 2026-08-20
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
 ---
 
@@ -581,6 +581,32 @@ the same refresh-suppression boundary as the stream source; admission begins
 only after Turbo accepts any confirmation.
 Reconnect freshness is an Action Cable token handshake, not a browser
 MutationObserver.
+
+## Patrol Fix review generations and route state
+
+The `patrol-fix` workflow keeps its semantic authority in the task manifest and
+append-only `patrol-fix-receipts.jsonl`. One review decision is allowed for an
+exact `(task slug, generation, evidence revision, review, decision)` tuple. The
+controller resolves the current worktree ownership receipt, clean HEAD, bounded
+diff, fix receipt, and validation receipt before launch and revalidates the
+manifest and those exact bytes immediately before appending the decision.
+
+`rework` and explicit operator `reopen` write a stable slug-scoped route intent
+under `.hive-state/patrol-fix/transitions/<slug>/` before mutation. They advance
+the manifest/evidence generation and append a new-generation `reopen` receipt
+before any fresh decision. Rework moves the same folder from Review to Fix,
+rotates the current worktree ownership file, retains the prior generation's
+owned bytes, and carries no validation receipt. A review-stage operator reopen
+stays in Review and may explicitly carry the unchanged fix and validation
+receipt IDs; this provenance is a controller transition, not a newly executed
+validation. A completed route intent remains replayable so a crash after the
+folder move is reconciled from either the old caller path or the new location.
+
+`reject`, `blocked`, and `escalate` are parked non-terminal outcomes. Escalation
+uses a stable source fingerprint to capture one ordinary coding task and stores
+reciprocal controller-owned relations on both tasks. A crash after capture but
+before either link is repaired reuses the same successor. No issue record or
+GitHub mutation is part of this state machine.
 
 ## Patrol occurrence, selection, and recovery state
 

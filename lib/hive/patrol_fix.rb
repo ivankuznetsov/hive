@@ -23,6 +23,9 @@ module Hive
     autoload :WorktreeReceipt, "hive/patrol_fix/worktree_receipt"
     autoload :ValidationReceipt, "hive/patrol_fix/validation_receipt"
     autoload :StageTransition, "hive/patrol_fix/stage_transition"
+    autoload :ReviewReceipt, "hive/patrol_fix/review_receipt"
+    autoload :Transition, "hive/patrol_fix/transition"
+    autoload :SuccessorMaterializer, "hive/patrol_fix/successor_materializer"
 
     module_function
 

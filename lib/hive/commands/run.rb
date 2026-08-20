@@ -174,6 +174,7 @@ module Hive
             end
             raise
           end
+          task = task_after_patrol_fix_move(task, result)
           commit_after(
             task, result, config: cfg, terminal_snapshot: terminal_snapshot,
             completion_time: legacy_completed_at,
@@ -184,6 +185,20 @@ module Hive
           terminal_snapshot&.close
         end
       end
+
+      def task_after_patrol_fix_move(task, result)
+        return task unless Hive::Workflows.patrol_fix_id?(task.workflow.id)
+        destination = result.is_a?(Hash) && result[:moved_task_folder]
+        return task unless destination
+
+        moved = Hive::Task.new(destination, workflow_generation: task.workflow_generation)
+        unless moved.project_root == task.project_root && moved.slug == task.slug &&
+               Hive::Workflows.patrol_fix_id?(moved.workflow.id)
+          raise Hive::InvalidTaskPath, "Patrol Fix runner returned a foreign moved task"
+        end
+        moved
+      end
+      private :task_after_patrol_fix_move
 
       def resolve_task
         Hive::TaskResolver.new(

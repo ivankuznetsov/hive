@@ -226,8 +226,9 @@ module Hive
     # values select no command arguments beyond the registered action ID and
     # exact project/task identity; stage, verb, and guards are recomputed.
     class Executor
-      def initialize(recovery_writer: Hive::Recovery::API)
+      def initialize(recovery_writer: Hive::Recovery::API, patrol_fix_transition_factory: nil)
         @recovery_writer = recovery_writer
+        @patrol_fix_transition_factory = patrol_fix_transition_factory
       end
 
       def execute(action_id:, target:, observation_token:)
@@ -328,41 +329,39 @@ module Hive
       def execute_patrol_fix_reopen(task, project_name:, action_id:, target:, observation_token:)
         require "hive/lock"
         require "hive/patrol_fix/projection"
-        require "hive/patrol_fix/receipt_store"
+        require "hive/patrol_fix/stage_transition"
+        require "hive/patrol_fix/transition"
 
-        Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "patrol-fix-reopen", create: false) do
-          OperationalAction.assert_current!(
-            task,
-            project: project_name,
-            action_id: action_id,
-            target: target,
-            observation_token: observation_token
-          )
-          patrol_fix = Hive::PatrolFix::Projection.new(
-            task_folder: task.folder,
-            stage: "#{task.stage_index}-#{task.stage_name}"
-          ).to_h
-          unless OperationalAction.patrol_fix_reopenable?(
-            "workflow" => task.workflow.id.to_s, "patrol_fix" => patrol_fix
-          )
-            raise Hive::StaleOperationalObservation,
-                  "the patrol-fix outcome is no longer eligible for reopen"
+        Hive::PatrolFix::StageTransition.with_lock(task) do
+          Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "patrol-fix-reopen", create: false) do
+            OperationalAction.assert_current!(
+              task,
+              project: project_name,
+              action_id: action_id,
+              target: target,
+              observation_token: observation_token
+            )
+            patrol_fix = Hive::PatrolFix::Projection.new(
+              task_folder: task.folder,
+              stage: "#{task.stage_index}-#{task.stage_name}"
+            ).to_h
+            unless OperationalAction.patrol_fix_reopenable?(
+              "workflow" => task.workflow.id.to_s, "patrol_fix" => patrol_fix
+            )
+              raise Hive::StaleOperationalObservation,
+                    "the patrol-fix outcome is no longer eligible for reopen"
+            end
+
+            transition = if @patrol_fix_transition_factory
+              @patrol_fix_transition_factory.call(task)
+            else
+              Hive::PatrolFix::Transition.new(task)
+            end
+            transition.reopen!(
+              outcome_receipt_id: patrol_fix.dig("outcome", "receipt_id"),
+              operator: "action"
+            )
           end
-
-          outcome_receipt_id = patrol_fix.dig("outcome", "receipt_id")
-          generation = patrol_fix.fetch("task_generation")
-          receipt_id = "reopen-#{Digest::SHA256.hexdigest([ task.slug, generation, outcome_receipt_id ].join("\0"))}"
-          Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).append!(
-            "schema" => "hive-patrol-fix-receipt",
-            "schema_version" => 1,
-            "receipt_id" => receipt_id,
-            "kind" => "reopen",
-            "stage" => task.stage_name,
-            "task" => { "slug" => task.slug, "generation" => generation },
-            "evidence_revision" => patrol_fix.fetch("evidence_revision"),
-            "recorded_at" => Time.now.utc.iso8601,
-            "payload" => { "outcome_receipt_id" => outcome_receipt_id, "operator" => "action" }
-          )
         end
       end
 

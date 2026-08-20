@@ -1484,7 +1484,9 @@ class PatrolCommandTest < Minitest::Test
   end
 
   def with_patrol_project
-    with_tmp_global_config do
+    previous_usage_path = Hive::UsageDb.instance_variable_get(:@path)
+    with_tmp_global_config do |global_home|
+      Hive::UsageDb.path = File.join(global_home, "usage.db")
       with_tmp_git_repo do |repo|
         FileUtils.mkdir_p(File.join(repo, ".hive-state"))
         cfg = Hive::Config.deep_merge(
@@ -1503,6 +1505,8 @@ class PatrolCommandTest < Minitest::Test
         yield repo
       end
     end
+  ensure
+    Hive::UsageDb.path = previous_usage_path
   end
 
   def command_for(project: "demo", json: true, dry_run: false, mapper: FakeMapper.new([]),

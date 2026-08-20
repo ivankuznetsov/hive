@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-08-12
+updated: 2026-08-20
 tags: [attempts, ownership, leases, daemon, recovery, bounded-storage]
 ---
 
@@ -52,6 +52,16 @@ This boundary does not split Attempts into another repository, process, or gem.
 It creates an in-monorepo seam that Hive can exercise first; a separately
 published package remains a later response to demonstrated non-Hive demand,
 not a requirement of the module design.
+
+Task-projection cache validation and journal replay use
+`Store#fetch_projection_binding`. Hot records still receive full schema
+validation because their lifecycle fields can
+change. Immutable permanent proofs take a narrower validated read of the exact
+identity, generation, state, outcome, lease, and lineage fields consumed by the
+projection. Full `Store#fetch` continues to validate receipts, diagnostics, and
+every output reference for consumers that use those domains. This prevents a
+status scan from repeatedly walking cumulative inherited-output arrays while
+preserving fail-closed binding validation.
 
 The component catalog keeps this admission slice as a guarded reference
 `candidate`. Its facade, result contracts, focused clean-process load, and

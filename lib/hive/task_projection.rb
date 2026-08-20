@@ -42,7 +42,9 @@ module Hive
     end
 
     def self.replay_journal(bytes, attempt_store: nil)
-      validator = Hive::TaskJournal::Validator.new(attempt_store: attempt_store)
+      validator = Hive::TaskJournal::Validator.new(
+        attempt_store: attempt_store, projection_bindings: true
+      )
       Hive::WorkLedger.replay(
         bytes: bytes,
         record_id: ->(record) { record["event_id"] },

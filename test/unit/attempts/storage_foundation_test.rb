@@ -63,6 +63,31 @@ class AttemptsStorageFoundationTest < Minitest::Test
     end
   end
 
+  def test_projection_binding_skips_unrelated_output_and_receipt_validation
+    with_tmp_dir do |root|
+      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
+      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      terminal = terminal_record(
+        source, attempt_id: "projection-proof", request_id: "projection-request"
+      )
+      store.permanent_proofs.publish(terminal)
+
+      replacement = ->(*) { raise "full record validation must not run" }
+      binding = with_replaced_singleton_method(
+        Hive::Attempts::Record, :new, replacement
+      ) do
+        store.fetch_projection_binding(terminal.attempt_id)
+      end
+
+      assert_equal terminal.attempt_id, binding.fetch("attempt_id")
+      assert_equal terminal.task_input_epoch, binding.fetch("task_input_epoch")
+      assert_equal terminal.state, binding.fetch("state")
+      assert_equal terminal.outcome, binding.fetch("outcome")
+      assert_equal Hive::Attempts::PermanentProofStore::PROJECTION_BINDING_KEYS.sort,
+                   binding.keys.sort
+    end
+  end
+
   def test_hot_record_wins_during_interrupted_proof_promotion
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
@@ -462,9 +487,15 @@ class AttemptsStorageFoundationTest < Minitest::Test
       path = proof.path_for(terminal.attempt_id)
       File.binwrite(path, JSON.generate(launching.to_h) + "\n")
       assert_raises(Hive::Attempts::StoreError) { proof.fetch(terminal.attempt_id) }
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.fetch_projection_binding(terminal.attempt_id)
+      end
 
       File.binwrite(path, "{")
       assert_raises(Hive::Attempts::StoreError) { proof.fetch(terminal.attempt_id) }
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.fetch_projection_binding(terminal.attempt_id)
+      end
     end
   end
 

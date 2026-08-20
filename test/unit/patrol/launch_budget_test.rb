@@ -188,6 +188,86 @@ class PatrolLaunchBudgetTest < Minitest::Test
     end
   end
 
+  def test_reservation_rejection_fails_closed_and_releases_the_lock
+    with_tmp_dir do |dir|
+      store = Object.new
+      store.define_singleton_method(:path) { File.join(dir, "usage.db") }
+      store.define_singleton_method(:patrol_activity) do |**|
+        { available: true, agent_spawns: 0 }
+      end
+      store.define_singleton_method(:record!) { |**| false }
+      budget = Hive::Patrol::LaunchBudget.new(dir, cfg: config, usage_db: store)
+
+      refute acquire(budget, Time.now.utc)
+      assert_equal "usage_store_unavailable", budget.last_exhaustion.fetch(:reason)
+      assert_nil budget.instance_variable_get(:@launch_lock)
+    end
+  end
+
+  def test_reservation_exception_fails_closed_and_reports_the_error
+    with_tmp_dir do |dir|
+      store = Object.new
+      store.define_singleton_method(:path) { File.join(dir, "usage.db") }
+      store.define_singleton_method(:patrol_activity) do |**|
+        { available: true, agent_spawns: 0 }
+      end
+      store.define_singleton_method(:record!) { |**| raise IOError, "disk unavailable" }
+      budget = Hive::Patrol::LaunchBudget.new(dir, cfg: config, usage_db: store)
+
+      _out, err = capture_io { refute acquire(budget, Time.now.utc) }
+
+      assert_equal "usage_store_unavailable", budget.last_exhaustion.fetch(:reason)
+      assert_match(/launch reservation failed: disk unavailable/, err)
+      assert_nil budget.instance_variable_get(:@launch_lock)
+    end
+  end
+
+  def test_unavailable_activity_has_no_remaining_capacity
+    with_tmp_dir do |dir|
+      store = Object.new
+      store.define_singleton_method(:path) { File.join(dir, "usage.db") }
+      store.define_singleton_method(:patrol_activity) do |**|
+        { available: false, agent_spawns: 0 }
+      end
+      budget = Hive::Patrol::LaunchBudget.new(dir, cfg: config, usage_db: store)
+
+      assert_equal 0, budget.remaining_launches
+      assert_equal "usage_store_unavailable", budget.last_exhaustion.fetch(:reason)
+      assert_equal "patrol agent launch blocked (usage_store_unavailable)",
+                   budget.exhaustion_message
+    end
+  end
+
+  def test_architecture_fix_uses_the_configured_fix_agent_without_a_profile_name
+    with_tmp_dir do |dir|
+      agents = []
+      store = Object.new
+      store.define_singleton_method(:path) { File.join(dir, "usage.db") }
+      store.define_singleton_method(:patrol_activity) do |**|
+        { available: true, agent_spawns: 0 }
+      end
+      store.define_singleton_method(:record!) do |**args|
+        agents << args.fetch(:agent)
+        true
+      end
+      cfg = config.merge(
+        "refactor_patrol" => { "auto_fix" => { "agent" => "grok" } }
+      )
+      budget = Hive::Patrol::LaunchBudget.new(dir, cfg: cfg, usage_db: store)
+      profile = Object.new
+      now = Time.utc(2026, 8, 20, 12)
+
+      assert budget.acquire(
+        profile: profile, stage: "refactor-patrol-fix", started_at: now
+      )
+      assert budget.record!(
+        result: { status: :ok }, profile: profile,
+        stage: "refactor-patrol-fix", started_at: now
+      )
+      assert_equal [ "grok", "grok" ], agents
+    end
+  end
+
   def test_usage_store_failure_blocks_remaining_launches_in_the_cycle
     with_tmp_dir do |dir|
       Hive::UsageDb.path = dir

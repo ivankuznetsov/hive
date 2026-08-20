@@ -117,6 +117,23 @@ module Hive
       def pull_request_merged(entry, manifest)
         manifest = Hive::RefactorPatrol::PrManifest.validate!(manifest)
         source = manifest.fetch("source")
+        post_merge = manifest.fetch("schema_version") == Hive::RefactorPatrol::PrManifest::SCHEMA_VERSION
+        idempotency_key = "pull-request:#{source.fetch('repository')}:#{source.fetch('number')}:#{source.fetch('merge_sha')}"
+        idempotency_key = "#{idempotency_key}:#{manifest.fetch('job_id')}" if post_merge
+        payload = {
+          "repository" => source.fetch("repository"), "number" => source.fetch("number"),
+          "merge_commit" => source.fetch("merge_sha"),
+          "manifest_digest" => manifest.fetch("manifest_checksum"),
+          "job_id" => manifest.fetch("job_id"),
+          "legacy_enqueue_provenance" => {
+            "decision" => {
+              "rationale" => "due", "job_id" => manifest.fetch("job_id"),
+              "phase" => "discovery"
+            },
+            "effects" => [ { "kind" => "job", "id" => manifest.fetch("job_id") } ]
+          }
+        }
+        payload["post_merge"] = post_merge_event_projection(manifest) if post_merge
         ledger(entry).record(
           project_id: entry.fetch("project_id"), project: entry.fetch("name"),
           event_name: "pull_request.merged", occurred_at: source.fetch("merged_at"),
@@ -124,25 +141,37 @@ module Hive
             "type" => "github_pull_request",
             "id" => "#{source.fetch('repository')}##{source.fetch('number')}"
           },
-          idempotency_key: "pull-request:#{source.fetch('repository')}:#{source.fetch('number')}:#{source.fetch('merge_sha')}",
-          payload: {
-            "repository" => source.fetch("repository"), "number" => source.fetch("number"),
-            "merge_commit" => source.fetch("merge_sha"),
-            "manifest_digest" => manifest.fetch("manifest_checksum"),
-            "job_id" => manifest.fetch("job_id"),
-            "legacy_enqueue_provenance" => {
-              "decision" => {
-                "rationale" => "due", "job_id" => manifest.fetch("job_id"),
-                "phase" => "discovery"
-              },
-              "effects" => [ { "kind" => "job", "id" => manifest.fetch("job_id") } ]
-            }
-          },
+          idempotency_key: idempotency_key, payload: payload,
           recorded_at: @clock.call
         )
       end
 
       private
+
+      # The immutable manifest remains the exact provenance authority. Events
+      # carry every merge identity plus a digest/count for its bounded path
+      # mapping so split batches have distinct, inspectable delivery without
+      # copying up to 512 long paths into EventLedger's 64 KiB envelope.
+      def post_merge_event_projection(manifest)
+        classification = manifest.fetch("classification")
+        provenance = manifest.fetch("provenance")
+        merges = provenance.fetch("merges")
+        {
+          "lane" => manifest.fetch("lane"),
+          "classification" => classification.slice(
+            "occurrence_id", "snapshot_digest", "changed_paths_digest",
+            "decision", "classified_at", "model_receipt"
+          ),
+          "provenance_digest" => Hive::RefactorPatrol::PrManifest.checksum(provenance),
+          "path_count" => merges.sum { |merge| merge.fetch("path_mappings").size },
+          "merges" => merges.map do |merge|
+            merge.slice(
+              "repository", "number", "merge_sha", "merged_at",
+              "classification_occurrence_id"
+            )
+          end
+        }
+      end
 
       def ledger(entry) = @ledger_factory.call(entry)
 

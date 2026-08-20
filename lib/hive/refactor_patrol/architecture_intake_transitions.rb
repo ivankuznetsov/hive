@@ -197,10 +197,18 @@ module Hive
       end
 
       def manifest_source(manifest)
-        manifest.fetch("source").merge(
+        source = manifest.fetch("source").merge(
           "changed_paths" => manifest.fetch("changed_paths"),
           "manifest_checksum" => manifest.fetch("manifest_checksum")
         )
+        if manifest.fetch("schema_version") == Hive::RefactorPatrol::PrManifest::SCHEMA_VERSION
+          source.merge!(
+            "lane" => manifest.fetch("lane"),
+            "classification" => manifest.fetch("classification"),
+            "provenance" => manifest.fetch("provenance")
+          )
+        end
+        source
       end
 
       def dry_identity(prefix, manifest)

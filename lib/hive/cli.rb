@@ -1129,6 +1129,20 @@ module Hive
       ).call
     end
 
+    desc "refactor-patrol-classify PROJECT", "Run one queued merge classifier (daemon/internal)"
+    option :occurrence_id, type: :string, required: true
+    option :reservation_id, type: :string, required: true
+    option :result_file, type: :string, required: true
+    def refactor_patrol_classify(project)
+      require "hive/commands/refactor_patrol_classify"
+      Hive::Commands::RefactorPatrolClassify.new(
+        project,
+        occurrence_id: options[:occurrence_id],
+        reservation_id: options[:reservation_id],
+        result_file: options[:result_file]
+      ).call
+    end
+
     desc "answer TARGET", "Inventory or persist one identity-bound brainstorm answer"
     long_desc <<~DESC, wrap: false
       With no --binding, reads TARGET at 2-brainstorm and returns every question

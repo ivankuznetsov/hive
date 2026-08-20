@@ -11,7 +11,8 @@ tags: [command, refactor-patrol, architecture, json, daemon]
 patrol. Every mode emits the current v4 route contract over a fresh durable v4
 job lifecycle: immutable PR scope, read-only discovery, explicit
 `fix`/`discuss`/`dismiss` decisions, and separately authorized isolated fixes
-or deduplicated issues. V3 JobStore data is left byte-identical and is not read
+or PR publication. The first-party module no longer grants issue mutation;
+retained legacy issue records remain readable. V3 JobStore data is left byte-identical and is not read
 by the v4 runtime. Automatic mutation remains narrower than discovery; a
 language needs a certified public-contract guard or its thesis routes to
 discussion with `public_contract_safety_unavailable`.
@@ -31,6 +32,9 @@ hive refactor-patrol my-project --pr https://github.com/acme/app/pull/123 --json
 hive refactor-patrol my-project --job-manifest PATH --json
 hive refactor-patrol my-project --job-manifest PATH --actions --json
 # The daemon also supplies an internal --result-file under v2/results/.
+# Ambiguous classification uses a supervised internal Patrol-scan child:
+hive refactor-patrol-classify my-project --occurrence-id DIGEST \
+  --reservation-id DIGEST --result-file PATH --json
 
 # Read-only durable job inspection
 hive refactor-patrol my-project --list
@@ -223,9 +227,31 @@ PR resolution bind GitHub calls and returned PR URLs to the exact host and
 repository resolved from the registered checkout. The reconciler's v2
 checkpoint separately binds registration, host, repository, and default branch;
 unsupported/corrupt checkpoints or identity changes are quarantined and block
-instead of silently rebaselining. Each manifest records the source URL and
-repository, base and merge SHAs, merged time, complete file statuses/renames,
-changed paths, and checksum before its job is runnable.
+instead of silently rebaselining. Existing immutable
+`hive-refactor-patrol-pr-manifest` v2 artifacts remain readable for exact
+redelivery/adoption; this narrow compatibility is distinct from the v4
+JobStore, whose obsolete v3 bytes remain opaque.
+
+New intake first stores a bounded immutable classifier snapshot with title,
+body, labels, author, patches, changed paths, target head, and validated Patrol
+publication provenance. Deterministic gates close controller-owned Patrol PRs,
+linked coding successors, docs/dependency/fix/chore-only merges, and scopes with
+no production path. Ambiguous merges run asynchronously as supervised Patrol
+scans using the selected project's normal trusted agent profile. The agent can
+return only `feature` or `skip`; repository, merge, head, and path identity stay
+controller-owned. Provider deadlines extend generic retry backoff, malformed
+output retries, and missing inputs or exhausted attempts are visible blocked
+occurrences.
+
+Accepted `feature` rows are the sole unclaimed post-merge queue. At reservation,
+Hive remaps one current-default SHA, then freezes overlapping stable slices: at
+most eight merges and 512 paths within ten minutes. Larger single merges split
+into deterministic 512-path owner batches. Only each synthetic owner receives
+a v3 manifest, v4 JobStore row, merge event, and discovery claim; there are no
+staging member jobs or coalesced aliases. A classifier row binds to its exact
+owner job/checksum set only after every chunk materializes. Split events include
+the owner job identity, while the checksum-bound manifest/JobStore retains the
+exact merge-to-path-to-slice provenance.
 
 Catch-up is incremental and restart-safe without changing that authoritative
 `reconciler.json` v2 checkpoint. A separate identity-fenced

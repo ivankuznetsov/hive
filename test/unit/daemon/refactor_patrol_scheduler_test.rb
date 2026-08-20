@@ -20,6 +20,257 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_classification_is_supervised_claimed_once_and_terminal_skip_leaves_queue
+    with_project do |dir, entry, store|
+      classifier = Hive::RefactorPatrol::MergeClassifier.new(
+        root: File.join(entry.fetch("hive_state_path"), "refactor_patrol", "v2", "merge-classifications"),
+        decision_provider: lambda do |_prompt|
+          {
+            "decision" => "skip", "rationale" => "Not a feature",
+            "evidence" => [ "Maintenance only" ], "model_receipt" => "fake:model"
+          }
+        end
+      )
+      record = classifier.hydrate(classification_snapshot, now: T0)
+      options = {
+        classifier_factory: ->(*) { classifier },
+        migration_ownership: ->(*) { true },
+        migration_snapshot: ->(*) { { "owner" => "legacy", "admission" => true, "epoch" => 1 } }
+      }
+      first = scheduler(entry, store, **options)
+      second = scheduler(entry, store, **options)
+      candidate = first.candidates(now: T0).fetch(0)
+
+      dispatch = first.reserve(candidate, now: T0)
+      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        second.reserve(candidate, now: T0)
+      end
+      assert_equal "classification_claim_unavailable", error.reason
+      assert_includes dispatch.fetch(:command), "refactor-patrol-classify"
+      refute_includes dispatch.fetch(:command), "read-only"
+
+      classifier.run_occurrence(
+        record.fetch("occurrence_id"),
+        reservation_id: dispatch.dig(:dispatch_token, :reservation_id), now: T0 + 1
+      )
+      result = first.complete(
+        dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 0,
+        envelope: { "decision" => "feature" }, now: T0 + 2
+      )
+
+      assert_equal :closed, result.fetch(:status)
+      assert_empty first.candidates(now: T0 + 3)
+    end
+  end
+
+  def test_feature_materialization_recovers_after_event_boundary_and_binds_once
+    with_project do |_dir, entry, store|
+      classifier = Hive::RefactorPatrol::MergeClassifier.new(
+        root: File.join(entry.fetch("hive_state_path"), "refactor_patrol", "v2", "merge-classifications"),
+        decision_provider: lambda do |_prompt|
+          {
+            "decision" => "feature", "rationale" => "New capability",
+            "evidence" => [ "Production behavior added" ], "model_receipt" => "fake:model"
+          }
+        end
+      )
+      record = classifier.hydrate(classification_snapshot, now: T0)
+      calls = 0
+      publisher = Object.new
+      publisher.define_singleton_method(:pull_request_merged) do |_entry, _manifest|
+        calls += 1
+        raise IOError, "event fsync failed" if calls == 1
+      end
+      slice_mapper = Object.new
+      slice_mapper.define_singleton_method(:call) do |analysis_sha:, paths:, **|
+        Hive::RefactorPatrol::PostMergeSliceMapper::Mapping.new(
+          analysis_sha: analysis_sha,
+          path_mappings: paths.map do |path|
+            { "path" => path, "slice_ids" => [ "feature-slice" ] }
+          end
+        )
+      end
+      options = {
+        classifier_factory: ->(*) { classifier }, event_publisher: publisher,
+        post_merge_slice_mapper: slice_mapper,
+        checkout_guard_factory: ->(*) { Guard.new(sha: "c" * 40) },
+        cfg: enabled_cfg.merge(
+          "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" }
+        ),
+        migration_ownership: ->(*) { true },
+        migration_snapshot: ->(*) { { "owner" => "legacy", "admission" => true, "epoch" => 1 } }
+      }
+      active = scheduler(entry, store, **options)
+      candidate = active.candidates(now: T0).fetch(0)
+      dispatch = active.reserve(candidate, now: T0)
+      classifier.run_occurrence(
+        record.fetch("occurrence_id"),
+        reservation_id: dispatch.dig(:dispatch_token, :reservation_id), now: T0 + 1
+      )
+
+      failed = active.complete(
+        dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 0,
+        envelope: {}, now: T0 + 2
+      )
+      assert_equal :classified, failed.fetch(:status)
+      assert_nil classifier.fetch_occurrence(record.fetch("occurrence_id"))["materialization"]
+      assert_empty store.jobs, "classifier settlement must not create a staging JobStore row"
+      assert_equal 0, calls, "classifier settlement must not publish a merge event"
+
+      batch_candidate = active.candidates(now: T0 + 3).fetch(0)
+      assert_equal :post_merge, batch_candidate.fetch(:action_phase)
+      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        active.reserve(batch_candidate, now: T0 + 3)
+      end
+      assert_equal "post_merge_batch_materialization_failed", error.reason
+      assert_equal 1, store.jobs.size,
+                   "synthetic owner enqueue must survive the later event failure"
+      assert_nil classifier.fetch_occurrence(record.fetch("occurrence_id"))["materialization"]
+
+      candidates = active.candidates(now: T0 + 4)
+      bound = classifier.fetch_occurrence(record.fetch("occurrence_id"))
+      job = store.jobs.fetch(0)
+      assert_equal 2, calls
+      assert_equal [ job.fetch("job_id") ], bound.dig("materialization", "job_ids")
+      assert_equal [ job.fetch("job_id") ], candidates.map { |item| item.fetch(:job_id) }
+      assert_equal 2, calls, "bound feature must not republish on later candidate scans"
+      active.candidates(now: T0 + 5)
+      assert_equal 2, calls
+    end
+  end
+
+  def test_two_overlapping_feature_merges_materialize_one_owner_and_one_event
+    with_project do |_dir, entry, store|
+      classifier = Hive::RefactorPatrol::MergeClassifier.new(
+        root: File.join(entry.fetch("hive_state_path"), "refactor_patrol", "v2", "merge-classifications"),
+        decision_provider: lambda do |_prompt|
+          {
+            "decision" => "feature", "rationale" => "New capability",
+            "evidence" => [ "Production behavior added" ], "model_receipt" => "fake:model"
+          }
+        end
+      )
+      records = [
+        classifier.call(classification_snapshot(number: 7, paths: [ "lib/a.rb" ]), now: T0),
+        classifier.call(
+          classification_snapshot(number: 8, paths: [ "lib/b.rb" ], merged_at: T0 + 60),
+          now: T0 + 60
+        )
+      ]
+      published = []
+      publisher = Object.new
+      publisher.define_singleton_method(:pull_request_merged) do |_entry, manifest|
+        published << manifest
+      end
+      slice_mapper = Object.new
+      slice_mapper.define_singleton_method(:call) do |analysis_sha:, paths:, **|
+        Hive::RefactorPatrol::PostMergeSliceMapper::Mapping.new(
+          analysis_sha: analysis_sha,
+          path_mappings: paths.map do |path|
+            { "path" => path, "slice_ids" => [ "shared-slice" ] }
+          end
+        )
+      end
+      active = scheduler(
+        entry, store,
+        cfg: enabled_cfg.merge(
+          "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" }
+        ),
+        classifier_factory: ->(*) { classifier }, event_publisher: publisher,
+        post_merge_slice_mapper: slice_mapper,
+        checkout_guard_factory: ->(*) { Guard.new(sha: "c" * 40) },
+        migration_ownership: ->(*) { true },
+        migration_snapshot: ->(*) { { "owner" => "legacy", "admission" => true, "epoch" => 1 } }
+      )
+
+      candidates = active.candidates(now: T0 + 61)
+      assert_equal 2, candidates.count { |item| item.fetch(:action_phase) == :post_merge }
+      dispatch = active.reserve(candidates.first, now: T0 + 61)
+
+      assert_equal 1, store.jobs.size
+      assert_equal 1, published.size
+      owner = store.jobs.fetch(0)
+      assert_equal owner.fetch("job_id"), dispatch.dig(:dispatch_token, :job_id)
+      provenance_occurrences = owner.dig("source", "provenance", "merges").map do |merge|
+        merge.fetch("classification_occurrence_id")
+      end
+      assert_equal records.map { |record| record.fetch("occurrence_id") },
+                   provenance_occurrences
+      bindings = records.map do |record|
+        classifier.fetch_occurrence(record.fetch("occurrence_id")).dig("materialization", "job_ids")
+      end
+      assert_equal [ [ owner.fetch("job_id") ], [ owner.fetch("job_id") ] ], bindings
+      assert_equal published.first.fetch("manifest_checksum"),
+                   owner.dig("source", "manifest_checksum")
+      active.cancel(dispatch, reason: "test_complete", now: T0 + 62)
+    end
+  end
+
+  def test_oversized_feature_scope_splits_into_distinct_owner_events_and_binds_once
+    with_project do |_dir, entry, store|
+      classifier = Hive::RefactorPatrol::MergeClassifier.new(
+        root: File.join(entry.fetch("hive_state_path"), "refactor_patrol", "v2", "merge-classifications"),
+        decision_provider: lambda do |_prompt|
+          {
+            "decision" => "feature", "rationale" => "New capability",
+            "evidence" => [ "Production behavior added" ], "model_receipt" => "fake:model"
+          }
+        end
+      )
+      paths = 513.times.map { |index| "lib/features/#{index}.rb" }
+      record = classifier.call(classification_snapshot(paths: paths), now: T0)
+      slice_mapper = Object.new
+      slice_mapper.define_singleton_method(:call) do |analysis_sha:, paths:, **|
+        Hive::RefactorPatrol::PostMergeSliceMapper::Mapping.new(
+          analysis_sha: analysis_sha,
+          path_mappings: paths.map do |path|
+            { "path" => path, "slice_ids" => [ "shared-slice" ] }
+          end
+        )
+      end
+      active = scheduler(
+        entry, store,
+        cfg: enabled_cfg.merge(
+          "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" }
+        ),
+        classifier_factory: ->(*) { classifier },
+        post_merge_slice_mapper: slice_mapper,
+        checkout_guard_factory: ->(*) { Guard.new(sha: "c" * 40) },
+        migration_ownership: ->(*) { true },
+        migration_snapshot: ->(*) { { "owner" => "legacy", "admission" => true, "epoch" => 1 } }
+      )
+
+      first_candidate = active.candidates(now: T0 + 1).find do |item|
+        item.fetch(:action_phase) == :post_merge
+      end
+      first_dispatch = active.reserve(first_candidate, now: T0 + 1)
+      active.cancel(first_dispatch, reason: "test_next_chunk", now: T0 + 2)
+      assert_nil classifier.fetch_occurrence(record.fetch("occurrence_id"))["materialization"]
+
+      second_candidate = active.candidates(now: T0 + 3).find do |item|
+        item.fetch(:action_phase) == :post_merge
+      end
+      second_dispatch = active.reserve(second_candidate, now: T0 + 3)
+
+      jobs = store.jobs.sort_by { |job| job.fetch("created_at") }
+      assert_equal 2, jobs.size
+      assert_equal 2, jobs.map { |job| job.fetch("job_id") }.uniq.size
+      assert_equal [ 512, 1 ], jobs.map { |job| job.dig("source", "changed_paths").size }
+      assert_equal paths, jobs.flat_map { |job| job.dig("source", "changed_paths") }
+      binding = classifier.fetch_occurrence(record.fetch("occurrence_id")).fetch("materialization")
+      assert_equal jobs.map { |job| job.fetch("job_id") }, binding.fetch("job_ids")
+      assert_equal 2, binding.fetch("job_ids").uniq.size
+      events = Hive::Modules::EventLedger.new(
+        root: File.join(entry.fetch("hive_state_path"), "module-runtime")
+      ).all.select { |event| event.fetch("event_name") == "pull_request.merged" }
+      assert_equal 2, events.size
+      assert_equal 2, events.map { |event| event.fetch("event_id") }.uniq.size
+      assert_equal binding.fetch("job_ids").sort,
+                   events.map { |event| event.dig("payload", "job_id") }.sort
+      active.cancel(second_dispatch, reason: "test_complete", now: T0 + 4)
+    end
+  end
+
   def test_reserves_oldest_due_job_with_stable_identity_and_durable_manifest_command
     with_project do |dir, entry, store|
       enqueue(store, job_id: "new", number: 8, merged_at: T0 + 60)
@@ -2412,12 +2663,14 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   end
 
   def scheduler(entry, store, claim_resolver: ->(_attempt) { :resolved },
-                claim_liveness_resolver: claim_resolver, **options)
+                cfg: enabled_cfg,
+                claim_liveness_resolver: claim_resolver,
+                checkout_guard_factory: ->(*) { Guard.new }, **options)
     Hive::Daemon::RefactorPatrolScheduler.new(
-      registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
+      registry: -> { [ entry ] }, config_loader: ->(_path) { cfg },
       job_store_factory: ->(_path) { store },
       repository_resolver: ->(_entry, _cfg) { repository_identity },
-      checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a",
+      checkout_guard_factory: checkout_guard_factory, owner: "daemon-a",
       claim_resolver: claim_resolver,
       claim_liveness_resolver: claim_liveness_resolver,
       **options
@@ -2444,6 +2697,22 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
 
   def repository_identity(repository = "acme/demo", host = "github.com")
     { "repository" => repository, "host" => host }
+  end
+
+  def classification_snapshot(number: 7, paths: [ "lib/feature.rb" ], merged_at: T0)
+    {
+      "repository" => "acme/demo", "number" => number,
+      "url" => "https://github.com/acme/demo/pull/#{number}",
+      "base_branch" => "main", "base_sha" => "a" * 40,
+      "merge_sha" => format("%040x", number), "merged_at" => merged_at.iso8601,
+      "target_head" => "c" * 40, "title" => "Add feature", "body" => "Capability",
+      "labels" => [ "feature" ], "author" => "dev",
+      "changed_paths" => paths,
+      "files" => paths.map do |path|
+        { "path" => path, "status" => "modified", "patch" => "@@ -1 +1 @@" }
+      end,
+      "publication_provenance" => { "kind" => "none", "marker" => nil }
+    }
   end
 
   def enqueue(store, job_id: "job-7", number: 7, merged_at: T0, registration: "demo")

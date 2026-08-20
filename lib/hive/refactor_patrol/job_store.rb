@@ -40,7 +40,7 @@ module Hive
       ].freeze
       SOURCE_KEYS = %w[
         url number repository registration base_branch base_sha merge_sha
-        merged_at changed_paths manifest_checksum
+        merged_at changed_paths manifest_checksum lane classification provenance
       ].freeze
       POLICY_KEYS = %w[discovery auto_fix issue_filing action epoch captured_at].freeze
       POLICY_ACTION_KEYS = %w[
@@ -2312,18 +2312,31 @@ module Hive
 
       def source_from_manifest(manifest)
         unless manifest.is_a?(Hash) && manifest["schema"] == PrManifest::SCHEMA &&
-               manifest["schema_version"] == PrManifest::SCHEMA_VERSION
-          raise CorruptRecord, "refactor patrol intake requires a v2 PR manifest"
+               [ PrManifest::LEGACY_SCHEMA_VERSION, PrManifest::SCHEMA_VERSION ]
+                 .include?(manifest["schema_version"])
+          raise CorruptRecord, "refactor patrol intake requires a supported PR manifest"
         end
+        PrManifest.validate!(manifest) if
+          manifest.fetch("schema_version") == PrManifest::SCHEMA_VERSION
 
         source = manifest.fetch("source")
         %w[url number repository registration base_branch base_sha merge_sha merged_at].each do |key|
           source.fetch(key)
         end
-        source.merge(
+        projected = source.merge(
           "changed_paths" => manifest.fetch("changed_paths"),
           "manifest_checksum" => manifest.fetch("manifest_checksum")
         )
+        if manifest.fetch("schema_version") == PrManifest::SCHEMA_VERSION
+          projected = projected.merge(
+            "lane" => manifest.fetch("lane"),
+            "classification" => manifest.fetch("classification"),
+            "provenance" => manifest.fetch("provenance")
+          )
+        end
+        projected
+      rescue PrManifest::Invalid => error
+        raise CorruptRecord, error.message
       end
 
       def queued_aggregate(job_id:, source:, policy:, occurrence_id:,

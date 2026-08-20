@@ -66,6 +66,23 @@ class PatrolFixSuccessorMaterializerTest < Minitest::Test
     end
   end
 
+  def test_publication_marker_is_stable_and_fails_closed_for_a_corrupt_relation
+    with_origin do |task, decision|
+      result = Hive::PatrolFix::SuccessorMaterializer.new(task).call(decision)
+      folder = result.fetch(:task_folder)
+
+      first = Hive::PatrolFix::SuccessorMaterializer.publication_marker(folder)
+      second = Hive::PatrolFix::SuccessorMaterializer.publication_marker(folder)
+
+      assert_equal first, second
+      assert_match(/\A<!-- hive-patrol-fix-successor:v1 digest=[0-9a-f]{64} -->\z/, first)
+      File.write(File.join(folder, "patrol-fix-origin.json"), "{}")
+      assert_raises(Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor) do
+        Hive::PatrolFix::SuccessorMaterializer.publication_marker(folder)
+      end
+    end
+  end
+
   def test_retry_commits_links_left_written_by_a_lost_commit_acknowledgement
     with_origin do |task, decision|
       git_ops = Hive::GitOps.new(task.project_root)

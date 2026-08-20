@@ -11,6 +11,18 @@ module Hive
     # feature-specific validation and response shapes used by durable patrol
     # publication and merge intake.
     class GithubGateway
+      MAX_MERGE_TITLE_BYTES = 512
+      MAX_MERGE_BODY_BYTES = 32 * 1024
+      MAX_MERGE_LABELS = 100
+      MAX_MERGE_LABEL_BYTES = 256
+      MAX_MERGE_FILES = 10_000
+      MAX_MERGE_PATCH_BYTES = 32 * 1024
+      MAX_MERGE_PATCH_TOTAL_BYTES = 512 * 1024
+      PATROL_PUBLICATION_MARKER =
+        /<!--\s*hive-publication:v1\s+id=pub-[0-9a-f]{32}\s+base=[0-9a-f]{40,64}\s*-->/
+      PATROL_SUCCESSOR_MARKER =
+        /<!--\s*hive-patrol-fix-successor:v1\s+digest=[0-9a-f]{64}\s*-->/
+
       def self.coerce(gateway = nil, transport:, required:)
         return gateway unless gateway.nil?
 
@@ -165,7 +177,10 @@ module Hive
         @transport.ensure_authenticated!(
           cfg, host: host, timeout_sec: remaining_timeout(deadline)
         )
-        fields = %w[number url state baseRefName baseRefOid mergeCommit mergedAt changedFiles].join(",")
+        fields = %w[
+          number url state baseRefName baseRefOid mergeCommit mergedAt changedFiles
+          title body labels author
+        ].join(",")
         out, err, status = @transport.capture3(
           "gh", "pr", "view", pr.to_s, "--repo", "#{host}/#{repository}",
           "--json", fields,
@@ -176,6 +191,29 @@ module Hive
         end
         doc = JSON.parse(out)
         raise Hive::GhError, "`gh pr view #{pr}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+
+        title = bounded_merge_text(
+          doc["title"], "title", MAX_MERGE_TITLE_BYTES, allow_empty: true
+        )
+        body = bounded_merge_text(doc["body"], "body", MAX_MERGE_BODY_BYTES, allow_empty: true)
+        author = doc.dig("author", "login")
+        author = bounded_merge_text(
+          author, "author", MAX_MERGE_LABEL_BYTES, allow_empty: true
+        )
+        labels = doc["labels"]
+        unless labels.is_a?(Array) && labels.size <= MAX_MERGE_LABELS
+          raise Hive::GhError, "merged PR labels are incomplete"
+        end
+        labels = labels.map do |label|
+          unless label.is_a?(Hash)
+            raise Hive::GhError, "merged PR labels contain a non-object"
+          end
+          bounded_merge_text(label["name"], "label", MAX_MERGE_LABEL_BYTES)
+        end.uniq.sort
+        changed_files = doc["changedFiles"]
+        unless changed_files.is_a?(Integer) && changed_files.between?(1, MAX_MERGE_FILES)
+          raise Hive::GhError, "merged PR changed-file count is invalid"
+        end
 
         number = doc["number"]
         validate_pr_repository_identity!(doc["url"], repository, number, host: host)
@@ -192,18 +230,40 @@ module Hive
         unless pages.is_a?(Array) && pages.all? { |page| page.is_a?(Array) }
           raise Hive::GhError, "`gh api` returned incomplete file pages for PR #{number}"
         end
+        patch_bytes = 0
         files = pages.flat_map do |page|
           page.map do |file|
             unless file.is_a?(Hash)
               raise Hive::GhError, "`gh api` returned a non-object file for PR #{number}"
             end
 
+            patch = bounded_merge_text(
+              file["patch"], "file patch", MAX_MERGE_PATCH_BYTES, allow_empty: true
+            )
+            patch_bytes += patch.bytesize
+            if patch_bytes > MAX_MERGE_PATCH_TOTAL_BYTES
+              raise Hive::GhError, "merged PR file patches exceed their aggregate bound"
+            end
             {
               "path" => file["filename"].to_s,
               "status" => file["status"].to_s,
-              "previous_path" => file["previous_filename"].to_s.empty? ? nil : file["previous_filename"].to_s
+              "previous_path" => file["previous_filename"].to_s.empty? ? nil : file["previous_filename"].to_s,
+              "patch" => patch
             }.compact
           end
+        end
+        unless files.size == changed_files
+          raise Hive::GhError,
+                "merged PR file metadata is incomplete (expected #{changed_files}, got #{files.size})"
+        end
+
+        marker = body[PATROL_PUBLICATION_MARKER] || body[PATROL_SUCCESSOR_MARKER]
+        provenance_kind = if marker&.match?(PATROL_PUBLICATION_MARKER)
+          "patrol"
+        elsif marker&.match?(PATROL_SUCCESSOR_MARKER)
+          "patrol_successor"
+        else
+          "none"
         end
 
         {
@@ -215,7 +275,9 @@ module Hive
           "base_sha" => doc["baseRefOid"],
           "merge_sha" => doc.dig("mergeCommit", "oid"),
           "merged_at" => doc["mergedAt"],
-          "changed_files" => doc["changedFiles"],
+          "changed_files" => changed_files,
+          "title" => title, "body" => body, "labels" => labels, "author" => author,
+          "publication_provenance" => { "kind" => provenance_kind, "marker" => marker },
           "files" => files
         }
       rescue JSON::ParserError => e
@@ -353,6 +415,15 @@ module Hive
       end
 
       private
+
+      def bounded_merge_text(value, label, max_bytes, allow_empty: false)
+        text = value.to_s.dup.force_encoding(Encoding::UTF_8)
+        unless text.valid_encoding? && text.bytesize <= max_bytes &&
+               (allow_empty || !text.empty?) && !text.include?("\0")
+          raise Hive::GhError, "merged PR #{label} is invalid"
+        end
+        text
+      end
 
       def operation_deadline(timeout_sec)
         return nil if timeout_sec.nil?

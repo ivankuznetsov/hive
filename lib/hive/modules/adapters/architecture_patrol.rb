@@ -234,7 +234,6 @@ module Hive
         def require_mutation_capabilities!(context)
           context.require_repository_write!
           context.require_filesystem_write!(".hive-state/refactor_patrol/**")
-          context.require_github_mutation!("issues")
           context.require_github_mutation!("pull_requests")
           context.require_external_command!("gh")
           context.require_network_host!("api.github.com")

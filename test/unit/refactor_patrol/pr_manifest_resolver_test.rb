@@ -1,5 +1,7 @@
 require "test_helper"
 require "hive/refactor_patrol/pr_manifest_resolver"
+require "hive/refactor_patrol/merge_classifier"
+require "hive/refactor_patrol/post_merge_batch_store"
 
 class RefactorPatrolPrManifestResolverTest < Minitest::Test
   include HiveTestHelper
@@ -53,6 +55,25 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
 
       assert_equal 7, resolver.resolve("7").dig("source", "number")
       refute Dir.exist?(File.join(dir, ".hive-state", "refactor_patrol", "v2"))
+    end
+  end
+
+  def test_classified_redelivery_adopts_existing_v2_manifest_without_reclassifying_or_rewriting
+    with_tmp_dir do |dir|
+      resolver = resolver_for(dir, FakeGh.new(details))
+      legacy = resolver.resolve("7")
+      path = resolver.manifest_path(legacy.fetch("job_id"))
+      bytes = File.binread(path)
+      classifier = Object.new
+      classifier.define_singleton_method(:hydrate) { |_| raise "must not reclassify" }
+
+      resolution = resolver.resolve_classified("7", classifier: classifier)
+
+      assert_equal legacy, resolution.manifest
+      assert_equal "adopted", resolution.classification.fetch("status")
+      assert_equal "existing_manifest_v2", resolution.classification.fetch("reason")
+      assert_equal bytes, File.binread(path)
+      assert_equal 1, Dir.glob(File.join(File.dirname(path), "*.json")).size
     end
   end
 
@@ -214,6 +235,108 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
     invalid_time.fetch("source")["merged_at"] = "yesterday"
     assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
       Hive::RefactorPatrol::PrManifest.validate!(invalid_time)
+    end
+  end
+
+  def test_v3_manifest_retains_post_merge_classification_and_provenance_while_v2_remains_readable
+    source = details.slice(
+      "url", "number", "repository", "base_branch", "base_sha", "merge_sha", "merged_at"
+    ).merge("registration" => "demo")
+    classification = {
+      "occurrence_id" => "c" * 64, "snapshot_digest" => "d" * 64,
+      "changed_paths_digest" => "e" * 64, "decision" => "feature",
+      "reason" => "llm", "rationale" => "New capability", "evidence" => [ "Feature behavior" ],
+      "model_receipt" => "fake:model", "attempts" => 1,
+      "classified_at" => "2026-08-20T12:00:00Z",
+      "prefilter" => { "decision" => "ambiguous", "reason" => "no_match", "evidence" => [] }
+    }
+    files = details.fetch("files").map { |file| file.merge("patch" => "@@ -1 +1 @@") }
+    provenance = {
+      "merges" => [ source.slice("repository", "number", "merge_sha", "merged_at").merge(
+        "classification_occurrence_id" => classification.fetch("occurrence_id"),
+        "path_mappings" => files.map do |file|
+          { "path" => file.fetch("path"), "slice_ids" => [ "slice-checkout" ] }
+        end
+      ) ]
+    }
+
+    manifest = Hive::RefactorPatrol::PrManifest.build(
+      source: source, files: files, lane: "post_merge", classification: classification,
+      provenance: provenance
+    )
+
+    assert_equal 3, manifest.fetch("schema_version")
+    assert_equal "post_merge", manifest.fetch("lane")
+    assert_equal "feature", manifest.dig("classification", "decision")
+    assert_equal provenance.fetch("merges"), manifest.dig("provenance", "merges")
+    assert_same manifest, Hive::RefactorPatrol::PrManifest.validate!(manifest)
+    missing_mapping = Marshal.load(Marshal.dump(manifest))
+    missing_mapping.dig("provenance", "merges", 0, "path_mappings").pop
+    missing_mapping["manifest_checksum"] = Hive::RefactorPatrol::PrManifest.checksum(
+      missing_mapping.reject { |key, _value| key == "manifest_checksum" }
+    )
+    assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+      Hive::RefactorPatrol::PrManifest.validate!(missing_mapping)
+    end
+
+    legacy = Hive::RefactorPatrol::PrManifest.build(source: source, files: details.fetch("files"))
+    assert_equal 2, legacy.fetch("schema_version")
+    assert_equal "pr-7-f8b3f911d781de2c", legacy.fetch("job_id"),
+                 "default identity must preserve the pre-U7 v2 job id"
+    assert_same legacy, Hive::RefactorPatrol::PrManifest.validate!(legacy)
+  end
+
+  def test_materializes_one_mapped_batch_owner_with_every_merge_path_provenance
+    with_tmp_dir do |dir|
+      classifier = Hive::RefactorPatrol::MergeClassifier.new(
+        root: File.join(dir, "classifications"),
+        decision_provider: ->(_prompt) {
+          {
+            "decision" => "feature", "rationale" => "Adds a feature",
+            "evidence" => [ "Production behavior" ], "model_receipt" => "fake:model"
+          }
+        }
+      )
+      classifications = [ [ 7, "lib/a.rb" ], [ 8, "lib/b.rb" ] ].map do |number, path|
+        classifier.call(
+          {
+            "repository" => "acme/demo", "number" => number,
+            "url" => "https://github.com/acme/demo/pull/#{number}",
+            "base_branch" => "main", "base_sha" => "a" * 40,
+            "merge_sha" => number.to_s(16).rjust(40, "0"),
+            "merged_at" => "2026-08-20T12:00:00Z", "target_head" => "b" * 40,
+            "title" => "Add feature #{number}", "body" => "Adds behavior",
+            "labels" => [], "author" => "dev", "changed_paths" => [ path ],
+            "files" => [ { "path" => path, "status" => "modified", "patch" => number.to_s } ],
+            "publication_provenance" => { "kind" => "none", "marker" => nil }
+          },
+          now: Time.utc(2026, 8, 20, 12, 0, number)
+        )
+      end
+      mappings = {
+        classifications[0].fetch("occurrence_id") => [ { "path" => "lib/a.rb", "slice_ids" => [ "shared" ] } ],
+        classifications[1].fetch("occurrence_id") => [ { "path" => "lib/b.rb", "slice_ids" => [ "shared" ] } ]
+      }
+      batch = Hive::RefactorPatrol::PostMergeBatchStore.new(
+        root: File.join(dir, "batches")
+      ).claim!(
+        primary_occurrence_id: classifications[0].fetch("occurrence_id"),
+        classifications: classifications.map { |item| item.merge("registration" => "demo") },
+        analysis_sha: "a" * 40, mappings: mappings,
+        now: Time.utc(2026, 8, 20, 12, 5, 0)
+      )
+
+      owner = resolver_for(dir, FakeGh.new(details)).materialize_batch(
+        batch, classifications: classifications
+      )
+
+      assert_equal batch.fetch("owner_job_id"), owner.fetch("job_id")
+      assert_equal %w[lib/a.rb lib/b.rb], owner.fetch("changed_paths")
+      assert_equal classifications.map { |item| item.fetch("occurrence_id") },
+                   owner.dig("provenance", "merges").map { |merge| merge.fetch("classification_occurrence_id") }
+      assert_equal mappings.values,
+                   owner.dig("provenance", "merges").map { |merge| merge.fetch("path_mappings") }
+      assert_same owner, Hive::RefactorPatrol::PrManifest.validate!(owner)
     end
   end
 

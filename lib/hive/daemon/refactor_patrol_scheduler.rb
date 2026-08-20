@@ -11,6 +11,7 @@ require "hive/gh"
 require "hive/lock"
 require "hive/process_kill"
 require "hive/refactor_patrol/checkout_guard"
+require "hive/refactor_patrol/architecture_intake_transitions"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/architecture_occurrence_lifecycle"
 require "hive/refactor_patrol/claim_liveness_resolver"
@@ -19,6 +20,13 @@ require "hive/refactor_patrol/action_claim_transitions"
 require "hive/refactor_patrol/claim_maintenance_transitions"
 require "hive/refactor_patrol/discovery_transitions"
 require "hive/refactor_patrol/pr_manifest"
+require "hive/refactor_patrol/pr_manifest_resolver"
+require "hive/refactor_patrol/merge_classifier"
+require "hive/refactor_patrol/merge_classifier_runner"
+require "hive/refactor_patrol/post_merge_batch_store"
+require "hive/refactor_patrol/post_merge_slice_mapper"
+require "hive/refactor_patrol/policy"
+require "hive/refactor_patrol/state_store"
 require "hive/refactor_patrol/process_group_resolver"
 require "hive/refactor_patrol/repository_ownership"
 require "hive/modules/event_publisher"
@@ -69,7 +77,10 @@ module Hive
                      lease_sec: 7200, dry_run: false,
                      migration_authority: :legacy, migration_ownership: nil,
                      migration_snapshot: nil, evidence_store_factory: nil,
-                     event_publisher: nil, module_execution: nil)
+                     event_publisher: nil, module_execution: nil,
+                     classifier_factory: nil, manifest_resolver_factory: nil,
+                     post_merge_batch_store_factory: nil,
+                     post_merge_slice_mapper: nil)
         @registry = registry
         @config_loader = config_loader
         @job_store_factory = job_store_factory
@@ -113,6 +124,19 @@ module Hive
         end
         @event_publisher = event_publisher || Hive::Modules::EventPublisher.new
         @module_execution = module_execution
+        @classifier_factory = classifier_factory
+        @manifest_resolver_factory = manifest_resolver_factory
+        @post_merge_batch_store_factory = post_merge_batch_store_factory
+        @post_merge_slice_mapper = post_merge_slice_mapper ||
+                                   Hive::RefactorPatrol::PostMergeSliceMapper.new
+        @architecture_intake_transitions =
+          Hive::RefactorPatrol::ArchitectureIntakeTransitions.new(
+            config_loader: @config_loader,
+            migration_snapshot: ->(entry) { @migration_snapshot.call(entry, "architecture-patrol") },
+            evidence_store_factory: @evidence_store_factory,
+            module_execution: @module_execution,
+            admission_error: ReservationBlocked
+          )
         @occurrence_lifecycle =
           Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle.new(
             migration_authority: @migration_authority,
@@ -163,6 +187,8 @@ module Hive
           unless recover_occurrences(store, entry, now)
             next [ entry.fetch("name"), [] ]
           end
+          recover_post_merge_batches(entry, store, now)
+          classifications = classification_work(entry, store, now)
           claimable = if discovery_available?(entry)
             store.claimable_jobs(
               now: now,
@@ -175,7 +201,8 @@ module Hive
           # provider backoff remain authoritative, but it never consults the
           # independent scheduled-architecture daily allowance.
           discovery = claimable
-          work = discovery.map { |job| { aggregate: job, phase: :discovery } } +
+          work = classifications +
+                 discovery.map { |job| { aggregate: job, phase: :discovery } } +
                  store.actionable_jobs(now: now).map { |job| { aggregate: job, phase: :action } }
           [ entry.fetch("name"), work ]
         end
@@ -194,6 +221,11 @@ module Hive
 
           store = stores_by_project.fetch(project)
           work.filter_map do |item|
+            if %i[classification post_merge].include?(item.fetch(:phase))
+              next candidate_for_classification(
+                entry, item.fetch(:classification), phase: item.fetch(:phase)
+              )
+            end
             aggregate = item.fetch(:aggregate)
             if (capacity = effect_capacity_exhaustion(
               store, aggregate, phase: item.fetch(:phase), now: now
@@ -244,8 +276,8 @@ module Hive
           raise ReservationBlocked.new("migration_ownership_changed")
         end
         phase = candidate.fetch(:action_phase, :discovery).to_sym
-        store = store_for(entry)
-        aggregate = store.read_job(candidate.fetch(:job_id))
+        store = %i[classification post_merge].include?(phase) ? nil : store_for(entry)
+        aggregate = store&.read_job(candidate.fetch(:job_id))
         cfg = begin
           @config_loader.call(entry.fetch("path"))
         rescue StandardError => e
@@ -254,13 +286,13 @@ module Hive
             "path" => File.expand_path(entry.fetch("path")),
             "error" => "#{e.class}: #{e.message}"
           }
-          block(
-            entry, aggregate,
-            reason: "project_config_unavailable",
-            evidence: evidence,
-            now: now,
-            phase: phase
-          )
+          unless %i[classification post_merge].include?(phase)
+            block(
+              entry, aggregate,
+              reason: "project_config_unavailable", evidence: evidence,
+              now: now, phase: phase
+            )
+          end
           raise ReservationBlocked.new("project_config_unavailable", evidence)
         end
         enabled = cfg.dig("daemon", "enabled") == true &&
@@ -269,6 +301,8 @@ module Hive
         unless enabled
           raise ReservationBlocked.new("architecture_patrol_disabled")
         end
+        return reserve_classification(candidate, entry, cfg, now) if phase == :classification
+        return reserve_post_merge(candidate, entry, cfg, now) if phase == :post_merge
 
         ownership = repository_ownership_decision(
           entry, aggregate, cfg: cfg, phase: phase,
@@ -298,7 +332,7 @@ module Hive
           @checkout_guard_factory.call(entry.fetch("path"), branch)
                                  .validate_and_snapshot!(
                                    merge_sha: aggregate.dig("source", "merge_sha"),
-                                   analysis_sha: aggregate["analysis_sha"]
+                                   analysis_sha: candidate[:batch_analysis_sha] || aggregate["analysis_sha"]
                                  ).fetch("analysis_sha")
         rescue Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk => error
           retirement = if @dry_run
@@ -410,7 +444,7 @@ module Hive
 
       def spawned(dispatch, pid:, process_start_time:, pgid:, now: Time.now)
         return dispatch if @dry_run
-        return dispatch if dispatch.dig(:dispatch_token, :phase) == :action
+        return dispatch if %i[action classification].include?(dispatch.dig(:dispatch_token, :phase))
 
         @claim_maintenance_transitions.attach_discovery(
           store: store_for(dispatch.fetch(:entry)),
@@ -428,6 +462,14 @@ module Hive
         return unless token
         return dispatch if @dry_run || token[:dry_run]
         return dispatch if token[:phase] == :action
+        if token[:phase] == :classification
+          entry = dispatch.fetch(:entry)
+          classifier_for(entry, @config_loader.call(entry.fetch("path"))).release_claim!(
+            token.fetch(:classification_occurrence_id),
+            reservation_id: token.fetch(:reservation_id), now: now
+          )
+          return dispatch
+        end
 
         entry = dispatch.fetch(:entry)
         store = store_for(entry)
@@ -442,6 +484,8 @@ module Hive
       def complete(dispatch_token:, exit_code:, envelope:, now: Time.now)
         return completion_result(:dry_run, dispatch_token, envelope) if @dry_run || dispatch_token[:dry_run]
         return complete_action(dispatch_token, exit_code, envelope, now) if dispatch_token[:phase] == :action
+        return complete_classification(dispatch_token, exit_code, now) if
+          dispatch_token[:phase] == :classification
 
         entry = entry_for_token(dispatch_token)
         store = store_for(entry)
@@ -617,6 +661,311 @@ module Hive
         )
       end
 
+      def classifier_for(entry, cfg = entry.fetch("_refactor_patrol_cfg"))
+        return @classifier_factory.call(entry, cfg) if @classifier_factory
+
+        state_root = entry["hive_state_path"] || File.join(entry.fetch("path"), ".hive-state")
+        state = Hive::RefactorPatrol::StateStore.new(
+          entry.fetch("path"), hive_state_path: state_root
+        )
+        Hive::RefactorPatrol::MergeClassifier.new(
+          root: File.join(state_root, "refactor_patrol", "v2", "merge-classifications"),
+          decision_provider: lambda do |prompt|
+            Hive::RefactorPatrol::MergeClassifierRunner.new(
+              project_root: entry.fetch("path"), cfg: cfg, state: state
+            ).call(prompt)
+          end
+        )
+      end
+
+      def post_merge_batch_store_for(entry)
+        return @post_merge_batch_store_factory.call(entry) if @post_merge_batch_store_factory
+
+        Hive::RefactorPatrol::PostMergeBatchStore.new(
+          root: File.join(
+            entry.fetch("hive_state_path"), "refactor_patrol", "v2", "post-merge-batches"
+          )
+        )
+      end
+
+      def recover_post_merge_batches(entry, store, now)
+        return if @dry_run
+
+        post_merge_batch_store_for(entry).pending(limit: 100).each do |batch|
+          materialize_batch_record(entry, store, batch, now)
+        rescue StandardError => error
+          @events << {
+            status: :blocked, project: entry.fetch("name"),
+            batch_id: batch["batch_id"], reason: "post_merge_batch_recovery_failed",
+            error: "#{error.class}: #{error.message}"[0, 2_000]
+          }
+        end
+      end
+
+      def materialize_batch_record(entry, store, batch, now)
+        cfg = entry.fetch("_refactor_patrol_cfg") do
+          @config_loader.call(entry.fetch("path"))
+        end
+        resolver = if @manifest_resolver_factory
+          @manifest_resolver_factory.call(entry, cfg)
+        else
+          Hive::RefactorPatrol::PrManifestResolver.new(
+            project_root: entry.fetch("path"), registration: entry.fetch("name"),
+            default_branch: cfg.fetch("default_branch"), cfg: cfg,
+            hive_state_path: entry["hive_state_path"]
+          )
+        end
+        classifier = classifier_for(entry, cfg)
+        occurrence_ids = batch.fetch("members").map { |member| member.fetch("occurrence_id") }.uniq
+        classifications = occurrence_ids.map do |occurrence_id|
+          classifier.fetch_occurrence(occurrence_id) ||
+            raise(Hive::RefactorPatrol::MergeClassifier::Invalid, "batch classification is missing")
+        end
+        manifest = resolver.materialize_batch(batch, classifications: classifications)
+        aggregate = @architecture_intake_transitions.enqueue(
+          entry: entry, store: store, manifest: manifest,
+          policy: Hive::RefactorPatrol::Policy.capture(cfg, now: now),
+          now: now, dry_run: false
+        )
+        @event_publisher.pull_request_merged(entry, manifest)
+        batch_store = post_merge_batch_store_for(entry)
+        batch_store.mark_materialized!(
+          batch.fetch("batch_id"), job_id: manifest.fetch("job_id"),
+          manifest_checksum: manifest.fetch("manifest_checksum"), now: now
+        )
+        classifications.each do |classification|
+          binding = batch_store.materialization_binding(
+            classification.merge("registration" => entry.fetch("name"))
+          )
+          next unless binding
+
+          classifier.bind_materialization!(
+            classification.fetch("occurrence_id"),
+            job_ids: binding.fetch("job_ids"),
+            manifest_checksums: binding.fetch("manifest_checksums"), now: now
+          )
+        end
+        batch_store.finalize!(
+          batch.fetch("batch_id"), job_id: manifest.fetch("job_id"),
+          manifest_checksum: manifest.fetch("manifest_checksum")
+        )
+        { aggregate: aggregate, manifest_path: resolver.manifest_path(manifest.fetch("job_id")) }
+      end
+
+      def classification_work(entry, store, now)
+        records = classifier_for(entry).eligible_records(now: now, limit: 100)
+        features = records.select do |record|
+          record.fetch("status") == "feature" && !record["materialization"]
+        end
+        unclaimed = post_merge_batch_store_for(entry).unclaimed_occurrence_ids(
+          features.map { |record| record.merge("registration" => entry.fetch("name")) }
+        )
+        records.filter_map do |record|
+          case record.fetch("status")
+          when "feature"
+            next if record["materialization"]
+            next unless unclaimed.include?(record.fetch("occurrence_id"))
+
+            { classification: record, phase: :post_merge }
+          when "pending"
+            { classification: record, phase: :classification }
+          when "retry_wait"
+            retry_at = record["retry_at"] && Time.iso8601(record.fetch("retry_at"))
+            { classification: record, phase: :classification } if !retry_at || retry_at <= now
+          end
+        rescue StandardError => error
+          @events << {
+            status: :blocked, project: entry.fetch("name"),
+            occurrence_id: record["occurrence_id"], reason: "classification_admission_failed",
+            error: "#{error.class}: #{error.message}"[0, 2_000]
+          }
+          nil
+        end
+      end
+
+      def reserve_post_merge(candidate, entry, cfg, now)
+        raise ReservationBlocked.new("post_merge_would_batch") if @dry_run
+
+        classifier = classifier_for(entry, cfg)
+        primary = classifier.fetch_occurrence(
+          candidate.fetch(:classification_occurrence_id)
+        )
+        unless primary && primary.fetch("status") == "feature" &&
+               primary.fetch("decision") == "feature" && !primary["materialization"]
+          raise ReservationBlocked.new("post_merge_classification_changed")
+        end
+        branch = cfg["default_branch"].to_s
+        raise ReservationBlocked.new("missing_default_branch") if branch.empty?
+        analysis_sha = @checkout_guard_factory.call(entry.fetch("path"), branch)
+          .validate_and_snapshot!(
+            merge_sha: primary.dig("snapshot", "merge_sha"), analysis_sha: nil
+          ).fetch("analysis_sha")
+
+        records = post_merge_candidates(classifier, primary, entry, now)
+        unique_paths = records.flat_map { |record| record.dig("snapshot", "changed_paths") }.uniq
+        mapping = @post_merge_slice_mapper.call(
+          entry: entry, cfg: cfg, analysis_sha: analysis_sha, paths: unique_paths
+        )
+        by_path = mapping.path_mappings.to_h { |item| [ item.fetch("path"), item ] }
+        mappings = records.to_h do |record|
+          [
+            record.fetch("occurrence_id"),
+            record.dig("snapshot", "changed_paths").map { |path| by_path.fetch(path) }
+          ]
+        end
+
+        fresh = records.filter_map do |record|
+          current = classifier.fetch_occurrence(record.fetch("occurrence_id"))
+          next unless current == record.reject { |key, _value| key == "registration" }
+
+          current.merge("registration" => entry.fetch("name"))
+        end
+        unless fresh.any? { |record| record.fetch("occurrence_id") == primary.fetch("occurrence_id") }
+          raise ReservationBlocked.new("post_merge_classification_changed")
+        end
+        fresh_ids = fresh.map { |record| record.fetch("occurrence_id") }
+        mappings.select! { |occurrence_id, _value| fresh_ids.include?(occurrence_id) }
+        batch = post_merge_batch_store_for(entry).claim!(
+          primary_occurrence_id: primary.fetch("occurrence_id"),
+          classifications: fresh, analysis_sha: analysis_sha,
+          mappings: mappings, now: now
+        )
+        materialized = materialize_batch_record(entry, store_for(entry), batch, now)
+        owner_candidate = candidate_for(
+          entry, materialized.fetch(:aggregate), phase: :discovery
+        ).merge(batch_analysis_sha: analysis_sha)
+        reserve(owner_candidate, now: now)
+      rescue Hive::RefactorPatrol::PostMergeBatchStore::Conflict
+        batch = post_merge_batch_store_for(entry)
+          .batches_for_occurrence(candidate.fetch(:classification_occurrence_id))
+          .reject { |record| record.fetch("status") == "finalized" }.last
+        raise ReservationBlocked.new("post_merge_batch_claim_changed") unless batch
+
+        materialized = materialize_batch_record(entry, store_for(entry), batch, now)
+        reserve(
+          candidate_for(entry, materialized.fetch(:aggregate), phase: :discovery)
+            .merge(batch_analysis_sha: batch.fetch("analysis_sha")),
+          now: now
+        )
+      rescue Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk => error
+        @events << {
+          status: :blocked, project: entry.fetch("name"),
+          occurrence_id: candidate[:classification_occurrence_id],
+          reason: "source_no_longer_on_trunk",
+          evidence: { "merge_sha" => error.merge_sha, "trunk_sha" => error.trunk_sha }
+        }
+        raise ReservationBlocked.new("source_no_longer_on_trunk")
+      rescue Hive::GitError, Hive::RefactorPatrol::JobStore::Error,
+             Hive::RefactorPatrol::PrManifest::Invalid,
+             Hive::RefactorPatrol::PrManifestResolver::Conflict,
+             SystemCallError, IOError, KeyError => error
+        @events << {
+          status: :blocked, project: entry.fetch("name"),
+          occurrence_id: candidate[:classification_occurrence_id],
+          reason: "post_merge_batch_materialization_failed",
+          error: "#{error.class}: #{error.message}"[0, 2_000]
+        }
+        raise ReservationBlocked.new(
+          "post_merge_batch_materialization_failed", "error" => error.message
+        )
+      end
+
+      def post_merge_candidates(classifier, primary, entry, now)
+        primary_time = parse_time(primary.dig("snapshot", "merged_at"))
+        records = classifier.eligible_records(now: now, limit: 100).select do |record|
+          record.fetch("status") == "feature" && !record["materialization"] &&
+            record.dig("snapshot", "repository") == primary.dig("snapshot", "repository") &&
+            (parse_time(record.dig("snapshot", "merged_at")) - primary_time).abs <=
+              Hive::RefactorPatrol::PostMergeBatchStore::WINDOW_SEC
+        end
+        records.unshift(primary) unless records.any? do |record|
+          record.fetch("occurrence_id") == primary.fetch("occurrence_id")
+        end
+        ordered = [ primary ] + records.reject do |record|
+          record.fetch("occurrence_id") == primary.fetch("occurrence_id")
+        end
+        paths = 0
+        ordered.first(Hive::RefactorPatrol::PostMergeBatchStore::MAX_CANDIDATES)
+          .take_while do |record|
+            paths += record.dig("snapshot", "changed_paths").size
+            paths <= Hive::RefactorPatrol::MergeClassifier::MAX_FILES
+          end
+          .map { |record| record.merge("registration" => entry.fetch("name")) }
+      end
+
+      def reserve_classification(candidate, entry, cfg, now)
+        classifier = classifier_for(entry, cfg)
+        reservation_id = Digest::SHA256.hexdigest(
+          [ @owner, candidate.fetch(:classification_occurrence_id), SecureRandom.hex(16) ].join("\0")
+        )
+        record = classifier.claim!(
+          candidate.fetch(:classification_occurrence_id),
+          reservation_id: reservation_id, owner: @owner, now: now,
+          lease_sec: @lease_sec
+        )
+        state_root = entry["hive_state_path"] || File.join(entry.fetch("path"), ".hive-state")
+        result_path = File.join(
+          state_root, "refactor_patrol", "v2", "results",
+          "classification-#{record.fetch('occurrence_id')}-#{SecureRandom.hex(8)}.json"
+        )
+        token = {
+          kind: :architecture_patrol, phase: :classification,
+          registration: entry.fetch("name"),
+          classification_occurrence_id: record.fetch("occurrence_id"),
+          reservation_id: reservation_id,
+          result_path: result_path
+        }
+        candidate.merge(
+          slug: "#{PATROL_SLUG_PREFIX}-classification-#{record.fetch('occurrence_id')[0, 12]}",
+          stage: PATROL_STAGE,
+          command: "hive refactor-patrol-classify #{Shellwords.escape(entry.fetch('name'))} " \
+                   "--occurrence-id #{record.fetch('occurrence_id')} " \
+                   "--reservation-id #{reservation_id} " \
+                   "--result-file #{Shellwords.escape(result_path)} --json",
+          state_file_mtime: nil, state_file_path: nil,
+          hive_state_path: entry["hive_state_path"], dispatch_token: token
+        )
+      rescue Hive::RefactorPatrol::MergeClassifier::Conflict,
+             Hive::RefactorPatrol::MergeClassifier::Retryable => error
+        raise ReservationBlocked.new(
+          "classification_claim_unavailable", "error" => error.message
+        )
+      end
+
+      def complete_classification(token, _exit_code, now)
+        entry = entry_for_registration(token.fetch(:registration))
+        classifier = classifier_for(
+          entry, @config_loader.call(entry.fetch("path"))
+        )
+        record = classifier.fetch_occurrence(token.fetch(:classification_occurrence_id))
+        return { status: :blocked, reason: "classification_occurrence_missing" } unless record
+
+        if record["claim"]&.fetch("reservation_id", nil) == token.fetch(:reservation_id)
+          record = classifier.release_claim!(
+            record.fetch("occurrence_id"), reservation_id: token.fetch(:reservation_id), now: now
+          )
+        end
+
+        status = case record.fetch("status")
+        when "feature" then :classified
+        when "skip" then :closed
+        when "blocked" then :blocked
+        else :retry
+        end
+        {
+          status: status, phase: :classification,
+          occurrence_id: record.fetch("occurrence_id"),
+          reason: record.fetch("reason")
+        }
+      rescue StandardError => error
+        {
+          status: :blocked, phase: :classification,
+          occurrence_id: token[:classification_occurrence_id],
+          reason: "classification_completion_failed",
+          error: "#{error.class}: #{error.message}"[0, 2_000]
+        }
+      end
+
       def discovery_available?(entry)
         cfg = entry.fetch("_refactor_patrol_cfg")
         cfg.dig("refactor_patrol", "enabled") == true
@@ -676,6 +1025,21 @@ module Hive
             entry.fetch("hive_state_path"), "refactor_patrol", "v2", "manifests",
             "#{aggregate.fetch('job_id')}.json"
           )
+        }
+      end
+
+      def candidate_for_classification(entry, record, phase: :classification)
+        snapshot = record.fetch("snapshot")
+        label = phase == :post_merge ? "post-merge" : "classification"
+        {
+          project: entry.fetch("name"), patrol_kind: :architecture,
+          action_phase: phase,
+          job_id: "#{label}-#{record.fetch('occurrence_id')[0, 24]}",
+          classification_occurrence_id: record.fetch("occurrence_id"),
+          pr_number: snapshot.fetch("number"), pr_url: snapshot.fetch("url"),
+          merged_at: snapshot.fetch("merged_at"), entry: entry,
+          slug: "#{PATROL_SLUG_PREFIX}-#{label}-#{record.fetch('occurrence_id')[0, 12]}",
+          stage: PATROL_STAGE
         }
       end
 
@@ -827,6 +1191,13 @@ module Hive
           "changed_paths" => manifest.fetch("changed_paths"),
           "manifest_checksum" => manifest.fetch("manifest_checksum")
         )
+        if manifest.fetch("schema_version") == Hive::RefactorPatrol::PrManifest::SCHEMA_VERSION
+          source.merge!(
+            "lane" => manifest.fetch("lane"),
+            "classification" => manifest.fetch("classification"),
+            "provenance" => manifest.fetch("provenance")
+          )
+        end
         unless manifest["job_id"] == aggregate.fetch("job_id") && source == aggregate.fetch("source")
           raise Hive::RefactorPatrol::JobStore::InconsistentRecord,
                 "published manifest does not match authoritative job"
@@ -835,14 +1206,18 @@ module Hive
 
       def entry_for_token(token)
         registration = token.fetch(:registration)
-        entry = Array(@registry.call).find { |candidate| candidate.fetch("name") == registration }
-        raise Hive::RefactorPatrol::JobStore::RecordNotFound, "claimed refactor patrol job registration not found" unless entry
-
+        entry = entry_for_registration(registration)
         aggregate = store_for(entry).read_job(token.fetch(:job_id))
         unless aggregate.dig("source", "registration") == registration
           raise Hive::RefactorPatrol::JobStore::InconsistentRecord,
                 "claimed refactor patrol job registration does not match its token"
         end
+        entry
+      end
+
+      def entry_for_registration(registration)
+        entry = Array(@registry.call).find { |candidate| candidate.fetch("name") == registration }
+        raise Hive::RefactorPatrol::JobStore::RecordNotFound, "claimed refactor patrol job registration not found" unless entry
         entry
       end
 

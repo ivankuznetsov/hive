@@ -193,17 +193,20 @@ The two systems share only the legacy JSON persistence mechanics in
 They deliberately retain separate namespaces:
 `.hive-state/patrol/` for ordinary patrol and
 `.hive-state/refactor_patrol/v2/` for retained architecture manifests,
-semantic families, runs, logs, and result receipts. Architecture jobs,
+merge classifications, frozen post-merge batches, semantic families, runs,
+logs, and result receipts. Existing `hive-refactor-patrol-pr-manifest` v2
+artifacts remain readable for redelivery; that narrow manifest compatibility
+does not make old JobStore data readable. Architecture jobs,
 occurrences, and the job-query index live only under
 `.hive-state/refactor_patrol/v4/`. V3 JobStore bytes remain opaque; the first
 current mutation starts an empty v4 store without a compatibility reader.
 `Hive::Daemon::PatrolArbiter` is the only shared
 orchestration seam: it alternates ready work under the project's
 `daemon.max_concurrent_patrol_scans` capacity. Enabling architecture discovery
-does not enable ordinary patrol or auto-fixing. Deduplicated GitHub issues are
-its default human review surface, with an explicit
-`issue_filing.enabled: false` opt-out; neither system can consume the other's
-state as proof of completion.
+does not enable ordinary patrol or auto-fixing. The active first-party
+Architecture module grants pull-request mutation but no issue mutation;
+historical issue receipts remain read-only provenance. Neither system can
+consume the other's state as proof of completion.
 
 ## Daemon triggers
 
@@ -252,6 +255,14 @@ scheduled-result aggregate and offered to the fix-admission outbox before the
 cursor advances. A coverage-pass generation distinguishes later same-SHA
 sweeps, while crash replay within one pass converges on the same occurrence.
 Merged-PR jobs and actions remain a separate post-merge authority.
+
+Merged PR delivery now settles a durable classifier row before any JobStore
+row exists. Deterministic irrelevant or recursive merges stop there; ambiguous
+merges use a supervised normal-profile LLM gate. Accepted rows bypass scheduled
+allowance and are claimed as frozen current-main batches of overlapping slices
+(eight merges, 512 paths, ten minutes). A larger PR splits into multiple owner
+batches. Only those owners become v4 jobs/events; classifier rows retain the
+one-to-many owner binding, so replay never manufactures staging or alias jobs.
 
 Architecture discovery leases are crash fences, not mandatory restart delays.
 Candidate selection read-only probes an attached worker's PID, process start

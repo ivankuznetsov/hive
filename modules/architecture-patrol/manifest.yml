@@ -69,7 +69,6 @@ settings:
 permissions:
   repository_write: true
   github_mutations:
-    - "issues"
     - "pull_requests"
   external_commands:
     - "gh"
@@ -89,4 +88,4 @@ docs:
 files:
   "README.md": "ececda34faa53626eed7eef2c3c84f4cc5f77a697c955d5fb0c1d70fa38ef9f6"
   "templates/refactor-patrol.yml": "dc64ee66282374b8cc39c4769c005c1649982739e91fb4686cc0ffa04ebaac42"
-release_sha256: "2035bba347f77a8077bdb0510b8eda52acb5d0967a5bb47ee2745322d8f8ef5e"
+release_sha256: "c5275de8ce33184be51fa1a22f63612eceb080406aafb3519996ed089ee7c6b4"

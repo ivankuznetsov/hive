@@ -90,7 +90,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       result.descriptor.hooks.map { |hook| hook.fetch("id") }
     )
     assert_equal [ "pull_request.merged" ], result.descriptor.hooks.fetch(2).fetch("events")
-    assert_equal %w[issues pull_requests], result.descriptor.permissions.fetch("github_mutations")
+    assert_equal %w[pull_requests], result.descriptor.permissions.fetch("github_mutations")
   end
 
   def test_shadow_merged_event_uses_exact_reconciler_job_without_claiming
@@ -731,7 +731,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
     Configuration.new(
       settings: { "shadow_mode" => shadow, "dry_run" => false },
       grants: {
-        "repository_write" => true, "github_mutations" => %w[issues pull_requests],
+        "repository_write" => true, "github_mutations" => %w[pull_requests],
         "external_commands" => %w[gh git], "network_hosts" => [ "api.github.com" ],
         "filesystem_read" => [ "repository" ],
         "filesystem_write" => [

@@ -36,6 +36,7 @@ module Hive
     IDENTITY_KEYS = (BASE_KEYS - %w[phase]).freeze
     OPTIONAL_KEYS = %w[
       head_oid report_sha256 scan_sha256
+      publication_marker
       push_intent_id push_attempted_at observed_remote_oid pushed_at
       pr_create_intent_id pr_create_attempted_at
       pr_number pr_url pr_state observed_at
@@ -63,16 +64,16 @@ module Hive
     }.freeze
     ALLOWED_BY_PHASE = {
       "worktree_created" => BASE_KEYS,
-      "agent_validated" => BASE_KEYS + %w[head_oid report_sha256 scan_sha256],
+      "agent_validated" => BASE_KEYS + %w[head_oid report_sha256 scan_sha256 publication_marker],
       "push_intent" => BASE_KEYS + %w[
-        head_oid report_sha256 scan_sha256 push_intent_id push_attempted_at
+        head_oid report_sha256 scan_sha256 publication_marker push_intent_id push_attempted_at
       ],
       "branch_pushed" => BASE_KEYS + %w[
-        head_oid report_sha256 scan_sha256 push_intent_id push_attempted_at
+        head_oid report_sha256 scan_sha256 publication_marker push_intent_id push_attempted_at
         observed_remote_oid pushed_at
       ],
       "pr_create_intent" => BASE_KEYS + %w[
-        head_oid report_sha256 scan_sha256 push_intent_id push_attempted_at
+        head_oid report_sha256 scan_sha256 publication_marker push_intent_id push_attempted_at
         observed_remote_oid pushed_at pr_create_intent_id pr_create_attempted_at
       ],
       "pr_observed" => ALL_KEYS - %w[terminal_outcome terminal_at error_reason],
@@ -233,6 +234,12 @@ module Hive
           raise Hive::WorktreeError, "#{FILENAME} #{key} is invalid"
         end
         data[key] = data[key].downcase
+      end
+      if data["publication_marker"] &&
+         !data.fetch("publication_marker").match?(
+           /\A<!-- hive-patrol-fix-successor:v1 digest=[0-9a-f]{64} -->\z/
+         )
+        raise Hive::WorktreeError, "#{FILENAME} publication_marker is invalid"
       end
       %w[push_intent_id pr_create_intent_id].each do |key|
         next unless data[key]

@@ -21,6 +21,51 @@ module Hive
       MAX_LINKS = 32
       class InvalidSuccessor < Hive::Error; end
 
+      class << self
+        def publication_marker(task_folder, missing: false)
+          path = File.join(task_folder, ORIGIN_FILENAME)
+          return nil if missing && !File.exist?(path) && !File.symlink?(path)
+          raise InvalidSuccessor, "coding successor relation must not be a symlink" if File.symlink?(path)
+
+          stat = File.lstat(path)
+          unless stat.file? && stat.nlink == 1 && stat.size <= MAX_BYTES
+            raise InvalidSuccessor, "coding successor relation is invalid"
+          end
+          document = validate_relation_document!(JSON.parse(File.binread(path, MAX_BYTES + 1)))
+          digest = Digest::SHA256.hexdigest(PatrolFix.canonical_json(document))
+          "<!-- hive-patrol-fix-successor:v1 digest=#{digest} -->"
+        rescue Errno::ENOENT
+          return nil if missing
+          raise InvalidSuccessor, "coding successor relation is missing"
+        rescue JSON::ParserError, SystemCallError, IOError => error
+          raise InvalidSuccessor, "coding successor relation is unavailable: #{error.message}"
+        end
+
+        def validate_relation_document!(document)
+          fields = %w[schema schema_version origin links]
+          unless document.is_a?(Hash) && document.keys.sort == fields.sort &&
+                 document["schema"] == SCHEMA && document["schema_version"] == SCHEMA_VERSION &&
+                 document["origin"].is_a?(Hash) && document["origin"].keys.sort == %w[project slug] &&
+                 document.dig("origin", "project").is_a?(String) &&
+                 document.dig("origin", "slug").to_s.match?(TaskManifest::SLUG) &&
+                 document["links"].is_a?(Array) && document["links"].length.between?(1, MAX_LINKS)
+            raise InvalidSuccessor, "coding successor relation is invalid"
+          end
+          document.fetch("links").each do |link|
+            unless link.is_a?(Hash) && link.keys.sort == %w[decision_receipt_id evidence_digest generation] &&
+                   link["generation"].is_a?(Integer) && link["generation"].positive? &&
+                   link["evidence_digest"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                   link["decision_receipt_id"].is_a?(String) && !link["decision_receipt_id"].empty?
+              raise InvalidSuccessor, "coding successor relation link is invalid"
+            end
+          end
+          unless document.fetch("links").uniq == document.fetch("links")
+            raise InvalidSuccessor, "coding successor relation links must be unique"
+          end
+          PatrolFix.deep_freeze(document)
+        end
+      end
+
       def initialize(origin_task, project_name: nil, workflow_info: nil,
                      task_capture_factory: nil, git_ops: nil, after_capture: nil)
         @origin = origin_task
@@ -183,27 +228,7 @@ module Hive
       end
 
       def validate_relation!(document)
-        fields = %w[schema schema_version origin links]
-        unless document.is_a?(Hash) && document.keys.sort == fields.sort &&
-               document["schema"] == SCHEMA && document["schema_version"] == SCHEMA_VERSION &&
-               document["origin"].is_a?(Hash) && document["origin"].keys.sort == %w[project slug] &&
-               document.dig("origin", "project").is_a?(String) &&
-               document.dig("origin", "slug").to_s.match?(TaskManifest::SLUG) &&
-               document["links"].is_a?(Array) && document["links"].length.between?(1, MAX_LINKS)
-          raise InvalidSuccessor, "coding successor relation is invalid"
-        end
-        document.fetch("links").each do |link|
-          unless link.is_a?(Hash) && link.keys.sort == %w[decision_receipt_id evidence_digest generation] &&
-                 link["generation"].is_a?(Integer) && link["generation"].positive? &&
-                 link["evidence_digest"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
-                 link["decision_receipt_id"].is_a?(String) && !link["decision_receipt_id"].empty?
-            raise InvalidSuccessor, "coding successor relation link is invalid"
-          end
-        end
-        unless document.fetch("links").uniq == document.fetch("links")
-          raise InvalidSuccessor, "coding successor relation links must be unique"
-        end
-        PatrolFix.deep_freeze(document)
+        self.class.validate_relation_document!(document)
       end
     end
   end

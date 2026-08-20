@@ -143,6 +143,55 @@ class ModulesEventRoutingTest < Minitest::Test
     end
   end
 
+  def test_post_merge_events_have_batch_identity_and_bounded_provenance_projection
+    ledger = RecordingLedger.new
+    publisher = Hive::Modules::EventPublisher.new(
+      ledger_factory: ->(_entry) { ledger }, clock: -> { NOW }
+    )
+    entry = { "name" => "demo", "project_id" => "project-1", "hive_state_path" => "/state" }
+    source = {
+      "url" => "https://github.com/owner/repo/pull/7", "number" => 7,
+      "repository" => "owner/repo", "registration" => "demo",
+      "base_branch" => "main", "base_sha" => "a" * 40, "merge_sha" => "b" * 40,
+      "merged_at" => NOW.iso8601
+    }
+    classification = {
+      "occurrence_id" => "c" * 64, "snapshot_digest" => "d" * 64,
+      "changed_paths_digest" => "e" * 64, "decision" => "feature",
+      "reason" => "llm", "rationale" => "Feature", "evidence" => [ "behavior" ],
+      "model_receipt" => "fake:model", "attempts" => 1,
+      "classified_at" => NOW.iso8601,
+      "prefilter" => { "decision" => "ambiguous", "reason" => "no_match", "evidence" => [] }
+    }
+    provenance = {
+      "merges" => [ {
+        "repository" => "owner/repo", "number" => 7, "merge_sha" => "b" * 40,
+        "merged_at" => NOW.iso8601, "classification_occurrence_id" => "c" * 64,
+        "path_mappings" => [ { "path" => "lib/demo.rb", "slice_ids" => [ "slice-demo" ] } ]
+      } ]
+    }
+    manifests = %w[first second].map do |identity|
+      Hive::RefactorPatrol::PrManifest.build(
+        source: source,
+        files: [ { "path" => "lib/demo.rb", "status" => "modified", "patch" => "@@" } ],
+        lane: "post_merge", classification: classification, provenance: provenance,
+        identity: identity
+      )
+    end
+
+    manifests.each { |manifest| publisher.pull_request_merged(entry, manifest) }
+
+    first, second = ledger.records
+    refute_equal first.fetch(:idempotency_key), second.fetch(:idempotency_key)
+    assert first.fetch(:idempotency_key).end_with?(manifests.first.fetch("job_id"))
+    assert_equal "post_merge", first.dig(:payload, "post_merge", "lane")
+    assert_equal 1, first.dig(:payload, "post_merge", "path_count")
+    assert_equal "c" * 64,
+                 first.dig(:payload, "post_merge", "merges", 0, "classification_occurrence_id")
+    assert_equal Hive::RefactorPatrol::PrManifest.checksum(provenance),
+                 first.dig(:payload, "post_merge", "provenance_digest")
+  end
+
   def test_publisher_persists_registration_with_default_ledger_factory
     with_tmp_dir do |root|
       entry = {

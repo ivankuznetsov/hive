@@ -30,10 +30,23 @@ class AgentCliRuntimeErrorExtractorsTest < Minitest::Test
     }
   }.freeze
 
+  PI_OUTPUT_TRUNCATED = {
+    "type" => "message_end",
+    "message" => {
+      "role" => "assistant",
+      "provider" => "openrouter",
+      "model" => "deepseek/deepseek-v4-pro",
+      "usage" => { "input" => 8_079, "output" => 8_192 },
+      "stopReason" => "length",
+      "rawStopReason" => "length"
+    }
+  }.freeze
+
   def test_pi_refusal_is_extracted_with_its_status_code
     error = AgentCliRuntime.extract_provider_error(:pi, PI_REFUSAL)
 
     refute_nil error, "a stopReason=error turn must surface as a provider error"
+    assert_equal :provider_error, error[:kind]
     assert_equal :pi, error[:provider]
     assert_equal 402, error[:status_code]
     assert_includes error[:message], "Prompt tokens limit exceeded"
@@ -42,6 +55,16 @@ class AgentCliRuntimeErrorExtractorsTest < Minitest::Test
 
   def test_pi_completed_turn_is_not_an_error
     assert_nil AgentCliRuntime.extract_provider_error(:pi, PI_SUCCESS)
+  end
+
+  def test_pi_output_truncation_is_a_typed_incomplete_turn
+    error = AgentCliRuntime.extract_provider_error(:pi, PI_OUTPUT_TRUNCATED)
+
+    refute_nil error, "stopReason=length must not read as a successful Pi turn"
+    assert_equal :model_output_limit, error[:kind]
+    assert_equal :pi, error[:provider]
+    assert_nil error[:status_code]
+    assert_equal "model response reached its maximum output tokens", error[:message]
   end
 
   def test_pi_refusal_without_a_status_code_still_reports_the_message
@@ -60,6 +83,7 @@ class AgentCliRuntimeErrorExtractorsTest < Minitest::Test
       :codex, { "type" => "error", "message" => "429: rate limit reached" }
     )
 
+    assert_equal :provider_error, error[:kind]
     assert_equal 429, error[:status_code]
     assert_equal :codex, error[:provider]
   end

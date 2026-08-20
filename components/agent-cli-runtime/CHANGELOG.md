@@ -4,6 +4,11 @@
 
 ## 0.2.2 - 2026-08-18
 
+- Treat Pi's `stopReason: "length"` as a typed `model_output_limit` failure.
+  Pi exits zero after this provider stop even when the model exhausted its
+  output allowance before writing the requested artifact; callers can now
+  distinguish that incomplete turn from an agent that silently produced
+  0 bytes and tell operators to raise `maxTokens` or lower reasoning effort.
 - Declare Grok's filesystem sandbox flags, so a caller asking for confined
   execution gets it instead of being told Grok cannot confine. `--sandbox
   workspace` limits writes to the working directory and `--sandbox read-only`

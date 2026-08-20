@@ -107,22 +107,35 @@ module AgentCliRuntime
       end
     end
 
-    # A provider refusal seen mid-stream, normalized to
-    # {provider:, status_code:, message:}, or nil when the event is clean.
-    # Callers use this to tell a provider-side stop (quota, credit ceiling,
-    # rate limit) apart from an agent that genuinely produced nothing: several
-    # CLIs report the former on the stream and still exit zero.
+    # A provider failure seen mid-stream, normalized to
+    # {kind:, provider:, status_code:, message:}, or nil when the event is
+    # clean. Callers use this to tell a provider-side stop (quota, credit
+    # ceiling, rate limit, model output truncation) apart from an agent that
+    # genuinely produced nothing: several CLIs report the former on the stream
+    # and still exit zero.
     def extract_provider_error(profile, event)
       resolved = Profiles.resolve(profile)
-      text = resolved.extract_error_event(event)
-      return nil if text.nil? || text.to_s.strip.empty?
+      extracted = resolved.extract_error_event(event)
+      return nil if extracted.nil?
+
+      kind, text = normalize_extracted_error(extracted)
+      return nil if text.nil? || text.strip.empty?
 
       {
+        kind: kind,
         provider: resolved.name,
         status_code: status_code_from(text),
         message: Redactor.diagnostic(text)
       }.freeze
     end
+
+    def normalize_extracted_error(extracted)
+      return [ extracted.kind, extracted.message ] if extracted.is_a?(ExtractedFailure)
+      return [ :provider_error, extracted ] if extracted.is_a?(String)
+
+      [ nil, nil ]
+    end
+    private_class_method :normalize_extracted_error
 
     def observe(profile, result)
       resolved = Profiles.resolve(profile)

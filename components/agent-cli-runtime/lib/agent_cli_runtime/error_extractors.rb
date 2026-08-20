@@ -1,8 +1,9 @@
 module AgentCliRuntime
-  # Provider-side refusals that a CLI reports on its event stream while still
-  # exiting zero. Each profile owns the shape its own CLI emits; every
-  # extractor returns the raw provider text, or nil when the event carries no
-  # failure. Runtime.extract_provider_error normalizes and redacts it.
+  # Provider-side failures that a CLI reports on its event stream while still
+  # exiting zero. Each profile owns the shape its own CLI emits. Extractors
+  # return either the raw provider text, an ExtractedFailure, or nil when the
+  # event carries no failure. Runtime.extract_provider_error normalizes and
+  # redacts the result.
   module ErrorExtractors
     module_function
 
@@ -23,16 +24,23 @@ module AgentCliRuntime
     end
 
     # pi keeps the envelope type ("message_start"/"message_end") and moves the
-    # failure into stopReason/errorMessage, so a provider refusal arrives as a
-    # well-formed assistant message with empty content and the process still
-    # exits zero. Matching on type alone never sees it.
+    # terminal state into stopReason. Provider refusals use
+    # stopReason=error/errorMessage. A model that consumes its entire output
+    # allowance uses stopReason=length and can exit zero without executing the
+    # final write tool. Matching on type alone sees neither failure.
     PI = lambda do |event|
       next nil unless event.is_a?(Hash)
 
       message = event["message"].is_a?(Hash) ? event["message"] : event
-      next nil unless message["stopReason"].to_s == "error"
-
-      ErrorExtractors.message_from(message) || ErrorExtractors.message_from(event)
+      case message["stopReason"].to_s
+      when "error"
+        ErrorExtractors.message_from(message) || ErrorExtractors.message_from(event)
+      when "length"
+        ExtractedFailure.new(
+          kind: :model_output_limit,
+          message: "model response reached its maximum output tokens"
+        )
+      end
     end
 
     def message_from(event)

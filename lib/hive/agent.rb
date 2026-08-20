@@ -24,6 +24,9 @@ module Hive
     OPENCODE_INSPECTION_TIMEOUT_SECONDS = 10
     OPENCODE_CAPTURE_BYTES =
       AgentCliRuntime::OpenCode::ResultParser::MAX_RUN_BYTES + 1
+    TOKEN_LIMIT_REASON = "token_limit".freeze
+    TURN_LIMIT_REASON = "turn_limit".freeze
+    MODEL_OUTPUT_LIMIT_REASON = "model_output_limit".freeze
 
     # Converts provider JSONL usage events into one monotonic in-flight count.
     # Claude reports input/cache at message_start and cumulative output for the
@@ -411,6 +414,7 @@ module Hive
             # stopReason/errorMessage, so the type-based scan below never sees
             # it — the run then reads as a clean exit 0 that produced nothing,
             # and a quota wall gets misreported as invalid agent output.
+            provider_error = nil
             if limit_text.nil? && !sensitive_payload
               provider_error = Hive::AgentRuntime.extract_provider_error(@profile, json)
               if provider_error && provider_limit_status?(provider_error)
@@ -437,11 +441,17 @@ module Hive
               observed_tokens = token_meter.observe(json, usage)
               if @max_tokens && observed_tokens >= @max_tokens && resource_exhaustion.nil?
                 resource_exhaustion = {
-                  reason: "token_limit",
+                  reason: TOKEN_LIMIT_REASON,
                   limit: @max_tokens,
                   observed: observed_tokens
                 }
               end
+            end
+            if provider_error&.dig(:kind) == :model_output_limit && resource_exhaustion.nil?
+              resource_exhaustion = {
+                reason: MODEL_OUTPUT_LIMIT_REASON,
+                observed: usage&.dig(:output)
+              }.compact
             end
             turn_completed = claude_turn_completed?(json)
             if turn_completed
@@ -449,7 +459,7 @@ module Hive
               write_turn_completed = true if write_tool_in_current_turn
               if @max_turns && completed_turns >= @max_turns && resource_exhaustion.nil?
                 resource_exhaustion = {
-                  reason: "turn_limit",
+                  reason: TURN_LIMIT_REASON,
                   limit: @max_turns,
                   observed: completed_turns
                 }
@@ -1337,13 +1347,25 @@ module Hive
         return
       end
 
-      resource = detail.fetch(:reason) == "turn_limit" ? "turn" : "token"
-      message = "agent reached in-flight #{resource} limit " \
-                "(observed #{detail.fetch(:observed)}, limit #{detail.fetch(:limit)})"
+      reason = detail.fetch(:reason)
+      case reason
+      when MODEL_OUTPUT_LIMIT_REASON
+        observed = detail[:observed]
+        count = observed ? " after #{observed} output tokens" : ""
+        message = "agent response reached the model's maximum output tokens#{count}; " \
+                  "raise the model maxTokens setting or lower reasoning effort"
+      when TOKEN_LIMIT_REASON, TURN_LIMIT_REASON
+        resource = reason == TURN_LIMIT_REASON ? "turn" : "token"
+        message = "agent reached in-flight #{resource} limit " \
+                  "(observed #{detail.fetch(:observed)}, limit #{detail.fetch(:limit)})"
+      else
+        raise Hive::AgentError, "unknown resource exhaustion reason #{reason.inspect}"
+      end
       if effective_status_mode == :state_file_marker
         Hive::Markers.set(@task.state_file, :error, **resource_exhaustion_marker_attrs(detail))
       end
       result[:status] = :error
+      result[:error_reason] = reason
       result[:error_message] = message
     end
 
@@ -1377,18 +1399,28 @@ module Hive
     end
 
     def resource_exhaustion_marker_attrs(detail)
-      if detail.fetch(:reason) == "token_limit"
+      case detail.fetch(:reason)
+      when TOKEN_LIMIT_REASON
         {
-          reason: "token_limit",
+          reason: TOKEN_LIMIT_REASON,
           observed_tokens: detail.fetch(:observed),
           max_tokens: detail.fetch(:limit)
         }
-      else
+      when TURN_LIMIT_REASON
         {
-          reason: "turn_limit",
+          reason: TURN_LIMIT_REASON,
           observed_turns: detail.fetch(:observed),
           max_turns: detail.fetch(:limit)
         }
+      when MODEL_OUTPUT_LIMIT_REASON
+        {
+          reason: MODEL_OUTPUT_LIMIT_REASON,
+          observed_output_tokens: detail[:observed],
+          remedy: "raise_model_max_tokens_or_lower_reasoning_effort"
+        }.compact
+      else
+        raise Hive::AgentError,
+              "unknown resource exhaustion reason #{detail.fetch(:reason).inspect}"
       end
     end
 

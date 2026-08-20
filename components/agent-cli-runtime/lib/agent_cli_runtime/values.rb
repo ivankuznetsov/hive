@@ -81,6 +81,22 @@ module AgentCliRuntime
     end
   end
 
+  EXTRACTED_FAILURE_KINDS = %i[model_output_limit].freeze
+
+  ExtractedFailure = Data.define(:kind, :message) do
+    def initialize(kind:, message:)
+      normalized_kind = kind.to_sym
+      unless EXTRACTED_FAILURE_KINDS.include?(normalized_kind)
+        raise ArgumentError,
+              "unknown extracted failure kind #{kind.inspect}; " \
+              "valid: #{EXTRACTED_FAILURE_KINDS.inspect}"
+      end
+
+      super(kind: normalized_kind, message: Immutable.string(message))
+    end
+  end
+  private_constant :EXTRACTED_FAILURE_KINDS
+
   Request = Data.define(
     :profile, :prompt, :permission_mode, :permission_arguments,
     :add_dirs, :require_add_dirs,

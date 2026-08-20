@@ -2311,6 +2311,47 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_pi_model_output_truncation_is_not_reported_as_missing_output
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      event = {
+        "type" => "message_end",
+        "message" => {
+          "role" => "assistant",
+          "provider" => "openrouter",
+          "model" => "deepseek/deepseek-v4-pro",
+          "usage" => { "input" => 8_079, "output" => 8_192 },
+          "stopReason" => "length",
+          "rawStopReason" => "length"
+        }
+      }
+      output = File.join(task.folder, "missing-review.json")
+
+      with_env(
+        "HIVE_PI_BIN" => FAKE_BIN,
+        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event)
+      ) do
+        result = Hive::Agent.new(
+          task: task,
+          prompt: "review the plan",
+          max_budget_usd: nil,
+          timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:pi),
+          status_mode: :output_file_exists,
+          expected_output: output
+        ).run!
+
+        assert_equal 0, result[:exit_code]
+        assert_equal :error, result[:status]
+        assert_equal "model_output_limit", result[:error_reason]
+        assert_equal "model_output_limit", result.dig(:resource_exhaustion, :reason)
+        assert_equal 8_192, result.dig(:resource_exhaustion, :observed)
+        assert_match(/maximum output tokens/, result[:error_message])
+        refute_match(/expected output file missing/, result[:error_message])
+      end
+    end
+  end
+
   def test_claude_write_tool_event_recognizes_completed_assistant_tool_use
     with_tmp_dir do |dir|
       agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)

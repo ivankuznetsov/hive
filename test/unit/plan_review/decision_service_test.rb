@@ -174,11 +174,37 @@ class PlanReviewDecisionServiceTest < Minitest::Test
       ))
 
       assert result.applied
+      assert_match(/\Areview-[0-9a-f]{64}\z/, result.decision.target_fingerprint)
       resets = store.current["routes"].last(2)
       assert_equal %w[primary adversarial], resets.map { |entry| entry.fetch("role") }
       assert resets.all? { |entry| entry.fetch("recovery_reset") }
       assert resets.all? { |entry| entry.fetch("outcome") == "retryable_failure" }
       assert resets.none? { |entry| entry.key?("attempt_id") }
+    end
+  end
+
+  def test_request_review_identity_changes_for_a_new_terminal_attempt
+    with_service(routes: [ route("terminal_failure") ]) do |service, store, record|
+      first = service.apply(**decision_arguments(
+        record, action: "request_review", authorized: false
+      ))
+      current = store.current
+      next_route = route("terminal_failure").merge("attempt_id" => "pra-#{'f' * 64}")
+      retried = Hive::PlanReview::Record.new(current.to_h.merge(
+        "version" => current.version + 1,
+        "routes" => current["routes"] + [ next_route ],
+        "attempt_ids" => current["attempt_ids"] + [ next_route.fetch("attempt_id") ],
+        "current_attempt_id" => next_route.fetch("attempt_id")
+      ))
+      store.publish_current!(retried, expected_version: current.version)
+
+      second = service.apply(**decision_arguments(
+        store.current, action: "request_review", authorized: false
+      ))
+
+      assert second.applied
+      refute_equal first.decision.target_fingerprint, second.decision.target_fingerprint
+      refute_equal first.decision.decision_id, second.decision.decision_id
     end
   end
 

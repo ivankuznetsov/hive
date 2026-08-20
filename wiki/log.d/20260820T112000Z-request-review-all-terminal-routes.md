@@ -18,4 +18,7 @@ linked plan and remain ineligible for this action.
 **Verification:** The decision-service regression pins mixed primary
 `terminal_failure` plus adversarial `unsupported`, asserting two ordered reset
 rows with no forged attempt IDs. The focused file passes with 14 runs and 60
-assertions; focused RuboCop is green.
+assertions; a second regression proves a later terminal attempt receives a new
+semantic target rather than replaying the earlier request as a no-op. The
+expanded focused file passes with 15 runs and 65 assertions; focused RuboCop is
+green.

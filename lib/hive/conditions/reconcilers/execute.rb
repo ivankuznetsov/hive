@@ -196,7 +196,6 @@ module Hive
         end
 
         def derived_wait_reason(worktree:, changes_state:, changes_reason:, research:)
-          return "dirty_worktree" if worktree[:dirty]
           return nil if research
           return "evidence_unverifiable" if changes_state == "unverifiable"
           return "no_worktree_changes" if changes_reason == "no_worktree_changes"

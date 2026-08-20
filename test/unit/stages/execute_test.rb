@@ -188,6 +188,33 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_makes_agent_owned_dirty_progress_recoverable
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(
+        task,
+        "path" => File.join(dir, "worktree"),
+        "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "base", branch: task.slug, dirty: true, ancestor_result: true
+      )
+
+      result = with_fake_git_and_spawn(git, status: :ok) do
+        Hive::Stages::Execute.run_pass(
+          task, execute_cfg("pi"), File.join(dir, "worktree")
+        )
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "execute_dirty_worktree", status: :error }, result)
+      assert_equal :error, marker.name
+      assert_equal "dirty_worktree", marker.attrs.fetch("reason")
+    end
+  end
+
   def test_run_pass_marks_error_when_ancestor_check_raises
     with_tmp_dir do |dir|
       task = build_task(dir)

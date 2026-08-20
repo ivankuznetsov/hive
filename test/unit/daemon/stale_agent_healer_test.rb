@@ -125,6 +125,63 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     assert events.all? { |_name, attributes| attributes[:request_id] == "coordinated-1" }
   end
 
+  def test_attributed_execute_dirty_wait_is_upgraded_to_recoverable_error
+    with_marker_file do |state_file|
+      attrs = {
+        "reason" => "dirty_worktree",
+        "attempt_id" => "attempt-pi-1",
+        "task_generation" => "generation-1",
+        "ownership_generation" => "generation-1"
+      }
+      Hive::Markers.set(state_file, :execute_waiting, attrs)
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "4-execute",
+        workflow: "coding",
+        marker: "execute_waiting",
+        marker_attrs: attrs,
+        action: "needs_input",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      marker = Hive::Markers.current(state_file)
+      assert_equal :error, marker.name
+      assert_equal "dirty_worktree", marker.attrs.fetch("reason")
+      assert_equal "execute_waiting", marker.attrs.fetch("recovered_from")
+      assert_equal "attempt-pi-1", marker.attrs.fetch("attempt_id")
+      refute_empty marker.attrs.fetch("marker_id")
+      assert_empty @coordinator.requests,
+                   "the fresh error is submitted by the next status tick"
+      event = @logger.events.find { |name, _| name == :marker_healed }
+      assert_equal "execute_dirty_worktree", event.last.fetch(:reason)
+    end
+  end
+
+  def test_unattributed_execute_dirty_wait_remains_a_human_pause
+    with_marker_file do |state_file|
+      attrs = { "reason" => "dirty_worktree" }
+      Hive::Markers.set(state_file, :execute_waiting, attrs)
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "4-execute",
+        workflow: "coding",
+        marker: "execute_waiting",
+        marker_attrs: attrs,
+        action: "needs_input",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert_equal :execute_waiting, Hive::Markers.current(state_file).name
+      assert_empty @coordinator.requests
+    end
+  end
+
   def test_blocked_receipt_uses_the_same_coordinator_projection
     @coordinator.request_status = "blocked"
 

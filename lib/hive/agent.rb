@@ -330,6 +330,7 @@ module Hive
       token_meter = StreamTokenMeter.new(@profile.name)
       resource_exhaustion = nil
       provider_signal = nil
+      provider_error = nil
       termination_deadline = nil
       completion_event_deadline = nil
       completed_turns = 0
@@ -414,11 +415,13 @@ module Hive
             # stopReason/errorMessage, so the type-based scan below never sees
             # it — the run then reads as a clean exit 0 that produced nothing,
             # and a quota wall gets misreported as invalid agent output.
-            provider_error = nil
+            event_provider_error = if provider_error.nil? && !sensitive_payload
+              Hive::AgentRuntime.extract_provider_error(@profile, json)
+            end
+            provider_error ||= event_provider_error
             if limit_text.nil? && !sensitive_payload
-              provider_error = Hive::AgentRuntime.extract_provider_error(@profile, json)
-              if provider_error && provider_limit_status?(provider_error)
-                limit_text = provider_error[:message].to_s.strip
+              if event_provider_error && provider_limit_status?(event_provider_error)
+                limit_text = event_provider_error[:message].to_s.strip
               elsif provider_limit_candidate?(json) && Hive::AgentLimit.limit_reached?(line)
                 detail = json && (json["message"] || (json["error"].is_a?(Hash) ? json["error"]["message"] : nil))
                 limit_text = (detail || line).to_s.strip
@@ -447,7 +450,7 @@ module Hive
                 }
               end
             end
-            if provider_error&.dig(:kind) == :model_output_limit && resource_exhaustion.nil?
+            if event_provider_error&.dig(:kind) == :model_output_limit && resource_exhaustion.nil?
               resource_exhaustion = {
                 reason: MODEL_OUTPUT_LIMIT_REASON,
                 observed: usage&.dig(:output)
@@ -583,6 +586,7 @@ module Hive
         resource_exhaustion: resource_exhaustion,
         output_completed: output_completed,
         provider_signal: provider_signal,
+        provider_error: provider_error,
         status: nil
       }
       if structured_failure
@@ -1243,6 +1247,11 @@ module Hive
         return
       end
 
+      if result[:provider_error]
+        handle_provider_error(result)
+        return
+      end
+
       if result[:timed_out]
         # Only the :state_file_marker mode writes :error to task.state_file
         # on timeout. The other modes leave the orchestrator-owned marker
@@ -1440,7 +1449,9 @@ module Hive
     end
 
     def detected_limit_text(result)
-      return nil if result[:exit_code] == 0 && !result[:timed_out]
+      typed_provider_limit = result[:provider_error] &&
+                             provider_limit_status?(result[:provider_error])
+      return nil if result[:exit_code] == 0 && !result[:timed_out] && !typed_provider_limit
 
       # Prefer the limit text captured directly from the raw stream
       # (result[:limit_text]); it catches CLIs like codex that emit the
@@ -1451,6 +1462,32 @@ module Hive
       return nil unless Hive::AgentLimit.limit_reached?(limit)
 
       limit
+    end
+
+    # Some CLIs report a failed provider turn in their structured event stream
+    # but still exit zero. The profile extractor is the typed boundary that
+    # distinguishes that failure from innocent model text. Keep trusted route
+    # health separate: this fails only the current agent result and lets the
+    # owning stage decide its ordinary retry policy.
+    def handle_provider_error(result)
+      error = result.fetch(:provider_error)
+      message = error[:message].to_s
+      message = "provider reported a failed turn" if message.empty?
+      if effective_status_mode == :state_file_marker
+        Hive::Markers.set(
+          @task.state_file,
+          :error,
+          {
+            reason: "provider_error",
+            provider: error[:provider],
+            status_code: error[:status_code],
+            message: message
+          }.compact
+        )
+      end
+      result[:status] = :error
+      result[:error_reason] = "provider_error"
+      result[:error_message] = message
     end
 
     def handle_exit_state_file_marker(result)

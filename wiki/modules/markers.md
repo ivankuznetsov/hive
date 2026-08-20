@@ -75,7 +75,7 @@ Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`, requires a marker-nam
 
 | Marker | Attributes | Lifecycle |
 |--------|------------|-----------|
-| `EXECUTE_WAITING` | Current 4-execute pause reasons: `reason=no_worktree_changes`, `dirty_worktree`, `missing_research_output`, `branch_mismatch`, or `head_not_descendant`. Legacy pre-U9 review markers may carry `findings_count=` / `pass=` — these attrs are still parsed but no live consumer reads them (the TUI triage mode that once routed off `findings_count` was removed). | Terminal until the user/agent fixes the worktree, updates plan frontmatter, or reruns the implementer. |
+| `EXECUTE_WAITING` | Current 4-execute pause reasons: `reason=no_worktree_changes`, `missing_research_output`, `branch_mismatch`, or `head_not_descendant`. Historical `reason=dirty_worktree` rows remain readable; the daemon upgrades one carrying `attempt_id` to recoverable `ERROR`, while unattributed dirt stays manual. Legacy pre-U9 review markers may carry `findings_count=` / `pass=` — these attrs are still parsed but no live consumer reads them. | Terminal until the required input/evidence repair; attributed legacy dirt migrates to scheduler-owned recovery. |
 | `EXECUTE_COMPLETE` | No attrs for normal implementation commits. `mode=research` when `plan.md` explicitly declares `execution_mode: research` and a structured final agent message was captured. | Terminal success — ready to move to 6-review. |
 | `EXECUTE_STALE` | Legacy review-loop stale marker. | No longer written by current 4-execute; retained for historical recovery. |
 

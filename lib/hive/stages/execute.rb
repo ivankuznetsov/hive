@@ -236,9 +236,8 @@ module Hive
         if dirty_worktree
           return apply_execute_outcome(
             task, cfg, worktree_path, baseline_head,
-            marker_name: :execute_waiting, attrs: { reason: "dirty_worktree" },
-            commit: "execute_waiting_dirty_worktree", status: :execute_waiting,
-            waiting_reason: "dirty_worktree"
+            marker_name: :error, attrs: { reason: "dirty_worktree" },
+            commit: "execute_dirty_worktree", status: :error
           )
         end
 

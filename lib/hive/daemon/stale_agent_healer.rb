@@ -242,6 +242,13 @@ module Hive
           next if legacy_layout_projects.include?(row.project)
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
+          if attributed_dirty_execute_waiting?(row)
+            heal_attributed_dirty_execute_waiting(row) if
+              row.live_task_lock != true &&
+              daemon_enabled_for_row?(row, daemon_enabled_projects)
+            next
+          end
+
           if %w[error review_error].include?(row.marker.to_s)
             heal_recoverable_error_if_auto_recoverable(row, now: now) if daemon_enabled_for_row?(
               row, daemon_enabled_projects
@@ -313,6 +320,68 @@ module Hive
       # applies — a project the operator disabled is not worked on at all.
       def daemon_enabled_for_row?(row, projects)
         projects.nil? || projects.include?(row.project)
+      end
+
+      # Older execute runners treated agent-authored uncommitted progress as a
+      # human pause. Once the row carries a durable attempt identity, Hive can
+      # distinguish that owned agent work from an arbitrary dirty checkout and
+      # safely route it through the same guarded recovery used by ERROR. This
+      # one-way bridge lets existing tasks adopt the autonomous contract after
+      # a daemon upgrade; unattributed legacy dirt remains untouched.
+      def attributed_dirty_execute_waiting?(row)
+        Hive::Workflows.coding_row?(row) &&
+          row.stage.to_s == "4-execute" && # coding-scoped: legacy bridge applies only to coding execute
+          row.marker.to_s == "execute_waiting" &&
+          marker_reason(row) == "dirty_worktree" &&
+          !marker_attrs_for(row)["attempt_id"].to_s.empty?
+      end
+
+      def heal_attributed_dirty_execute_waiting(row)
+        expected = marker_attrs_for(row)
+        transitioned = Hive::Lock.with_task_lock(
+          row.folder.to_s,
+          "owner" => "stale_agent_healer",
+          "reason" => "execute_dirty_worktree"
+        ) do
+          marker = Hive::Markers.current(row.state_file)
+          next false unless marker.name == :execute_waiting
+          next false unless expected.all? do |key, value|
+            marker.attrs[key.to_s].to_s == value.to_s
+          end
+
+          Hive::Markers.set(
+            row.state_file,
+            :error,
+            expected.merge(
+              "reason" => "dirty_worktree",
+              "recovered_from" => "execute_waiting"
+            )
+          )
+          true
+        end
+        return unless transitioned
+
+        @logger.event(
+          :marker_healed,
+          project: row.project,
+          slug: row.slug,
+          stage: row.stage,
+          prior_marker: row.marker,
+          reason: "execute_dirty_worktree",
+          attempt_id: expected["attempt_id"],
+          state_file: row.state_file
+        )
+      rescue Hive::ConcurrentRunError
+        nil
+      rescue StandardError => e
+        @logger.event(
+          :marker_heal_failed,
+          project: row.project,
+          slug: row.slug,
+          stage: row.stage,
+          reason: "execute_dirty_worktree",
+          error: "#{e.class}: #{e.message}"
+        )
       end
 
       def task_for_attempt(attempt, outcome)

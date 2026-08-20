@@ -282,7 +282,7 @@ class RunExecuteTest < Minitest::Test
     end
   end
 
-  def test_dirty_worktree_pause_can_complete_after_cleanup_without_another_commit
+  def test_recoverable_dirty_worktree_can_complete_after_cleanup_without_another_commit
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder, _slug = setup_execute_task(dir)
@@ -290,10 +290,12 @@ class RunExecuteTest < Minitest::Test
         ENV["HIVE_EXEC_DRIVER_DIRTY"] = "1"
         ENV["HIVE_EXEC_DRIVER_OUTPUT"] = "Committed but left dirty file."
 
-        capture_io { Hive::Commands::Run.new(folder).call }
+        assert_raises(Hive::TaskInErrorState) do
+          capture_io { Hive::Commands::Run.new(folder).call }
+        end
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
-        assert_equal :execute_waiting, marker.name
+        assert_equal :error, marker.name
         assert_equal "dirty_worktree", marker.attrs["reason"]
 
         ENV.delete("HIVE_EXEC_DRIVER_DIRTY")

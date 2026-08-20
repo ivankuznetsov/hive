@@ -3,11 +3,11 @@ title: 4-execute stage
 type: stage
 source: lib/hive/stages/execute.rb, templates/execute_prompt.md.erb
 created: 2026-04-25
-updated: 2026-08-12
+updated: 2026-08-20
 tags: [stage, execute, worktree, plan-review]
 ---
 
-**TLDR**: Implementation-only since U9 (ADR-014). Entry from built-in coding plan first requires a current [[modules/plan_review]] resolution; raw movement into execute revalidates existing review evidence and writes a compatibility receipt only for a task with no review root. First implementation entry creates a feature worktree at `<worktree_root>/<slug>`, records its baseline HEAD in `worktree.yml`, spawns the implementation agent, captures its final message into `task.md`, and finalises with `EXECUTE_COMPLETE` only when the worktree stays on the task branch, descends from the baseline, has a new commit, and is clean. Clean no-change exits pause as `EXECUTE_WAITING reason=no_worktree_changes` unless `plan.md` opts into `execution_mode: research` and the agent produced a structured final answer. Provider quota walls write `ERROR reason=limits_reached provider=<execute-agent> retry_after=<iso8601>`; like every persisted execute error, the daemon submits that exact marker generation to `RecoveryCoordinator` after the shared cooldown instead of hot-looping. The user `mv`s completed tasks to `6-review/` to enter the autonomous review loop. No PR review/iteration logic lives in 4-execute — that all moved to [[stages/review]].
+**TLDR**: Implementation-only since U9 (ADR-014). Entry from built-in coding plan first requires a current [[modules/plan_review]] resolution; raw movement into execute revalidates existing review evidence and writes a compatibility receipt only for a task with no review root. First implementation entry creates a feature worktree at `<worktree_root>/<slug>`, records its baseline HEAD in `worktree.yml`, spawns the implementation agent, captures its final message into `task.md`, and finalises with `EXECUTE_COMPLETE` only when the worktree stays on the task branch, descends from the baseline, has a new commit, and is clean. Clean no-change exits pause as `EXECUTE_WAITING reason=no_worktree_changes` unless `plan.md` opts into `execution_mode: research` and the agent produced a structured final answer. Provider quota walls write `ERROR reason=limits_reached`; typed non-limit provider failures and agent-owned dirty progress also become recoverable errors. The daemon submits each exact error generation to `RecoveryCoordinator` after the shared cooldown instead of hot-looping. The user `mv`s completed tasks to `6-review/` to enter the autonomous review loop. No PR review/iteration logic lives in 4-execute — that all moved to [[stages/review]].
 
 ## Condition boundary
 
@@ -42,13 +42,13 @@ Crash/provider retries, daemon adoption, restart, and project config edits stay 
 | Marker / State | Action |
 |----------------|--------|
 | `:execute_complete` | print `"already complete; mv this folder to 6-review/"`, return |
-| `:execute_waiting` | re-run the implementation pass after the user reviews the captured `## Execute Output` and decides whether to revise the plan, add `execution_mode: research`, or retry |
+| `:execute_waiting` | re-run the implementation pass after the user reviews a true input/evidence pause; an attributed legacy `dirty_worktree` wait is upgraded automatically to recoverable `ERROR` |
 | `:error` | warn with attrs; user investigates, clears marker |
 | `worktree.yml` exists but path missing | warn `"worktree pointer present but worktree missing; recover with `git -C <root> worktree prune`, delete worktree.yml, then re-run"`, exit 1 |
 | no `worktree.yml` | run **init pass** |
 | `worktree.yml` exists, healthy | re-running on a complete task says "already complete; mv to 6-review/" |
 
-`EXECUTE_WAITING` is still written by 4-execute for implementation-output pauses: `reason=no_worktree_changes` when the agent exits cleanly without a baseline-descendant commit, `reason=dirty_worktree` when it leaves uncommitted work behind, `reason=missing_research_output` when a research-mode plan has no structured final message, `reason=branch_mismatch` when the worktree is detached or on the wrong branch, and `reason=head_not_descendant` when HEAD no longer descends from the execute baseline. `EXECUTE_STALE` review-iteration state moved to `REVIEW_STALE` in 6-review.
+`EXECUTE_WAITING` is written for implementation-output or evidence pauses: `reason=no_worktree_changes` when the agent exits cleanly without a baseline-descendant commit, `reason=missing_research_output` when a research-mode plan has no structured final message, `reason=branch_mismatch` when the worktree is detached or on the wrong branch, and `reason=head_not_descendant` when HEAD no longer descends from the execute baseline. Current uncommitted agent progress writes `ERROR reason=dirty_worktree`. The daemon upgrades historical `EXECUTE_WAITING reason=dirty_worktree` rows only when they carry a durable `attempt_id`; unattributed legacy dirt remains a human pause. `EXECUTE_STALE` review-iteration state moved to `REVIEW_STALE` in 6-review.
 
 ## Init pass (`run_init_pass`)
 
@@ -61,14 +61,14 @@ Crash/provider retries, daemon adoption, restart, and project config edits stay 
 7. Capture the agent's final stdout / stream-json result into `task.md` under `## Execute Output`.
 8. SHA-256 protect pass on `plan.md` / `worktree.yml`.
 9. Verify the worktree is on the expected task branch, descends from `execute_base_head`, is clean, and either has a new baseline-descendant commit or is an explicit `execution_mode: research` plan with a structured final agent message.
-10. `EXECUTE_COMPLETE` or `EXECUTE_WAITING reason=...`.
+10. `EXECUTE_COMPLETE`, a true `EXECUTE_WAITING reason=...` input pause, or a recoverable `ERROR`.
 
 Re-running with `worktree.yml` already present and a `:execute_complete` marker is a no-op announcing 6-review.
 An automatic retry after `ERROR` resumes the exact owned worktree even when it
 contains uncommitted edits from the failed agent. Those edits are durable
 implementation progress; ownership, branch, ancestry, and tamper checks still
-run, and a successful agent exit with remaining dirt pauses as
-`EXECUTE_WAITING reason=dirty_worktree` instead of completing.
+run. If a successful agent exit still leaves dirt, Execute writes a fresh
+`ERROR reason=dirty_worktree`, so retry backoff and lineage remain scheduler-owned.
 
 ## Implementation sub-agent (`spawn_implementation`)
 
@@ -87,8 +87,8 @@ run, and a successful agent exit with remaining dirt pauses as
   unchanged. The protected-anchor set itself is capped at 16 manifests and
   rejects required-output policies; a custody validation failure leaves task
   state untouched instead of writing through an unsafe boundary.
-- If the implementation spawn exits with provider-limit text in `limit_text` or `error_message`, `run_pass` writes `ERROR reason=limits_reached provider=<execute-agent> message="implementer hit a usage/credit limit" retry_after=<iso8601>` and returns `commit=limits_reached`. Complete dated provider reset hints are preserved into `Hive::AgentLimit.retry_after`; ambiguous or absent hints use the fixed cooldown. Non-limit agent failures still write `ERROR reason=implementer_failed status=<status> message=<error_message>`. An exception before the agent can return a typed result also writes that recoverable marker with `status=exception`, a bounded redacted message, and the exception class before the exception continues to the durable attempt receipt. Tamper evidence retains precedence. The retry boundary is shared with `StaleAgentHealer` and documented in [[state-model]] and [[modules/daemon]].
-- Normal success requires the worktree to remain on the branch from `worktree.yml`, HEAD to descend from `execute_base_head`, the worktree to be clean, and at least one new baseline-descendant commit. A clean no-commit exit pauses as `EXECUTE_WAITING reason=no_worktree_changes`; a dirty worktree pauses as `EXECUTE_WAITING reason=dirty_worktree`; detached/wrong-branch commits pause as `reason=branch_mismatch` or `reason=head_not_descendant`.
+- If the implementation spawn exits with provider-limit text in `limit_text` or `error_message`, `run_pass` writes `ERROR reason=limits_reached provider=<execute-agent> message="implementer hit a usage/credit limit" retry_after=<iso8601>` and returns `commit=limits_reached`. Complete dated provider reset hints are preserved into `Hive::AgentLimit.retry_after`; ambiguous or absent hints use the fixed cooldown. Pi and other typed stream extractors can fail a provider turn even when the CLI exits zero; non-limit failures return `error_reason=provider_error`, then Execute writes `ERROR reason=implementer_failed status=error message=<redacted provider diagnostic>`. An exception before the agent can return a typed result also writes that recoverable marker with `status=exception`, a bounded redacted message, and the exception class before the exception continues to the durable attempt receipt. Tamper evidence retains precedence. The retry boundary is shared with `StaleAgentHealer` and documented in [[state-model]] and [[modules/daemon]].
+- Normal success requires the worktree to remain on the branch from `worktree.yml`, HEAD to descend from `execute_base_head`, the worktree to be clean, and at least one new baseline-descendant commit. A clean no-commit exit pauses as `EXECUTE_WAITING reason=no_worktree_changes`; a dirty worktree writes recoverable `ERROR reason=dirty_worktree`; detached/wrong-branch commits pause as `reason=branch_mismatch` or `reason=head_not_descendant`.
 - Research-only execution is explicit: `plan.md` YAML frontmatter must include `execution_mode: research`. In that mode a clean no-commit exit can complete, but only if the final message was captured; otherwise it pauses as `EXECUTE_WAITING reason=missing_research_output`.
 
 ## Tests

@@ -2432,6 +2432,79 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_pi_zero_exit_provider_failure_is_not_reported_as_success
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      event = {
+        "type" => "message_end",
+        "message" => {
+          "role" => "assistant",
+          "content" => [],
+          "provider" => "openrouter",
+          "model" => "deepseek/deepseek-v4-pro",
+          "stopReason" => "error",
+          "errorMessage" => "Upstream error from DigitalOcean: stream failed"
+        }
+      }
+
+      with_env(
+        "HIVE_PI_BIN" => FAKE_BIN,
+        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event)
+      ) do
+        result = Hive::Agent.new(
+          task: task,
+          prompt: "implement the plan",
+          max_budget_usd: nil,
+          timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:pi),
+          status_mode: :exit_code_only
+        ).run!
+
+        assert_equal 0, result[:exit_code]
+        assert_equal :error, result[:status]
+        assert_equal "provider_error", result[:error_reason]
+        assert_equal :provider_error, result.dig(:provider_error, :kind)
+        assert_equal :pi, result.dig(:provider_error, :provider)
+        assert_equal "Upstream error from DigitalOcean: stream failed",
+                     result[:error_message]
+      end
+    end
+  end
+
+  def test_pi_zero_exit_typed_quota_failure_keeps_limits_classification
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      event = {
+        "type" => "message_end",
+        "message" => {
+          "stopReason" => "error",
+          "errorMessage" => "429 rate limit reached"
+        }
+      }
+
+      with_env(
+        "HIVE_PI_BIN" => FAKE_BIN,
+        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event)
+      ) do
+        result = Hive::Agent.new(
+          task: task,
+          prompt: "review the plan",
+          max_budget_usd: nil,
+          timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:pi),
+          status_mode: :output_file_exists,
+          expected_output: File.join(task.folder, "missing-review.json")
+        ).run!
+
+        assert_equal 0, result[:exit_code]
+        assert_equal :error, result[:status]
+        assert_equal "limits_reached", result[:error_reason]
+        assert_match(/limits reached for pi/i, result[:error_message])
+        refute_match(/expected output file missing/, result[:error_message])
+      end
+    end
+  end
+
   def test_claude_write_tool_event_recognizes_completed_assistant_tool_use
     with_tmp_dir do |dir|
       agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)

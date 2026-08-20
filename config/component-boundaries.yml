@@ -239,6 +239,7 @@ components:
         - Hive::PatrolFix::TaskManifest
         - Hive::PatrolFix::ReceiptStore
         - Hive::PatrolFix::Projection
+        - Hive::PatrolFix::PublicationReceipt
         - Hive::PatrolFix::SemanticAdmission
         - Hive::PatrolFix::SourceSnapshot
         - Hive::PatrolFix::TaskMaterializer
@@ -255,6 +256,7 @@ components:
         - Hive::PatrolFix::SourceSnapshot::InvalidSnapshot
         - Hive::PatrolFix::TaskManifest::InvalidManifest
         - Hive::PatrolFix::ReceiptStore::InvalidReceipt
+        - Hive::PatrolFix::PublicationReceipt::InvalidPublication
         - Hive::PatrolFix::InboxReport::InvalidReport
         - Hive::PatrolFix::FixReport::InvalidReport
         - Hive::PatrolFix::WorktreeReceipt::InvalidWorktree
@@ -267,6 +269,7 @@ components:
       - lib/hive/patrol_fix/task_manifest.rb
       - lib/hive/patrol_fix/receipt_store.rb
       - lib/hive/patrol_fix/projection.rb
+      - lib/hive/patrol_fix/publication_receipt.rb
       - lib/hive/patrol_fix/runner.rb
       - lib/hive/patrol_fix/admission_store.rb
       - lib/hive/patrol_fix/cutover_gate.rb
@@ -313,6 +316,8 @@ components:
       - hive/atomic_file
       - hive/agent_git_gate
       - hive/git_ops
+      - hive/gh/repository_identity
+      - hive/git_ref
       - hive/lock
       - hive/managed_directory
       - hive/secret_patterns
@@ -344,6 +349,7 @@ components:
       - lib/hive/stages/patrol_fix/fix.rb
       - lib/hive/stages/patrol_fix/validate.rb
       - lib/hive/stages/patrol_fix/review.rb
+      - lib/hive/stages/patrol_fix/publish.rb
     mutation_authority: "Strict task-local manifest replacement, append-only decision/fix/validation/publication/reopen receipts, stable receipt-gated stage/route-transition journals, and reciprocal coding-successor relations only."
     recovery_surface: "Projects generation-guarded reopen eligibility, replays incomplete route actions, and reconciles exactly one linked coding successor; no scheduler, adapter, issue, or remote-publication authority."
     wiki_page: wiki/modules/patrol.md
@@ -351,6 +357,7 @@ components:
       - test/unit/patrol_fix/task_manifest_test.rb
       - test/unit/patrol_fix/receipt_store_test.rb
       - test/unit/patrol_fix/projection_test.rb
+      - test/unit/patrol_fix/publication_receipt_test.rb
       - test/unit/patrol_fix/task_action_test.rb
       - test/unit/patrol_fix/worktree_receipt_test.rb
       - test/unit/patrol_fix/validation_receipt_test.rb
@@ -358,6 +365,7 @@ components:
       - test/unit/patrol_fix/review_receipt_test.rb
       - test/unit/patrol_fix/transition_test.rb
       - test/unit/patrol_fix/successor_materializer_test.rb
+      - test/unit/stages/patrol_fix/publish_test.rb
     migration_exceptions: []
 
   - id: patrol-effects

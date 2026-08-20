@@ -3,6 +3,7 @@ require "json"
 require "time"
 require "hive/patrol_fix"
 require "hive/secret_patterns"
+require "hive/patrol_fix/publication_receipt"
 
 module Hive
   module PatrolFix
@@ -156,11 +157,9 @@ module Hive
 
       def validate_pull_request!(entry, index)
         label = "existing_pull_requests[#{index}]"
-        hash!(entry, label)
-        exact_keys!(entry, %w[id url branch head_revision state], label)
-        %w[id url branch].each { |key| string!(entry.fetch(key), "#{label}.#{key}", max: 2_048) }
-        string!(entry.fetch("head_revision"), "#{label}.head_revision", max: 40, pattern: REVISION)
-        invalid!("#{label}.state is invalid") unless %w[open draft closed merged].include?(entry["state"])
+        PublicationReceipt.validate_payload!(entry)
+      rescue PublicationReceipt::InvalidPublication
+        invalid!("#{label} is not an exact canonical publication")
       end
 
       def material_evidence

@@ -51,7 +51,10 @@
     },
     "diagnostic": {
       "type": "object", "additionalProperties": false, "required": ["summary"],
-      "properties": {"summary": {"type": "string", "maxLength": 512}}
+      "properties": {
+        "code": {"enum": ["cleanup_failed"]},
+        "summary": {"type": "string", "maxLength": 512}
+      }
     },
     "action": {
       "type": "object", "additionalProperties": false,

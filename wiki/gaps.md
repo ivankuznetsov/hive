@@ -9,13 +9,16 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 
 ## Unified Patrol Fix live execution
 
-The Inbox/Fix/Validate/Review path has focused local proof for exact worktree and
+The Inbox/Fix/Validate/Review/Publish path has focused local proof for exact worktree and
 receipt custody, failed-validation continuation, independent decision parsing,
 generation-safe rework/reopen, parked outcomes, and exactly-once coding
-successors, but has not yet run a real configured provider against a disposable
-project. Publish and the PR-gated done boundary are not implemented in this
-slice. End-to-end dogfood belongs to the plan's final lifecycle verification;
-no current evidence claims live PR production.
+successors. Local bare remotes and injected GitHub inventories also prove
+expected-absence publication, lost-response reconciliation, exact hosted-PR
+adoption, strict publication receipts, cleanup diagnostics, and the PR-gated
+Done move. The workflow has not yet run a real configured provider or GitHub
+publication against a disposable project. End-to-end dogfood belongs to the
+plan's final lifecycle verification; no current evidence claims live PR
+production.
 
 ## Patrol v4 needs installed fleet dogfood (2026-08-14)
 

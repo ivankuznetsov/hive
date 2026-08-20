@@ -608,6 +608,41 @@ reciprocal controller-owned relations on both tasks. A crash after capture but
 before either link is repaired reuses the same successor. No issue record or
 GitHub mutation is part of this state machine.
 
+Publish is a deterministic stage after an exact current Review `publish`
+receipt. It repeatedly reconstructs the current manifest, referenced Fix and
+Validation receipts, worktree custody, clean HEAD/diff, repository identity,
+base branch, and title/body bytes. The lower `Hive::GithubPublication`
+controller persists one generation-scoped publication identity under
+`.hive-state/patrol-fix/publications/<slug>/generation-<n>.json`. That file
+contains only immutable identities and digests plus intent, attempt, remote
+observation, and hosted-PR evidence; raw title, body, and diff bytes are never
+durable controller state.
+
+V1 publication only pushes with an expected-absence lease. A deterministic
+branch already present on first contact is foreign unless a complete all-state
+PR inventory contains exactly one controller-marker-owned match with the exact
+title/body digests and repository/base/branch/head identity. Intent is durable
+before an attempt. A crash before the attempt may resume it; once an attempt is
+recorded, an absent/unresolved outcome parks until reconciliation and is never
+blindly repeated. Lost successful push or create responses reconcile from the
+remote branch and complete paginated inventory. Open, draft, closed, and merged
+matches all produce a receipt while retaining their hosted state; later base
+branch advancement does not rewrite the immutable creation-base commit.
+
+The stage writes `pr.md` and one strict canonical publication receipt before
+`StageTransition` may move the task from `5-publish` to `6-done`. Done projects
+as current and archived only when that receipt matches the current task and
+evidence generation. Worktree cleanup follows receipt durability; failure is a
+bounded diagnostic and cannot revoke completion. Publication performs no LLM,
+issue, edit, close, ready, or merge operation.
+
+Admission/migration may bypass remote reconciliation only by supplying this
+same full canonical publication payload, including host/repository/base,
+immutable creation base, exact head and digests, hosted state, and observation
+time. `PublicationReceipt.adopt` wraps those exact validated bytes without a
+GitHub call. The former five-field existing-PR summary is provenance only and
+is rejected as Done authority.
+
 ## Patrol occurrence, selection, and recovery state
 
 Ordinary Patrol and Architecture Patrol expose separate product stores over the

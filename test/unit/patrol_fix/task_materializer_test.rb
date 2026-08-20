@@ -83,13 +83,10 @@ class PatrolFixTaskMaterializerTest < Minitest::Test
       store = admission_store(project_root)
       snapshot = source_snapshot(
         external_issues: [ { "url" => "https://github.com/acme/demo/issues/9", "number" => 9 } ],
-        existing_pull_requests: [ {
-          "id" => "pr-7", "url" => "https://github.com/acme/demo/pull/7",
-          "branch" => "patrol/fix-7", "head_revision" => "3" * 40, "state" => "open"
-        } ]
+        existing_pull_requests: [ exact_publication(number: 7) ]
       )
       decide_same_root(
-        store, "ordinary-finding-pr-v1", snapshot, "pr-7",
+        store, "ordinary-finding-pr-v1", snapshot, "github:acme/demo#7",
         kind: "pull_request"
       )
 
@@ -100,6 +97,7 @@ class PatrolFixTaskMaterializerTest < Minitest::Test
       assert_equal [ 9 ], manifest.dig("relations", "issues").map { |issue| issue.fetch("number") }
       publication = receipts.find { |receipt| receipt.fetch("kind") == "publication" }
       assert_equal "https://github.com/acme/demo/pull/7", publication.dig("payload", "url")
+      assert_equal "pub-#{'7' * 32}", publication.dig("payload", "publication_id")
       assert_equal 1, publication.dig("task", "generation")
     end
   end
@@ -283,6 +281,21 @@ class PatrolFixTaskMaterializerTest < Minitest::Test
       external_issues: external_issues, existing_pull_requests: existing_pull_requests,
       accepted_at: NOW.iso8601
     )
+  end
+
+  def exact_publication(number:)
+    {
+      "id" => "github:acme/demo##{number}",
+      "publication_id" => "pub-#{number.to_s * 32}",
+      "number" => number,
+      "url" => "https://github.com/acme/demo/pull/#{number}",
+      "host" => "github.com", "repository" => "acme/demo",
+      "base_branch" => "main", "creation_base_revision" => "1" * 40,
+      "branch" => "patrol/fix-#{number}", "head_revision" => "3" * 40,
+      "diff_digest" => "4" * 64, "title_digest" => "5" * 64,
+      "body_digest" => "6" * 64, "marker_digest" => "7" * 64,
+      "state" => "open", "observed_at" => NOW.iso8601
+    }
   end
 
   def patrol_fix_tasks(project_root)

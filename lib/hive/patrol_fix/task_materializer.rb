@@ -4,6 +4,7 @@ require "hive/atomic_file"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/patrol_fix/admission_store"
+require "hive/patrol_fix/publication_receipt"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/source_snapshot"
 require "hive/patrol_fix/stage_transition"
@@ -249,7 +250,7 @@ module Hive
         pull_request = exact_pull_request(record, snapshot)
         return false unless pull_request
 
-        receipt = publication_receipt(manifest, snapshot, pull_request)
+        receipt = publication_receipt(manifest, pull_request)
         store = ReceiptStore.new(task_folder: folder)
         existed = store.read_all.any? { |entry| entry.fetch("receipt_id") == receipt.fetch("receipt_id") }
         store.append!(receipt)
@@ -396,20 +397,12 @@ module Hive
         end
       end
 
-      def publication_receipt(manifest, snapshot, pull_request)
-        receipt_key = [ manifest.dig("task", "slug"), manifest.dig("task", "generation"),
-                        pull_request.fetch("id"), pull_request.fetch("head_revision") ].join(":")
-        {
-          "schema" => ReceiptStore::SCHEMA,
-          "schema_version" => ReceiptStore::SCHEMA_VERSION,
-          "receipt_id" => "admission-publication-#{Digest::SHA256.hexdigest(receipt_key)[0, 32]}",
-          "kind" => "publication",
-          "stage" => "publish",
-          "task" => manifest.fetch("task"),
-          "evidence_revision" => manifest.fetch("evidence_revision"),
-          "recorded_at" => snapshot.to_h.fetch("accepted_at"),
-          "payload" => pull_request
-        }
+      def publication_receipt(manifest, pull_request)
+        PublicationReceipt.adopt(
+          task: manifest.fetch("task"),
+          evidence_revision: manifest.fetch("evidence_revision"),
+          payload: pull_request
+        )
       end
 
       def capture_originals(*paths)

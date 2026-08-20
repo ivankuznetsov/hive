@@ -227,10 +227,10 @@ module Hive
 
       def validate_publication!(stage, payload, label)
         invalid!("publication receipts require the publish stage") unless stage == "publish"
-        exact_keys!(payload, %w[id url branch head_revision state], "#{label}.payload")
-        %w[id url branch].each { |key| string!(payload.fetch(key), "#{label}.payload.#{key}", max: 4_096) }
-        string!(payload.fetch("head_revision"), "#{label}.payload.head_revision", max: 40, pattern: REVISION)
-        invalid!("#{label}.payload.state is invalid") unless %w[open draft closed merged].include?(payload["state"])
+        require "hive/patrol_fix/publication_receipt"
+        Hive::PatrolFix::PublicationReceipt.validate_payload!(payload)
+      rescue Hive::PatrolFix::PublicationReceipt::InvalidPublication => e
+        invalid!("#{label}.payload #{e.message}")
       end
 
       def validate_reopen!(stage, payload, label)

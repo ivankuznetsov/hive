@@ -238,6 +238,7 @@ class ComponentBoundariesTest < Minitest::Test
       Hive::PatrolFix::HandoffOutbox
       Hive::PatrolFix::InboxReport
       Hive::PatrolFix::Projection
+      Hive::PatrolFix::PublicationReceipt
       Hive::PatrolFix::ReceiptStore
       Hive::PatrolFix::ReviewReceipt
       Hive::PatrolFix::SemanticAdmission

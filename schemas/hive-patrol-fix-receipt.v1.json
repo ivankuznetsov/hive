@@ -108,13 +108,24 @@
       }
     },
     "publicationPayload": {
-      "type": "object", "additionalProperties": false, "required": ["id", "url", "branch", "head_revision", "state"],
+      "type": "object", "additionalProperties": false, "required": ["id", "publication_id", "number", "url", "host", "repository", "base_branch", "creation_base_revision", "branch", "head_revision", "diff_digest", "title_digest", "body_digest", "marker_digest", "state", "observed_at"],
       "properties": {
-        "id": {"type": "string", "minLength": 1, "maxLength": 4096},
-        "url": {"type": "string", "minLength": 1, "maxLength": 4096},
-        "branch": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "id": {"type": "string", "pattern": "^github:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$", "maxLength": 272},
+        "publication_id": {"type": "string", "pattern": "^pub-[0-9a-f]{32}$"},
+        "number": {"type": "integer", "minimum": 1},
+        "url": {"type": "string", "format": "uri", "minLength": 1, "maxLength": 4096},
+        "host": {"type": "string", "minLength": 1, "maxLength": 253},
+        "repository": {"type": "string", "minLength": 3, "maxLength": 255},
+        "base_branch": {"type": "string", "minLength": 1, "maxLength": 241},
+        "creation_base_revision": {"$ref": "#/$defs/revision"},
+        "branch": {"type": "string", "minLength": 1, "maxLength": 241},
         "head_revision": {"$ref": "#/$defs/revision"},
-        "state": {"enum": ["open", "draft", "closed", "merged"]}
+        "diff_digest": {"$ref": "#/$defs/digest"},
+        "title_digest": {"$ref": "#/$defs/digest"},
+        "body_digest": {"$ref": "#/$defs/digest"},
+        "marker_digest": {"$ref": "#/$defs/digest"},
+        "state": {"enum": ["open", "draft", "closed", "merged"]},
+        "observed_at": {"type": "string", "format": "date-time"}
       }
     },
     "reopenPayload": {

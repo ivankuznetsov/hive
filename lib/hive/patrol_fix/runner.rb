@@ -11,7 +11,8 @@ module Hive
         "inbox" => "hive/stages/patrol_fix/inbox",
         "fix" => "hive/stages/patrol_fix/fix",
         "validate" => "hive/stages/patrol_fix/validate",
-        "review" => "hive/stages/patrol_fix/review"
+        "review" => "hive/stages/patrol_fix/review",
+        "publish" => "hive/stages/patrol_fix/publish"
       }.freeze
 
       def run!(task, cfg = nil, **kwargs)
@@ -56,7 +57,8 @@ module Hive
 
         require file
         constant = {
-          "inbox" => :Inbox, "fix" => :Fix, "validate" => :Validate, "review" => :Review
+          "inbox" => :Inbox, "fix" => :Fix, "validate" => :Validate,
+          "review" => :Review, "publish" => :Publish
         }.fetch(stage.to_s)
         handlers[stage.to_s] = Hive::Stages::PatrolFix.const_get(constant).method(:run!)
       end

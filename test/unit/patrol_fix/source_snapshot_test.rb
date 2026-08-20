@@ -29,6 +29,18 @@ class PatrolFixSourceSnapshotTest < Minitest::Test
     refute_includes error.message, secret
   end
 
+  def test_existing_pull_request_requires_an_exact_canonical_publication
+    error = assert_raises(Hive::PatrolFix::SourceSnapshot::InvalidSnapshot) do
+      build_snapshot(existing_pull_requests: [ {
+        "id" => "pr-7", "url" => "https://github.com/acme/demo/pull/7",
+        "branch" => "patrol/fix-7", "head_revision" => "3" * 40,
+        "state" => "open"
+      } ])
+    end
+
+    assert_includes error.message, "exact canonical publication"
+  end
+
   private
 
   def build_snapshot(overrides = {})

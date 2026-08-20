@@ -107,6 +107,10 @@ details rather than potentially credential-bearing transport output.
   PR policy remain outside the component.
 - Managed draft-PR AgentReport and handoff use the closed read vocabulary,
   exact absence publication, and root-confined cleanup.
+- Patrol Fix publication delegates its exact worktree reads, expected-absence
+  branch push, and idempotent cleanup through the gate. The separate
+  `Hive::GithubPublication` controller owns durable PR identity and replay;
+  `AgentGitGate` still knows nothing about GitHub records or workflow stages.
 - Refactor patrol captures one managed push URL, uses managed remote
   observations, and publishes through the exact expected-OID/absence gate.
   Its append-only action ledger remains the authority deciding which old OID is

@@ -26,6 +26,7 @@ module Hive
     autoload :ReviewReceipt, "hive/patrol_fix/review_receipt"
     autoload :Transition, "hive/patrol_fix/transition"
     autoload :SuccessorMaterializer, "hive/patrol_fix/successor_materializer"
+    autoload :PublicationReceipt, "hive/patrol_fix/publication_receipt"
 
     module_function
 

@@ -93,7 +93,9 @@ qualification proof.
 task manifests, reports, exact local worktree generations, validation receipts,
 stable stage and route-transition journals, strict independent-review decisions,
 exactly-once coding-successor relations, projections, semantic admission, and
-idempotent task materialization. It depends downward on the Safe Agent Git Gate
+idempotent task materialization. Its strict publication receipt validates the
+hosted evidence required by Done but owns no transport effect. It depends
+downward on the Safe Agent Git Gate
 for closed, read-only worktree identity and diff verification and on lower-level
 Task Capture for standard coding successors; it has no issue or remote
 publication authority. Source-owned ordinary and Architecture adapters translate into
@@ -104,6 +106,15 @@ acknowledging the source, and replays incomplete create/update boundaries. The
 daemon admission controller is a consumer outside the component and is
 independent of discovery scheduling and allowances. Its cutover gate remains
 disabled until the authority migration activates a persisted epoch.
+
+The workflow-owned Publish stage is above this core. It composes the separate
+`Hive::GithubPublication` mechanism, which lives outside both `Hive::Stages`
+and `Hive::PatrolFix`, with the Safe Agent Git Gate and an injected GitHub
+gateway. That mechanism owns only immutable publication identity, complete
+all-state reconciliation, expected-absence push leases, intent-versus-attempt
+recovery, and exact hosted observation. It has no LLM, task-routing, issue,
+review-handoff, ready, merge, close, or PR-edit authority. Coding Draft PR and
+both legacy Patrol publishers retain their existing adapters and behavior.
 
 Controller-owned Inbox re-investigates the current repository head and accepts
 only a closed semantic decision. Fix creates or recovers one exact, no-fetch

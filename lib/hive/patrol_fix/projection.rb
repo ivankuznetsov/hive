@@ -1,6 +1,8 @@
 require "hive/patrol_fix"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/receipt_store"
+require "json"
+require "time"
 
 module Hive
   module PatrolFix
@@ -50,6 +52,8 @@ module Hive
         state = missing_publication ? "invalid" : "current"
         diagnostic = if missing_publication
           { "summary" => "Patrol-fix done requires an exact current pull-request receipt." }
+        else
+          publication_diagnostic
         end
 
         data = {
@@ -73,7 +77,8 @@ module Hive
           "diagnostic" => diagnostic,
           "action" => action_for(
             state: state, done: done, outcome: outcome,
-            decision: last_decision, fix: fix, validation: validation
+            decision: last_decision, fix: fix, validation: validation,
+            publication: publication
           )
         }
         PatrolFix.deep_freeze(data)
@@ -124,7 +129,7 @@ module Hive
         }
       end
 
-      def action_for(state:, done:, outcome:, decision:, fix:, validation:)
+      def action_for(state:, done:, outcome:, decision:, fix:, validation:, publication:)
         return action("invalid", runnable: false, reopen: false) if state == "invalid"
         return action("done", runnable: false, reopen: false) if done
         return action("parked", runnable: false, reopen: true) if outcome
@@ -133,6 +138,7 @@ module Hive
         when "2-fix" then !fix.nil?
         when "3-validate" then !validation.nil?
         when "4-review" then decision&.dig("payload", "route") == "publish"
+        when "5-publish" then !publication.nil?
         else false
         end
         return action("advance", runnable: true, reopen: false) if ready
@@ -176,6 +182,32 @@ module Hive
             }
           }
         )
+      end
+
+      def publication_diagnostic
+        path = File.join(task_folder, "patrol-fix-publication-diagnostic.json")
+        return unless File.exist?(path) || File.symlink?(path)
+
+        flags = File::RDONLY | File::NONBLOCK
+        flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        bytes = File.open(path, flags) do |file|
+          raise ReceiptStore::InvalidReceipt, "publication diagnostic must be a regular file" unless
+            file.stat.file? && file.stat.nlink == 1
+          file.read(4_097).to_s
+        end
+        raise ReceiptStore::InvalidReceipt, "publication diagnostic is oversized" if bytes.bytesize > 4_096
+        document = JSON.parse(bytes)
+        fields = %w[schema schema_version code summary recorded_at]
+        unless document.is_a?(Hash) && document.keys.sort == fields.sort &&
+               document["schema"] == "hive-patrol-fix-publication-diagnostic" &&
+               document["schema_version"] == 1 && document["code"] == "cleanup_failed" &&
+               document["summary"].is_a?(String) && document["summary"].bytesize <= MAX_DIAGNOSTIC_BYTES
+          raise ReceiptStore::InvalidReceipt, "publication diagnostic is invalid"
+        end
+        Time.iso8601(document.fetch("recorded_at"))
+        { "code" => document.fetch("code"), "summary" => document.fetch("summary") }
+      rescue SystemCallError, IOError, JSON::ParserError, ArgumentError => e
+        raise ReceiptStore::InvalidReceipt, "publication diagnostic is invalid: #{e.class}"
       end
     end
   end

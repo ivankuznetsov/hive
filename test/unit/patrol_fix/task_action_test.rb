@@ -194,8 +194,14 @@ class PatrolFixTaskActionTest < Minitest::Test
       "evidence_revision" => { "generation" => 1, "digest" => "a" * 64 },
       "recorded_at" => "2026-08-20T12:02:00Z",
       "payload" => {
-        "id" => "github:acme/demo#42", "url" => "https://github.com/acme/demo/pull/42",
-        "branch" => "hive/repair-login", "head_revision" => "2" * 40, "state" => "open"
+        "id" => "github:acme/demo#42", "publication_id" => "pub-#{'1' * 32}",
+        "number" => 42, "url" => "https://github.com/acme/demo/pull/42",
+        "host" => "github.com", "repository" => "acme/demo",
+        "base_branch" => "main", "creation_base_revision" => "1" * 40,
+        "branch" => "hive/repair-login", "head_revision" => "2" * 40,
+        "diff_digest" => "3" * 64, "title_digest" => "4" * 64,
+        "body_digest" => "5" * 64, "marker_digest" => "6" * 64,
+        "state" => "open", "observed_at" => "2026-08-20T12:02:00Z"
       }
     }
   end

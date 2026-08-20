@@ -241,6 +241,17 @@ class AgentProfileTest < Minitest::Test
     assert result.effort_supported
   end
 
+  def test_identity_arguments_preserve_default_effort_without_rendering_a_flag
+    profile = Hive::AgentProfiles.lookup(:grok)
+
+    result = profile.identity_arguments(model: "grok-4.6", effort: "default")
+
+    assert_equal [ "--model", "grok-4.6" ], result.native_arguments
+    assert_equal "default", result.requested_effort
+    assert_nil result.effective_effort
+    assert result.effort_supported
+  end
+
   def test_identity_arguments_report_unsupported_effort_without_native_argument
     profile = make_profile(model_argument_builder: ->(model) { [ "--model", model ] })
 

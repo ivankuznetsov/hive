@@ -307,9 +307,14 @@ module Hive
       normalized_model =
         Hive::ImplementationIdentity.normalize_model(model, concrete: true)
       requested_effort = Hive::ImplementationIdentity.normalize_effort(effort)
+      native_effort = if Hive::ImplementationIdentity::CONCRETE_MODEL_SENTINELS.include?(requested_effort)
+        nil
+      else
+        requested_effort
+      end
       package_identity = @runtime_profile.identity_arguments(
         model: normalized_model,
-        effort: effort_argument_builder ? requested_effort : nil,
+        effort: effort_argument_builder ? native_effort : nil,
         pin_model: pin_model
       )
       native_arguments = Hive::ImplementationIdentity.validate_native_arguments(

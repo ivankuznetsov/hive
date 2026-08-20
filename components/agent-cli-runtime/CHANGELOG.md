@@ -4,6 +4,10 @@
 
 ## 0.2.2 - 2026-08-18
 
+- Deliver built-in Pi prompts through its native non-TTY stdin reader instead
+  of one positional argv element. This prevents implementation-sized prompts
+  from failing at process spawn with the operating system's per-argument
+  `E2BIG` limit; Codex retains its separate stdin-plus-`-` transport.
 - Treat Pi's `stopReason: "length"` as a typed `model_output_limit` failure.
   Pi exits zero after this provider stop even when the model exhausted its
   output allowance before writing the requested artifact; callers can now

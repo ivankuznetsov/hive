@@ -57,6 +57,41 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_plan_review_attempt_generation_advances_with_review_projection
+    with_dispatcher do |dispatcher, launcher, task, store|
+      task.stage_index = 3
+      task.stage_name = "plan"
+      task.folder = File.dirname(task.state_file)
+      task.project_root = task.folder
+      review_dir = File.join(task.folder, "plan-review")
+      FileUtils.mkdir_p(review_dir)
+      current_path = File.join(review_dir, "current.json")
+      File.write(current_path, JSON.generate("state" => "verifying", "version" => 1))
+      dispatcher.instance_variable_set(:@task_resolver, ->(_request) { task })
+      dispatcher.define_singleton_method(:provider_for) { |_task| "pi" }
+      request = lambda do |id|
+        FakeRequest.new(
+          slug: task.slug, project: "demo",
+          argv: [ "hive", "plan-review-run", task.slug ], request_id: id,
+          inherited_outputs: []
+        )
+      end
+
+      first = dispatcher.dispatch_request(request.call("review-one"), now: NOW)
+      terminalize_attempt(
+        store, launcher, first, outcome: "succeeded", exit_status: 0, now: NOW + 3
+      )
+      replay = dispatcher.dispatch_request(request.call("review-two"), now: NOW + 4)
+      File.write(current_path, JSON.generate("state" => "verifying", "version" => 2))
+      retry_result = dispatcher.dispatch_request(request.call("review-three"), now: NOW + 5)
+
+      assert_equal :terminal_replay, replay.status
+      assert_equal :accepted, retry_result.status
+      refute_equal first.attempt.task_generation, retry_result.attempt.task_generation
+      assert_equal 2, launcher.launched.length
+    end
+  end
+
   def test_launch_context_is_captured_after_attempt_creation_and_before_handoff
     events = []
     provenance = Object.new

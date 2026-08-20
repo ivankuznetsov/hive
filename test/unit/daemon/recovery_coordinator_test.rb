@@ -81,6 +81,24 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_recovery_backoff_resets_after_a_successful_stage_transition
+    with_fixture(mtime: NOW - 6) do |coordinator, row, state_home|
+      write_terminal_recovery_history(
+        row: row.with(stage: "3-plan"), state_home: state_home, retry_count: 25
+      )
+
+      receipt = coordinator.request(
+        row: row, requestor: "healer", request_id: "first-execute-retry", now: NOW
+      )
+
+      assert_equal "queued", receipt.status
+      assert_equal 1, receipt.retry_count
+      assert_equal 1, Q.pending(state_home: state_home).count do |request|
+        request.request_id == "first-execute-retry"
+      end
+    end
+  end
+
   # The cooldown paces Hive's own retry sweep. First failure waits the first
   # backoff step, not the provider-sized hour.
   def test_request_before_cooldown_returns_cooldown_without_writing
@@ -630,6 +648,37 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal "running", first.status
       assert_equal "running", replay.status
       assert_equal "attempt-1", replay.attempt_id
+    end
+  end
+
+  def test_failed_terminal_recovery_repairs_unchanged_markerless_task_for_retry
+    with_fixture do |coordinator, row, state_home|
+      coordinator.request(
+        row: row, requestor: "healer", request_id: "recover-markerless-failure",
+        now: NOW
+      )
+      admitted = Q.fetch("recover-markerless-failure", state_home: state_home)
+      coordinator.resume(request: admitted, row: row, now: NOW)
+      cleared = Q.fetch("recover-markerless-failure", state_home: state_home)
+      coordinator.mark_dispatched(cleared, attempt_id: "attempt-failed", now: NOW)
+      dispatched = Q.fetch("recover-markerless-failure", state_home: state_home)
+      coordinator.mark_dispatched(
+        dispatched, attempt_id: "attempt-failed", terminal: true,
+        outcome: "failed", now: NOW + 1
+      )
+      terminal = Q.fetch("recover-markerless-failure", state_home: state_home)
+
+      assert coordinator.repair_failed_terminal_marker(terminal)
+
+      marker = Hive::Markers.current(row.state_file)
+      assert_equal :error, marker.name
+      assert_equal "recovery_attempt_failed", marker.attrs.fetch("reason")
+      assert_equal "attempt-failed", marker.attrs.fetch("attempt_id")
+      assert_equal "failed", marker.attrs.fetch("outcome")
+      assert_equal "recover-markerless-failure",
+                   marker.attrs.fetch("recovery_request_id")
+      refute coordinator.repair_failed_terminal_marker(terminal),
+             "a durable error marker must not be replaced on replay"
     end
   end
 

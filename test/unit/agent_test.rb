@@ -1922,6 +1922,46 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_pi_profile_pipes_large_prompt_without_an_argv_placeholder
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      fake_pi = File.join(dir, "fake-pi")
+      argv_log = File.join(dir, "argv.log")
+      stdin_log = File.join(dir, "stdin.log")
+      File.write(fake_pi, <<~SH)
+        #!/usr/bin/env bash
+        printf '%s\n' "$@" > "#{argv_log}"
+        cat > "#{stdin_log}"
+        exit 0
+      SH
+      File.chmod(0o755, fake_pi)
+      profile = Hive::AgentProfile.new(
+        name: :pi,
+        bin_default: fake_pi,
+        headless_flag: "-p",
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}",
+        prompt_style: :piped_stdin,
+        status_detection_mode: :exit_code_only
+      )
+      prompt = "p" * (256 * 1024)
+
+      result = Hive::Agent.new(
+        task: task,
+        prompt: prompt,
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        profile: profile,
+        status_mode: :exit_code_only
+      ).run!
+
+      assert_equal :ok, result[:status]
+      assert_equal [ "-p" ], File.read(argv_log).lines.map(&:chomp)
+      assert_equal prompt, File.binread(stdin_log)
+    end
+  end
+
   # Regression: claude's Edit/Write tools rewrite atomically (write tempfile
   # then rename), changing the file's inode. The earlier inode-tracking
   # heuristic falsely flagged that as a "concurrent edit". Verify hive does

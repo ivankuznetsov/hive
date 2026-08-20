@@ -82,7 +82,8 @@ module Hive
                      plan_approval: Hive::Daemon::PlanApproval,
                      module_runtime: nil,
                      module_migration_coordinator: nil,
-                     runtime_ready_callback: nil)
+                     runtime_ready_callback: nil,
+                     clock: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -101,6 +102,7 @@ module Hive
         @lost_outcome_processor = lost_outcome_processor
         @operational_snapshot = operational_snapshot
         @runtime_ready_callback = runtime_ready_callback
+        @clock = clock
         @module_runtime = module_runtime
         @module_migration_coordinator = module_migration_coordinator
         @attempt_snapshot = nil
@@ -2411,6 +2413,7 @@ module Hive
       def dispatch_request!(req, now:)
         return :shutdown unless admission_open?
 
+        now = current_dispatch_time(now)
         command = Shellwords.join(req.argv)
         state_file_path = resolve_request_state_file_path(req)
         preclaim_dispatch_request(req, now: now)
@@ -2775,6 +2778,16 @@ module Hive
 
           request = delivery.request
           if request.recovery&.fetch("phase", nil) == "terminal"
+            if @recovery_coordinator.repair_failed_terminal_marker(request, refresh: false)
+              @logger.event(
+                :marker_healed,
+                project: request.project, slug: request.slug,
+                stage: request.expected_stage,
+                reason: "recovery_attempt_failed",
+                attempt_id: request.recovery["attempt_id"],
+                request_id: request.request_id
+              )
+            end
             acknowledge_attempt_finalization(attempt_id, :request_delivery)
             next
           end
@@ -3117,6 +3130,14 @@ module Hive
       def dispatch_durable_command(command, project:, slug:, stage:, now:, trigger:, request_id:)
         return :shutdown unless admission_open?
 
+        # A full daemon tick can take longer than the attempt launch window
+        # when recovery and status backlogs are large. The tick timestamp is a
+        # coherent observation time for policy, but it must not become the
+        # creation time of an attempt launched minutes later: doing so mints a
+        # claim deadline that is already expired before the wrapper starts.
+        # Production injects a wall clock; deterministic unit callers that do
+        # not inject one retain the supplied timestamp.
+        now = current_dispatch_time(now)
         argv = Shellwords.split(command)
         request = Hive::Daemon::DispatchRequestQueue::Request.new(
           request_id: request_id || Hive::Daemon::DispatchRequestQueue.generate_request_id,
@@ -3177,6 +3198,10 @@ module Hive
           )
         end
         result
+      end
+
+      def current_dispatch_time(fallback)
+        @clock ? @clock.call.utc : fallback
       end
 
       def log_attempt_admission(result)

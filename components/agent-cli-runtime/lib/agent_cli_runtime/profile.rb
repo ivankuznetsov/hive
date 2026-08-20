@@ -4,7 +4,7 @@ require "rubygems/version"
 
 module AgentCliRuntime
   class Profile
-    PROMPT_STYLES = %i[positional headless_flag_value stdin].freeze
+    PROMPT_STYLES = %i[positional headless_flag_value stdin piped_stdin].freeze
     WORKSPACE_WRITE_PERMISSION_MODE = "workspace-write".freeze
     READ_ONLY_PERMISSION_MODE = "read-only".freeze
     CAPTURE_TIMEOUT_SECONDS = 10

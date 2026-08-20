@@ -576,14 +576,17 @@ module Hive
         nil
       end
 
-      # Highest durable retry count already recorded for this task. The
-      # coordinator uses this ledger value when admitting a fresh marker
-      # generation; adapters cannot supply or reset recovery history.
-      def recovery_retry_count(project:, slug:, state_home: Hive::Paths.state_home)
+      # Highest durable retry count already recorded for this task stage. A
+      # successful workflow transition starts a new failure series; plan-stage
+      # recovery history must not put the first execute failure at the hourly
+      # ceiling. Adapters still cannot supply or reset the ledger value.
+      def recovery_retry_count(project:, slug:, expected_stage: nil,
+                               state_home: Hive::Paths.state_home)
         request_files(directory(state_home: state_home)).filter_map do |path|
           parsed = parse_file(path)
           next if parsed.is_a?(Symbol) || !parsed.recovery.is_a?(Hash)
           next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
+          next if expected_stage && parsed.expected_stage.to_s != expected_stage.to_s
 
           count = parsed.recovery["retry_count"]
           count if count.is_a?(Integer) && count >= 0

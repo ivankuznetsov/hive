@@ -489,7 +489,9 @@ module Hive
             "blocked_reason" => operator_blocked ? "health_state_unavailable" : nil,
             "blocked_remediation" => operator_blocked ?
               "inspect and repair the unavailable provider-health scope" : nil,
-            "retry_count" => durable_retry_count_for(project: project, slug: slug) + 1,
+            "retry_count" => durable_retry_count_for(
+              project: project, slug: slug, expected_stage: task_stage(locked_task)
+            ) + 1,
             "provider_hint" => nil,
             "policy_digest" => decision.policy_digest,
             "source_receipt" => nil,
@@ -764,6 +766,59 @@ module Hive
         end
       end
 
+      RETRYABLE_TERMINAL_OUTCOMES = %w[failed cancelled lost].freeze
+
+      # A stage normally writes a fresh ERROR/REVIEW_ERROR before its failed
+      # recovery attempt terminalizes. An exception before that stage-owned
+      # boundary (for example Process.spawn raising E2BIG) used to leave a
+      # terminal recovery receipt over a markerless task forever. Repair only
+      # that exact unchanged post-clear generation; meaningful progress or a
+      # newer marker/attempt wins and is never overwritten.
+      def repair_failed_terminal_marker(request, refresh: true)
+        current = if refresh
+          @request_queue.fetch(request.request_id, state_home: @state_home) || request
+        else
+          request
+        end
+        recovery = current.recovery || {}
+        return false unless recovery["phase"] == "terminal"
+        return false unless RETRYABLE_TERMINAL_OUTCOMES.include?(recovery["terminal_outcome"])
+
+        task = @task_resolver.call(
+          project: current.project,
+          slug: current.slug,
+          folder: recovery["canonical_task_folder"],
+          stage: current.expected_stage
+        )
+        Hive::Lock.with_task_lock(task.folder, "operation" => "terminal_recovery_repair") do
+          locked_task = @task_resolver.call(
+            project: current.project,
+            slug: current.slug,
+            folder: recovery["canonical_task_folder"],
+            stage: current.expected_stage
+          )
+          return false unless same_task_identity?(task, locked_task)
+          return false unless request_task_identity_matches?(current, locked_task)
+
+          marker = Hive::Markers.current(locked_task.state_file)
+          return false unless marker.none?
+
+          generation = generation_for_current(locked_task, current)
+          return false unless generation_matches?(generation, recovery)
+
+          Hive::Markers.set(
+            locked_task.state_file, :error,
+            reason: "recovery_attempt_failed",
+            attempt_id: recovery["attempt_id"],
+            outcome: recovery["terminal_outcome"],
+            recovery_request_id: current.request_id
+          )
+          true
+        end
+      rescue Hive::Error, SystemCallError, IOError, ArgumentError, TypeError
+        false
+      end
+
       # A preflight/spawn failure after the marker was cleared must not be
       # retried on every daemon tick. Keep the durable transition in `cleared`
       # and schedule the next admission with the same shared hourly cadence.
@@ -840,13 +895,15 @@ module Hive
 
       def durable_retry_count(row)
         durable_retry_count_for(
-          project: value(row, :project), slug: value(row, :slug)
+          project: value(row, :project), slug: value(row, :slug),
+          expected_stage: value(row, :stage)
         )
       end
 
-      def durable_retry_count_for(project:, slug:)
+      def durable_retry_count_for(project:, slug:, expected_stage:)
         @request_queue.recovery_retry_count(
-          project: project, slug: slug, state_home: @state_home
+          project: project, slug: slug, expected_stage: expected_stage,
+          state_home: @state_home
         )
       end
 

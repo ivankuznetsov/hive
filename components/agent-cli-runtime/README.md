@@ -41,6 +41,11 @@ Compilation does not execute the returned command. Unsupported requested
 controls raise `AgentCliRuntime::UnsupportedCapability` with typed evidence
 instead of silently widening the request.
 
+Prompt transport is profile-owned. `:stdin` writes the prompt to stdin and
+adds the CLI's conventional `-` argv marker; `:piped_stdin` writes the prompt
+to stdin without a marker for CLIs such as Pi that consume a non-TTY stream
+directly. Built-in Pi therefore keeps arbitrarily large prompts out of argv.
+
 `permission_mode: nil` selects the profile's default non-interactive permission
 flags, which may include a provider's bypass flag. Pass `"read-only"` or
 `"workspace-write"` explicitly when the integration requires that constraint.

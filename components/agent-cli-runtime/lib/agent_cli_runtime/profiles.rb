@@ -220,6 +220,10 @@ module AgentCliRuntime
       bin_default: "pi",
       env_bin_override_keys: %w[AGENT_CLI_RUNTIME_PI_BIN HIVE_PI_BIN],
       headless_flag: "-p",
+      # Pi reads a non-TTY stdin stream into its initial message without an
+      # argv placeholder. Keeping the prompt out of argv also avoids Linux's
+      # per-argument size limit on real implementation plans.
+      prompt_style: :piped_stdin,
       output_format_flags: [ "--mode", "json", "--no-session" ],
       version_flag: "--version",
       min_version: "0.70.2",

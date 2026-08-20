@@ -105,9 +105,11 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
     ], codex.argv
     assert_equal "hello", codex.stdin_data
 
+    pi = compile(:pi)
     assert_equal [
-      "pi", "-p", "--mode", "json", "--no-session", "hello"
-    ], compile(:pi).argv
+      "pi", "-p", "--mode", "json", "--no-session"
+    ], pi.argv
+    assert_equal "hello", pi.stdin_data
 
     assert_equal [
       "grok", "-p", "hello", "--always-approve",

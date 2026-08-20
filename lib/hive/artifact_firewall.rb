@@ -13,6 +13,7 @@ module Hive
   module ArtifactFirewall
     DIAGNOSTIC_BYTES = 512
     MAX_ENTRIES = 128
+    MAX_CUSTODY_MANIFESTS = 16
     MAX_PATH_BYTES = 4_096
     REQUIRED_OUTPUT_INSPECTION_ID = "required-output-inspection"
     ORCHESTRATOR_OWNED = Hive::ProtectedFiles::ORCHESTRATOR_OWNED
@@ -330,6 +331,90 @@ module Hive
         return true unless called?
 
         report && (!report.tampered? || report.restored?)
+      end
+    end
+
+    # A single untrusted call can own more protected anchors than one bounded
+    # manifest accepts. This group nests ordinary single-use custody guards so
+    # every manifest is captured before the call and every guard validates in
+    # reverse order afterward, including when an inner validation raises.
+    class ProtectedAnchorCustodySet
+      class CombinedReport
+        attr_reader :reports
+
+        def initialize(reports)
+          @reports = reports.dup.freeze
+        end
+
+        def tampered?
+          reports.any?(&:tampered?)
+        end
+
+        def tampered_labels
+          reports.flat_map(&:tampered_labels).uniq.freeze
+        end
+
+        def restored?
+          affected = reports.select(&:tampered?)
+          return nil if affected.empty?
+
+          affected.all? { |report| report.restored? == true }
+        end
+
+        def restore_diagnostic
+          diagnostics = reports.filter_map(&:restore_diagnostic)
+          return nil if diagnostics.empty?
+
+          diagnostics.join("; ").byteslice(0, DIAGNOSTIC_BYTES).scrub
+        end
+      end
+
+      attr_reader :report
+
+      def initialize(manifests)
+        entries = Array(manifests)
+        raise InvalidManifest, "agent custody set requires at least one manifest" if entries.empty?
+        if entries.length > MAX_CUSTODY_MANIFESTS
+          raise InvalidManifest,
+                "agent custody set exceeds #{MAX_CUSTODY_MANIFESTS} manifests"
+        end
+        unless entries.all? { |manifest| manifest.is_a?(Manifest) }
+          raise InvalidManifest, "agent custody set entries must be manifests"
+        end
+        if entries.any? { |manifest| !manifest.required_outputs.empty? }
+          raise InvalidManifest, "protected-anchor custody set does not accept required outputs"
+        end
+
+        @custodies = entries.map { |manifest| AgentCustody.new(manifest) }.freeze
+        @called = false
+        @report = nil
+      end
+
+      def call(&block)
+        raise Error, "agent custody requires a block" unless block
+        raise Error, "agent custody is single-use" if @called
+
+        @called = true
+        invoke(0, &block)
+      ensure
+        reports = @custodies&.map(&:report)
+        @report = CombinedReport.new(reports) if reports&.all?
+      end
+
+      def called? = @called
+
+      def safe_after?
+        return true unless called?
+
+        @custodies.all?(&:safe_after?)
+      end
+
+      private
+
+      def invoke(index, &block)
+        return block.call if index == @custodies.length
+
+        @custodies.fetch(index).call { invoke(index + 1, &block) }
       end
     end
 

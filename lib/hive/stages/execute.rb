@@ -153,26 +153,22 @@ module Hive
         baseline_head = execute_baseline_head(task, worktree_git)
         return worktree_git_failed(task, cfg, worktree_path) unless baseline_head
 
-        custody_manifest = Hive::ArtifactFirewall::Manifest.new(
-          root: task.folder,
-          protected_anchors: execute_protected_files(task),
-          permitted_writable_roots: [ task.folder, worktree_path ]
+        agent_custody = Hive::ArtifactFirewall::ProtectedAnchorCustodySet.new(
+          execute_custody_manifests(task, worktree_path)
         )
-        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
         begin
           impl_result = spawn_implementation(
             task, cfg, worktree_path, identity: identity,
             agent_custody: agent_custody
           )
         rescue Hive::ProviderRouteFailed
-          if agent_custody.report&.tampered?
-            record_tamper(
-              task, agent_custody.report.tampered_labels, who: "implementer",
-              restored: agent_custody.report.restored?,
-              restore_error: agent_custody.report.restore_diagnostic
-            )
-          else
+          record_implementation_exception(task, agent_custody) do
             mark_provider_route_failure(task)
+          end
+          raise
+        rescue StandardError => e
+          record_implementation_exception(task, agent_custody) do
+            mark_implementer_exception(task, cfg, e)
           end
           raise
         end
@@ -297,6 +293,19 @@ module Hive
         paths.uniq.freeze
       end
 
+      # Durable context and activity receipts grow with every retry. Keep all
+      # of them under exact per-file custody without asking one firewall
+      # manifest to exceed its deliberate admission bound.
+      def execute_custody_manifests(task, worktree_path)
+        execute_protected_files(task).each_slice(Hive::ArtifactFirewall::MAX_ENTRIES).map do |paths|
+          Hive::ArtifactFirewall::Manifest.new(
+            root: task.folder,
+            protected_anchors: paths,
+            permitted_writable_roots: [ task.folder, worktree_path ]
+          )
+        end.freeze
+      end
+
       def apply_execute_outcome(task, cfg, worktree_path, baseline_head,
                                 marker_name:, attrs:, commit:, status:, waiting_reason: nil,
                                 research: false, research_evidence: false)
@@ -365,6 +374,34 @@ module Hive
           attrs[:route_id] = route.fetch("route_id")
         end
         Hive::Markers.set(task.state_file, :error, attrs)
+      end
+
+      # Process-spawn and stream failures can raise before Agent returns its
+      # ordinary typed result. Leaving the task markerless makes the durable
+      # failed attempt visible but gives StaleAgentHealer nothing to retry.
+      # Preserve the exception for the attempt receipt while also publishing
+      # the same recoverable marker used by ordinary implementation failures.
+      def mark_implementer_exception(task, cfg, error)
+        Hive::Markers.set(
+          task.state_file, :error,
+          reason: "implementer_failed",
+          provider: execute_agent_name(cfg),
+          status: "exception",
+          exception_class: error.class.name,
+          message: AgentCliRuntime::Redactor.diagnostic(error)
+        )
+      end
+
+      def record_implementation_exception(task, custody)
+        report = custody.report
+        if report&.tampered?
+          record_tamper(
+            task, report.tampered_labels, who: "implementer",
+            restored: report.restored?, restore_error: report.restore_diagnostic
+          )
+        elsif custody.safe_after?
+          yield
+        end
       end
 
       def implementer_hit_limit?(impl_result)

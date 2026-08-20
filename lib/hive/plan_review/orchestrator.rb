@@ -232,6 +232,13 @@ module Hive
           record["findings"], verification_findings, verification_outcome,
           verification_evidence
         )
+        if retry_incomplete_verification?(
+          record, verification_outcome, verification_findings, verification_blockers
+        )
+          return reset_incomplete_verification(
+            record, findings:, blockers: verification_blockers
+          )
+        end
         if record["candidate_plan_digest"] && !SUCCESS_OUTCOMES.include?(verification_outcome)
           verification_blockers << {
             "owner" => "reviewer", "reason" => "candidate_verification_#{verification_outcome}"
@@ -334,15 +341,7 @@ module Hive
       def reset_for_capability(record)
         routes = record["routes"]
         latest = %w[primary adversarial].filter_map { |role| latest_route(record, role) }
-        reset = latest.map do |route|
-          route.slice(
-            "role", "requested", "actual", "capability_result",
-            "independence_verified", "independence_reason"
-          ).merge(
-            "outcome" => "retryable_failure", "retry_at" => nil,
-            "recovery_reset" => true
-          )
-        end
+        reset = latest.map { |route| recovery_reset_route(route) }
         Projection.new(
           publish(
             record,
@@ -352,6 +351,58 @@ module Hive
             "execution_allowed" => false
           )
         )
+      end
+
+      # A verifier can return a valid success result with no contrary finding
+      # while accidentally omitting one or more fingerprint-bound evidence
+      # rows. That is an incomplete attempt, not a verdict that the candidate
+      # failed. Preserve every attestation it did provide and retry only the
+      # still-incorporated dispositions under the normal transient bound.
+      def retry_incomplete_verification?(record, outcome, observed, blockers)
+        return false unless SUCCESS_OUTCOMES.include?(outcome)
+        return false unless Array(observed).empty?
+
+        missing = Array(blockers)
+        return false if missing.empty? || missing.any? do |blocker|
+          blocker["reason"] != "disposition_verification_missing"
+        end
+
+        incomplete_attestation_retries(record) <
+          Integer(@cfg.dig("plan_review", "attempts", "max_transient"))
+      end
+
+      def reset_incomplete_verification(record, findings:, blockers:)
+        route = latest_route(record, "verification")
+        reset = recovery_reset_route(
+          route,
+          "incomplete_attestation_retry" => true,
+          "diagnostic" => "verification omitted #{blockers.length} disposition attestation(s)"
+        )
+        Projection.new(
+          publish(
+            record,
+            "findings" => findings, "routes" => record["routes"] + [ reset ],
+            "state" => "verifying", "outcome" => nil, "blockers" => [],
+            "required_action" => "retry incomplete disposition verification automatically",
+            "execution_allowed" => false
+          )
+        )
+      end
+
+      def incomplete_attestation_retries(record)
+        record["routes"].count do |route|
+          route["role"] == "verification" && route["incomplete_attestation_retry"] == true
+        end
+      end
+
+      def recovery_reset_route(route, attributes = {})
+        route.slice(
+          "role", "requested", "actual", "capability_result",
+          "independence_verified", "independence_reason"
+        ).merge(
+          "outcome" => "retryable_failure", "retry_at" => nil,
+          "recovery_reset" => true
+        ).merge(attributes)
       end
 
       def ensure_leg(record, role, plan_bytes, requested: nil, merge_coverage: true,

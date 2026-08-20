@@ -245,6 +245,14 @@ charge. An omitted or empty successor-output override inherits the
 predecessor's complete output set; only a non-empty explicit override replaces
 it.
 
+`plan-review-run` also binds the byte-exact `plan-review/current.json`
+projection into its progress token. Plan review is a multi-step state machine:
+it can move from revision to verification or install a bounded recovery reset
+without changing `plan.md` or its completion marker. An unchanged projection
+still replays the successful orchestration attempt, while a changed projection
+advances generation so the daemon can run the next review step instead of
+replaying the earlier success forever.
+
 A terminal explicit attempt with a trusted provider-evidence receipt is also a
 valid, narrowly scoped successor predecessor. `RecoveryCoordinator` alone puts
 that immutable predecessor ID on the v5 recovery delivery after provider

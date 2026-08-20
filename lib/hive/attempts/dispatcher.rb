@@ -8,11 +8,13 @@ require "hive/provider_routing"
 require "hive/task_resolver"
 require "hive/workflows"
 require "hive/context_provenance"
+require "hive/plan_review/store"
 
 module Hive
   module Attempts
     class Dispatcher
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: coding brainstorm artifact repair
+      PLAN_REVIEW_RUN_COMMAND = "plan-review-run".freeze
 
       DEFAULT_LIMITS = { max_global: 3, max_per_project: 3, max_daily: 50 }.freeze
 
@@ -46,7 +48,8 @@ module Hive
                    admission_view: nil, routing_policy: nil)
         @launcher.preflight!
         generation = normalize_generation(
-          generation, task: task, project: project, intended_stage: intended_stage
+          generation, task: task, project: project, intended_stage: intended_stage,
+          argv: argv
         )
         policy = routing_policy || resolve_routing_policy(task, intended_stage)
         result = admit(
@@ -133,6 +136,7 @@ module Hive
         intended_stage = intended_stage_for(request.argv, task)
         generation = Generation.resolve(
           task: task, project: request.project, intended_stage: intended_stage,
+          progress_token: command_progress_token(request.argv, task),
           task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil,
           attempt_store: @store
         )
@@ -604,12 +608,44 @@ module Hive
         { "attempt_id" => record.attempt_id }
       end
 
-      def normalize_generation(generation, task:, project:, intended_stage:)
+      def normalize_generation(generation, task:, project:, intended_stage:, argv:)
         return generation if generation.is_a?(Generation)
 
         Generation.resolve(
           task: task, project: project, intended_stage: intended_stage,
+          progress_token: command_progress_token(argv, task),
           task_generation: generation, attempt_store: @store
+        )
+      end
+
+      # plan-review-run advances an internal state machine while plan.md and
+      # its COMPLETE marker remain unchanged. Include the current review
+      # projection in the progress token so one successful orchestration step
+      # deduplicates, but a recovery reset or other review transition can run
+      # the next step instead of replaying the prior terminal attempt forever.
+      def command_progress_token(argv, task)
+        base = Generation.artifact_token(task)
+        return base unless Array(argv)[1].to_s == PLAN_REVIEW_RUN_COMMAND
+
+        folder = task.respond_to?(:folder) && task.folder ? task.folder : File.dirname(task.state_file)
+        current = File.join(
+          folder, Hive::PlanReview::Store::ROOT_BASENAME,
+          Hive::PlanReview::Store::CURRENT_BASENAME
+        )
+        digest = ::Digest::SHA256.new
+        digest << "hive-plan-review-progress-v1\0"
+        digest << base
+        begin
+          File.open(current, "rb") do |file|
+            digest << file.read(64 * 1024) until file.eof?
+          end
+        rescue Errno::ENOENT, Errno::ENOTDIR
+          digest << "\0missing"
+        end
+        digest.hexdigest
+      rescue SystemCallError, IOError => e
+        ::Digest::SHA256.hexdigest(
+          "hive-plan-review-progress-v1\0unreadable\0#{e.class}\0#{base}"
         )
       end
 

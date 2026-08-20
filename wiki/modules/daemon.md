@@ -147,6 +147,14 @@ dispatched this tick is already in-flight in the controller and the row
 scan's per-slug in-flight gate (`controller.running_task?`) keeps the same
 tick from double-spawning.
 
+The timestamp captured at tick start is an observation timestamp, not a
+durable-attempt launch timestamp. A full tick can exceed
+`attempt_launch_timeout_sec` while draining recovery work. Immediately before
+durable admission, the production dispatcher reads a fresh wall clock for the
+request creation time and attempt claim deadline; otherwise later rows could
+be born with already-expired claim windows and fail every detached handoff as
+`launch_handoff_failed`.
+
 Scheduler decisions are captured in memory as each row is evaluated. At the
 end of the tick the dispatcher fetches status a second time and publishes a
 `complete` snapshot only after matching task identity, generation, stage,
@@ -425,7 +433,21 @@ advances a workflow stage directly:
    configuration, credentials, provider state, or the configured agent binary
    changed, so the rerun itself is the universal health probe. A repeated
    failure writes a fresh marker and restarts the cooldown; no error retry
-   budget can exhaust.
+   budget can exhaust. Terminal-recovery reconciliation enforces that
+   invariant when a stage crashes before it can write the marker: if and only
+   if the failed/cancelled/lost receipt still names the exact unchanged
+   markerless post-clear generation, the coordinator writes
+   `ERROR reason=recovery_attempt_failed`. A meaningful marker, changed task
+   generation, moved task, or newer attempt is never overwritten. During
+   daemon reconciliation the coordinator consumes the already parsed claimed
+   request instead of rescanning the full dispatch queue for every terminal
+   recovery.
+
+   The retry ladder is durable per project, task, and workflow stage. Repeated
+   failures within one stage climb the shared backoff, but a successful stage
+   transition begins a new failure series at the five-second step. Historical
+   plan-review recovery therefore cannot put a task's first execute failure at
+   the one-hour ceiling.
 
    `StaleAgentHealer` is only the automatic scheduler for those durable errors.
    After the shared marker-age cooldown it submits the observed row to
@@ -679,7 +701,7 @@ unlinks the claim and logs completion.
 Current request schema is v5. It carries generation intent, predecessor
 attempt, inherited output references, and a restartable recovery object with
 canonical task, stage, marker ID, expected attrs, dispatch generation,
-owner/remediation, phase, retry count, terminal outcome/time, bounded routing
+owner/remediation, phase, stage-scoped retry count, terminal outcome/time, bounded routing
 admission observation, and immutable source terminal-receipt identity. Its
 closed recovery union distinguishes ordinary marker recovery from markerless
 initial route exhaustion keyed by task generation and frozen policy digest.

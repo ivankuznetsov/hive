@@ -236,8 +236,8 @@ class AgentRuntimeTest < Minitest::Test
     assert_equal "do work", codex_call.stdin_data
 
     pi_call = compile(pi, add_dirs: [ "/workspace/extra" ], max_budget_usd: 2)
-    assert_equal [ pi.bin, "-p", *pi.output_format_flags, "do work" ], pi_call.argv
-    assert_nil pi_call.stdin_data
+    assert_equal [ pi.bin, "-p", *pi.output_format_flags ], pi_call.argv
+    assert_equal "do work", pi_call.stdin_data
     directory_evidence = pi_call.capability_evidence.find { |item| item.capability == :add_directory }
     assert_equal false, directory_evidence.supported
 

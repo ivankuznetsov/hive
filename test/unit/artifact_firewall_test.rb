@@ -765,6 +765,73 @@ class ArtifactFirewallTest < Minitest::Test
     end
   end
 
+  def test_protected_anchor_custody_set_encloses_one_call_with_multiple_manifests
+    with_tmp_dir do |dir|
+      first = File.join(dir, "first")
+      second = File.join(dir, "second")
+      File.write(first, "first before\n")
+      File.write(second, "second before\n")
+      custody = Hive::ArtifactFirewall::ProtectedAnchorCustodySet.new([
+        build_manifest(dir, protected: { "first" => first }),
+        build_manifest(dir, protected: { "second" => second })
+      ])
+
+      result = custody.call do
+        File.write(second, "agent forged\n")
+        :provider_result
+      end
+
+      assert_equal :provider_result, result
+      assert custody.called?
+      assert custody.report.tampered?
+      assert_equal [ "second" ], custody.report.tampered_labels
+      assert custody.report.restored?
+      assert custody.safe_after?
+      assert_equal "second before\n", File.binread(second)
+      assert_raises(Hive::ArtifactFirewall::Error) { custody.call { :again } }
+    end
+  end
+
+  def test_protected_anchor_custody_set_rejects_unbounded_or_output_manifests
+    with_tmp_dir do |dir|
+      manifest = build_manifest(dir)
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        Hive::ArtifactFirewall::ProtectedAnchorCustodySet.new(
+          Array.new(Hive::ArtifactFirewall::MAX_CUSTODY_MANIFESTS + 1, manifest)
+        )
+      end
+      assert_includes error.message, "exceeds"
+
+      output_manifest = build_manifest(
+        dir, outputs: { "result" => File.join(dir, "result.json") }
+      )
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        Hive::ArtifactFirewall::ProtectedAnchorCustodySet.new([ output_manifest ])
+      end
+      assert_includes error.message, "does not accept required outputs"
+    end
+  end
+
+  def test_protected_anchor_custody_set_rejects_unbounded_or_output_manifests
+    with_tmp_dir do |dir|
+      manifest = build_manifest(dir)
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        Hive::ArtifactFirewall::ProtectedAnchorCustodySet.new(
+          Array.new(Hive::ArtifactFirewall::MAX_CUSTODY_MANIFESTS + 1, manifest)
+        )
+      end
+      assert_includes error.message, "exceeds"
+
+      output_manifest = build_manifest(
+        dir, outputs: { "result" => File.join(dir, "result.json") }
+      )
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        Hive::ArtifactFirewall::ProtectedAnchorCustodySet.new([ output_manifest ])
+      end
+      assert_includes error.message, "does not accept required outputs"
+    end
+  end
+
   private
 
   def build_manifest(dir, protected: {}, outputs: {}, roots: [], redactor: Hive::SecretPatterns.method(:redact))

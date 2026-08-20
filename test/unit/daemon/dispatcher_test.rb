@@ -306,7 +306,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   class FakeRecoveryCoordinator
     attr_reader :resumes, :deferred, :marked, :admission_failures,
-                :admission_observations
+                :admission_observations, :terminal_repairs
     attr_accessor :defer_error
 
     def initialize(status: "blocked")
@@ -316,6 +316,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @marked = []
       @admission_failures = []
       @admission_observations = []
+      @terminal_repairs = []
       @defer_error = nil
     end
 
@@ -366,6 +367,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     def mark_dispatched(request, **attributes)
       @marked << { request: request, **attributes }
+    end
+
+    def repair_failed_terminal_marker(request, refresh: true)
+      @terminal_repairs << { request_id: request.request_id, refresh: refresh }
+      false
     end
 
     def request_admission_failure(request:, decision:, now:)
@@ -425,7 +431,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       module_migration_coordinator: nil,
                       recovery_coordinator: nil,
                       plan_approval: Hive::Daemon::PlanApproval,
-                      runtime_ready_callback: nil)
+                      runtime_ready_callback: nil, clock: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -479,7 +485,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       module_migration_coordinator: module_migration_coordinator,
       recovery_coordinator: recovery_coordinator,
       plan_approval: plan_approval,
-      runtime_ready_callback: runtime_ready_callback
+      runtime_ready_callback: runtime_ready_callback,
+      clock: clock
     )
     # Generic dispatcher tests exercise routing, not the detached production
     # name generator. Rows intentionally omit display names in many fixtures;
@@ -1198,6 +1205,38 @@ class HiveDaemonDispatcherTest < Minitest::Test
       assert_equal expected_outcome, disposition.fetch(:decision)
       assert_equal expected_owner, disposition.fetch(:owner)
     end
+  end
+
+  def test_durable_dispatch_refreshes_admission_time_after_a_long_tick
+    admitted_at = nil
+    request_created_at = nil
+    attempt = Struct.new(:attempt_id, :task_generation, :state)
+                    .new("attempt-1", "generation-1", "running")
+    result = Hive::Attempts::DispatchResult.new(
+      status: :accepted, attempt: attempt, receipt: nil,
+      attach_descriptor: nil, reason: nil
+    )
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **options|
+      admitted_at = options.fetch(:now)
+      request_created_at = request.created_at
+      result
+    end
+    launch_time = T0 + 120
+    dispatcher, = make_dispatcher(
+      rows: [], attempt_dispatcher: attempt_dispatcher,
+      clock: -> { launch_time }
+    )
+    observed = row(
+      stage: "3-plan", action: "plan_reviewing",
+      command: "hive plan-review-run s1 --project demo --json"
+    )
+
+    outcome = dispatcher.send(:dispatch_or_block, observed, now: T0)
+
+    assert_equal :dispatched, outcome
+    assert_equal launch_time, admitted_at
+    assert_equal launch_time, request_created_at
   end
 
   def test_durable_dispatch_publishes_the_exact_provider_routing_decision
@@ -5067,6 +5106,40 @@ end
     end
   end
 
+  def test_queue_delivery_refreshes_admission_time_after_a_long_tick
+    Dir.mktmpdir("hive-dispatch-queue-fresh-time") do |state_home|
+      admitted_at = nil
+      attempt = Struct.new(:attempt_id, :task_generation, :state)
+                      .new("attempt-1", "generation-1", "launching")
+      result = Hive::Attempts::DispatchResult.new(
+        status: :accepted, attempt: attempt, receipt: nil,
+        attach_descriptor: nil, reason: nil
+      )
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) do |_request, **options|
+        admitted_at = options.fetch(:now)
+        result
+      end
+      launch_time = T0 + 120
+      dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        attempt_dispatcher: attempt_dispatcher,
+        clock: -> { launch_time }
+      )
+      Q.write_request!(
+        project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+        request_id: "request-fresh-time", state_home: state_home, now: T0
+      )
+      request = Q.pending(state_home: state_home).first
+
+      dispatcher.send(:dispatch_request!, request, now: T0)
+
+      assert_equal launch_time, admitted_at
+      claim_path = Dir.glob(File.join(state_home, "dispatch_requests", "*.claim")).first
+      assert_equal launch_time.iso8601(6), JSON.parse(File.read(claim_path)).fetch("claimed_at")
+    end
+  end
+
   def test_durable_request_releases_preclaim_when_shutdown_arrives_before_dispatch
     Dir.mktmpdir("hive-dispatch-shutdown") do |state_home|
       calls = []
@@ -5608,6 +5681,35 @@ end
     end
     assert_equal [ "request-failed" ], discarded
     assert_equal [ "request-failed" ], removed
+  end
+
+  def test_terminal_recovery_reconciles_markerless_failed_attempt_before_acknowledging
+    request = Q::Request.new(
+      request_id: "recovery-markerless", created_at: T0,
+      project: "p1", slug: "demo-task",
+      argv: %w[hive run demo-task], requestor: "healer", chat_id: nil,
+      expected_stage: "4-execute",
+      recovery: dispatcher_recovery(phase: "terminal").merge(
+        "attempt_id" => "attempt-failed",
+        "terminal_outcome" => "failed",
+        "terminal_at" => T0.iso8601(6)
+      )
+    )
+    delivery = Q::ClaimedDelivery.new(
+      request: request, claim: { "attempt_id" => "attempt-failed" }, path: "/claim"
+    )
+    coordinator = FakeRecoveryCoordinator.new
+    dispatcher, = make_dispatcher(
+      rows: [], attempt_reconciler: Object.new,
+      recovery_coordinator: coordinator
+    )
+
+    with_replaced_singleton_method(Q, :claimed, ->(**_kwargs) { [ delivery ] }) do
+      dispatcher.send(:reconcile_attempt_deliveries, now: T0)
+    end
+
+    assert_equal [ { request_id: "recovery-markerless", refresh: false } ],
+                 coordinator.terminal_repairs
   end
 
   def test_terminal_attempt_reconciliation_closes_the_durable_recovery_receipt

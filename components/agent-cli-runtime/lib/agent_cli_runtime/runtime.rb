@@ -46,12 +46,23 @@ module AgentCliRuntime
       end
       argv.concat(request.trusted_cli_arguments)
       argv.concat(profile.output_format_flags) if request.include_output_format
-      argv << (prompt_style == :stdin ? "-" : request.prompt) unless
-        prompt_style == :headless_flag_value
+      stdin_data =
+        case prompt_style
+        when :positional
+          argv << request.prompt
+          nil
+        when :headless_flag_value
+          nil
+        when :stdin
+          argv << "-"
+          request.prompt
+        when :piped_stdin
+          request.prompt
+        end
 
       CompiledInvocation.new(
         argv: request.command_prefix + argv,
-        stdin_data: prompt_style == :stdin ? request.prompt : nil,
+        stdin_data:,
         provider: profile.name,
         launcher_identity: profile.launcher_identity,
         capability_evidence: evidence

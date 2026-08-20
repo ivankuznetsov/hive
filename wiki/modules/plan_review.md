@@ -137,6 +137,14 @@ generation and planner incorporation. A verified candidate is atomically
 promoted to canonical `plan.md` under the task mutation lock immediately before
 its matching terminal resolution is published under that same lock.
 
+A successful verifier result with no contrary finding but an incomplete set of
+fingerprint-bound evidence rows is treated as an incomplete transient attempt,
+not immediately cached as a terminal plan verdict. Hive preserves the evidence
+already returned, resets only the verification route, and asks the next attempt
+only about dispositions still lacking attestations. This recovery is bounded by
+`plan_review.attempts.max_transient`; exhaustion still blocks. A verifier that
+returns an actual finding never enters this retry path and remains blocking.
+
 ## Durable identity and artifacts
 
 Each task owns an owner-private `plan-review/` tree:

@@ -40,6 +40,11 @@ cannot represent them. Provider profiles and extractors are public,
 SemVer-governed behavior; orchestration policy stays injectable or outside the
 package.
 
+The prompt transport distinguishes stdin with an argv marker (`:stdin`, used
+by Codex) from a raw non-TTY pipe (`:piped_stdin`, used by Pi). Pi's native
+pipe reader constructs the initial message from stdin, so implementation-sized
+prompts never occupy one operating-system-limited argv element.
+
 OpenCode adds a stricter, additive preparation surface because its safe
 headless contract depends on an invocation-owned configuration overlay. An
 `OpenCodePreparationRequest` identifies an exact `provider/model`, a selected

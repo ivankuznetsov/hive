@@ -10,7 +10,7 @@ module Hive
 
       CommandResult = Struct.new(
         :name, :command, :exit_code, :signal, :stdout, :stderr, :timed_out,
-        :output_truncated,
+        :output_truncated, :started_at, :finished_at, :duration_ms, :provenance,
         keyword_init: true
       ) do
         def passed?
@@ -81,6 +81,26 @@ module Hive
         }
       end
 
+      # Run an explicit controller/agent-selected command set. Callers must
+      # supply this structured list deliberately; discovery reproduction prose
+      # is never accepted or interpreted by this API.
+      def validate_selected(worktree_path, selections)
+        rows = Array(selections).map do |selection|
+          unless selection.is_a?(Hash) && selection.keys.map(&:to_s).sort == %w[command identity provenance]
+            raise ArgumentError, "selected validation command has an invalid field set"
+          end
+          identity = selection["identity"] || selection[:identity]
+          command = selection["command"] || selection[:command]
+          provenance = selection["provenance"] || selection[:provenance]
+          unless identity.is_a?(String) && !identity.empty? && command.is_a?(String) && !command.empty? &&
+                 %w[controller agent].include?(provenance.to_s)
+            raise ArgumentError, "selected validation command is invalid"
+          end
+          run_command(identity, command, worktree_path, provenance: provenance.to_s)
+        end
+        { "passed" => !rows.empty? && rows.all?(&:passed?), "commands" => rows }
+      end
+
       private
 
       def active_commands(names: nil)
@@ -92,7 +112,9 @@ module Hive
         end
       end
 
-      def run_command(name, command, worktree_path)
+      def run_command(name, command, worktree_path, provenance: "controller")
+        started_at = Time.now.utc
+        started_monotonic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         stdin, stdout, stderr, waiter = Open3.popen3(
           "bash", "-lc", command, chdir: worktree_path, pgroup: true
         )
@@ -115,12 +137,18 @@ module Hive
         CommandResult.new(
           name: name, command: command, exit_code: exit_code, signal: signal,
           stdout: out, stderr: err, timed_out: timed_out,
-          output_truncated: out_truncated || err_truncated
+          output_truncated: out_truncated || err_truncated,
+          started_at: started_at, finished_at: Time.now.utc,
+          duration_ms: ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_monotonic) * 1000).round,
+          provenance: provenance
         )
       rescue SystemCallError => e
         CommandResult.new(
           name: name, command: command, exit_code: 127, signal: nil, stdout: "", stderr: e.message,
-          timed_out: false, output_truncated: false
+          timed_out: false, output_truncated: false,
+          started_at: started_at || Time.now.utc, finished_at: Time.now.utc,
+          duration_ms: started_monotonic ? ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_monotonic) * 1000).round : 0,
+          provenance: provenance
         )
       ensure
         [ stdin, stdout, stderr ].compact.each { |io| io.close unless io.closed? }

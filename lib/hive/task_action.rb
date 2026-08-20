@@ -420,6 +420,7 @@ module Hive
       when "blocked" then ACTIONS.fetch(:patrol_fix_blocked)
       when "escalated" then ACTIONS.fetch(:patrol_fix_escalated)
       else
+        return ACTIONS.fetch(:ready_to_advance) if patrol_fix.dig("action", "kind") == "advance"
         ACTIONS.fetch(:generic_ready_to_run)
       end
     end

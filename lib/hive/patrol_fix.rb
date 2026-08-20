@@ -18,6 +18,11 @@ module Hive
     autoload :TaskMaterializer, "hive/patrol_fix/task_materializer"
     autoload :CutoverGate, "hive/patrol_fix/cutover_gate"
     autoload :HandoffOutbox, "hive/patrol_fix/handoff_outbox"
+    autoload :InboxReport, "hive/patrol_fix/inbox_report"
+    autoload :FixReport, "hive/patrol_fix/fix_report"
+    autoload :WorktreeReceipt, "hive/patrol_fix/worktree_receipt"
+    autoload :ValidationReceipt, "hive/patrol_fix/validation_receipt"
+    autoload :StageTransition, "hive/patrol_fix/stage_transition"
 
     module_function
 

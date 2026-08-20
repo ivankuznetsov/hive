@@ -7,6 +7,14 @@ updated: 2026-08-20
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Unified Patrol Fix live execution
+
+The Inbox/Fix/Validate U3 path has focused local proof for exact worktree and
+receipt custody, failed-validation continuation, and transition recovery, but
+has not yet run a real configured provider against a disposable project. That
+end-to-end dogfood belongs to the plan's final lifecycle verification after
+Review and Publish exist; no current evidence claims live PR production.
+
 ## Patrol v4 needs installed fleet dogfood (2026-08-14)
 
 Focused tests prove scoreless route normalization, fresh v4 JobStore isolation,

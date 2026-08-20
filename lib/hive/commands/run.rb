@@ -129,6 +129,14 @@ module Hive
 
       def do_call
         task = resolve_task
+        if Hive::Workflows.patrol_fix_id?(task.workflow.id)
+          require "hive/patrol_fix/stage_transition"
+          return Hive::PatrolFix::StageTransition.with_lock(task) { run_task(task) }
+        end
+        run_task(task)
+      end
+
+      def run_task(task)
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
           Hive::DependencySnapshot.enforce_admission!(task)
           Hive::Attempts::Context.current&.validate_generation!(task)

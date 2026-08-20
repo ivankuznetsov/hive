@@ -37,31 +37,51 @@
     },
     "decisionPayload": {
       "type": "object", "additionalProperties": false,
-      "required": ["route", "rationale", "evidence", "blocker_owner"],
+      "required": ["route", "rationale", "evidence", "blocker_owner", "head_revision"],
       "properties": {
         "route": {"enum": ["fix", "publish", "rework", "escalate", "reject", "blocked"]},
         "rationale": {"type": "string", "minLength": 1, "maxLength": 16384},
         "evidence": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 16384}},
-        "blocker_owner": {"type": "string", "minLength": 1, "maxLength": 128}
+        "blocker_owner": {"type": "string", "minLength": 1, "maxLength": 128},
+        "head_revision": {"$ref": "#/$defs/revision"}
       }
     },
     "fixPayload": {
       "type": "object", "additionalProperties": false,
-      "required": ["worktree_generation", "worktree", "branch", "base_revision", "head_revision", "diff_digest"],
+      "required": ["worktree_generation", "worktree", "branch", "base_revision", "head_revision", "diff_digest", "validation_commands"],
       "properties": {
         "worktree_generation": {"type": "integer", "minimum": 1},
         "worktree": {"type": "string", "minLength": 1, "maxLength": 4096},
         "branch": {"type": "string", "minLength": 1, "maxLength": 4096},
         "base_revision": {"$ref": "#/$defs/revision"},
         "head_revision": {"$ref": "#/$defs/revision"},
-        "diff_digest": {"$ref": "#/$defs/digest"}
+        "diff_digest": {"$ref": "#/$defs/digest"},
+        "validation_commands": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/selectedCommand"}}
+      }
+    },
+    "selectedCommand": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity", "command", "provenance"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1, "maxLength": 128},
+        "command": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "provenance": {"const": "agent"}
       }
     },
     "command": {
-      "type": "object", "additionalProperties": false, "required": ["identity", "exit_status", "result_digest"],
+      "type": "object", "additionalProperties": false, "required": ["identity", "provenance", "command_digest", "started_at", "finished_at", "duration_ms", "exit_status", "timed_out", "output_truncated", "stdout", "stderr", "result_digest"],
       "properties": {
         "identity": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "provenance": {"enum": ["controller", "agent"]},
+        "command_digest": {"$ref": "#/$defs/digest"},
+        "started_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": "string", "format": "date-time"},
+        "duration_ms": {"type": "integer", "minimum": 0},
         "exit_status": {"type": "integer", "minimum": 0},
+        "timed_out": {"type": "boolean"},
+        "output_truncated": {"type": "boolean"},
+        "stdout": {"type": "string", "maxLength": 4000},
+        "stderr": {"type": "string", "maxLength": 4000},
         "result_digest": {"$ref": "#/$defs/digest"}
       }
     },
@@ -70,7 +90,7 @@
       "properties": {
         "verdict": {"enum": ["passed", "failed", "blocked"]},
         "worktree_head": {"$ref": "#/$defs/revision"},
-        "commands": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/command"}}
+        "commands": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/command"}}
       }
     },
     "publicationPayload": {

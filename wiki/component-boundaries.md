@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-08-14
+updated: 2026-08-20
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -54,7 +54,7 @@ Every retained entry point has focused clean-process load proof, every
 catalog-owned path and focused test resolves inside this repository, and the
 direct-construction guards pass against all production Ruby sources.
 
-The component dependency graph has ten edges:
+The component dependency graph has eleven edges:
 
 ```mermaid
 flowchart LR
@@ -64,7 +64,7 @@ flowchart LR
   workflow_live --> workflow_core
   workflow_core[Workflow Creator] --> workflow_values[Workflow Creator Values]
   patrol_effects[Patrol Effect Evidence - candidate]
-  patrol_fix[Patrol Fix Task Artifacts]
+  patrol_fix[Patrol Fix Workflow Core] --> git_gate[Safe Agent Git Gate]
   attempts[Attempts admission - candidate] --> provider_health[Provider Health - candidate]
   attempts --> provider_routing[Provider Routing Policy - candidate]
   routing_operations[Provider Routing Operations - candidate] --> attempts
@@ -72,7 +72,6 @@ flowchart LR
   routing_operations --> provider_routing
   user_service[UserService]
   artifact_firewall[Agent Artifact Firewall]
-  git_gate[Safe Agent Git Gate]
   work_ledger[WorkLedger]
 ```
 
@@ -91,8 +90,11 @@ candidates rather than being promoted ahead of their remaining lifecycle or
 qualification proof.
 
 `Patrol Fix Workflow Core` owns strict source snapshots, admission occurrences,
-task manifests, receipts, projections, semantic admission, and idempotent task
-materialization. Source-owned ordinary and Architecture adapters translate into
+task manifests, reports, exact local worktree generations, validation receipts,
+stable transition journals, projections, semantic admission, and idempotent task
+materialization. It depends downward on the Safe Agent Git Gate for closed,
+read-only worktree identity and diff verification; it has no remote publication
+authority. Source-owned ordinary and Architecture adapters translate into
 the core without a reverse dependency. Admission persists an exact candidate
 digest, releases its lock while a provider reasons, rejects stale decisions,
 records materialization intent before task capture, binds the task before
@@ -100,6 +102,20 @@ acknowledging the source, and replays incomplete create/update boundaries. The
 daemon admission controller is a consumer outside the component and is
 independent of discovery scheduling and allowances. Its cutover gate remains
 disabled until the authority migration activates a persisted epoch.
+
+Controller-owned Inbox re-investigates the current repository head and accepts
+only a closed semantic decision. Fix creates or recovers one exact, no-fetch
+local worktree generation based on that decision head; trusted/YOLO agent
+execution remains an operator posture, while controller custody ignores and
+restores agent-written task, receipt, and publication artifacts. A clean
+committed descendant becomes a generation/evidence/base/head/diff-bound fix
+receipt. Validate executes only configured commands or structured commands
+deliberately selected by the fixer, records bounded redacted timing and result
+evidence even on failure, marks receipt-level truncation while digesting omitted
+redacted bytes, and never executes reproduction prose. Receipt-backed
+advances journal intent under a stable slug lock outside the moving task folder,
+shared by stage execution and evidence-generation updates, so intent-before-move
+and moved-before-acknowledgement retries reconcile without generation drift.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
 eleven ready components currently has the named non-Hive adopter and independent

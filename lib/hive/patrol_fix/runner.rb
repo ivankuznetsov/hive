@@ -7,14 +7,21 @@ module Hive
     module Runner
       module_function
 
-      def run!(task, **kwargs)
+      STAGE_FILES = {
+        "inbox" => "hive/stages/patrol_fix/inbox",
+        "fix" => "hive/stages/patrol_fix/fix",
+        "validate" => "hive/stages/patrol_fix/validate"
+      }.freeze
+
+      def run!(task, cfg = nil, **kwargs)
+        load_handler(task.stage_name)
         handler = handlers[task.stage_name]
         unless handler
           raise Hive::StageError,
                 "patrol-fix controller for stage #{task.stage_name} is not available"
         end
 
-        handler.call(task, **kwargs)
+        handler.call(task, cfg || {}, **kwargs)
       end
 
       def register(stage, callable = nil, &block)
@@ -34,6 +41,17 @@ module Hive
       def handlers
         @handlers ||= {}
       end
+
+      def load_handler(stage)
+        file = STAGE_FILES[stage.to_s]
+        return unless file
+        return if handlers.key?(stage.to_s)
+
+        require file
+        constant = { "inbox" => :Inbox, "fix" => :Fix, "validate" => :Validate }.fetch(stage.to_s)
+        handlers[stage.to_s] = Hive::Stages::PatrolFix.const_get(constant).method(:run!)
+      end
+      private_class_method :load_handler
     end
   end
 end

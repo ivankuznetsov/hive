@@ -25,9 +25,10 @@ Skillpack, Safe Agent Git Gate, WorkLedger, Patrol Fix Workflow Core, and Workfl
 Safety plus the composed Workflow Creator and deterministic Workflow Creator
 Execution custody—and five guarded candidates: Provider Health, Provider
 Routing Policy, Provider Routing Operations, Attempts admission, and Patrol
-Effect Evidence. The graph has ten declared component edges, including the
+Effect Evidence. The graph has eleven declared component edges, including the
 read-only routing projection's dependencies on Attempts, Provider Health, and
-routing policy. Patrol's U3
+routing policy plus Patrol Fix's downward dependency on the Safe Agent Git
+Gate for exact local worktree reads. Patrol's U3
 qualification fence is the only migration exception. Hive
 is the first and primary consumer, and internal readiness does not imply a gem,
 version, repository, or release.

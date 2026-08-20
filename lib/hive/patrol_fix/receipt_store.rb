@@ -49,6 +49,10 @@ module Hive
         end
         ids = receipts.map { |receipt| receipt.fetch("receipt_id") }
         invalid!("receipt ids must be unique") unless ids.uniq.length == ids.length
+        terminal_keys = receipts.map { |receipt| terminal_key(receipt) }
+        unless terminal_keys.uniq.length == terminal_keys.length
+          invalid!("terminal receipt tuples must be unique")
+        end
         PatrolFix.deep_freeze(receipts)
       end
 
@@ -58,7 +62,10 @@ module Hive
         invalid!("receipt exceeds the size limit") if line.bytesize > MAX_RECEIPT_BYTES
         Dir.mkdir(task_folder) unless File.directory?(task_folder)
 
-        File.open(@lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+        lock_flags = File::RDWR | File::CREAT | File::NONBLOCK
+        lock_flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        File.open(@lock_path, lock_flags, 0o600) do |lock|
+          invalid!("receipt lock must be a regular file") unless lock.stat.file? && lock.stat.nlink == 1
           lock.flock(File::LOCK_EX)
           existing = read_all
           match = existing.find { |candidate| candidate["receipt_id"] == receipt["receipt_id"] }
@@ -66,12 +73,17 @@ module Hive
             invalid!("receipt id already exists with conflicting bytes") unless match == receipt
             return match
           end
+          terminal = existing.find { |candidate| terminal_key(candidate) == terminal_key(receipt) }
+          if terminal
+            invalid!("terminal receipt already exists with conflicting bytes") unless terminal == receipt
+            return terminal
+          end
           invalid!("receipt journal exceeds #{MAX_RECEIPTS} records") if existing.length >= MAX_RECEIPTS
           existing_bytes = File.exist?(path) ? File.size(path) : 0
           invalid!("receipt journal exceeds the size limit") if existing_bytes + line.bytesize > MAX_JOURNAL_BYTES
           reject_symlink!(path, "receipt journal")
 
-          flags = File::WRONLY | File::CREAT | File::APPEND
+          flags = File::WRONLY | File::CREAT | File::APPEND | File::NONBLOCK
           flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
           File.open(path, flags, 0o600) do |journal|
             invalid!("receipt journal must be a regular file") unless journal.stat.file?
@@ -83,6 +95,8 @@ module Hive
         receipt
       rescue Errno::ELOOP
         invalid!("receipt journal must not be a symlink")
+      rescue SystemCallError, IOError => e
+        invalid!("receipt journal is unwritable: #{e.message}")
       rescue JSON::GeneratorError, ArgumentError => e
         invalid!(e.message)
       end
@@ -139,18 +153,26 @@ module Hive
 
       def validate_decision!(stage, payload, label)
         invalid!("decision receipts are only valid for inbox or review") unless DECISION_ROUTES.key?(stage)
-        exact_keys!(payload, %w[route rationale evidence blocker_owner], "#{label}.payload")
+        exact_keys!(payload, %w[route rationale evidence blocker_owner head_revision], "#{label}.payload")
         invalid!("#{label}.payload.route is invalid for #{stage}") unless
           DECISION_ROUTES.fetch(stage).include?(payload["route"])
         string!(payload.fetch("rationale"), "#{label}.payload.rationale", max: MAX_TEXT_BYTES)
         string_array!(payload.fetch("evidence"), "#{label}.payload.evidence", min: 1,
                       max: MAX_LIST, item_max: MAX_TEXT_BYTES)
         string!(payload.fetch("blocker_owner"), "#{label}.payload.blocker_owner", max: 128)
+        string!(payload.fetch("head_revision"), "#{label}.payload.head_revision", max: 40, pattern: REVISION)
+      end
+
+      def terminal_key(receipt)
+        [
+          receipt.dig("task", "slug"), receipt.fetch("stage"),
+          receipt.dig("task", "generation"), receipt.fetch("kind")
+        ]
       end
 
       def validate_fix!(stage, payload, label)
         invalid!("fix receipts require the fix stage") unless stage == "fix"
-        exact_keys!(payload, %w[worktree_generation worktree branch base_revision head_revision diff_digest],
+        exact_keys!(payload, %w[worktree_generation worktree branch base_revision head_revision diff_digest validation_commands],
                     "#{label}.payload")
         positive_integer!(payload.fetch("worktree_generation"), "#{label}.payload.worktree_generation")
         %w[worktree branch].each { |key| string!(payload.fetch(key), "#{label}.payload.#{key}", max: 4_096) }
@@ -158,6 +180,15 @@ module Hive
           string!(payload.fetch(key), "#{label}.payload.#{key}", max: 40, pattern: REVISION)
         end
         string!(payload.fetch("diff_digest"), "#{label}.payload.diff_digest", max: 64, pattern: DIGEST)
+        commands = array!(payload.fetch("validation_commands"), "#{label}.payload.validation_commands", min: 0, max: 16)
+        commands.each_with_index do |command, index|
+          item = "#{label}.payload.validation_commands[#{index}]"
+          hash!(command, item)
+          exact_keys!(command, %w[identity command provenance], item)
+          string!(command.fetch("identity"), "#{item}.identity", max: 128)
+          string!(command.fetch("command"), "#{item}.command", max: 4_096)
+          invalid!("#{item}.provenance is invalid") unless command["provenance"] == "agent"
+        end
       end
 
       def validate_validation!(stage, payload, label)
@@ -165,15 +196,24 @@ module Hive
         exact_keys!(payload, %w[verdict worktree_head commands], "#{label}.payload")
         invalid!("#{label}.payload.verdict is invalid") unless %w[passed failed blocked].include?(payload["verdict"])
         string!(payload.fetch("worktree_head"), "#{label}.payload.worktree_head", max: 40, pattern: REVISION)
-        commands = array!(payload.fetch("commands"), "#{label}.payload.commands", min: 1, max: 64)
+        commands = array!(payload.fetch("commands"), "#{label}.payload.commands", min: 0, max: 64)
         commands.each_with_index do |command, index|
           item = "#{label}.payload.commands[#{index}]"
           hash!(command, item)
-          exact_keys!(command, %w[identity exit_status result_digest], item)
+          exact_keys!(command, %w[identity provenance command_digest started_at finished_at duration_ms exit_status timed_out output_truncated stdout stderr result_digest], item)
           string!(command.fetch("identity"), "#{item}.identity", max: 4_096)
+          invalid!("#{item}.provenance is invalid") unless %w[controller agent].include?(command["provenance"])
+          string!(command.fetch("command_digest"), "#{item}.command_digest", max: 64, pattern: DIGEST)
+          timestamp!(command.fetch("started_at"), "#{item}.started_at")
+          timestamp!(command.fetch("finished_at"), "#{item}.finished_at")
+          invalid!("#{item}.duration_ms must be non-negative") unless command["duration_ms"].is_a?(Integer) && command["duration_ms"] >= 0
           invalid!("#{item}.exit_status must be a non-negative integer") unless
             command["exit_status"].is_a?(Integer) && command["exit_status"] >= 0
           string!(command.fetch("result_digest"), "#{item}.result_digest", max: 64, pattern: DIGEST)
+          %w[timed_out output_truncated].each do |key|
+            invalid!("#{item}.#{key} must be boolean") unless command[key] == true || command[key] == false
+          end
+          %w[stdout stderr].each { |key| bounded_text!(command.fetch(key), "#{item}.#{key}", max: 4_000) }
         end
       end
 
@@ -197,9 +237,10 @@ module Hive
         stat = File.lstat(path)
         invalid!("receipt journal must be a regular file") unless stat.file?
         invalid!("receipt journal exceeds the size limit") if stat.size > MAX_JOURNAL_BYTES
-        flags = File::RDONLY
+        flags = File::RDONLY | File::NONBLOCK
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
         File.open(path, flags) do |file|
+          invalid!("receipt journal must be a regular file") unless file.stat.file? && file.stat.nlink == 1
           bytes = file.read(MAX_JOURNAL_BYTES + 1).to_s
           invalid!("receipt journal exceeds the size limit") if bytes.bytesize > MAX_JOURNAL_BYTES
           bytes
@@ -240,6 +281,12 @@ module Hive
         invalid!("#{label} exceeds #{max} bytes") if value.bytesize > max
         invalid!("#{label} contains invalid control characters") if value.match?(/[\u0000-\u001f\u007f]/)
         invalid!("#{label} has an invalid format") if pattern && !value.match?(pattern)
+      end
+
+      def bounded_text!(value, label, max:)
+        invalid!("#{label} must be a string") unless value.is_a?(String)
+        invalid!("#{label} exceeds #{max} bytes") if value.bytesize > max
+        invalid!("#{label} contains invalid control characters") if value.match?(/[\u0000\u007f]/)
       end
 
       def positive_integer!(value, label)

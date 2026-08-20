@@ -6,7 +6,9 @@ require "hive/lock"
 require "hive/patrol_fix/admission_store"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/source_snapshot"
+require "hive/patrol_fix/stage_transition"
 require "hive/patrol_fix/task_manifest"
+require "hive/task"
 require "hive/task_capture"
 require "hive/task_meta"
 
@@ -124,20 +126,24 @@ module Hive
           return [ capture.folder, task_binding(persisted), capture.created ]
         end
 
-        current = TaskManifest.new(task_folder: folder).read
         if candidate&.fetch("kind") == "task"
           unless candidate.fetch("identity") == intent.fetch("slug")
             raise InvalidAdmission, "durable materialization intent changed canonical task"
           end
-          expected = merged_manifest(current, snapshot)
-          assert_matching_intent!(intent, expected, "task:#{intent.fetch('slug')}")
-          # Re-run the scoped commit even when the bytes already match. A hard
-          # stop may have landed the atomic manifest write but not its commit.
-          persist_task_artifacts!(folder, current: current, candidate: expected,
-                                  record: record, snapshot: snapshot)
+          expected = nil
+          with_task_authority(folder, op: "patrol-fix-admit") do
+            current = TaskManifest.new(task_folder: folder).read
+            expected = merged_manifest(current, snapshot)
+            assert_matching_intent!(intent, expected, "task:#{intent.fetch('slug')}")
+            # Re-run the scoped commit even when the bytes already match. A hard
+            # stop may have landed the atomic manifest write but not its commit.
+            persist_task_artifacts!(folder, current: current, candidate: expected,
+                                    record: record, snapshot: snapshot)
+          end
           return [ folder, task_binding(expected), false ]
         end
 
+        current = TaskManifest.new(task_folder: folder).read
         expected = build_initial_manifest(intent.fetch("slug"), snapshot)
         assert_matching_intent!(
           intent, expected, root_identity(record, snapshot, candidate)
@@ -174,7 +180,7 @@ module Hive
 
       def update_existing!(occurrence_id, record, snapshot, folder)
         binding = nil
-        Hive::Lock.with_task_lock(folder, slug: File.basename(folder), op: "patrol-fix-admit", create: false) do
+        with_task_authority(folder, op: "patrol-fix-admit") do
           current = TaskManifest.new(task_folder: folder).read
           candidate = merged_manifest(current, snapshot)
           intent = materialization_intent(candidate, "task:#{File.basename(folder)}")
@@ -208,7 +214,11 @@ module Hive
       def persist_publication_receipt!(folder, manifest, record, snapshot)
         return unless exact_pull_request(record, snapshot)
 
-        Hive::Lock.with_task_lock(folder, slug: File.basename(folder), op: "patrol-fix-admit", create: false) do
+        with_task_authority(folder, op: "patrol-fix-admit") do
+          current = TaskManifest.new(task_folder: folder).read
+          unless current == manifest
+            raise InvalidAdmission, "task generation changed before publication provenance was linked"
+          end
           originals = capture_originals(ReceiptStore.new(task_folder: folder).path)
           begin
             Hive::Lock.with_commit_lock(@hive_state) do
@@ -223,6 +233,15 @@ module Hive
             reset_task_index!(folder)
             raise
           end
+        end
+      end
+
+      def with_task_authority(folder, op:)
+        task = Hive::Task.new(folder)
+        Hive::PatrolFix::StageTransition.with_lock(task) do
+          Hive::Lock.with_task_lock(
+            folder, slug: File.basename(folder), op: op, create: false
+          ) { yield }
         end
       end
 

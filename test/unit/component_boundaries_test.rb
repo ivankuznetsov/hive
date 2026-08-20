@@ -234,15 +234,20 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal %w[
       Hive::PatrolFix::AdmissionStore
       Hive::PatrolFix::CutoverGate
+      Hive::PatrolFix::FixReport
       Hive::PatrolFix::HandoffOutbox
+      Hive::PatrolFix::InboxReport
       Hive::PatrolFix::Projection
       Hive::PatrolFix::ReceiptStore
       Hive::PatrolFix::SemanticAdmission
       Hive::PatrolFix::SourceSnapshot
+      Hive::PatrolFix::StageTransition
       Hive::PatrolFix::TaskManifest
       Hive::PatrolFix::TaskMaterializer
+      Hive::PatrolFix::ValidationReceipt
+      Hive::PatrolFix::WorktreeReceipt
     ], patrol_fix.dig("public_contract", "values").sort
-    assert_empty patrol_fix.fetch("component_dependencies")
+    assert_equal [ "safe-agent-git-gate" ], patrol_fix.fetch("component_dependencies")
     refute patrol_fix.fetch("allowed_hive_dependencies").any? { |path|
       path.start_with?("hive/patrol") || path.start_with?("hive/refactor_patrol") ||
         path.start_with?("hive/commands") || path.start_with?("hive/daemon") ||
@@ -833,6 +838,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal(
       {
         "attempts" => [ "provider-health", "provider-routing-policy" ],
+        "patrol-fix" => [ "safe-agent-git-gate" ],
         "provider-routing-operations" => [
           "attempts", "provider-health", "provider-routing-policy"
         ],

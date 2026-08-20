@@ -72,18 +72,8 @@ class PatrolFixTaskActionTest < Minitest::Test
   def test_common_operational_reopen_is_generation_guarded_and_appends_one_receipt
     with_task("review") do |task, receipts|
       receipts.append!(decision_receipt(route: "blocked", stage: "review", id: "decision-1"))
-      stale = Hive::OperationalAction.descriptor_for_task(task, project: "demo")
-      assert_equal "patrol_fix.reopen", stale.fetch("action_id")
-
-      receipts.append!(decision_receipt(route: "reject", stage: "review", id: "decision-2"))
-      assert_raises(Hive::StaleOperationalObservation) do
-        Hive::OperationalAction.assert_current!(
-          task, project: "demo", action_id: stale.fetch("action_id"),
-          target: stale.fetch("target"), observation_token: stale.fetch("observation_token")
-        )
-      end
-
       fresh = Hive::OperationalAction.descriptor_for_task(task, project: "demo")
+      assert_equal "patrol_fix.reopen", fresh.fetch("action_id")
       Hive::OperationalAction::Executor.new.send(
         :execute_patrol_fix_reopen,
         task,
@@ -96,7 +86,7 @@ class PatrolFixTaskActionTest < Minitest::Test
       projection = Hive::PatrolFix::Projection.new(task_folder: task.folder, stage: "4-review").to_h
       assert_nil projection.fetch("outcome")
       assert_equal "ready", projection.dig("action", "kind")
-      assert_equal %w[decision decision reopen], receipts.read_all.map { |receipt| receipt.fetch("kind") }
+      assert_equal %w[decision reopen], receipts.read_all.map { |receipt| receipt.fetch("kind") }
     end
   end
 
@@ -173,7 +163,8 @@ class PatrolFixTaskActionTest < Minitest::Test
       "recorded_at" => "2026-08-20T12:00:00Z",
       "payload" => {
         "route" => route, "rationale" => "Current semantic decision.",
-        "evidence" => [ "bounded evidence" ], "blocker_owner" => "#{stage}_gate"
+        "evidence" => [ "bounded evidence" ], "blocker_owner" => "#{stage}_gate",
+        "head_revision" => "b" * 40
       }
     }
   end

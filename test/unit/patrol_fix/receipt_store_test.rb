@@ -41,6 +41,38 @@ class PatrolFixReceiptStoreTest < Minitest::Test
     end
   end
 
+  def test_rejects_conflicting_terminal_bytes_for_the_same_stage_generation_and_kind
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::ReceiptStore.new(task_folder: dir)
+      first = decision_receipt
+      store.append!(first)
+      conflict = Marshal.load(Marshal.dump(first))
+      conflict["receipt_id"] = "decision-2"
+      conflict.fetch("payload")["route"] = "blocked"
+
+      assert_raises(Hive::PatrolFix::ReceiptStore::InvalidReceipt) do
+        store.append!(conflict)
+      end
+    end
+  end
+
+  def test_existing_conflicting_terminal_tuple_fails_closed_on_read
+    Dir.mktmpdir do |dir|
+      first = decision_receipt
+      conflict = Marshal.load(Marshal.dump(first))
+      conflict["receipt_id"] = "decision-2"
+      conflict.fetch("payload")["route"] = "blocked"
+      File.write(
+        File.join(dir, Hive::PatrolFix::ReceiptStore::FILENAME),
+        Hive::PatrolFix.canonical_json(first) + Hive::PatrolFix.canonical_json(conflict)
+      )
+
+      assert_raises(Hive::PatrolFix::ReceiptStore::InvalidReceipt) do
+        Hive::PatrolFix::ReceiptStore.new(task_folder: dir).read_all
+      end
+    end
+  end
+
   def test_malformed_oversized_or_symlinked_journal_fails_closed
     Dir.mktmpdir do |dir|
       store = Hive::PatrolFix::ReceiptStore.new(task_folder: dir)
@@ -91,7 +123,8 @@ class PatrolFixReceiptStoreTest < Minitest::Test
         "route" => "reject",
         "rationale" => "The current code no longer contains the reported branch.",
         "evidence" => [ "The replacement path is covered by the focused test." ],
-        "blocker_owner" => "inbox_gate"
+        "blocker_owner" => "inbox_gate",
+        "head_revision" => "b" * 40
       }
     }
   end

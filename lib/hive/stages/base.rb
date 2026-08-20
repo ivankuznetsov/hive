@@ -374,8 +374,9 @@ module Hive
       # Prepare one actor launch from one managed snapshot, so its prompt and
       # permission scope cannot observe different configuration generations.
       def actor_prompt_and_scope(cfg, stage_name, task, profile, prompt:,
-                                 managed_slot: "stages.#{stage_name}", **scope_kwargs)
-        with_permission_config_error_marker(task) do
+                                 managed_slot: "stages.#{stage_name}",
+                                 mark_permission_error: true, **scope_kwargs)
+        build = lambda do
           context = task.managed_runtime_context(managed_slot) if
             task.respond_to?(:managed_workflow?) && task.managed_workflow?
           prompt = task.managed_prompt(managed_slot, prompt, context) if context
@@ -387,6 +388,9 @@ module Hive
             scope[:runtime_policy]&.host_outputs?
           [ prompt, scope ]
         end
+        return build.call unless mark_permission_error
+
+        with_permission_config_error_marker(task, &build)
       end
 
       # The three tool-scoping kwargs every spawn site forwards from a

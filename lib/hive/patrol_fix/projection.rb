@@ -35,6 +35,7 @@ module Hive
         decision = current_decision(current)
         last_decision = current.reverse.find { |receipt| receipt["kind"] == "decision" }
         validation = current.reverse.find { |receipt| receipt["kind"] == "validation" }
+        fix = current.reverse.find { |receipt| receipt["kind"] == "fix" }
         publication = current.reverse.find { |receipt| receipt["kind"] == "publication" }
         outcome = parked_outcome(decision)
         done = stage == "6-done"
@@ -63,7 +64,10 @@ module Hive
           "publication" => publication&.fetch("payload", nil),
           "archived" => done && publication && state == "current" ? true : false,
           "diagnostic" => diagnostic,
-          "action" => action_for(state: state, done: done, outcome: outcome)
+          "action" => action_for(
+            state: state, done: done, outcome: outcome,
+            decision: last_decision, fix: fix, validation: validation
+          )
         }
         PatrolFix.deep_freeze(data)
       end
@@ -113,10 +117,17 @@ module Hive
         }
       end
 
-      def action_for(state:, done:, outcome:)
+      def action_for(state:, done:, outcome:, decision:, fix:, validation:)
         return action("invalid", runnable: false, reopen: false) if state == "invalid"
         return action("done", runnable: false, reopen: false) if done
         return action("parked", runnable: false, reopen: true) if outcome
+        ready = case stage
+        when "1-inbox" then decision&.dig("payload", "route") == "fix"
+        when "2-fix" then !fix.nil?
+        when "3-validate" then !validation.nil?
+        else false
+        end
+        return action("advance", runnable: true, reopen: false) if ready
 
         action("ready", runnable: true, reopen: false)
       end

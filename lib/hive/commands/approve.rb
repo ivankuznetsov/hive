@@ -111,6 +111,16 @@ module Hive
 
       def do_call
         task = resolve_task
+        if Hive::Workflows.patrol_fix_id?(task.workflow.id)
+          require "hive/patrol_fix/stage_transition"
+          return Hive::PatrolFix::StageTransition.with_lock(task) do |transition|
+            do_call_for(task, patrol_transition: transition)
+          end
+        end
+        do_call_for(task)
+      end
+
+      def do_call_for(task, patrol_transition: nil)
         activity = Hive::TaskActivity.for_task(task, clock: @clock)
         reconcile_approval_operations(activity, task)
         validate_stage_refs!
@@ -122,6 +132,7 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         validate_move!(task, next_stage_dir, marker)
         direction = direction_of(task, next_stage_dir)
+        patrol_transition&.begin!(next_stage_dir) if direction == "forward"
         operation = begin_approval_operation(
           activity, task, next_stage_dir, marker, direction
         )
@@ -132,6 +143,7 @@ module Hive
           enforce_admission: direction == "forward"
         )
         complete_approval_operation(operation, new_folder, next_stage_dir, direction)
+        patrol_transition&.complete!(next_stage_dir) if direction == "forward"
         emit_success(task, next_stage_dir, new_folder, marker, commit_action, direction)
       end
 
@@ -281,6 +293,12 @@ module Hive
           task:, destination: dest_stage, config: @plan_review_config
         )
         return if @force
+        if Hive::Workflows.patrol_fix_id?(task.workflow.id)
+          projection = Hive::PatrolFix::Projection.new(
+            task_folder: task.folder, stage: "#{task.stage_index}-#{task.stage_name}"
+          ).to_h
+          return if projection.dig("action", "kind") == "advance"
+        end
         return if VALID_TERMINAL_MARKERS.include?(marker.name)
 
         valid = VALID_TERMINAL_MARKERS.map { |m| ":#{m}" }.join(", ")

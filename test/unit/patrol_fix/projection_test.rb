@@ -50,17 +50,13 @@ class PatrolFixProjectionTest < Minitest::Test
     end
   end
 
-  def test_reopen_targeting_an_older_receipt_cannot_clear_a_newer_parked_outcome
+  def test_same_generation_cannot_write_a_second_decision_after_reopen
     with_task do |dir, _manifest, receipts|
       receipts.append!(decision_receipt(route: "blocked", stage: "review", id: "decision-1"))
-      receipts.append!(decision_receipt(route: "reject", stage: "review", id: "decision-2"))
       receipts.append!(reopen_receipt(outcome_receipt_id: "decision-1"))
-
-      projected = Hive::PatrolFix::Projection.new(task_folder: dir, stage: "4-review").to_h
-
-      assert_equal "rejected", projected.dig("outcome", "kind")
-      assert_equal "decision-2", projected.dig("outcome", "receipt_id")
-      assert projected.dig("action", "reopen_eligible")
+      assert_raises(Hive::PatrolFix::ReceiptStore::InvalidReceipt) do
+        receipts.append!(decision_receipt(route: "reject", stage: "review", id: "decision-2"))
+      end
     end
   end
 
@@ -127,6 +123,18 @@ class PatrolFixProjectionTest < Minitest::Test
     end
   end
 
+  def test_fix_routed_inbox_is_ready_to_advance_only_while_still_in_inbox
+    with_task do |dir, _manifest, receipts|
+      receipts.append!(decision_receipt(route: "fix", stage: "inbox"))
+      inbox = Hive::PatrolFix::Projection.new(task_folder: dir, stage: "1-inbox").to_h
+      assert_equal "advance", inbox.dig("action", "kind")
+      assert inbox.dig("action", "runnable")
+
+      fix = Hive::PatrolFix::Projection.new(task_folder: dir, stage: "2-fix").to_h
+      assert_equal "ready", fix.dig("action", "kind")
+    end
+  end
+
   private
 
   def with_task(successor: nil)
@@ -161,7 +169,8 @@ class PatrolFixProjectionTest < Minitest::Test
       "recorded_at" => "2026-08-20T12:00:00Z",
       "payload" => {
         "route" => route, "rationale" => "Current semantic decision.",
-        "evidence" => [ "bounded evidence" ], "blocker_owner" => "#{stage}_gate"
+        "evidence" => [ "bounded evidence" ], "blocker_owner" => "#{stage}_gate",
+        "head_revision" => "b" * 40
       }
     }
   end

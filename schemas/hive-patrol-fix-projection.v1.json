@@ -54,7 +54,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["kind", "runnable", "reopen_eligible", "generation"],
       "properties": {
-        "kind": {"enum": ["ready", "parked", "done", "invalid"]},
+        "kind": {"enum": ["ready", "advance", "parked", "done", "invalid"]},
         "runnable": {"type": "boolean"},
         "reopen_eligible": {"type": "boolean"},
         "generation": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]}

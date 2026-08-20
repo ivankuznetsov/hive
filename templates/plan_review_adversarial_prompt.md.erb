@@ -10,10 +10,12 @@ END_UNTRUSTED_PLAN_REFERENCE_<%= nonce %>
 
 Review level: `<%= level %>`
 Required coverage: `<%= required_coverage_json %>`
+Repository root: `<%= project_root %>`
 
 Focus on hidden contradictions, unsafe assumptions, rollback/recovery gaps,
 unmet acceptance criteria, and ways the plan could appear complete while
-failing in production. Do not edit the canonical plan or project source.
+failing in production. Use the repository root for read-only inspection. Do
+not edit the canonical plan or project source.
 <% if host_output_mode %>
 Return the review-result JSON as the complete string value at
 `files["<%= output_basename %>"]` in the required host-output wrapper. The

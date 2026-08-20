@@ -321,14 +321,15 @@ module Hive
             skill_invocation: request.kind == "adversarial" ? nil : capability.fetch("invocation"),
             nonce: SecureRandom.hex(24),
             plan_path: File.join(disposable, "plan.md"),
+            project_root: request.project_root,
             output_path:,
             level: request.level,
             required_coverage_json: JSON.generate(request.required_coverage),
             attempt_id: request.attempt_id,
             plan_digest: request.plan_digest,
             policy_fingerprint: request.policy_fingerprint,
-            host_computed_anchors: request.reviewer.fetch("provider") == "pi",
-            host_output_mode: request.reviewer.fetch("provider") == "pi",
+            host_computed_anchors: false,
+            host_output_mode: false,
             output_basename: OUTPUT_BASENAME,
             verification_findings_json: JSON.pretty_generate(request.verification_findings)
           )

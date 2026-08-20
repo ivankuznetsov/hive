@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/plan_review/route_resolver"
 
 class PlanReviewRouteResolverTest < Minitest::Test
+  include HiveTestHelper
+
   def test_adversarial_route_prefers_native_grok_46_and_attests_independence
     observed = nil
     resolution = Hive::PlanReview::RouteResolver.resolve(
@@ -233,9 +235,13 @@ class PlanReviewRouteResolverTest < Minitest::Test
   # refuses a provider is failing to prepare its runtime at all, and the
   # diagnostic must name that real reason rather than a policy verdict.
   def test_default_probe_refuses_a_provider_whose_runtime_cannot_be_prepared
-    observation = Hive::PlanReview::RouteResolver.default_probe(
-      candidate("opencode", "claude-sonnet-4.5", "anthropic")
-    )
+    failure = ->(*) { raise "opencode runtime unavailable" }
+    observation = nil
+    with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, failure) do
+      observation = Hive::PlanReview::RouteResolver.default_probe(
+        candidate("opencode", "claude-sonnet-4.5", "anthropic")
+      )
+    end
 
     assert_equal "unsupported", observation.fetch("status")
     refute_includes observation.fetch("diagnostic"),

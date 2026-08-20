@@ -1,7 +1,6 @@
 require "hive/agent_profile"
 require "hive/config"
 require "hive/permission_scope"
-require "hive/workflow_package/runtime_policy"
 
 module Hive
   module PlanReview
@@ -41,11 +40,16 @@ module Hive
       def launch_kwargs(profile:, workspace:, role:, output_path: nil)
         return workspace_write_kwargs if profile.workspace_write_supported?
 
-        tools = REVIEW_TOOLS + write_tools(workspace)
-        return pi_launch_kwargs(
-          profile:, workspace:, role:, output_path:, tools:
-        ) if profile.name == :pi
+        # Pi's managed-workflow wrapper is deliberately read-only and cannot
+        # expose Bash or network access. Those are both required here: the
+        # reviewer must inspect the repository and referenced documentation,
+        # and its finding format requires SHA-256. Plan review uses the same
+        # ArtifactFirewall detection-and-restore boundary as the other native
+        # stages, so launch Pi directly instead of pretending its managed
+        # output wrapper can enforce this broader review contract.
+        return unrestricted_kwargs if profile.name == :pi
 
+        tools = REVIEW_TOOLS + write_tools(workspace)
         scope = Hive::PermissionScope.resolve(
           { "preset" => "scoped", "tools" => tools },
           task_folder: workspace,
@@ -70,39 +74,21 @@ module Hive
         }
       end
 
+      def unrestricted_kwargs
+        {
+          permission_mode: nil,
+          allowed_tools: nil,
+          disallowed_tools: nil
+        }
+      end
+
       # Edit(path) alone: Claude does not enforce Write(path), so granting it
       # would be a rule that reads like a restriction and enforces nothing.
       def write_tools(workspace)
         [ "Edit(#{File.expand_path(workspace.to_s)}/**)" ]
       end
 
-      def pi_launch_kwargs(profile:, workspace:, role:, output_path:, tools:)
-        if output_path.to_s.empty?
-          raise Hive::ConfigError,
-                "plan review #{role} Pi confinement requires an exact output path"
-        end
-
-        relative = File.expand_path(output_path).delete_prefix("#{File.expand_path(workspace)}/")
-        if relative == File.expand_path(output_path) || relative.empty?
-          raise Hive::ConfigError,
-                "plan review #{role} Pi output must stay inside the disposable workspace"
-        end
-
-        runtime_policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
-          { "preset" => "scoped", "tools" => tools },
-          task_folder: workspace,
-          package_root: workspace,
-          profile:,
-          managed_outputs: [ output_path ]
-        )
-        {
-          permission_mode: runtime_policy.permission_mode,
-          allowed_tools: runtime_policy.allowed_tools,
-          disallowed_tools: runtime_policy.disallowed_tools,
-          runtime_policy:
-        }
-      end
-      private_class_method :pi_launch_kwargs, :workspace_write_kwargs, :write_tools
+      private_class_method :unrestricted_kwargs, :workspace_write_kwargs, :write_tools
     end
   end
 end

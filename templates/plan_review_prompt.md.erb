@@ -18,9 +18,12 @@ END_UNTRUSTED_PLAN_REFERENCE_<%= nonce %>
 
 Review level: `<%= level %>`
 Required coverage: `<%= required_coverage_json %>`
+Repository root: `<%= project_root %>`
 
-The reviewer may edit only the disposable directory containing that copy. It
-must not edit the canonical plan, task metadata, markers, or project source.
+Use the repository root for read-only code, wiki, history, and contract
+inspection. Do not edit the canonical plan, task metadata, markers, or project
+source; the disposable directory containing the plan copy and result is the
+only writable review workspace.
 <% if host_output_mode %>
 Return the review-result JSON as the complete string value at
 `files["<%= output_basename %>"]` in the required host-output wrapper. The

@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-08-13
+updated: 2026-08-20
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -65,11 +65,18 @@ whole-document/specialist leg. The adversarial leg uses a separate prompt and
 route. Neither reviewer can publish canonical `plan.md`; malformed or free-form
 output has no clearance authority.
 
-Reviewer and original-planner revision launches are confined to disposable
-workspaces with provider-enforced workspace-write or exact Claude file-tool
-scope. A provider that cannot enforce either boundary is unavailable rather
-than inheriting a bypass-permissions default. The reviewed input is itself a
-protected anchor, so findings cannot be minted against a reviewer-mutated copy.
+Reviewers receive the repository root plus search, shell, and network access so
+they can verify a plan against code, wiki context, history, and referenced
+contracts instead of checking only the document against itself. The disposable
+directory remains the declared review-output workspace. Codex and Grok retain
+their native workspace-write sandboxes; Claude receives exact file-tool scope.
+Pi cannot combine its managed read-only wrapper with the required shell and
+network access, so plan review launches Pi directly under the same
+ArtifactFirewall detection-and-restore boundary used by Hive's other native
+stages. The reviewed input and authority records are protected anchors, so
+findings cannot be minted against a reviewer-mutated copy. Pi writes the normal
+adapter JSON file directly; the managed host-output wrapper is not used for
+this full-access review route.
 
 The default adversarial request is native Grok Build, model `grok-4.6`, effort
 `high`. Every route records requested and actual provider, model, model family,

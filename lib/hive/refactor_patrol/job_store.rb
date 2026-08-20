@@ -1,4 +1,5 @@
 require "json"
+require "base64"
 require "digest"
 require "time"
 require "uri"
@@ -17,6 +18,7 @@ require "hive/refactor_patrol/pr_manifest"
 require "hive/refactor_patrol/publication_attempt"
 require "hive/refactor_patrol/thesis"
 require "hive/refactor_patrol/fix_admission_outbox"
+require "hive/workflow_package/canonical_json"
 
 module Hive
   module RefactorPatrol
@@ -122,6 +124,8 @@ module Hive
 
       DISCOVERY_ATTEMPT_KIND = "discovery_claim".freeze
       ACTIVE_CLAIM_STATES = %w[claimed running].freeze
+      MIGRATION_CURSOR_PREFIX = "patrol-fix-architecture-migration-v1".freeze
+      MIGRATION_CURSOR_KEYS = %w[after count snapshot_token through].freeze
 
       attr_reader :project_root, :root, :patrol_fix_admission_outbox
 
@@ -1586,6 +1590,60 @@ module Hive
         end
       end
 
+      # Complete, authoritative v4 migration page. Membership is frozen by a
+      # bounded filename snapshot rather than the rebuildable query index.
+      # Individual unreadable aggregates become blocking entries.
+      def patrol_fix_migration_page(limit:, cursor: nil)
+        page_limit = Integer(limit)
+        unless page_limit.between?(1, 512)
+          raise InconsistentRecord, "refactor patrol migration page limit is invalid"
+        end
+        state = cursor ? decode_migration_cursor(cursor) : nil
+        ids = @job_files.each_job_id.to_a
+        if state
+          frozen_ids = ids.select { |id| id <= state.fetch("through") }
+          unless frozen_ids.length == state.fetch("count") &&
+                 migration_snapshot_token(frozen_ids) == state.fetch("snapshot_token")
+            raise CorruptRecord, "refactor patrol migration snapshot changed"
+          end
+          after = state.fetch("after")
+          selected = frozen_ids.select { |id| id > after }.first(page_limit + 1)
+          snapshot_token = state.fetch("snapshot_token")
+          through = state.fetch("through")
+          count = state.fetch("count")
+        else
+          frozen_ids = ids.sort
+          snapshot_token = migration_snapshot_token(frozen_ids)
+          through = frozen_ids.last
+          count = frozen_ids.length
+          selected = frozen_ids.first(page_limit + 1)
+        end
+        has_more = selected.length > page_limit
+        page_ids = selected.first(page_limit)
+        next_cursor = if has_more
+          encode_migration_cursor(
+            "after" => page_ids.last,
+            "count" => count,
+            "snapshot_token" => snapshot_token,
+            "through" => through
+          )
+        end
+        {
+          "entries" => page_ids.map { |job_id| migration_job_entry(job_id) },
+          "next_cursor" => next_cursor,
+          "snapshot_token" => snapshot_token
+        }
+      rescue ArgumentError, TypeError
+        raise InconsistentRecord, "refactor patrol migration page limit is invalid"
+      end
+
+      def patrol_fix_migration_inventory(canonical_action_catalog: nil)
+        require "hive/refactor_patrol/migration_inventory"
+        Hive::RefactorPatrol::MigrationInventory.new(
+          self, canonical_action_catalog: canonical_action_catalog
+        )
+      end
+
       def rebuild_indexes!
         prepare_current_namespace!
         indexes = @job_indexes.project(each_job)
@@ -1610,6 +1668,86 @@ module Hive
       end
 
       private
+
+      def migration_job_entry(job_id)
+        bytes = @job_files.read_job(job_id)
+        repeated = @job_files.read_job(job_id)
+        raise CorruptRecord, "job changed while it was inventoried" unless bytes == repeated
+        aggregate = JSON.parse(bytes)
+        path = job_path(job_id)
+        raise CorruptRecord.new("refactor patrol job must contain a JSON object", path: path) unless
+          aggregate.is_a?(Hash)
+        version = aggregate["schema_version"]
+        unless version.is_a?(Integer)
+          raise CorruptRecord.new("refactor patrol job has no integer schema_version", path: path)
+        end
+        unless version == SCHEMA_VERSION
+          raise UnsupportedVersion.new(
+            "unsupported refactor patrol job schema_version #{version}", path: path
+          )
+        end
+        validate_job!(aggregate, path: path)
+        unless aggregate.fetch("job_id") == job_id
+          raise InconsistentRecord.new(
+            "refactor patrol job id does not match its migration filename", path: path
+          )
+        end
+        canonical = Hive::WorkflowPackage::CanonicalJSON.generate(aggregate)
+        {
+          "source_id" => job_id,
+          "source_schema" => "#{SCHEMA}/v#{SCHEMA_VERSION}",
+          "canonical_digest" => Digest::SHA256.hexdigest(canonical),
+          "record" => aggregate,
+          "error" => nil
+        }
+      rescue Error, JSON::ParserError, KeyError, ArgumentError,
+             Hive::ManagedDirectory::UnsafeError, SystemCallError, IOError => error
+        raw = begin
+          @job_files.read_job(job_id)
+        rescue StandardError
+          nil
+        end
+        descriptor = raw || Hive::WorkflowPackage::CanonicalJSON.generate(
+          "source_id" => job_id, "error" => error.class.name
+        )
+        {
+          "source_id" => job_id,
+          "source_schema" => "#{SCHEMA}/v#{SCHEMA_VERSION}",
+          "canonical_digest" => Digest::SHA256.hexdigest(descriptor),
+          "record" => nil,
+          "error" => "architecture job is unavailable or invalid"
+        }
+      end
+
+      def migration_snapshot_token(ids)
+        Digest::SHA256.hexdigest(
+          Hive::WorkflowPackage::CanonicalJSON.generate(ids)
+        )
+      end
+
+      def encode_migration_cursor(payload)
+        encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
+        "#{MIGRATION_CURSOR_PREFIX}.#{encoded}"
+      end
+
+      def decode_migration_cursor(cursor)
+        value = cursor.to_s
+        prefix, encoded = value.split(".", 2)
+        raise CorruptRecord, "refactor patrol migration cursor is invalid" unless
+          value.bytesize <= 4_096 && prefix == MIGRATION_CURSOR_PREFIX && encoded
+        payload = JSON.parse(Base64.urlsafe_decode64(encoded))
+        valid = payload.is_a?(Hash) && payload.keys.sort == MIGRATION_CURSOR_KEYS.sort &&
+          payload["after"].to_s.match?(ID_PATTERN) &&
+          payload["through"].to_s.match?(ID_PATTERN) &&
+          payload["after"] <= payload["through"] &&
+          payload["count"].is_a?(Integer) && payload["count"].positive? &&
+          payload["count"] <= JobStoreFiles::MAX_JOB_ENTRIES &&
+          payload["snapshot_token"].to_s.match?(/\A[0-9a-f]{64}\z/)
+        raise CorruptRecord, "refactor patrol migration cursor is invalid" unless valid
+        payload
+      rescue JSON::ParserError, ArgumentError
+        raise CorruptRecord, "refactor patrol migration cursor is invalid"
+      end
 
       def ordered_job_query_ids
         each_job.to_a.sort_by do |aggregate|

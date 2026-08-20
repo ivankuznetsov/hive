@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hive-patrol-fix-migration-disposition-manifest.v1.json",
+  "title": "Hive Patrol Fix Migration Disposition Manifest (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "inventory", "semantic_groups", "dispositions", "observation_dispositions", "integrity"],
+  "properties": {
+    "schema": {"const": "hive-patrol-fix-migration-disposition-manifest"},
+    "schema_version": {"const": 1},
+    "inventory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["count", "root_digest", "candidates", "opaque_v3"],
+      "properties": {
+        "count": {"type": "integer", "minimum": 0, "maximum": 16384},
+        "root_digest": {"$ref": "#/$defs/digest"},
+        "candidates": {"type": "array", "maxItems": 16384, "items": {"$ref": "#/$defs/candidate"}},
+        "opaque_v3": {"$ref": "#/$defs/opaqueInventory"}
+      }
+    },
+    "semantic_groups": {"type": "array", "maxItems": 16384, "items": {"$ref": "#/$defs/group"}},
+    "dispositions": {"type": "array", "maxItems": 16384, "items": {"$ref": "#/$defs/disposition"}},
+    "observation_dispositions": {"type": "array", "maxItems": 65536, "items": {"$ref": "#/$defs/observationDisposition"}},
+    "integrity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["inventory_count", "disposition_count", "reconstructed_root_digest", "opaque_v3_count"],
+      "properties": {
+        "inventory_count": {"type": "integer", "minimum": 0},
+        "disposition_count": {"type": "integer", "minimum": 0},
+        "reconstructed_root_digest": {"$ref": "#/$defs/digest"},
+        "opaque_v3_count": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableText": {"type": ["string", "null"], "maxLength": 4096},
+    "observation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "identity", "state", "match", "canonical_digest", "details"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "identity": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "state": {"type": "string", "minLength": 1, "maxLength": 128},
+        "match": {"type": "string", "minLength": 1, "maxLength": 128},
+        "canonical_digest": {"$ref": "#/$defs/digest"},
+        "details": {"type": "object"}
+      }
+    },
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_kind", "source_id", "source_schema", "canonical_digest", "authority_state", "semantic_root", "observations", "blocking_reason"],
+      "properties": {
+        "source_kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "source_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "source_schema": {"type": "string", "minLength": 1, "maxLength": 256},
+        "canonical_digest": {"$ref": "#/$defs/digest"},
+        "authority_state": {"enum": ["accepted", "claimed", "blocked"]},
+        "semantic_root": {"$ref": "#/$defs/nullableText"},
+        "observations": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/observation"}},
+        "blocking_reason": {"$ref": "#/$defs/nullableText"}
+      }
+    },
+    "opaqueEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_id", "canonical_digest", "byte_size"],
+      "properties": {
+        "source_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "canonical_digest": {"$ref": "#/$defs/digest"},
+        "byte_size": {"type": "integer", "minimum": 0, "maximum": 67108864}
+      }
+    },
+    "opaqueInventory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["count", "root_digest", "entries"],
+      "properties": {
+        "count": {"type": "integer", "minimum": 0, "maximum": 16384},
+        "root_digest": {"$ref": "#/$defs/digest"},
+        "entries": {"type": "array", "maxItems": 16384, "items": {"$ref": "#/$defs/opaqueEntry"}}
+      }
+    },
+    "semanticDecision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["route", "inventory_candidate_set_digest", "current_head", "receipt_digests"],
+      "properties": {
+        "route": {"enum": ["exact_root", "injected_same_root", "injected_distinct", "insufficient_evidence", "semantic_decision_required"]},
+        "inventory_candidate_set_digest": {"$ref": "#/$defs/digest"},
+        "current_head": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+        "receipt_digests": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/digest"}}
+      }
+    },
+    "canonicalDecision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["route", "canonical_identity", "planned_mutations", "observation_ids"],
+      "properties": {
+        "route": {"type": "string", "minLength": 1, "maxLength": 128},
+        "canonical_identity": {"$ref": "#/$defs/nullableText"},
+        "planned_mutations": {"type": "array", "maxItems": 0},
+        "observation_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}}
+      }
+    },
+    "group": {
+      "type": "object", "additionalProperties": false,
+      "required": ["group_id", "candidate_set_digest", "members", "canonical_source", "semantic_decision", "canonical_decision"],
+      "properties": {
+        "group_id": {"type": "string", "pattern": "^group-[0-9a-f]{32}$"},
+        "candidate_set_digest": {"$ref": "#/$defs/digest"},
+        "members": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
+        "canonical_source": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "semantic_decision": {"$ref": "#/$defs/semanticDecision"},
+        "canonical_decision": {"$ref": "#/$defs/canonicalDecision"}
+      }
+    },
+    "disposition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_kind", "source_id", "source_schema", "canonical_digest", "group_id", "route", "canonical_identity", "blocking_reason"],
+      "properties": {
+        "source_kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "source_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "source_schema": {"type": "string", "minLength": 1, "maxLength": 256},
+        "canonical_digest": {"$ref": "#/$defs/digest"},
+        "group_id": {"type": "string", "pattern": "^group-[0-9a-f]{32}$"},
+        "route": {"type": "string", "minLength": 1, "maxLength": 128},
+        "canonical_identity": {"$ref": "#/$defs/nullableText"},
+        "blocking_reason": {"$ref": "#/$defs/nullableText"}
+      }
+    },
+    "observationDisposition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["group_id", "kind", "identity", "canonical_digest", "route"],
+      "properties": {
+        "group_id": {"type": "string", "pattern": "^group-[0-9a-f]{32}$"},
+        "kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "identity": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "canonical_digest": {"$ref": "#/$defs/digest"},
+        "route": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    }
+  }
+}

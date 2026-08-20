@@ -237,6 +237,10 @@ class ComponentBoundariesTest < Minitest::Test
       Hive::PatrolFix::FixReport
       Hive::PatrolFix::HandoffOutbox
       Hive::PatrolFix::InboxReport
+      Hive::PatrolFix::Migration::DispositionManifest
+      Hive::PatrolFix::Migration::Inventory
+      Hive::PatrolFix::Migration::Reconciler
+      Hive::PatrolFix::Migration::SemanticGroup
       Hive::PatrolFix::Projection
       Hive::PatrolFix::PublicationReceipt
       Hive::PatrolFix::ReceiptStore

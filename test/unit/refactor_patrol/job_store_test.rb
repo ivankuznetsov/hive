@@ -21,6 +21,38 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_migration_pages_use_authoritative_v4_membership_and_keep_corrupt_rows
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.write_job!(job("job_id" => "job-1"))
+      store.write_job!(job(
+        "job_id" => "job-2", "occurrence_id" => "occ-#{'3' * 64}",
+        "intake_transition_id" => "intent-#{'4' * 64}", "actions" => []
+      ))
+      File.write(File.join(store.root, "jobs", "job-corrupt.json"), "{")
+
+      entries = []
+      cursor = nil
+      tokens = []
+      loop do
+        page = store.patrol_fix_migration_page(limit: 1, cursor: cursor)
+        entries.concat(page.fetch("entries"))
+        tokens << page.fetch("snapshot_token")
+        cursor = page.fetch("next_cursor")
+        break unless cursor
+      end
+
+      assert_equal %w[job-1 job-2 job-corrupt],
+                   entries.map { |entry| entry.fetch("source_id") }
+      assert_equal 1, tokens.uniq.length
+      corrupt = entries.last
+      assert_nil corrupt.fetch("record")
+      assert_equal "architecture job is unavailable or invalid", corrupt.fetch("error")
+      port = store.patrol_fix_migration_inventory
+      assert_instance_of Hive::RefactorPatrol::MigrationInventory, port
+    end
+  end
+
   def test_incomplete_job_probe_uses_the_bounded_query_index
     with_tmp_dir do |dir|
       incomplete = Hive::RefactorPatrol::JobStore.new(

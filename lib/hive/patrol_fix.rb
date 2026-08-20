@@ -28,6 +28,14 @@ module Hive
     autoload :SuccessorMaterializer, "hive/patrol_fix/successor_materializer"
     autoload :PublicationReceipt, "hive/patrol_fix/publication_receipt"
 
+    module Migration
+      autoload :Inventory, "hive/patrol_fix/migration/inventory"
+      autoload :SemanticGroup, "hive/patrol_fix/migration/semantic_group"
+      autoload :Reconciler, "hive/patrol_fix/migration/reconciler"
+      autoload :DispositionManifest,
+               "hive/patrol_fix/migration/disposition_manifest"
+    end
+
     module_function
 
     def canonical_json(value)

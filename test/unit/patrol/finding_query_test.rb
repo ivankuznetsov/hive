@@ -33,6 +33,35 @@ class PatrolFindingQueryTest < Minitest::Test
     end
   end
 
+  def test_migration_pages_enumerate_all_authoritative_findings_and_keep_corrupt_rows
+    with_tmp_dir do |dir|
+      store = Hive::Patrol::StateStore.new(dir)
+      store.with_cycle_lock { nil }
+      30.times { |index| store.write_finding(finding(index, state: "active")) }
+      store.rebuild_finding_query_projection!
+      assert store.finding_query_projection.fetch("truncated")
+      File.write(File.join(store.root, "findings", "finding-corrupt.json"), "{")
+
+      entries = []
+      cursor = nil
+      tokens = []
+      loop do
+        page = store.patrol_fix_migration_page(limit: 7, cursor: cursor)
+        entries.concat(page.fetch("entries"))
+        tokens << page.fetch("snapshot_token")
+        cursor = page.fetch("next_cursor")
+        break unless cursor
+      end
+
+      assert_equal 31, entries.length
+      assert_equal 1, tokens.uniq.length
+      corrupt = entries.find { |entry| entry.fetch("source_id") == "finding-corrupt" }
+      assert_nil corrupt.fetch("record")
+      assert_equal "finding record is unavailable or invalid", corrupt.fetch("error")
+      assert_match(/\A[0-9a-f]{64}\z/, corrupt.fetch("canonical_digest"))
+    end
+  end
+
   def test_text_renders_summary_and_each_finding
     payload = {
       "project" => "demo",

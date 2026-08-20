@@ -430,11 +430,25 @@ remain unproven.
   generation-bound token attached by the scheduler.
 - JobStore runtime and child completion accept v4 only. Construction and
   read-only queries do not create state; the first mutation lazily creates
-  only v4. Hive has no v3 reader, probe, converter, reset command, archive
-  layer, package hook, or retry timer. V3 bytes are ignored while every other
+  only v4. Runtime Hive has no v3 parser, converter, reset command, archive
+  layer, package hook, or retry timer. The Patrol-fix migration preflight is
+  the sole narrow exception: its source-owned adapter enumerates v3 regular
+  files only as opaque path/size/raw-byte digests and never parses or rewrites
+  them. V3 bytes remain ignored by every downstream owner while every other
   live reconciler owner and the global terminal-proof catalog remain unchanged.
   Malformed v4 job, occurrence, or query-index evidence fails closed instead
   of being rewritten.
+- Patrol-fix migration is a read-only preflight. Ordinary and Architecture
+  source adapters freeze complete bounded filename membership and feed strict
+  source-neutral candidates through injected ports; the core never opens
+  Patrol, daemon, command, or UI state. Exact roots may group deterministically,
+  but different roots require a durable semantic decision bound to the full
+  candidate-set digest and current head. Ordinary fingerprint and active
+  occurrence evidence is strict and read-only; Architecture action evidence is
+  partitioned by its owning thesis/finding. Existing tasks, successors, issues,
+  branches, intents, and all-state PRs are observations only. One deterministic
+  manifest retains every group member and artifact disposition, reconstructs
+  the source count/root digest, and keeps opaque v3 count/digest separate.
 - Live v4 jobs, query sidecars, quarantine evidence, and action locks are
   accessed only through one descriptor-confined `JobStoreFiles` port. A
   store-wide admission lock enforces the 8,192-job bound before any new

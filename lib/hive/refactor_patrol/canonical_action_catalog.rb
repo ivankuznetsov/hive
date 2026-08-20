@@ -8,6 +8,7 @@ require "hive/config"
 require "hive/paths"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/pr_manifest"
+require "hive/workflow_package/canonical_json"
 
 module Hive
   module RefactorPatrol
@@ -100,7 +101,78 @@ module Hive
         snapshot(dry_run: false)
       end
 
+      # Timestamp-free, mutation-free terminal-effect observations for Patrol
+      # Fix migration. The catalog rebuild logic may consult every registered
+      # v4 authority, but dry-run never writes indexes or proof archives.
+      def patrol_fix_migration_observations
+        actions = snapshot(dry_run: true).fetch("actions")
+        actions.keys.sort.flat_map do |action_id|
+          action = actions.fetch(action_id)
+          canonical = action.slice(*ENTRY_KEYS)
+          digest = Digest::SHA256.hexdigest(
+            Hive::WorkflowPackage::CanonicalJSON.generate(canonical)
+          )
+          observations = [
+            {
+              "kind" => "canonical_action",
+              "identity" => action_id,
+              "state" => action.fetch("outcome"),
+              "match" => "exact",
+              "canonical_digest" => digest,
+              "details" => canonical
+            }
+          ]
+          proof = action.fetch("proof")
+          if proof["pr_url"]
+            state = case action.fetch("outcome")
+            when "merged" then "merged"
+            when "closed_without_merge" then "closed"
+            else "open"
+            end
+            observations << migration_effect_observation(
+              kind: "pull_request", identity: proof.fetch("pr_url"),
+              state: state, match: "legacy_link",
+              action: action, digest: digest
+            )
+          end
+          if proof["review_task_path"]
+            observations << migration_effect_observation(
+              kind: "coding_task", identity: proof.fetch("review_task_path"),
+              state: "legacy_review", action: action, digest: digest
+            )
+          end
+          if proof["issue_url"]
+            observations << migration_effect_observation(
+              kind: "issue", identity: proof.fetch("issue_url"),
+              state: action.fetch("outcome"), action: action, digest: digest
+            )
+          end
+          observations
+        end.freeze
+      end
+
       private
+
+      def migration_effect_observation(kind:, identity:, state:, action:, digest:,
+                                       match: "exact")
+        {
+          "kind" => kind,
+          "identity" => identity,
+          "state" => state,
+          "match" => match,
+          "canonical_digest" => Digest::SHA256.hexdigest(
+            Hive::WorkflowPackage::CanonicalJSON.generate(
+              "action_digest" => digest, "kind" => kind,
+              "identity" => identity, "state" => state
+            )
+          ),
+          "details" => {
+            "canonical_action_id" => action.fetch("canonical_action_id"),
+            "owner" => action.fetch("owner"),
+            "proof_digest" => action.fetch("proof_digest")
+          }
+        }
+      end
 
       def snapshot(dry_run:)
         return build_snapshot(existing_catalog, archived_entries) if dry_run

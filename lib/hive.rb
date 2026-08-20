@@ -75,6 +75,8 @@ module Hive
       "hive-patrol-fix-decision" => 1,
       "hive-patrol-fix-receipt" => 1,
       "hive-patrol-fix-projection" => 1,
+      "hive-patrol-fix-migration-semantic-decision" => 1,
+      "hive-patrol-fix-migration-disposition-manifest" => 1,
       "hive-refactor-patrol" => 4,
       "hive-refactor-patrol-jobs" => 2,
       "hive-refactor-patrol-thesis" => 4,

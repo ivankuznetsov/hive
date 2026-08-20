@@ -1,3 +1,4 @@
+require "base64"
 require "digest"
 require "hive/patrol/feature"
 require "hive/patrol/finding"
@@ -7,6 +8,7 @@ require "hive/managed_directory"
 require "hive/modules/migration/occurrence_journal"
 require "hive/modules/migration/patrol_evidence"
 require "hive/patrol/fix_admission_outbox"
+require "hive/modules/migration/bounded_file_inventory"
 
 module Hive
   module Patrol
@@ -43,6 +45,12 @@ module Hive
         "lifecycle_state" => 32,
         "lifecycle_updated_at" => 64
       }.freeze
+      MIGRATION_FINDING_SCHEMA = "hive-patrol-finding/v1".freeze
+      MIGRATION_FINDING_MAX_BYTES = 512 * 1024
+      MIGRATION_FINDING_MAX_ENTRIES = 8_192
+      MIGRATION_FINGERPRINT_MAX_BYTES = 16 * 1024 * 1024
+      MIGRATION_FINDING_CURSOR_PREFIX = "patrol-fix-finding-migration-v1".freeze
+      MIGRATION_FINDING_CURSOR_KEYS = %w[inventory_cursor snapshot_token].freeze
 
       attr_reader :patrol_fix_admission_outbox
 
@@ -557,6 +565,82 @@ module Hive
         end
       end
 
+      # Authoritative, cursor-aware migration inventory. Unlike the bounded
+      # query projection, this freezes and traverses every finding filename.
+      # A malformed, missing, linked, or content-racing record remains a
+      # blocking entry with a stable identity instead of disappearing.
+      def patrol_fix_migration_page(limit:, cursor: nil)
+        page_limit = Integer(limit)
+        unless page_limit.between?(1, 512)
+          raise Hive::ConfigError, "patrol migration page limit is invalid"
+        end
+        inventory = migration_finding_inventory
+        if cursor
+          cursor_state = decode_migration_finding_cursor(cursor)
+          snapshot_token = cursor_state.fetch("snapshot_token")
+          page = inventory.page(
+            limit: page_limit,
+            cursor: cursor_state.fetch("inventory_cursor")
+          )
+        else
+          snapshot = inventory.snapshot
+          snapshot_token = migration_snapshot_token(snapshot)
+          page = inventory.page(limit: page_limit, snapshot: snapshot)
+        end
+        entries = page.names.map { |name| migration_finding_entry(name) }
+        {
+          "entries" => entries,
+          "next_cursor" => page.next_cursor && encode_migration_finding_cursor(
+            page.next_cursor, snapshot_token
+          ),
+          "snapshot_token" => snapshot_token
+        }
+      rescue ArgumentError, TypeError
+        raise Hive::ConfigError, "patrol migration page limit is invalid"
+      end
+
+      def patrol_fix_migration_inventory
+        require "hive/patrol/migration_inventory"
+        Hive::Patrol::MigrationInventory.new(self)
+      end
+
+      # Strict read-only support evidence for the source-owned migration
+      # adapter. Unlike BaseStateStore#fingerprints, malformed bytes cannot
+      # collapse to an empty hash during cutover preflight.
+      def patrol_fix_migration_fingerprints
+        bytes = @cycle_directory.read(
+          "fingerprints.json", max_bytes: MIGRATION_FINGERPRINT_MAX_BYTES,
+          missing: true
+        )
+        return {}.freeze unless bytes
+
+        repeated = @cycle_directory.read(
+          "fingerprints.json", max_bytes: MIGRATION_FINGERPRINT_MAX_BYTES
+        )
+        raise Hive::ConfigError, "patrol fingerprints changed during migration inventory" unless
+          bytes == repeated
+        parsed = JSON.parse(bytes)
+        raise Hive::ConfigError, "patrol fingerprints must contain an object" unless
+          parsed.is_a?(Hash)
+
+        Hive::PatrolFix.deep_freeze(Hive::PatrolFix.deep_copy(parsed))
+      rescue JSON::ParserError, EncodingError,
+             Hive::ManagedDirectory::UnsafeError, SystemCallError, IOError
+        raise Hive::ConfigError,
+              "patrol fingerprints are unavailable or invalid for migration"
+      end
+
+      def each_patrol_fix_migration_active_occurrence
+        return enum_for(__method__) unless block_given?
+
+        @occurrence_store.each_record do |record|
+          next unless migration_active_occurrence?(record)
+
+          yield record
+        end
+        nil
+      end
+
       def patrol_fix_legacy_downstream_allowed?(finding)
         @patrol_fix_admission_outbox.legacy_downstream_allowed?(finding)
       end
@@ -585,6 +669,113 @@ module Hive
       end
 
       private
+
+      def migration_active_occurrence?(record)
+        record.fetch("phase") == "reserved" ||
+          record.fetch("effects").values.any? do |cell|
+            !Hive::Modules::Migration::OccurrenceContract::TERMINAL_STATES
+              .include?(cell.fetch("state"))
+          end || record.fetch("outbox").any? do |entry|
+            entry.fetch("acknowledged") == false
+          end
+      rescue KeyError, TypeError
+        raise Hive::ConfigError,
+              "patrol occurrence is invalid for migration inventory"
+      end
+
+      def migration_finding_inventory
+        Hive::Modules::Migration::BoundedFileInventory.new(
+          directory: @cycle_directory,
+          relative: "findings",
+          filename_pattern: /\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\.json\z/,
+          max_entries: MIGRATION_FINDING_MAX_ENTRIES,
+          cursor_prefix: "patrol-fix-findings-v1",
+          malformed_message: "patrol migration finding inventory is malformed",
+          overflow_message: "patrol migration finding inventory is too large",
+          missing: true
+        )
+      end
+
+      def migration_finding_entry(name)
+        identity = name.delete_suffix(".json")
+        relative = File.join("findings", name)
+        bytes = @cycle_directory.read(
+          relative, max_bytes: MIGRATION_FINDING_MAX_BYTES
+        )
+        repeated = @cycle_directory.read(
+          relative, max_bytes: MIGRATION_FINDING_MAX_BYTES
+        )
+        raise Hive::ConfigError, "finding changed while it was inventoried" unless bytes == repeated
+        parsed = JSON.parse(bytes)
+        raise Hive::ConfigError, "finding record must be an object" unless parsed.is_a?(Hash)
+        finding = Finding.from_h(parsed)
+        unless finding.id.to_s == identity
+          raise Hive::ConfigError, "finding filename does not match its immutable identity"
+        end
+        canonical = Hive::PatrolFix.canonical_json(finding.to_h)
+        {
+          "source_id" => identity,
+          "source_schema" => MIGRATION_FINDING_SCHEMA,
+          "canonical_digest" => Digest::SHA256.hexdigest(canonical),
+          "record" => finding.to_h,
+          "error" => nil
+        }
+      rescue JSON::ParserError, KeyError, ArgumentError, Hive::ConfigError,
+             Hive::ManagedDirectory::UnsafeError, SystemCallError, IOError => error
+        raw = begin
+          @cycle_directory.read(
+            relative, max_bytes: MIGRATION_FINDING_MAX_BYTES,
+            missing: true
+          )
+        rescue StandardError
+          nil
+        end
+        descriptor = raw || Hive::PatrolFix.canonical_json(
+          "source_id" => identity, "error" => error.class.name
+        )
+        {
+          "source_id" => identity,
+          "source_schema" => MIGRATION_FINDING_SCHEMA,
+          "canonical_digest" => Digest::SHA256.hexdigest(descriptor),
+          "record" => nil,
+          "error" => "finding record is unavailable or invalid"
+        }
+      end
+
+      def migration_snapshot_token(snapshot)
+        Digest::SHA256.hexdigest(Hive::PatrolFix.canonical_json(
+          "count" => snapshot.count,
+          "through" => snapshot.through,
+          "fingerprint" => snapshot.fingerprint,
+          "binding" => snapshot.binding
+        ))
+      end
+
+      def encode_migration_finding_cursor(inventory_cursor, snapshot_token)
+        payload = {
+          "inventory_cursor" => inventory_cursor,
+          "snapshot_token" => snapshot_token
+        }
+        encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
+        "#{MIGRATION_FINDING_CURSOR_PREFIX}.#{encoded}"
+      end
+
+      def decode_migration_finding_cursor(cursor)
+        value = cursor.to_s
+        prefix, encoded = value.split(".", 2)
+        raise Hive::ConfigError, "patrol migration cursor is invalid" unless
+          value.bytesize <= 4_096 && prefix == MIGRATION_FINDING_CURSOR_PREFIX &&
+          encoded && !encoded.empty?
+        payload = JSON.parse(Base64.urlsafe_decode64(encoded))
+        valid = payload.is_a?(Hash) &&
+          payload.keys.sort == MIGRATION_FINDING_CURSOR_KEYS.sort &&
+          payload["inventory_cursor"].is_a?(String) &&
+          payload["snapshot_token"].to_s.match?(/\A[0-9a-f]{64}\z/)
+        raise Hive::ConfigError, "patrol migration cursor is invalid" unless valid
+        payload
+      rescue JSON::ParserError, ArgumentError
+        raise Hive::ConfigError, "patrol migration cursor is invalid"
+      end
 
       def mark_finding_query_dirty!
         @cycle_directory.atomic_write(

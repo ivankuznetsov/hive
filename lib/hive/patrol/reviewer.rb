@@ -10,7 +10,7 @@ require "hive/patrol/agent_launch"
 require "hive/patrol/review_error_details"
 require "hive/patrol/source_reader"
 require "hive/patrol/state_store"
-require "hive/patrol/token_budget"
+require "hive/patrol/launch_budget"
 require "hive/patrol/validator"
 require "hive/stages/base"
 
@@ -48,12 +48,12 @@ module Hive
       attr_reader :review_errors
 
       def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil,
-                     token_budget: nil)
+                     launch_budget: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @agent_runner = agent_runner || method(:run_agent)
-        @token_budget = token_budget || TokenBudget.new(@project_root, cfg: cfg)
+        @launch_budget = launch_budget || LaunchBudget.new(@project_root, cfg: cfg)
         @review_errors = []
         @source_reader = Hive::Patrol::SourceReader.new(@project_root)
       end
@@ -126,7 +126,7 @@ module Hive
 
       # Candidate scoring and evidence validation retain the complete mapped
       # feature. The model receives a bounded initial view so large components
-      # cannot spend the per-agent allowance loading every context and test
+      # cannot spend the review turn loading every context and test
       # file before the response that must write findings. A concrete defect
       # hypothesis may still use the prompt's one direct follow-up round.
       def bounded_prompt_feature(feature)
@@ -321,20 +321,19 @@ module Hive
         )
         launch = Hive::Patrol::AgentLaunch.prepare(
           profile: profile,
-          prompt: prompt,
           role: :review,
           cfg: @cfg,
           routing_arguments: routing_arguments
         )
-        unless @token_budget.acquire(minimum_tokens: launch.fetch(:minimum_tokens))
-          exhaustion = @token_budget.resource_exhaustion if @token_budget.respond_to?(:resource_exhaustion)
+        started_at = Time.now.utc
+        unless @launch_budget.acquire(profile: profile, stage: STAGE, started_at: started_at)
+          exhaustion = @launch_budget.resource_exhaustion if @launch_budget.respond_to?(:resource_exhaustion)
           return {
             status: :error,
-            error_message: @token_budget.exhaustion_message,
+            error_message: @launch_budget.exhaustion_message,
             resource_exhaustion: exhaustion
           }
         end
-        started_at = Time.now.utc
         result = nil
         begin
           result = Hive::Agent.new(
@@ -343,7 +342,6 @@ module Hive
             add_dirs: [ @project_root ],
             cwd: @project_root,
             max_budget_usd: nil,
-            max_tokens: @token_budget.max_tokens,
             max_turns: launch.fetch(:max_turns),
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
             log_label: STAGE,
@@ -354,7 +352,7 @@ module Hive
             routing_arguments: routing_arguments
           ).run!
         ensure
-          @token_budget.record!(
+          @launch_budget.record!(
             result: result, profile: profile, stage: STAGE, started_at: started_at
           )
         end

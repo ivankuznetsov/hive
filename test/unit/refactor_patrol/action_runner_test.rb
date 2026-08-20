@@ -640,6 +640,35 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_fix_daily_launch_limit_waits_until_the_next_utc_day
+    with_tmp_dir do |dir|
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy("auto_fix" => true),
+        dispositions: dispositions(fix: [ disposition(thesis(id: "daily-limit")) ])
+      )
+      exhausted = Hive::RefactorPatrol::Fixer::Result.new(
+        outcome: "fix_agent_failed", terminal: false,
+        analysis_sha: "c" * 40,
+        details: {
+          "resource_exhaustion" => {
+            "reason" => "daily_agent_spawn_limit", "limit" => 8, "observed" => 8
+          }
+        }
+      )
+      runner = build_runner(
+        dir, store: store, fixer: FakeFixer.new(exhausted),
+        clock: -> { T0 }, backoff_sec: 3600
+      )
+
+      first = runner.run(job_id: "job-1")
+      claim = first.actions.find { |action| action.fetch("kind") == "fix" }
+                   .fetch("claims").last
+
+      assert_equal (T0 + 43_200).iso8601, claim.fetch("next_eligible_at")
+    end
+  end
+
   def test_closed_unmerged_refactor_pr_routes_the_accepted_thesis_to_an_issue
     with_tmp_dir do |dir|
       item = thesis(id: "closed-pr")

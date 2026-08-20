@@ -82,4 +82,20 @@ class HivePatrolFeatureBatchTest < Minitest::Test
       refute result.complete
     end
   end
+
+  def test_zero_runtime_limit_selects_no_features_without_advancing
+    with_tmp_dir do |dir|
+      selector = Hive::Patrol::FeatureBatch.new(
+        cfg: { "patrol" => { "max_features_per_cycle" => 12 } },
+        state: Hive::Patrol::StateStore.new(dir)
+      )
+
+      result = selector.call(features(5), target_sha: "sha", limit: 0)
+
+      assert_empty result.features
+      assert_equal 0, result.start_cursor
+      assert_equal 0, result.next_cursor
+      refute result.complete
+    end
+  end
 end

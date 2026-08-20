@@ -5,7 +5,7 @@ require "hive"
 require "hive/agent"
 require "hive/agent_profiles"
 require "hive/patrol/runner_task"
-require "hive/patrol/token_budget"
+require "hive/patrol/launch_budget"
 require "hive/patrol/agent_launch"
 require "hive/permission_scope"
 require "hive/refactor_patrol/agent_identity"
@@ -22,7 +22,7 @@ module Hive
       RAW_FINAL_MESSAGE_BASENAME = "final-message.txt".freeze
 
       def initialize(project_root:, cfg:, state:, dry_run: false, read_only: false,
-                     token_budget: nil)
+                     launch_budget: nil)
         @project_root = project_root
         @cfg = cfg
         @state = state
@@ -31,7 +31,7 @@ module Hive
         @review_identity = Hive::RefactorPatrol::AgentIdentity.new(
           cfg: cfg, project_root: @project_root
         ).review
-        @token_budget = token_budget || Hive::Patrol::TokenBudget.new(@project_root, cfg: cfg)
+        @launch_budget = launch_budget || Hive::Patrol::LaunchBudget.new(@project_root, cfg: cfg)
       end
 
       def call(prompt:, output_path:, run_dir:, timeout_sec: nil, **)
@@ -47,16 +47,16 @@ module Hive
         )
         profile = Hive::AgentProfiles.lookup(@review_identity.provider, cfg: @cfg)
         scope = read_only_scope(profile)
-        launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :review)
-        unless @token_budget.acquire(minimum_tokens: launch.fetch(:minimum_tokens))
-          exhaustion = @token_budget.resource_exhaustion if @token_budget.respond_to?(:resource_exhaustion)
+        launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, role: :review)
+        started_at = Time.now.utc
+        unless @launch_budget.acquire(profile: profile, stage: STAGE, started_at: started_at)
+          exhaustion = @launch_budget.resource_exhaustion if @launch_budget.respond_to?(:resource_exhaustion)
           return {
             status: :error,
-            error_message: @token_budget.exhaustion_message,
+            error_message: @launch_budget.exhaustion_message,
             resource_exhaustion: exhaustion
           }
         end
-        started_at = Time.now.utc
         result = nil
         begin
           result = Hive::Agent.new(
@@ -65,7 +65,6 @@ module Hive
             add_dirs: [ @project_root ],
             cwd: @project_root,
             max_budget_usd: nil,
-            max_tokens: @token_budget.max_tokens,
             max_turns: launch.fetch(:max_turns),
             timeout_sec: effective_timeout(timeout_sec),
             log_label: STAGE,
@@ -81,7 +80,7 @@ module Hive
           end
           result = materialize_read_only_output(result, output_path) if @read_only
         ensure
-          @token_budget.record!(
+          @launch_budget.record!(
             result: result, profile: profile, stage: STAGE, started_at: started_at
           )
         end
@@ -162,9 +161,9 @@ module Hive
       end
 
       # Kept as the runner's narrow recording seam for tests and adapters;
-      # TokenBudget owns the project lock and best-effort usage telemetry.
+      # LaunchBudget owns the project lock and usage-backed daily allowance.
       def record_usage(result, profile, started_at)
-        @token_budget.record!(
+        @launch_budget.record!(
           result: result, profile: profile, stage: STAGE, started_at: started_at
         )
       end

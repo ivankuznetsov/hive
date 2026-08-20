@@ -1338,8 +1338,7 @@ class RefactorPatrolFixerTest < Minitest::Test
       assert_equal Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE,
                    captured.fetch(:permission_mode)
       assert_equal dir, captured.fetch(:cwd)
-      assert_equal Hive::Patrol::TokenBudget::DEFAULT_MAX_TOKENS_PER_AGENT,
-                   captured.fetch(:max_tokens)
+      refute captured.key?(:max_tokens)
       assert_nil captured.fetch(:max_budget_usd)
       assert_equal [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=high" ],
                    captured.fetch(:identity_arguments)
@@ -1347,15 +1346,15 @@ class RefactorPatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_default_agent_runner_refuses_initial_context_above_the_runaway_ceiling
+  def test_default_agent_runner_refuses_an_exhausted_launch_budget
     with_tmp_dir do |dir|
       budget = Object.new
-      budget.define_singleton_method(:acquire) { |minimum_tokens:| minimum_tokens.negative? }
-      budget.define_singleton_method(:exhaustion_message) { "runaway ceiling too small" }
+      budget.define_singleton_method(:acquire) { |**| false }
+      budget.define_singleton_method(:exhaustion_message) { "daily launch limit reached" }
       budget.define_singleton_method(:resource_exhaustion) do
-        { reason: "insufficient_launch_headroom", limit: 10, observed: 20_001 }
+        { reason: "daily_agent_spawn_limit", limit: 8, observed: 8 }
       end
-      subject = Hive::RefactorPatrol::Fixer.new(dir, cfg: cfg(dir), token_budget: budget)
+      subject = Hive::RefactorPatrol::Fixer.new(dir, cfg: cfg(dir), launch_budget: budget)
 
       result = subject.send(
         :run_agent, prompt: "isolate policy", worktree_path: dir,
@@ -1363,9 +1362,9 @@ class RefactorPatrolFixerTest < Minitest::Test
       )
 
       assert_equal :error, result.fetch(:status)
-      assert_equal "runaway ceiling too small", result.fetch(:error_message)
+      assert_equal "daily launch limit reached", result.fetch(:error_message)
       assert_equal(
-        { reason: "insufficient_launch_headroom", limit: 10, observed: 20_001 },
+        { reason: "daily_agent_spawn_limit", limit: 8, observed: 8 },
         result.fetch(:resource_exhaustion)
       )
     end

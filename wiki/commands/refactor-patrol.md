@@ -3,7 +3,7 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-08-14
+updated: 2026-08-20
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
@@ -167,15 +167,18 @@ per child, checkpoints each completed slice, and resumes the remainder in a
 later child. On-demand discovery processes its complete supplied scope under
 the run-wide thesis and wall-clock bounds; it cannot silently report a partial
 scope as complete.
-Before each ordinary or architecture review/fix spawn, one project-wide lock
-serializes the agent lifetime and one deliberately high
-`patrol.max_tokens_per_agent` fuse bounds the child process. There are no
-cycle, daily, launch-count, multiplier, or Patrol-specific USD allowances.
-UsageDb rows remain telemetry and never deny a launch. Ordinary incomplete or
-errored discovery keeps its 60-second retry. A discovery error whose structured
-`resource_exhaustion.reason` is `token_limit` or `turn_limit` is instead a typed
-runaway result: its checkpoint evidence is retained and it shares the fixed
-one-hour cooldown used by actions.
+Before each ordinary or architecture review/fix spawn, Hive writes an
+unmetered reservation under the registered project name, and one lock on that
+same counter serializes the agent lifetime while checking the shared
+mode-derived UTC-day launch allowance (`36/18/8/2` for
+ultrapatrol/high/medium/low). Metered, unmetered, and controller-abandoned
+launches count equally. There are no Patrol token budgets, token admission
+checks, multipliers, or Patrol-specific USD allowances; token totals remain
+telemetry. Ordinary incomplete or errored discovery keeps its 60-second retry.
+A discovery error whose structured `resource_exhaustion.reason` is
+`daily_agent_spawn_limit` waits until the next UTC day. Provider-originated
+`token_limit` or `turn_limit` results retain checkpoint evidence and use the
+fixed one-hour cooldown shared by actions.
 The read-only runner accepts either bare JSON or exactly one `json` code fence.
 Plain-text rationale may precede or follow that single fence, but another fence
 remains invalid so there is only one canonical structured result. The third

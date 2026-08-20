@@ -389,13 +389,13 @@ module Hive
       zero_aggregate
     end
 
-    # Current-day patrol consumption used by the runtime budget gate. Both
-    # ordinary and architecture patrol stages share the same project token
-    # budget, while their durable launch counts remain separate. An
+    # Current-day Patrol activity used by the launch gate and usage surfaces.
+    # Ordinary and Architecture Patrol share the aggregate launch count while
+    # retaining separate attribution fields. An
     # "-unmetered" row represents a real agent launch whose CLI returned no
     # trustworthy positive token totals.
     def patrol_activity(scope:, now: Time.now.utc)
-      # Unlike the read-only TUI aggregate, enforcement deliberately creates
+      # Unlike the read-only TUI aggregate, launch admission deliberately creates
       # the empty store before the first spawn. That distinguishes a genuine
       # zero-usage day from an unavailable store, which must fail closed.
       with_database(create: true) do |db|

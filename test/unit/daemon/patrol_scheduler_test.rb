@@ -472,6 +472,53 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_daily_launch_limit_defers_retry_until_the_next_utc_day
+    with_tmp_dir do |dir|
+      write_state(dir, "last_scanned_sha" => "old")
+      sched = scheduler(project_entry(dir), enabled_cfg)
+      assert_equal 1, sched.tick(now: T0).size
+      envelope = {
+        "review_errors" => [
+          {
+            "details" => {
+              "resource_exhaustion" => {
+                "reason" => "daily_agent_spawn_limit", "limit" => 8, "observed" => 8
+              }
+            }
+          }
+        ]
+      }
+
+      sched.complete(project: "p1", exit_code: 1, envelope: envelope, now: T0 + 10)
+
+      assert_empty sched.tick(now: T0 + 43_199)
+      assert_equal 1, sched.tick(now: T0 + 43_200).size
+    end
+  end
+
+  def test_daily_launch_limit_skips_a_due_command_until_the_next_utc_day
+    old_path = Hive::UsageDb.path
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = File.join(dir, "usage.db")
+      8.times do
+        Hive::UsageDb.record!(
+          agent: "codex", model: nil, project_slug: "p1",
+          task_slug: "patrol-review", stage: "patrol-review",
+          started_at: T0, ended_at: T0, input: 1, output: 1, cached: 0
+        )
+      end
+      write_state(dir, "last_scanned_sha" => "old")
+      sched = scheduler(project_entry(dir), enabled_cfg)
+
+      assert_empty sched.tick(now: T0)
+      assert_equal T0 + 43_200,
+                   sched.instance_variable_get(:@next_check_at).fetch("p1")
+      assert_equal 1, sched.tick(now: T0 + 43_200).size
+    end
+  ensure
+    Hive::UsageDb.path = old_path
+  end
+
   # Finding U2/poll_interval_sec: the new_commits trigger must run its
   # `git rev-parse` due-check on the slow patrol cadence, not every
   # daemon tick. Without the throttle the scheduler shelled out to git on

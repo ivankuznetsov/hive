@@ -6,17 +6,17 @@ require "hive/refactor_patrol/state_store"
 class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
   include HiveTestHelper
 
-  def test_call_refuses_initial_context_above_the_runaway_ceiling
+  def test_call_refuses_an_exhausted_launch_budget
     with_tmp_dir do |dir|
       budget = Object.new
-      budget.define_singleton_method(:acquire) { |minimum_tokens:| minimum_tokens.negative? }
-      budget.define_singleton_method(:exhaustion_message) { "runaway ceiling too small" }
+      budget.define_singleton_method(:acquire) { |**| false }
+      budget.define_singleton_method(:exhaustion_message) { "daily launch limit reached" }
       budget.define_singleton_method(:resource_exhaustion) do
-        { reason: "insufficient_launch_headroom", limit: 10, observed: 20_001 }
+        { reason: "daily_agent_spawn_limit", limit: 8, observed: 8 }
       end
       runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
         project_root: dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
-        token_budget: budget
+        launch_budget: budget
       )
       profile = Struct.new(:name, :initial_context_tokens) do
         def require_cli_capability!(name)
@@ -31,9 +31,9 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
       end
 
       assert_equal :error, result.fetch(:status)
-      assert_equal "runaway ceiling too small", result.fetch(:error_message)
+      assert_equal "daily launch limit reached", result.fetch(:error_message)
       assert_equal(
-        { reason: "insufficient_launch_headroom", limit: 10, observed: 20_001 },
+        { reason: "daily_agent_spawn_limit", limit: 8, observed: 8 },
         result.fetch(:resource_exhaustion)
       )
     end
@@ -69,9 +69,12 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
         Hive::UsageDb.define_singleton_method(:record!, original_record)
       end
 
-      assert_equal 1, records.size
-      assert_equal "claude", records.first.fetch(:agent)
-      assert_equal "refactor-patrol-review", records.first.fetch(:stage)
+      assert_equal 2, records.size
+      reservation, completed = records
+      assert_equal "claude", reservation.fetch(:agent)
+      assert_equal "refactor-patrol-review-unmetered", reservation.fetch(:stage)
+      assert_equal "refactor-patrol-review", completed.fetch(:stage)
+      assert_equal reservation.fetch(:session_id), completed.fetch(:session_id)
     end
   end
 
@@ -128,8 +131,7 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
       end
 
       assert_equal 12.5, captured.fetch(:timeout_sec)
-      assert_equal Hive::Patrol::TokenBudget::DEFAULT_MAX_TOKENS_PER_AGENT,
-                   captured.fetch(:max_tokens)
+      refute captured.key?(:max_tokens)
       assert_nil captured.fetch(:max_budget_usd)
     end
   end
@@ -563,8 +565,8 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
   private
 
   def assert_budget_lock_available(project_root)
-    budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
-    assert budget.acquire,
+    budget = Hive::Patrol::LaunchBudget.new(project_root, cfg: cfg)
+    assert budget.send(:acquire_launch_lock),
            "pre-launch validation must not strand the project patrol lock"
   ensure
     budget&.send(:release_launch_lock)

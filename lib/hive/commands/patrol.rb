@@ -19,7 +19,7 @@ require "hive/patrol/pr_opener"
 require "hive/patrol/reviewer"
 require "hive/patrol/decision_projection"
 require "hive/patrol/state_store"
-require "hive/patrol/token_budget"
+require "hive/patrol/launch_budget"
 require "hive/patrol/validator"
 require "hive/workflows"
 require "hive/worktree"
@@ -138,15 +138,18 @@ module Hive
           )
           state.recover_pending_fingerprint_effects!
         end
-        token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
+        launch_budget = Hive::Patrol::LaunchBudget.new(
+          project_root, cfg: cfg, project_name: entry.fetch("name")
+        )
         dismissed = @dismissals_factory.call(project_root, state).reconcile
         target_sha = sweep_target_sha(project_root, cfg, state)
         features, feature_batch, reviewer, findings = with_scan_checkout(project_root, target_sha) do |scan_root|
           mapped = @mapper_factory.call(scan_root, cfg, state).call
           batch = Hive::Patrol::FeatureBatch.new(cfg: cfg, state: state).call(
-            mapped, target_sha: target_sha
+            mapped, target_sha: target_sha,
+            limit: review_launch_limit(cfg, launch_budget)
           )
-          scan_reviewer = build_reviewer(scan_root, cfg, state, token_budget)
+          scan_reviewer = build_reviewer(scan_root, cfg, state, launch_budget)
           reviewed = stamp_findings(
             scan_reviewer.call(batch.features), scan_root,
             target_sha: target_sha, cfg: cfg
@@ -184,7 +187,7 @@ module Hive
         pr_results = []
         fix_results = []
         unless @dry_run
-          fixer = build_fixer(project_root, cfg, state, token_budget)
+          fixer = build_fixer(project_root, cfg, state, launch_budget)
           pr_opener = if @pr_opener_factory
             @pr_opener_factory.call(project_root, cfg, state)
           else
@@ -438,7 +441,7 @@ module Hive
       def terminal_patrol_exhaustion?(patch)
         exhaustion = patch.validation["resource_exhaustion"] || patch.validation[:resource_exhaustion]
         reason = exhaustion.is_a?(Hash) && (exhaustion["reason"] || exhaustion[:reason]).to_s
-        reason == "token_limit"
+        %w[token_limit daily_agent_spawn_limit].include?(reason)
       end
 
       # A later feature failure must pin that feature, not replay already-clean
@@ -464,16 +467,31 @@ module Hive
         indices
       end
 
-      def build_reviewer(root, cfg, state, token_budget)
+      def build_reviewer(root, cfg, state, launch_budget)
         return @reviewer_factory.call(root, cfg, state) if @reviewer_factory
 
-        Hive::Patrol::Reviewer.new(root, cfg: cfg, state: state, token_budget: token_budget)
+        Hive::Patrol::Reviewer.new(root, cfg: cfg, state: state, launch_budget: launch_budget)
       end
 
-      def build_fixer(root, cfg, state, token_budget)
+      def build_fixer(root, cfg, state, launch_budget)
         return @fixer_factory.call(root, cfg, state) if @fixer_factory
 
-        Hive::Patrol::Fixer.new(root, cfg: cfg, state: state, token_budget: token_budget)
+        Hive::Patrol::Fixer.new(root, cfg: cfg, state: state, launch_budget: launch_budget)
+      end
+
+      # Keep one review moving while reserving the rest of today's allowance
+      # for fixes. Unused fix headroom becomes review capacity on a later
+      # scheduled cycle, so neither side can permanently starve.
+      def review_launch_limit(cfg, launch_budget)
+        remaining = launch_budget.remaining_launches
+        return 0 if remaining.zero?
+        return remaining if @dry_run
+
+        fix_reserve = [
+          cfg.dig("patrol", "max_fix_attempts_per_cycle").to_i,
+          remaining - 1
+        ].min
+        remaining - fix_reserve
       end
 
       def ensure_validation_configured!(cfg)

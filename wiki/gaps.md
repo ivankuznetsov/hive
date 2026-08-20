@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-16
+updated: 2026-08-20
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -719,33 +719,20 @@ recovery, and handoff creation. Until that smoke exists, the checked-in tests
 prove Hive's local state machine and command contracts, not the complete hosted
 provider behavior under real network ambiguity.
 
-## Non-Claude patrol in-flight token enforcement needs live stream fixtures (2026-07-16)
+## Shared Patrol launch ceiling needs installed mixed-lane proof (2026-08-20)
 
-Claude 2.1.179 patrol logs and focused process-group tests prove that nested
-`message_start` usage plus cumulative `message_delta` output can stop a running
-agent at `max_tokens_per_agent`. Codex and Pi terminal totals are parsed, while
-current Grok streaming JSON exposes no counts, but representative live interim
-usage streams for those three profiles have not been captured. Until they are,
-Hive can mark a terminal-total run over-limit but cannot promise an early token
-interrupt for that provider; launch ceilings and wall-clock timeouts remain the
-provider-independent bounds. Capture real streams before adding profile-specific
-interim accounting so cumulative events are not accidentally double-counted.
-
-## Patrol provider-event ceilings remain event-granular (2026-07-16)
-
-Live Claude patrol sampling showed that provider-owned startup context can be
-charged before Hive receives its first measurable usage event. Hive now refuses
-a patrol launch unless the remaining allowance covers Claude's conservative
-20,000-token initial-context reserve plus one token per prompt byte, and a
-four-turn/output-complete boundary prevents an unnecessary follow-up after the
-artifact is written; the fourth turn is emergency finalization only. This
-closes the previously observed unbounded pre-event
-launch and extra-response paths, but it cannot make provider telemetry
-continuous: a single usage event can still cross the configured token ceiling
-before Hive can send TERM. The exact provider context/tokenization is not a
-stable local API, so the reserve is deliberately conservative rather than an
-exact forecast. Recalibrate from captured streams if Claude materially changes
-its headless context or event cadence.
+Focused unit and integration coverage proves that ordinary review/fix and
+Architecture Patrol review/fix count the same metered and unmetered UsageDb
+rows, that the mode derives 36/18/8/2 daily launches, and that daily exhaustion
+backs off to the next UTC day. Fault tests also prove that the pre-spawn
+reservation survives controller loss or a final telemetry-write failure, and
+that matching checkout basenames remain isolated by registered project name.
+The current source has not yet been installed and
+observed across a UTC rollover with both patrol lanes active. Capture one live
+medium project that reaches eight combined launches, emits no ninth provider
+process, sleeps without hot retries, and resumes after rollover. Token totals
+are intentionally telemetry-only, so no provider stream fixtures are required
+for launch admission.
 
 ## Three incident e2e fixtures remain sibling-gated (updated 2026-08-11)
 
@@ -896,6 +883,11 @@ promotion is deliberately explicit/manual.
 Implementation ownership resolves pi from project/home `settings.json` and Grok from project/home `settings.json` or top-level `config.toml`, extracting only provider/model identifiers. Deterministic tests cover those current shapes and ensure PR opening remains unpinned, but neither CLI publishes a Hive-stable config schema. A future upstream path/key change will intentionally fail before execute capture rather than serialize `default` or route to another provider. The next verified CLI upgrade should re-check these read-only paths and update the headless matrix plus fixtures if native configuration moved.
 
 ## Patrol quota-progress fixes need post-release dogfood (2026-07-19)
+
+Historical note: the split ordinary/architecture launch accounting described
+below was superseded on 2026-08-20 by the shared mode-derived daily ceiling.
+The remaining current live-proof requirement is recorded in “Shared Patrol
+launch ceiling needs installed mixed-lane proof” above.
 
 A live medium ordinary-patrol run exposed that the configured 12-feature batch
 could consume its three-launch cycle envelope, report the remaining features as

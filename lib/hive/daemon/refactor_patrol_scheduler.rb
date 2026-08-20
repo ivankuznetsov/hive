@@ -24,6 +24,7 @@ require "hive/refactor_patrol/repository_ownership"
 require "hive/modules/event_publisher"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
+require "hive/patrol/launch_budget"
 require "hive/workflow_package/canonical_json"
 require "hive/workflows"
 
@@ -39,7 +40,7 @@ module Hive
       RUNAWAY_RETRY_BACKOFF_SEC =
         Hive::RefactorPatrol::ActionClaimTransitions::RETRY_BACKOFF_SEC
       DEFERRED_RESOURCE_EXHAUSTION_REASONS = %w[
-        token_limit turn_limit agent_in_flight
+        token_limit turn_limit agent_in_flight daily_agent_spawn_limit
       ].freeze
       ACTION_EFFECT_CAPACITY_RESERVE = 1
       SUPPORTED_REPORT_SCHEMA_VERSIONS = [
@@ -138,6 +139,7 @@ module Hive
           )
         @claim_maintenance_transitions =
           Hive::RefactorPatrol::ClaimMaintenanceTransitions.new
+        @launch_deferred_until = {}
         @events = []
         @schemers = SUPPORTED_REPORT_SCHEMA_VERSIONS.to_h do |version|
           [ version, JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol", version: version))) ]
@@ -162,11 +164,16 @@ module Hive
           unless recover_occurrences(store, entry, now)
             next [ entry.fetch("name"), [] ]
           end
-          discovery = if discovery_available?(entry)
+          claimable = if discovery_available?(entry)
             store.claimable_jobs(
               now: now,
               claim_liveness_resolver: @claim_liveness_resolver
             )
+          else
+            []
+          end
+          discovery = if claimable.any? && discovery_launch_available?(entry, now)
+            claimable
           else
             []
           end
@@ -457,7 +464,7 @@ module Hive
         aggregate = checkpoint_discovery_through_gateway!(
           entry, store, dispatch_token,
           envelope: envelope, now: now,
-          backoff_sec: discovery_retry_backoff_sec(envelope)
+          backoff_sec: discovery_retry_backoff_sec(envelope, now)
         )
         result = completion_result(
           if envelope.fetch("complete")
@@ -615,6 +622,29 @@ module Hive
       def discovery_available?(entry)
         cfg = entry.fetch("_refactor_patrol_cfg")
         cfg.dig("refactor_patrol", "enabled") == true
+      end
+
+      def discovery_launch_available?(entry, now)
+        project = entry.fetch("name")
+        deadline = @launch_deferred_until[project]
+        return false if deadline && now < deadline
+
+        budget = Hive::Patrol::LaunchBudget.new(
+          entry.fetch("path"), cfg: entry.fetch("_refactor_patrol_cfg"),
+          project_name: entry.fetch("name"),
+          clock: -> { now }
+        )
+        if budget.remaining_launches.positive?
+          @launch_deferred_until.delete(project)
+          return true
+        end
+
+        reason = budget.resource_exhaustion&.fetch(:reason, nil)
+        delay = Hive::Patrol::LaunchBudget.resource_exhaustion_backoff_sec(
+          [ reason ].compact, now: now, fallback: RETRY_BACKOFF_SEC
+        )
+        @launch_deferred_until[project] = now + delay
+        false
       end
 
       def result_path_for(entry, job_id, phase)
@@ -909,12 +939,18 @@ module Hive
         phase.to_sym == :action ? RUNAWAY_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
       end
 
-      def discovery_retry_backoff_sec(envelope)
-        deferred = Array(envelope["review_errors"]).any? do |error|
-          reason = error.dig("details", "resource_exhaustion", "reason")
-          DEFERRED_RESOURCE_EXHAUSTION_REASONS.include?(reason)
+      def discovery_retry_backoff_sec(envelope, now)
+        reasons = Array(envelope["review_errors"]).filter_map do |error|
+          error.dig("details", "resource_exhaustion", "reason") if error.is_a?(Hash)
         end
-        deferred ? RUNAWAY_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
+        fallback = if reasons.any? { |reason| DEFERRED_RESOURCE_EXHAUSTION_REASONS.include?(reason) }
+          RUNAWAY_RETRY_BACKOFF_SEC
+        else
+          RETRY_BACKOFF_SEC
+        end
+        Hive::Patrol::LaunchBudget.resource_exhaustion_backoff_sec(
+          reasons, now: now, fallback: fallback
+        )
       end
 
       def valid_report_envelope?(envelope)

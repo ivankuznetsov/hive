@@ -8,6 +8,7 @@ require "hive/modules/event_publisher"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
 require "hive/patrol/decision_projection"
+require "hive/patrol/launch_budget"
 require "hive/patrol/state_store"
 require "hive/workflows"
 
@@ -145,6 +146,7 @@ module Hive
             )
             next
           end
+          next unless launch_capacity_available?(entry, cfg, now)
 
           dispatches << dispatch_for(
             entry,
@@ -243,6 +245,11 @@ module Hive
           interval = FAILURE_BACKOFF_SCHEDULE[
             [ count - 1, FAILURE_BACKOFF_SCHEDULE.size - 1 ].min
           ]
+          interval = Hive::Patrol::LaunchBudget.resource_exhaustion_backoff_sec(
+            patrol_resource_exhaustion_reasons(envelope),
+            now: now,
+            fallback: interval
+          )
           @failures[project] = { count: count, next_eligible_at: now + interval }
         end
       end
@@ -269,6 +276,36 @@ module Hive
       end
 
       private
+
+      def launch_capacity_available?(entry, cfg, now)
+        budget = Hive::Patrol::LaunchBudget.new(
+          entry.fetch("path"), cfg: cfg, project_name: entry.fetch("name"),
+          clock: -> { now }
+        )
+        return true if budget.remaining_launches.positive?
+
+        reason = budget.resource_exhaustion&.fetch(:reason, nil)
+        delay = Hive::Patrol::LaunchBudget.resource_exhaustion_backoff_sec(
+          [ reason ].compact, now: now, fallback: FAILURE_BACKOFF_SCHEDULE.first
+        )
+        @next_check_at[entry.fetch("name")] = now + delay
+        false
+      end
+
+      def patrol_resource_exhaustion_reasons(envelope)
+        return [] unless envelope.is_a?(Hash)
+
+        errors = envelope["review_errors"] || envelope[:review_errors]
+        Array(errors).filter_map do |error|
+          next unless error.is_a?(Hash)
+
+          details = error["details"] || error[:details]
+          exhaustion = details.is_a?(Hash) &&
+                       (details["resource_exhaustion"] || details[:resource_exhaustion])
+          exhaustion.is_a?(Hash) &&
+            (exhaustion["reason"] || exhaustion[:reason]).to_s
+        end
+      end
 
       def backed_off?(project, now)
         deadline = @failures.dig(project, :next_eligible_at)

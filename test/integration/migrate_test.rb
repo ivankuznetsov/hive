@@ -458,7 +458,7 @@ class MigrateTest < Minitest::Test
         migrated_bytes = File.read(cfg_path)
         migrated = YAML.safe_load(migrated_bytes)
         assert_includes migrated_bytes, "# Keep this project comment."
-        assert_equal 1_000_000_000, migrated.dig("patrol", "max_tokens_per_agent")
+        assert_equal 4, migrated.dig("patrol", "max_agent_spawns_per_day")
         Hive::Commands::Migrate::RETIRED_PATROL_CONFIG_KEYS.each do |key|
           refute migrated.fetch("patrol").key?(key), key
         end
@@ -484,8 +484,9 @@ class MigrateTest < Minitest::Test
         File.write(cfg_path, <<~YAML)
           patrol:
             max_tokens_per_day: 200
-            # Keep this with the surviving per-agent fuse.
+            # Token fuse retired; the daily launch ceiling follows.
             max_tokens_per_agent: 1000000000
+            max_agent_spawns_per_day: 11
           refactor_patrol:
             enabled: false
             min_leverage_score: 0.10
@@ -503,7 +504,7 @@ class MigrateTest < Minitest::Test
         capture_io { migrate_command(dir, daemon_restarter: -> { }).call }
 
         migrated = File.read(cfg_path)
-        assert_includes migrated, "# Keep this with the surviving per-agent fuse."
+        assert_includes migrated, "# Token fuse retired; the daily launch ceiling follows."
         assert_includes migrated, "# Keep this with the surviving whole-run deadline."
         assert_includes migrated, "# Keep this with the following top-level section."
       end
@@ -554,7 +555,8 @@ class MigrateTest < Minitest::Test
         File.write(
           cfg_path,
           before +
-          "patrol: {mode: off, max_tokens_per_day: 2, max_tokens_per_agent: 1000000000}\n" +
+          "patrol: {mode: off, max_tokens_per_day: 2, max_tokens_per_agent: 1000000000, " \
+          "max_agent_spawns_per_day: 12}\n" +
           between +
           "refactor_patrol: {enabled: false, min_leverage_score: 0.1, " \
           "issue_filing: {enabled: false, min_leverage_score: 0.25}, " \
@@ -570,7 +572,8 @@ class MigrateTest < Minitest::Test
         assert migrated_bytes.start_with?(before)
         assert_includes migrated_bytes, between
         assert migrated_bytes.end_with?(after)
-        assert_equal 1_000_000_000, migrated.dig("patrol", "max_tokens_per_agent")
+        assert_equal 12, migrated.dig("patrol", "max_agent_spawns_per_day")
+        refute migrated.fetch("patrol").key?("max_tokens_per_agent")
         refute migrated.fetch("patrol").key?("max_tokens_per_day")
         refute migrated.fetch("refactor_patrol").key?("min_leverage_score")
         refute migrated.fetch("refactor_patrol").key?("leverage")
@@ -686,13 +689,14 @@ class MigrateTest < Minitest::Test
               100
               # An old operator note must be retired with the value.
               200
-            max_agent_spawns_per_day:
+            max_agent_spawns_per_cycle:
               - 3
               - 4
             max_budget_usd_per_agent: >
               7
               dollars
             max_tokens_per_agent: 1000000000
+            max_agent_spawns_per_day: 4
           refactor_patrol:
             enabled: false
         YAML
@@ -702,7 +706,7 @@ class MigrateTest < Minitest::Test
         migrated_bytes = File.read(cfg_path)
         migrated = YAML.safe_load(migrated_bytes)
         assert_equal false, migrated.dig("patrol", "mode")
-        assert_equal 1_000_000_000, migrated.dig("patrol", "max_tokens_per_agent")
+        assert_equal 4, migrated.dig("patrol", "max_agent_spawns_per_day")
         Hive::Commands::Migrate::RETIRED_PATROL_CONFIG_KEYS.each do |key|
           refute migrated.fetch("patrol").key?(key), key
         end

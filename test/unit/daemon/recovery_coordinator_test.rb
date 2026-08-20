@@ -682,6 +682,43 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  # Marker repair runs on every daemon tick against on-disk state that may be
+  # mid-write or gone. A raise here would abort the whole delivery
+  # reconciliation loop, so the repair fails closed and leaves the request for
+  # the next tick instead.
+  def test_failed_terminal_repair_fails_closed_when_marker_state_is_unreadable
+    with_fixture do |coordinator, row, state_home|
+      coordinator.request(
+        row: row, requestor: "healer", request_id: "recover-unreadable-marker",
+        now: NOW
+      )
+      admitted = Q.fetch("recover-unreadable-marker", state_home: state_home)
+      coordinator.resume(request: admitted, row: row, now: NOW)
+      cleared = Q.fetch("recover-unreadable-marker", state_home: state_home)
+      coordinator.mark_dispatched(cleared, attempt_id: "attempt-failed", now: NOW)
+      dispatched = Q.fetch("recover-unreadable-marker", state_home: state_home)
+      coordinator.mark_dispatched(
+        dispatched, attempt_id: "attempt-failed", terminal: true,
+        outcome: "failed", now: NOW + 1
+      )
+      terminal = Q.fetch("recover-unreadable-marker", state_home: state_home)
+
+      repaired = with_replaced_singleton_method(
+        Hive::Markers, :current,
+        ->(_state_file) { raise Hive::Error, "marker read failed" }
+      ) do
+        coordinator.repair_failed_terminal_marker(terminal)
+      end
+
+      refute repaired, "an unreadable marker must not report a repair"
+      assert_predicate Hive::Markers.current(row.state_file), :none?,
+                       "failing closed must leave the task markerless for the next tick"
+
+      assert coordinator.repair_failed_terminal_marker(terminal),
+             "a later tick must still be able to repair the marker"
+    end
+  end
+
   def test_receipt_helper_fails_closed_for_unknown_requests
     request = Q::Request.new(
       request_id: "unknown-phase",

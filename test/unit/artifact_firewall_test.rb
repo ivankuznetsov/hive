@@ -812,23 +812,55 @@ class ArtifactFirewallTest < Minitest::Test
     end
   end
 
-  def test_protected_anchor_custody_set_rejects_unbounded_or_output_manifests
+  def test_protected_anchor_custody_set_rejects_empty_and_non_manifest_entries
     with_tmp_dir do |dir|
-      manifest = build_manifest(dir)
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        Hive::ArtifactFirewall::ProtectedAnchorCustodySet.new([])
+      end
+      assert_includes error.message, "at least one manifest"
+
       error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
         Hive::ArtifactFirewall::ProtectedAnchorCustodySet.new(
-          Array.new(Hive::ArtifactFirewall::MAX_CUSTODY_MANIFESTS + 1, manifest)
+          [ build_manifest(dir), { root: dir, protected_anchors: {} } ]
         )
       end
-      assert_includes error.message, "exceeds"
+      assert_includes error.message, "entries must be manifests"
+    end
+  end
 
-      output_manifest = build_manifest(
-        dir, outputs: { "result" => File.join(dir, "result.json") }
-      )
-      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
-        Hive::ArtifactFirewall::ProtectedAnchorCustodySet.new([ output_manifest ])
+  # A custody set fans one untrusted call across several manifests, so the
+  # combined report has to surface *why* a restore was refused -- not just
+  # that it was. Aggregate every per-manifest diagnostic so the caller can
+  # log the parent-substitution reason instead of a bare `restored? == false`.
+  def test_protected_anchor_custody_set_report_aggregates_restore_diagnostics
+    with_tmp_dir do |dir|
+      clean = File.join(dir, "clean")
+      File.write(clean, "clean before\n")
+      parent = File.join(dir, "controller")
+      original_parent = File.join(dir, "controller-original")
+      outside = File.join(dir, "outside")
+      FileUtils.mkdir_p([ parent, outside ])
+      File.write(File.join(parent, "anchor"), "trusted\n")
+      File.write(File.join(outside, "anchor"), "outside must survive\n")
+      custody = Hive::ArtifactFirewall::ProtectedAnchorCustodySet.new([
+        build_manifest(dir, protected: { "clean" => clean }),
+        build_manifest(dir, protected: { "anchor" => File.join(parent, "anchor") })
+      ])
+
+      custody.call do
+        File.rename(parent, original_parent)
+        File.symlink(outside, parent)
+        :provider_result
       end
-      assert_includes error.message, "does not accept required outputs"
+
+      assert custody.report.tampered?
+      assert_includes custody.report.tampered_labels, "anchor"
+      assert_equal false, custody.report.restored?
+      assert_includes custody.report.restore_diagnostic, "parent substitution"
+      refute custody.safe_after?,
+             "a refused restore must not report the call as safe"
+      assert_equal "outside must survive\n", File.read(File.join(outside, "anchor"))
+      assert_equal "clean before\n", File.read(clean)
     end
   end
 

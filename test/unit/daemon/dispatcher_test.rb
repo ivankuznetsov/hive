@@ -307,7 +307,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   class FakeRecoveryCoordinator
     attr_reader :resumes, :deferred, :marked, :admission_failures,
                 :admission_observations, :terminal_repairs
-    attr_accessor :defer_error
+    attr_accessor :defer_error, :terminal_repair_result
 
     def initialize(status: "blocked")
       @status = status
@@ -318,6 +318,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @admission_observations = []
       @terminal_repairs = []
       @defer_error = nil
+      @terminal_repair_result = false
     end
 
     def assessment(row, now:)
@@ -371,7 +372,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     def repair_failed_terminal_marker(request, refresh: true)
       @terminal_repairs << { request_id: request.request_id, refresh: refresh }
-      false
+      @terminal_repair_result
     end
 
     def request_admission_failure(request:, decision:, now:)
@@ -5710,6 +5711,46 @@ end
 
     assert_equal [ { request_id: "recovery-markerless", refresh: false } ],
                  coordinator.terminal_repairs
+  end
+
+  # Healing a markerless failed recovery is the only signal an operator gets
+  # that the attempt died without writing its own marker. Silence here reads
+  # as "nothing happened" while the task quietly moves back to retry.
+  def test_repaired_terminal_recovery_marker_is_logged_as_healed
+    request = Q::Request.new(
+      request_id: "recovery-healed", created_at: T0,
+      project: "p1", slug: "demo-task",
+      argv: %w[hive run demo-task], requestor: "healer", chat_id: nil,
+      expected_stage: "4-execute",
+      recovery: dispatcher_recovery(phase: "terminal").merge(
+        "attempt_id" => "attempt-failed",
+        "terminal_outcome" => "failed",
+        "terminal_at" => T0.iso8601(6)
+      )
+    )
+    delivery = Q::ClaimedDelivery.new(
+      request: request, claim: { "attempt_id" => "attempt-failed" }, path: "/claim"
+    )
+    coordinator = FakeRecoveryCoordinator.new
+    coordinator.terminal_repair_result = true
+    dispatcher, _sup, _ctrl, logger = make_dispatcher(
+      rows: [], attempt_reconciler: Object.new,
+      recovery_coordinator: coordinator
+    )
+
+    with_replaced_singleton_method(Q, :claimed, ->(**_kwargs) { [ delivery ] }) do
+      dispatcher.send(:reconcile_attempt_deliveries, now: T0)
+    end
+
+    assert events_include?(logger, :marker_healed),
+           "a repaired terminal marker must be observable; events=#{logger.events.inspect}"
+    attrs = logger.events.find { |(name, _)| name == :marker_healed }[1]
+    assert_equal "recovery_attempt_failed", attrs[:reason]
+    assert_equal "attempt-failed", attrs[:attempt_id]
+    assert_equal "recovery-healed", attrs[:request_id]
+    assert_equal "4-execute", attrs[:stage]
+    assert_equal "p1", attrs[:project]
+    assert_equal "demo-task", attrs[:slug]
   end
 
   def test_terminal_attempt_reconciliation_closes_the_durable_recovery_receipt

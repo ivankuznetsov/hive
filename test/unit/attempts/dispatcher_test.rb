@@ -92,6 +92,41 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  # The review projection is the plan-review progress token's only moving
+  # part, so an absent or unreadable current.json must still yield a stable,
+  # distinct token. Failing closed to the artifact token would make a
+  # markerless review replay forever; raising would strand the dispatch.
+  def test_plan_review_progress_token_survives_missing_and_unreadable_projection
+    with_dispatcher do |dispatcher, _launcher, task|
+      task.folder = File.dirname(task.state_file)
+      review_argv = [ "hive", "plan-review-run", task.slug ]
+      base = dispatcher.send(:command_progress_token, [ "hive", "run", task.slug ], task)
+
+      missing = dispatcher.send(:command_progress_token, review_argv, task)
+
+      assert_equal missing, dispatcher.send(:command_progress_token, review_argv, task),
+                   "a missing projection must hash deterministically"
+      refute_equal base, missing,
+                   "the review token must not collapse onto the artifact token"
+
+      # A directory in place of current.json raises EISDIR -- a SystemCallError
+      # the ENOENT/ENOTDIR guard deliberately does not swallow.
+      FileUtils.mkdir_p(
+        File.join(
+          task.folder, Hive::PlanReview::Store::ROOT_BASENAME,
+          Hive::PlanReview::Store::CURRENT_BASENAME
+        )
+      )
+
+      unreadable = dispatcher.send(:command_progress_token, review_argv, task)
+
+      assert_equal unreadable, dispatcher.send(:command_progress_token, review_argv, task),
+                   "an unreadable projection must hash deterministically"
+      refute_equal missing, unreadable
+      refute_equal base, unreadable
+    end
+  end
+
   def test_launch_context_is_captured_after_attempt_creation_and_before_handoff
     events = []
     provenance = Object.new

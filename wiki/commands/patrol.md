@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-08-14
+updated: 2026-08-20
 tags: [command, patrol, review, pr, json]
 ---
 
@@ -44,7 +44,7 @@ patrol:
   max_fixes_per_feature_per_cycle: 1
   max_fix_attempts_per_cycle: 6
   max_prs_per_cycle: 3
-  max_tokens_per_agent: 100000000 # optional emergency fuse for any Patrol child
+  max_agent_spawns_per_day: 8 # optional override; medium already derives 8
   draft_prs: false   # default: open ready PRs (the babysitter skips drafts). Set true to open draft PRs.
   review_prs: true    # default: enqueue each opened patrol PR into 6-review as "Patrol: ..."
   review:
@@ -65,17 +65,24 @@ patrol:
 - `new_commits` runs only when the default branch SHA differs from `last_scanned_sha`.
 - `timer` runs whenever `last_run_at` is older than `poll_interval_sec`.
 
-`patrol.mode` controls cadence only. One deliberately high
-`max_tokens_per_agent` value applies equally to ordinary review/fix and
-architecture review/fix as an emergency streamed-token fuse. There are no
-Patrol cycle/day token quotas, launch-count quotas, multipliers, or native USD
-allowance. UsageDb still records metered and unmetered launches as telemetry,
-but telemetry cannot refuse future work. One project-wide advisory lock is held
-for the complete lifetime of each Patrol agent so ordinary and architecture
-workers cannot mutate the same project concurrently; a competing launch returns
-`agent_in_flight`. Wall-clock timeouts, Claude's four-turn review boundary,
-feature/fix/PR output caps, and daemon concurrency remain the normal runaway
-guards.
+`patrol.mode` controls cadence and a shared project-wide UTC-day agent-launch
+ceiling: `ultrapatrol=36`, `high=18`, `medium=8`, and `low=2`. An explicit
+`max_agent_spawns_per_day` overrides the mode-derived value and must be at
+least 2 so review work cannot permanently consume every fix slot. Ordinary review,
+ordinary fix, Architecture Patrol review, and Architecture Patrol fix all
+consume the same allowance; metered and unmetered launches count equally.
+There are no Patrol token budgets or token-based admission checks. UsageDb
+still records token totals as telemetry and supplies the durable launch count.
+Before each provider child starts, Hive persists an unmetered reservation under
+the registered project name and holds that counter's advisory lock for the
+complete agent lifetime. Ordinary and architecture workers therefore cannot
+race the same remaining slot, controller crashes still consume their launch,
+and projects with matching checkout basenames remain independent. A competing
+launch returns `agent_in_flight`. Reaching the daily limit
+returns `daily_agent_spawn_limit`, and daemon retries wait until the next UTC
+day instead of hot-looping. Wall-clock timeouts, Claude's four-turn review
+boundary, feature/fix/PR output caps, and daemon concurrency remain the normal
+runaway guards.
 
 ## Steps
 

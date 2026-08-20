@@ -32,7 +32,7 @@ module Hive
 
       def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil, dry_run: false,
                      source_pr: nil, read_only: false, monotonic_clock: nil,
-                     token_budget: nil, audit_context: nil)
+                     launch_budget: nil, audit_context: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
@@ -45,7 +45,7 @@ module Hive
                         ReviewAgentRunner.new(
                           project_root: @project_root, cfg: cfg, state: state,
                           dry_run: dry_run, read_only: read_only,
-                          token_budget: token_budget
+                          launch_budget: launch_budget
                         )
         @review_errors = []
         @feature_results = []
@@ -176,8 +176,8 @@ module Hive
       end
 
       # Evidence validation uses the complete mapped component. The model gets
-      # a smaller initial view so a wide component does not spend its
-      # architecture allowance reading every file
+      # a smaller initial view so a wide component does not spend its review
+      # turn reading every file
       # before it can form a hypothesis; its bounded follow-up can request a
       # direct dependency when the initial evidence warrants one.
       def bounded_prompt_feature(feature)

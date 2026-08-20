@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-08-14
+updated: 2026-08-20
 tags: [decisions, adr, plan-review]
 ---
 
@@ -763,35 +763,43 @@ status returns to its released v0.6.9 v1 shape without `job_store_resets`, while
 retaining later valid fields such as the `binary_drift: unreadable` state. This
 decision supersedes ADR-041.
 
-## ADR-043: Architecture Patrol uses categorical routes and one runaway fuse
+## ADR-043: Architecture Patrol uses categorical routes and one daily launch allowance
 
 **Status:** Active
 
 **Context:** The v3 Architecture Patrol contract assigned numerical leverage
 scores and separate acceptance/issue thresholds, while Patrol admission mixed
 per-cycle, per-day, per-agent, launch-count, architecture, unmetered, multiplier,
-and USD-style limits. Useful findings around 0.10 were incorrectly presented as
-low-confidence work, and durable allowance exhaustion prevented normal
-discovery/action progress.
+and USD-style limits. Removing every launch boundary later allowed ordinary and
+Architecture Patrol to dispatch hundreds of provider-rejected attempts in a
+day. Useful findings around 0.10 were also incorrectly presented as
+low-confidence work.
 
 **Decision:** Current Architecture Patrol output is v4 and every thesis has one
 explicit `fix`, `discuss`, or `dismiss` route plus categorical route reasons and
 `architecture_effects`. Verified, sufficiently confident, unblocked work may
 `fix`; strategic or safety decisions `discuss`; unverifiable or inadmissible
 work `dismiss`es. Numerical leverage and thresholds are deleted. Ordinary and
-Architecture Patrol share exactly one deliberately high
-`patrol.max_tokens_per_agent` emergency fuse and one project-wide agent lock;
-UsageDb is telemetry, not allowance. Architecture JobStore starts fresh at v4
-and never reads or rewrites v3. `hive update` runs fleet migration that deletes
-retired config keys before starting the current runtime.
+Architecture Patrol share one project-wide agent lock and one mode-derived
+UTC-day launch allowance: 36/18/8/2 for ultrapatrol/high/medium/low. Metered and
+unmetered review/fix launches count equally. Hive writes an unmetered
+reservation under the registered project name before the provider child starts
+and updates the same row on completion, so controller loss does not reopen the
+slot and same-basename projects remain independent. Explicit overrides must be
+at least 2 so review cannot permanently starve fix work. Token totals are telemetry only;
+there is no Patrol token budget or token-based admission. Architecture JobStore
+starts fresh at v4 and never reads or rewrites v3. `hive update` runs fleet
+migration that deletes retired token/per-cycle/specialized quota keys while
+preserving an explicit `max_agent_spawns_per_day` override.
 
 **Consequences:** Existing v3 JobStore bytes remain recoverable as files but
 have no runtime continuity. `discuss` creates an issue action; `fix` is PR-first
 with a dormant deterministic-nonfixable issue fallback; `dismiss` creates no
-action. Ordinary transient discovery retries after 60 seconds; structured
-`token_limit`/`turn_limit` discovery and action retries use one fixed hour.
-Wall-clock, turn, feature/fix/PR, process-custody, and daemon concurrency bounds
-remain. This decision supersedes ADR-042.
+action. Ordinary transient discovery retries after 60 seconds; provider
+`token_limit`/`turn_limit` discovery and action retries use one fixed hour;
+Hive daily launch exhaustion sleeps until the next UTC day. Wall-clock, turn,
+feature/fix/PR, process-custody, and daemon concurrency bounds remain. This
+decision supersedes ADR-042.
 
 ## ADR-032: Per-stage controls overlay the current durable identity
 

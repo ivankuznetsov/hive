@@ -869,7 +869,7 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_review_batch_uses_feature_limit_without_reserving_fix_capacity
+  def test_review_batch_reserves_daily_launch_capacity_for_fixes
     with_patrol_project do |repo|
       cfg_path = File.join(repo, ".hive-state", "config.yml")
       cfg = YAML.safe_load_file(cfg_path, aliases: true)
@@ -889,17 +889,17 @@ class PatrolCommandTest < Minitest::Test
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, status
-      assert_equal 7, reviewer.features.size
-      assert_equal 7, JSON.parse(out).fetch("features_review_attempted")
+      assert_equal 5, reviewer.features.size
+      assert_equal 5, JSON.parse(out).fetch("features_review_attempted")
     end
   end
 
-  def test_review_batch_ignores_usage_telemetry_when_selecting_features
+  def test_review_batch_respects_shared_daily_launch_usage
     with_patrol_project do |repo|
       now = Time.now.utc
       6.times do
         Hive::UsageDb.record!(
-          agent: "codex", model: nil, project_slug: File.basename(repo),
+          agent: "codex", model: nil, project_slug: "demo",
           task_slug: "patrol-review", stage: "patrol-review",
           started_at: now, ended_at: now, input: 1, output: 0, cached: 0
         )
@@ -917,8 +917,8 @@ class PatrolCommandTest < Minitest::Test
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, status
-      assert_equal features.map(&:id), reviewer.features.map(&:id)
-      assert_equal 12, JSON.parse(out).fetch("features_review_attempted")
+      assert_equal [ "feature-01" ], reviewer.features.map(&:id)
+      assert_equal 1, JSON.parse(out).fetch("features_review_attempted")
     end
   end
 
@@ -952,7 +952,7 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_default_reviewer_and_fixer_builders_receive_the_shared_budget
+  def test_default_reviewer_and_fixer_builders_receive_the_shared_launch_budget
     with_patrol_project do |repo|
       cfg = Hive::Config.load(repo)
       state = Hive::Patrol::StateStore.new(repo)
@@ -964,9 +964,27 @@ class PatrolCommandTest < Minitest::Test
 
       assert_instance_of Hive::Patrol::Reviewer, reviewer
       assert_instance_of Hive::Patrol::Fixer, fixer
-      assert_same budget, reviewer.instance_variable_get(:@token_budget)
-      assert_same budget, fixer.instance_variable_get(:@token_budget)
+      assert_same budget, reviewer.instance_variable_get(:@launch_budget)
+      assert_same budget, fixer.instance_variable_get(:@launch_budget)
     end
+  end
+
+  def test_review_batch_reserves_daily_launches_for_fixes
+    cfg = { "patrol" => { "max_fix_attempts_per_cycle" => 6 } }
+    budget = Object.new
+    budget.define_singleton_method(:remaining_launches) { 8 }
+
+    assert_equal 2, Hive::Commands::Patrol.new("demo").send(
+      :review_launch_limit, cfg, budget
+    )
+    assert_equal 8, Hive::Commands::Patrol.new("demo", dry_run: true).send(
+      :review_launch_limit, cfg, budget
+    )
+
+    budget.define_singleton_method(:remaining_launches) { 0 }
+    assert_equal 0, Hive::Commands::Patrol.new("demo").send(
+      :review_launch_limit, cfg, budget
+    )
   end
 
   # max_prs_per_cycle caps PRs *opened*, not fix candidates: a failed

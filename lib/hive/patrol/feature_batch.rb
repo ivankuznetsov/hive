@@ -39,7 +39,7 @@ module Hive
       end
 
       def effective_limit(runtime_limit)
-        return limit unless runtime_limit.is_a?(Integer) && runtime_limit.positive?
+        return limit unless runtime_limit.is_a?(Integer) && runtime_limit >= 0
 
         [ limit, runtime_limit ].min
       end

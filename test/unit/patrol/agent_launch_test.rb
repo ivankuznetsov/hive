@@ -2,7 +2,7 @@ require "test_helper"
 require "hive/patrol/agent_launch"
 
 class PatrolAgentLaunchTest < Minitest::Test
-  def test_claude_patrol_launch_disables_customizations_and_reserves_initial_context
+  def test_claude_patrol_launch_disables_customizations_and_bounds_review_turns
     profile = Struct.new(:name, :initial_context_tokens) do
       def require_cli_capability!(name)
         raise "unexpected capability #{name.inspect}" unless name == :patrol_review_context
@@ -11,20 +11,20 @@ class PatrolAgentLaunchTest < Minitest::Test
       end
     end.new(:claude, 8_000)
 
-    launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: "review this", role: :review)
+    launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, role: :review)
 
     assert_equal [ "--safe-mode", "--disable-slash-commands" ], launch.fetch(:cli_flags)
-    assert_equal 8_011, launch.fetch(:minimum_tokens)
+    refute launch.key?(:minimum_tokens)
     assert_equal 4, launch.fetch(:max_turns)
   end
 
-  def test_non_claude_patrol_launch_reserves_prompt_without_claude_flags
+  def test_non_claude_patrol_launch_has_no_token_estimate_or_claude_flags
     profile = Struct.new(:name, :initial_context_tokens).new(:codex, 0)
 
-    launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: "é", role: :fix)
+    launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, role: :fix)
 
     assert_empty launch.fetch(:cli_flags)
-    assert_equal 2, launch.fetch(:minimum_tokens)
+    refute launch.key?(:minimum_tokens)
     assert_nil launch.fetch(:max_turns)
   end
 
@@ -43,7 +43,6 @@ class PatrolAgentLaunchTest < Minitest::Test
 
     launch = Hive::Patrol::AgentLaunch.prepare(
       profile: profile,
-      prompt: "review this",
       role: :review,
       cfg: cfg,
       routing_arguments: nil
@@ -68,7 +67,6 @@ class PatrolAgentLaunchTest < Minitest::Test
 
     launch = Hive::Patrol::AgentLaunch.prepare(
       profile: profile,
-      prompt: "review this",
       role: :review,
       cfg: cfg,
       routing_arguments: route

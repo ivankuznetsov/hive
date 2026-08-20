@@ -501,11 +501,10 @@ module Hive
         "max_fixes_per_feature_per_cycle" => 1,
         "max_fix_attempts_per_cycle" => 6,
         "max_prs_per_cycle" => 3,
-        # One deliberately high per-agent fuse stops a genuinely runaway child
-        # without turning normal Patrol work into daily/cycle allowance math.
-        # Provider quotas and the existing wall-clock/process-custody bounds
-        # remain independent safety fences.
-        "max_tokens_per_agent" => 100_000_000,
+        # Shared by ordinary and Architecture Patrol. Modes derive a concrete
+        # UTC-day allowance when explicitly selected; medium is the fallback
+        # for direct/synthetic configs and architecture-only projects.
+        "max_agent_spawns_per_day" => 8,
         # Open ready (non-draft) PRs by default so the babysitter — which
         # skips draft PRs — picks them up. Set `draft_prs: true` per project
         # to revert to draft PRs that need a manual "ready" toggle first.
@@ -1113,7 +1112,7 @@ module Hive
       return unless PATROL_MODES.include?(mode)
 
       PATROL_MODE_KNOBS.fetch(mode).each do |key, value|
-        patrol[key] = value unless nested_key?(data, "patrol", key)
+        patrol[key] = value if !nested_key?(data, "patrol", key) || patrol[key].nil?
       end
       patrol["mode"] = mode
     end
@@ -3497,20 +3496,24 @@ module Hive
       "ultrapatrol" => {
         "trigger" => "timer",
         "poll_interval_sec" => 1800,
+        "max_agent_spawns_per_day" => 36,
         "enabled" => true
       },
       "high" => {
         "trigger" => "timer",
         "poll_interval_sec" => 7200,
+        "max_agent_spawns_per_day" => 18,
         "enabled" => true
       },
       "medium" => {
         "trigger" => "timer",
         "poll_interval_sec" => 14_400,
+        "max_agent_spawns_per_day" => 8,
         "enabled" => true
       },
       "low" => {
         "trigger" => "new_commits",
+        "max_agent_spawns_per_day" => 2,
         "enabled" => true
       },
       "off" => {
@@ -3526,7 +3529,7 @@ module Hive
       [ "max_fixes_per_feature_per_cycle", 1 ],
       [ "max_fix_attempts_per_cycle", 1 ],
       [ "max_prs_per_cycle", 1 ],
-      [ "max_tokens_per_agent", 1 ]
+      [ "max_agent_spawns_per_day", 2 ]
     ].freeze
 
     def validate_patrol!(cfg, source_path)

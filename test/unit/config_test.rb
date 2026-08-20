@@ -975,7 +975,7 @@ class ConfigTest < Minitest::Test
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
         patrol:
           mode: off
-          max_tokens_per_agent: 1000000000
+          max_agent_spawns_per_day: 11
         refactor_patrol:
           enabled: true
           auto_fix:
@@ -994,7 +994,7 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
 
       assert_equal false, cfg.dig("patrol", "enabled")
-      assert_equal 1_000_000_000, cfg.dig("patrol", "max_tokens_per_agent")
+      assert_equal 11, cfg.dig("patrol", "max_agent_spawns_per_day")
       assert_equal true, cfg.dig("refactor_patrol", "enabled")
       assert_equal true, cfg.dig("refactor_patrol", "auto_fix", "enabled")
       assert_equal "codex", cfg.dig("refactor_patrol", "auto_fix", "agent")
@@ -1306,14 +1306,14 @@ class ConfigTest < Minitest::Test
 
   def test_load_resolves_patrol_frequency_modes
     cases = {
-      "ultrapatrol" => [ "timer", 1800, true ],
-      "high" => [ "timer", 7200, true ],
-      "medium" => [ "timer", 14_400, true ],
-      "low" => [ "new_commits", 600, true ],
-      "off" => [ "continuous", 600, false ]
+      "ultrapatrol" => [ "timer", 1800, true, 36 ],
+      "high" => [ "timer", 7200, true, 18 ],
+      "medium" => [ "timer", 14_400, true, 8 ],
+      "low" => [ "new_commits", 600, true, 2 ],
+      "off" => [ "continuous", 600, false, 8 ]
     }
 
-    cases.each do |mode, (trigger, poll_interval_sec, enabled)|
+    cases.each do |mode, (trigger, poll_interval_sec, enabled, max_spawns)|
       with_tmp_dir do |dir|
         FileUtils.mkdir_p(File.join(dir, ".hive-state"))
         File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
@@ -1337,7 +1337,8 @@ class ConfigTest < Minitest::Test
                      "#{mode} must not change the PR cap"
         assert_equal 6, cfg.dig("patrol", "max_fix_attempts_per_cycle"),
                      "#{mode} must not change the fix-attempt cap"
-        assert_equal 100_000_000, cfg.dig("patrol", "max_tokens_per_agent")
+        assert_equal max_spawns, cfg.dig("patrol", "max_agent_spawns_per_day")
+        refute cfg.fetch("patrol").key?("max_tokens_per_agent")
         assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix"),
                      "#{mode} must not change the confidence gate"
       end
@@ -1351,6 +1352,7 @@ class ConfigTest < Minitest::Test
         patrol:
           mode: medium
           poll_interval_sec: 600
+          max_agent_spawns_per_day: 13
       YAML
 
       cfg = Hive::Config.load(dir)
@@ -1359,6 +1361,23 @@ class ConfigTest < Minitest::Test
       assert_equal true, cfg.dig("patrol", "enabled")
       assert_equal "timer", cfg.dig("patrol", "trigger")
       assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
+      assert_equal 13, cfg.dig("patrol", "max_agent_spawns_per_day")
+    end
+  end
+
+  def test_load_treats_null_patrol_knob_as_unset_for_selected_mode
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        patrol:
+          mode: high
+          max_agent_spawns_per_day:
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "high", cfg.dig("patrol", "mode")
+      assert_equal 18, cfg.dig("patrol", "max_agent_spawns_per_day")
     end
   end
 
@@ -1448,7 +1467,8 @@ class ConfigTest < Minitest::Test
       "max_features_per_cycle: 0",
       "max_fixes_per_feature_per_cycle: 0",
       "max_fix_attempts_per_cycle: 0",
-      "max_tokens_per_agent: 0",
+      "max_agent_spawns_per_day: 1",
+      "max_agent_spawns_per_day: 0",
       "poll_interval_sec: 30",
       "commands: []",
       "commands:\n    test: ''",

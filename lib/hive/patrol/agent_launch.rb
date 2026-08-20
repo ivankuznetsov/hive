@@ -3,22 +3,20 @@ require "hive/config"
 
 module Hive
   module Patrol
-    # Builds the provider-specific safety envelope used by every patrol spawn.
-    # The explicit prompt is charged at one token per byte, a conservative
-    # upper bound for byte-level tokenizers, before the provider receives it.
+    # Builds the provider-specific context and turn envelope used by every
+    # Patrol spawn. Launch admission is count-based and does not inspect token
+    # estimates or streamed token totals.
     module AgentLaunch
       module_function
 
-      def prepare(profile:, prompt:, role:, cfg: nil,
+      def prepare(profile:, role:, cfg: nil,
                   routing_arguments: nil)
-        initial_context = profile.respond_to?(:initial_context_tokens) ? profile.initial_context_tokens : 0
         cli_flags = minimal_context_flags(profile, role)
         if claude?(profile) && cfg && routing_arguments.nil?
           cli_flags.concat(Hive::Config.claude_cli_flags(cfg))
         end
         {
           cli_flags: cli_flags,
-          minimum_tokens: initial_context + prompt.to_s.bytesize,
           max_turns: review_turn_limit(profile, role)
         }
       end

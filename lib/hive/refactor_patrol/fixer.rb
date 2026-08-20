@@ -5,7 +5,7 @@ require "hive/agent"
 require "hive/agent_profiles"
 require "hive/patrol/architecture_mapper"
 require "hive/patrol/runner_task"
-require "hive/patrol/token_budget"
+require "hive/patrol/launch_budget"
 require "hive/patrol/agent_launch"
 require "hive/patrol/validator"
 require "hive/refactor_patrol/caps"
@@ -48,7 +48,7 @@ module Hive
 
       def initialize(project_root, cfg:, worktree_factory: nil, agent_runner: nil,
                      validator_factory: nil, public_contract_guard: Caps,
-                     clock: nil, token_budget: nil)
+                     clock: nil, launch_budget: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @worktree_factory = worktree_factory || method(:build_worktree)
@@ -58,7 +58,7 @@ module Hive
           Hive::Patrol::Validator.new(commands, timeout_sec: validation_timeout)
         end
         @public_contract_guard = public_contract_guard
-        @token_budget = token_budget || Hive::Patrol::TokenBudget.new(@project_root, cfg: cfg)
+        @launch_budget = launch_budget || Hive::Patrol::LaunchBudget.new(@project_root, cfg: cfg)
         @fix_identity = Hive::RefactorPatrol::AgentIdentity.new(
           cfg: cfg, project_root: @project_root
         ).fix unless agent_runner
@@ -530,23 +530,22 @@ module Hive
           slug: STAGE
         )
         profile = fix_profile
-        launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :fix)
-        unless @token_budget.acquire(minimum_tokens: launch.fetch(:minimum_tokens))
-          exhaustion = @token_budget.resource_exhaustion if
-            @token_budget.respond_to?(:resource_exhaustion)
+        launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, role: :fix)
+        started_at = Time.now.utc
+        unless @launch_budget.acquire(profile: profile, stage: STAGE, started_at: started_at)
+          exhaustion = @launch_budget.resource_exhaustion if
+            @launch_budget.respond_to?(:resource_exhaustion)
           return {
             status: :error,
-            error_message: @token_budget.exhaustion_message,
+            error_message: @launch_budget.exhaustion_message,
             resource_exhaustion: exhaustion
           }.compact
         end
-        started_at = Time.now.utc
         result = nil
         begin
           result = Hive::Agent.new(
             task: task, prompt: prompt, add_dirs: [], cwd: worktree_path,
             max_budget_usd: nil,
-            max_tokens: @token_budget.max_tokens,
             max_turns: launch.fetch(:max_turns),
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
             log_label: STAGE, profile: profile, status_mode: :exit_code_only,
@@ -555,7 +554,7 @@ module Hive
             permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE
           ).run!
         ensure
-          @token_budget.record!(
+          @launch_budget.record!(
             result: result, profile: profile, stage: STAGE, started_at: started_at
           )
         end

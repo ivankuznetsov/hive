@@ -51,8 +51,8 @@ module Hive
       RETIRED_PATROL_CONFIG_KEYS = %w[
         max_tokens_per_cycle
         max_tokens_per_day
+        max_tokens_per_agent
         max_agent_spawns_per_cycle
-        max_agent_spawns_per_day
         max_architecture_review_spawns_per_day
         max_architecture_unmetered_spawns_per_day
         max_budget_usd_per_agent

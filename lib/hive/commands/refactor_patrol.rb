@@ -11,7 +11,7 @@ require "hive/git_ops"
 require "hive/lock"
 require "hive/process_kill"
 require "hive/patrol/mapper"
-require "hive/patrol/token_budget"
+require "hive/patrol/launch_budget"
 require "hive/refactor_patrol/architecture_intake_transitions"
 require "hive/refactor_patrol/claim_liveness_resolver"
 require "hive/refactor_patrol/claim_maintenance_transitions"
@@ -151,8 +151,10 @@ module Hive
         assert_repository_ownership!(
           entry, cfg, aggregate: @job_store.read_job(@manifest.fetch("job_id"))
         )
-        token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
-        runner = build_action_runner(project_root, cfg, token_budget, entry: entry)
+        launch_budget = Hive::Patrol::LaunchBudget.new(
+          project_root, cfg: cfg, project_name: entry.fetch("name")
+        )
+        runner = build_action_runner(project_root, cfg, launch_budget, entry: entry)
         result = with_claim_heartbeat(@manifest.fetch("job_id")) do
           runner.run(job_id: @manifest.fetch("job_id"), dry_run: @dry_run)
         end
@@ -184,13 +186,15 @@ module Hive
         existing_theses = prior_theses
         existing_suppressions = prior_suppressions
         pending_features = features.reject { |feature| completed.key?(feature.id.to_s) }
-        token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
+        launch_budget = Hive::Patrol::LaunchBudget.new(
+          project_root, cfg: cfg, project_name: entry.fetch("name")
+        )
         review_features = if pr_mode? && !@dry_run
           pending_features.first(DURABLE_DISCOVERY_FEATURE_SLICE)
         else
           pending_features
         end
-        reviewer = build_reviewer(analysis_root, cfg, state, token_budget)
+        reviewer = build_reviewer(analysis_root, cfg, state, launch_budget)
         yielded_thesis_ids = {}
         incrementally_suppressed = []
         completed_new_theses = []
@@ -371,7 +375,7 @@ module Hive
         )
       end
 
-      def build_reviewer(root, cfg, state, token_budget)
+      def build_reviewer(root, cfg, state, launch_budget)
         return @reviewer_factory.call(root, cfg, state) if @reviewer_factory
 
         Hive::RefactorPatrol::Reviewer.new(
@@ -388,11 +392,11 @@ module Hive
             "analysis_sha" => @checkout_snapshot.fetch("analysis_sha"),
             "source_pr" => source_pr_context
           } : nil,
-          token_budget: token_budget
+          launch_budget: launch_budget
         )
       end
 
-      def build_action_runner(root, cfg, token_budget, entry:)
+      def build_action_runner(root, cfg, launch_budget, entry:)
         return @action_runner_factory.call(root, cfg) if @action_runner_factory
 
         Hive::RefactorPatrol::ActionRunner.new(
@@ -400,7 +404,7 @@ module Hive
           hive_state_path: entry.fetch("hive_state_path"),
           job_store: @job_store,
           repository_ownership: @repository_ownership,
-          token_budget: token_budget,
+          launch_budget: launch_budget,
           occurrence_id: @occurrence_id,
           module_execution: @module_execution
         )

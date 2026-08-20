@@ -7,6 +7,7 @@ require "hive/gh"
 require "hive/lock"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
+require "hive/patrol/launch_budget"
 require "hive/refactor_patrol/canonical_action_catalog"
 require "hive/refactor_patrol/family_store"
 require "hive/refactor_patrol/fixer"
@@ -58,7 +59,7 @@ module Hive
                      claim_resolver: nil, repository_resolver: nil, config_loader: nil,
                      repository_ownership: nil,
                      canonical_action_catalog: nil,
-                     registration: nil, token_budget: nil,
+                     registration: nil, launch_budget: nil,
                      effect_gateway_factory: nil, evidence_store: nil,
                      occurrence_id: nil, module_execution: nil,
                      lease_sec: 3600, backoff_sec: RETRY_BACKOFF_SEC,
@@ -69,7 +70,7 @@ module Hive
           hive_state_path || cfg["hive_state_path"] || ".hive-state",
           @project_root
         )
-        @token_budget = token_budget
+        @launch_budget = launch_budget
         @registration = registration.to_s.empty? ? cfg["project_name"].to_s : registration.to_s
         @job_store = job_store || JobStore.new(
           @project_root,
@@ -777,7 +778,7 @@ module Hive
           outcome: adapter_result.outcome,
           receipts: result_receipts,
           terminal: adapter_result.terminal == true,
-          backoff_sec: backoff_sec_for(adapter_result.outcome)
+          backoff_sec: adapter_backoff_sec(adapter, adapter_result)
         )
         aggregate
       end
@@ -1630,7 +1631,7 @@ module Hive
           [ kind, action_policy_signature(effective_cfg, kind) ]
         end
         @fixer = @fixer_override || Fixer.new(
-          @project_root, cfg: effective_cfg, clock: @clock, token_budget: @token_budget
+          @project_root, cfg: effective_cfg, clock: @clock, launch_budget: @launch_budget
         )
         @pr_opener = @pr_opener_override || PrOpener.new(@project_root, cfg: effective_cfg)
         @issue_filer = @issue_filer_override || IssueFiler.new(@project_root, cfg: effective_cfg)
@@ -1737,10 +1738,21 @@ module Hive
       def backoff_sec_for(reason)
         return @authority_backoff_sec if AUTHORITY_RECHECK_REASONS.include?(reason.to_s)
 
-        # Agent resource exhaustion follows the same fixed retry cadence as
-        # other transient action failures. Usage telemetry no longer creates
-        # a separate next-UTC-day scheduling policy.
         @backoff_sec
+      end
+
+      def adapter_backoff_sec(adapter, result)
+        fallback = backoff_sec_for(result.outcome)
+        return fallback unless adapter == :fix && result.respond_to?(:details)
+
+        details = result.details
+        exhaustion = details.is_a?(Hash) &&
+                     (details["resource_exhaustion"] || details[:resource_exhaustion])
+        reason = exhaustion.is_a?(Hash) &&
+                 (exhaustion["reason"] || exhaustion[:reason])
+        Hive::Patrol::LaunchBudget.resource_exhaustion_backoff_sec(
+          [ reason ].compact, now: now, fallback: fallback
+        )
       end
 
       def event(outcome, **details)

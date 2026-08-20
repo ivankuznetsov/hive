@@ -838,6 +838,79 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_daily_launch_limit_defers_review_until_the_next_utc_day
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      scheduler = scheduler(entry, store)
+      dispatch = scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
+      scheduler.spawned(dispatch, pid: 1234, process_start_time: "boot", pgid: 1234, now: T0 + 1)
+      error = {
+        "feature_id" => "checkout", "error" => "agent_failed",
+        "message" => "daily launch limit reached",
+        "details" => {
+          "resource_exhaustion" => {
+            "reason" => "daily_agent_spawn_limit", "limit" => 8, "observed" => 8
+          }
+        }
+      }
+      partial = complete_zero_envelope(entry).merge(
+        "complete" => false,
+        "review_errors" => [ error ],
+        "feature_results" => [
+          { "feature_id" => "checkout", "complete" => false, "thesis_ids" => [], "errors" => [ error ] }
+        ],
+        "zero_reason" => nil
+      )
+
+      result = scheduler.complete(
+        dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 0,
+        envelope: partial, now: T0 + 2
+      )
+
+      assert_equal :retry, result.fetch(:status)
+      assert_empty scheduler.candidates(now: T0 + 43_199)
+      assert_equal [ "job-7" ],
+                   scheduler.candidates(now: T0 + 43_200).map { |item| item.fetch(:job_id) }
+    end
+  end
+
+  def test_idle_discovery_does_not_query_launch_capacity
+    with_project do |_dir, entry, store|
+      subject = scheduler(entry, store)
+      unexpected = lambda do |*, **|
+        raise "idle discovery must not construct a launch budget"
+      end
+
+      with_replaced_singleton_method(
+        Hive::Patrol::LaunchBudget, :new, unexpected
+      ) do
+        assert_empty subject.candidates(now: T0)
+      end
+    end
+  end
+
+  def test_daily_launch_limit_skips_discovery_candidates_until_the_next_utc_day
+    old_path = Hive::UsageDb.path
+    with_project do |dir, entry, store|
+      Hive::UsageDb.path = File.join(dir, "usage.db")
+      8.times do
+        Hive::UsageDb.record!(
+          agent: "codex", model: nil, project_slug: entry.fetch("name"),
+          task_slug: "patrol-review", stage: "patrol-review",
+          started_at: T0, ended_at: T0, input: 1, output: 1, cached: 0
+        )
+      end
+      enqueue(store)
+      scheduler = scheduler(entry, store)
+
+      assert_empty scheduler.candidates(now: T0)
+      assert_equal [ "job-7" ],
+                   scheduler.candidates(now: T0 + 43_200).map { |item| item.fetch(:job_id) }
+    end
+  ensure
+    Hive::UsageDb.path = old_path
+  end
+
   def test_action_progress_digest_ignores_hash_insertion_order
     with_project do |_dir, entry, store|
       instance = scheduler(entry, store)

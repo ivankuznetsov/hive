@@ -1875,8 +1875,7 @@ class HivePatrolFixerTest < Minitest::Test
       agent_singleton.define_method(:new) { |**kwargs| captured = kwargs; fake_agent }
       assert_equal({ status: :ok },
                    fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo))
-      assert_equal Hive::Patrol::TokenBudget::DEFAULT_MAX_TOKENS_PER_AGENT,
-                   captured.fetch(:max_tokens)
+      refute captured.key?(:max_tokens)
       assert_nil captured.fetch(:max_budget_usd)
       assert_equal File.join(repo, "fix.json"), captured.fetch(:expected_output)
       assert_equal :output_file_exists, captured.fetch(:status_mode)
@@ -1948,15 +1947,15 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_run_agent_wrapper_refuses_initial_context_above_the_runaway_ceiling
+  def test_run_agent_wrapper_refuses_an_exhausted_launch_budget
     with_tmp_git_repo do |repo|
       budget = Object.new
-      budget.define_singleton_method(:acquire) { |minimum_tokens:| minimum_tokens.negative? }
-      budget.define_singleton_method(:exhaustion_message) { "runaway ceiling too small" }
+      budget.define_singleton_method(:acquire) { |**| false }
+      budget.define_singleton_method(:exhaustion_message) { "daily launch limit reached" }
       budget.define_singleton_method(:resource_exhaustion) do
-        { reason: "insufficient_launch_headroom", limit: 10, observed: 20_001 }
+        { reason: "daily_agent_spawn_limit", limit: 8, observed: 8 }
       end
-      fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), token_budget: budget)
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), launch_budget: budget)
       profile = Struct.new(:name, :initial_context_tokens) do
         def require_cli_capability!(name)
           raise "unexpected capability #{name.inspect}" unless name == :patrol_fix_context
@@ -1970,8 +1969,8 @@ class HivePatrolFixerTest < Minitest::Test
       end
 
       assert_equal :error, result.fetch(:status)
-      assert_equal "runaway ceiling too small", result.fetch(:error_message)
-      assert_equal "insufficient_launch_headroom", result.dig(:resource_exhaustion, :reason)
+      assert_equal "daily launch limit reached", result.fetch(:error_message)
+      assert_equal "daily_agent_spawn_limit", result.dig(:resource_exhaustion, :reason)
     end
   end
 
@@ -2005,7 +2004,10 @@ class HivePatrolFixerTest < Minitest::Test
         row = rows.first
         assert_equal "codex", row["agent"]
         assert_equal "fallback-model", row["model"]
-        assert_equal File.basename(repo), row["project_slug"]
+        assert_match(
+          /\A#{Regexp.escape(File.basename(repo))}-[0-9a-f]{12}\z/,
+          row["project_slug"]
+        )
         assert_equal "patrol-fix", row["task_slug"]
         assert_equal "patrol-fix", row["stage"]
         assert_equal 80, row["input"]
@@ -2020,6 +2022,8 @@ class HivePatrolFixerTest < Minitest::Test
 
   def test_run_agent_wrapper_does_not_raise_when_usage_recording_fails
     with_tmp_git_repo do |repo|
+      old_path = Hive::UsageDb.path
+      Hive::UsageDb.path = File.join(repo, "usage.db")
       fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
       fake_agent = Object.new
       def fake_agent.run!
@@ -2032,9 +2036,15 @@ class HivePatrolFixerTest < Minitest::Test
       profiles_lookup = Hive::AgentProfiles.method(:lookup)
       agent_new = Hive::Agent.method(:new)
       usage_record = Hive::UsageDb.method(:record!)
+      record_calls = 0
       profiles_singleton.define_method(:lookup) { |*| Struct.new(:name).new("claude") }
       agent_singleton.define_method(:new) { |*| fake_agent }
-      usage_singleton.define_method(:record!) { |**| raise "db locked" }
+      usage_singleton.define_method(:record!) do |**args|
+        record_calls += 1
+        raise "db locked" if record_calls == 2
+
+        usage_record.call(**args)
+      end
 
       result = nil
       _out, err = capture_io do
@@ -2047,6 +2057,7 @@ class HivePatrolFixerTest < Minitest::Test
       profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_singleton && profiles_lookup
       agent_singleton.define_method(:new, agent_new) if agent_singleton && agent_new
       usage_singleton.define_method(:record!, usage_record) if usage_singleton && usage_record
+      Hive::UsageDb.path = old_path if old_path
     end
   end
 

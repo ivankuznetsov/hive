@@ -422,9 +422,8 @@ patrol:
   # Bound expensive fix-agent work even when findings are stale or fail validation.
   max_fix_attempts_per_cycle: 6
   max_prs_per_cycle: 3
-  # One deliberately high per-agent fuse stops a genuinely runaway child.
-  # Normal work is not constrained by shared daily/cycle token allowances.
-  max_tokens_per_agent: 100000000
+  # The selected mode supplies a project-wide daily agent-launch ceiling shared
+  # by ordinary and Architecture Patrol. Token volume is recorded, not capped.
   # Open ready (non-draft) PRs by default so the babysitter — which skips
   # draft PRs — picks them up. Set true to open draft PRs instead.
   draft_prs: false

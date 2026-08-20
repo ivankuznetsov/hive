@@ -16,6 +16,7 @@ require "hive/modules/migration/patrols"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/refactor_patrol/publication_attempt"
 require "hive/refactor_patrol/thesis"
+require "hive/refactor_patrol/fix_admission_outbox"
 
 module Hive
   module RefactorPatrol
@@ -122,7 +123,7 @@ module Hive
       DISCOVERY_ATTEMPT_KIND = "discovery_claim".freeze
       ACTIVE_CLAIM_STATES = %w[claimed running].freeze
 
-      attr_reader :project_root, :root
+      attr_reader :project_root, :root, :patrol_fix_admission_outbox
 
       class << self
         def root_for(project_root, hive_state_path: nil)
@@ -184,7 +185,9 @@ module Hive
         end
       end
 
-      def initialize(project_root, hive_state_path: nil)
+      def initialize(project_root, hive_state_path: nil,
+                     patrol_fix_cutover_gate: Hive::PatrolFix::CutoverGate.new,
+                     patrol_fix_admission_outbox: nil)
         @project_root = File.expand_path(project_root)
         hive_state_root = File.expand_path(hive_state_path || ".hive-state", @project_root)
         @root = self.class.root_for(@project_root, hive_state_path: hive_state_root)
@@ -215,6 +218,11 @@ module Hive
           corrupt_record: CorruptRecord,
           inconsistent_record: InconsistentRecord
         )
+        @patrol_fix_admission_outbox = patrol_fix_admission_outbox ||
+          Hive::RefactorPatrol::FixAdmissionOutbox.new(
+            root: File.join(@root, "patrol-fix-outbox"),
+            gate: patrol_fix_cutover_gate
+          )
         @occurrence_lifecycle = JobOccurrenceLifecycle.new(
           inconsistent_record: InconsistentRecord,
           record_validator: @record_validator,
@@ -1012,6 +1020,13 @@ module Hive
 
           action = find_action!(aggregate, canonical_action_id, path)
           return nil if action.fetch("terminal")
+          unless legacy_action_allowed?(aggregate, action)
+            action["outcome"] = "patrol_fix_workflow_owned"
+            action["updated_at"] = now.utc.iso8601 if action.key?("updated_at")
+            aggregate["state"] = "blocked"
+            aggregate["updated_at"] = now.utc.iso8601
+            next [ aggregate, nil ]
+          end
           return nil if another_action_active?(aggregate, action)
           unless action.fetch("owner_job_id") == aggregate.fetch("job_id")
             raise InconsistentRecord.new("linked canonical action must be reconciled from its owner", path: path)
@@ -1128,7 +1143,10 @@ module Hive
       # performs no state mutation; holding the aggregate lock while checking
       # the active generation proves a superseded worker cannot proceed.
       def assert_action_claim!(token, now: Time.now)
-        mutate_action_claim(token, now: now) do |aggregate, _action, _claim|
+        mutate_action_claim(token, now: now) do |aggregate, action, _claim|
+          unless legacy_action_allowed?(aggregate, action)
+            raise InconsistentRecord, "Patrol Fix workflow acknowledgement fences the legacy action"
+          end
           aggregate
         end
         true
@@ -1145,6 +1163,9 @@ module Hive
         end
 
         mutate_action_claim(token, now: now) do |aggregate, action, claim|
+          unless legacy_action_allowed?(aggregate, action)
+            raise InconsistentRecord, "Patrol Fix workflow acknowledgement fences the legacy action"
+          end
           existing = action.fetch("receipts")["creation_intent"]
           if claim.fetch("authority") == "continuation_only"
             unless existing && existing["payload"] == payload
@@ -1621,7 +1642,12 @@ module Hive
           raise InconsistentRecord.new("action thesis is not classified", path: path) unless entry
 
           disposition, thesis = entry
-          validate_action_authority!(aggregate, kind, disposition, thesis, path)
+          disposition_item = aggregate.dig("dispositions", disposition).find do |item|
+            item.fetch("id") == thesis_id
+          end
+          validate_action_authority!(
+            aggregate, kind, disposition, thesis, disposition_item, path
+          )
           family_id = specification["family_id"].to_s unless specification["family_id"].nil?
           identity = action_identity(kind, family_id, thesis, path)
           {
@@ -1644,7 +1670,15 @@ module Hive
         end.sort_by { |item| item.fetch("canonical_action_id") }
       end
 
-      def validate_action_authority!(aggregate, kind, disposition, thesis, path)
+      def validate_action_authority!(aggregate, kind, disposition, thesis,
+                                     disposition_item, path)
+        unless @patrol_fix_admission_outbox.legacy_downstream_allowed?(
+          aggregate, disposition_item
+        )
+          raise InconsistentRecord.new(
+            "Patrol Fix workflow acknowledgement fences legacy action planning", path: path
+          )
+        end
         unless ACTION_KINDS.include?(kind)
           raise InconsistentRecord.new("action kind must be one of #{ACTION_KINDS.inspect}", path: path)
         end
@@ -1873,6 +1907,17 @@ module Hive
           attempt["kind"] == SOURCE_RETIREMENT_ATTEMPT_KIND &&
             attempt["reason"] == "source_no_longer_on_trunk"
         end
+      end
+
+      def legacy_action_allowed?(aggregate, action)
+        disposition = aggregate.fetch("dispositions").values.flatten.find do |item|
+          item.fetch("id") == action.fetch("thesis_id")
+        end
+        return false unless disposition
+
+        @patrol_fix_admission_outbox.legacy_downstream_allowed?(
+          aggregate, disposition
+        )
       end
 
       def obsolete_source_continuation?(aggregate, action)
@@ -2247,7 +2292,10 @@ module Hive
             if existing && existing != item
               raise InconsistentRecord, "completed thesis #{item.fetch('id').inspect} changed during discovery resume"
             end
-            aggregate.dig("dispositions", name) << item unless existing
+            unless existing
+              @patrol_fix_admission_outbox.publish_disposition!(aggregate, item)
+              aggregate.dig("dispositions", name) << item
+            end
           end
         end
         aggregate["feature_results"] = complete_results.sort_by { |item| item.fetch("feature_id") }

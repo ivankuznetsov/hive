@@ -225,7 +225,7 @@ components:
     migration_exceptions: []
 
   - id: patrol-fix
-    name: Patrol Fix Task Artifacts
+    name: Patrol Fix Workflow Core
     state: boundary-ready
     entrypoint:
       file: lib/hive/patrol_fix.rb
@@ -233,10 +233,18 @@ components:
       constant: Hive::PatrolFix
     public_contract:
       values:
+        - Hive::PatrolFix::AdmissionStore
+        - Hive::PatrolFix::CutoverGate
+        - Hive::PatrolFix::HandoffOutbox
         - Hive::PatrolFix::TaskManifest
         - Hive::PatrolFix::ReceiptStore
         - Hive::PatrolFix::Projection
+        - Hive::PatrolFix::SemanticAdmission
+        - Hive::PatrolFix::SourceSnapshot
+        - Hive::PatrolFix::TaskMaterializer
       errors:
+        - Hive::PatrolFix::AdmissionStore::Error
+        - Hive::PatrolFix::SourceSnapshot::InvalidSnapshot
         - Hive::PatrolFix::TaskManifest::InvalidManifest
         - Hive::PatrolFix::ReceiptStore::InvalidReceipt
     owned_paths:
@@ -245,6 +253,12 @@ components:
       - lib/hive/patrol_fix/receipt_store.rb
       - lib/hive/patrol_fix/projection.rb
       - lib/hive/patrol_fix/runner.rb
+      - lib/hive/patrol_fix/admission_store.rb
+      - lib/hive/patrol_fix/cutover_gate.rb
+      - lib/hive/patrol_fix/handoff_outbox.rb
+      - lib/hive/patrol_fix/semantic_admission.rb
+      - lib/hive/patrol_fix/source_snapshot.rb
+      - lib/hive/patrol_fix/task_materializer.rb
       - schemas/hive-patrol-fix-decision.v1.json
       - schemas/hive-patrol-fix-task-manifest.v1.json
       - schemas/hive-patrol-fix-receipt.v1.json
@@ -253,19 +267,32 @@ components:
       - "The strict task manifest binds every source revision and one canonical task generation while append-only receipts bind exact evidence generation"
       - "Equivalent evidence may add provenance within a generation; materially changed evidence advances exactly one generation and invalidates old receipts"
       - "Projection fails closed with bounded diagnostics, keeps parked outcomes non-done, and requires an exact current publication receipt for done"
+      - "Source-owned handoffs feed one strict admission occurrence; deterministic intent precedes task capture, exact binding precedes source acknowledgement, and replay repairs every incomplete boundary"
+      - "Semantic admission snapshots and revalidates the bounded candidate set without holding a durable store lock across provider reasoning"
     schema_contracts:
       - "Manifest, decision, receipt, and projection contracts are versioned, bounded, and reject unknown fields"
       - "Source provenance includes source engine, identity, target revision, evidence, affected code, reproduction guidance, discovery run, and semantic lineage"
+      - "Source snapshots, outbox records, and admission records are canonical, size bounded, digest bound, and reject secret-like material"
     lock_contracts:
       - "Manifest replacement is atomic and receipts append under a task-local journal lock"
       - "The common operational action acquires the task lock and revalidates its observation token before appending a reopen receipt"
+      - "Admission records use per-occurrence locks; cross-occurrence task materialization is serialized without holding a source lock"
     component_dependencies: []
     allowed_hive_dependencies:
       - hive
       - hive/atomic_file
+      - hive/git_ops
+      - hive/lock
+      - hive/managed_directory
+      - hive/secret_patterns
+      - hive/task_capture
+      - hive/task_meta
       - hive/workflow_package/canonical_json
     internal_collaborators:
       - Hive::AtomicFile
+      - Hive::GitOps
+      - Hive::ManagedDirectory
+      - Hive::TaskCapture
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:

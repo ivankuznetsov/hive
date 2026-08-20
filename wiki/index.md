@@ -21,7 +21,7 @@ Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descr
 Reusable mechanisms remain in this monorepo behind the canonical
 [[component-boundaries]] catalog. The sixteen-row internal graph has eleven
 `boundary-ready` facades—UserService, Agent ABI, Agent Artifact Firewall,
-Skillpack, Safe Agent Git Gate, WorkLedger, Patrol Fix Task Artifacts, and Workflow Creator Values/Text
+Skillpack, Safe Agent Git Gate, WorkLedger, Patrol Fix Workflow Core, and Workflow Creator Values/Text
 Safety plus the composed Workflow Creator and deterministic Workflow Creator
 Execution custody—and five guarded candidates: Provider Health, Provider
 Routing Policy, Provider Routing Operations, Attempts admission, and Patrol

@@ -6,6 +6,7 @@ require "hive/patrol/effect_gateway"
 require "hive/managed_directory"
 require "hive/modules/migration/occurrence_journal"
 require "hive/modules/migration/patrol_evidence"
+require "hive/patrol/fix_admission_outbox"
 
 module Hive
   module Patrol
@@ -43,7 +44,11 @@ module Hive
         "lifecycle_updated_at" => 64
       }.freeze
 
-      def initialize(project_root, hive_state_path: nil)
+      attr_reader :patrol_fix_admission_outbox
+
+      def initialize(project_root, hive_state_path: nil,
+                     patrol_fix_cutover_gate: Hive::PatrolFix::CutoverGate.new,
+                     patrol_fix_admission_outbox: nil)
         super(
           project_root,
           state_directory: "patrol",
@@ -58,6 +63,11 @@ module Hive
           label: "ordinary patrol cycle"
         )
         @cycle_lock_owner = nil
+        @patrol_fix_admission_outbox = patrol_fix_admission_outbox ||
+          Hive::Patrol::FixAdmissionOutbox.new(
+            root: File.join(root, "patrol-fix-outbox"),
+            gate: patrol_fix_cutover_gate
+          )
       end
 
       # The finding query file is a bounded, derived read model. Patrol owns
@@ -463,13 +473,29 @@ module Hive
       end
 
       def write_finding(finding)
+        reconcile = lambda do |_intent, digest|
+          observed = effect_target_value("findings/#{finding.id}")
+          matched = observed == effect_object(finding.to_h)
+          if matched && @patrol_fix_admission_outbox.enabled? &&
+             finding.lifecycle_state.to_s == "active" &&
+             %w[admitted recurrence_after_terminal].include?(finding.lifecycle_reason.to_s)
+            matched = @patrol_fix_admission_outbox.published_for_finding?(finding)
+          end
+          {
+            "status" => matched ? "matched" : "absent",
+            "outcome" => matched ?
+              { "content_digest" => digest } : { "observed" => "incomplete" }
+          }
+        end
         effect_write(
           sink: "finding",
           target: "findings/#{finding.id}",
-          value: finding.to_h
+          value: finding.to_h,
+          reconcile: reconcile
         ) do
           mark_finding_query_dirty!
           write_record("findings", finding)
+          @patrol_fix_admission_outbox.publish_finding!(finding)
         end
       end
 
@@ -529,6 +555,10 @@ module Hive
         rescue KeyError, ArgumentError
           nil
         end
+      end
+
+      def patrol_fix_legacy_downstream_allowed?(finding)
+        @patrol_fix_admission_outbox.legacy_downstream_allowed?(finding)
       end
 
       def transition_finding(finding_or_id, state:, reason:, now: Time.now, superseded_by: nil)

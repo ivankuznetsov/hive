@@ -174,6 +174,16 @@ module Hive
         # admission, and portfolio scoring. The reviewer itself is a pure
         # producer and cannot accumulate untriaged duplicates.
         admission.persistable_findings.each { |finding| state.write_finding(finding) }
+        workflow_owned, candidates = candidates.partition do |finding|
+          !state.patrol_fix_legacy_downstream_allowed?(finding)
+        end
+        skipped.concat(workflow_owned.map do |finding|
+          {
+            "finding_id" => finding.id,
+            "fingerprint" => finding.fingerprint,
+            "reason" => "patrol_fix_workflow_owned"
+          }
+        end)
         write_selection_audit(state, candidates, skipped)
 
         # `max_prs_per_cycle` caps PRs opened per scan, not fix candidates.

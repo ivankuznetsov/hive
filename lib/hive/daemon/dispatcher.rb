@@ -24,6 +24,7 @@ require "hive/daemon/logger"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/refactor_patrol_scheduler"
+require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/daemon/patrol_arbiter"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/refactor_patrol_merge_reconciler"
@@ -73,6 +74,7 @@ module Hive
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
                      merge_watcher: nil, refactor_patrol_merge_reconciler: nil,
                      patrol_scheduler: nil, refactor_patrol_scheduler: nil,
+                     patrol_fix_admission_scheduler: nil,
                      patrol_arbiter: nil, answer_digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
@@ -92,6 +94,7 @@ module Hive
         @refactor_patrol_merge_reconciler = refactor_patrol_merge_reconciler
         @patrol_scheduler = patrol_scheduler
         @refactor_patrol_scheduler = refactor_patrol_scheduler
+        @patrol_fix_admission_scheduler = patrol_fix_admission_scheduler
         @patrol_arbiter = patrol_arbiter
         @answer_digest_scheduler = answer_digest_scheduler
         @dry_run = dry_run
@@ -444,6 +447,12 @@ module Hive
         # from double-dispatching. Single-writer invariant: only the
         # daemon spawns `hive run`-class verbs.
         process_dispatch_requests(now: now, rows: result.rows)
+
+        # Accepted-source admission is an independent control lane. It is
+        # intentionally ticked before discovery scheduling and never enters
+        # the patrol-scan controller path; its injected predicate consults
+        # normal workflow capacity instead.
+        run_patrol_fix_admission_scheduler_tick(now: now)
 
         # 3c. Project-level patrol scans are not task rows, so they do
         # not go through Policy. They still pass through the same
@@ -929,6 +938,29 @@ module Hive
         @digest_scheduler_fatal_signatures.delete(label)
       rescue StandardError => e
         log_digest_scheduler_fatal(label, e)
+      end
+
+      def run_patrol_fix_admission_scheduler_tick(now:)
+        return unless @patrol_fix_admission_scheduler
+        return unless admission_open?
+
+        @patrol_fix_admission_scheduler.tick(now: now).each do |result|
+          @logger.event(
+            :patrol_fix_admission,
+            source: result.source,
+            occurrence_id: result.occurrence_id,
+            status: result.status,
+            task_slug: result.task_slug,
+            retry_at: result.retry_at,
+            reason: result.reason
+          )
+        end
+      rescue StandardError => error
+        @logger.event(
+          :fatal,
+          message: "Patrol Fix admission scheduler raised: #{error.class}: #{error.message}",
+          keeping_previous: true
+        )
       end
 
       def run_refactor_patrol_merge_reconciler_tick(now:)

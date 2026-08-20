@@ -21,7 +21,7 @@ the first and primary consumer.
 | Provider Routing Policy | `candidate` | `require "hive/provider_routing"` → `Hive::ProviderRouting` | [[modules/provider_routing]] |
 | Provider Routing Operations | `candidate` | `require "hive/provider_routing/operational_projection"` → `Hive::ProviderRouting::OperationalProjection` | [[modules/provider_routing]] |
 | Patrol Effect Evidence | `candidate` (U3a protocol complete; reduced installed/live smoke source-pinned; full U3b/U3c proof pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
-| Patrol Fix Task Artifacts | `boundary-ready` | `require "hive/patrol_fix"` → `Hive::PatrolFix` | [[modules/patrol]] |
+| Patrol Fix Workflow Core | `boundary-ready` | `require "hive/patrol_fix"` → `Hive::PatrolFix` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | Workflow Creator Values | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_text_safety"` → `HiveLiveAgentProof::WorkflowCreator::TextSafety` | [[component-boundaries]] |
 | Workflow Creator | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_evidence"` → `HiveLiveAgentProof::WorkflowCreatorEvidence` | [[component-boundaries]] |
@@ -89,6 +89,17 @@ while Provider Health, Provider Routing Policy, Provider Routing Operations,
 Attempts, and Patrol Effect Evidence are deliberately retained as guarded
 candidates rather than being promoted ahead of their remaining lifecycle or
 qualification proof.
+
+`Patrol Fix Workflow Core` owns strict source snapshots, admission occurrences,
+task manifests, receipts, projections, semantic admission, and idempotent task
+materialization. Source-owned ordinary and Architecture adapters translate into
+the core without a reverse dependency. Admission persists an exact candidate
+digest, releases its lock while a provider reasons, rejects stale decisions,
+records materialization intent before task capture, binds the task before
+acknowledging the source, and replays incomplete create/update boundaries. The
+daemon admission controller is a consumer outside the component and is
+independent of discovery scheduling and allowances. Its cutover gate remains
+disabled until the authority migration activates a persisted epoch.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
 eleven ready components currently has the named non-Hive adopter and independent

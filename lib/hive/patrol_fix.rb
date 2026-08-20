@@ -12,6 +12,12 @@ module Hive
     autoload :ReceiptStore, "hive/patrol_fix/receipt_store"
     autoload :Projection, "hive/patrol_fix/projection"
     autoload :Runner, "hive/patrol_fix/runner"
+    autoload :SourceSnapshot, "hive/patrol_fix/source_snapshot"
+    autoload :AdmissionStore, "hive/patrol_fix/admission_store"
+    autoload :SemanticAdmission, "hive/patrol_fix/semantic_admission"
+    autoload :TaskMaterializer, "hive/patrol_fix/task_materializer"
+    autoload :CutoverGate, "hive/patrol_fix/cutover_gate"
+    autoload :HandoffOutbox, "hive/patrol_fix/handoff_outbox"
 
     module_function
 

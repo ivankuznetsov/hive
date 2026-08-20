@@ -13,6 +13,7 @@ require "hive/task_counter"
 require "hive/task_meta"
 require "hive/task"
 require "hive/task_action"
+require "hive/task_capture"
 require "hive/markers"
 require "hive/workflows"
 require "hive/workflow_selection"
@@ -59,12 +60,12 @@ module Hive
       class InvalidDraftPrCombination < TypedValueError
         def exit_code = Hive::ExitCodes::USAGE
       end
-      class SlugCollisionError < TypedValueError; end
+      SlugCollisionError = Hive::TaskCapture::SlugCollisionError
       # Raised when an attachment's filename fails the basename/empty guard
       # in `copy_attachments!`. Distinct from `InvalidSlugError` so TUI
       # callers can distinguish "rephrase the title" feedback from
       # "attachment routing bug" feedback in their rescue lists.
-      class InvalidAttachmentError < TypedValueError; end
+      InvalidAttachmentError = Hive::TaskCapture::InvalidAttachmentError
       # Raised when a project's configured default_workflow is not a registered
       # workflow (a hand-edit, or a workflow removed after the project was set
       # up). Distinct from the user-supplied `--workflow` UnknownWorkflow so the
@@ -79,13 +80,12 @@ module Hive
       # config.yml (mirroring UnregisteredProjectWorkflow) instead of crashing
       # with a raw Psych backtrace that escapes call's rescue list.
       class ProjectConfigUnreadable < TypedValueError; end
-      class IdempotencyConflict < TypedValueError
-        def exit_code = Hive::ExitCodes::USAGE
-      end
-      PreparedAttachment = Data.define(:snapshot_path, :destination, :name, :sha256)
+      IdempotencyConflict = Hive::TaskCapture::IdempotencyConflict
+      PreparedAttachment = Hive::TaskCapture::Attachment
 
       def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], base: nil,
-                     depends_on: nil, workflow: nil, idempotency_key: nil, json: false)
+                     depends_on: nil, workflow: nil, idempotency_key: nil, json: false,
+                     task_capture_factory: nil)
         @project_name = project_name
         @text = text.to_s
         @slug_override = slug_override
@@ -95,6 +95,7 @@ module Hive
         @depends_on = depends_on
         @workflow_name = workflow
         @idempotency_key_raw = idempotency_key
+        @task_capture_factory = task_capture_factory || ->(**options) { Hive::TaskCapture.new(**options) }
         # Machine-readable creation was added for idempotent automation.
         # Preserve the legacy plain-text contract for a bare `hive new --json`
         # whose caller did not opt into that side-effect boundary.
@@ -193,31 +194,27 @@ module Hive
         ops = Hive::GitOps.new(project["path"])
 
         if @idempotency_key
-          result = with_stable_workflow_selection(workflow_info, hive_state) do |stable_selection|
-            Hive::Lock.with_commit_lock(hive_state) do
-              validate_stable_authored_workflow!(workflow_info, hive_state)
-              existing = find_idempotent_task!(hive_state, @idempotency_key, fingerprint)
-              validate_stable_authored_workflow!(workflow_info, hive_state)
-              next { folder: existing.fetch(:folder), created: false } if existing
-
-              create_task_candidate!(
-                task_dir, slug: slug, entry_stage: entry_stage, workflow: workflow,
-                depends_on: depends_on, base_branch: base_branch,
-                workflow_info: workflow_info, hive_state: hive_state,
-                idempotency_key: @idempotency_key, input_fingerprint: fingerprint,
-                stable_selection: stable_selection
-              )
-              begin
-                ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
-              rescue StandardError, Interrupt
-                cleanup_failed_task_commit!(ops, hive_state, task_dir)
-                raise
-              end
-              { folder: task_dir, created: true }
-            end
-          end
-          unless result.fetch(:created)
-            return emit_task_result(result.fetch(:folder), workflow, created: false)
+          result = @task_capture_factory.call(
+            project_root: project.fetch("path"),
+            hive_state: hive_state,
+            workflow_info: workflow_info,
+            slug: slug,
+            state_bytes: render_initial_state(
+              slug, @text, body_override: @body_override, workflow: workflow
+            ),
+            idempotency_key: @idempotency_key,
+            input_fingerprint: fingerprint,
+            attachments: @prepared_attachments,
+            depends_on: depends_on,
+            base_branch: base_branch,
+            initial_marker: entry_stage.kind == :human ? {
+              name: :waiting,
+              attrs: { "decision_id" => SecureRandom.hex(8) }
+            } : nil,
+            git_ops: ops
+          ).call
+          unless result.created
+            return emit_task_result(result.folder, workflow, created: false)
           end
 
           spawn_name_generator(task_dir)

@@ -411,6 +411,20 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  class FakePatrolFixAdmissionScheduler
+    attr_reader :ticks
+
+    def initialize(results: [])
+      @results = results
+      @ticks = []
+    end
+
+    def tick(now:)
+      @ticks << now
+      @results
+    end
+  end
+
   # ── construction helpers ───────────────────────────────────────────────
 
   def make_dispatcher(rows: [], dry_run: false, with_merge_watcher: false,
@@ -420,6 +434,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       with_answer_digest_scheduler: false,
                       refactor_patrol_merge_reconciler: nil,
                       refactor_patrol_scheduler: nil, patrol_arbiter: nil,
+                      patrol_fix_admission_scheduler: nil,
                       attempt_dispatcher: nil, attempt_reconciler: nil,
                       operational_snapshot: nil, module_runtime: nil,
                       module_migration_coordinator: nil,
@@ -467,6 +482,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       refactor_patrol_merge_reconciler: refactor_patrol_merge_reconciler,
       patrol_scheduler: patrol_scheduler,
       refactor_patrol_scheduler: refactor_patrol_scheduler,
+      patrol_fix_admission_scheduler: patrol_fix_admission_scheduler,
       patrol_arbiter: patrol_arbiter,
       answer_digest_scheduler: answer_digest_scheduler,
       dry_run: dry_run,
@@ -495,6 +511,25 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler,
       answer_digest_scheduler
     ]
+  end
+
+  def test_patrol_fix_admission_scheduler_has_an_independent_dispatcher_tick
+    event = Hive::Daemon::PatrolFixAdmissionScheduler::Event.new(
+      source: "ordinary_patrol", occurrence_id: "ordinary:finding-1:v1",
+      status: :acknowledged, task_slug: "repair-refresh-abc123",
+      retry_at: nil, reason: nil
+    )
+    scheduler = FakePatrolFixAdmissionScheduler.new(results: [ event ])
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [], patrol_fix_admission_scheduler: scheduler
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ T0 ], scheduler.ticks
+    logged = logger.events.find { |name, _attrs| name == :patrol_fix_admission }
+    assert_equal "ordinary:finding-1:v1", logged.last.fetch(:occurrence_id)
+    assert_equal :acknowledged, logged.last.fetch(:status)
   end
 
   def test_recovery_request_is_resumed_by_the_shared_coordinator_before_dispatch

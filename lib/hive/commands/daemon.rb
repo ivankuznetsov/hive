@@ -244,6 +244,18 @@ module Hive
           dry_run: @dry_run,
           event_publisher: module_event_publisher
         )
+        # U2 composes the admission lane inert. Its source ports remain empty
+        # until U9 installs the persisted cutover gate; keeping the scheduler
+        # present here prevents activation from being coupled to discovery.
+        patrol_fix_admission_scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
+          sources: [],
+          capacity_available: lambda do |source:, now:, **|
+            project = source.respond_to?(:project) ? source.project : nil
+            project && controller.can_dispatch?(
+              project: project, slug: "patrol-fix-admission", now: now
+            ) == :ok
+          end
+        )
         patrol_arbiter = Hive::Daemon::PatrolArbiter.new(
           ordinary_scheduler: patrol_scheduler,
           architecture_scheduler: refactor_patrol_scheduler,
@@ -305,6 +317,7 @@ module Hive
           refactor_patrol_merge_reconciler: refactor_patrol_merge_reconciler,
           patrol_scheduler: patrol_scheduler,
           refactor_patrol_scheduler: refactor_patrol_scheduler,
+          patrol_fix_admission_scheduler: patrol_fix_admission_scheduler,
           patrol_arbiter: patrol_arbiter,
           answer_digest_scheduler: answer_digest_scheduler,
           dry_run: @dry_run,

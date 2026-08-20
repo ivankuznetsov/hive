@@ -92,6 +92,7 @@ module Hive
         architecture_patrol_closed
         architecture_patrol_blocked
         patrol_recovery_blocked
+        patrol_fix_admission
         module_migration
         module_runtime
         fatal

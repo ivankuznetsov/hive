@@ -232,9 +232,15 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "hive/patrol_fix", patrol_fix.dig("entrypoint", "require")
     assert_equal "Hive::PatrolFix", patrol_fix.dig("entrypoint", "constant")
     assert_equal %w[
+      Hive::PatrolFix::AdmissionStore
+      Hive::PatrolFix::CutoverGate
+      Hive::PatrolFix::HandoffOutbox
       Hive::PatrolFix::Projection
       Hive::PatrolFix::ReceiptStore
+      Hive::PatrolFix::SemanticAdmission
+      Hive::PatrolFix::SourceSnapshot
       Hive::PatrolFix::TaskManifest
+      Hive::PatrolFix::TaskMaterializer
     ], patrol_fix.dig("public_contract", "values").sort
     assert_empty patrol_fix.fetch("component_dependencies")
     refute patrol_fix.fetch("allowed_hive_dependencies").any? { |path|

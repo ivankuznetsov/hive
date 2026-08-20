@@ -16,6 +16,9 @@ module Hive
   module PlanReview
     class DecisionService
       TRANSIENT_OUTCOMES = Adapters::Base::TRANSIENT_OUTCOMES
+      RECOVERABLE_TERMINAL_OUTCOMES = (
+        Adapters::Base::OUTCOMES - Adapters::Base::SUCCESS_OUTCOMES - TRANSIENT_OUTCOMES
+      ).freeze
 
       Result = Data.define(:applied, :decision, :projection) do
         def noop? = !applied
@@ -353,13 +356,16 @@ module Hive
           raise InvalidAction,
                 "request_review cannot clear a verification finding; create a linked plan generation"
         end
-        route = current["routes"].reverse.find do |entry|
-          %w[primary adversarial verification].include?(entry["role"]) &&
-            !TRANSIENT_OUTCOMES.include?(entry["outcome"])
+        routes = %w[primary adversarial verification].filter_map do |role|
+          current["routes"].reverse.find { |entry| entry["role"] == role }
+        end.select do |entry|
+          RECOVERABLE_TERMINAL_OUTCOMES.include?(entry["outcome"])
         end
-        raise InvalidAction, "request_review requires a terminal reviewer route" unless route
+        raise InvalidAction, "request_review requires a terminal reviewer route" if routes.empty?
 
-        append_recovery_reset(current, route)
+        routes.reduce(current["routes"]) do |rows, route|
+          append_recovery_reset(current.to_h.merge("routes" => rows), route)
+        end
       end
 
       def append_recovery_reset(current, route)

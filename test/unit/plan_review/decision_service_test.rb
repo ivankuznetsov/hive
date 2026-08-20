@@ -163,6 +163,25 @@ class PlanReviewDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_request_review_resets_each_current_terminal_reviewer_route
+    primary = route("terminal_failure")
+    adversarial = route("unsupported").merge(
+      "role" => "adversarial", "attempt_id" => "pra-#{'f' * 64}"
+    )
+    with_service(routes: [ primary, adversarial ]) do |service, store, record|
+      result = service.apply(**decision_arguments(
+        record, action: "request_review", authorized: false
+      ))
+
+      assert result.applied
+      resets = store.current["routes"].last(2)
+      assert_equal %w[primary adversarial], resets.map { |entry| entry.fetch("role") }
+      assert resets.all? { |entry| entry.fetch("recovery_reset") }
+      assert resets.all? { |entry| entry.fetch("outcome") == "retryable_failure" }
+      assert resets.none? { |entry| entry.key?("attempt_id") }
+    end
+  end
+
   def test_action_value_normalization_is_shared_by_cli_and_web_callers
     assert_equal({ "answer" => "yes" }, Hive::PlanReview::DecisionService.action_value(
       "answer-finding", answer: "yes"

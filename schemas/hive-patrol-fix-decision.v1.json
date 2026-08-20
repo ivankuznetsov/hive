@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hive-patrol-fix-decision.v1.json",
+  "title": "Hive Patrol Fix Decision (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "stage", "route", "rationale", "evidence", "blocker_owner"],
+  "properties": {
+    "schema": {"const": "hive-patrol-fix-decision"},
+    "schema_version": {"const": 1},
+    "stage": {"enum": ["inbox", "review"]},
+    "route": {"enum": ["fix", "publish", "rework", "escalate", "reject", "blocked"]},
+    "rationale": {"type": "string", "minLength": 1, "maxLength": 16384},
+    "evidence": {
+      "type": "array", "minItems": 1, "maxItems": 128,
+      "items": {"type": "string", "minLength": 1, "maxLength": 16384}
+    },
+    "blocker_owner": {"type": "string", "minLength": 1, "maxLength": 128}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"stage": {"const": "inbox"}}, "required": ["stage"]},
+      "then": {"properties": {"route": {"enum": ["fix", "escalate", "reject", "blocked"]}}}
+    },
+    {
+      "if": {"properties": {"stage": {"const": "review"}}, "required": ["stage"]},
+      "then": {"properties": {"route": {"enum": ["publish", "rework", "escalate", "reject", "blocked"]}}}
+    }
+  ]
+}

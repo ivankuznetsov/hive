@@ -28,7 +28,8 @@ class OperationalActionTest < Minitest::Test
   end
 
   def test_provider_administration_is_not_a_confirmation_free_operational_action
-    assert_equal %w[workflow.advance workflow.retry], Hive::OperationalAction::EXECUTABLE_ACTION_IDS
+    assert_equal %w[workflow.advance workflow.retry patrol_fix.reopen],
+                 Hive::OperationalAction::EXECUTABLE_ACTION_IDS
     refute Hive::OperationalAction.const_defined?(:PROVIDER_BLOCK_ACTION_ID, false)
     refute Hive::OperationalAction.const_defined?(:PROVIDER_RESET_ACTION_ID, false)
     refute Hive::OperationalAction.const_defined?(:FORCED_PROBE_ACTION_ID, false)

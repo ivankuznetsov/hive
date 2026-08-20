@@ -71,6 +71,10 @@ module Hive
       "hive-patrol" => 3,
       "hive-patrol-findings" => 1,
       "hive-patrol-finding" => 3,
+      "hive-patrol-fix-task-manifest" => 1,
+      "hive-patrol-fix-decision" => 1,
+      "hive-patrol-fix-receipt" => 1,
+      "hive-patrol-fix-projection" => 1,
       "hive-refactor-patrol" => 4,
       "hive-refactor-patrol-jobs" => 2,
       "hive-refactor-patrol-thesis" => 4,
@@ -272,6 +276,9 @@ module Hive
       AGENT_RUNNING       = "agent_running".freeze
       ARCHIVED            = "archived".freeze
       MANUAL_STEERING     = "manual_steering".freeze
+      PATROL_FIX_REJECTED = "patrol_fix_rejected".freeze
+      PATROL_FIX_BLOCKED  = "patrol_fix_blocked".freeze
+      PATROL_FIX_ESCALATED = "patrol_fix_escalated".freeze
       ERROR               = "error".freeze
       ADMISSION_ERROR     = "admission_error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze

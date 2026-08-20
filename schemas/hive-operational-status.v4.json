@@ -270,7 +270,7 @@
       "additionalProperties": false,
       "required": [
         "identity", "workflow", "position", "liveness", "state", "blocker_owner",
-        "reason", "reasons", "provider", "routing", "retry", "recovery", "closure", "plan_review",
+        "reason", "reasons", "provider", "routing", "retry", "recovery", "closure", "plan_review", "patrol_fix",
         "dependency", "freshness", "evidence", "action"
       ],
       "properties": {
@@ -365,6 +365,12 @@
           "oneOf": [
             { "type": "null" },
             { "$ref": "#/$defs/PlanReviewSummary" }
+          ]
+        },
+        "patrol_fix": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "hive-patrol-fix-projection.v1.json" }
           ]
         },
         "dependency": {

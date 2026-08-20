@@ -134,7 +134,7 @@
         "condition_task_generation",
          "commit_generation", "current_attempt", "conditions", "condition_history",
          "evidence", "closure", "condition_overrides", "condition_gate", "condition_migration", "condition_provenance",
-         "shadow_audit", "condition_warning", "plan_review", "auto_residue", "unanswered_questions", "action",
+         "shadow_audit", "condition_warning", "plan_review", "patrol_fix", "auto_residue", "unanswered_questions", "action",
          "action_label", "suggested_command", "outcomes",
         "next_action", "diagnostic"
       ],
@@ -268,6 +268,12 @@
             { "$ref": "#/$defs/PlanReviewSummary" }
           ]
         },
+        "patrol_fix": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "hive-patrol-fix-projection.v1.json" }
+          ]
+        },
         "implementation_identity": {
           "oneOf": [
             { "$ref": "#/$defs/ImplementationIdentity" },
@@ -290,6 +296,7 @@
             "ready_to_finalize", "ready_to_archive", "ready_to_advance",
             "ready_to_run", "recover_draft_pr", "review_parked", "needs_input", "recover_execute",
             "recover_review", "agent_running", "archived", "manual_steering",
+            "patrol_fix_rejected", "patrol_fix_blocked", "patrol_fix_escalated",
             "plan_reviewing", "plan_review_retry", "plan_review_decision",
             "plan_review_degraded", "plan_review_unsupported", "plan_review_blocked",
             "error", "admission_error"

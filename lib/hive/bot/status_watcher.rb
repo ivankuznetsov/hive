@@ -11,7 +11,7 @@ module Hive
                         :condition_task_generation, :commit_generation, :current_attempt,
                         :conditions, :condition_history, :evidence, :condition_overrides, :condition_gate,
                         :condition_migration, :condition_provenance, :shadow_audit,
-                        :condition_warning, :auto_residue) do
+                        :condition_warning, :patrol_fix, :auto_residue) do
         def initialize(project:, slug:, id: nil, display_name: nil, project_path: nil, hive_state_path: nil,
                        stage: nil, workflow: nil, marker: nil, attrs: {}, folder: nil,
                        state_file: nil, pr_url: nil, state_file_mtime: nil, age_seconds: nil,
@@ -20,7 +20,7 @@ module Hive
                        commit_generation: nil, current_attempt: nil, conditions: [],
                        condition_history: [], evidence: [], condition_overrides: [], condition_gate: nil,
                        condition_migration: nil, condition_provenance: {}, shadow_audit: {},
-                       condition_warning: nil, auto_residue: nil)
+                       condition_warning: nil, patrol_fix: nil, auto_residue: nil)
           # Explicit-keyword super (matching Snapshot::Row) rather than the
           # bare positional form, so a future member-order change in the
           # Data.define above can't silently misbind constructor arguments.
@@ -37,7 +37,7 @@ module Hive
             condition_overrides: condition_overrides,
             condition_gate: condition_gate, condition_migration: condition_migration,
             condition_provenance: condition_provenance, shadow_audit: shadow_audit,
-            condition_warning: condition_warning, auto_residue: auto_residue
+            condition_warning: condition_warning, patrol_fix: patrol_fix, auto_residue: auto_residue
           )
         end
       end
@@ -321,6 +321,7 @@ module Hive
               condition_provenance: task["condition_provenance"] || {},
               shadow_audit: task["shadow_audit"] || {},
               condition_warning: task["condition_warning"],
+              patrol_fix: task["patrol_fix"],
               auto_residue: task["auto_residue"]
             )
           end

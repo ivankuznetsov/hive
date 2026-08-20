@@ -363,7 +363,8 @@ module Hive
       end
       action = Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row)
       if daemon_enabled?(project.fetch("name")) &&
-         action&.fetch("action_id") != Hive::OperationalAction::RETRY_ACTION_ID
+         ![ Hive::OperationalAction::RETRY_ACTION_ID,
+            Hive::OperationalAction::PATROL_FIX_REOPEN_ACTION_ID ].include?(action&.fetch("action_id", nil))
         action = nil
       end
       {
@@ -400,6 +401,7 @@ module Hive
         "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
         "closure" => closure_payload(project, row),
         "plan_review" => row["plan_review"],
+        "patrol_fix" => row["patrol_fix"],
         "dependency" => {
           "blocked" => row["blocked"] == true,
           "blocked_by" => row["blocked_by"],
@@ -566,6 +568,7 @@ module Hive
       return [ "unknown", "unknown" ] if invalid_task?(row)
       return [ "needs_repair", "hive" ] if stale_liveness?(row)
       return [ "running", "agent" ] if running?(row)
+      return [ "waiting_on_you", "operator" ] if patrol_fix_parked?(row)
       return [ "waiting_on_you", "operator" ] if row["action"] == "plan_review_decision"
       if PLAN_REVIEW_WAIT_ACTIONS.include?(row["action"])
         owner = daemon_enabled?(project["name"]) ? "scheduler" : operational_review_owner(row)
@@ -839,6 +842,10 @@ module Hive
       HUMAN_ACTIONS.include?(row["action"])
     end
 
+    def patrol_fix_parked?(row)
+      row["workflow"] == "patrol-fix" && row.dig("patrol_fix", "action", "kind") == "parked"
+    end
+
     def daemon_plan_approval?(project, row)
       daemon_enabled?(project["name"]) && row["workflow"] == "coding" && row["stage"] == CODING_PLAN_STAGE
     end
@@ -876,6 +883,10 @@ module Hive
         review = row.fetch("plan_review")
         message = review["required_action"] || review["blocker_reason"] || row["action_label"]
         reasons << reason("plan_review_#{review['state']}", message, "plan_review")
+      elsif patrol_fix_parked?(row)
+        outcome = row.dig("patrol_fix", "outcome") || {}
+        message = outcome["rationale"] || row["action_label"] || "patrol-fix task is parked"
+        reasons << reason("patrol_fix_#{outcome['kind'] || 'parked'}", message, "patrol_fix")
       elsif row["admission_error"]
         error = row.fetch("admission_error")
         reasons << reason(error.fetch("reason_code"), error.fetch("safe_correction"), "dependency")

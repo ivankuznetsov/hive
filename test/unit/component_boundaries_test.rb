@@ -19,6 +19,7 @@ class ComponentBoundariesTest < Minitest::Test
       agent-artifact-firewall
       attempts
       patrol-effects
+      patrol-fix
       provider-health
       provider-routing-operations
       provider-routing-policy
@@ -226,7 +227,24 @@ class ComponentBoundariesTest < Minitest::Test
       "the deleted compatibility store must not survive in the component contract"
     )
 
-    ready_components = [ user_service ]
+    patrol_fix = contract.component("patrol-fix")
+    assert_equal "boundary-ready", patrol_fix.fetch("state")
+    assert_equal "hive/patrol_fix", patrol_fix.dig("entrypoint", "require")
+    assert_equal "Hive::PatrolFix", patrol_fix.dig("entrypoint", "constant")
+    assert_equal %w[
+      Hive::PatrolFix::Projection
+      Hive::PatrolFix::ReceiptStore
+      Hive::PatrolFix::TaskManifest
+    ], patrol_fix.dig("public_contract", "values").sort
+    assert_empty patrol_fix.fetch("component_dependencies")
+    refute patrol_fix.fetch("allowed_hive_dependencies").any? { |path|
+      path.start_with?("hive/patrol") || path.start_with?("hive/refactor_patrol") ||
+        path.start_with?("hive/commands") || path.start_with?("hive/daemon") ||
+        path.start_with?("hive/web")
+    }
+    assert_empty patrol_fix.fetch("migration_exceptions")
+
+    ready_components = [ user_service, patrol_fix ]
 
     clean_load = contract.validate_clean_load!("attempts")
     assert_equal "Hive::Attempts::API", clean_load.fetch("constant")
@@ -505,6 +523,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal %w[
       agent-abi
       agent-artifact-firewall
+      patrol-fix
       safe-agent-git-gate
       skillpack
       user-service
@@ -518,6 +537,10 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::AgentRuntime", agent_abi_load.fetch("constant")
     assert_empty agent_abi_load.fetch("forbidden_loaded_features")
     assert_empty agent_abi_load.fetch("forbidden_constants")
+    patrol_fix_load = ready_loads.fetch("patrol-fix")
+    assert_equal "Hive::PatrolFix", patrol_fix_load.fetch("constant")
+    assert_empty patrol_fix_load.fetch("forbidden_loaded_features")
+    assert_empty patrol_fix_load.fetch("forbidden_constants")
     user_service_load = ready_loads.fetch("user-service")
     assert_equal "Hive::UserService", user_service_load.fetch("constant")
     assert_empty user_service_load.fetch("forbidden_loaded_features")

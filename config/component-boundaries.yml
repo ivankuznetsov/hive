@@ -224,6 +224,65 @@ components:
       - test/unit/commands/circuits_test.rb
     migration_exceptions: []
 
+  - id: patrol-fix
+    name: Patrol Fix Task Artifacts
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/patrol_fix.rb
+      require: hive/patrol_fix
+      constant: Hive::PatrolFix
+    public_contract:
+      values:
+        - Hive::PatrolFix::TaskManifest
+        - Hive::PatrolFix::ReceiptStore
+        - Hive::PatrolFix::Projection
+      errors:
+        - Hive::PatrolFix::TaskManifest::InvalidManifest
+        - Hive::PatrolFix::ReceiptStore::InvalidReceipt
+    owned_paths:
+      - lib/hive/patrol_fix.rb
+      - lib/hive/patrol_fix/task_manifest.rb
+      - lib/hive/patrol_fix/receipt_store.rb
+      - lib/hive/patrol_fix/projection.rb
+      - lib/hive/patrol_fix/runner.rb
+      - schemas/hive-patrol-fix-decision.v1.json
+      - schemas/hive-patrol-fix-task-manifest.v1.json
+      - schemas/hive-patrol-fix-receipt.v1.json
+      - schemas/hive-patrol-fix-projection.v1.json
+    state_contracts:
+      - "The strict task manifest binds every source revision and one canonical task generation while append-only receipts bind exact evidence generation"
+      - "Equivalent evidence may add provenance within a generation; materially changed evidence advances exactly one generation and invalidates old receipts"
+      - "Projection fails closed with bounded diagnostics, keeps parked outcomes non-done, and requires an exact current publication receipt for done"
+    schema_contracts:
+      - "Manifest, decision, receipt, and projection contracts are versioned, bounded, and reject unknown fields"
+      - "Source provenance includes source engine, identity, target revision, evidence, affected code, reproduction guidance, discovery run, and semantic lineage"
+    lock_contracts:
+      - "Manifest replacement is atomic and receipts append under a task-local journal lock"
+      - "The common operational action acquires the task lock and revalidates its observation token before appending a reopen receipt"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive
+      - hive/atomic_file
+      - hive/workflow_package/canonical_json
+    internal_collaborators:
+      - Hive::AtomicFile
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/workflows/patrol_fix.rb
+      - lib/hive/stages/resolver.rb
+      - lib/hive/task_action.rb
+      - lib/hive/operational_action.rb
+    mutation_authority: "Strict task-local manifest replacement and append-only decision, fix, validation, publication, and reopen receipts only."
+    recovery_surface: "Projects a generation-guarded reopen eligibility consumed only by the common operational-action controller; no scheduler, adapter, or remote-effect authority."
+    wiki_page: wiki/modules/patrol.md
+    focused_tests:
+      - test/unit/patrol_fix/task_manifest_test.rb
+      - test/unit/patrol_fix/receipt_store_test.rb
+      - test/unit/patrol_fix/projection_test.rb
+      - test/unit/patrol_fix/task_action_test.rb
+    migration_exceptions: []
+
   - id: patrol-effects
     name: Patrol Effect Evidence
     state: candidate

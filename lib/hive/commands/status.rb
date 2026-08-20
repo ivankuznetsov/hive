@@ -649,6 +649,7 @@ module Hive
           "closure" => row.dig(:projection_data, "closure"),
           "condition_warning" => row[:condition_warning],
           "plan_review" => row[:plan_review],
+          "patrol_fix" => row[:patrol_fix],
           "implementation_identity" => row[:implementation_identity],
           "auto_residue" => Hive::Events.clean_exit_summary(row[:folder]),
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
@@ -1206,12 +1207,20 @@ module Hive
                 )
                 next
               end
-              marker = Hive::Markers.current(task.state_file)
+              marker = if Hive::Workflows.patrol_fix_id?(task.workflow.id)
+                Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+              else
+                Hive::Markers.current(task.state_file)
+              end
               marker, projection = status_projection(
                 task, marker, project: project_name || project_name_for(task)
               )
               folder_mtime = File.mtime(entry)
-              mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
+              mtime = if Hive::Workflows.patrol_fix_id?(task.workflow.id)
+                folder_mtime
+              else
+                File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
+              end
               # Generic markerless tasks still carry meta.yml. Use that stable
               # task-owned file for the action observation before falling back
               # to the directory mtime. Keep `mtime` on its long-standing
@@ -1576,6 +1585,9 @@ module Hive
         # non-advancing, so it sorts with the other review-complete rows rather
         # than falling below "Error" as an unknown label.
         "Ad-hoc review complete (parked)",
+        "Rejected (parked)",
+        "Blocked (parked)",
+        "Escalated (parked)",
         "Ready to finalize",
         "Ready to archive",
         "Archived",
@@ -1640,7 +1652,8 @@ module Hive
           condition_gate: nil,
           condition_migration: nil,
           condition_warning: nil,
-          plan_review: nil
+          plan_review: nil,
+          patrol_fix: nil
         }
       end
 
@@ -1687,6 +1700,7 @@ module Hive
             condition_migration: action.migration_selection.to_h,
             condition_warning: action.condition_warning,
             plan_review: action.plan_review,
+            patrol_fix: action.patrol_fix,
             state_label: condition_state_label(row, action)
           )
         end

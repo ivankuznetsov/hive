@@ -21,6 +21,7 @@ the first and primary consumer.
 | Provider Routing Policy | `candidate` | `require "hive/provider_routing"` → `Hive::ProviderRouting` | [[modules/provider_routing]] |
 | Provider Routing Operations | `candidate` | `require "hive/provider_routing/operational_projection"` → `Hive::ProviderRouting::OperationalProjection` | [[modules/provider_routing]] |
 | Patrol Effect Evidence | `candidate` (U3a protocol complete; reduced installed/live smoke source-pinned; full U3b/U3c proof pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
+| Patrol Fix Task Artifacts | `boundary-ready` | `require "hive/patrol_fix"` → `Hive::PatrolFix` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | Workflow Creator Values | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_text_safety"` → `HiveLiveAgentProof::WorkflowCreator::TextSafety` | [[component-boundaries]] |
 | Workflow Creator | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_evidence"` → `HiveLiveAgentProof::WorkflowCreatorEvidence` | [[component-boundaries]] |
@@ -41,7 +42,7 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The catalog retains fifteen components: ten are `boundary-ready`; Provider
+The catalog retains sixteen components: eleven are `boundary-ready`; Provider
 Health, Provider Routing Policy, Provider Routing Operations, Attempts, and
 Patrol Effect Evidence remain `candidate`.
 Patrol retains one bounded U3 exception for deterministic public-path and
@@ -63,6 +64,7 @@ flowchart LR
   workflow_live --> workflow_core
   workflow_core[Workflow Creator] --> workflow_values[Workflow Creator Values]
   patrol_effects[Patrol Effect Evidence - candidate]
+  patrol_fix[Patrol Fix Task Artifacts]
   attempts[Attempts admission - candidate] --> provider_health[Provider Health - candidate]
   attempts --> provider_routing[Provider Routing Policy - candidate]
   routing_operations[Provider Routing Operations - candidate] --> attempts
@@ -89,7 +91,7 @@ candidates rather than being promoted ahead of their remaining lifecycle or
 qualification proof.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
-nine ready components currently has the named non-Hive adopter and independent
+eleven ready components currently has the named non-Hive adopter and independent
 package proof required by the standalone-gem plan.
 
 `Patrol Effect Evidence` owns the immutable cross-product capture, selection,

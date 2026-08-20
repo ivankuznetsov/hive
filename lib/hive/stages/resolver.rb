@@ -55,6 +55,10 @@ module Hive
           runner = CODING_RUNNERS[task.stage_name]
           return runner.call if runner
         end
+        if Hive::Workflows.patrol_fix_id?(descriptor.id)
+          require "hive/patrol_fix/runner"
+          return Hive::PatrolFix::Runner.method(:run!) if descriptor.stage_named(task.stage_name)
+        end
 
         stage = descriptor.stages.find { |candidate| candidate.name == task.stage_name }
         if stage&.kind == :agent

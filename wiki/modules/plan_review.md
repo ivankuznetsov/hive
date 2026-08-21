@@ -145,7 +145,11 @@ provider process. Hive's own durable session-start/session-finish writes to
 they cannot be misclassified as planner tampering, while provider writes to
 the same anchors still fail closed and are restored. A launcher that returns
 success without invoking the supplied custody is rejected. Hive then runs a
-disposition/regression verification leg. Each accepted finding
+disposition/regression verification leg. A custody-verified, bounded candidate
+ending in the exact `COMPLETE` marker remains authoritative completion evidence
+when a provider's terminal telemetry is malformed or truncated. Missing,
+non-terminal, oversized, invalid, or tampered candidates still fail closed.
+Each accepted finding
 requires explicit fingerprint-bound verification evidence; absence from a
 generic critique does not verify it. A
 remaining or newly discovered actionable finding is reopened in the same

@@ -143,6 +143,7 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
         assert_includes result.fetch("diagnostic"), "protected artifacts"
       end
 
+      FileUtils.rm_f(output)
       missing = lambda do |_task, agent_custody:, **|
         agent_custody.call { { status: :failed, error_message: "no candidate" } }
       end
@@ -183,6 +184,27 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
         )
         assert_equal "success", result.fetch("status")
         assert_includes result.fetch("diagnostic"), "salvaged complete candidate"
+      end
+
+      malformed_telemetry_complete = lambda do |_task, agent_custody:, **kwargs|
+        agent_custody.call do
+          File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
+          {
+            status: :failed,
+            error_reason: "malformed_output",
+            error_message: "OpenCode sanitized export is malformed: unexpected EOF"
+          }
+        end
+      end
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :spawn_agent, malformed_telemetry_complete
+      ) do
+        result = runner.call(
+          prompt: "revise", workspace:, output_path: output,
+          planner_identity:, timeout_sec: 60
+        )
+        assert_equal "success", result.fetch("status")
+        assert_includes result.fetch("diagnostic"), "planner telemetry failure"
       end
 
       capture_error = ->(_manifest) { raise Hive::ArtifactFirewall::Error, "capture failed" }

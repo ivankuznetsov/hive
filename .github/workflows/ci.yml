@@ -14,8 +14,39 @@ permissions:
   contents: read
 
 jobs:
+  # Docs-only short-circuit: patrol/digest lanes produce wiki/docs-heavy PRs
+  # that cannot change behavior. Only a confidently pure docs diff
+  # short-circuits heavy proofs; any detection failure or empty diff defaults
+  # to running everything. Required checks still report — aggregators treat
+  # a docs-only diff as success (see their verdict scripts).
+  changes:
+    name: detect docs-only diffs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          code=true
+          if [[ -n "${BASE_SHA:-}" ]] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            changed="$(git diff --name-only "${BASE_SHA}..HEAD" || true)"
+            if [[ -n "$changed" ]] && ! grep -qEv '^(wiki/|docs/|writing/|raw/|CHANGELOG\.md)' <<< "$changed"; then
+              code=false
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   coverage-shards:
     name: coverage shard ${{ matrix.label }}/6
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -80,7 +111,7 @@ jobs:
   test:
     name: coverage (Ruby 3.4)
     if: ${{ always() }}
-    needs: coverage-shards
+    needs: [changes, coverage-shards]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -97,7 +128,13 @@ jobs:
         shell: bash
         env:
           HIVE_COVERAGE_SHARDS_RESULT: ${{ needs.coverage-shards.result }}
-        run: test "$HIVE_COVERAGE_SHARDS_RESULT" = "success"
+          HIVE_CHANGES_CODE: ${{ needs.changes.outputs.code }}
+        run: |
+          if [[ "$HIVE_CHANGES_CODE" != "true" ]]; then
+            echo "docs-only diff: coverage proofs short-circuited"
+            exit 0
+          fi
+          test "$HIVE_COVERAGE_SHARDS_RESULT" = "success"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
@@ -130,6 +167,8 @@ jobs:
 
   expensive-test-gates:
     name: ${{ matrix.name }}
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -159,6 +198,7 @@ jobs:
     name: rake test (Ruby 3.4)
     if: ${{ always() }}
     needs:
+      - changes
       - test
       - expensive-test-gates
       - e2e
@@ -179,13 +219,20 @@ jobs:
           HIVE_COVERAGE_RESULT: ${{ needs.test.result }}
           HIVE_EXPENSIVE_GATES_RESULT: ${{ needs.expensive-test-gates.result }}
           HIVE_E2E_RESULT: ${{ needs.e2e.result }}
+          HIVE_CHANGES_CODE: ${{ needs.changes.outputs.code }}
         run: |
+          if [[ "$HIVE_CHANGES_CODE" != "true" ]]; then
+            echo "docs-only diff: heavy proofs short-circuited; required gate reports success"
+            exit 0
+          fi
           test "$HIVE_COVERAGE_RESULT" = "success"
           test "$HIVE_EXPENSIVE_GATES_RESULT" = "success"
           test "$HIVE_E2E_RESULT" = "success"
 
   e2e:
     name: real CLI scenario harness
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -241,6 +288,8 @@ jobs:
 
   web-tests:
     name: ${{ matrix.name }}
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -310,7 +359,7 @@ jobs:
   web:
     name: Hive web (Rails tests + system)
     if: ${{ always() }}
-    needs: web-tests
+    needs: [changes, web-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -326,7 +375,13 @@ jobs:
         shell: bash
         env:
           HIVE_WEB_TESTS_RESULT: ${{ needs.web-tests.result }}
-        run: test "$HIVE_WEB_TESTS_RESULT" = "success"
+          HIVE_CHANGES_CODE: ${{ needs.changes.outputs.code }}
+        run: |
+          if [[ "$HIVE_CHANGES_CODE" != "true" ]]; then
+            echo "docs-only diff: web proofs short-circuited"
+            exit 0
+          fi
+          test "$HIVE_WEB_TESTS_RESULT" = "success"
 
   # Hosted Windows runners cannot run Linux containers (Windows-container
   # mode only, no WSL2) — the per-OS surface that CAN break is our

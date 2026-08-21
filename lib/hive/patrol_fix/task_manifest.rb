@@ -1,10 +1,12 @@
 require "json"
+require "digest"
 require "hive/patrol_fix"
 require "hive/atomic_file"
 
 module Hive
   module PatrolFix
     class TaskManifest
+      Snapshot = Data.define(:document, :canonical_bytes, :digest)
       FILENAME = "patrol-fix-manifest.json".freeze
       SCHEMA = "hive-patrol-fix-task-manifest".freeze
       SCHEMA_VERSION = 1
@@ -34,6 +36,23 @@ module Hive
 
       def read
         validate!(JSON.parse(read_bytes))
+      rescue JSON::ParserError => e
+        invalid!("manifest is malformed JSON: #{e.message}")
+      end
+
+      # One exact, canonical read for consumers that must bind later work to
+      # the manifest bytes they inspected. Writers have always emitted this
+      # canonical form; rejecting alternate encodings keeps inventory digests
+      # independent of parser or whitespace behavior.
+      def read_snapshot
+        bytes = read_bytes
+        document = validate!(JSON.parse(bytes))
+        canonical = PatrolFix.canonical_json(document)
+        invalid!("manifest is not canonical") unless canonical.b == bytes.b
+        Snapshot.new(
+          document: document, canonical_bytes: canonical.freeze,
+          digest: Digest::SHA256.hexdigest(canonical).freeze
+        ).freeze
       rescue JSON::ParserError => e
         invalid!("manifest is malformed JSON: #{e.message}")
       end

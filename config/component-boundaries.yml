@@ -315,6 +315,7 @@ components:
       - schemas/hive-patrol-fix-migration-semantic-decision.v1.json
       - schemas/hive-patrol-fix-migration-disposition-manifest.v1.json
       - schemas/hive-patrol-fix-migration-cutover-state.v1.json
+      - schemas/hive-patrol-fix-dogfood-report.v1.json
     state_contracts:
       - "The strict task manifest binds every source revision and one canonical task generation while append-only receipts bind exact evidence generation"
       - "Equivalent evidence may add provenance within a generation; materially changed evidence advances exactly one generation and invalidates old receipts"
@@ -336,6 +337,7 @@ components:
       - "Source provenance includes source engine, identity, target revision, evidence, affected code, reproduction guidance, discovery run, and semantic lineage"
       - "Source snapshots, outbox records, and admission records are canonical, size bounded, digest bound, and reject secret-like material"
       - "Migration semantic decisions bind the complete candidate-set digest and current head; opaque Architecture v3 bytes remain a separate count and digest inventory"
+      - "Dogfood reports bind one source occurrence through ordered workflow observations to one exact publication receipt and zero-duplicate replay counts"
     lock_contracts:
       - "Manifest replacement is atomic and receipts append under a task-local journal lock"
       - "The common operational action acquires the stable slug lock then task lock, revalidates its observation token, and advances generation before a reopen receipt"

@@ -1,0 +1,190 @@
+{
+  "schema": "hive-patrol-fix-qualification-corpus",
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "patrol-semantic-alias",
+      "source": "ordinary_patrol",
+      "gate": "semantic_admission",
+      "safety_critical": false,
+      "baseline_decision": "same_root",
+      "unsafe_decisions": [],
+      "prompt_schema_version": "patrol-fix-semantic-admission-v2",
+      "provenance": {
+        "origin": "historical",
+        "source_identity": "architecture-lib-hive-workflow-package-part-3-20260817T041533Z-6a49f728-1",
+        "source_digest": "d418cc2032559125c05d8c0f24f4a9685e39de117804e409851c0ceb354705dd",
+        "target_revision": "20a73e6d0d1c91449b0a5ed66fbfa9f90c94e2cd",
+        "label_rationale": "The retained finding and candidate both identify the same untyped author metadata root; splitting them would be conservative but duplicate repair work."
+      },
+      "input": {
+        "summary": "A scalar author in honeycomb.yml reaches Hash#dig and raises an unhandled TypeError.",
+        "affected_code": ["lib/hive/workflow_package/publisher.rb"],
+        "evidence": ["publisher.rb calls metadata.dig('author', 'name') without first proving author is a Hash."],
+        "remediation": "Validate the author shape and raise the existing actionable configuration error.",
+        "source_revision": "20a73e6d0d1c91449b0a5ed66fbfa9f90c94e2cd"
+      }
+    },
+    {
+      "id": "architecture-semantic-distinct",
+      "source": "architecture_patrol",
+      "gate": "semantic_admission",
+      "safety_critical": true,
+      "baseline_decision": "distinct",
+      "unsafe_decisions": ["same_root"],
+      "prompt_schema_version": "patrol-fix-semantic-admission-v2",
+      "provenance": {
+        "origin": "historical",
+        "source_identity": "pr-1015-8181522c6a7dcff1",
+        "source_digest": "38db641439c314eb38072973f981ab8fb4e2b526a01a608e9447acaa70c22f56",
+        "target_revision": "7b4dd4b63a379c2b8d7c696b2511ed12b7571afa",
+        "label_rationale": "The retained PR 1015 Architecture job contains web and workflow ownership theses, not the candidate retry-remediation root; merging them would be unsafe."
+      },
+      "input": {
+        "summary": "PR 1015 produced independent web lifecycle and workflow ownership theses.",
+        "affected_code": ["lib/hive/web", "lib/hive/workflows"],
+        "evidence": ["The retained Architecture job routes multiple web and workflow ownership roots independently."],
+        "remediation": "Keep this architecture work distinct from an unrelated retry repair.",
+        "source_revision": "7b4dd4b63a379c2b8d7c696b2511ed12b7571afa"
+      }
+    },
+    {
+      "id": "patrol-feature-fix",
+      "source": "ordinary_patrol",
+      "gate": "feature_classification",
+      "safety_critical": true,
+      "baseline_decision": "skip",
+      "unsafe_decisions": ["feature"],
+      "prompt_schema_version": "patrol-fix-feature-classification-v1",
+      "provenance": {
+        "origin": "historical",
+        "source_identity": "architecture-lib-hive-workflow-package-part-3-20260817T180030Z-303b4f72-1",
+        "source_digest": "757b5a910c8434b359182579894d3667ad5a12e9ecb4a8e4c4e3b304afe8a3e4",
+        "target_revision": "20a73e6d0d1c91449b0a5ed66fbfa9f90c94e2cd",
+        "label_rationale": "The retained finding is a destructive-cleanup regression in existing behavior, so classifying it as a feature could recursively trigger Architecture Patrol on a fix."
+      },
+      "input": {
+        "summary": "Cleanup after a rejected non-empty destination deletes caller-owned contents.",
+        "affected_code": ["lib/hive/workflow_package/publisher.rb", "lib/hive/workflow_package/registry_client.rb"],
+        "evidence": ["The rescue unconditionally removes destination after the ownership guard rejects it."],
+        "remediation": "Gate cleanup on a controller-owned destination flag.",
+        "source_revision": "20a73e6d0d1c91449b0a5ed66fbfa9f90c94e2cd"
+      }
+    },
+    {
+      "id": "architecture-feature-new-policy",
+      "source": "architecture_patrol",
+      "gate": "feature_classification",
+      "safety_critical": false,
+      "baseline_decision": "feature",
+      "unsafe_decisions": [],
+      "prompt_schema_version": "patrol-fix-feature-classification-v1",
+      "provenance": {
+        "origin": "historical",
+        "source_identity": "pr-1114-21bd13cfcfc345a4",
+        "source_digest": "30b80e6a3573e4cd0a5435f8aedcb081282ae99ff0e1c047f79474bc37295eeb",
+        "target_revision": "9b1736ddcfb5ee353632bf8197e5dcaa2bc59850",
+        "label_rationale": "The retained PR 1114 job covers a measured multi-shard coverage capability rather than maintenance-only churn; a conservative skip is reportable, not unsafe."
+      },
+      "input": {
+        "summary": "PR 1114 introduces a measured six-shard coverage execution capability.",
+        "affected_code": ["Rakefile", ".github/workflows"],
+        "evidence": ["The retained job describes coverage shard cardinality and declared path admission as new owned behavior."],
+        "remediation": "Classify the merged capability for targeted Architecture Patrol.",
+        "source_revision": "9b1736ddcfb5ee353632bf8197e5dcaa2bc59850"
+      }
+    },
+    {
+      "id": "patrol-inbox-fix",
+      "source": "ordinary_patrol",
+      "gate": "inbox_routing",
+      "safety_critical": false,
+      "baseline_decision": "fix",
+      "unsafe_decisions": [],
+      "prompt_schema_version": "patrol-fix-inbox-v1",
+      "provenance": {
+        "origin": "historical",
+        "source_identity": "architecture-lib-hive-workflow-package-part-4-20260817T042207Z-6772e909-1",
+        "source_digest": "14a83984f5bb69ca845e48f2ddd99328afbded01fad947d8b25e1e027be434ce",
+        "target_revision": "20a73e6d0d1c91449b0a5ed66fbfa9f90c94e2cd",
+        "label_rationale": "The retained finding has one bounded offset-domain root and direct characterization, so fix is the expected lightweight route; rejection is conservative, not unsafe."
+      },
+      "input": {
+        "summary": "Security diagnostics mix character offsets with byte slicing on multibyte text.",
+        "affected_code": ["lib/hive/workflow_package/security_scanner.rb"],
+        "evidence": ["MatchData#begin feeds text.byteslice, producing wrong or invalid UTF-8 locations."],
+        "remediation": "Use one character-offset domain in the shared location helper.",
+        "source_revision": "20a73e6d0d1c91449b0a5ed66fbfa9f90c94e2cd"
+      }
+    },
+    {
+      "id": "architecture-inbox-escalate",
+      "source": "architecture_patrol",
+      "gate": "inbox_routing",
+      "safety_critical": true,
+      "baseline_decision": "escalate",
+      "unsafe_decisions": ["fix"],
+      "prompt_schema_version": "patrol-fix-inbox-v1",
+      "provenance": {
+        "origin": "historical",
+        "source_identity": "pr-1113-300dbd75b27d0024",
+        "source_digest": "48af3903e8abd8870d420ea86c87ce1aa77d97e1f5d004d3bd21c49a87ec05a6",
+        "target_revision": "41b128a1c63cc16695b738f59db23bbd07ae3891",
+        "label_rationale": "The retained PR 1113 job spans policy, launch lifecycle, publication, TUI and CLI ownership; forcing it through one lightweight fix would be unsafe without product scope."
+      },
+      "input": {
+        "summary": "PR 1113 deliberately changes quota policy and multiple operational ownership boundaries.",
+        "affected_code": ["lib/hive/daemon", "lib/hive/patrol", "lib/hive/tui"],
+        "evidence": ["The retained job contains both fix and discuss dispositions across several public surfaces."],
+        "remediation": "Escalate the cross-surface product scope before selecting a lightweight repair.",
+        "source_revision": "41b128a1c63cc16695b738f59db23bbd07ae3891"
+      }
+    },
+    {
+      "id": "patrol-review-rework",
+      "source": "ordinary_patrol",
+      "gate": "independent_review",
+      "safety_critical": true,
+      "baseline_decision": "rework",
+      "unsafe_decisions": ["approve"],
+      "prompt_schema_version": "patrol-fix-review-v1",
+      "provenance": {
+        "origin": "historical",
+        "source_identity": "architecture-lib-hive-workflow-package-part-3-20260817T041533Z-6a49f728-2",
+        "source_digest": "336640ce1a6b0d9d2bfa6aeeb3c9122f6ffd8f45678c65e49b03e3a6a63153a6",
+        "target_revision": "20a73e6d0d1c91449b0a5ed66fbfa9f90c94e2cd",
+        "label_rationale": "The retained finding proves the catalog schema mismatch; a patch that checks the same nonexistent workflows key must rework, and approval would publish a known ineffective fix."
+      },
+      "input": {
+        "summary": "The patch still checks a workflows catalog key that the canonical entries schema never contains.",
+        "affected_code": ["lib/hive/workflow_package/publisher.rb", "lib/hive/workflow_package/registry_client.rb"],
+        "evidence": ["The retained schema contract accepts only entries and schema, so the guard remains inert."],
+        "remediation": "Return to fix and scan catalog entries by name and version.",
+        "source_revision": "20a73e6d0d1c91449b0a5ed66fbfa9f90c94e2cd"
+      }
+    },
+    {
+      "id": "architecture-review-approve",
+      "source": "architecture_patrol",
+      "gate": "independent_review",
+      "safety_critical": false,
+      "baseline_decision": "approve",
+      "unsafe_decisions": [],
+      "prompt_schema_version": "patrol-fix-review-v1",
+      "provenance": {
+        "origin": "historical",
+        "source_identity": "pr-1115-b20598487108076a",
+        "source_digest": "1ece70d07f186264c68ba2ea8b64899d20c1c36bde6d9c73a5dd3dba4ca569b9",
+        "target_revision": "d786bde187ad66998a9e4f95faaeec230be8064d",
+        "label_rationale": "The retained PR 1115 job completed with only dismissed architecture theses; approval of its exact outcome-evidence repair is the baseline, while conservative rework is reportable."
+      },
+      "input": {
+        "summary": "The outcome-evidence repair keeps custody outside the web boundary and passes its exact contract checks.",
+        "affected_code": ["lib/hive/artifacts/outcome_evidence", "lib/hive/web"],
+        "evidence": ["The retained Architecture job completed without an admissible conflicting thesis."],
+        "remediation": "Approve publication of the exact reviewed repair.",
+        "source_revision": "d786bde187ad66998a9e4f95faaeec230be8064d"
+      }
+    }
+  ]
+}

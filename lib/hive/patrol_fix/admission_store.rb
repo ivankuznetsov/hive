@@ -1,5 +1,6 @@
 require "digest"
 require "json"
+require "securerandom"
 require "time"
 require "hive/managed_directory"
 require "hive/patrol_fix"
@@ -10,10 +11,12 @@ module Hive
   module PatrolFix
     class AdmissionStore
       SCHEMA = "hive-patrol-fix-admission".freeze
-      SCHEMA_VERSION = 1
+      SCHEMA_VERSION = 2
       MAX_RECORD_BYTES = 512 * 1024
       MAX_RECORDS = 8_192
       MAX_CANDIDATES = 64
+      MAX_CANDIDATE_BYTES = 6 * 1024
+      MAX_CANDIDATE_CONTEXT_BYTES = 192 * 1024
       MAX_EVIDENCE = 64
       OCCURRENCE_ID = /\A[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}\z/
       DIGEST = /\A[0-9a-f]{64}\z/
@@ -56,17 +59,40 @@ module Hive
         bytes && parse_record(bytes, expected_id: id)
       end
 
-      def prepare_decision!(occurrence_id, candidates:, current_head:, now: Time.now.utc)
+      def prepare_decision!(occurrence_id, candidates:, current_head:, inventory: nil,
+                            reservation_id: nil, lease_expires_at: nil,
+                            now: Time.now.utc)
         normalized = normalize_candidates(candidates)
         head = revision!(current_head, "current head")
-        digest = candidate_digest(normalized, current_head: head)
+        frozen_inventory = normalize_candidate_inventory(
+          inventory || default_inventory(normalized), candidates: normalized
+        )
+        digest = candidate_digest(
+          normalized, current_head: head, inventory: frozen_inventory
+        )
+        reservation = normalize_decision_reservation(
+          "reservation_id" => reservation_id || SecureRandom.hex(32),
+          "reserved_at" => timestamp(now),
+          "expires_at" => timestamp(lease_expires_at || (now.utc + 7_200))
+        )
         mutate(occurrence_id) do |record|
           terminal = %w[materializing bound acknowledged].include?(record.fetch("status"))
           conflict!("admission is already materializing or bound") if terminal
+          existing = record["decision_reservation"]
+          if record.fetch("status") == "deciding" && existing &&
+             Time.iso8601(existing.fetch("expires_at")) > now.utc
+            if existing.fetch("reservation_id") == reservation.fetch("reservation_id") &&
+               record.fetch("candidate_digest") == digest
+              next record
+            end
+            conflict!("semantic admission decision is already reserved")
+          end
           record["status"] = "deciding"
           record["candidates"] = normalized
+          record["candidate_inventory"] = frozen_inventory
           record["candidate_digest"] = digest
           record["current_head"] = head
+          record["decision_reservation"] = reservation
           record["decision"] = nil
           record["retry"] = nil
           touch(record, now)
@@ -75,12 +101,14 @@ module Hive
       end
 
       def record_decision!(occurrence_id, candidate_digest:, decision:, rationale:, evidence:,
-                           model_receipt:, candidate_identity: nil, now: Time.now.utc)
+                           model_receipt:, candidate_identity: nil, reservation_id:,
+                           now: Time.now.utc)
         mutate(occurrence_id) do |record|
           unless record.fetch("status") == "deciding" &&
                  record.fetch("candidate_digest") == candidate_digest
             raise StaleDecision, "admission candidate set changed while deciding"
           end
+          assert_reservation!(record, reservation_id, now: now)
           route = decision.to_s
           conflict!("semantic admission decision is invalid") unless DECISIONS.include?(route)
           identity = candidate_identity&.to_s
@@ -105,38 +133,100 @@ module Hive
           reject_secret!(decision_record)
           record["decision"] = decision_record
           record["status"] = route == "insufficient_evidence" ? "blocked" : "decided"
+          record["decision_reservation"] = nil
           touch(record, now)
           record
         end
       end
 
-      def reset_stale!(occurrence_id, now: Time.now.utc)
+      def reset_stale!(occurrence_id, reservation_id:, now: Time.now.utc)
         mutate(occurrence_id) do |record|
+          assert_reservation!(record, reservation_id, now: now)
           record["status"] = "pending"
           record["candidates"] = []
+          record["candidate_inventory"] = nil
           record["candidate_digest"] = nil
           record["current_head"] = nil
+          record["decision_reservation"] = nil
           record["decision"] = nil
           touch(record, now)
           record
         end
       end
 
-      def record_retry!(occurrence_id, reason:, error_class:, retry_at:, now: Time.now.utc)
+      def reset_decided_stale!(occurrence_id, now: Time.now.utc)
+        mutate(occurrence_id) do |record|
+          unless record.fetch("status") == "decided" && !record["decision_reservation"]
+            conflict!("only an unfenced decided admission may be reset before materialization")
+          end
+          record.merge!(
+            "status" => "pending", "candidates" => [], "candidate_inventory" => nil,
+            "candidate_digest" => nil, "current_head" => nil, "decision" => nil
+          )
+          touch(record, now)
+          record
+        end
+      end
+
+      def expire_decision!(occurrence_id, now: Time.now.utc)
+        mutate(occurrence_id) do |record|
+          reservation = record["decision_reservation"]
+          unless record.fetch("status") == "deciding" && reservation &&
+                 Time.iso8601(reservation.fetch("expires_at")) <= now.utc
+            conflict!("semantic admission reservation is not expired")
+          end
+          record.merge!(
+            "status" => "pending", "candidates" => [], "candidate_inventory" => nil,
+            "candidate_digest" => nil, "current_head" => nil,
+            "decision_reservation" => nil, "decision" => nil
+          )
+          touch(record, now)
+          record
+        end
+      end
+
+      def cancel_unlaunched_decision!(occurrence_id, reservation_id:, now: Time.now.utc)
+        mutate(occurrence_id) do |record|
+          reservation = record["decision_reservation"]
+          unless record.fetch("status") == "deciding" && reservation &&
+                 reservation.fetch("reservation_id") == reservation_id.to_s
+            raise StaleDecision, "semantic admission reservation changed"
+          end
+          record.merge!(
+            "status" => "pending", "candidates" => [], "candidate_inventory" => nil,
+            "candidate_digest" => nil, "current_head" => nil,
+            "decision_reservation" => nil, "decision" => nil
+          )
+          touch(record, now)
+          record
+        end
+      end
+
+      def record_provider_retry!(occurrence_id, reason:, error_class:, retry_at:,
+                                 reservation_id:, now: Time.now.utc)
+        retry_time = retry_at.utc
+        conflict!("admission retry must be scheduled in the future") unless retry_time > now.utc
+        mutate(occurrence_id) do |record|
+          assert_reservation!(record, reservation_id, now: now)
+          apply_retry!(
+            record, reason: reason, error_class: error_class,
+            retry_at: retry_time, now: now
+          )
+        end
+      end
+
+      def record_retry!(occurrence_id, reason:, error_class:, retry_at:,
+                        now: Time.now.utc)
         retry_time = retry_at.utc
         conflict!("admission retry must be scheduled in the future") unless retry_time > now.utc
         mutate(occurrence_id) do |record|
           conflict!("an acknowledged admission cannot enter retry") if record["acknowledgement"]
-          attempts = record.dig("retry", "attempts").to_i + 1
-          record["retry"] = {
-            "attempts" => attempts,
-            "reason" => text!(reason.to_s, "retry reason", max: 256),
-            "error_class" => text!(error_class.to_s, "retry error class", max: 256),
-            "retry_at" => timestamp(retry_time)
-          }
-          record["status"] = "retry_wait"
-          touch(record, now)
-          record
+          conflict!("reserved provider retry requires its exact reservation") if
+            record["decision_reservation"]
+          apply_retry!(
+            record, reason: reason, error_class: error_class,
+            retry_at: retry_time, now: now
+          )
         end
       end
 
@@ -270,11 +360,15 @@ module Hive
         end.first(max).freeze
       end
 
-      def candidate_digest(candidates, current_head:)
+      def candidate_digest(candidates, current_head:, inventory: nil)
         normalized = normalize_candidates(candidates)
         head = revision!(current_head, "current head")
+        frozen_inventory = normalize_candidate_inventory(
+          inventory || default_inventory(normalized), candidates: normalized
+        )
         Digest::SHA256.hexdigest(PatrolFix.canonical_json(
           "current_head" => head,
+          "inventory" => frozen_inventory,
           "candidates" => normalized
         ))
       end
@@ -292,8 +386,10 @@ module Hive
           "evidence_digest" => snapshot.evidence_digest,
           "status" => "pending",
           "candidates" => [],
+          "candidate_inventory" => nil,
           "candidate_digest" => nil,
           "current_head" => nil,
+          "decision_reservation" => nil,
           "decision" => nil,
           "materialization_intent" => nil,
           "task" => nil,
@@ -342,6 +438,7 @@ module Hive
       def parse_record(bytes, expected_id:)
         record = JSON.parse(bytes)
         corrupt!("admission record is not canonical") unless PatrolFix.canonical_json(record) == bytes
+        record = upgrade_v1_record(record) if record["schema_version"] == 1
         validate_record!(record, expected_id: expected_id)
       rescue JSON::ParserError, EncodingError
         corrupt!("admission record is malformed")
@@ -349,9 +446,9 @@ module Hive
 
       def validate_record!(record, expected_id:)
         unless record.is_a?(Hash) && record.keys.sort == %w[
-          acknowledgement candidate_digest candidates created_at current_head decision
-          evidence_digest materialization_intent occurrence_id retry schema schema_version
-          source source_digest status task updated_at
+          acknowledgement candidate_digest candidate_inventory candidates created_at
+          current_head decision decision_reservation evidence_digest materialization_intent
+          occurrence_id retry schema schema_version source source_digest status task updated_at
         ].sort
           corrupt!("admission record fields are invalid")
         end
@@ -370,20 +467,28 @@ module Hive
         corrupt!("admission candidates are not canonical") unless
           candidates == record.fetch("candidates")
         candidate_digest = digest!(record["candidate_digest"], "candidate digest", optional: true)
+        inventory = record["candidate_inventory"] &&
+          normalize_candidate_inventory(
+            record.fetch("candidate_inventory"), candidates: candidates
+          )
         current_head = revision!(record["current_head"], "current head", optional: true)
-        if candidate_digest || current_head
+        if candidate_digest || inventory || current_head
           corrupt!("admission candidate snapshot is incomplete") unless
-            candidate_digest && current_head
-          expected = self.candidate_digest(candidates, current_head: current_head)
+            candidate_digest && inventory && current_head
+          expected = self.candidate_digest(
+            candidates, current_head: current_head, inventory: inventory
+          )
           corrupt!("admission candidate digest does not match its snapshot") unless
             candidate_digest == expected
         end
+        reservation = record["decision_reservation"] &&
+          normalize_decision_reservation(record.fetch("decision_reservation"))
         validate_decision!(record["decision"], candidates: candidates) if record["decision"]
         normalize_materialization_intent(record["materialization_intent"]) if record["materialization_intent"]
         normalize_task_binding(record["task"]) if record["task"]
         validate_acknowledgement!(record["acknowledgement"]) if record["acknowledgement"]
         validate_retry!(record["retry"]) if record["retry"]
-        validate_state_invariants!(record)
+        validate_state_invariants!(record, reservation: reservation)
         timestamp_value!(record.fetch("created_at"), "created_at")
         timestamp_value!(record.fetch("updated_at"), "updated_at")
         PatrolFix.deep_freeze(record)
@@ -395,20 +500,180 @@ module Hive
         list = Array(candidates)
         conflict!("candidate set exceeds #{MAX_CANDIDATES} entries") if list.length > MAX_CANDIDATES
         normalized = list.map.with_index do |candidate, index|
-          unless candidate.is_a?(Hash) && candidate.keys.sort ==
-                 %w[evidence_digest identity kind target_revision]
+          unless candidate.is_a?(Hash)
+            conflict!("candidate #{index} fields are invalid")
+          end
+          minimal_keys = %w[evidence_digest identity kind target_revision]
+          rich_keys = %w[
+            affected_code context_digest evidence evidence_digest identity kind
+            manifest_digest remediation target_revision
+          ]
+          unless [ minimal_keys.sort, rich_keys.sort ].include?(candidate.keys.sort)
             conflict!("candidate #{index} fields are invalid")
           end
           kind = candidate.fetch("kind").to_s
           conflict!("candidate #{index} kind is invalid") unless CANDIDATE_KINDS.include?(kind)
-          {
+          core = {
             "kind" => kind,
             "identity" => text!(candidate.fetch("identity"), "candidate identity", max: 2_048),
             "evidence_digest" => digest!(candidate.fetch("evidence_digest"), "candidate evidence digest"),
             "target_revision" => revision!(candidate.fetch("target_revision"), "candidate target revision")
           }
+          next core if candidate.keys.sort == minimal_keys.sort
+
+          rich = core.merge(
+            "manifest_digest" => digest!(
+              candidate.fetch("manifest_digest"), "candidate manifest digest"
+            ),
+            "evidence" => string_array!(
+              candidate.fetch("evidence"), "candidate evidence",
+              min: 1, max: 3, item_max: 768
+            ),
+            "affected_code" => string_array!(
+              candidate.fetch("affected_code"), "candidate affected code",
+              min: 1, max: 12, item_max: 256
+            ),
+            "remediation" => text!(
+              candidate.fetch("remediation"), "candidate remediation", max: 1_536
+            )
+          )
+          context_digest = digest!(
+            candidate.fetch("context_digest"), "candidate context digest"
+          )
+          expected = Digest::SHA256.hexdigest(PatrolFix.canonical_json(rich))
+          conflict!("candidate context digest does not match its bytes") unless
+            context_digest == expected
+          rich["context_digest"] = context_digest
+          conflict!("candidate context exceeds its byte limit") if
+            PatrolFix.canonical_json(rich).bytesize > MAX_CANDIDATE_BYTES
+          rich
         end
-        normalized.sort_by { |candidate| [ candidate.fetch("kind"), candidate.fetch("identity") ] }
+        normalized = normalized.sort_by do |candidate|
+          [ candidate.fetch("kind"), candidate.fetch("identity") ]
+        end
+        conflict!("candidate context exceeds its aggregate byte limit") if
+          PatrolFix.canonical_json(normalized).bytesize > MAX_CANDIDATE_CONTEXT_BYTES
+        normalized
+      end
+
+      def default_inventory(candidates)
+        digest = Digest::SHA256.hexdigest(PatrolFix.canonical_json(candidates))
+        {
+          "count" => candidates.length,
+          "digest" => digest,
+          "context_digest" => digest,
+          "truncated" => false
+        }
+      end
+
+      def normalize_candidate_inventory(inventory, candidates:)
+        unless inventory.is_a?(Hash) && inventory.keys.sort == %w[
+          context_digest count digest truncated
+        ]
+          conflict!("candidate inventory fields are invalid")
+        end
+        count = Integer(inventory.fetch("count"))
+        conflict!("candidate inventory count is invalid") unless
+          count.between?(0, MAX_RECORDS)
+        truncated = inventory.fetch("truncated")
+        conflict!("candidate inventory truncation is invalid") unless
+          truncated == true || truncated == false
+        conflict!("candidate inventory count is smaller than its selected context") if
+          count < candidates.length
+        conflict!("candidate inventory truncation conflicts with selected context") if
+          truncated != (count > candidates.length)
+        context_digest = digest!(
+          inventory.fetch("context_digest"), "candidate context digest"
+        )
+        expected_context_digest = Digest::SHA256.hexdigest(
+          PatrolFix.canonical_json(candidates)
+        )
+        conflict!("candidate context digest does not match selected bytes") unless
+          context_digest == expected_context_digest
+        {
+          "count" => count,
+          "digest" => digest!(inventory.fetch("digest"), "candidate inventory digest"),
+          "context_digest" => context_digest,
+          "truncated" => truncated
+        }
+      rescue ArgumentError, TypeError
+        conflict!("candidate inventory count is invalid")
+      end
+
+      def normalize_decision_reservation(reservation)
+        unless reservation.is_a?(Hash) && reservation.keys.sort == %w[
+          expires_at reservation_id reserved_at
+        ]
+          conflict!("semantic admission reservation fields are invalid")
+        end
+        normalized = {
+          "reservation_id" => digest!(
+            reservation.fetch("reservation_id"), "semantic admission reservation id"
+          ),
+          "reserved_at" => timestamp_value!(
+            reservation.fetch("reserved_at"), "semantic admission reserved_at"
+          ).utc.iso8601,
+          "expires_at" => timestamp_value!(
+            reservation.fetch("expires_at"), "semantic admission expires_at"
+          ).utc.iso8601
+        }
+        conflict!("semantic admission reservation expiry is invalid") unless
+          Time.iso8601(normalized.fetch("expires_at")) >
+          Time.iso8601(normalized.fetch("reserved_at"))
+        normalized
+      end
+
+      def assert_reservation!(record, reservation_id, now:)
+        reservation = record["decision_reservation"]
+        unless reservation &&
+               reservation.fetch("reservation_id") == reservation_id.to_s
+          raise StaleDecision, "semantic admission reservation changed"
+        end
+        if Time.iso8601(reservation.fetch("expires_at")) <= now.utc
+          raise StaleDecision, "semantic admission reservation expired"
+        end
+      end
+
+      def apply_retry!(record, reason:, error_class:, retry_at:, now:)
+        attempts = record.dig("retry", "attempts").to_i + 1
+        record["retry"] = {
+          "attempts" => attempts,
+          "reason" => text!(reason.to_s, "retry reason", max: 256),
+          "error_class" => text!(error_class.to_s, "retry error class", max: 256),
+          "retry_at" => timestamp(retry_at)
+        }
+        record["status"] = "retry_wait"
+        record["decision_reservation"] = nil
+        touch(record, now)
+        record
+      end
+
+      def upgrade_v1_record(record)
+        expected = %w[
+          acknowledgement candidate_digest candidates created_at current_head decision
+          evidence_digest materialization_intent occurrence_id retry schema schema_version
+          source source_digest status task updated_at
+        ]
+        corrupt!("admission v1 record fields are invalid") unless
+          record.is_a?(Hash) && record.keys.sort == expected.sort && record["schema"] == SCHEMA
+        upgraded = PatrolFix.deep_copy(record)
+        candidates = normalize_candidates(upgraded.fetch("candidates"))
+        if upgraded.fetch("status") == "deciding"
+          upgraded.merge!(
+            "status" => "pending", "candidates" => [], "candidate_digest" => nil,
+            "current_head" => nil, "decision" => nil
+          )
+          inventory = nil
+        elsif upgraded["candidate_digest"]
+          inventory = default_inventory(candidates)
+          upgraded["candidate_digest"] = candidate_digest(
+            candidates, current_head: upgraded.fetch("current_head"), inventory: inventory
+          )
+        end
+        upgraded["candidate_inventory"] = inventory
+        upgraded["decision_reservation"] = nil
+        upgraded["schema_version"] = SCHEMA_VERSION
+        upgraded
       end
 
       def normalize_materialization_intent(intent)
@@ -450,12 +715,18 @@ module Hive
         reject_secret!(decision)
       end
 
-      def validate_state_invariants!(record)
+      def validate_state_invariants!(record, reservation:)
         status = record.fetch("status")
         decision = record["decision"]
         intent = record["materialization_intent"]
         task = record["task"]
         acknowledgement = record["acknowledgement"]
+
+        if status == "deciding"
+          corrupt!("deciding admission lacks an exact reservation") unless reservation
+        elsif reservation
+          corrupt!("non-deciding admission retains a decision reservation")
+        end
 
         if %w[decided blocked materializing bound acknowledged].include?(status)
           corrupt!("admission state lacks a decision") unless decision
@@ -568,6 +839,7 @@ module Hive
       def timestamp_value!(value, label)
         time = Time.iso8601(value.to_s)
         corrupt!("#{label} must be UTC") unless time.utc? && value.end_with?("Z")
+        time
       rescue ArgumentError
         corrupt!("#{label} is invalid")
       end

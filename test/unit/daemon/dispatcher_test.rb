@@ -412,16 +412,35 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   class FakePatrolFixAdmissionScheduler
-    attr_reader :ticks
+    attr_reader :ticks, :completed, :cancelled
+    attr_writer :results
 
     def initialize(results: [])
       @results = results
       @ticks = []
+      @completed = []
+      @cancelled = []
     end
 
     def tick(now:)
       @ticks << now
       @results
+    end
+
+    def complete(dispatch_token:, exit_code:, envelope:, now:)
+      @completed << {
+        dispatch_token: dispatch_token, exit_code: exit_code,
+        envelope: envelope, now: now
+      }
+      Hive::Daemon::PatrolFixAdmissionScheduler::Event.new(
+        source: dispatch_token.fetch(:source),
+        occurrence_id: dispatch_token.fetch(:occurrence_id),
+        status: :decision_completed
+      )
+    end
+
+    def cancel(dispatch_token:, now:)
+      @cancelled << { dispatch_token: dispatch_token, now: now }
     end
   end
 
@@ -530,6 +549,71 @@ class HiveDaemonDispatcherTest < Minitest::Test
     logged = logger.events.find { |name, _attrs| name == :patrol_fix_admission }
     assert_equal "ordinary:finding-1:v1", logged.last.fetch(:occurrence_id)
     assert_equal :acknowledged, logged.last.fetch(:status)
+  end
+
+  def test_patrol_fix_semantic_dispatch_uses_the_shared_supervisor_and_completion_token
+    token = {
+      kind: :patrol_fix_semantic_admission, project: "p1",
+      source: "ordinary_patrol", occurrence_id: "ordinary:finding-1:v1",
+      reservation_id: "a" * 64
+    }
+    event = Hive::Daemon::PatrolFixAdmissionScheduler::Event.new(
+      source: "ordinary_patrol", occurrence_id: token.fetch(:occurrence_id),
+      status: :decision_dispatch,
+      command: "hive __patrol-fix-semantic-decision p1 --source ordinary_patrol " \
+               "--occurrence-id ordinary:finding-1:v1 --reservation-id #{'a' * 64} --json",
+      dispatch_token: token
+    )
+    scheduler = FakePatrolFixAdmissionScheduler.new(results: [ event ])
+    dispatcher, supervisor, controller, logger = make_dispatcher(
+      rows: [], patrol_fix_admission_scheduler: scheduler
+    )
+
+    dispatcher.tick(now: T0)
+
+    spawned = supervisor.spawned.fetch(0)
+    assert_equal token, spawned.fetch(:dispatch_token)
+    assert_equal "patrol-fix-semantic-admission", spawned.fetch(:stage)
+    assert_equal 1, controller.task_running_count(project: "p1")
+
+    supervisor.next_exits = [
+      ChildExit.new(
+        pid: spawned.fetch(:pid), exit_code: 0, project: "p1",
+        slug: spawned.fetch(:slug), stage: spawned.fetch(:stage),
+        command: spawned.fetch(:command), state_file_path: nil,
+        started_at: T0, finished_at: T0 + 1,
+        json_envelope: { "ok" => true }, dispatch_token: token
+      )
+    ]
+    dispatcher.send(:reap_completed, now: T0 + 1)
+
+    assert_equal token, scheduler.completed.fetch(0).fetch(:dispatch_token)
+    assert_equal 0, controller.task_running_count(project: "p1")
+    completion = logger.events.find { |name, _| name == :patrol_fix_semantic_completion }
+    assert_equal :decision_completed, completion.last.fetch(:status)
+  end
+
+  def test_patrol_fix_semantic_reservation_is_cancelled_if_capacity_closes_before_spawn
+    token = {
+      kind: :patrol_fix_semantic_admission, project: "p1",
+      source: "ordinary_patrol", occurrence_id: "ordinary:finding-1:v1",
+      reservation_id: "a" * 64
+    }
+    event = Hive::Daemon::PatrolFixAdmissionScheduler::Event.new(
+      source: token.fetch(:source), occurrence_id: token.fetch(:occurrence_id),
+      status: :decision_dispatch, command: "hive __patrol-fix-semantic-decision p1",
+      dispatch_token: token
+    )
+    scheduler = FakePatrolFixAdmissionScheduler.new(results: [ event ])
+    dispatcher, supervisor, controller = make_dispatcher(
+      rows: [], patrol_fix_admission_scheduler: scheduler
+    )
+    controller.define_singleton_method(:can_dispatch?) { |**| :global_cap }
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    assert_equal token, scheduler.cancelled.fetch(0).fetch(:dispatch_token)
   end
 
   def test_recovery_request_is_resumed_by_the_shared_coordinator_before_dispatch

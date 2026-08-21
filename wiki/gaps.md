@@ -25,28 +25,29 @@ locked exact-byte epoch fencing, rollback before the first new-authority
 effect, source re-read and digest verification, task materialization before
 source acknowledgement, final authority verification, and reconstruction of
 both source adapters in one daemon after restart. This is not live dogfood.
-U11 has four release blockers at the current admission runtime seam:
+U11 closes the four admission-runtime blockers without adding another
+coordinator: the daemon inventories only exact Patrol Fix task manifests,
+fails visibly on owned corruption while ignoring unrelated task bytes, binds
+the complete owned inventory count/digest/head, and supplies one deterministic
+top-64 context capped at 192 KiB. Exact source/alias/lineage overlap ranks
+before path and lexical relevance; every selected row carries bounded evidence,
+affected code, remediation, manifest digest, and a digest of those exact bytes.
+Each reserved decision attempt receives exactly one provider launch through
+the existing `ChildSupervisor`, with no candidate-page fan-out. An occurrence
+may retry later under bounded provider backoff. A durable AdmissionStore
+reservation fences late, expired, restarted, or never-launched children, and
+the parent alone retains materialization and source-acknowledgement authority.
 
-- `Hive::Daemon::PatrolFixRuntime#candidate_provider` scans every stage folder
-  and can pass more than `AdmissionStore::MAX_CANDIDATES` (64), so a large
-  Patrol Fix project fails admission instead of supplying bounded candidate
-  context with exact stale-set revalidation.
-- That same scan raises when any unrelated task has unreadable admission
-  metadata, allowing one non-Patrol task to poison Patrol admission.
-- Candidate evidence contains only identity, digest, and target revision. It
-  does not supply the bounded finding/remediation evidence an LLM needs for a
-  meaningful semantic-root comparison.
-- `PatrolFixSemanticDecisionRunner` executes synchronously inside the daemon
-  tick after the workflow-capacity check instead of under the existing
-  `ChildSupervisor` custody and completion protocol.
-
-U10 deliberately exposes these as gaps rather than hiding them in status or
-adding another coordinator. U11 must add bounded candidate paging/context,
-exact candidate-set revalidation, unrelated-corruption isolation, and
-supervised provider custody with focused greater-than-64, stale-set,
-unreadable-neighbour, meaningful-evidence, restart, and timeout tests. The
-current local proof does not claim those behaviors or asynchronous provider
-custody.
+The remaining gap is live delivery evidence, not local runtime behavior. The
+new fake-provider lifecycle proves both source engines, a cross-source duplicate,
+rework, a separately parked escalation successor, one local publication, and
+restart replay. The frozen historical corpus exercises the four production LLM
+prompt/parser seams and the dogfood report schema can retain one exact source to
+PR trace, but no configured real provider, enabled-project discovery round,
+hosted GitHub PR, hosted CI, or natural finding was executed in this change.
+Keep release/dogfood incomplete until the opt-in historical corpus has actual
+provider/model receipts and one naturally discovered finding reaches `done`
+with an exact PR and zero duplicate replay.
 
 ## Patrol v4 needs installed fleet dogfood (2026-08-14)
 

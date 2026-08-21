@@ -100,8 +100,13 @@ module Hive
           }
         end
 
-        def render_prompt(task, manifest, fix, validation, snapshot, allowed, output)
-          tag = "untrusted_patrol_review_#{SecureRandom.hex(8)}"
+        def render_prompt(task, manifest, fix, validation, snapshot, allowed, output,
+                          boundary_token: nil)
+          token = boundary_token || SecureRandom.hex(8)
+          unless token.is_a?(String) && token.match?(/\A[a-z0-9]{16,64}\z/)
+            raise ArgumentError, "Patrol Fix review boundary token is invalid"
+          end
+          tag = "untrusted_patrol_review_#{token}"
           context = {
             "finding" => manifest, "fix_receipt" => fix,
             "validation_receipt" => validation, "diff" => snapshot.fetch("diff")

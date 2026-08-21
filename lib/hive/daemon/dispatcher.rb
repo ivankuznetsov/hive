@@ -842,6 +842,7 @@ module Hive
           if entry.exit_code == Hive::ExitCodes::CONFIG &&
              !global_digest_stage?(entry.stage) &&
              !patrol_stage?(entry.stage) &&
+             entry.dispatch_token&.[](:kind) != :patrol_fix_semantic_admission &&
              entry.json_envelope&.dig("error_kind") != "admission_error"
             @controller.record_project_dropped(project: entry.project)
             @logger.event(:project_dropped, project: entry.project)
@@ -868,6 +869,19 @@ module Hive
               event,
               project: entry.project,
               **(result || { status: :retry })
+            )
+          end
+          if entry.dispatch_token &&
+             entry.dispatch_token[:kind] == :patrol_fix_semantic_admission
+            result = @patrol_fix_admission_scheduler&.complete(
+              dispatch_token: entry.dispatch_token, exit_code: entry.exit_code,
+              envelope: entry.json_envelope, now: now
+            )
+            @logger.event(
+              :patrol_fix_semantic_completion,
+              project: entry.project, occurrence_id: result&.occurrence_id,
+              status: result&.status, retry_at: result&.retry_at,
+              reason: result&.reason
             )
           end
           complete_digest_scheduler_for(entry, now: now)
@@ -956,12 +970,60 @@ module Hive
             retry_at: result.retry_at,
             reason: result.reason
           )
+          dispatch_patrol_fix_semantic(result, now: now) if
+            result.status == :decision_dispatch
         end
       rescue StandardError => error
         @logger.event(
           :fatal,
           message: "Patrol Fix admission scheduler raised: #{error.class}: #{error.message}",
           keeping_previous: true
+        )
+      end
+
+      def dispatch_patrol_fix_semantic(result, now:)
+        token = result.dispatch_token
+        return unless token && result.command
+        unless admission_open?
+          @patrol_fix_admission_scheduler.cancel(dispatch_token: token, now: now)
+          return
+        end
+
+        project = token.fetch(:project)
+        gate = @controller.can_dispatch?(
+          project: project, slug: "patrol-fix-admission", now: now
+        )
+        unless gate == :ok
+          @patrol_fix_admission_scheduler.cancel(dispatch_token: token, now: now)
+          @logger.event(
+            :blocked, project: project, slug: "patrol-fix-admission",
+            stage: "patrol-fix-semantic-admission", action: "semantic_admission",
+            reason: gate.to_s
+          )
+          return
+        end
+        dispatched = dispatch_command(
+          result.command, project: project,
+          slug: "patrol-fix-admission-#{result.occurrence_id.to_s[0, 24]}",
+          stage: "patrol-fix-semantic-admission",
+          state_file_mtime: nil, state_file_path: nil, now: now,
+          trigger: "patrol_fix_semantic_admission", kind: :patrol_fix_semantic,
+          dispatch_token: token
+        )
+        @patrol_fix_admission_scheduler.cancel(dispatch_token: token, now: now) if
+          dispatched == :shutdown
+      rescue StandardError => error
+        completion = @patrol_fix_admission_scheduler.complete(
+          dispatch_token: token, exit_code: Hive::ExitCodes::SOFTWARE,
+          envelope: {
+            "error_class" => error.class.name,
+            "error" => error.message.to_s[0, 512]
+          }, now: now
+        )
+        @logger.event(
+          :fatal, project: token && token[:project],
+          message: "Patrol Fix semantic dispatch failed: #{error.class}: #{error.message}",
+          recovery_status: completion&.status
         )
       end
 

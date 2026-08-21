@@ -1,6 +1,7 @@
 require "open3"
 require "hive/agent_limit"
 require "hive/config"
+require "hive/daemon/patrol_fix_candidate_inventory"
 require "hive/daemon/patrol_fix_operational_projection"
 require "hive/daemon/patrol_fix_semantic_decision_runner"
 require "hive/git_ops"
@@ -9,10 +10,8 @@ require "hive/patrol/state_store"
 require "hive/patrol_fix/admission_store"
 require "hive/patrol_fix/migration/cutover_state"
 require "hive/patrol_fix/semantic_admission"
-require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/task_materializer"
 require "hive/refactor_patrol/fix_admission_outbox"
-require "hive/task_meta"
 require "hive/workflows/registry"
 
 module Hive
@@ -101,15 +100,30 @@ module Hive
         entry = source.entry
         project_root = entry.fetch("path")
         cfg = @config_loader.call(project_root)
-        state = Hive::Patrol::StateStore.new(
-          project_root, hive_state_path: entry.fetch("hive_state_path")
-        )
         Hive::PatrolFix::SemanticAdmission.new(
           store: store, candidate_provider: candidate_provider(source),
-          decision_provider: @decision_runner_factory.call(
-            project_root: project_root, cfg: cfg, state: state
-          ),
+          decision_provider: lambda do |input|
+            state = Hive::Patrol::StateStore.new(
+              project_root, hive_state_path: entry.fetch("hive_state_path")
+            )
+            @decision_runner_factory.call(
+              project_root: project_root, cfg: cfg, state: state
+            ).call(input)
+          end,
           current_head: -> { current_head(source) }
+        )
+      end
+
+      def run_semantic_decision(project:, source_name:, occurrence_id:, reservation_id:,
+                                now: Time.now.utc)
+        source = @sources.find do |item|
+          item.project.to_s == project.to_s && item.source.to_s == source_name.to_s
+        end
+        raise Hive::ConfigError, "Patrol Fix semantic admission source is unavailable" unless source
+
+        store = admission_store(source: source)
+        semantic_admission(store: store, source: source).run_reserved(
+          occurrence_id: occurrence_id, reservation_id: reservation_id, now: now
         )
       end
 
@@ -164,25 +178,10 @@ module Hive
       end
 
       def candidate_provider(source)
-        lambda do |_snapshot|
-          Dir.glob(File.join(source.entry.fetch("hive_state_path"), "stages", "*", "*"))
-            .filter_map do |folder|
-              next unless File.directory?(folder)
-              admission = Hive::TaskMeta.read_for_admission(folder)
-              unless admission.status == :ok
-                raise Hive::ConfigError,
-                      "Patrol-fix candidate task metadata is unreadable"
-              end
-              next unless admission.data.fetch(:workflow).to_s == "patrol-fix"
-
-              manifest = Hive::PatrolFix::TaskManifest.new(task_folder: folder).read
-              {
-                "kind" => "task", "identity" => manifest.dig("task", "slug"),
-                "evidence_digest" => manifest.dig("evidence_revision", "digest"),
-                "target_revision" => manifest.fetch("target_revision")
-              }
-            end
-        end
+        inventory = Hive::Daemon::PatrolFixCandidateInventory.new(
+          hive_state_path: source.entry.fetch("hive_state_path")
+        )
+        ->(snapshot) { inventory.call(snapshot) }
       end
 
       def current_head(source)

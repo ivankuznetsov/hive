@@ -96,8 +96,12 @@ module Hive
             custody: status, diagnostic: report&.diagnostic }
         end
 
-        def render_prompt(task, manifest, head, output_path)
-          tag = "untrusted_patrol_finding_#{SecureRandom.hex(8)}"
+        def render_prompt(task, manifest, head, output_path, boundary_token: nil)
+          token = boundary_token || SecureRandom.hex(8)
+          unless token.is_a?(String) && token.match?(/\A[a-z0-9]{16,64}\z/)
+            raise ArgumentError, "Patrol Fix inbox boundary token is invalid"
+          end
+          tag = "untrusted_patrol_finding_#{token}"
           <<~PROMPT
             Re-investigate one admitted Patrol finding against the current repository.
             Controller-selected task: #{task.slug}

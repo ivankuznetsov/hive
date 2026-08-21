@@ -79,6 +79,7 @@ module Hive
       "hive-patrol-fix-migration-semantic-decision" => 1,
       "hive-patrol-fix-migration-disposition-manifest" => 1,
       "hive-patrol-fix-migration-cutover-state" => 1,
+      "hive-patrol-fix-dogfood-report" => 1,
       "hive-refactor-patrol" => 4,
       "hive-refactor-patrol-jobs" => 2,
       "hive-refactor-patrol-thesis" => 4,

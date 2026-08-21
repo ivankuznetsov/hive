@@ -85,12 +85,26 @@ module Hive
         return unless record.fetch("status") == "decided"
 
         snapshot = SourceSnapshot.new(record.fetch("source"))
+        candidate_set = @candidate_provider.call(snapshot)
+        candidates, inventory = if candidate_set.is_a?(Hash)
+          [
+            candidate_set.fetch("candidates"),
+            {
+              "count" => candidate_set.fetch("inventory_count"),
+              "digest" => candidate_set.fetch("inventory_digest"),
+              "context_digest" => candidate_set.fetch("context_digest"),
+              "truncated" => candidate_set.fetch("truncated")
+            }
+          ]
+        else
+          [ Array(candidate_set), nil ]
+        end
         current_digest = @store.candidate_digest(
-          @candidate_provider.call(snapshot), current_head: @current_head.call
+          candidates, inventory: inventory, current_head: @current_head.call
         )
         return if current_digest == record.fetch("candidate_digest")
 
-        @store.reset_stale!(occurrence_id, now: @clock.call)
+        @store.reset_decided_stale!(occurrence_id, now: @clock.call)
         raise AdmissionStore::StaleDecision,
               "admission candidate set changed before materialization"
       end

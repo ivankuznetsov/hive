@@ -35,6 +35,8 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
           root: File.join(hive_state, "patrol-fix", "admissions")
         )
         capacity_checks = 0
+        provider_calls = 0
+        services = []
         scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
           sources: [ source ], admission_store: admission,
           capacity_available: lambda do |**_args|
@@ -42,10 +44,11 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
             true
           end,
           semantic_admission_factory: lambda do |store:, **_args|
-            Hive::PatrolFix::SemanticAdmission.new(
+            semantic = Hive::PatrolFix::SemanticAdmission.new(
               store: store, candidate_provider: ->(_snapshot) { [] },
               current_head: -> { "2" * 40 },
               decision_provider: lambda do |_input|
+                provider_calls += 1
                 {
                   "decision" => "distinct", "candidate_identity" => nil,
                   "rationale" => "No shared root", "evidence" => [ "No candidate" ],
@@ -54,7 +57,10 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
               end,
               clock: -> { NOW }
             )
+            services << semantic
+            semantic
           end,
+          semantic_command_factory: ->(_token) { "hive __patrol-fix-semantic-decision test" },
           task_materializer_factory: lambda do |store:, source_acknowledger:, **_args|
             Hive::PatrolFix::TaskMaterializer.new(
               project_root: project_root, hive_state: hive_state, store: store,
@@ -68,9 +74,21 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
           clock: -> { NOW }
         )
 
-        events = scheduler.tick(now: NOW)
+        dispatch = scheduler.tick(now: NOW).fetch(0)
+        assert_equal :decision_dispatch, dispatch.status
+        assert_equal 0, provider_calls
+        services.fetch(0).run_reserved(
+          occurrence_id: dispatch.occurrence_id,
+          reservation_id: dispatch.dispatch_token.fetch(:reservation_id)
+        )
+        assert_equal 1, provider_calls
+        scheduler.complete(
+          dispatch_token: dispatch.dispatch_token, exit_code: 0, envelope: { "ok" => true },
+          now: NOW + 1
+        )
+        events = scheduler.tick(now: NOW + 2)
 
-        assert_equal 1, capacity_checks
+        assert_equal 2, capacity_checks
         assert_equal [ :acknowledged ], events.map(&:status)
         assert_empty source.pending
         assert_equal 1, Dir.glob(File.join(hive_state, "stages", "1-inbox", "*", "meta.yml")).length
@@ -91,10 +109,11 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         admission = Hive::PatrolFix::AdmissionStore.new(
           root: File.join(hive_state, "patrol-fix", "admissions")
         )
+        services = []
         scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
           sources: [ source ], admission_store: admission,
           semantic_admission_factory: lambda do |store:, **_args|
-            Hive::PatrolFix::SemanticAdmission.new(
+            semantic = Hive::PatrolFix::SemanticAdmission.new(
               store: store, candidate_provider: ->(_snapshot) { [] },
               current_head: -> { "2" * 40 },
               decision_provider: lambda do |_input|
@@ -107,12 +126,25 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
               end,
               clock: -> { NOW }
             )
+            services << semantic
+            semantic
           end,
+          semantic_command_factory: ->(_token) { "hive __patrol-fix-semantic-decision test" },
           task_materializer_factory: ->(**) { flunk "blocked admission must not materialize" },
           clock: -> { NOW }
         )
 
-        assert_equal [ :blocked ], scheduler.tick(now: NOW).map(&:status)
+        dispatch = scheduler.tick(now: NOW).fetch(0)
+        assert_equal :decision_dispatch, dispatch.status
+        services.fetch(0).run_reserved(
+          occurrence_id: dispatch.occurrence_id,
+          reservation_id: dispatch.dispatch_token.fetch(:reservation_id)
+        )
+        scheduler.complete(
+          dispatch_token: dispatch.dispatch_token, exit_code: 0, envelope: { "ok" => true },
+          now: NOW + 1
+        )
+        assert_equal [ :blocked ], scheduler.tick(now: NOW + 2).map(&:status)
         assert_empty source.pending
         refute source.acknowledged?(entry.fetch("occurrence_id"))
         assert_equal "blocked", admission.visible_blocked.first.fetch("status")
@@ -135,10 +167,11 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
           root: File.join(hive_state, "patrol-fix", "admissions")
         )
         launches = 0
+        services = []
         scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
           sources: [ source ], admission_store: admission,
           semantic_admission_factory: lambda do |store:, **_args|
-            Hive::PatrolFix::SemanticAdmission.new(
+            semantic = Hive::PatrolFix::SemanticAdmission.new(
               store: store, candidate_provider: ->(_snapshot) { [] },
               current_head: -> { "2" * 40 },
               decision_provider: lambda do |_input|
@@ -147,18 +180,32 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
               end,
               clock: -> { NOW }
             )
+            services << semantic
+            semantic
           end,
+          semantic_command_factory: ->(_token) { "hive __patrol-fix-semantic-decision test" },
           task_materializer_factory: ->(**) { flunk "retrying admission must not materialize" },
           retry_policy: ->(_record, _error, now) { now + 300 },
           clock: -> { NOW }
         )
 
-        assert_equal [ :retry_wait ], scheduler.tick(now: NOW).map(&:status)
+        dispatch = scheduler.tick(now: NOW).fetch(0)
+        error = assert_raises(StandardError) do
+          services.fetch(0).run_reserved(
+            occurrence_id: dispatch.occurrence_id,
+            reservation_id: dispatch.dispatch_token.fetch(:reservation_id)
+          )
+        end
+        completion = scheduler.complete(
+          dispatch_token: dispatch.dispatch_token, exit_code: 1,
+          envelope: { "error" => error.message, "error_class" => error.class.name }, now: NOW + 1
+        )
+        assert_equal :retry_wait, completion.status
         assert_equal 1, launches
         assert_empty source.pending(now: NOW + 299)
         assert_empty scheduler.tick(now: NOW + 299)
         assert_equal [ entry.fetch("occurrence_id") ],
-                     source.pending(now: NOW + 300).map { |record| record.fetch("occurrence_id") }
+                     source.pending(now: NOW + 301).map { |record| record.fetch("occurrence_id") }
       end
     end
   end
@@ -169,21 +216,38 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         root: File.join(hive_state, "patrol-fix", "admissions")
       )
       retry_at = NOW + 7_200
+      services = []
       scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
         sources: [ source ], admission_store: admission,
         semantic_admission_factory: lambda do |store:, **_args|
-          Hive::PatrolFix::SemanticAdmission.new(
+          semantic = Hive::PatrolFix::SemanticAdmission.new(
             store: store, candidate_provider: ->(_snapshot) { [] },
             current_head: -> { "2" * 40 },
             decision_provider: ->(_input) { raise QuotaError, retry_at.iso8601 },
             clock: -> { NOW }
           )
+          services << semantic
+          semantic
         end,
+        semantic_command_factory: ->(_token) { "hive __patrol-fix-semantic-decision test" },
         task_materializer_factory: ->(**) { flunk "quota failure must not materialize" },
         clock: -> { NOW }
       )
 
-      event = scheduler.tick(now: NOW).fetch(0)
+      dispatch = scheduler.tick(now: NOW).fetch(0)
+      error = assert_raises(QuotaError) do
+        services.fetch(0).run_reserved(
+          occurrence_id: dispatch.occurrence_id,
+          reservation_id: dispatch.dispatch_token.fetch(:reservation_id)
+        )
+      end
+      event = scheduler.complete(
+        dispatch_token: dispatch.dispatch_token, exit_code: 1,
+        envelope: {
+          "error" => error.message, "error_class" => error.class.name,
+          "retry_at" => error.retry_at
+        }, now: NOW + 1
+      )
 
       assert_equal :retry_wait, event.status
       assert_equal retry_at.iso8601, event.retry_at
@@ -200,7 +264,7 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
       )
       semantic_launches = 0
       materialization_attempts = 0
-      scheduler = scheduler_for(
+      scheduler, services = scheduler_for(
         project_root, source, admission,
         decision_provider: lambda do |_input|
           semantic_launches += 1
@@ -222,13 +286,22 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         end
       )
 
-      assert_equal [ :retry_wait ], scheduler.tick(now: NOW).map(&:status)
+      dispatch = scheduler.tick(now: NOW).fetch(0)
+      services.fetch(0).run_reserved(
+        occurrence_id: dispatch.occurrence_id,
+        reservation_id: dispatch.dispatch_token.fetch(:reservation_id)
+      )
+      scheduler.complete(
+        dispatch_token: dispatch.dispatch_token, exit_code: 0, envelope: { "ok" => true },
+        now: NOW + 1
+      )
+      assert_equal [ :retry_wait ], scheduler.tick(now: NOW + 2).map(&:status)
       assert_empty source.pending(now: NOW + 299)
-      recovered = scheduler.tick(now: NOW + 300)
+      recovered = scheduler.tick(now: NOW + 302)
       assert_equal [ :acknowledged ], recovered.map(&:status), recovered.map(&:reason).inspect
       assert_equal 1, semantic_launches
       assert_equal 2, materialization_attempts
-      assert_empty source.pending(now: NOW + 300)
+      assert_empty source.pending(now: NOW + 302)
     end
   end
 
@@ -237,7 +310,7 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
       admission = OneShotAcknowledgementFailureStore.new(
         root: File.join(hive_state, "patrol-fix", "admissions")
       )
-      scheduler = scheduler_for(
+      scheduler, services = scheduler_for(
         project_root, source, admission,
         decision_provider: lambda do |_input|
           {
@@ -251,15 +324,80 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         end
       )
 
-      assert_equal [ :retry_wait ], scheduler.tick(now: NOW).map(&:status)
+      dispatch = scheduler.tick(now: NOW).fetch(0)
+      services.fetch(0).run_reserved(
+        occurrence_id: dispatch.occurrence_id,
+        reservation_id: dispatch.dispatch_token.fetch(:reservation_id)
+      )
+      scheduler.complete(
+        dispatch_token: dispatch.dispatch_token, exit_code: 0, envelope: { "ok" => true },
+        now: NOW + 1
+      )
+      assert_equal [ :retry_wait ], scheduler.tick(now: NOW + 2).map(&:status)
       occurrence_id = entry.fetch("occurrence_id")
       assert source.acknowledged?(occurrence_id)
       assert_empty source.pending(now: NOW + 299)
 
-      recovered = scheduler.tick(now: NOW + 300)
+      recovered = scheduler.tick(now: NOW + 302)
       assert_equal [ :acknowledged ], recovered.map(&:status), recovered.map(&:reason).inspect
       assert_equal "acknowledged", admission.fetch(occurrence_id).fetch("status")
-      assert_empty source.pending(now: NOW + 300)
+      assert_empty source.pending(now: NOW + 302)
+    end
+  end
+
+  def test_restart_waits_for_the_live_lease_then_replaces_it_and_fences_the_old_child
+    with_initialized_scheduler_project do |project_root, hive_state, source, _entry|
+      admission = Hive::PatrolFix::AdmissionStore.new(
+        root: File.join(hive_state, "patrol-fix", "admissions")
+      )
+      provider_calls = 0
+      decision = lambda do |_input|
+        provider_calls += 1
+        {
+          "decision" => "distinct", "candidate_identity" => nil,
+          "rationale" => "No shared root", "evidence" => [ "No candidate" ],
+          "model_receipt" => "fake-provider:distinct"
+        }
+      end
+      first, old_services = scheduler_for(
+        project_root, source, admission, decision_provider: decision,
+        materializer_factory: ->(**) { flunk "decision is not materialized in this proof" }
+      )
+      old_dispatch = first.tick(now: NOW).fetch(0)
+
+      restarted, new_services = scheduler_for(
+        project_root, source, admission, decision_provider: decision,
+        materializer_factory: ->(**) { flunk "decision is not materialized in this proof" }
+      )
+      waiting = restarted.tick(now: NOW + 60).fetch(0)
+      assert_equal :decision_in_flight, waiting.status
+      assert_empty new_services
+      assert_equal 0, provider_calls
+
+      timeout = first.complete(
+        dispatch_token: old_dispatch.dispatch_token, exit_code: 1,
+        envelope: { "error" => "timed out" }, now: NOW + 7_201
+      )
+      assert_equal :stale, timeout.status
+      assert_equal "reservation_expired", timeout.reason
+
+      replacement = restarted.tick(now: NOW + 7_201).fetch(0)
+      assert_equal :decision_dispatch, replacement.status
+      refute_equal old_dispatch.dispatch_token.fetch(:reservation_id),
+                   replacement.dispatch_token.fetch(:reservation_id)
+      assert_raises(Hive::PatrolFix::AdmissionStore::StaleDecision) do
+        old_services.fetch(0).run_reserved(
+          occurrence_id: old_dispatch.occurrence_id,
+          reservation_id: old_dispatch.dispatch_token.fetch(:reservation_id),
+          now: NOW + 7_202
+        )
+      end
+      new_services.fetch(0).run_reserved(
+        occurrence_id: replacement.occurrence_id,
+        reservation_id: replacement.dispatch_token.fetch(:reservation_id),
+        now: NOW + 7_202
+      )
+      assert_equal 1, provider_calls
     end
   end
 
@@ -281,19 +419,24 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
   end
 
   def scheduler_for(project_root, source, admission, decision_provider:, materializer_factory:)
-    Hive::Daemon::PatrolFixAdmissionScheduler.new(
+    services = []
+    scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
       sources: [ source ], admission_store: admission,
       semantic_admission_factory: lambda do |store:, **_args|
-        Hive::PatrolFix::SemanticAdmission.new(
+        semantic = Hive::PatrolFix::SemanticAdmission.new(
           store: store, candidate_provider: ->(_snapshot) { [] },
           current_head: -> { "2" * 40 }, decision_provider: decision_provider,
           clock: -> { NOW }
         )
+        services << semantic
+        semantic
       end,
+      semantic_command_factory: ->(_token) { "hive __patrol-fix-semantic-decision test" },
       task_materializer_factory: materializer_factory,
       retry_policy: ->(_record, _error, now) { now + 300 },
       clock: -> { NOW }
     )
+    [ scheduler, services ]
   end
 
   def real_materializer(project_root, hive_state, store:, source_acknowledger:, **_args)

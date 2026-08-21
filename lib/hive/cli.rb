@@ -1143,6 +1143,19 @@ module Hive
       ).call
     end
 
+    desc "__patrol-fix-semantic-decision PROJECT",
+         "Run one reserved Patrol Fix semantic gate (daemon/internal)", hide: true
+    option :source, type: :string, required: true
+    option :occurrence_id, type: :string, required: true
+    option :reservation_id, type: :string, required: true
+    def __patrol_fix_semantic_decision(project)
+      require "hive/commands/patrol_fix_semantic_decision"
+      exit Hive::Commands::PatrolFixSemanticDecision.new(
+        project, source: options[:source], occurrence_id: options[:occurrence_id],
+        reservation_id: options[:reservation_id]
+      ).call
+    end
+
     desc "answer TARGET", "Inventory or persist one identity-bound brainstorm answer"
     long_desc <<~DESC, wrap: false
       With no --binding, reads TARGET at 2-brainstorm and returns every question

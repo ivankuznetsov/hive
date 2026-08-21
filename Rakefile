@@ -255,6 +255,16 @@ namespace :e2e do
     t.warning = false
     t.description = "Run the opt-in reduced installed-CLI Patrol qualification smoke"
   end
+
+  Rake::TestTask.new(:patrol_fix_qualification) do |t|
+    t.libs << "test"
+    t.libs << "lib"
+    t.test_files = FileList[
+      "test/e2e/qualification/patrol_fix_qualification_test.rb"
+    ]
+    t.warning = false
+    t.description = "Run the opt-in real-provider Patrol Fix four-gate qualification"
+  end
 end
 
 task "test:require_nonempty_ci_gate" do

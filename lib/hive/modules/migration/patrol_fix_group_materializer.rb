@@ -102,6 +102,7 @@ module Hive
           )
           @admission_store.record_decision!(
             occurrence_id, candidate_digest: prepared.fetch("candidate_digest"),
+            reservation_id: prepared.dig("decision_reservation", "reservation_id"),
             decision: decision, candidate_identity: identity,
             rationale: "U8 cutover manifest canonical semantic group",
             evidence: [ "Bound to #{group.fetch('candidate_set_digest')}" ],

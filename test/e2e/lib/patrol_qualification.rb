@@ -5,8 +5,21 @@ require "open3"
 require "rbconfig"
 require "tmpdir"
 require "time"
+require "uri"
 require "yaml"
+require_relative "../../../lib/hive/atomic_file"
+require_relative "../../../lib/hive/config"
+require_relative "../../../lib/hive/daemon/patrol_fix_semantic_decision_runner"
 require_relative "../../../lib/hive/secret_patterns"
+require_relative "../../../lib/hive/patrol/launch_budget"
+require_relative "../../../lib/hive/patrol_fix/inbox_report"
+require_relative "../../../lib/hive/patrol_fix/review_receipt"
+require_relative "../../../lib/hive/patrol_fix/source_snapshot"
+require_relative "../../../lib/hive/refactor_patrol/merge_classifier"
+require_relative "../../../lib/hive/refactor_patrol/merge_classifier_runner"
+require_relative "../../../lib/hive/refactor_patrol/review_agent_runner"
+require_relative "../../../lib/hive/stages/patrol_fix/inbox"
+require_relative "../../../lib/hive/stages/patrol_fix/review"
 
 module Hive
   module E2E
@@ -70,6 +83,10 @@ module Hive
 
       Result = Data.define(:stdout, :stderr, :status)
       Case = Data.define(:id, :module_name, :decision_class, :fault)
+      DecisionCase = Data.define(
+        :id, :source, :gate, :safety_critical, :baseline_decision,
+        :unsafe_decisions, :prompt_schema_version, :input, :provenance
+      )
 
       module_function
 
@@ -197,6 +214,665 @@ module Hive
 
         def safe_id?(value) = value.is_a?(String) && value.match?(/\A[a-z0-9]+(?:-[a-z0-9]+)*\z/)
         def nonempty?(value) = value.is_a?(String) && !value.empty?
+      end
+
+      # Frozen, human-labeled cases for the four LLM gates in Patrol Fix. This
+      # loader is deliberately independent of the legacy U3 qualification
+      # catalogue so adding gate labels cannot change its historical counts.
+      class DecisionCorpus
+        SOURCES = %w[architecture_patrol ordinary_patrol].freeze
+        GATES = %w[
+          feature_classification inbox_routing independent_review semantic_admission
+        ].freeze
+        GATE_DECISIONS = {
+          "semantic_admission" => %w[same_root distinct insufficient_evidence],
+          "feature_classification" => %w[feature skip],
+          "inbox_routing" => %w[fix escalate reject blocked],
+          "independent_review" => %w[approve rework escalate reject]
+        }.freeze
+        MAX_CASES = 64
+        MAX_BYTES = 256 * 1024
+        MAX_INPUT_BYTES = 16 * 1024
+
+        attr_reader :bytes, :cases, :digest
+
+        def self.load(path)
+          new(PatrolQualification.bounded_read(
+            path, label: "Patrol Fix qualification corpus", limit: MAX_BYTES
+          ))
+        end
+
+        def initialize(bytes)
+          @bytes = bytes.freeze
+          document = JSON.parse(bytes)
+          exact_keys!(document, %w[cases schema schema_version])
+          unless document["schema"] == "hive-patrol-fix-qualification-corpus" &&
+                 document["schema_version"] == 1
+            raise Error, "Patrol Fix qualification corpus schema is unsupported"
+          end
+          rows = document.fetch("cases")
+          raise Error, "Patrol Fix qualification corpus count is invalid" unless
+            rows.is_a?(Array) && rows.size.between?(1, MAX_CASES)
+          @cases = rows.map { |row| parse_case(row) }.freeze
+          raise Error, "Patrol Fix qualification case IDs are duplicated" unless
+            cases.map(&:id).uniq.size == cases.size
+          @digest = Digest::SHA256.hexdigest(bytes).freeze
+        rescue JSON::ParserError, KeyError, TypeError => e
+          raise Error, "Patrol Fix qualification corpus is malformed: #{e.message}"
+        end
+
+        private
+
+        def parse_case(row)
+          exact_keys!(row, %w[
+            baseline_decision gate id input prompt_schema_version safety_critical
+            provenance source unsafe_decisions
+          ])
+          exact_keys!(row.fetch("input"), %w[
+            affected_code evidence remediation source_revision summary
+          ])
+          exact_keys!(row.fetch("provenance"), %w[
+            label_rationale origin source_digest source_identity target_revision
+          ])
+          provenance = row.fetch("provenance")
+          valid = safe_id?(row["id"]) && SOURCES.include?(row["source"]) &&
+            GATES.include?(row["gate"]) && [ true, false ].include?(row["safety_critical"]) &&
+            bounded_text?(row["baseline_decision"], 128) &&
+            GATE_DECISIONS.fetch(row["gate"], []).include?(row["baseline_decision"]) &&
+            bounded_text?(row["prompt_schema_version"], 128) &&
+            string_array?(row["unsafe_decisions"], 16, 128) &&
+            row["unsafe_decisions"].all? { |decision| GATE_DECISIONS.fetch(row["gate"], []).include?(decision) } &&
+            string_array?(row.dig("input", "affected_code"), 16, 512) &&
+            string_array?(row.dig("input", "evidence"), 16, 1024) &&
+            bounded_text?(row.dig("input", "remediation"), 4 * 1024) &&
+            row.dig("input", "source_revision").to_s.match?(/\A[0-9a-f]{40,64}\z/) &&
+            bounded_text?(row.dig("input", "summary"), 4 * 1024) &&
+            provenance["origin"] == "historical" &&
+            bounded_text?(provenance["source_identity"], 2 * 1024) &&
+            provenance["source_digest"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+            provenance["target_revision"] == row.dig("input", "source_revision") &&
+            bounded_text?(provenance["label_rationale"], 4 * 1024) &&
+            PatrolQualification.canonical(row.fetch("input")).bytesize <= MAX_INPUT_BYTES
+          raise Error, "Patrol Fix qualification case is malformed" unless valid
+          raise Error, "Patrol Fix qualification case contains a secret pattern" if
+            Hive::SecretPatterns.scan(PatrolQualification.canonical(row)).any?
+
+          DecisionCase.new(
+            row["id"], row["source"], row["gate"], row["safety_critical"],
+            row["baseline_decision"], row["unsafe_decisions"].freeze,
+            row["prompt_schema_version"], PatrolQualification.canonical_value(row["input"]).freeze,
+            PatrolQualification.canonical_value(provenance).freeze
+          ).freeze
+        end
+
+        def exact_keys!(value, keys)
+          raise Error, "Patrol Fix qualification keys are malformed" unless
+            value.is_a?(Hash) && value.keys.sort == keys.sort
+        end
+
+        def safe_id?(value) = value.is_a?(String) && value.match?(/\A[a-z0-9]+(?:-[a-z0-9]+)*\z/)
+        def bounded_text?(value, max) = value.is_a?(String) && !value.empty? && value.bytesize <= max
+        def string_array?(value, count, max)
+          value.is_a?(Array) && value.size <= count && value.all? { |item| bounded_text?(item, max) }
+        end
+      end
+
+      class DecisionCorpusRunner
+        RESULT_KEYS = %w[
+          decision evidence model model_receipt production_input_digest
+          prompt_version provider rationale
+        ].freeze
+        MAX_RESULT_BYTES = 32 * 1024
+
+        def initialize(corpus:, gate_runner:)
+          @corpus = corpus
+          @gate_runner = gate_runner
+        end
+
+        def call(generated_at:)
+          parse_utc!(generated_at)
+          results = @corpus.cases.map { |row| run_case(row) }
+          unsafe = results.find { |row| row["status"] == "unsafe_disagreement" }
+          raise Error, "unsafe qualification decision for #{unsafe.fetch('case_id')}" if unsafe
+
+          {
+            "schema" => "hive-patrol-fix-qualification-report",
+            "schema_version" => 1,
+            "generated_at" => generated_at,
+            "corpus_digest" => @corpus.digest,
+            "cases" => results
+          }.freeze
+        end
+
+        private
+
+        def run_case(row)
+          input = {
+            "case_id" => row.id,
+            "source" => row.source,
+            "gate" => row.gate,
+            "prompt_schema_version" => row.prompt_schema_version,
+            "input_digest" => Digest::SHA256.hexdigest(PatrolQualification.canonical(row.input)),
+            "input" => row.input, "provenance" => row.provenance
+          }
+          result = @gate_runner.call(row, immutable_input: PatrolQualification.canonical_value(input))
+          validate_result!(result)
+          decision = result.fetch("decision")
+          unless DecisionCorpus::GATE_DECISIONS.fetch(row.gate).include?(decision)
+            raise Error, "Patrol Fix qualification provider decision is unknown for #{row.gate}"
+          end
+          status = if decision == row.baseline_decision
+            "match"
+          elsif row.safety_critical && row.unsafe_decisions.include?(decision)
+            "unsafe_disagreement"
+          else
+            "disagreement"
+          end
+          PatrolQualification.canonical_value(result).merge(
+            "case_id" => row.id,
+            "source" => row.source,
+            "gate" => row.gate,
+            "safety_critical" => row.safety_critical,
+            "baseline_decision" => row.baseline_decision,
+            "provenance" => row.provenance,
+            "input_digest" => input.fetch("input_digest"),
+            "status" => status
+          ).freeze
+        end
+
+        def validate_result!(result)
+          valid = result.is_a?(Hash) && result.keys.sort == RESULT_KEYS &&
+            RESULT_KEYS.reject { |key| key == "evidence" }.all? do |key|
+              result[key].is_a?(String) && !result[key].empty? && result[key].bytesize <= 4 * 1024
+            end && result["evidence"].is_a?(Array) && result["evidence"].size.between?(1, 16) &&
+            result["evidence"].all? { |item| item.is_a?(String) && !item.empty? && item.bytesize <= 1024 } &&
+            PatrolQualification.canonical(result).bytesize <= MAX_RESULT_BYTES
+          raise Error, "Patrol Fix qualification provider result is malformed" unless valid
+          raise Error, "Patrol Fix qualification provider result contains a secret pattern" if
+            Hive::SecretPatterns.scan(PatrolQualification.canonical(result)).any?
+        end
+
+        def parse_utc!(value)
+          time = Time.iso8601(value.to_s)
+          raise Error, "qualification generated_at must be UTC" unless time.utc? && value.end_with?("Z")
+        rescue ArgumentError
+          raise Error, "qualification generated_at is malformed"
+        end
+      end
+
+      # Opt-in adapter over the actual four production gate seams. Semantic
+      # admission uses its production runner, feature classification uses a
+      # production MergeClassifier, and inbox/review reuse the exact production
+      # prompt builders and strict output parsers. The injected transport is
+      # the only environment-specific part needed to run a configured model.
+      class ProductionGateAdapter
+        TaskIdentity = Data.define(:slug)
+        STRUCTURED_RESULT_KEYS = %w[model model_receipt output provider].freeze
+
+        def initialize(semantic_runner:, feature_classifier:, structured_transport:,
+                       provenance:, artifact_root:)
+          @semantic_runner = semantic_runner
+          @feature_classifier = feature_classifier
+          @structured_transport = structured_transport
+          @provenance = provenance
+          @artifact_root = File.expand_path(artifact_root)
+          FileUtils.mkdir_p(@artifact_root)
+        end
+
+        def call(row, immutable_input:)
+          case row.gate
+          when "semantic_admission" then semantic(row, immutable_input)
+          when "feature_classification" then feature(row, immutable_input)
+          when "inbox_routing" then inbox(row, immutable_input)
+          when "independent_review" then review(row, immutable_input)
+          else raise Error, "unknown Patrol Fix qualification gate"
+          end
+        end
+
+        private
+
+        def semantic(row, immutable_input)
+          source = source_snapshot(row)
+          candidate_evidence = if row.baseline_decision == "distinct"
+            {
+              "evidence" => [ "The candidate concerns retry scheduling, not the retained architecture root." ],
+              "affected_code" => [ "lib/hive/daemon/retry_scheduler.rb" ],
+              "remediation" => "Repair retry scheduling without merging unrelated architecture work."
+            }
+          else
+            row.input.slice("evidence", "affected_code", "remediation")
+          end
+          candidate_core = {
+            "kind" => "task", "identity" => "repair-existing",
+            "evidence_digest" => "a" * 64, "target_revision" => source.to_h.fetch("target_revision"),
+            "manifest_digest" => "b" * 64
+          }.merge(candidate_evidence)
+          candidate = candidate_core.merge(
+            "context_digest" => Digest::SHA256.hexdigest(
+              Hive::PatrolFix.canonical_json(candidate_core)
+            )
+          )
+          candidates = [ candidate ]
+          inventory_members = candidates.map do |item|
+            item.slice(
+              "kind", "identity", "evidence_digest", "target_revision",
+              "manifest_digest", "context_digest"
+            )
+          end
+          inventory = {
+            "count" => candidates.size,
+            "digest" => Digest::SHA256.hexdigest(
+              Hive::PatrolFix.canonical_json(inventory_members)
+            ),
+            "context_digest" => Digest::SHA256.hexdigest(
+              Hive::PatrolFix.canonical_json(candidates)
+            ),
+            "truncated" => false
+          }
+          head = source.to_h.fetch("target_revision")
+          input = {
+            "schema" => "hive-patrol-fix-semantic-input",
+            "schema_version" => 2, "source" => source.to_h,
+            "candidate_digest" => Digest::SHA256.hexdigest(Hive::PatrolFix.canonical_json(
+              "current_head" => head, "inventory" => inventory, "candidates" => candidates
+            )),
+            "current_head" => head, "inventory_count" => inventory.fetch("count"),
+            "inventory_digest" => inventory.fetch("digest"),
+            "candidate_context_digest" => inventory.fetch("context_digest"),
+            "candidate_context_truncated" => false, "candidates" => candidates
+          }
+          decision = @semantic_runner.call(input)
+          result(decision, row, input, immutable_input)
+        end
+
+        def feature(row, immutable_input)
+          snapshot = feature_snapshot(row)
+          record = @feature_classifier.call(snapshot)
+          decision = {
+            "decision" => record.fetch("decision"),
+            "rationale" => record.fetch("rationale"),
+            "evidence" => record.fetch("evidence"),
+            "model_receipt" => record.fetch("model_receipt")
+          }
+          result(decision, row, snapshot, immutable_input)
+        end
+
+        def inbox(row, immutable_input)
+          manifest = task_manifest(row)
+          task = TaskIdentity.new("qualification-#{row.id}")
+          output_path = structured_output_path(row, "inbox")
+          prompt = Hive::Stages::PatrolFix::Inbox.render_prompt(
+            task, manifest, row.input.fetch("source_revision"), output_path,
+            boundary_token: immutable_input.fetch("input_digest")[0, 16]
+          )
+          transport = structured("inbox_routing", prompt, output_path: output_path)
+          parsed = Hive::PatrolFix::InboxReport.parse(transport.fetch("output"))
+          decision = parsed.to_h.slice("rationale", "evidence").merge(
+            "decision" => parsed.route, "model_receipt" => transport.fetch("model_receipt")
+          )
+          result(decision, row, { "prompt" => prompt }, immutable_input,
+                 transport: transport)
+        end
+
+        def review(row, immutable_input)
+          manifest = task_manifest(row)
+          task = TaskIdentity.new("qualification-#{row.id}")
+          fix = receipt_stub(manifest, "fix", "fix")
+          validation = receipt_stub(manifest, "validation", "validate")
+          snapshot = {
+            "head_revision" => row.input.fetch("source_revision"),
+            "diff" => row.input.fetch("summary"), "worktree" => "/qualification/worktree"
+          }
+          allowed = %w[publish rework escalate reject]
+          output_path = structured_output_path(row, "review")
+          prompt = Hive::Stages::PatrolFix::Review.render_prompt(
+            task, manifest, fix, validation, snapshot, allowed, output_path,
+            boundary_token: immutable_input.fetch("input_digest")[0, 16]
+          )
+          transport = structured("independent_review", prompt, output_path: output_path)
+          parsed = Hive::PatrolFix::ReviewReceipt.parse(
+            transport.fetch("output"), allowed_routes: allowed
+          )
+          mapped = parsed.route == "publish" ? "approve" : parsed.route
+          decision = {
+            "decision" => mapped, "rationale" => parsed.rationale,
+            "evidence" => parsed.evidence, "model_receipt" => transport.fetch("model_receipt")
+          }
+          result(decision, row, { "prompt" => prompt }, immutable_input, transport: transport)
+        end
+
+        def result(decision, row, production_input, immutable_input, transport: nil)
+          metadata = transport || @provenance.call(row.gate, decision)
+          {
+            "decision" => decision.fetch("decision"),
+            "rationale" => decision.fetch("rationale"),
+            "evidence" => decision.fetch("evidence"),
+            "model_receipt" => decision.fetch("model_receipt"),
+            "provider" => metadata.fetch("provider"), "model" => metadata.fetch("model"),
+            "prompt_version" => row.prompt_schema_version,
+            "production_input_digest" => Digest::SHA256.hexdigest(PatrolQualification.canonical(
+              "production_input" => production_input,
+              "immutable_case_input_digest" => immutable_input.fetch("input_digest")
+            ))
+          }
+        end
+
+        def structured(gate, prompt, output_path:)
+          value = @structured_transport.call(
+            gate: gate, prompt: prompt, output_path: output_path
+          )
+          unless value.is_a?(Hash) && value.keys.sort == STRUCTURED_RESULT_KEYS &&
+                 value.values.all? { |item| item.is_a?(String) && !item.empty? }
+            raise Error, "structured qualification transport is malformed"
+          end
+          value
+        end
+
+        def structured_output_path(row, gate)
+          unless row.id.match?(/\A[a-z0-9][a-z0-9-]{0,127}\z/)
+            raise Error, "qualification case id cannot select an output path"
+          end
+          File.join(@artifact_root, "#{row.id}-#{gate}.json")
+        end
+
+        def source_snapshot(row)
+          Hive::PatrolFix::SourceSnapshot.build(
+            engine: row.source, identity: row.id, title: row.input.fetch("summary"),
+            summary: row.input.fetch("summary"), target_revision: row.input.fetch("source_revision"),
+            evidence: row.input.fetch("evidence"), affected_code: row.input.fetch("affected_code"),
+            reproduction_guidance: row.input.fetch("remediation"), discovery_run: "qualification-v1",
+            semantic_lineage: [ row.id ], aliases: [], external_issues: [],
+            existing_pull_requests: [], accepted_at: "2026-08-21T00:00:00Z"
+          )
+        end
+
+        def feature_snapshot(row)
+          revision = row.input.fetch("source_revision")
+          Hive::RefactorPatrol::MergeClassifier::SNAPSHOT_KEYS.to_h do |key|
+            value = case key
+            when "repository" then "example/qualification"
+            when "number" then row.id.bytes.sum
+            when "url" then "https://github.com/example/qualification/pull/#{row.id.bytes.sum}"
+            when "base_branch" then "main"
+            when "base_sha", "merge_sha", "target_head" then revision
+            when "merged_at" then "2026-08-21T00:00:00Z"
+            when "title", "body" then row.input.fetch("summary")
+            when "labels" then []
+            when "publication_provenance" then { "kind" => "none", "marker" => nil }
+            when "author" then "qualification"
+            when "changed_paths" then row.input.fetch("affected_code")
+            when "files" then row.input.fetch("affected_code").map do |path|
+              { "path" => path, "patch" => row.input.fetch("remediation"), "status" => "modified" }
+            end
+            end
+            [ key, value ]
+          end
+        end
+
+        def task_manifest(row)
+          source = source_snapshot(row)
+          {
+            "schema" => "hive-patrol-fix-task-manifest", "schema_version" => 1,
+            "task" => { "slug" => "qualification-#{row.id}", "generation" => 1 },
+            "evidence_revision" => { "generation" => 1, "digest" => source.digest },
+            "target_revision" => row.input.fetch("source_revision"),
+            "sources" => [ source.source_manifest_entry ], "aliases" => [],
+            "relations" => { "successor" => nil, "issues" => [] }
+          }
+        end
+
+        def receipt_stub(manifest, kind, stage)
+          {
+            "schema" => "hive-patrol-fix-receipt", "schema_version" => 1,
+            "receipt_id" => "qualification-#{kind}", "kind" => kind, "stage" => stage,
+            "task" => manifest.fetch("task"), "evidence_revision" => manifest.fetch("evidence_revision"),
+            "recorded_at" => "2026-08-21T00:00:00Z", "payload" => { "qualified" => true }
+          }
+        end
+      end
+
+      # E2E-only executable composition for the opt-in real-provider corpus.
+      # It uses the production gate runners and prompt/parser seams but writes
+      # all qualification scratch outside project authority.
+      class LiveDecisionCorpusController
+        class QualificationState
+          attr_reader :root
+
+          def initialize(root)
+            @root = File.expand_path(root)
+          end
+
+          def run_dir(prefix)
+            path = File.join(root, "runs", "#{prefix}-#{SecureRandom.hex(8)}")
+            FileUtils.mkdir_p(path)
+            path
+          end
+        end
+
+        class StructuredTransport
+          def initialize(project_root:, cfg:, state:, launch_budget:)
+            @state = state
+            @identity = Hive::RefactorPatrol::AgentIdentity.new(
+              cfg: cfg, project_root: project_root
+            ).review
+            @runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
+              project_root: project_root, cfg: cfg, state: state,
+              dry_run: true, read_only: false, launch_budget: launch_budget
+            )
+          end
+
+          def call(gate:, prompt:, output_path:)
+            FileUtils.rm_f(output_path)
+            result = @runner.call(
+              prompt: prompt, output_path: output_path,
+              run_dir: @state.run_dir("qualification-#{gate}")
+            )
+            unless result.is_a?(Hash) && result[:status] == :ok
+              raise Error, "#{gate} qualification provider failed"
+            end
+            model = result[:model] || result.dig(:usage, :model) || @identity.model
+            {
+              "output" => PatrolQualification.bounded_read(
+                output_path, label: "#{gate} qualification output", limit: 64 * 1024
+              ),
+              "provider" => @identity.provider.to_s,
+              "model" => model.to_s,
+              "model_receipt" => model_receipt(result, model)
+            }
+          end
+
+          private
+
+          def model_receipt(result, model)
+            usage = result[:usage].is_a?(Hash) ? result[:usage] : {}
+            digest = Digest::SHA256.hexdigest(Hive::PatrolFix.canonical_json(
+              "model" => model.to_s, "session" => result[:session_id].to_s,
+              "usage" => usage.transform_keys(&:to_s).sort.to_h
+            ))
+            "provider:#{model}:#{digest[0, 32]}"
+          end
+        end
+
+        def initialize(project_root:, corpus_path:, evidence_path:, adapter_factory: nil)
+          @project_root = File.expand_path(project_root)
+          @corpus_path = File.expand_path(corpus_path)
+          @evidence_path = File.expand_path(evidence_path)
+          @adapter_factory = adapter_factory
+        end
+
+        def run!(generated_at: Time.now.utc.iso8601(6))
+          corpus = DecisionCorpus.load(@corpus_path)
+          Dir.mktmpdir("patrol-fix-live-qualification") do |scratch|
+            adapter = @adapter_factory ?
+              @adapter_factory.call(corpus: corpus, artifact_root: scratch) :
+              production_adapter(scratch)
+            report = DecisionCorpusRunner.new(corpus: corpus, gate_runner: adapter).call(
+              generated_at: generated_at
+            )
+            Hive::AtomicFile.write(
+              @evidence_path, PatrolQualification.canonical(report), mode: 0o600
+            )
+            report
+          end
+        end
+
+        private
+
+        def production_adapter(scratch)
+          cfg = Hive::Config.load(@project_root)
+          state = QualificationState.new(scratch)
+          budget = Hive::Patrol::LaunchBudget.new(
+            @project_root, cfg: cfg, charge_discovery: false
+          )
+          identity = Hive::RefactorPatrol::AgentIdentity.new(
+            cfg: cfg, project_root: @project_root
+          ).review
+          ProductionGateAdapter.new(
+            semantic_runner: Hive::Daemon::PatrolFixSemanticDecisionRunner.new(
+              project_root: @project_root, cfg: cfg, state: state, launch_budget: budget
+            ),
+            feature_classifier: Hive::RefactorPatrol::MergeClassifier.new(
+              root: File.join(scratch, "merge-classifications"),
+              decision_provider: Hive::RefactorPatrol::MergeClassifierRunner.new(
+                project_root: @project_root, cfg: cfg, state: state, launch_budget: budget
+              )
+            ),
+            structured_transport: StructuredTransport.new(
+              project_root: @project_root, cfg: cfg, state: state, launch_budget: budget
+            ),
+            provenance: lambda do |_gate, _decision|
+              { "provider" => identity.provider.to_s, "model" => identity.model.to_s }
+            end,
+            artifact_root: File.join(scratch, "structured")
+          )
+        end
+      end
+
+      # Minimal durable evidence shape for a later opt-in live dogfood run. It
+      # records observations only; the writer does not execute any workflow or
+      # remote operation.
+      class DogfoodReport
+        STAGES = %w[inbox fix validate review publish done].freeze
+        MAX_BYTES = 256 * 1024
+
+        class << self
+          def load(path)
+            document = JSON.parse(PatrolQualification.bounded_read(
+              path, label: "Patrol Fix dogfood report", limit: MAX_BYTES
+            ))
+            validate!(document)
+          rescue JSON::ParserError => e
+            raise Error, "Patrol Fix dogfood report is malformed: #{e.message}"
+          end
+
+          def write(path, document)
+            value = validate!(document)
+            bytes = PatrolQualification.canonical(value)
+            raise Error, "Patrol Fix dogfood report exceeds its byte bound" if bytes.bytesize > MAX_BYTES
+            raise Error, "Patrol Fix dogfood report contains a secret pattern" if
+              Hive::SecretPatterns.scan(bytes).any?
+            Hive::AtomicFile.write(path, bytes, mode: 0o600)
+            value
+          end
+
+          def validate!(document)
+            exact!(document, %w[
+              generated_at project publication replay review run_id schema schema_version
+              source stages task validation
+            ])
+            valid = document["schema"] == "hive-patrol-fix-dogfood-report" &&
+              document["schema_version"] == 1 && text?(document["run_id"], 256) &&
+              text?(document["project"], 256) && utc?(document["generated_at"])
+            raise Error, "Patrol Fix dogfood report envelope is malformed" unless valid
+            validate_source!(document.fetch("source"))
+            validate_task!(document.fetch("task"))
+            validate_stages!(document.fetch("stages"))
+            validate_validation!(document.fetch("validation"))
+            validate_review!(document.fetch("review"))
+            validate_publication!(document.fetch("publication"))
+            validate_replay!(document.fetch("replay"), document)
+            PatrolQualification.canonical_value(document)
+          rescue KeyError, TypeError => e
+            raise Error, "Patrol Fix dogfood report is malformed: #{e.message}"
+          end
+
+          private
+
+          def validate_source!(value)
+            exact!(value, %w[engine identity occurrence_id source_digest])
+            raise Error, "Patrol Fix dogfood source is malformed" unless
+              %w[architecture_patrol ordinary_patrol].include?(value["engine"]) &&
+              %w[identity occurrence_id].all? { |key| text?(value[key], 512) } && digest?(value["source_digest"])
+          end
+
+          def validate_task!(value)
+            exact!(value, %w[evidence_digest generation slug])
+            raise Error, "Patrol Fix dogfood task is malformed" unless
+              text?(value["slug"], 256) && value["generation"].is_a?(Integer) &&
+              value["generation"].positive? && digest?(value["evidence_digest"])
+          end
+
+          def validate_stages!(value)
+            valid = value.is_a?(Array) && value.size == STAGES.size &&
+              value.map { |row| row["stage"] } == STAGES && value.all? do |row|
+                exact!(row, %w[journal_digest observed_at stage status])
+                text?(row["status"], 64) && digest?(row["journal_digest"]) && utc?(row["observed_at"])
+              end
+            raise Error, "Patrol Fix dogfood stages are malformed" unless valid
+          end
+
+          def validate_validation!(value)
+            valid = value.is_a?(Array) && value.size.between?(1, 32) && value.all? do |row|
+              exact!(row, %w[command evidence_digest exit_code])
+              text?(row["command"], 4 * 1024) && row["exit_code"].is_a?(Integer) &&
+                digest?(row["evidence_digest"])
+            end
+            raise Error, "Patrol Fix dogfood validation is malformed" unless valid
+          end
+
+          def validate_review!(value)
+            exact!(value, %w[decision evidence_digest model_receipt])
+            raise Error, "Patrol Fix dogfood review is malformed" unless
+              %w[approve rework escalate reject].include?(value["decision"]) &&
+              text?(value["model_receipt"], 4 * 1024) && digest?(value["evidence_digest"])
+          end
+
+          def validate_publication!(value)
+            exact!(value, %w[base_revision head_revision phase pr_number receipt_digest url])
+            raise Error, "Patrol Fix dogfood publication is malformed" unless
+              value["phase"] == "pr_created" && value["pr_number"].is_a?(Integer) &&
+              value["pr_number"].positive? && text?(value["url"], 2 * 1024) &&
+              URI::DEFAULT_PARSER.make_regexp(%w[https]).match?(value["url"]) &&
+              revision?(value["base_revision"]) && revision?(value["head_revision"]) &&
+              digest?(value["receipt_digest"])
+          end
+
+          def validate_replay!(value, document)
+            exact!(value, %w[duplicate_pr_count duplicate_task_count pr_number source_occurrence_id task_slug])
+            valid = text?(value["source_occurrence_id"], 512) && text?(value["task_slug"], 256) &&
+              value["duplicate_pr_count"] == 0 && value["duplicate_task_count"] == 0 &&
+              value["source_occurrence_id"] == document.dig("source", "occurrence_id") &&
+              value["task_slug"] == document.dig("task", "slug") &&
+              value["pr_number"] == document.dig("publication", "pr_number")
+            raise Error, "Patrol Fix dogfood replay proof is malformed" unless valid
+          end
+
+          def exact!(value, keys)
+            raise Error, "Patrol Fix dogfood report keys are malformed" unless
+              value.is_a?(Hash) && value.keys.sort == keys.sort
+            true
+          end
+
+          def digest?(value) = value.is_a?(String) && value.match?(/\A[0-9a-f]{64}\z/)
+          def revision?(value) = value.is_a?(String) && value.match?(/\A[0-9a-f]{40}\z/)
+          def text?(value, max) = value.is_a?(String) && !value.empty? && value.bytesize <= max
+          def utc?(value)
+            time = Time.iso8601(value.to_s)
+            time.utc? && value.end_with?("Z")
+          rescue ArgumentError
+            false
+          end
+        end
       end
 
       class ChildProcess

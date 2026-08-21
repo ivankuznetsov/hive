@@ -248,6 +248,7 @@ class PatrolFixTaskMaterializerTest < Minitest::Test
     )
     store.record_decision!(
       occurrence_id, candidate_digest: prepared.fetch("candidate_digest"),
+      reservation_id: prepared.dig("decision_reservation", "reservation_id"),
       decision: "distinct", rationale: "Different root", evidence: [ "No exact candidate" ],
       model_receipt: "fake:distinct", now: NOW
     )
@@ -264,6 +265,7 @@ class PatrolFixTaskMaterializerTest < Minitest::Test
     )
     store.record_decision!(
       occurrence_id, candidate_digest: prepared.fetch("candidate_digest"),
+      reservation_id: prepared.dig("decision_reservation", "reservation_id"),
       decision: "same_root", candidate_identity: identity, rationale: "Same root",
       evidence: [ "Same failure" ], model_receipt: "fake:same", now: NOW
     )

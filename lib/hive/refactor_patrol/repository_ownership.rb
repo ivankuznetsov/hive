@@ -1,7 +1,5 @@
 require "hive/config"
 require "hive/gh"
-require "hive/refactor_patrol/job_store"
-require "hive/refactor_patrol/publication_attempt"
 require "hive/workflows"
 require "uri"
 
@@ -15,31 +13,6 @@ module Hive
         def full? = authority == :full
         def continuation_only? = authority == :continuation_only
         def blocked? = authority == :blocked
-      end
-
-      def self.continuation_evidence?(aggregate)
-        aggregate.fetch("actions").any? do |action|
-          next false if action.fetch("terminal")
-
-          receipts = action.fetch("receipts")
-          action.fetch("owner_job_id") != aggregate.fetch("job_id") ||
-            receipts.key?("creation_intent") || receipts.key?("pr_url") ||
-            receipts.key?("issue_url") || receipts.key?("review_task_path") ||
-            PublicationAttempt.phase_evidence?(receipts)
-        end
-      end
-
-      def self.remote_continuation_evidence?(aggregate)
-        aggregate.fetch("actions").any? do |action|
-          next false if action.fetch("terminal")
-
-          receipts = action.fetch("receipts")
-          receipts["creation_intent"].is_a?(Hash) ||
-            !receipts["pr_url"].to_s.empty? ||
-            !receipts["issue_url"].to_s.empty? ||
-            !receipts["review_task_path"].to_s.empty? ||
-            PublicationAttempt.phase_evidence?(receipts)
-        end
       end
 
       def self.identity_from_source(source)
@@ -61,12 +34,10 @@ module Hive
 
       def initialize(registry: -> { Hive::Config.registered_projects },
                      config_loader: ->(path) { Hive::Config.load(path) },
-                     identity_resolver: nil, continuation_resolver: nil,
-                     require_registration: true)
+                     identity_resolver: nil, require_registration: true)
         @registry = registry
         @config_loader = config_loader
         @require_registration = require_registration
-        @continuation_resolver = continuation_resolver || method(:stored_continuation_identities)
         @identity_resolver = identity_resolver || lambda do |entry, cfg|
           Hive::Gh.repository_identity(entry.fetch("path"), cfg: cfg)
         end
@@ -82,7 +53,6 @@ module Hive
         registry_cache = {}
         config_cache = {}
         identity_cache = {}
-        continuation_cache = {}
 
         self.class.new(
           registry: lambda do
@@ -98,22 +68,15 @@ module Hive
               @identity_resolver.call(entry, cfg)
             end
           end,
-          continuation_resolver: lambda do |entry, cfg|
-            snapshot_fetch(continuation_cache, entry_key(normalized_entry(entry))) do
-              @continuation_resolver.call(entry, cfg)
-            end
-          end,
           require_registration: @require_registration
         )
       end
 
-      def call(entry:, cfg:, expected_identity: nil, continuation: false,
-               continuation_owner: false)
+      def call(entry:, cfg:, expected_identity: nil)
         target = normalized_entry(entry)
-        enabled, unresolved, registered, configured = enabled_registrations(target, cfg)
+        enabled, unresolved, registered = enabled_registrations(target, cfg)
         participants = (enabled + [ [ target, cfg ] ]).uniq { |candidate, _| entry_key(candidate) }
         identities = resolve_identities(participants, unresolved)
-        continuations = resolve_continuations(configured, unresolved)
         return unresolved_decision(unresolved) if unresolved.any?
 
         target_identity = identities.fetch(entry_key(target))
@@ -122,14 +85,7 @@ module Hive
           enabled_owners = enabled.select do |candidate, _candidate_cfg|
             identities.fetch(entry_key(candidate)) == guarded_identity
           end.map(&:first)
-          continuation_owners = continuations.select do |item|
-            item.fetch(:identity) == guarded_identity
-          end.map { |item| item.fetch(:entry) }
-          if continuation_owner && expected == guarded_identity
-            continuation_owners << target
-          end
-          owners = (enabled_owners + continuation_owners).uniq { |owner| entry_key(owner) }
-          return duplicate_decision(guarded_identity, owners) if owners.size > 1
+          return duplicate_decision(guarded_identity, enabled_owners) if enabled_owners.size > 1
         end
 
         if @require_registration && !registered
@@ -146,7 +102,7 @@ module Hive
             "expected_host" => identity_host(expected_identity)
           ).compact
           return decision(
-            continuation ? :continuation_only : :blocked,
+            :blocked,
             "repository_identity_drift", evidence
           )
         end
@@ -155,8 +111,6 @@ module Hive
           decision(:blocked, "architecture_patrol_disabled")
         elsif cfg.dig("refactor_patrol", "enabled") == true
           decision(:full)
-        elsif continuation
-          decision(:continuation_only, "architecture_patrol_disabled")
         else
           decision(:blocked, "architecture_patrol_disabled")
         end
@@ -217,10 +171,10 @@ module Hive
           Hive::Workflows.coding_id?(cfg.dig("default_workflow")) &&
             cfg.dig("refactor_patrol", "enabled") == true
         end
-        [ enabled, unresolved, registered, configured ]
+        [ enabled, unresolved, registered ]
       rescue StandardError => e
         unresolved << registration_evidence(target).merge("error" => "#{e.class}: #{e.message}")
-        [ [], unresolved, false, [] ]
+        [ [], unresolved, false ]
       end
 
       def resolve_identities(participants, unresolved)
@@ -229,27 +183,6 @@ module Hive
         rescue StandardError => e
           unresolved << registration_evidence(entry).merge("error" => "#{e.class}: #{e.message}")
         end
-      end
-
-      def resolve_continuations(configured, unresolved)
-        configured.filter_map do |entry, cfg|
-          Array(@continuation_resolver.call(entry, cfg)).map do |identity|
-            { entry: entry, identity: normalize_identity(identity) }
-          end
-        rescue StandardError => e
-          unresolved << registration_evidence(entry).merge("error" => "#{e.class}: #{e.message}")
-          nil
-        end.flatten
-      end
-
-      def stored_continuation_identities(entry, _cfg)
-        JobStore.new(
-          entry.fetch("path"),
-          hive_state_path: entry["hive_state_path"]
-        ).each_job.filter_map do |aggregate|
-          self.class.identity_from_source(aggregate.fetch("source")) if
-            self.class.remote_continuation_evidence?(aggregate)
-        end.uniq
       end
 
       def normalized_entry(entry)

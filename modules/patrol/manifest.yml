@@ -79,25 +79,21 @@ settings:
     default: false
     description: "Retain the legacy Patrol dry-run execution mode"
 permissions:
-  repository_write: true
-  github_mutations:
-    - "pull_requests"
+  repository_write: false
+  github_mutations: []
   external_commands:
-    - "gh"
     - "git"
-  network_hosts:
-    - "api.github.com"
+  network_hosts: []
   filesystem_read:
     - "repository"
   filesystem_write:
     - ".hive-state/patrol/**"
-    - ".hive-state/stages/**"
   secrets: []
 templates:
   - "templates/patrol.yml"
 docs:
   - "README.md"
 files:
-  "README.md": "5c7122c19be2b8cba0c195905d56d79368d2f5a06f7646dc10f1370004574f92"
+  "README.md": "84c72f4394695282606283b182e46f61ebdc81fc74300ad9bbbbb2a0302eb109"
   "templates/patrol.yml": "821cbe6870fb874ab84b80d4cc9f9875cdfe8fdfd23af79117df0809a56b1474"
-release_sha256: "75f27e92ddb5fcd6aa1c6f6d51fc54f74f65d77a7bbc6dc2871785f869c9415c"
+release_sha256: "e4de0960c1e22d08ac1e9b2fd8adef05bd94d8f43a2adb5331a84d08d93377eb"

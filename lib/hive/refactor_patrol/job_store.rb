@@ -21,8 +21,9 @@ require "hive/workflow_package/canonical_json"
 
 module Hive
   module RefactorPatrol
-    # Authoritative v4 lifecycle storage. A job aggregate owns discovery and
-    # action receipts; the indexes below are disposable projections rebuilt by
+    # Authoritative v4 lifecycle storage. New jobs use the discovery portion of
+    # the aggregate; historical action receipts remain readable as inert
+    # provenance. The indexes below are disposable projections rebuilt by
     # scanning terminal aggregates.
     class JobStore
       SCHEMA = "hive-refactor-patrol-job".freeze
@@ -809,13 +810,12 @@ module Hive
           if payload.fetch("complete")
             aggregate["review_errors"] = []
             aggregate["zero_reason"] = payload.fetch("zero_reason")
-            terminal = !action_authorized_for?(aggregate)
-            aggregate["state"] = terminal ? "complete" : "classified"
-            aggregate["complete"] = terminal
+            aggregate["state"] = "complete"
+            aggregate["complete"] = true
             @claim_transitions.finish!(
               attempt,
               state: "complete",
-              outcome: terminal ? "complete" : "classified",
+              outcome: "complete",
               now: now,
               touch_heartbeat: false
             )
@@ -2263,15 +2263,6 @@ module Hive
           end
         end
         aggregate["feature_results"] = complete_results.sort_by { |item| item.fetch("feature_id") }
-      end
-
-      def action_authorized_for?(aggregate)
-        policy = aggregate.fetch("policy")
-        (policy.fetch("auto_fix") && aggregate.dig("dispositions", "fix").any?) ||
-          (policy.fetch("issue_filing") && (
-            aggregate.dig("dispositions", "fix").any? ||
-            aggregate.dig("dispositions", "discuss").any? { |item| item["admissible"] == true }
-          ))
       end
 
       def source_from_manifest(manifest)

@@ -43,16 +43,6 @@ hooks:
     events:
       - "pull_request.merged"
     concurrency: "drop"
-  -
-    id: "actions"
-    target:
-      kind: "entrypoint"
-      id: "architecture-patrol.actions"
-    default_enabled: false
-    schedules:
-      - "*/10 * * * *"
-    events: []
-    concurrency: "drop"
 settings:
   -
     name: "shadow_mode"
@@ -68,24 +58,20 @@ settings:
     description: "Retain the legacy Architecture Patrol dry-run execution mode"
 permissions:
   repository_write: true
-  github_mutations:
-    - "pull_requests"
+  github_mutations: []
   external_commands:
-    - "gh"
     - "git"
-  network_hosts:
-    - "api.github.com"
+  network_hosts: []
   filesystem_read:
     - "repository"
   filesystem_write:
     - ".hive-state/refactor_patrol/**"
-    - ".hive-state/stages/**"
   secrets: []
 templates:
   - "templates/refactor-patrol.yml"
 docs:
   - "README.md"
 files:
-  "README.md": "fdf5913e5e37c2b9cf8895be0cdd26aca9424b25f8bb855bdcc7c5ec46613747"
-  "templates/refactor-patrol.yml": "2cc38868acdd2c1db566a024c976b1ab4a68c8fc9d53cddb2bdae26249816da5"
-release_sha256: "7c9ba3a9567e2c8d22299c0301e4435e34b1bbc1f4060ad1f90793fc465a960b"
+  "README.md": "5e1cbd44c3f8a784188e66e804a73f8d6b09e1524f6eb3a1d64d7ef14e1ed26c"
+  "templates/refactor-patrol.yml": "af33e28f26e34ab34916a003625a772ce939d9f04ad4e74d811f153c8d394e48"
+release_sha256: "fcc488f91fde43590ccea1b8f993575696b83c6497d7eca59893b7f0d050fc8a"

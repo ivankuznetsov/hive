@@ -2,7 +2,6 @@ require "test_helper"
 require "hive/modules/migration/occurrence_journal"
 require "hive/refactor_patrol/transition_gateway"
 require "hive/refactor_patrol/job_store"
-require "hive/refactor_patrol/pr_opener"
 
 class RefactorPatrolJobStoreTest < Minitest::Test
   include HiveTestHelper
@@ -642,7 +641,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
-  def test_accepted_thesis_remains_actionable_for_issue_when_auto_fix_is_disabled
+  def test_accepted_thesis_completes_discovery_without_legacy_actions
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       policy = intake_policy.merge("issue_filing" => true)
@@ -667,14 +666,13 @@ class RefactorPatrolJobStoreTest < Minitest::Test
 
       checkpoint = store.checkpoint_discovery!(token, envelope: envelope, now: T0 + 1)
 
-      refute checkpoint.fetch("complete")
-      assert_equal "classified", checkpoint.fetch("state")
-      assert_equal [ "pr-7-stable" ],
-                   store.actionable_jobs(now: T0 + 2).map { |job| job.fetch("job_id") }
+      assert checkpoint.fetch("complete")
+      assert_equal "complete", checkpoint.fetch("state")
+      assert_empty store.actionable_jobs(now: T0 + 2)
     end
   end
 
-  def test_admissible_flagged_thesis_remains_actionable_for_issue
+  def test_discuss_thesis_completes_discovery_without_legacy_actions
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       policy = intake_policy.merge("issue_filing" => true)
@@ -700,8 +698,8 @@ class RefactorPatrolJobStoreTest < Minitest::Test
 
       checkpoint = store.checkpoint_discovery!(token, envelope: envelope, now: T0 + 1)
 
-      refute checkpoint.fetch("complete")
-      assert_equal "classified", checkpoint.fetch("state")
+      assert checkpoint.fetch("complete")
+      assert_equal "complete", checkpoint.fetch("state")
     end
   end
 
@@ -3144,31 +3142,31 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   end
 
   def publication_push_intent(action_id, patch, expected_remote_oid:)
-    Hive::RefactorPatrol::PrOpener.push_intent_payload(
-      canonical_action_id: action_id,
-      repository: "acme/demo",
-      branch: patch.fetch("branch"),
-      commit_sha: patch.fetch("commit_sha"),
-      expected_remote_oid: expected_remote_oid
+    publication_operation(
+      "push_branch", action_id, patch,
+      "expected_remote_oid" => expected_remote_oid
     )
   end
 
   def publication_push_complete(action_id, patch)
-    Hive::RefactorPatrol::PrOpener.push_complete_payload(
-      canonical_action_id: action_id,
-      repository: "acme/demo",
-      branch: patch.fetch("branch"),
-      commit_sha: patch.fetch("commit_sha")
+    publication_operation(
+      "push_branch_complete", action_id, patch,
+      "remote_oid" => patch.fetch("commit_sha")
     )
   end
 
   def publication_pr_create_intent(action_id, patch)
-    Hive::RefactorPatrol::PrOpener.pr_create_intent_payload(
-      canonical_action_id: action_id,
-      repository: "acme/demo",
-      branch: patch.fetch("branch"),
-      commit_sha: patch.fetch("commit_sha")
-    )
+    publication_operation("create_pr", action_id, patch)
+  end
+
+  def publication_operation(operation, action_id, patch, extra = {})
+    {
+      "operation" => operation,
+      "canonical_action_id" => action_id,
+      "repository" => "acme/demo",
+      "branch" => patch.fetch("branch"),
+      "commit_sha" => patch.fetch("commit_sha")
+    }.merge(extra)
   end
 
   def terminal_proof(action_id, project_root:, outcome: "pr_opened",

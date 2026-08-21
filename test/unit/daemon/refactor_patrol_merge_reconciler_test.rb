@@ -733,7 +733,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
-  def test_intake_snapshots_the_complete_action_policy
+  def test_intake_disables_legacy_action_policy_even_when_old_config_enables_it
     with_tmp_dir do |dir|
       gh = FakeGh.new
       gh.details = { 2 => details(2, at: T0) }
@@ -747,8 +747,8 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       )
       policy = job_store(dir).jobs.fetch(0).fetch("policy")
 
-      assert_equal true, policy.fetch("auto_fix")
-      assert_equal true, policy.fetch("issue_filing")
+      assert_equal false, policy.fetch("auto_fix")
+      assert_equal false, policy.fetch("issue_filing")
       assert_equal "codex", policy.dig("action", "auto_fix_agent")
       refute policy.dig("action", "caps").key?("max_files")
       refute policy.dig("action", "caps").key?("max_diff_lines")

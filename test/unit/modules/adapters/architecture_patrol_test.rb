@@ -86,11 +86,11 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
     assert_equal "architecture-patrol", result.descriptor.name
     assert_equal "architecture-patrol", result.descriptor.type
     assert_equal(
-      %w[setup scheduled-discovery merged-pr-discovery actions],
+      %w[setup scheduled-discovery merged-pr-discovery],
       result.descriptor.hooks.map { |hook| hook.fetch("id") }
     )
     assert_equal [ "pull_request.merged" ], result.descriptor.hooks.fetch(2).fetch("events")
-    assert_equal %w[pull_requests], result.descriptor.permissions.fetch("github_mutations")
+    assert_empty result.descriptor.permissions.fetch("github_mutations")
   end
 
   def test_shadow_merged_event_uses_exact_reconciler_job_without_claiming
@@ -111,28 +111,6 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       assert_equal "due", shadow.fetch(0).fetch("rationale")
       assert_equal "job-7", shadow.fetch(0).fetch("job_id")
       refute File.exist?(File.join(project.fetch("path"), ".hive-state", "refactor_patrol"))
-    end
-  end
-
-  def test_scheduled_action_reserves_existing_lifecycle_and_invokes_internal_mode
-    with_project(owner: "module") do |project|
-      scheduler = FakeScheduler.new([ candidate.merge(action_phase: :action) ])
-      commands = []
-      adapter = adapter_for(scheduler, commands: commands)
-
-      assert_equal 0, adapter.call(
-        project: project, hook_id: "actions", event: schedule_event,
-        configuration: configuration(shadow: false)
-      )
-
-      name, options = commands.fetch(0)
-      assert_equal "demo", name
-      assert options.fetch(:actions)
-      assert_equal "/project/manifest.json", options.fetch(:job_manifest)
-      assert_equal project, options.fetch(:project_entry)
-      assert_instance_of Hive::Modules::CapabilityContext, options.fetch(:capability_context)
-      assert_equal true, options.fetch(:config_loader).call(project.fetch("path")).dig("refactor_patrol", "enabled")
-      assert_equal "job-7", scheduler.completed.fetch(:dispatch_token).fetch(:job_id)
     end
   end
 

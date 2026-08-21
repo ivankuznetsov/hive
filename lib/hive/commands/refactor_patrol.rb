@@ -17,7 +17,6 @@ require "hive/refactor_patrol/claim_liveness_resolver"
 require "hive/refactor_patrol/claim_maintenance_transitions"
 require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/discovery_capacity"
-require "hive/refactor_patrol/action_runner"
 require "hive/refactor_patrol/collisions"
 require "hive/refactor_patrol/checkout_guard"
 require "hive/refactor_patrol/fingerprint"
@@ -48,11 +47,11 @@ module Hive
         Hive::RefactorPatrol::DiscoveryCapacity::MAX_FEATURES_PER_CLAIM
 
       def initialize(project, json: false, dry_run: false, feature: nil, entrypoint: nil, path: nil, changed_since: nil, pr: nil,
-                     job_manifest: nil, actions: false, result_file: nil, list: false, show: nil,
+                     job_manifest: nil, result_file: nil, list: false, show: nil,
                      limit: nil, cursor: nil, full: false,
                      mapper_factory: nil, reviewer_factory: nil,
                      caps_factory: nil, collisions_factory: nil, manifest_resolver_factory: nil,
-                     action_runner_factory: nil, job_store_factory: nil,
+                     job_store_factory: nil,
                      repository_ownership: nil, checkout_guard_factory: nil,
                      analysis_worktree_factory: nil,
                      heartbeat_interval_sec: CLAIM_HEARTBEAT_INTERVAL_SEC,
@@ -72,7 +71,6 @@ module Hive
         @changed_since = changed_since
         @pr = pr
         @job_manifest = job_manifest
-        @actions = actions
         @result_file = result_file
         @list_jobs = list == true
         @show_job = show
@@ -98,7 +96,6 @@ module Hive
         end
         @manifest_resolver_factory = manifest_resolver_factory
         @repository_ownership = repository_ownership || Hive::RefactorPatrol::RepositoryOwnership.new
-        @action_runner_factory = action_runner_factory
         @job_store_factory = job_store_factory
         @checkout_guard_factory = checkout_guard_factory || lambda do |root, branch|
           Hive::RefactorPatrol::CheckoutGuard.new(root, default_branch: branch)
@@ -127,8 +124,6 @@ module Hive
       def call
         validate_mode!
         return run_job_query if query_mode?
-        return emit(run_action_cycle, []) if @actions
-
         payload, theses = run_cycle
         emit(payload, theses)
       rescue Hive::Error => e
@@ -143,28 +138,6 @@ module Hive
       end
 
       private
-
-      def run_action_cycle
-        entry, project_root, cfg = resolve_project!
-        require_module_observation_capabilities!
-        require_module_mutation_capabilities! unless @dry_run
-        @manifest = resolve_manifest(entry, project_root, cfg)
-        validate_result_file!(entry, project_root) if @result_file
-        @job_store = job_store_for(entry, project_root)
-        assert_repository_ownership!(
-          entry, cfg, aggregate: @job_store.read_job(@manifest.fetch("job_id"))
-        )
-        launch_budget = Hive::Patrol::LaunchBudget.new(
-          project_root, cfg: cfg, project_id: entry.fetch("project_id"),
-          project_name: entry.fetch("name"), engine: :architecture,
-          charge_discovery: false
-        )
-        runner = build_action_runner(project_root, cfg, launch_budget, entry: entry)
-        result = with_claim_heartbeat(@manifest.fetch("job_id")) do
-          runner.run(job_id: @manifest.fetch("job_id"), dry_run: @dry_run)
-        end
-        build_action_payload(entry, project_root, result)
-      end
 
       def run_cycle
         entry, project_root, cfg = resolve_project!
@@ -278,10 +251,6 @@ module Hive
 
         @capability_context.require_repository_write!
         @capability_context.require_filesystem_write!(".hive-state/refactor_patrol/**")
-        @capability_context.require_filesystem_write!(".hive-state/stages/**")
-        @capability_context.require_github_mutation!("pull_requests")
-        @capability_context.require_external_command!("gh")
-        @capability_context.require_network_host!("api.github.com")
       end
 
       def resolve_project!
@@ -295,7 +264,7 @@ module Hive
                 "hive refactor-patrol: project #{entry.fetch('name').inspect} uses non-coding " \
                 "default_workflow #{cfg['default_workflow'].inspect}"
         end
-        unless query_mode? || @actions || (cfg["refactor_patrol"] || {})["enabled"]
+        unless query_mode? || (cfg["refactor_patrol"] || {})["enabled"]
           raise Hive::ConfigError, "hive refactor-patrol: project #{entry.fetch('name').inspect} must opt in with refactor_patrol.enabled: true"
         end
 
@@ -308,14 +277,9 @@ module Hive
         decision = @repository_ownership.call(
           entry: entry,
           cfg: cfg,
-          expected_identity: expected,
-          continuation: aggregate && Hive::RefactorPatrol::RepositoryOwnership.continuation_evidence?(aggregate),
-          continuation_owner: aggregate && Hive::RefactorPatrol::RepositoryOwnership
-            .remote_continuation_evidence?(aggregate)
+          expected_identity: expected
         )
         return unless decision.blocked?
-        return if aggregate && decision.reason == "architecture_patrol_disabled"
-
         raise Hive::ConfigError,
               "hive refactor-patrol: #{decision.reason}: #{JSON.generate(decision.evidence)}"
       end
@@ -410,20 +374,6 @@ module Hive
             "source_pr" => source_pr_context
           } : nil,
           launch_budget: launch_budget
-        )
-      end
-
-      def build_action_runner(root, cfg, launch_budget, entry:)
-        return @action_runner_factory.call(root, cfg) if @action_runner_factory
-
-        Hive::RefactorPatrol::ActionRunner.new(
-          root, cfg: cfg, registration: @project,
-          hive_state_path: entry.fetch("hive_state_path"),
-          job_store: @job_store,
-          repository_ownership: @repository_ownership,
-          launch_budget: launch_budget,
-          occurrence_id: @occurrence_id,
-          module_execution: @module_execution
         )
       end
 
@@ -529,10 +479,10 @@ module Hive
           incompatible = [
             @pr, @job_manifest, @result_file, @feature_hint, @entrypoint_hint,
             @path_hint, @changed_since
-          ].any? { |value| !value.nil? } || @actions || @dry_run
+          ].any? { |value| !value.nil? } || @dry_run
           if incompatible
             raise Hive::RefactorPatrol::JobQuery::UsageError,
-                  "hive refactor-patrol --list/--show cannot be combined with discovery or action options"
+                  "hive refactor-patrol --list/--show cannot be combined with discovery options"
           end
           if @query_cursor && !@list_jobs
             raise Hive::RefactorPatrol::JobQuery::UsageError,
@@ -556,19 +506,6 @@ module Hive
           raise Hive::ConfigError,
                 "hive refactor-patrol --result-file requires --job-manifest and --json"
         end
-        if @actions
-          unless @json && @job_manifest && !@pr
-            raise Hive::ConfigError,
-                  "hive refactor-patrol --actions requires --job-manifest and --json"
-          end
-          hints = [ @feature_hint, @entrypoint_hint, @path_hint, @changed_since ]
-          if hints.any? { |value| !value.nil? }
-            raise Hive::ConfigError,
-                  "hive refactor-patrol --actions cannot be combined with discovery scope hints"
-          end
-          return
-        end
-
         if !pr_mode? && @changed_since && !(@feature_hint || @entrypoint_hint || @path_hint)
           raise Hive::ConfigError,
                 "hive refactor-patrol --changed-since requires --feature, --entrypoint, or --path"
@@ -851,7 +788,7 @@ module Hive
         @job_store.active_claim_tokens_for_process(
           @manifest.fetch("job_id"), pid: Process.pid,
           process_start_time: process_start
-        )
+        ).select { |token| token.fetch(:kind) == :discovery }
       end
 
       def with_claim_heartbeat(job_id)
@@ -901,9 +838,8 @@ module Hive
         active_claim_tokens.each do |token|
           renew_claim(token, now)
         rescue Hive::RefactorPatrol::JobStore::StaleClaim
-          # The action may have settled after active_claim_tokens snapshotted
-          # it. Its durable transition is authoritative; keep heartbeating
-          # later actions instead of converting a successful child into error.
+          # Discovery may have settled after the token snapshot. Its durable
+          # transition is authoritative.
           next
         end
       end
@@ -1031,12 +967,7 @@ module Hive
           raise Hive::ConfigError, "refactor patrol job manifest must be a published file under #{root}"
         end
 
-        default_branch = if @actions
-          store = job_store_for(entry, project_root)
-          store.read_job(File.basename(path, ".json")).dig("source", "base_branch")
-        else
-          cfg["default_branch"] || Hive::GitOps.new(project_root).default_branch
-        end
+        default_branch = cfg["default_branch"] || Hive::GitOps.new(project_root).default_branch
         Hive::RefactorPatrol::PrManifest.load!(
           path,
           expected_job_id: File.basename(path, ".json"),
@@ -1118,38 +1049,6 @@ module Hive
         return "all_dismissed" if payload.fetch("dismiss").size == theses.size
 
         nil
-      end
-
-      def build_action_payload(entry, project_root, result)
-        aggregate = result.aggregate
-        unless aggregate.fetch("job_id") == @manifest.fetch("job_id") &&
-               aggregate.fetch("source") == source_pr_context
-          raise Hive::ConfigError, "refactor patrol action job does not match its immutable manifest"
-        end
-
-        dispositions = aggregate.fetch("dispositions")
-        {
-          "schema" => "hive-refactor-patrol",
-          "schema_version" => Hive::RefactorPatrol::Reporter::V4_SCHEMA_VERSION,
-          "ok" => true,
-          "job_id" => aggregate.fetch("job_id"),
-          "project" => entry.fetch("name"),
-          "project_root" => project_root,
-          "dry_run" => @dry_run,
-          "source_pr" => aggregate.fetch("source"),
-          "analysis_sha" => aggregate.fetch("analysis_sha"),
-          "complete" => aggregate.fetch("complete"),
-          "features_mapped" => aggregate.fetch("feature_results").size,
-          "fix" => dispositions.fetch("fix"),
-          "discuss" => dispositions.fetch("discuss"),
-          "dismiss" => dispositions.fetch("dismiss"),
-          "review_errors" => aggregate.fetch("review_errors"),
-          "feature_results" => aggregate.fetch("feature_results"),
-          "zero_reason" => aggregate.fetch("zero_reason"),
-          "attempts" => aggregate.fetch("attempts"),
-          "actions" => aggregate.fetch("actions").map { |action| action_projection(action) },
-          "action_status" => result.completeness
-        }
       end
 
       def action_projection(action)

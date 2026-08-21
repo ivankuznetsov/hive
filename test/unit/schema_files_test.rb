@@ -22,7 +22,6 @@ require "hive/patrol_fix/operational_projection"
 require "hive/plan_review"
 require "hive/agent_skills/inspector"
 require "hive/agent_skills/provisioner"
-require "hive/patrol/candidate_selector"
 require "hive/patrol/reviewer"
 require "hive/commands/setup_agents"
 require "hive/tui/snapshot"
@@ -2269,24 +2268,17 @@ class SchemaFilesTest < Minitest::Test
       "review_errors" => [],
       "findings" => 1,
       "fix_candidates" => 1,
-      "fixes_attempted" => 1,
-      "fixes_validated" => 1,
-      "prs_opened" => 1,
-      "pr_urls" => [ "https://example.com/pr/1" ],
-      "review_handoff_errors" => [
-        { "pr_url" => "https://example.com/pr/2", "reason" => "review_handoff_failed" }
-      ],
-      "fix_results" => [
-        {
-          "finding_id" => "f1", "patch_id" => "p1", "passed" => true,
-          "reason" => "validated", "patch_artifact" => ".hive-state/patrol/patches/p1.json",
-          "detail" => nil, "publication_status" => "opened", "publication_reason" => nil,
-          "publication_detail" => nil, "pr_url" => "https://example.com/pr/1"
-        }
-      ],
+      "fixes_attempted" => 0,
+      "fixes_validated" => 0,
+      "prs_opened" => 0,
+      "pr_urls" => [],
+      "review_handoff_errors" => [],
+      "fix_results" => [],
       "skipped_findings" => [
-        { "finding_id" => "f2", "fingerprint" => "fp2", "reason" => "low_confidence" },
-        { "finding_id" => "f3", "fingerprint" => "fp3", "reason" => "similar_to_existing" }
+        {
+          "finding_id" => "f2", "fingerprint" => "fp2",
+          "reason" => "semantic_duplicate", "canonical_finding_id" => "f1"
+        }
       ],
       "last_scanned_sha" => "abc123"
     }
@@ -2295,14 +2287,11 @@ class SchemaFilesTest < Minitest::Test
     assert_empty errors, "hive-patrol success payload must validate"
   end
 
-  def test_hive_patrol_v3_accepts_every_candidate_selector_skip_reason
+  def test_hive_patrol_v3_accepts_the_discovery_deduplication_reason
     document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
     allowed = document.dig("$defs", "SuccessPayload", "properties", "skipped_findings",
                            "items", "properties", "reason", "enum")
-    produced = Hive::Patrol::CandidateSelector::SKIP_REASONS +
-      [ Hive::Commands::Patrol::WORKFLOW_OWNED_REASON ]
-
-    assert_equal produced.sort, allowed.sort
+    assert_equal [ "semantic_duplicate" ], allowed
   end
 
   def test_hive_patrol_v3_review_error_kinds_match_reviewer
@@ -2313,17 +2302,16 @@ class SchemaFilesTest < Minitest::Test
     assert_equal Hive::Patrol::Reviewer::REVIEW_ERROR_KINDS.sort, allowed.sort
   end
 
-  def test_hive_patrol_v3_fix_and_publication_reasons_match_producers
+  def test_hive_patrol_v3_retires_inline_fix_and_publication_results
     document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
-    properties = document.dig("$defs", "SuccessPayload", "properties", "fix_results",
-                              "items", "properties")
+    properties = document.dig("$defs", "SuccessPayload", "properties")
 
-    assert_equal Hive::Commands::Patrol::FIX_RESULT_REASONS.sort,
-                 properties.dig("reason", "enum").sort
-    assert_equal Hive::Patrol::PrOpener::RESULT_STATUSES.map(&:to_s).sort,
-                 properties.dig("publication_status", "enum").compact.sort
-    assert_equal Hive::Patrol::PrOpener::RESULT_REASONS.compact.sort,
-                 properties.dig("publication_reason", "enum").compact.sort
+    %w[fixes_attempted fixes_validated prs_opened].each do |name|
+      assert_equal 0, properties.dig(name, "const")
+    end
+    %w[pr_urls review_handoff_errors fix_results].each do |name|
+      assert_equal 0, properties.dig(name, "maxItems")
+    end
   end
 
   def test_hive_patrol_finding_schema_file_exists_and_accepts_record

@@ -39,20 +39,13 @@ module Hive
     end
 
     Request = Data.define(
-      :task, :generation, :evidence_digest, :review_receipt_id,
       :worktree_path, :host, :repository, :base_branch,
       :creation_base_oid, :branch, :head_oid, :diff_digest,
       :title, :body, :diff, :draft
     ) do
-      def initialize(task:, generation:, evidence_digest:, review_receipt_id:,
-                     worktree_path:, host:, repository:, base_branch:,
+      def initialize(worktree_path:, host:, repository:, base_branch:,
                      creation_base_oid:, branch:, head_oid:, diff_digest:,
                      title:, body:, diff: "", draft: true)
-        normalized_task = bounded_string(task, "task", 128)
-        normalized_generation = Integer(generation)
-        raise ArgumentError, "generation must be positive" unless normalized_generation.positive?
-        evidence = digest(evidence_digest, "evidence digest")
-        review = bounded_string(review_receipt_id, "review receipt", 128)
         worktree = File.expand_path(bounded_string(worktree_path, "worktree path", 4_096))
         normalized_host = Hive::Gh::RepositoryIdentity.validated_github_host(host)
         normalized_repository = Hive::Gh::RepositoryIdentity.validated_repository_slug(repository)
@@ -73,8 +66,6 @@ module Hive
           raise ArgumentError, "draft must be boolean"
         end
         super(
-          task: normalized_task.freeze, generation: normalized_generation,
-          evidence_digest: evidence.freeze, review_receipt_id: review.freeze,
           worktree_path: worktree.freeze, host: normalized_host.freeze,
           repository: normalized_repository.freeze, base_branch: normalized_base.freeze,
           creation_base_oid: base_oid.freeze, branch: normalized_branch.freeze,
@@ -87,9 +78,6 @@ module Hive
       def publication_id
         "pub-#{Digest::SHA256.hexdigest(JSON.generate(
           {
-            "task" => task, "generation" => generation,
-            "evidence_digest" => evidence_digest,
-            "review_receipt_id" => review_receipt_id,
             "host" => host, "repository" => repository,
             "base_branch" => base_branch,
             "creation_base_oid" => creation_base_oid,
@@ -184,10 +172,14 @@ module Hive
       end
     end
 
-    # Complete all-state GitHub inventory and one explicit create operation.
+    # Complete all-state inventory for one exact head branch and one explicit
+    # create operation. The branch filter keeps reconciliation proportional to
+    # this publication rather than to the repository's lifetime PR count.
     # `--paginate --slurp` is load-bearing: errors or malformed page arrays
     # raise instead of being mistaken for an empty inventory.
     class GithubGateway
+      class DefiniteCreateFailure < Hive::GhError; end
+
       def initialize(transport: Hive::Gh, cfg: nil)
         @transport = transport
         @cfg = cfg
@@ -197,12 +189,12 @@ module Hive
         @transport.ensure_authenticated!(@cfg, host: host)
       end
 
-      def list_pull_requests(repository:, host:, cursor:, **)
-        raise Hive::GhError, "GitHub pagination cursor is not supported by the complete adapter" if cursor
-
+      def list_pull_requests(repository:, host:, branch:, **)
         repo = Hive::Gh::RepositoryIdentity.validated_repository_slug(repository)
         github_host = Hive::Gh::RepositoryIdentity.validated_github_host(host)
-        endpoint = "repos/#{repo}/pulls?state=all&per_page=100"
+        owner = repo.split("/", 2).first
+        head = URI.encode_www_form_component("#{owner}:#{Hive::GitRef.validate_branch_name(branch)}")
+        endpoint = "repos/#{repo}/pulls?state=all&head=#{head}&per_page=100"
         out, err, status = @transport.capture3(
           "gh", "api", "--hostname", github_host, endpoint,
           "--paginate", "--slurp", cfg: @cfg,
@@ -221,10 +213,7 @@ module Hive
         if items.length > MAX_RECORDS
           raise Hive::GhError, "GitHub pull-request inventory exceeded its safe record cap"
         end
-        {
-          "items" => items, "next_cursor" => nil,
-          "has_next_page" => false, "complete" => true, "truncated" => false
-        }
+        items.freeze
       rescue JSON::ParserError => e
         raise Hive::GhError, "GitHub pull-request inventory was unparseable: #{e.message}"
       end
@@ -244,7 +233,9 @@ module Hive
             *args, chdir: request.worktree_path, cfg: @cfg
           )
           unless status.success?
-            raise Hive::GhError,
+            error = status.respond_to?(:exitstatus) && status.exitstatus == 4 ?
+              DefiniteCreateFailure : Hive::GhError
+            raise error,
                   "GitHub pull-request create failed: #{err.to_s.empty? ? out : err}"
           end
           true
@@ -293,8 +284,8 @@ module Hive
 
     class Controller
       STATE_FIELDS = %w[
-        schema schema_version phase publication_id task generation evidence_digest
-        review_receipt_id host repository base_branch creation_base_oid branch head_oid
+        schema schema_version phase publication_id host repository base_branch
+        creation_base_oid branch head_oid
         diff_digest title_digest body_digest marker_digest draft expected_remote_oid
         push_attempted_at push_observation create_attempts create_attempted_at
         pr updated_at
@@ -399,7 +390,11 @@ module Hive
         end
         revalidate!(revalidate, :before_push)
         if state.fetch("push_attempted_at")
-          blocked!("push_outcome_unknown", "remote push outcome requires reconciliation")
+          # A fresh remote observation proving the leased branch is still
+          # absent makes another non-force exact-OID push safe.
+          state = write_state(state.merge(
+            "push_attempted_at" => nil, "updated_at" => timestamp
+          ))
         end
         state = write_state(state.merge(
           "push_attempted_at" => timestamp, "updated_at" => timestamp
@@ -414,6 +409,25 @@ module Hive
         rescue Blocked
           raise
         rescue StandardError
+          after_failure = observe(request)
+          if after_failure.fetch("oid") == request.head_oid
+            observation = {
+              "expected_oid" => state.fetch("expected_remote_oid"),
+              "before_oid" => state.fetch("expected_remote_oid"),
+              "after_oid" => request.head_oid,
+              "remote_fingerprint" => after_failure.fetch("remote_fingerprint")
+            }
+            return write_state(state.merge(
+              "phase" => "branch_observed", "push_observation" => observation,
+              "updated_at" => timestamp
+            ))
+          end
+          if after_failure.fetch("oid") == state.fetch("expected_remote_oid")
+            write_state(state.merge(
+              "push_attempted_at" => nil, "updated_at" => timestamp
+            ))
+            blocked!("push_failed", "remote push failed before creating the leased branch")
+          end
           blocked!("push_outcome_unknown", "remote push outcome requires reconciliation")
         end
         after = observe(request)
@@ -455,6 +469,14 @@ module Hive
           @github.create_pull_request(
             request: request, publication_id: request.publication_id
           )
+        rescue GithubGateway::DefiniteCreateFailure
+          owned = reconcile_pull_requests(request)
+          return observe_pr(state, request, owned) if owned
+
+          write_state(state.merge(
+            "create_attempted_at" => nil, "updated_at" => timestamp
+          ))
+          blocked!("create_failed", "pull-request creation definitely failed and may be retried")
         rescue StandardError
           blocked!("create_outcome_unknown", "pull-request create outcome requires reconciliation")
         end
@@ -466,10 +488,7 @@ module Hive
 
       def reconcile_pull_requests(request)
         records = complete_inventory(request)
-        candidates = records.select do |record|
-          record.fetch("head_branch") == request.branch ||
-            record.fetch("body").lines.any? { |line| line.strip == request.marker }
-        end
+        candidates = records.select { |record| record.fetch("head_branch") == request.branch }
         return nil if candidates.empty?
         exact = candidates.select { |record| exact_owned?(record, request) }
         return exact.first if candidates.one? && exact.one?
@@ -478,52 +497,25 @@ module Hive
       end
 
       def complete_inventory(request)
-        cursor = nil
-        seen = {}
-        records = []
-        MAX_PAGES.times do
-          page = @github.list_pull_requests(
-            repository: request.repository, host: request.host,
-            branch: request.branch, state: "all", cursor: cursor
-          )
-          validate_page!(page)
-          blocked!("inventory_incomplete", "pull-request inventory is incomplete") if
-            page.fetch("truncated") || !page.fetch("complete")
-          records.concat(page.fetch("items").map { |record| validate_record!(record, request) })
-          blocked!("inventory_capped", "pull-request inventory exceeds its safe traversal bound") if
-            records.length > MAX_RECORDS
-          unless records.map { |record| record.fetch("number") }.uniq.length == records.length
-            blocked!("inventory_incomplete", "pull-request inventory contains duplicate records")
-          end
-          return records.freeze unless page.fetch("has_next_page")
-
-          next_cursor = page.fetch("next_cursor")
-          unless next_cursor.is_a?(String) && !next_cursor.empty? && !seen[next_cursor]
-            blocked!("inventory_incomplete", "pull-request inventory pagination is incomplete")
-          end
-          seen[next_cursor] = true
-          cursor = next_cursor
+        records = @github.list_pull_requests(
+          repository: request.repository, host: request.host,
+          branch: request.branch, state: "all"
+        )
+        unless records.is_a?(Array)
+          blocked!("inventory_incomplete", "pull-request inventory is incomplete")
         end
-        blocked!("inventory_capped", "pull-request inventory exceeds its safe traversal bound")
+        if records.length > MAX_RECORDS
+          blocked!("inventory_capped", "pull-request inventory exceeds its safe traversal bound")
+        end
+        records = records.map { |record| validate_record!(record, request) }
+        unless records.map { |record| record.fetch("number") }.uniq.length == records.length
+          blocked!("inventory_incomplete", "pull-request inventory contains duplicate records")
+        end
+        records.freeze
       rescue Blocked
         raise
       rescue StandardError
         blocked!("inventory_unavailable", "pull-request inventory is unavailable")
-      end
-
-      def validate_page!(page)
-        fields = %w[items next_cursor has_next_page complete truncated]
-        unless page.is_a?(Hash) && page.keys.sort == fields.sort &&
-               page["items"].is_a?(Array) &&
-               [ true, false ].include?(page["has_next_page"]) &&
-               [ true, false ].include?(page["complete"]) &&
-               [ true, false ].include?(page["truncated"])
-          blocked!("inventory_incomplete", "pull-request inventory page is incomplete")
-        end
-        cursor = page.fetch("next_cursor")
-        valid_cursor = page.fetch("has_next_page") ?
-          cursor.is_a?(String) && !cursor.empty? : cursor.nil?
-        blocked!("inventory_incomplete", "pull-request inventory cursor is incomplete") unless valid_cursor
       end
 
       def validate_record!(record, request)
@@ -634,9 +626,6 @@ module Hive
       def identity(request)
         {
           "publication_id" => request.publication_id,
-          "task" => request.task, "generation" => request.generation,
-          "evidence_digest" => request.evidence_digest,
-          "review_receipt_id" => request.review_receipt_id,
           "host" => request.host, "repository" => request.repository,
           "base_branch" => request.base_branch,
           "creation_base_oid" => request.creation_base_oid,
@@ -676,8 +665,6 @@ module Hive
         unless state.is_a?(Hash) && state.keys.sort == STATE_FIELDS.sort &&
                state["schema"] == SCHEMA && state["schema_version"] == SCHEMA_VERSION &&
                PHASES.include?(state["phase"]) && state["publication_id"].to_s.match?(PUBLICATION_ID) &&
-               state["generation"].is_a?(Integer) && state["generation"].positive? &&
-               state["evidence_digest"].to_s.match?(DIGEST) &&
                state["creation_base_oid"].to_s.match?(OID) &&
                state["head_oid"].to_s.match?(OID) &&
                state["diff_digest"].to_s.match?(DIGEST) &&
@@ -689,7 +676,7 @@ module Hive
                state["create_attempts"].is_a?(Integer) && state["create_attempts"] >= 0
           blocked!("state_corrupt", "publication state contract is invalid")
         end
-        %w[task review_receipt_id host repository base_branch branch].each do |key|
+        %w[host repository base_branch branch].each do |key|
           blocked!("state_corrupt", "publication state contract is invalid") unless
             state[key].is_a?(String) && !state[key].empty?
         end
@@ -717,13 +704,11 @@ module Hive
             blocked!("state_corrupt", "publication state create evidence is invalid")
           end
         elsif phase == "pr_create_intent"
-          unless pr.nil? && [ 0, 1 ].include?(state.fetch("create_attempts")) &&
-                 (state.fetch("create_attempts") == 1) == !state.fetch("create_attempted_at").nil?
+          unless pr.nil?
             blocked!("state_corrupt", "publication state create evidence is invalid")
           end
         elsif phase == "pr_observed"
-          unless valid_pr_observation?(pr, state) && [ 0, 1 ].include?(state.fetch("create_attempts")) &&
-                 (state.fetch("create_attempts") == 1) == !state.fetch("create_attempted_at").nil?
+          unless valid_pr_observation?(pr, state)
             blocked!("state_corrupt", "publication state pull-request evidence is invalid")
           end
         end
@@ -737,7 +722,7 @@ module Hive
           imported = push.nil? && state.fetch("push_attempted_at").nil? &&
             state.fetch("create_attempts").zero?
           created = !push.nil? && !state.fetch("push_attempted_at").nil? &&
-            state.fetch("create_attempts") == 1
+            state.fetch("create_attempts").positive? && !state.fetch("create_attempted_at").nil?
           unless imported || created
             blocked!("state_corrupt", "publication state provenance is invalid")
           end

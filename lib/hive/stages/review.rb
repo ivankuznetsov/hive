@@ -1706,8 +1706,8 @@ module Hive
 
       def patrol_task?(task)
         frontmatter = task_frontmatter(task.state_file)
-        # Normalize before comparing: the producer (Hive::Patrol::ReviewHandoff)
-        # writes a bare lowercase `source: patrol` via to_yaml, but matching
+        # Normalize before comparing: Patrol task frontmatter uses a bare
+        # lowercase `source: patrol`, but matching
         # exact-case-sensitively means any future producer drift (quoting,
         # casing, trailing whitespace) would silently misroute a patrol PR
         # to the broader normal reviewer set. strip + casecmp? tolerates that.

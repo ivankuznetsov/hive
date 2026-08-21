@@ -5,50 +5,37 @@ require "hive/github_publication"
 
 class GithubPublicationTest < Minitest::Test
   class FakeGithub
-    attr_reader :creates, :list_cursors
+    attr_reader :creates
     attr_accessor :records, :crash_after_create, :fail_before_create,
-                  :truncate, :list_error, :cap_loop, :page_mutator
+                  :definite_fail_before_create, :invalid_inventory, :list_error
 
     def initialize(records: [])
       @records = records
       @creates = 0
-      @list_cursors = []
       @crash_after_create = false
       @fail_before_create = false
-      @truncate = false
+      @definite_fail_before_create = false
+      @invalid_inventory = false
       @list_error = false
-      @cap_loop = false
     end
 
     def authenticate!(**)
       true
     end
 
-    def list_pull_requests(cursor:, **)
+    def list_pull_requests(**)
       raise Hive::GhError, "remote list failed with sensitive-looking details" if list_error
+      return {} if invalid_inventory
 
-      @list_cursors << cursor
-      offset = cursor ? Integer(cursor, 10) : 0
-      if cap_loop
-        return {
-          "items" => [], "next_cursor" => (offset + 1).to_s,
-          "has_next_page" => true, "complete" => true, "truncated" => false
-        }
-      end
-      page = records.slice(offset, 1) || []
-      next_cursor = offset + page.length < records.length ? (offset + page.length).to_s : nil
-      page = {
-        "items" => page,
-        "next_cursor" => next_cursor,
-        "has_next_page" => !next_cursor.nil?,
-        "complete" => true,
-        "truncated" => truncate
-      }
-      page_mutator ? page_mutator.call(page) : page
+      records
     end
 
     def create_pull_request(request:, **)
       @creates += 1
+      if definite_fail_before_create
+        raise Hive::GithubPublication::GithubGateway::DefiniteCreateFailure,
+              "create was rejected"
+      end
       raise Hive::GhError, "create failed before a response" if fail_before_create
       number = 40 + creates
       records << owned_pr(request, number: number)
@@ -77,8 +64,7 @@ class GithubPublicationTest < Minitest::Test
     Dir.mktmpdir do |repo|
       diff = ""
       request = Hive::GithubPublication::Request.new(
-        task: "repair-one", generation: 1, evidence_digest: "a" * 64,
-        review_receipt_id: "review-one", worktree_path: repo,
+        worktree_path: repo,
         host: "github.com", repository: "acme/demo", base_branch: "main",
         creation_base_oid: "1" * 40, branch: "hive/patrol-fix/repair-one/g1",
         head_oid: "2" * 40, diff_digest: Digest::SHA256.hexdigest(diff),
@@ -111,12 +97,14 @@ class GithubPublicationTest < Minitest::Test
       end
       gateway = Hive::GithubPublication::GithubGateway.new(transport: transport)
 
-      page = gateway.list_pull_requests(
-        repository: request.repository, host: request.host, cursor: nil
+      records = gateway.list_pull_requests(
+        repository: request.repository, host: request.host,
+        branch: request.branch
       )
-      assert_equal "MERGED", page.dig("items", 0, "state")
+      assert_equal "MERGED", records.dig(0, "state")
       api_args, api_options = calls.first
-      assert_includes api_args, "repos/acme/demo/pulls?state=all&per_page=100"
+      assert_includes api_args,
+                      "repos/acme/demo/pulls?state=all&head=acme%3Ahive%2Fpatrol-fix%2Frepair-one%2Fg1&per_page=100"
       assert_includes api_args, "--paginate"
       assert_includes api_args, "--slurp"
       assert_equal Hive::GithubPublication::MAX_INVENTORY_BYTES,
@@ -132,7 +120,30 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
-  def test_lost_create_response_reconciles_owned_match_beyond_page_one
+  def test_github_gateway_only_classifies_auth_rejection_as_definite
+    with_local_remote do |repo, _remote, head|
+      request = request_for(repo, head)
+      transport = Object.new
+      transport.define_singleton_method(:capture3) do |*, **|
+        [ "", "failed", Hive::Gh::CommandStatus.new(exitstatus: 1) ]
+      end
+      gateway = Hive::GithubPublication::GithubGateway.new(transport: transport)
+      error = assert_raises(Hive::GhError) do
+        gateway.create_pull_request(request: request)
+      end
+      refute_kind_of Hive::GithubPublication::GithubGateway::DefiniteCreateFailure,
+                     error
+
+      transport.define_singleton_method(:capture3) do |*, **|
+        [ "", "auth required", Hive::Gh::CommandStatus.new(exitstatus: 4) ]
+      end
+      assert_raises(
+        Hive::GithubPublication::GithubGateway::DefiniteCreateFailure
+      ) { gateway.create_pull_request(request: request) }
+    end
+  end
+
+  def test_lost_create_response_reconciles_owned_match
     with_local_remote do |repo, remote, head|
       github = FakeGithub.new
       request = request_for(repo, head)
@@ -152,8 +163,6 @@ class GithubPublicationTest < Minitest::Test
 
       assert_equal 41, result.fetch("number")
       assert_equal "open", result.fetch("hosted_state")
-      assert_includes github.list_cursors, "1"
-      assert_operator github.list_cursors.count("1"), :>=, 1
       assert_equal head, remote_oid(remote, request.branch)
       assert_equal 1, github.creates
     end
@@ -180,9 +189,6 @@ class GithubPublicationTest < Minitest::Test
         github_gateway: github
       )
 
-      assert_raises(Hive::GithubPublication::Blocked) do
-        controller.publish!(request, revalidate: ->(_phase) { true })
-      end
       result = controller.publish!(request, revalidate: ->(_phase) { true })
 
       assert_equal 1, pushes
@@ -191,7 +197,7 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
-  def test_intent_without_an_attempt_may_retry_but_unknown_effect_outcomes_never_repeat
+  def test_intents_retry_only_when_remote_absence_or_a_definite_failure_proves_safety
     with_local_remote do |repo, remote, head|
       request = request_for(repo, head)
       github = FakeGithub.new
@@ -242,9 +248,9 @@ class GithubPublicationTest < Minitest::Test
         error = assert_raises(Hive::GithubPublication::Blocked) do
           controller.publish!(request, revalidate: ->(_phase) { true })
         end
-        assert_equal "push_outcome_unknown", error.code
+        assert_equal "push_failed", error.code
       end
-      assert_equal 1, attempts
+      assert_equal 2, attempts
       assert_equal 0, github.creates
     end
 
@@ -260,6 +266,24 @@ class GithubPublicationTest < Minitest::Test
         assert_equal "create_outcome_unknown", error.code
       end
       assert_equal 1, github.creates
+    end
+
+    with_local_remote do |repo, remote, head|
+      request = request_for(repo, head)
+      github = FakeGithub.new
+      github.definite_fail_before_create = true
+      controller = controller_for(repo, remote, github)
+      2.times do
+        error = assert_raises(Hive::GithubPublication::Blocked) do
+          controller.publish!(request, revalidate: ->(_phase) { true })
+        end
+        assert_equal "create_failed", error.code
+      end
+      assert_equal 2, github.creates
+      github.definite_fail_before_create = false
+      assert_equal request.head_oid,
+                   controller.publish!(request, revalidate: ->(_phase) { true }).fetch("head_oid")
+      assert_equal 3, github.creates
     end
   end
 
@@ -316,7 +340,6 @@ class GithubPublicationTest < Minitest::Test
         [ "wrong_base", [ FakeGithub.new.owned_pr(request, overrides: { "base_branch" => "release" }) ] ],
         [ "wrong_title", [ FakeGithub.new.owned_pr(request, overrides: { "title" => "Edited title" }) ] ],
         [ "wrong_body", [ FakeGithub.new.owned_pr(request, overrides: { "body" => "Edited\n\n#{request.marker}\n" }) ] ],
-        [ "wrong_branch", [ FakeGithub.new.owned_pr(request, overrides: { "head_branch" => "other" }) ] ],
         [ "multiple", [ FakeGithub.new.owned_pr(request, number: 1), FakeGithub.new.owned_pr(request, number: 2) ] ]
       ]
 
@@ -335,7 +358,7 @@ class GithubPublicationTest < Minitest::Test
   def test_partial_or_failed_inventory_is_never_treated_as_absence
     with_local_remote do |repo, remote, head|
       request = request_for(repo, head)
-      [ :truncate, :list_error ].each do |failure|
+      [ :invalid_inventory, :list_error ].each do |failure|
         github = FakeGithub.new
         github.public_send("#{failure}=", true)
         error = assert_raises(Hive::GithubPublication::Blocked) do
@@ -350,8 +373,9 @@ class GithubPublicationTest < Minitest::Test
 
     with_local_remote do |repo, remote, head|
       request = request_for(repo, head)
-      github = FakeGithub.new
-      github.cap_loop = true
+      github = FakeGithub.new(
+        records: Array.new(Hive::GithubPublication::MAX_RECORDS + 1, {})
+      )
       error = assert_raises(Hive::GithubPublication::Blocked) do
         controller_for(repo, remote, github)
           .publish!(request, revalidate: ->(_phase) { true })
@@ -367,28 +391,6 @@ class GithubPublicationTest < Minitest::Test
         overrides: { "head_branch" => "unrelated", "body" => "user PR" }
       )
       github = FakeGithub.new(records: [ duplicate, duplicate.dup ])
-      error = assert_raises(Hive::GithubPublication::Blocked) do
-        controller_for(repo, remote, github)
-          .publish!(request, revalidate: ->(_phase) { true })
-      end
-      assert_equal "inventory_incomplete", error.code
-      assert_equal 0, github.creates
-    end
-
-    with_local_remote do |repo, remote, head|
-      request = request_for(repo, head)
-      github = FakeGithub.new(records: [
-        FakeGithub.new.owned_pr(
-          request, overrides: { "head_branch" => "unrelated", "body" => "user PR" }
-        ),
-        FakeGithub.new.owned_pr(
-          request, number: 43,
-          overrides: { "head_branch" => "another", "body" => "user PR" }
-        )
-      ])
-      github.page_mutator = lambda do |page|
-        page.merge("next_cursor" => nil)
-      end
       error = assert_raises(Hive::GithubPublication::Blocked) do
         controller_for(repo, remote, github)
           .publish!(request, revalidate: ->(_phase) { true })
@@ -505,8 +507,7 @@ class GithubPublicationTest < Minitest::Test
   def request_for(repo, head)
     diff = capture("git", "-C", repo, "diff", "HEAD~1..HEAD")
     Hive::GithubPublication::Request.new(
-      task: "repair-one", generation: 1, evidence_digest: "a" * 64,
-      review_receipt_id: "review-one", worktree_path: repo,
+      worktree_path: repo,
       host: "github.com", repository: "acme/demo", base_branch: "main",
       creation_base_oid: capture("git", "-C", repo, "rev-parse", "HEAD~1").strip,
       branch: "hive/patrol-fix/repair-one/g1", head_oid: head,

@@ -61,7 +61,9 @@ Architecture patrol is a post-merge subsystem beside the ordinary task state
 machine. `RefactorPatrolMergeReconciler` turns finalize observations and
 paginated GitHub catch-up into immutable, checksummed merge manifests. A
 durable job aggregate then owns feature-level discovery progress, exhaustive
-thesis dispositions, generation-fenced claims, and per-thesis action receipts.
+thesis dispositions, and generation-fenced discovery claims. Historical v4
+action receipts remain readable as inert provenance; no runtime schedules or
+continues those actions.
 `PatrolArbiter` shares one per-project scan budget between ordinary patrol and
 architecture patrol and alternates kinds so neither queue can starve the
 other.
@@ -83,37 +85,17 @@ neighboring boundary without broad repository search. The reviewer runs under pr
 enforcement and must leave the registered checkout byte-for-byte unchanged. A strict run-wide thesis
 budget leaves later slices resumable, and every cited file/line/snippet is
 verified against the pinned checkout's real bytes before a thesis is admissible.
-The mutation boundary is intentionally narrower. Each accepted thesis is
-processed in an isolated worktree only when certified public-contract guards,
-root confinement, `.hive-state` control-plane protection, secret scanning,
-dependency guards, applicable
-configured validation (or the built-in diff check for inert documentation
-formats), and the
-independently enabled `auto_fix` policy all pass. Cross-feature patches remain
-eligible regardless of file count or diff size, and every changed path
-participates in trunk-overlap reanalysis. Contract-changing,
-dependency-changing, or otherwise high-risk work may instead become one
-deduplicated strategic issue when issue filing is independently enabled.
-Architecture patrol never
-merges its own PRs; an OPEN or MERGED publication succeeds only after entering
-the normal `6-review` flow.
+The mutation boundary is separate from discovery. Every accepted thesis is
+published to the source-owned Patrol Fix outbox. The shared Patrol Fix workflow
+owns semantic admission, isolated editing, validation, review, and
+publication. Architecture Patrol itself does not edit code, create issues,
+push branches, or open pull requests.
 
 The daemon passes large child results through an atomic, job-bound result file
 instead of relying on the bounded stdout tail. Full authority requires the
-target's exact live registration; enabled owners and disabled registrations
-with pending remote continuations participate in fresh repository-ownership
-checks. PR and issue creation persist an intent before the first remote
-mutation and re-check both ownership and the exact claim generation around
-publication. Canonical actions bind source host, repository, kind, and thesis
-identity; fixes publish through the repository-global
-`hive-refactor/<canonical-action-id>` branch. Exact-host PR verification, a
-fresh handoff fence, remote branch OID checks, and action marker reconciliation
-make crash recovery fail closed. Family, fingerprint, and global canonical
-catalog indexes are rebuildable projections. Validated terminal effects are
-also copied into immutable global per-action proof archives, allowing exact
-cross-registration reuse even after owner deregistration or path removal;
-corrupt/conflicting proof blocks. Immutable manifests and job aggregates remain
-the per-occurrence authority. See
+target's exact live registration; enabled owners participate in fresh
+repository-ownership checks. Immutable manifests and discovery job aggregates
+remain the per-occurrence authority. See
 [[commands/refactor-patrol]], [[modules/daemon]], [[modules/gh]], and
 [[state-model]].
 
@@ -127,7 +109,7 @@ the per-occurrence authority. See
 | `brainstorm` | `Stages::Brainstorm` | yes | no |
 | `plan` | `Stages::Plan` | yes | no |
 | `execute` | `Stages::Execute` | yes (impl-only since ADR-014) | yes (in feature worktree) |
-| `open-pr` | `Stages::OpenPr` | yes | no code edits (`git push`, `gh pr create --draft`) |
+| `open-pr` | `Stages::OpenPr` | yes | authors `pr-draft.json`; shared controller owns push/create |
 | `review` | `Stages::Review` (orchestrator) → `Review::{CiFix,Triage,BrowserTest,FixGuardrail}` + `Hive::Reviewers` adapters | yes (CI-fix + reviewers + triage + fix + browser; sub-spawns use `status_mode: :exit_code_only` per ADR-021) | yes (fix agent commits in feature worktree) |
 | `artifacts` | `Stages::Artifacts` | yes | no code edits (`artifact.md` collection handoff) |
 | `finalize` | `Stages::Finalize` | yes | no code edits (`gh pr edit`, `gh pr ready`, `summary.md`) |

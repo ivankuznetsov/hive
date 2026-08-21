@@ -739,106 +739,6 @@ class GhUnitTest < Minitest::Test
     end
   end
 
-  def test_verify_pr_identity_binds_created_head_base_host_and_repository
-    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
-    record = {
-      "url" => "https://github.com/Acme/Demo/pull/9",
-      "number" => 9,
-      "state" => "OPEN",
-      "isDraft" => false,
-      "headRefName" => "hive-refactor/fix-abc",
-      "headRefOid" => "a" * 40,
-      "baseRefName" => "main",
-      "baseRefOid" => "b" * 40,
-      "headRepository" => { "nameWithOwner" => "Acme/Demo" }
-    }
-    captured = nil
-    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
-      captured = [ cmd, kwargs ]
-      [ JSON.generate(record), "", ok ]
-    }) do
-      verified = refactor_patrol_github.verify_pr_identity!(
-        record.fetch("url"), repository: "acme/demo", host: "github.com",
-        branch: "hive-refactor/fix-abc", head_oid: "a" * 40,
-        base_branch: "main", base_oid: "b" * 40
-      )
-      assert_equal record, verified
-    end
-
-    assert_equal [ "github.com/acme/demo" ], captured.first.each_cons(2)
-                                                         .select { |left, _| left == "--repo" }
-                                                         .map(&:last)
-    assert_includes captured.first.fetch(captured.first.index("--json") + 1), "baseRefOid"
-  end
-
-  def test_verify_pr_identity_rejects_changed_head
-    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
-    record = {
-      "url" => "https://github.com/acme/demo/pull/9", "number" => 9,
-      "state" => "OPEN", "isDraft" => false,
-      "headRefName" => "hive-refactor/fix-abc", "headRefOid" => "b" * 40,
-      "baseRefName" => "main", "baseRefOid" => "c" * 40,
-      "headRepository" => { "nameWithOwner" => "acme/demo" }
-    }
-    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*_cmd, **_kwargs|
-      [ JSON.generate(record), "", ok ]
-    }) do
-      assert_raises(Hive::GhError) do
-        refactor_patrol_github.verify_pr_identity!(
-          record.fetch("url"), repository: "acme/demo", host: "github.com",
-          branch: "hive-refactor/fix-abc", head_oid: "a" * 40,
-          base_branch: "main", base_oid: "c" * 40
-        )
-      end
-    end
-  end
-
-  def test_verify_pr_identity_rejects_remote_base_advance
-    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
-    record = {
-      "url" => "https://github.com/acme/demo/pull/9", "number" => 9,
-      "state" => "OPEN", "isDraft" => false,
-      "headRefName" => "hive-refactor/fix-abc", "headRefOid" => "a" * 40,
-      "baseRefName" => "main", "baseRefOid" => "c" * 40,
-      "headRepository" => { "nameWithOwner" => "acme/demo" }
-    }
-    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*_cmd, **_kwargs|
-      [ JSON.generate(record), "", ok ]
-    }) do
-      error = assert_raises(Hive::GhError) do
-        refactor_patrol_github.verify_pr_identity!(
-          record.fetch("url"), repository: "acme/demo", host: "github.com",
-          branch: "hive-refactor/fix-abc", head_oid: "a" * 40,
-          base_branch: "main", base_oid: "b" * 40
-        )
-      end
-      assert_includes error.message, "validated patch"
-    end
-  end
-
-  def test_verify_pr_identity_binds_view_result_to_created_url
-    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
-    record = {
-      "url" => "https://github.com/acme/demo/pull/10", "number" => 10,
-      "state" => "OPEN", "isDraft" => false,
-      "headRefName" => "hive-refactor/fix-abc", "headRefOid" => "a" * 40,
-      "baseRefName" => "main", "baseRefOid" => "b" * 40,
-      "headRepository" => { "nameWithOwner" => "acme/demo" }
-    }
-    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*_cmd, **_kwargs|
-      [ JSON.generate(record), "", ok ]
-    }) do
-      assert_raises(Hive::GhError) do
-        refactor_patrol_github.verify_pr_identity!(
-          "https://github.com/acme/demo/pull/9",
-          repository: "acme/demo", host: "github.com",
-          branch: "hive-refactor/fix-abc", head_oid: "a" * 40,
-          base_branch: "main", base_oid: "b" * 40
-        )
-      end
-    end
-  end
-
   def test_pr_state_raises_on_gh_pr_view_failure
     status = Hive::Gh::CommandStatus.new(exitstatus: 1)
     with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { [ "", "auth required", status ] }) do
@@ -1695,34 +1595,6 @@ def test_pull_request_lookup_requires_repository_and_host_together
   end
 end
 
-def test_verify_pr_identity_wraps_transport_shape_and_parse_failures
-  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
-  failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
-  responses = [
-    [ "transport failed", "", failed ],
-    [ "[]", "", ok ],
-    [ "{", "", ok ]
-  ]
-  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { responses.shift }) do
-    3.times do
-      assert_raises(Hive::GhError) do
-        refactor_patrol_github.verify_pr_identity!(
-          "https://github.com/acme/demo/pull/9",
-          repository: "acme/demo", host: "github.com", branch: "feature",
-          head_oid: "a" * 40, base_branch: "main", base_oid: "b" * 40
-        )
-      end
-    end
-  end
-
-  assert_raises(Hive::GhError) do
-    refactor_patrol_github.send(
-      :validate_pr_repository_identity!,
-      "http://[", "acme/demo", 9, host: "github.com"
-    )
-  end
-end
-
 def test_merged_pr_details_wraps_view_file_transport_shape_and_parse_failures
   ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
   failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
@@ -1821,7 +1693,7 @@ def test_merged_pr_page_rejects_invalid_inputs_transport_cursor_repository_and_j
   end
 end
 
-def test_refactor_patrol_gateway_timeout_and_url_helpers_fail_closed
+def test_refactor_patrol_gateway_timeout_fails_closed
   [ 0, -1, Float::NAN, "bad", Object.new ].each do |value|
     assert_raises(Hive::GhError) do
       refactor_patrol_github.send(:operation_deadline, value)
@@ -1834,19 +1706,12 @@ def test_refactor_patrol_gateway_timeout_and_url_helpers_fail_closed
   assert_raises(Hive::GhError) do
     Hive::Gh::RepositoryIdentity.validated_github_host("[")
   end
-  refute refactor_patrol_github.send(
-    :pull_request_url_matches_repository?, "http://[", "acme/demo",
-    host: "github.com", number: 7
-  )
 end
 
-def test_repository_url_helpers_reject_invalid_uris_and_ssh_passwords
+def test_repository_identity_rejects_invalid_uris_and_ssh_passwords
   assert_raises(Hive::GhError) do
     Hive::Gh::RepositoryIdentity.validated_github_host("[")
   end
-  refute refactor_patrol_github.send(
-    :issue_url_matches_repository?, "http://[", "acme/demo", host: "github.com", number: 7
-  )
   assert_raises(Hive::GhError) do
     Hive::Gh.repository_identity_from_remote("ssh://user:secret@github.com/acme/demo.git")
   end

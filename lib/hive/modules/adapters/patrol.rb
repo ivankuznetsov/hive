@@ -95,11 +95,7 @@ module Hive
         def run_cycle(project, context, cfg, configuration, event)
           dry_run = configuration.settings.fetch("dry_run")
           unless dry_run
-            context.require_repository_write!
             context.require_filesystem_write!(".hive-state/patrol/**")
-            context.require_github_mutation!("pull_requests")
-            context.require_external_command!("gh")
-            context.require_network_host!("api.github.com")
           end
           result = @command_factory.call(
             project.fetch("name"),

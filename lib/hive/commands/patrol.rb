@@ -7,35 +7,24 @@ require "hive/config"
 require "hive/git_ops"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
-require "hive/patrol/candidate_selector"
-require "hive/patrol/dismissals"
 require "hive/patrol/fingerprint"
 require "hive/patrol/finding_registry"
 require "hive/patrol/finding_query"
-require "hive/patrol/fixer"
 require "hive/patrol/feature_batch"
 require "hive/patrol/mapper"
-require "hive/patrol/pr_opener"
 require "hive/patrol/reviewer"
 require "hive/patrol/decision_projection"
 require "hive/patrol/state_store"
 require "hive/patrol/launch_budget"
-require "hive/patrol/validator"
 require "hive/workflows"
 require "hive/worktree"
 
 module Hive
   module Commands
     class Patrol
-      FIX_RESULT_REASONS = (
-        %w[validated validation_failed] + Hive::Patrol::Fixer::FAILURE_REASONS
-      ).uniq.freeze
-      WORKFLOW_OWNED_REASON = "patrol_fix_workflow_owned".freeze
-
       def initialize(project, json: false, dry_run: false, list: false,
                      mapper_factory: nil, reviewer_factory: nil,
-                     fixer_factory: nil, pr_opener_factory: nil,
-                     dismissals_factory: nil, project_entry: nil,
+                     project_entry: nil,
                      capability_context: nil, module_execution: nil,
                      occurrence_id: nil, capture: nil,
                      migration_authority: :legacy,
@@ -50,13 +39,6 @@ module Hive
           Hive::Patrol::Mapper.new(root, cfg: cfg, state: state, capabilities: [ :architecture ])
         end
         @reviewer_factory = reviewer_factory
-        @fixer_factory = fixer_factory
-        @pr_opener_factory = pr_opener_factory
-        @dismissals_factory = dismissals_factory || lambda do |root, state|
-          Hive::Patrol::Dismissals.new(
-            root, state: state, persist: !@dry_run
-          )
-        end
         @project_entry = project_entry
         @capability_context = capability_context
         @module_execution = module_execution
@@ -118,7 +100,6 @@ module Hive
         end
         require_module_observation_capabilities!
         require_module_mutation_capabilities! unless @dry_run
-        ensure_validation_configured!(cfg) unless @dry_run
         state = Hive::Patrol::StateStore.new(
           project_root, hive_state_path: entry.fetch("hive_state_path")
         )
@@ -143,7 +124,6 @@ module Hive
           project_root, cfg: cfg, project_id: entry.fetch("project_id"),
           project_name: entry.fetch("name"), engine: :ordinary
         )
-        dismissed = @dismissals_factory.call(project_root, state).reconcile
         target_sha = sweep_target_sha(project_root, cfg, state)
         features, feature_batch, reviewer, findings = with_scan_checkout(project_root, target_sha) do |scan_root|
           mapped = @mapper_factory.call(scan_root, cfg, state).call
@@ -160,80 +140,17 @@ module Hive
         end
         review = review_outcome(feature_batch, reviewer)
 
-        fingerprints = state.fingerprints
         registry = Hive::Patrol::FindingRegistry.new(state: state, target_sha: target_sha)
-        registry.reconcile!(fingerprints: fingerprints, dismissed: dismissed)
         admission = registry.admit(findings, retry_active: !@dry_run)
         findings = admission.findings
-        fix_pool = findings_for_fix_selection(registry, findings)
-        candidates, skipped = Hive::Patrol::CandidateSelector.new(
-          cfg: cfg,
-          fingerprints: fingerprints,
-          dismissed: dismissed
-        ).call(fix_pool)
-        skipped.concat(admission.skipped)
+        candidates = findings
+        skipped = admission.skipped
         # Persist only after target binding, semantic deduplication, lifecycle
         # admission, and portfolio scoring. The reviewer itself is a pure
         # producer and cannot accumulate untriaged duplicates.
-        admission.persistable_findings.each { |finding| state.write_finding(finding) }
-        unless @fixer_factory || @pr_opener_factory
-          skipped.concat(candidates.map do |finding|
-            {
-              "finding_id" => finding.id,
-              "fingerprint" => finding.fingerprint,
-              "reason" => WORKFLOW_OWNED_REASON
-            }
-          end)
-          candidates = []
-        end
-        write_selection_audit(state, candidates, skipped)
-
-        # `max_prs_per_cycle` caps PRs opened per scan, not fix candidates.
-        # Capping candidates before fixing meant a failed validation
-        # consumed the budget and an otherwise-fixable later candidate was
-        # never attempted. Keep attempting candidates in order until that
-        # many PRs are actually opened.
-        max_prs = cfg.dig("patrol", "max_prs_per_cycle") || 3
-        max_attempts = cfg.dig("patrol", "max_fix_attempts_per_cycle") || 6
-        fixes = []
-        pr_results = []
-        fix_results = []
         unless @dry_run
-          fixer = build_fixer(
-            project_root, cfg, state, launch_budget, capture
-          )
-          pr_opener = if @pr_opener_factory
-            @pr_opener_factory.call(project_root, cfg, state)
-          else
-            Hive::Patrol::PrOpener.new(
-              project_root,
-              cfg: cfg,
-              state: state,
-              capture: capture
-            )
-          end
-          prs_opened = 0
-          candidates.each do |finding|
-            break if prs_opened >= max_prs || fixes.size >= max_attempts
-
-            patch = perform_fix_attempt(
-              state, fixer, finding, capture
-            )
-            fixes << patch
-            outcome = fix_outcome(finding, patch)
-            fix_results << outcome
-            update_finding_lifecycle(registry, finding, outcome.fetch("reason"))
-            break if terminal_patrol_exhaustion?(patch)
-            next unless patch.passed
-
-            result = pr_opener.open(finding, patch)
-            pr_results << result
-            outcome["publication_status"] = result.status.to_s
-            outcome["publication_reason"] = result.reason
-            outcome["publication_detail"] = result.detail
-            outcome["pr_url"] = result.pr_url
-            prs_opened += 1 if result.opened?
-          end
+          admission.persistable_findings.each { |finding| state.write_finding(finding) }
+          write_selection_audit(state, candidates, skipped)
         end
 
         # Only advance the scanned-SHA watermark when every feature
@@ -242,7 +159,9 @@ module Hive
         # the next cycle re-review this commit instead of treating a
         # partial scan as a clean pass and never looking again (U5).
         now_iso = Time.now.utc.iso8601
-        if review.fetch("review_errors").any?
+        if @dry_run
+          scanned_sha = state.state["last_scanned_sha"].to_s
+        elsif review.fetch("review_errors").any?
           state.update_state(
             "last_run_at" => now_iso,
             "feature_review_active" => true,
@@ -270,10 +189,10 @@ module Hive
             "feature_review_cursor" => feature_batch.next_cursor
           )
         end
-        state.rebuild_finding_query_projection!
+        state.rebuild_finding_query_projection! unless @dry_run
         payload = success_payload(
           entry, project_root, scanned_sha, features, review,
-          findings, candidates, fixes, fix_results, pr_results, skipped
+          findings, candidates, skipped
         )
         finalize_manual_occurrence!(
           entry, state, capture, payload
@@ -286,17 +205,12 @@ module Hive
 
         @capability_context.require_filesystem_read!("repository")
         @capability_context.require_external_command!("git")
-        @capability_context.require_filesystem_write!(".hive-state/patrol/**")
       end
 
       def require_module_mutation_capabilities!
         return unless @capability_context
 
-        @capability_context.require_repository_write!
-        @capability_context.require_filesystem_write!(".hive-state/stages/**")
-        @capability_context.require_github_mutation!("pull_requests")
-        @capability_context.require_external_command!("gh")
-        @capability_context.require_network_host!("api.github.com")
+        @capability_context.require_filesystem_write!(".hive-state/patrol/**")
       end
 
       def patrol_capture(entry, state)
@@ -384,16 +298,8 @@ module Hive
         return true unless context
 
         case capability.to_s
-        when "repository_write"
-          context.require_repository_write!
-        when "github_pull_requests"
-          context.require_github_mutation!("pull_requests")
-          context.require_external_command!("gh")
-          context.require_network_host!("api.github.com")
         when "filesystem_write"
           context.require_filesystem_write!(".hive-state/patrol/**")
-        when "review_handoff"
-          context.require_filesystem_write!(".hive-state/stages/**")
         else
           return false
         end
@@ -452,12 +358,6 @@ module Hive
         }
       end
 
-      def terminal_patrol_exhaustion?(patch)
-        exhaustion = patch.validation["resource_exhaustion"] || patch.validation[:resource_exhaustion]
-        reason = exhaustion.is_a?(Hash) && (exhaustion["reason"] || exhaustion[:reason]).to_s
-        %w[token_limit daily_agent_spawn_limit].include?(reason)
-      end
-
       # A later feature failure must pin that feature, not replay already-clean
       # leading features. Unattributable errors still fail closed at the batch
       # start because Hive cannot prove which feature completed.
@@ -487,26 +387,10 @@ module Hive
         Hive::Patrol::Reviewer.new(root, cfg: cfg, state: state, launch_budget: launch_budget)
       end
 
-      def build_fixer(root, cfg, state, launch_budget, capture = nil)
-        return @fixer_factory.call(root, cfg, state) if @fixer_factory
-
-        options = { cfg: cfg, state: state, launch_budget: launch_budget }
-        options[:effect_fence] = ->(_boundary) { false } if capture
-        Hive::Patrol::Fixer.new(root, **options)
-      end
-
       # The allowance counts discovery launches only. Remediation is owned by
       # workflow concurrency, so all ordinary headroom is available to review.
       def review_launch_limit(_cfg, launch_budget)
         launch_budget.remaining_launches
-      end
-
-      def ensure_validation_configured!(cfg)
-        commands = cfg.dig("patrol", "commands")
-        return if Hive::Patrol::Validator.new(commands).configured?
-
-        raise Hive::ConfigError,
-              "patrol.commands must configure at least one of docs, format, lint, public_contract, typecheck, or test before fixes can run"
       end
 
       def stamp_findings(findings, project_root, target_sha:, cfg:)
@@ -516,59 +400,6 @@ module Hive
           finding.target_sha = target_sha
           finding.validation_key ||= configured_keys.first if configured_keys.one?
         end
-      end
-
-      def update_finding_lifecycle(registry, finding, reason)
-        case reason
-        when "stale_evidence", "stale_target_sha"
-          registry.transition_current!(finding, state: "superseded", reason: reason)
-        end
-      end
-
-      def findings_for_fix_selection(registry, reviewed_findings)
-        return reviewed_findings if @dry_run
-
-        seen = {}
-        (reviewed_findings + registry.active_findings).select do |finding|
-          next false if seen.key?(finding.id.to_s)
-
-          seen[finding.id.to_s] = true
-        end
-      end
-
-      def perform_fix_attempt(state, fixer, finding, capture)
-        patch = nil
-        result = state.perform_cycle_effect!(
-          sink: "attempt",
-          target: "attempts/#{finding.fingerprint}",
-          idempotency_key: [
-            capture.occurrence_id, "attempt", finding.fingerprint
-          ].join(":"),
-          capability: "repository_write",
-          reconcile: ->(_intent) { state.reconcile_attempt(finding.fingerprint) }
-        ) do
-          patch = fixer.attempt(finding)
-          { "patch_id" => patch.id.to_s }
-        end
-        patch || patch_from_effect_outcome(state, finding, result.outcome)
-      end
-
-      def patch_from_effect_outcome(state, finding, outcome)
-        data = state.patch_record(outcome.fetch("patch_id"))
-        Hive::Patrol::Fixer::PatchAttempt.new(
-          id: data.fetch("id"),
-          finding: finding,
-          branch: data.fetch("branch"),
-          worktree_path: data.fetch("worktree_path"),
-          validation: data.fetch("validation"),
-          passed: data.fetch("passed"),
-          diffstat: data.fetch("diffstat"),
-          base_sha: data.fetch("base_sha"),
-          head_sha: data.fetch("head_sha")
-        )
-      rescue KeyError, TypeError
-        raise Hive::ConfigError,
-              "patrol attempt reconciliation returned a malformed patch"
       end
 
       def current_default_sha(project_root, cfg)
@@ -697,34 +528,7 @@ module Hive
         })
       end
 
-      def fix_outcome(finding, patch)
-        raw_reason = patch.validation["reason"].to_s
-        reason = raw_reason.empty? ? (patch.passed ? "validated" : "validation_failed") : raw_reason
-        detail = patch.validation["error"]&.to_s
-        unless FIX_RESULT_REASONS.include?(reason)
-          detail = [ detail, "unrecognized fixer reason #{reason.inspect}" ].compact.join(": ")
-          reason = "fix_error"
-        end
-        {
-          "finding_id" => finding.id,
-          "patch_id" => patch.id,
-          "passed" => patch.passed == true,
-          "reason" => reason,
-          "detail" => detail,
-          "patch_artifact" => File.join(".hive-state", "patrol", "patches", "#{patch.id}.json"),
-          "publication_status" => nil,
-          "publication_reason" => nil,
-          "publication_detail" => nil,
-          "pr_url" => nil
-        }
-      end
-
-      def success_payload(entry, project_root, sha, features, review, findings, candidates,
-                          fixes, fix_results, pr_results, skipped)
-        opened = pr_results.select(&:opened?)
-        handoff_errors = pr_results.select(&:review_handoff_failed?).map do |result|
-          { "pr_url" => result.pr_url, "reason" => result.reason }
-        end
+      def success_payload(entry, project_root, sha, features, review, findings, candidates, skipped)
         {
           "schema" => "hive-patrol",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-patrol"),
@@ -739,12 +543,12 @@ module Hive
           "review_errors" => review.fetch("review_errors"),
           "findings" => findings.size,
           "fix_candidates" => candidates.size,
-          "fixes_attempted" => fixes.size,
-          "fixes_validated" => fixes.count(&:passed),
-          "prs_opened" => opened.size,
-          "pr_urls" => opened.map(&:pr_url),
-          "review_handoff_errors" => handoff_errors,
-          "fix_results" => fix_results,
+          "fixes_attempted" => 0,
+          "fixes_validated" => 0,
+          "prs_opened" => 0,
+          "pr_urls" => [],
+          "review_handoff_errors" => [],
+          "fix_results" => [],
           "skipped_findings" => skipped,
           "last_scanned_sha" => sha
         }

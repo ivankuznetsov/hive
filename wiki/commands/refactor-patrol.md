@@ -3,662 +3,83 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-08-20
+updated: 2026-08-21
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
-**TLDR**: `hive refactor-patrol` is Hive's language-neutral architecture
-patrol. Every mode emits the current v4 route contract over a fresh durable v4
-job lifecycle: immutable PR scope, read-only discovery, explicit
-`fix`/`discuss`/`dismiss` decisions, and separately authorized isolated fixes
-or PR publication. The first-party module no longer grants issue mutation;
-retained legacy issue records remain readable. V3 JobStore data is left byte-identical and is not read
-by the v4 runtime. Automatic mutation remains narrower than discovery; a
-language needs a certified public-contract guard or its thesis routes to
-discussion with `public_contract_safety_unavailable`.
+**TLDR**: `hive refactor-patrol` discovers evidence-backed architecture theses
+and routes each one to `fix`, `discuss`, or `dismiss`. Accepted `fix` and
+`discuss` dispositions are published to the shared Patrol Fix admission
+outbox. Architecture Patrol does not implement fixes, file issues, create
+branches, publish pull requests, or hand work directly to review.
 
 ## Usage
 
 ```bash
-# On-demand report (v4)
-hive refactor-patrol my-project --json
+# On-demand discovery
+hive refactor-patrol my-project
 hive refactor-patrol my-project --feature route-home --changed-since origin/main
+hive refactor-patrol my-project --entrypoint bin/server
+hive refactor-patrol my-project --path lib/payments --json
 
-# Explicit merged-PR replay (v4)
+# Explicit merged-PR replay
 hive refactor-patrol my-project --pr 123 --json
 hive refactor-patrol my-project --pr https://github.com/acme/app/pull/123 --json
 
-# Daemon/internal immutable-manifest phases
+# Daemon/internal immutable-manifest discovery
 hive refactor-patrol my-project --job-manifest PATH --json
-hive refactor-patrol my-project --job-manifest PATH --actions --json
-# The daemon also supplies an internal --result-file under v2/results/.
-# Ambiguous classification uses this hidden supervised Patrol-scan child; it
-# is a daemon protocol and is intentionally omitted from `hive help`:
-hive refactor-patrol-classify my-project --occurrence-id DIGEST \
-  --reservation-id DIGEST --result-file PATH --json
 
-# Read-only durable job inspection
+# Read-only durable history
 hive refactor-patrol my-project --list
 hive refactor-patrol my-project --list --limit 50 --cursor CURSOR
 hive refactor-patrol my-project --show JOB_ID
-hive refactor-patrol my-project --show JOB_ID --json
 hive refactor-patrol my-project --show JOB_ID --full --json
 ```
 
-Fresh terminal and web init recommend discovery (`refactor_patrol.enabled:
-true`) with a default-yes choice and explicitly enable confined auto-fix/PR
-attempts. GitHub issue creation is disabled; accepted findings enter the
-unified Patrol-fix workflow. Missing configuration in an existing project
-still resolves all three legacy gates to false, and older
-discovery-only configs do not inherit external-effect authority. Fresh headless
-init can resolve the whole architecture-patrol choice before any project-state write
-with `hive init --refactor-patrol` or `hive init --no-refactor-patrol`;
-omitting both keeps the enabled default.
+`--changed-since` is only a filter paired with `--feature`, `--entrypoint`, or
+`--path`. PR and job-manifest modes require JSON and cannot be combined with
+scope hints. `--list` and `--show` are read-only and cannot be combined with
+discovery options.
 
-Execution and merged-PR intake additionally require the project's resolved
-`default_workflow` to be `coding`. Non-coding defaults cannot discover or act
-even when stale configuration leaves `refactor_patrol.enabled: true`; read-only
-`--list` and `--show` history queries remain available.
+## Discovery
 
-```yaml
-refactor_patrol:
-  enabled: true
-  max_theses_per_feature: 1
-  auto_fix:
-    enabled: true
-    # agent/model/effort inherit the resolved refactor identity unless overridden.
-  issue_filing:
-    enabled: false # legacy configuration is readable; no new issue mutation
-  min_confidence: medium
-  commands:
-    docs: null
-    # Optional project-owned compatibility check for source/public surfaces.
-    public_contract: null
-    test: bin/test
-  caps:
-    # Cross-feature scope is normal for architecture refactoring. Contract and
-    # dependency changes remain gated independently of patch size.
-    single_feature_only: false
-    allow_cross_feature: true
-```
+On-demand discovery maps the current repository into bounded source and
+documentation slices. The reviewer runs read-only and must return complete,
+source-backed theses. Hive verifies evidence, confidence, contract risk,
+dependency risk, and cross-feature scope before assigning the route. Missing
+or unsafe proof becomes `dismiss` or `discuss`; only an admissible thesis uses
+the `fix` route.
 
-## Discovery modes
+Merged-PR intake binds discovery to an immutable manifest and an exact clean
+analysis worktree. The daemon and manual `--pr` path use the same v4 JobStore
+aggregate, generation-fenced discovery claim, feature checkpoints, and
+completion envelope. Completed discovery always terminalizes the job; there is
+no action phase.
 
-The no-PR mode accepts `--feature`, `--entrypoint`, or `--path` and emits the
-same v4 route vocabulary without creating a durable action job.
-`--changed-since` is only a Git-ref filter paired with one of those scope hints;
-standalone `--changed-since` is rejected instead of boosting changed features
-inside a full discovery run.
+The source outbox snapshots accepted dispositions after discovery. The shared
+Patrol Fix workflow independently decides which candidate to materialize and
+then owns implementation, validation, review, and publication.
 
-`--pr` and `--job-manifest` require JSON, reject on-demand scope hints, and
-select mapped features only from the immutable changed-path/status
-manifest, and pin a freshly fetched committed default-branch `analysis_sha`
-that contains the merge. Discovery materializes that commit as a detached,
-clean, exact worktree under the configured worktree root. Mapper and reviewer
-source reads use that tree, while durable job state remains under
-the registered project's `.hive-state`. The operator's current branch and
-uncommitted edits are therefore outside the analysis boundary. The daemon
-consumes only the write-once manifest published by merge intake; it never
-re-fetches mutable PR metadata during discovery.
+## Daemon lifecycle
 
-On partial-job resume, the durable `analysis_sha` must be a full 40- or
-64-character hexadecimal Git object ID. Commit resolution fences option
-parsing and revalidates Git's returned object ID before materializing a tree.
-An explicit replay of a terminal job creates its new occurrence before this
-pin step, so the replay samples the current committed default branch while an
-incomplete retry continues to reuse its original durable SHA. PR dry runs use
-an invocation-unique analysis-worktree key and therefore cannot reuse or
-remove a same-job daemon worker's tree. If an interrupted removal leaves only
-stale Git worktree administration, the next materialization prunes that orphan
-record and retries without operator repair.
+`Hive::Daemon::RefactorPatrolMergeReconciler` turns eligible merged PRs into
+immutable discovery manifests. `Hive::Daemon::RefactorPatrolScheduler` handles
+classification, discovery, checkpointing, retries, and post-merge bookkeeping.
+Scheduled current-main scans use the Architecture Patrol launch lane and
+publish their completed dispositions through the same source outbox.
 
-Before either discovery or action reservation, the daemon fetches the current
-default branch and proves that the immutable source merge is still reachable.
-If that ancestry check conclusively fails, the source is obsolete rather than
-retryable: Hive completes the job once, terminalizes every unpublished action
-with `source_no_longer_on_trunk`, and records the retirement through the normal
-qualified transition gateway. A durable remote continuation intent or receipt
-keeps the action resumable so reconciliation can finish an effect that may
-already exist. Fetch, checkout, and object-resolution failures remain transient
-checkout-guard errors and keep their bounded retry behavior.
+The runtime has no action candidate selection, action reservation, fixer,
+issue filer, branch creator, PR opener, or review handoff. Historical action
+fields remain readable in old v4 job records and bounded query output, but new
+jobs always emit `actions: []` and no component can execute those records.
 
-Discovery inherits the resolved execute provider, concrete model, and effort by
-default. `refactor_patrol.agent`, `.model`, and `.effort` may independently
-override that identity; omitted fields inherit, and a provider change without a
-model resolves that provider's concrete native default. Claude discovery uses
-its read-only tool scope plus verified `--safe-mode`; Codex discovery uses its
-native read-only sandbox with approvals disabled, ephemeral execution, and
-user config/rules suppressed. Other providers fail closed unless their profile
-can enforce read-only execution. Hive validates the analysis worktree
-before each feature checkpoint and again before completion. A reviewer that
-dirties the detached source tree makes the command fail, removes the ephemeral
-tree, and releases its discovery claim as `command_error`. Every thesis appears
-exactly once as `fix`, `discuss`, or `dismiss`. Complete zero-result runs use
-`no_mapped_slice`, `no_theses`, or `all_dismissed`; malformed or partial
-reviewer results remain retryable and do not checkpoint completion.
-Completed feature slices and their exhaustive dispositions are checkpointed
-independently; a retry reviews only incomplete slices and cannot rewrite a
-previously completed slice.
+## Output
 
-The architecture mapper groups bounded components rather than manufacturing a
-feature per file. It recognizes common language extensions, build files,
-package roots, infrastructure layouts, extensionless shebang scripts, and
-previously unknown text-source extensions; each package manifest owns a small
-dedicated slice instead of expanding every source feature. Lightweight generic
-and ecosystem-specific import resolution builds a source-only dependency graph
-across slash-, dot-, backslash-, and namespace-style references. Tests, docs,
-assets, generated artifacts, fixture/test manifests, and mapper chunk boundaries
-do not consume reviewer slices.
-All outer semantic and architecture mapping reads go
-through one root-confined source reader before a path can enter a reviewer
-slice: tracked symlinks may resolve only to regular files beneath the real
-project root, device/FIFO-like targets are skipped, and each UTF-8-scrubbed read
-is capped at 256 KiB. Deleted or renamed-away documentation paths may remain as
-non-readable historical scope, but an existing unsafe documentation symlink is
-never handed to the reviewer. This keeps an unfamiliar or hostile repository
-from escaping the checkout or turning discovery into an unbounded read.
-
-Documentation mapping is a refactor-patrol-only capability. When appropriate,
-it maps bounded root-document, `docs/`, wiki, ADR, and decision slices. Compiled
-wiki logs, raw notes, caches, generated content, and `.hive-state` do not become
-one broad documentation feature. Ordinary `hive patrol` mapping is unchanged.
-
-`max_theses_per_run` is a strict run-wide reviewer-output cap, not a
-per-feature allowance. The per-feature default is one thesis, explicitly a
-ceiling rather than a quota. `max_review_seconds_per_run` (default 3600) is the
-matching absolute monotonic wall-clock cap: each feature spawn receives only
-the smaller of its configured patrol timeout and the whole-run time remaining.
-Durable PR and job-manifest discovery processes at most 12 incomplete slices
-per child, checkpoints each completed slice, and resumes the remainder in a
-later child. On-demand discovery processes its complete supplied scope under
-the run-wide thesis and wall-clock bounds; it cannot silently report a partial
-scope as complete.
-Scheduled current-main Architecture reviews use an engine-specific,
-mode-derived UTC-day allowance (`16/8/4/2` for
-ultrapatrol/high/medium/low). Hive atomically reserves each launch under the
-stable registry project ID immediately before the provider spawn. The
-Architecture lane is independent from ordinary Patrol; merged-PR discovery,
-actions, fix workflow stages, and publication do not consume it. There are no
-Patrol token budgets, token admission checks, multipliers, or Patrol-specific
-USD allowances; token totals remain telemetry. Ordinary incomplete or errored
-discovery keeps its 60-second retry.
-A discovery error whose structured `resource_exhaustion.reason` is
-`daily_agent_spawn_limit` waits until the next UTC day. Provider-originated
-`token_limit` or `turn_limit` results retain checkpoint evidence and use the
-fixed one-hour cooldown shared by actions.
-
-The module's scheduled-discovery hook is a distinct current-main producer, not
-a relabeled merged-PR JobStore candidate. Every claim fetches current `main`,
-maps the current architecture/documentation feature IDs, selects one ID after
-the durable stable cursor, and pins that exact SHA for one review launch.
-Removed IDs are skipped and new IDs enter the ordered map. Completion requires
-an exact-SHA, complete feature result; Hive persists an immutable enumerable
-scheduled-result aggregate, publishes its dispositions to the fix-admission
-outbox, and only then advances the cursor. Replay after a crash converges on
-the same project/SHA/feature occurrence even when claim timestamps differ.
-The read-only runner accepts either bare JSON or exactly one `json` code fence.
-Plain-text rationale may precede or follow that single fence, but another fence
-remains invalid so there is only one canonical structured result. The third
-response must finalize JSON; a fourth response is emergency finalization only.
-The runner normalizes the accepted object into `theses.json` and retains the
-exact provider response as `final-message.txt` in the feature run directory for
-quality audits. Real PR-mode run directories are durable and include a
-`review-context.json` binding the artifact to its job, analysis SHA, source PR,
-and feature; only an explicit `--dry-run` uses ephemeral scratch space.
-Additional fences, malformed envelopes, null/scalar items, and
-schema-invalid records remain review errors rather than successful zero-result
-scans. Evidence is also checked against the pinned checkout's real,
-root-confined, 256 KiB-bounded bytes: cited
-files must exist, line anchors must be in range within that inspection window,
-and snippets must occur exactly within it when present. The reviewer requires
-evidence of a current consequence and states the concrete ownership,
-dependency, interface, or decision cost removed in `architecture_effects`.
-Hive verifies the evidence and normalizes the requested route:
-missing/unverified evidence or insufficient confidence becomes `dismiss`;
-contract, dependency, cross-feature, validation, or other risk becomes
-`discuss`; only an admissible unblocked `fix` can reach mutation. Every
-override retains categorical reasons, with no numerical quality score.
-
-## Durable post-merge lifecycle
-
-`Hive::Daemon::RefactorPatrolMergeReconciler` ingests both Hive finalize
-observations and paginated GitHub catch-up into one occurrence identity:
-registration, canonical repository, PR number, and merge SHA. First enablement
-seeds a current baseline rather than importing history. Catch-up and individual
-PR resolution bind GitHub calls and returned PR URLs to the exact host and
-repository resolved from the registered checkout. The reconciler's v2
-checkpoint separately binds registration, host, repository, and default branch;
-unsupported/corrupt checkpoints or identity changes are quarantined and block
-instead of silently rebaselining. Existing immutable
-`hive-refactor-patrol-pr-manifest` v2 artifacts remain readable for exact
-redelivery/adoption; this narrow compatibility is distinct from the v4
-JobStore, whose obsolete v3 bytes remain opaque.
-
-New intake first stores a bounded immutable classifier snapshot with title,
-body, labels, author, patches, changed paths, target head, and validated Patrol
-publication provenance. Deterministic gates close controller-owned Patrol PRs,
-linked coding successors, docs/dependency/fix/chore-only merges, and scopes with
-no production path. Ambiguous merges run asynchronously as supervised Patrol
-scans using the selected project's normal trusted agent profile. The agent can
-return only `feature` or `skip`; repository, merge, head, and path identity stay
-controller-owned. Provider deadlines extend generic retry backoff, malformed
-output retries, and missing inputs or exhausted attempts are visible blocked
-occurrences.
-
-Accepted `feature` rows are the sole unclaimed post-merge queue. At reservation,
-Hive remaps one current-default SHA, then freezes overlapping stable slices: at
-most eight merges and 512 paths within ten minutes. Larger single merges split
-into deterministic 512-path owner batches. Only each synthetic owner receives
-a v3 manifest, v4 JobStore row, merge event, and discovery claim; there are no
-staging member jobs or coalesced aliases. A classifier row binds to its exact
-owner job/checksum set only after every chunk materializes. Split events include
-the owner job identity, while the checksum-bound manifest/JobStore retains the
-exact merge-to-path-to-slice provenance.
-
-Catch-up is incremental and restart-safe without changing that authoritative
-`reconciler.json` v2 checkpoint. A separate identity-fenced
-`reconciler-progress.json` v1 sidecar binds registration, host, repository,
-default branch, and the SHA-256 fingerprint of the base checkpoint. It records
-one fixed overlap window (including its upper bound), the first page's result
-count, the next GitHub page plus accumulated merge identities, then the next
-manifest intake item plus already-enqueued PRs. A count or terminal traversal
-change restarts at page one without moving that upper bound. Each origin
-identity lookup, page, finalize-watcher PR-state poll, or hydration request
-receives the remaining slice of one absolute monotonic tick budget shared with
-exact-PR hydration later in that dispatcher tick. When
-the budget is spent, watcher poll/intake stops the batch and retries next tick
-without counting the deferral as a GitHub failure; a hanging state-poll
-subprocess is terminated and follows ordinary watcher backoff. Partial projects
-and the starting project rotate fairly so one slow repository cannot stall the
-daemon. Real
-GitHub failures persist jittered, capped exponential retry state from the
-observed failure time, and that state survives daemon restart.
-
-Sidecar and checkpoint replacements are atomic and directory-fsynced. A
-completed scan writes the v2 checkpoint before unlinking and fsyncing the
-sidecar. If a crash leaves the old sidecar after that checkpoint write, its base
-fingerprint is stale and the next tick removes it. Earlier crashes resume the
-page/intake cursor; write-once manifest/job intake makes replay idempotent.
-Malformed or identity-drifted progress is quarantined and blocks.
-
-The v4 job lifecycle is `queued → analyzing → classified → acting → complete`.
-Discovery and actions use generation-fenced claims renewed by exact
-PID/process-start heartbeats; workers without verifiable process identity do
-not claim work. `JobStore` remains the sole aggregate lock/read/write facade,
-but delegates deterministic responsibilities to three collaborators:
-`JobRecordValidator` validates complete records and monotonic transitions,
-`ClaimTransitions` constructs, renews, and finishes in-memory discovery/action
-claims, and `JobIndexes` projects rebuildable fingerprint/action indexes from
-terminal aggregates. None of those collaborators persists independently.
-Every production `job`, `discovery`, and `action` mutation enters JobStore
-through the persistence-free `TransitionGateway`, which applies the separate
-Architecture Patrol authorization gateway and the job-bound occurrence sender
-CAS before invoking the transition. JobStore still owns the aggregate and
-replay decision; the gateway adds no state file or recovery path.
-`PatrolArbiter` gives
-ordinary and architecture scans the same per-project patrol-scan budget and
-alternates kinds across ticks; architecture occurrences are oldest-first.
-Candidate selection takes one immutable, tick-scoped ownership snapshot so
-registration/config/identity/continuation reads are shared across all due jobs
-in that pass, including cached failures. Reservation never trusts that
-snapshot: it resolves ownership live again, as do manual PR replay, action
-resume, and every external-effect or handoff fence. Full
-authority requires the target's exact registered name and expanded path to
-still exist. Registration evidence is projected from that same normalized
-name/expanded-path representation, so diagnostics and ownership keys cannot
-drift. Hive resolves live origin host plus `owner/repo` for every enabled
-registration and scans every registered project's action ledger, whether
-currently enabled or disabled, for nonterminal remote continuation evidence.
-A durable creation intent, PR URL, issue URL, or review-task path makes that
-registration an owner of the action's source host/repository. Missing target
-registration, duplicate enabled/continuation owners, or unreadable
-config/identity/continuation state blocks visibly as
-`repository_registration_missing`, `duplicate_repository_registration`, or
-`repository_identity_unresolved`. The snapshot is never cached across
-transitions.
-
-`--actions` is the legacy daemon resume primitive. `ActionRunner` reconstructs
-only immutable fix thesis snapshots and can resume fix/PR state; it never plans
-or publishes an issue. Persisted issue actions remain readable and park as
-`issue_creation_retired`. Exact historical terminal proof remains visible in
-the catalog and migration inventory without becoming new effect authority. The
-v2 projection strips internal claims/timestamps while exposing action outcomes
-and completeness in `action_status`.
-
-Manual `--pr` uses this same manifest, policy snapshot, job claim, fencing
-generation, checkpoint, and report path. The first invocation can intentionally
-backfill a merge the catch-up baseline omitted. Invoking it again after that
-job is terminal creates an explicit `-replay-N` occurrence with the current
-policy snapshot and a freshly pinned current-default `analysis_sha`, while
-preserving the original job bytes. Canonical action ids
-still prevent duplicate remote effects across replays. Production ids hash the
-normalized source host, repository, action kind, and fix fingerprint. Legacy
-issue family ids remain stable read-only identities, so historical receipts can
-be migrated without renaming or loss.
-
-## Read-only job inspection
-
-`--list` and `--show JOB_ID` query the authoritative v4 `JobStore` in the CLI
-process. They do not enqueue, claim, replay, resume, or otherwise mutate a job,
-and they remain available for a registered project even when architecture
-discovery is currently disabled. `--list` returns jobs in their immutable
-durable intake sequence, with source identity, lifecycle state, counts, current
-blockers, and update time. Pages default to 100 records (`--limit` accepts 1
-through 100) and carry `has_more` plus an opaque `next_cursor`; pass that value
-back through `--cursor` to continue. The first page fixes a sequence high-water
-snapshot, so jobs arriving later, equal timestamps, and wall-clock rollback
-cannot skip or enter that pagination run. `count` and `page.total` report that
-snapshot's total while `page.returned` is the current page size.
-
-The sequence projection lives under `v4/indexes/job-query/` as immutable
-per-sequence sidecars plus an O(1) high-water record. Writer paths publish it
-only after the authoritative job exists. A list query reads the high-water
-once, opens at most `limit + 1` membership records, and parses only the selected
-full jobs; it never scans every historical aggregate and never repairs or
-writes the index. Missing, malformed, or mismatched membership fails closed.
-`JobStore#rebuild_job_query_index!` is the explicit writer-side recovery path;
-it changes the index generation so old cursors are rejected rather than
-silently changing membership. The first authoritative write after upgrade also
-migrates pre-index jobs. Newly created index ancestors are directory-fsynced
-before `active.json` can expose the generation.
-
-`--show` adds the stored source and policy snapshots, dispositions, feature
-results, review errors, discovery attempts, and action records. Histories that
-can grow across retries are bounded to their latest 100 entries by default:
-discovery attempts, each action's claim history, and each action's publication
-attempts. `job.history` reports total/returned/truncated counts for every slice.
-For pre-attempt ledgers, flat `patch`, `patch_N`, and supersession receipts are
-also bounded: normal show retains only the active legacy patch and reports the
-full flat patch count as truncated, while `--full` returns the complete legacy
-receipt history.
-
-Use `--limit 1..100` to request a smaller history window or `--full` to
-explicitly opt into the complete, potentially large history. `--full` and
-`--limit` are mutually exclusive.
-
-Text mode prints a compact operator summary. `--json` emits the versioned
-`hive-refactor-patrol-jobs.v2` success/error contract. An unknown job id is a
-`not_found` error with usage exit 64. Query options are mutually exclusive and
-cannot be combined with `--pr`, `--job-manifest`, `--actions`, `--dry-run`,
-legacy scope hints, or the internal result-file option. `--cursor` belongs only
-to `--list`; `--full` belongs only to `--show`. Invalid job ids and query
-modifiers—including `--limit`, `--cursor`, or `--full` without a selector—use
-the jobs-v2 `usage` error arm with exit 64, while a valid but
-missing id uses `not_found`; corruption in an existing valid-id record remains
-a hard error and is never relabeled as missing.
-
-Current action-block summaries use the per-action claim-generation snapshot
-persisted with each new block. Only a strictly newer claim supersedes that
-lifecycle blocker, independent of wall-clock rollback or same-second writes.
-Legacy blocks without the snapshot use a conservative strictly-later timestamp
-fallback, so ambiguous equality keeps the blocker visible.
-
-Action dispatch also binds a digest of the job aggregate observed at
-reservation. A schema-valid child result that leaves that digest unchanged is
-`action_no_progress`: the daemon persists a one-hour action block instead of
-dispatching the same inert child on every scheduler tick. Fix-agent resource
-exhaustion retains its structured reason and uses the same fixed one-hour retry
-as other transient Architecture Patrol action failures.
-Jobs retired because their source merge left current trunk are excluded from
-later candidate selection, so their diagnostic receipt is written once rather
-than producing another discovery or action retry loop.
-When an occurrence reaches its reserved effect-capacity boundary, the daemon
-rolls the job into the exact next occurrence generation. It first requires all
-predecessor transitions to be terminal, publishes that segment's capture and
-receipts, and only then advances the current pointer. A successor reserved just
-before a crash is completed by ordinary occurrence recovery. Historical
-capacity blockers belong to their predecessor segment and do not suppress the
-fresh generation. Rollover rechecks migration ownership inside the shared
-fence. If the saturated segment still owns an expired claim, normal fenced
-claim recovery runs first and rollover follows on the next scheduler pass.
-
-## Fix and workflow routing
-
-Only current `fix` theses can reach `Fixer`.
-The job's enqueue-time policy must have allowed auto-fix. New policy snapshots
-pin the resolved auto-fix provider, concrete model, effort, and launcher
-identity. The current config may revoke or narrow that
-snapshot; it cannot relax captured contract/dependency guards, lower
-confidence threshold, add a validation command, switch identities, or
-otherwise broaden an old job. A revoked action remains nonterminal so restored
-authority can resume it, but Hive probes that durable hold at most hourly
-instead of launching an action child every daemon minute. Other retryable
-action failures use the same fixed one-hour cadence.
-
-Fixes inherit the resolved refactor identity by default and may independently
-override `refactor_patrol.auto_fix.agent`, `.model`, and `.effort`. The selected
-profile must enforce workspace-write confinement, and Hive passes the pinned
-model/effort arguments into the agent. Fixes run in a deterministic isolated
-worktree on `hive-refactor/<canonical-action-id>`. The repository-global branch
-keeps the same action on one branch across jobs, replays, and registration
-handoffs. Hive fetches and validates the committed default-branch ref before
-the fix and at publication fences; the operator's checked-out branch and dirty
-files are irrelevant. Default-branch history must still descend from the
-validated head. Before commit or push,
-Hive checks actual feature-boundary paths, root confinement, `.hive-state`
-control-plane protection, protected paths, secrets, dependency manifests, and
-public declarations across supported ecosystems, then runs every named
-validation command under `timeout_sec.patrol`. Cross-feature scope is allowed
-by default because useful refactoring commonly consolidates ownership across
-components. File count and diff size are recorded as
-publication evidence but never accept, reject, truncate, or reroute a thesis;
-the normal review workflow judges whether the resulting PR is meaningful and
-coherent. The reviewer receives only bounded owned content plus a fixed-size
-list of mapper-selected context and test paths for its one follow-up inspection
-round; cross-feature discovery does not grant repository-wide search. Unknown source languages
-remain discoverable but fail automatic mutation when no public-contract guard
-can prove safety. Documentation-only fixes prefer an explicit `docs` command;
-without one, Hive runs `git diff --cached --check` as a deterministic minimum
-only for inert documentation extensions and named documentation files;
-executable documentation formats such as MDX remain report-only without a
-configured `docs` command
-and sends the resulting PR through the normal review workflow.
-When `refactor_patrol.commands.public_contract` is configured, it is an
-authoritative executable guard and runs for every automatic fix that changes a
-source or known public-surface path. Built-in declaration guards still enforce
-their supported ecosystems; the project-owned command extends coverage rather
-than weakening those checks. Ruby declaration checks scope `private`,
-`protected`, and `public` state to each parsed class/module, preventing one
-type's visibility from hiding a later type's public contract. Extensionless
-scripts are recognized from either current or pinned-base shebang bytes and
-remain report-only unless a configured public-contract command certifies them.
-Disjoint trunk movement rebases only the isolated
-patch and repeats the full audit; movement overlapping any actual patch path reruns the fix
-from current clean trunk. Registered trunk is never reset, pulled, edited, or
-committed by patrol.
-
-Architecture findings are not routed to GitHub issues. New accepted findings
-enter the unified `patrol-fix` workflow, where the LLM Inbox gate chooses a fix,
-rejection, block, or escalation. The workflow performs fix, validation,
-independent review, and PR publication. The legacy `issue_filing` configuration
-shape and issue receipts remain readable only for migration provenance.
-
-`PrOpener` reconciles the complete same-branch PR set by exact action marker,
-head SHA, base, repository, and GitHub host. Each validated patch generation
-owns an append-only entry under `receipts.publication_attempts`, keyed by
-`SHA256(publication_base_sha + NUL + commit_sha)` rather than by the ephemeral
-action-claim generation. Its immutable descriptor names the exact patch receipt,
-base SHA, and commit SHA. `push_intent`, `push_complete`, and
-`pr_create_intent` are immutable append-only phases; PR-create intent requires
-durable push completion, and a superseded or post-create attempt cannot advance.
-`JobStore` is the only writer and applies the pure `PublicationAttempt` grammar
-under the live action-claim fence before atomically committing each append.
-Existing flat publication receipts are imported additively on first resume by
-copying their exact matching phase payloads into the attempt. The original
-legacy receipt entries are not rewritten; import only adds generation-scoped
-copies and preserves their payload content byte-for-byte.
-
-The exact action-generation fence still runs before durable intent and again
-after intent immediately before a remote request. A rejected pre-intent fence
-is known-not-sent. On restart Hive first reconciles the exact remote branch: a
-landed push whose completion receipt was interrupted gets durable
-`push_complete` evidence before drift can supersede it. Hive then checks that
-registered trunk still equals the attempt's publication base before push work,
-and checks it again after proving the exact remote head immediately before
-`pr_create_intent`. Drift appends an immutable `superseded` record with the
-observed trunk SHA; the fixer then produces a new patch/base pair and therefore
-a new attempt id. Once
-`pr_create_intent` is durable, supersession is forbidden and an ambiguous result
-or changed remote head remains reconciliation-only.
-
-Publication requires exactly one origin push URL and reuses it for remote-OID
-lookup and push, so a later `origin` rewrite cannot redirect the transaction.
-New branches use an exact absence lease. A replacement is authorized only when
-the remote OID equals the commit of an older attempt that has both durable
-`push_complete` proof and durable supersession; the push then uses that exact
-old OID as its force-with-lease expectation. An arbitrary pre-existing remote
-branch remains a conflict. Publication phases themselves are remote
-continuation evidence, so disabled registrations still participate in unique
-repository ownership. Continuation-only claims may reconcile an existing
-request (or record completion of an already-intended push), but cannot create a
-replacement patch or begin a new push/PR phase.
-
-The Git mechanism for those reads and writes is the boundary-ready
-`Hive::AgentGitGate`. `PrOpener` requests managed URL/OID observations and its
-push compatibility call resolves the local branch once, publishes the
-immutable commit under the ledger-selected exact lease, and independently
-observes the remote afterward. The resulting component receipt records
-expected/before/published/after OIDs and a non-secret transport fingerprint.
-The component cannot invent replacement authority: the append-only patrol
-ledger above it remains the only source for the expected old OID.
-
-After `gh pr create`, an
-exact-host/repository `gh pr view` must prove the returned URL/number, OPEN
-non-draft state, head repository/branch/OID, and the exact base branch/OID from
-the validated patch before handoff.
-Same-branch reconciliation also rejects an OPEN PR unless `isDraft` is
-explicitly false; CLOSED/MERGED recovery remains available when draft metadata
-is absent because those states cannot be handed off as a live ready PR.
-Failure becomes reconciliation-only `remote_outcome_unknown`. Both new and
-reconciled PRs recheck continuation ownership and the live action claim
-immediately before enqueueing `6-review`. An OPEN or MERGED publication is
-successful only after that mandatory handoff; an externally CLOSED-unmerged PR
-terminates as `closed_without_merge`. Patrol never merges the PR itself.
-
-New Architecture action snapshots contain fix actions only. A persisted legacy
-issue action is parked as `issue_creation_retired`; `ActionRunner` exposes no
-issue writer and contains no issue publication sink. Complete historical issue
-inventories, action receipts, and semantic-family records remain accepted by
-the read-only migration/catalog paths so cutover does not erase provenance.
-
-If the registered repository identity later changes, only the individual
-actions already carrying remote intent/URL/handoff evidence may reconcile that
-existing effect. Unstarted siblings remain queued and the job records
-`repository_identity_drift`; a continuation claim cannot pass a new push/create
-fence. Duplicate or unresolved global ownership blocks even reconciliation
-until one owner remains and every registered config/continuation scan plus each
-participating live identity is resolvable. If the default branch advances after
-partial discovery pins its analysis SHA, the job preserves completed slices,
-reuses the original SHA, and rematerializes the same detached exact worktree
-for only the incomplete slices. Hive never mixes snapshots or resets trunk.
-
-## Module compatibility
-
-`hive refactor-patrol` is the serializer and recovery protocol for the
-first-party `architecture-patrol` module adapter. All public and
-daemon-internal modes use v4 jobs, immutable merge
-manifests, claims, progress, quarantine, result transport, publication
-attempts, and global terminal proofs. Module scheduling and
-`pull_request.merged` admission do not add a second GitHub poller; the current
-merge reconciler is the sole event producer.
-
-Architecture Patrol shares the durable shadow/cutover ownership epoch with
-ordinary Patrol. A rollback changes ownership and module pointers only; it
-does not copy state or replay merged-PR history.
-
-## State and JSON
-
-On-demand state remains under `.hive-state/refactor_patrol/`. It shares directory,
-atomic JSON-write, tolerant-read, and run-artifact mechanics with ordinary
-patrol through `Hive::Patrol::BaseStateStore`, while retaining its own namespace
-and thesis schema. Scheduled JobStore state uses a split namespace:
-
-```text
-.hive-state/refactor_patrol/
-  v2/
-    reconciler.json              # exact-host catch-up checkpoint, schema v2
-    reconciler-progress.json     # identity-bound page/intake cursor, schema v1
-    manifests/<job-id>.json      # write-once source occurrence
-    families/<family-id>.json    # rebuildable semantic-family projection
-    results/<dispatch-id>.json   # daemon completion channel; removed on reap
-    runs/ and logs/              # agent evidence
-  v4/
-    jobs/<job-id>.json           # sole aggregate authority
-    occurrences/records/occ-*.json # prepared/uncertain/terminal effects + outbox
-    indexes/                     # rebuildable job/action/query projections
-```
-
-JobStore authority is fixed at v4. Construction and `--list`/`--show` do not
-create state, while the first mutation lazily creates only v4. Runtime never
-probes, reads, hashes, moves, deletes, or interprets an obsolete v3 JobStore;
-those bytes remain opaque. Reconciler manifests, families, result transport,
-and global terminal proofs retain their separate namespaces and authority.
-Family ids remain stable once an issue action owns them; rebuilding the family
-projection refreshes its canonical descriptor from the current authoritative
-v4 thesis snapshot without rewriting that publication identity.
-
-Terminal remote-effect proof is repository-global rather than registration
-local:
-
-```text
-<Hive::Paths.state_home>/refactor_patrol/v2/
-  terminal-proofs/<canonical-action-id>.json # immutable terminal proof
-  indexes/canonical-actions.json             # disposable/rebuildable catalog
-  canonical-actions.lock
-```
-
-An archive entry is first derived from a validated terminal owner aggregate (or
-an exact already-materialized proof link), then never rewritten. The catalog is
-only a locator projection and may be deleted or rebuilt. Immutable archives
-preserve exact PR/issue/handoff proof across catalog corruption, project
-deregistration, or removal of the original project path; an unreadable or
-conflicting archive blocks action instead of reopening the remote effect.
-Mandatory review-handoff paths remain valid after their synthetic coding task
-advances from `6-review` through `7-artifacts`, `8-finalize`, or `9-done`, so a
-later catalog rebuild can recover terminal PR proof instead of mistaking stage
-movement for a missing handoff. Paths outside those exact stage roots, or nested
-below a task folder, still fail closed.
-
-Every report mode emits `hive-refactor-patrol.v4`, including source identity,
-`analysis_sha` where applicable, completeness, per-feature progress,
-`fix`/`discuss`/`dismiss` dispositions, review errors, attempts, and public
-action receipts. V4 thesis snapshots carry the complete normalized thesis,
-including categorical route reasons and architecture effects. Pre-dispatch
-`--json` usage errors use the same v4 error arm.
-
-Read-only `--list` and `--show` use a separate
-`hive-refactor-patrol-jobs.v2` schema. List responses contain validated job
-summaries plus bounded, sequence-snapshot continuation metadata; show responses contain one
-validated durable detail projection with bounded-history metadata or an
-explicit `full: true` projection.
-Their query-specific error arm preserves the requested `action` (`list` or
-`show`, or null for a selector-less query modifier) without falling through to
-either discovery reporter.
-
-Hive Web reads a separate internal newest-first recent projection. That
-projection is bounded but deliberately non-resumable, so it does not advertise
-the public jobs-v2 schema, action, or cursor contract.
-
-Daemon children write their v4 document atomically to the job-bound internal
-result file. Stdout remains operator logging, so a valid snapshot larger than
-the supervisor's ordinary 64 KiB log tail is not truncated into a false retry.
-
-`--dry-run` applies the same current-policy, exact-registration, ownership, and
-discovery-consent checks read-only, then previews discovery, would-initialize
-actions, or resumptions. An uninitialized action job whose discovery consent
-was revoked reports `discovery_revoked` with `would_complete: false`; it does
-not invent report-only completion. Dry run never writes manifests, ledgers,
-indexes, global catalogs or proof archives, durable worktrees, branches,
-commits, PRs, issues, handoffs, or completion checkpoints. PR-scoped discovery
-may materialize the same temporary detached analysis tree as a real run, but
-removes it before returning; authoritative job bytes remain unchanged.
+Discovery emits `hive-refactor-patrol.v4`, including the immutable source,
+analysis SHA, routed dispositions, per-feature completion records, and review
+errors. New records contain no publication attempts or actions. `--list` and
+`--show` emit `hive-refactor-patrol-jobs.v2`.
 
 ## Backlinks
 
-- [[commands/patrol]]
-- [[commands/init]]
-- [[modules/config]]
-- [[modules/daemon]]
-- [[modules/gh]]
-- [[state-model]]
-- [[testing]]
+- [[modules/patrol]] · [[modules/daemon]] · [[commands/patrol]]

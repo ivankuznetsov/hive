@@ -487,8 +487,8 @@ patrol:
 <% end -%>
 
 # Architecture patrol is independent from ordinary patrol. Fresh init
-# recommends discovery with confined auto-fix/PR attempts. Findings that need
-# work enter the unified Patrol-fix workflow; GitHub issue creation is retired.
+# recommends discovery. Findings that need work enter the unified Patrol Fix
+# workflow; Architecture Patrol itself has no fix or publication engine.
 # Existing projects with no block keep the disabled discovery policy.
 refactor_patrol:
   enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
@@ -496,16 +496,9 @@ refactor_patrol:
   # Unfinished features remain durable and resume in a later patrol run. Hive
   # also applies a fixed 12-slice runaway guard without another config knob.
   max_review_seconds_per_run: 3600
-  auto_fix:
-    enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
-    # agent/model/effort inherit the resolved refactor identity unless overridden.
   commands:
-    # Optional project-owned API/contract check for ecosystems without a
-    # built-in declaration adapter. It is consulted only when auto-fix is on.
+    # Optional project-owned API/contract check used to route risky theses.
     public_contract: null
-  issue_filing:
-    # Retained only so older configuration stays readable during migration.
-    enabled: false
 
 # Auto-rebase pre-step for `hive run` (plan
 # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md).

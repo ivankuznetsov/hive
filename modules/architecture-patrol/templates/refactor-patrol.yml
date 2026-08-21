@@ -1,10 +1,4 @@
 # Scheduled current-main discovery derives its independent Architecture Patrol
-# allowance from patrol.mode. Merged-PR discovery and actions do not consume it.
+# allowance from patrol.mode. Merged-PR discovery does not consume it.
 refactor_patrol:
   enabled: true
-  auto_fix:
-    enabled: true
-  issue_filing:
-    # Legacy read/migration compatibility only. Findings now enter the
-    # unified Patrol-fix workflow and publish pull requests, never issues.
-    enabled: false

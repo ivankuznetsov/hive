@@ -49,7 +49,7 @@ Each stage has exactly one "state file" the runner writes the marker into. This 
 | `3-plan` | `plan.md` | `Stages::Plan` agent on first run |
 | `4-execute` | `task.md` | `Stages::Execute#write_initial_task_md` (with frontmatter `slug`, `started_at`) |
 | `5-open-pr` | `pr.md` | `Stages::OpenPr` writes frontmatter `pr_url` / `pr_number` |
-| `6-review` | `task.md` | reused from `4-execute`, or created by `Hive::Patrol::ReviewHandoff` for patrol-opened PRs; markers driven by `Stages::Review` orchestrator |
+| `6-review` | `task.md` | reused from `4-execute`, created by Patrol Fix workflow routing, or created by `Hive::Commands::AdhocReview`; markers driven by `Stages::Review` orchestrator |
 | `7-artifacts` | `artifact.md` | `Stages::Artifacts` asks the configured artifact agent to write the artifact summary and stamp `COMPLETE` |
 | `8-finalize` | `pr.md` | reused from `5-open-pr`; `Stages::Finalize` appends the final `COMPLETE` marker and writes `summary.md` |
 | `9-done` | `task.md` | reused from `4-execute` |
@@ -762,9 +762,8 @@ fresh inventory with no remaining live v1 record.
 
 ## Architecture-patrol split-generation state
 
-Only JobStore-owned authority uses v4. Manifests, semantic-family projections,
-merge reconciliation, child results, runs, and logs retain their independent
-v2 owners:
+Only JobStore-owned authority uses v4. Manifests, merge reconciliation, child
+results, runs, and logs retain their independent v2 owners:
 
 ```text
 <hive_state_path>/refactor_patrol/
@@ -772,7 +771,6 @@ v2 owners:
 │   ├── reconciler.json                   # host-bound catch-up checkpoint
 │   ├── reconciler-progress.json          # restart-safe page/intake cursor
 │   ├── manifests/<job-id>.json           # checksummed immutable merge input
-│   ├── families/<family-id>.json
 │   ├── results/<dispatch-id>.json
 │   ├── runs/
 │   └── logs/
@@ -787,8 +785,7 @@ A fresh project initializes the v4 namespace on its first authoritative
 mutation. Construction and read-only job queries do not create it. JobStore
 never probes, reads, hashes, moves, deletes, or interprets `v3/jobs`; arbitrary
 v3 bytes are ignored, including when a non-empty v4 store already exists. The
-other live v2 owners and the separate global terminal-proof catalog remain
-independent and unchanged.
+other live v2 owners remain independent and unchanged.
 
 Read-only job listing is bounded by the `indexes/job-query/` sequence
 projection rather than a scan of every aggregate. Each authoritative new job
@@ -818,16 +815,6 @@ page and never mutate the projection; a rebuild makes stale cursors fail closed.
 The next authoritative lifecycle write migrates a pre-index ledger, and every
 new index directory ancestor is fsynced before the active-generation pointer is
 published.
-
-Canonical terminal effects also have a global proof namespace, separate from
-every registration's project ledger:
-
-```text
-<Hive::Paths.state_home>/refactor_patrol/v2/
-├── terminal-proofs/<canonical-action-id>.json # immutable authority
-├── indexes/canonical-actions.json             # disposable projection
-└── canonical-actions.lock
-```
 
 The manifest fixes registration, repository, PR number/URL (whose host is
 authoritative), base and merge SHAs, merged time, file statuses/renames,
@@ -869,11 +856,11 @@ cursors are strictly typed; a persisted current cursor already present in the
 consumed set is impossible state and is quarantined before any GitHub call.
 
 The job aggregate remains the only completion authority. It stores the
-enqueue-time policy snapshot, one pinned `analysis_sha`,
-feature-level completion/errors, immutable `fix`/`discuss`/`dismiss` thesis
-snapshots, claims and fencing generations, action ownership, attempts,
-creation intents, validation/patch/PR/issue/handoff receipts, and parent
-completeness. Writes use a locked atomic tempfile/fsync/rename transition and
+enqueue-time discovery snapshot, one pinned `analysis_sha`, feature-level
+completion/errors, immutable `fix`/`discuss`/`dismiss` thesis snapshots,
+discovery claims and fencing generations, and completion state. New jobs have
+an empty `actions` array; action fields are parsed only when inspecting old v4
+records. Writes use a locked atomic tempfile/fsync/rename transition and
 the shared `Hive::AtomicFile.fsync_directory` policy to persist directory-entry
 changes where the platform supports directory fsync. Current JobStore authority
 is v4; v3 is left byte-identical and opaque, and the first current mutation
@@ -894,75 +881,17 @@ tree keys so they cannot collide with claimed discovery, and a missing tree
 whose stale Git registration survived an interruption is pruned before the
 deterministic retry materializes it again.
 
-Fix-action receipts scope remote publication to the validated patch generation.
-`publication_attempts` is an append-only object whose key is
-`SHA256(publication_base_sha + "\0" + commit_sha)`. Each value contains an
-immutable descriptor (`attempt_id`, patch receipt key, publication base, commit,
-and timestamp), followed by immutable `push_intent`, `push_complete`, and
-`pr_create_intent` phase payloads when those boundaries are crossed. Phase
-ordering is validated: PR-create intent requires durable push completion;
-existing phases cannot be replaced; superseded attempts cannot advance; and an
-attempt with PR-create intent cannot be superseded.
+Discovery claims carry PID, process-start-time, process-group,
+lease/heartbeat, owner, occurrence, and generation. A stale generation cannot
+checkpoint. Repository ownership is resolved from the enabled registration
+before intake or reservation and is never inferred from old publication
+receipts. Once all feature slices complete, the aggregate is terminal and its
+accepted dispositions are published to the Patrol Fix source outbox.
 
-On the first resume of a pre-attempt aggregate, matching flat legacy
-`creation_intent` / `push_complete` / `pr_create_intent` payloads are copied
-exactly into the new namespace while the original receipt entries remain
-present and unchanged. Migration is therefore additive and preserves the exact
-legacy receipt payload content rather than rewriting it in place.
+Historical v4 action attempts and receipts remain visible through bounded
+`--show` output, but no scheduler or command claims, resumes, or mutates them.
+They are compatibility data, not runtime authority.
 
-Before a pushed attempt without PR-create intent can proceed, Hive reconciles
-the exact remote branch and records an observed landed push even when the
-process died before persisting `push_complete`. Registered trunk must still
-equal the descriptor's publication base before publication work and is checked
-again after exact remote-head verification immediately before PR-create intent.
-Trunk drift appends one write-once `superseded` record containing
-`reason: trunk_drift_retry`, the observed head SHA, and time. A replacement
-attempt can then reference a new patch receipt. The old branch OID is
-replaceable only when that superseded attempt also contains exact
-`push_complete` proof for its commit; legacy proof remains eligible after
-namespaced attempts are introduced. The subsequent push uses that old commit
-as its exact expected-OID lease. Missing or changed remote state after durable
-completion is an explicit conflict rather than an attempt to reopen the push
-phase. This makes crash recovery safe without turning arbitrary branch state
-into force-push authority.
-
-Claims carry PID, process-start-time, process-group, lease/heartbeat, owner, and
-generation. A stale generation cannot checkpoint or begin a remote effect.
-New job-level action blocks also snapshot the maximum claim generation for each
-action. Read-only inspection hides a block only after a strictly newer claim;
-legacy blocks use a conservative strictly-later timestamp fallback so clock
-rollback and same-second persistence cannot conceal a live block.
-Repository ownership is deliberately not cached in this state. Candidate
-enumeration may use one immutable in-memory snapshot for all due jobs in a
-single scheduler tick, but every dispatch reservation and external-effect/
-handoff fence requires the target's exact live
-registration, resolves enabled registrations by exact origin host/repository,
-and scans every registered ledger for nonterminal remote continuation evidence.
-Disabled registrations with a durable intent, PR/issue URL, or review-task path
-therefore still count as owners. Missing registration, duplicate owners, or
-unreadable config/identity/continuation state blocks. Every thesis action has a
-repository-global canonical identity derived from normalized source host,
-repository, action kind, and fix fingerprint or issue family id. Production
-publication phases count as remote continuation evidence: they retain unique
-repository ownership even after discovery/action consent is revoked. A
-continuation-only claim can reconcile existing evidence and persist completion
-of an already-intended push, but cannot add a replacement patch or begin a new
-push/PR request. Production
-fixes use `hive-refactor/<canonical-action-id>`, while semantic-family
-descriptors and ids also include the source host. A linked job remains
-authoritative about whether that occurrence is complete. Family and
-fingerprint files can be deleted and rebuilt from job aggregates; they must
-never be accepted as independent proof that a PR or issue was created. The
-global canonical catalog is likewise only a rebuildable locator. Its immutable
-per-action archive is created from validated terminal aggregate proof and keeps
-the exact PR/issue/handoff identity available after catalog deletion, owner
-deregistration, or removal of the original project path. A later registration
-with the same canonical action materializes that exact proof as
-`canonical_action_link` in its local aggregate and terminates without invoking
-fix/PR/issue adapters. A mandatory review-task path remains valid proof as the
-synthetic coding task advances through the exact `6-review`, `7-artifacts`,
-`8-finalize`, and `9-done` stage roots; paths in other roots or nested beneath a
-task folder are rejected. Archive corruption or conflicting proof fails closed.
 The temporary `results/` file is a transport receipt rather than durable job
 state: its path is bound to one supervisor dispatch token and is unlinked after
 reap. See [[commands/refactor-patrol]] and [[modules/daemon]].

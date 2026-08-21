@@ -37,7 +37,7 @@ Agent spawns that own controller artifacts use the boundary-ready
 `Hive::ArtifactFirewall` for same-user protected-anchor custody, required
 regular-output admission, bounded redacted reports, and verified safe restore;
 stage markers and success policy remain above that boundary.
-Post-agent Git, Patrol Fix publication, and architecture-patrol publication use the boundary-ready
+Post-agent Git plus coding and Patrol Fix publication use the boundary-ready
 `Hive::AgentGitGate`: a closed read vocabulary, exact detached materialization,
 and exact expected-OID publication with non-secret before/after receipts.
 

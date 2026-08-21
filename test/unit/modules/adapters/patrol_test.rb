@@ -27,7 +27,7 @@ class ModulesAdaptersPatrolTest < Minitest::Test
     assert_equal %w[setup scheduled-scan task-completed], result.descriptor.hooks.map { |hook| hook.fetch("id") }
     assert_equal %w[project.registered], result.descriptor.hooks.first.fetch("events")
     assert_equal [ "task.completed" ], result.descriptor.hooks.last.fetch("events")
-    assert result.descriptor.permissions.fetch("repository_write")
+    refute result.descriptor.permissions.fetch("repository_write")
   end
 
   def test_shadow_schedule_records_due_decision_without_invoking_engine
@@ -93,7 +93,7 @@ class ModulesAdaptersPatrolTest < Minitest::Test
     with_project(owner: "module") do |project|
       calls = []
       denied = configuration(shadow: false)
-      denied.grants["repository_write"] = false
+      denied.grants["filesystem_write"] = []
       adapter = Hive::Modules::Adapters::Patrol.new(
         command_factory: ->(*args) { calls << args; FakeCommand.new }
       )
@@ -539,10 +539,10 @@ class ModulesAdaptersPatrolTest < Minitest::Test
         "task_completed_workflows" => workflows, "dry_run" => false
       },
       grants: {
-        "repository_write" => true, "github_mutations" => [ "pull_requests" ],
-        "external_commands" => %w[gh git], "network_hosts" => [ "api.github.com" ],
+        "repository_write" => false, "github_mutations" => [],
+        "external_commands" => %w[git], "network_hosts" => [],
         "filesystem_read" => [ "repository" ],
-        "filesystem_write" => [ ".hive-state/patrol/**", ".hive-state/stages/**" ],
+        "filesystem_write" => [ ".hive-state/patrol/**" ],
         "secrets" => []
       },
       digest: "d" * 64,

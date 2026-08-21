@@ -1032,12 +1032,13 @@ module Hive
       patrol.review_prs: false to keep PR-only output.
 
       Use --list for a bounded, read-only finding summary shared with Hive Web.
-      Use --dry-run to map and review without creating fix worktrees,
-      pushing branches, or opening PRs. With --json, a cycle emits
-      hive-patrol.v3; --list emits hive-patrol-findings.v1.
+      Accepted findings are recorded for the shared patrol-fix workflow;
+      this command never edits code, pushes branches, or opens PRs. Use
+      --dry-run to map and review without persisting findings. With --json, a
+      cycle emits hive-patrol.v3; --list emits hive-patrol-findings.v1.
     DESC
     option :dry_run, type: :boolean, default: false,
-                     desc: "map and review, but do not fix, push, or open PRs"
+                     desc: "map and review without persisting findings"
     option :list, type: :boolean, default: false,
                   desc: "list bounded recorded finding health without running Patrol"
     option :occurrence_id, type: :string, hide: true
@@ -1071,9 +1072,6 @@ module Hive
       PR mode requires --json, cannot be combined with legacy scope hints, and
       emits hive-refactor-patrol.v4 through an enforceable read-only agent.
 
-      The daemon uses --actions with --job-manifest to resume the immutable
-      per-thesis action ledger after discovery. It emits the same v4 contract.
-
       Use --list or --show JOB_ID to inspect the authoritative durable job
       ledger without enqueueing, claiming, replaying, or resuming work. With
       --json these operations emit hive-refactor-patrol-jobs.v2. List output is
@@ -1090,8 +1088,6 @@ module Hive
     option :pr, type: :string, desc: "analyze one merged PR number or URL with the v4 read-only contract"
     option :job_manifest, type: :string,
                           desc: "analyze one immutable merge-intake manifest (daemon/internal)"
-    option :actions, type: :boolean, default: false,
-                     desc: "resume actions for --job-manifest (daemon/internal)"
     option :result_file, type: :string,
                          desc: "write daemon completion envelope to a fenced result file (internal)"
     option :occurrence_id, type: :string,
@@ -1118,7 +1114,6 @@ module Hive
         changed_since: options[:changed_since],
         pr: options[:pr],
         job_manifest: options[:job_manifest],
-        actions: options[:actions],
         result_file: options[:result_file],
         occurrence_id: options[:occurrence_id],
         list: options[:list],

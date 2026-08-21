@@ -1,5 +1,4 @@
 require "json"
-require "tempfile"
 require "time"
 require "uri"
 require "hive/gh"
@@ -9,7 +8,7 @@ module Hive
     # Architecture-patrol GitHub protocol. Hive::Gh remains the shared command
     # transport and repository identity boundary; this adapter owns the
     # feature-specific validation and response shapes used by durable patrol
-    # publication and merge intake.
+    # merge intake.
     class GithubGateway
       MAX_MERGE_TITLE_BYTES = 512
       MAX_MERGE_BODY_BYTES = 32 * 1024
@@ -35,133 +34,6 @@ module Hive
       def initialize(transport: Hive::Gh, monotonic_clock: nil)
         @transport = transport
         @monotonic_clock = monotonic_clock || -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
-      end
-
-      # The REST /issues endpoint includes pull requests, so fetch every page
-      # and validate every issue-shaped record before returning the exact issue
-      # inventory. Malformed or partial responses must not look like an empty
-      # inventory because publication callers would create duplicates.
-      def issues_for_repository(repository:, host:, cfg: nil)
-        repo = Hive::Gh::RepositoryIdentity.validated_repository_slug(repository)
-        github_host = Hive::Gh::RepositoryIdentity.validated_github_host(host)
-
-        endpoint = "repos/#{repo}/issues?state=all&per_page=100"
-        out, err, status = @transport.capture3(
-          "gh", "api", "--hostname", github_host, endpoint,
-          "--paginate", "--slurp", cfg: cfg
-        )
-        unless status.success?
-          message = err.to_s.strip.empty? ? out : err.strip
-          raise Hive::GhError, "`gh api` failed while listing issues for #{repo}: #{message}"
-        end
-
-        pages = JSON.parse(out)
-        unless pages.is_a?(Array) && pages.all? { |page| page.is_a?(Array) }
-          raise Hive::GhError, "`gh api --paginate --slurp` returned incomplete issue pages for #{repo}"
-        end
-
-        pages.flatten.filter_map do |issue|
-          validate_issue_api_record!(issue, repo, host: github_host)
-          next if issue.key?("pull_request")
-
-          {
-            "number" => issue.fetch("number"),
-            "state" => issue.fetch("state").upcase,
-            "url" => issue.fetch("html_url"),
-            "title" => issue.fetch("title"),
-            "body" => issue.fetch("body")
-          }
-        end
-      rescue JSON::ParserError => e
-        raise Hive::GhError, "issue pages for #{repository} were unparseable: #{e.message}"
-      end
-
-      def issues_with_marker(repository:, marker:, host:, cfg: nil)
-        needle = marker.to_s
-        raise Hive::GhError, "issue marker must be a non-empty string" if needle.empty?
-
-        issues_for_repository(repository: repository, host: host, cfg: cfg).select do |issue|
-          issue.fetch("body").to_s.lines.any? { |line| line.strip == needle }
-        end
-      end
-
-      # Use a temporary body file so markdown is never interpreted as argv or
-      # by a shell. The caller owns content bounds; this gateway owns transport
-      # and fail-closed command/result handling.
-      def create_issue(repository:, title:, body:, host:, cfg: nil)
-        repo = Hive::Gh::RepositoryIdentity.validated_repository_slug(repository)
-        github_host = Hive::Gh::RepositoryIdentity.validated_github_host(host)
-        unless title.is_a?(String) && !title.strip.empty?
-          raise Hive::GhError, "issue title must be a non-empty string"
-        end
-        raise Hive::GhError, "issue body must be a string" unless body.is_a?(String)
-
-        Tempfile.create([ "hive-refactor-issue-", ".md" ]) do |file|
-          file.binmode
-          file.write(body)
-          file.flush
-          out, err, status = @transport.capture3(
-            "gh", "issue", "create", "--repo", "#{github_host}/#{repo}",
-            "--title", title, "--body-file", file.path, cfg: cfg
-          )
-          unless status.success?
-            message = err.to_s.strip.empty? ? out : err.strip
-            raise Hive::GhError, "`gh issue create` failed for #{repo}: #{message}"
-          end
-
-          url = out.lines.map(&:strip).reject(&:empty?).last.to_s
-          raise Hive::GhError, "`gh issue create` returned no issue URL for #{repo}" if url.empty?
-          unless issue_url_matches_repository?(url, repo, host: github_host)
-            raise Hive::GhError, "`gh issue create` returned an unexpected issue URL for #{repo}"
-          end
-
-          url
-        end
-      end
-
-      def verify_pr_identity!(pr_url, repository:, host:, branch:, head_oid:,
-                              base_branch:, base_oid:, cfg: nil)
-        target = Hive::Gh::RepositoryIdentity.github_repository_target(repository, host)
-        fields = "url,number,state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid,headRepository"
-        out, err, status = @transport.capture3(
-          "gh", "pr", "view", pr_url.to_s, "--repo", target, "--json", fields,
-          cfg: cfg
-        )
-        unless status.success?
-          raise Hive::GhError,
-                "`gh pr view` failed while verifying created PR: " \
-                "#{err.to_s.strip.empty? ? out : err.strip}"
-        end
-        doc = JSON.parse(out)
-        unless doc.is_a?(Hash)
-          raise Hive::GhError, "`gh pr view` returned #{doc.class}; expected Hash"
-        end
-
-        validate_pr_repository_identity!(
-          pr_url, repository, doc["number"], host: host
-        )
-        validate_pr_repository_identity!(
-          doc["url"], repository, doc["number"], host: host
-        )
-
-        uri = URI.parse(doc["url"].to_s)
-        match = uri.path.match(%r{\A/([^/]+/[^/]+)/pull/([1-9]\d*)\z})
-        head_repository = doc["headRepository"]
-        valid = uri.is_a?(URI::HTTP) && uri.host&.casecmp?(host.to_s) && match &&
-                match[1].casecmp?(repository.to_s) && uri.userinfo.nil? &&
-                uri.query.nil? && uri.fragment.nil? &&
-                doc["number"].is_a?(Integer) && doc["number"].positive? &&
-                match[2].to_i == doc["number"] && doc["state"] == "OPEN" &&
-                doc["isDraft"] == false && doc["headRefName"] == branch &&
-                doc["headRefOid"] == head_oid && doc["baseRefName"] == base_branch &&
-                doc["baseRefOid"] == base_oid &&
-                head_repository.is_a?(Hash) &&
-                head_repository["nameWithOwner"].to_s.casecmp?(repository.to_s)
-        raise Hive::GhError, "created pull request identity does not match the validated patch" unless valid
-
-        doc
-      rescue JSON::ParserError, URI::InvalidURIError => e
-        raise Hive::GhError, "created pull request identity is unparseable: #{e.message}"
       end
 
       # Resolve the complete immutable inputs needed by PR-scoped architecture
@@ -464,80 +336,6 @@ module Hive
         true
       rescue URI::InvalidURIError
         raise Hive::GhError, "resolved PR URL #{url.inspect} is invalid"
-      end
-
-      def validate_issue_api_record!(issue, repository, host:)
-        unless issue.is_a?(Hash)
-          raise Hive::GhError, "`gh api` returned a non-object issue for #{repository}"
-        end
-
-        missing = %w[number state html_url title body].reject { |key| issue.key?(key) }
-        unless missing.empty?
-          raise Hive::GhError, "`gh api` issue for #{repository} is missing #{missing.inspect}"
-        end
-        unless issue["number"].is_a?(Integer) && issue["number"].positive?
-          raise Hive::GhError, "`gh api` issue for #{repository} has an invalid number"
-        end
-        unless %w[open closed].include?(issue["state"].to_s.downcase)
-          raise Hive::GhError, "`gh api` issue #{issue['number']} for #{repository} has an invalid state"
-        end
-        unless issue["html_url"].is_a?(String) && !issue["html_url"].empty?
-          raise Hive::GhError, "`gh api` issue #{issue['number']} for #{repository} has no URL"
-        end
-        unless issue["title"].is_a?(String) && !issue["title"].strip.empty?
-          raise Hive::GhError, "`gh api` issue #{issue['number']} for #{repository} has an invalid title"
-        end
-        unless issue["body"].nil? || issue["body"].is_a?(String)
-          raise Hive::GhError, "`gh api` issue #{issue['number']} for #{repository} has an invalid body"
-        end
-        if issue.key?("pull_request") && !issue["pull_request"].is_a?(Hash)
-          raise Hive::GhError,
-                "`gh api` issue #{issue['number']} for #{repository} has an invalid pull-request shape"
-        end
-        valid_url = if issue.key?("pull_request")
-          pull_request_url_matches_repository?(
-            issue["html_url"], repository, host: host, number: issue["number"]
-          )
-        else
-          issue_url_matches_repository?(
-            issue["html_url"], repository, host: host, number: issue["number"]
-          )
-        end
-        unless valid_url
-          kind = issue.key?("pull_request") ? "pull request" : "issue"
-          raise Hive::GhError,
-                "`gh api` #{kind} #{issue['number']} URL does not belong to #{repository}"
-        end
-
-        issue
-      end
-
-      def pull_request_url_matches_repository?(url, repository, host:, number: nil)
-        uri = URI.parse(url.to_s)
-        match = uri.path.match(%r{\A/([^/]+/[^/]+)/pull/([1-9]\d*)\z})
-        return false unless uri.is_a?(URI::HTTP) && uri.host && match
-        return false unless uri.host.casecmp?(host.to_s)
-        return false unless match[1].casecmp?(repository.to_s)
-        return false if number && match[2].to_i != number.to_i
-        return false unless uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
-
-        true
-      rescue URI::InvalidURIError
-        false
-      end
-
-      def issue_url_matches_repository?(url, repository, host:, number: nil)
-        uri = URI.parse(url.to_s)
-        match = uri.path.match(%r{\A/([^/]+/[^/]+)/issues/([1-9]\d*)\z})
-        return false unless uri.is_a?(URI::HTTP) && uri.host && match
-        return false unless uri.host.casecmp?(host.to_s)
-        return false unless match[1].casecmp?(repository.to_s)
-        return false if number && match[2].to_i != number.to_i
-        return false unless uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
-
-        true
-      rescue URI::InvalidURIError
-        false
       end
     end
   end

@@ -195,7 +195,6 @@ class ComponentBoundariesTest < Minitest::Test
       Hive::Modules::Migration::OccurrenceJournal
       Hive::Modules::Migration::OccurrenceRecoveryIndex
       Hive::Patrol::EffectGateway
-      Hive::RefactorPatrol::ActionTransitions
       Hive::RefactorPatrol::ArchitectureIntakeTransitions
       Hive::RefactorPatrol::ClaimMaintenanceTransitions
       Hive::RefactorPatrol::DiscoveryTransitions
@@ -908,7 +907,6 @@ class ComponentBoundariesTest < Minitest::Test
       materialize_terminal_proof!
       claim_action!
       attach_action_process!
-      renew_action_claim!
       record_creation_intent!
       record_action_receipt!
       record_patch_receipt!
@@ -923,8 +921,6 @@ class ComponentBoundariesTest < Minitest::Test
       write_job!
     ]
     allowed = %w[
-      lib/hive/refactor_patrol/action_claim_transitions.rb
-      lib/hive/refactor_patrol/action_plan_transitions.rb
       lib/hive/refactor_patrol/architecture_intake_transitions.rb
       lib/hive/refactor_patrol/claim_maintenance_transitions.rb
       lib/hive/refactor_patrol/discovery_block_transitions.rb
@@ -1023,14 +1019,6 @@ class ComponentBoundariesTest < Minitest::Test
       assert_empty offenders, "#{method_name} restored a parallel recovery map"
     end
 
-    action_runner = ruby_sources.fetch(
-      "lib/hive/refactor_patrol/action_runner.rb"
-    )
-    %w[@authorized_effects @effect_captures effect_outcome_ effect_intent_]
-      .each do |legacy_state|
-        refute_includes action_runner, legacy_state
-      end
-
     transition_port = ruby_sources.fetch(
       "lib/hive/refactor_patrol/transition_gateway.rb"
     )
@@ -1050,10 +1038,7 @@ class ComponentBoundariesTest < Minitest::Test
       refute_match(/class EffectGateway\s*</, source)
     end
 
-    transition_consumers = %w[
-      lib/hive/refactor_patrol/action_runner.rb
-      lib/hive/daemon/refactor_patrol_scheduler.rb
-    ]
+    transition_consumers = %w[lib/hive/daemon/refactor_patrol_scheduler.rb]
     transition_consumers.each do |path|
       source = ruby_sources.fetch(path)
       refute_includes source, "TransitionGateway.new"

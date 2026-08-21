@@ -16,7 +16,6 @@ require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/architecture_occurrence_lifecycle"
 require "hive/refactor_patrol/claim_liveness_resolver"
 require "hive/refactor_patrol/discovery_capacity"
-require "hive/refactor_patrol/action_claim_transitions"
 require "hive/refactor_patrol/claim_maintenance_transitions"
 require "hive/refactor_patrol/discovery_transitions"
 require "hive/refactor_patrol/pr_manifest"
@@ -33,7 +32,6 @@ require "hive/modules/event_publisher"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
 require "hive/patrol/launch_budget"
-require "hive/workflow_package/canonical_json"
 require "hive/workflows"
 
 module Hive
@@ -45,12 +43,10 @@ module Hive
       PATROL_SLUG_PREFIX = "refactor-patrol".freeze
       MODULE_SCHEDULE = "*/10 * * * *".freeze
       RETRY_BACKOFF_SEC = 60
-      RUNAWAY_RETRY_BACKOFF_SEC =
-        Hive::RefactorPatrol::ActionClaimTransitions::RETRY_BACKOFF_SEC
+      RESOURCE_RETRY_BACKOFF_SEC = 3600
       DEFERRED_RESOURCE_EXHAUSTION_REASONS = %w[
         token_limit turn_limit agent_in_flight daily_agent_spawn_limit
       ].freeze
-      ACTION_EFFECT_CAPACITY_RESERVE = 1
       SUPPORTED_REPORT_SCHEMA_VERSIONS = [
         Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
       ].freeze
@@ -202,8 +198,7 @@ module Hive
           # independent scheduled-architecture daily allowance.
           discovery = claimable
           work = classifications +
-                 discovery.map { |job| { aggregate: job, phase: :discovery } } +
-                 store.actionable_jobs(now: now).map { |job| { aggregate: job, phase: :action } }
+                 discovery.map { |job| { aggregate: job, phase: :discovery } }
           [ entry.fetch("name"), work ]
         end
         return [] if due_by_project.values.all?(&:empty?)
@@ -297,7 +292,7 @@ module Hive
         end
         enabled = cfg.dig("daemon", "enabled") == true &&
                   Hive::Workflows.coding_id?(cfg["default_workflow"]) &&
-                  (phase == :action || cfg.dig("refactor_patrol", "enabled") == true)
+                  cfg.dig("refactor_patrol", "enabled") == true
         unless enabled
           raise ReservationBlocked.new("architecture_patrol_disabled")
         end
@@ -363,43 +358,13 @@ module Hive
             }
             raise ReservationBlocked.new("source_no_longer_on_trunk", evidence)
           end
-          raise unless phase == :action && retirement == :continuation_required
-
-          aggregate = store.read_job(aggregate.fetch("job_id"))
-          aggregate.fetch("analysis_sha")
+          raise
         end
 
         capture = reserve_occurrence(
           store, entry, aggregate, migration, now
         )
         result_path = result_path_for(entry, aggregate.fetch("job_id"), phase)
-        if phase == :action
-          token = {
-            kind: :architecture_patrol,
-            phase: :action,
-            job_id: aggregate.fetch("job_id"),
-            registration: entry.fetch("name"),
-            result_path: result_path,
-            reservation_id: capture.occurrence_id,
-            occurrence_id: capture.occurrence_id,
-            migration_owner: migration.fetch("owner"),
-            migration_epoch: migration.fetch("epoch"),
-            job_digest: job_digest(aggregate)
-          }
-          return candidate.merge(
-            slug: "#{PATROL_SLUG_PREFIX}-#{aggregate.fetch('job_id')}-actions",
-            stage: PATROL_STAGE,
-            command: "hive refactor-patrol #{Shellwords.escape(entry.fetch('name'))} " \
-                     "--job-manifest #{Shellwords.escape(manifest_path)} " \
-                     "--result-file #{Shellwords.escape(result_path)} " \
-                     "--occurrence-id #{Shellwords.escape(capture.occurrence_id)} " \
-                     "--actions --json",
-            state_file_mtime: nil,
-            state_file_path: nil,
-            hive_state_path: entry["hive_state_path"],
-            dispatch_token: token
-          )
-        end
         token = if @dry_run
           { job_id: aggregate.fetch("job_id"), owner: @owner, generation: 0, dry_run: true }
         else
@@ -444,7 +409,7 @@ module Hive
 
       def spawned(dispatch, pid:, process_start_time:, pgid:, now: Time.now)
         return dispatch if @dry_run
-        return dispatch if %i[action classification].include?(dispatch.dig(:dispatch_token, :phase))
+        return dispatch if dispatch.dig(:dispatch_token, :phase) == :classification
 
         @claim_maintenance_transitions.attach_discovery(
           store: store_for(dispatch.fetch(:entry)),
@@ -461,7 +426,6 @@ module Hive
         token = dispatch[:dispatch_token]
         return unless token
         return dispatch if @dry_run || token[:dry_run]
-        return dispatch if token[:phase] == :action
         if token[:phase] == :classification
           entry = dispatch.fetch(:entry)
           classifier_for(entry, @config_loader.call(entry.fetch("path"))).release_claim!(
@@ -483,7 +447,6 @@ module Hive
 
       def complete(dispatch_token:, exit_code:, envelope:, now: Time.now)
         return completion_result(:dry_run, dispatch_token, envelope) if @dry_run || dispatch_token[:dry_run]
-        return complete_action(dispatch_token, exit_code, envelope, now) if dispatch_token[:phase] == :action
         return complete_classification(dispatch_token, exit_code, now) if
           dispatch_token[:phase] == :classification
 
@@ -631,8 +594,7 @@ module Hive
         Array(@configuration_errors).each do |item|
           entry = item.fetch(:entry)
           store = store_for(entry)
-          work = store.claimable_jobs(now: now).map { |job| [ job, :discovery ] } +
-                 store.actionable_jobs(now: now).map { |job| [ job, :action ] }
+          work = store.claimable_jobs(now: now).map { |job| [ job, :discovery ] }
           work.each do |aggregate, phase|
             block(
               entry, aggregate,
@@ -978,32 +940,16 @@ module Hive
         )
       end
 
-      def continuation_evidence?(aggregate)
-        Hive::RefactorPatrol::RepositoryOwnership.continuation_evidence?(aggregate)
-      end
-
       def repository_ownership_decision(entry, aggregate,
                                         cfg: entry.fetch("_refactor_patrol_cfg"),
                                         phase: :discovery,
                                         expected_identity: nil,
                                         ownership_resolver: @repository_ownership)
-        decision = ownership_resolver.call(
+        ownership_resolver.call(
           entry: entry,
           cfg: cfg,
-          expected_identity: expected_identity,
-          continuation: continuation_evidence?(aggregate),
-          continuation_owner: Hive::RefactorPatrol::RepositoryOwnership
-            .remote_continuation_evidence?(aggregate)
+          expected_identity: expected_identity
         )
-        if phase.to_sym == :action && decision.reason == "architecture_patrol_disabled"
-          return Hive::RefactorPatrol::RepositoryOwnership::Decision.new(
-            authority: :continuation_only,
-            reason: decision.reason,
-            evidence: decision.evidence
-          )
-        end
-
-        decision
       end
 
       def source_identity(aggregate)
@@ -1080,9 +1026,7 @@ module Hive
         }
       end
 
-      def effect_capacity_reserve(phase)
-        return ACTION_EFFECT_CAPACITY_RESERVE if phase.to_sym == :action
-
+      def effect_capacity_reserve(_phase)
         Hive::RefactorPatrol::DiscoveryCapacity::MAX_EFFECTS_PER_CLAIM
       end
 
@@ -1150,13 +1094,7 @@ module Hive
           return true unless resolved
         end
 
-        aggregate.fetch("actions").any? do |action|
-          Array(action["claims"]).any? do |claim|
-            claim["occurrence_id"] == occurrence_id &&
-              Hive::RefactorPatrol::JobStore::
-                ACTIVE_ACTION_CLAIM_STATES.include?(claim["state"])
-          end
-        end
+        false
       rescue ArgumentError, KeyError
         true
       end
@@ -1228,73 +1166,14 @@ module Hive
         "malformed_envelope"
       end
 
-      def complete_action(token, exit_code, envelope, now)
-        entry = entry_for_token(token)
-        store = store_for(entry)
-        aggregate = store.read_job(token.fetch(:job_id))
-        valid = exit_code == 0 && envelope.is_a?(Hash) && valid_report_envelope?(envelope) &&
-                envelope["job_id"] == aggregate.fetch("job_id") &&
-                envelope["project"] == entry.fetch("name") &&
-                envelope["project_root"] == entry.fetch("path") &&
-                envelope["source_pr"] == aggregate.fetch("source") &&
-                envelope["analysis_sha"] == aggregate.fetch("analysis_sha") &&
-                envelope["complete"] == aggregate.fetch("complete")
-        status = if valid && aggregate.fetch("complete")
-          :closed
-        elsif valid && action_progressed?(token, aggregate)
-          :action_pending
-        elsif valid
-          aggregate = block_through_gateway!(
-            entry, store, aggregate, phase: :action,
-            reason: "action_no_progress", evidence: {}, now: now,
-            backoff_sec: RUNAWAY_RETRY_BACKOFF_SEC
-          )
-          :retry
-        else
-          aggregate = block_through_gateway!(
-            entry, store, aggregate, phase: :action,
-            reason: action_completion_failure_reason(exit_code, envelope),
-            evidence: {},
-            now: now,
-            backoff_sec: RUNAWAY_RETRY_BACKOFF_SEC
-          )
-          :retry
-        end
-        result = completion_result(status, token, envelope, aggregate: aggregate)
-        publish_finalized(entry, token, result, aggregate, now)
-        result
-      rescue Hive::RefactorPatrol::JobStore::Error, Hive::ConfigError, KeyError
-        completion_result(:retry, token, envelope, aggregate: aggregate)
-      end
-
-      def action_completion_failure_reason(exit_code, envelope)
-        return "action_child_failed_or_signaled" unless exit_code == 0
-        return "action_missing_envelope" if envelope.nil?
-
-        "action_malformed_or_mismatched_envelope"
-      end
-
-      def action_progressed?(token, aggregate)
-        baseline = token[:job_digest] || token["job_digest"]
-        baseline.nil? || baseline != job_digest(aggregate)
-      end
-
-      def job_digest(aggregate)
-        Digest::SHA256.hexdigest(
-          Hive::WorkflowPackage::CanonicalJSON.generate(aggregate)
-        )
-      end
-
-      def retry_backoff_sec(phase)
-        phase.to_sym == :action ? RUNAWAY_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
-      end
+      def retry_backoff_sec(_phase) = RETRY_BACKOFF_SEC
 
       def discovery_retry_backoff_sec(envelope, now)
         reasons = Array(envelope["review_errors"]).filter_map do |error|
           error.dig("details", "resource_exhaustion", "reason") if error.is_a?(Hash)
         end
         fallback = if reasons.any? { |reason| DEFERRED_RESOURCE_EXHAUSTION_REASONS.include?(reason) }
-          RUNAWAY_RETRY_BACKOFF_SEC
+          RESOURCE_RETRY_BACKOFF_SEC
         else
           RETRY_BACKOFF_SEC
         end

@@ -40,13 +40,7 @@ class PatrolFixPublishStageTest < Minitest::Test
       true
     end
 
-    def list_pull_requests(cursor:, **)
-      raise "unexpected cursor" if cursor
-      {
-        "items" => records, "next_cursor" => nil,
-        "has_next_page" => false, "complete" => true, "truncated" => false
-      }
-    end
+    def list_pull_requests(**) = records
 
     def create_pull_request(request:, **)
       @creates += 1

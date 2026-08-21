@@ -8,15 +8,11 @@ class HiveCommandsRefactorPatrolManifestTest < Minitest::Test
 
   T0 = Time.utc(2026, 7, 11, 10, 0, 0)
 
-  def test_heartbeat_ignores_a_claim_that_settled_after_snapshot_and_renews_later_claims
-    stale = { job_id: "job-1", canonical_action_id: "fix-a", owner: "runner", generation: 1, kind: :action }
-    live = { job_id: "job-1", canonical_action_id: "issue-b", owner: "runner", generation: 1, kind: :action }
-    renewed = []
+  def test_heartbeat_ignores_a_discovery_claim_that_settled_after_snapshot
+    stale = { job_id: "job-1", owner: "runner", generation: 1, kind: :discovery }
     store = Object.new
-    store.define_singleton_method(:renew_action_claim!) do |token, **|
+    store.define_singleton_method(:renew_discovery_claim!) do |token, **|
       raise Hive::RefactorPatrol::JobStore::StaleClaim, "settled" if token == stale
-
-      renewed << token
     end
     command = Hive::Commands::RefactorPatrol.new(
       "demo", json: true, job_manifest: "/unused",
@@ -24,11 +20,9 @@ class HiveCommandsRefactorPatrolManifestTest < Minitest::Test
     )
     command.instance_variable_set(:@job_store, store)
     command.instance_variable_set(:@manifest, { "job_id" => "job-1" })
-    command.define_singleton_method(:active_claim_tokens) { [ stale, live ] }
+    command.define_singleton_method(:active_claim_tokens) { [ stale ] }
 
-    command.send(:heartbeat_active_claims)
-
-    assert_equal [ live ], renewed
+    assert_equal [ stale ], command.send(:heartbeat_active_claims)
   end
 
   def test_job_manifest_mode_consumes_published_bytes_without_pr_resolution

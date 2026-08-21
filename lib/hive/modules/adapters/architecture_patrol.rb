@@ -21,8 +21,7 @@ module Hive
         ENTRYPOINTS = {
           "architecture-patrol.setup" => "setup",
           "architecture-patrol.scheduled-discovery" => "scheduled-discovery",
-          "architecture-patrol.merged-pr-discovery" => "merged-pr-discovery",
-          "architecture-patrol.actions" => "actions"
+          "architecture-patrol.merged-pr-discovery" => "merged-pr-discovery"
         }.freeze
 
         def initialize(command_factory: nil, scheduler_factory: nil,
@@ -194,7 +193,6 @@ module Hive
               "configuration_digest" => configuration.digest
             }
           }
-          options[:actions] = true if reserved.fetch(:action_phase, :discovery).to_sym == :action
           envelope = @command_factory.call(project.fetch("name"), options).call
           result = scheduler.complete(
             dispatch_token: reserved.fetch(:dispatch_token),
@@ -208,9 +206,8 @@ module Hive
         end
 
         def select_candidate(candidates, hook_id, event)
-          phase = hook_id == "actions" ? :action : :discovery
           matches = Array(candidates).select do |candidate|
-            candidate.fetch(:action_phase, :discovery).to_sym == phase
+            candidate.fetch(:action_phase, :discovery).to_sym == :discovery
           end
           return matches.first unless hook_id == "merged-pr-discovery"
 
@@ -234,9 +231,6 @@ module Hive
         def require_mutation_capabilities!(context)
           context.require_repository_write!
           context.require_filesystem_write!(".hive-state/refactor_patrol/**")
-          context.require_github_mutation!("pull_requests")
-          context.require_external_command!("gh")
-          context.require_network_host!("api.github.com")
         end
 
         def require_scheduled_mutation_capabilities!(context)
@@ -371,7 +365,7 @@ module Hive
         def validate_hook!(hook_id, event)
           expected = {
             "setup" => "project.registered", "scheduled-discovery" => "schedule",
-            "merged-pr-discovery" => "pull_request.merged", "actions" => "schedule"
+            "merged-pr-discovery" => "pull_request.merged"
           }.fetch(hook_id) do
             raise Hive::ConfigError, "unknown Architecture Patrol module hook #{hook_id.inspect}"
           end

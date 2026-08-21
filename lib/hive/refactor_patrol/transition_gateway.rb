@@ -11,7 +11,7 @@ module Hive
   module RefactorPatrol
     # Product port for authoritative JobStore lifecycle mutations. It reuses
     # Architecture Patrol's single effect gateway and occurrence journal, so
-    # local job/discovery/action transitions receive the same live admission,
+    # local job/discovery transitions receive the same live admission,
     # stable sender lock, uncertainty, and canonical receipt guarantees as remote
     # sinks without becoming a second recovery mechanism.
     class TransitionGateway

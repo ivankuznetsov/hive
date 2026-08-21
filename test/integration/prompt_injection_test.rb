@@ -239,8 +239,10 @@ class PromptInjectionTest < Minitest::Test
           project_name: File.basename(dir),
           task_folder: task.folder,
           worktree_path: "/tmp/wt",
+          authoring_path: "/tmp/pr-draft.json",
           slug: "x-260424-aaaa",
           branch: "x-260424-aaaa",
+          base_branch: "main",
           plan_text: HOSTILE_IDEA,
           execute_output_text: HOSTILE_IDEA,
           user_supplied_tag: tag
@@ -248,10 +250,10 @@ class PromptInjectionTest < Minitest::Test
       )
       assert_includes prompt, "<#{tag} content_type=\"plan_md\">"
       assert_includes prompt, "<#{tag} content_type=\"execute_output_md\">"
-      # Tightened (round-1 finding): word-boundary on `--draft` so a
-      # future `--draft=false` (or any longer prefix-shared flag) does
-      # not silently pass this assertion.
-      assert_match(/gh pr create.*--draft\b/, prompt, "open-pr prompt must instruct draft PR creation")
+      assert_includes prompt, "/tmp/pr-draft.json"
+      assert_includes prompt, "publication controller exclusively owns"
+      assert_match(/Do not run `git push`, `gh`/, prompt)
+      refute_match(/gh pr create/, prompt)
       assert_equal 2, prompt.scan("<#{tag} ").count
       assert_equal 2, prompt.scan("</#{tag}>").count
     end

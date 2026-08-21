@@ -47,7 +47,7 @@ class ArchitecturePatrolModuleIntegrationTest < Minitest::Test
           settings: { "shadow_mode" => true, "dry_run" => false },
           hooks: {
             "setup" => false, "scheduled-discovery" => false,
-            "merged-pr-discovery" => true, "actions" => false
+            "merged-pr-discovery" => true
           },
           grants: validation.descriptor.permissions, now: NOW - 60
         )

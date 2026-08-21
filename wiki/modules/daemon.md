@@ -245,27 +245,19 @@ failures log `fatal` with `keeping_previous: true` instead of crashing the poll
 loop.
 
 Architecture-patrol dispatches are ordinary supervised child processes but
-not ordinary task rows. Discovery and action claims bind owner, exact process
+not ordinary task rows. Discovery claims bind owner, exact process
 start identity, process group, renewable heartbeat/lease, and fencing
 generation. Workers do not claim without a verifiable start identity; recovery
 can resolve a definitely dead PID but fails closed for a live process whose
 identity cannot be proven. A replacement generation is allowed only after the
 expired owner is proven gone or its process group is terminated. The scheduler
-takes one immutable ownership snapshot per candidate-selection pass, sharing
-registration/config/identity/continuation reads (and failures) across every due
-job in that tick. Reservation deliberately ignores that snapshot and resolves
-the live inputs again. Full authority requires the target's exact registered
-name/path. Live identities from architecture-enabled registrations count even
-when their daemon is disabled, while every registered project ledger is
-scanned for nonterminal remote intents, PR/issue URLs, or review-handoff paths;
-those pending continuations remain owners even after that registration is
-disabled. Missing registration, duplicate owners, and unreadable
-config/identity/continuation state fail closed. Feature checkpoints and action
-receipts live in the authoritative job aggregate, so daemon restart
-reconstructs work rather than trusting its in-memory slots. Action children
-resume classified/acting jobs separately from read-only discovery and re-check
-current consent and unique ownership before each new external effect, plus
-ownership and the current action claim before a PR handoff. Large v2
+takes one immutable ownership snapshot per candidate-selection pass. Reservation
+resolves the live registration and configuration again before claiming.
+Missing registration, duplicate enabled owners, and unreadable identity state
+fail closed. Feature checkpoints live in the authoritative job aggregate, so
+daemon restart reconstructs discovery rather than trusting in-memory slots.
+Completed discovery terminalizes the job and publishes accepted dispositions
+to the Patrol Fix source outbox. Large v2
 documents are written atomically under
 `.hive-state/refactor_patrol/v2/results/`; the supervisor consumes and removes
 the exact path carried in the dispatch token when the child is reaped.

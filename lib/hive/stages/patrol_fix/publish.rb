@@ -38,37 +38,40 @@ module Hive
 
           git_gateway ||= default_git_gateway(cfg)
           github_gateway ||= Hive::GithubPublication::GithubGateway.new(cfg: cfg)
-          request = publication_request(
+          request, authority = publication_context(
             task, cfg, git_gateway: git_gateway, worktree_root: worktree_root
           )
           controller ||= Hive::GithubPublication::Controller.new(
-            state_path: publication_state_path(task, request.generation),
+            state_path: publication_state_path(task, authority.fetch("generation")),
             git_gateway: git_gateway, github_gateway: github_gateway
           )
           revalidate = lambda do |_phase|
-            current = publication_request(
+            current, current_authority = publication_context(
               task, cfg, git_gateway: git_gateway, worktree_root: worktree_root
             )
-            current.to_h == request.to_h
+            current.to_h == request.to_h && current_authority == authority
           end
           publication = controller.publish!(request, revalidate: revalidate)
 
           # The lower-level controller revalidates at its final observation,
           # and the stage repeats that exact check immediately before local
           # completion authority becomes durable.
-          final = publication_request(
+          final, final_authority = publication_context(
             task, cfg, git_gateway: git_gateway, worktree_root: worktree_root
           )
-          unless final.to_h == request.to_h
+          unless final.to_h == request.to_h && final_authority == authority
             raise Hive::GithubPublication::Blocked.new(
               "stale_authority", "publication authority changed before the canonical receipt"
             )
           end
           receipt = Hive::PatrolFix::PublicationReceipt.build(
-            task: { "slug" => request.task, "generation" => request.generation },
+            task: {
+              "slug" => task.slug,
+              "generation" => authority.fetch("generation")
+            },
             evidence_revision: {
-              "generation" => request.generation,
-              "digest" => request.evidence_digest
+              "generation" => authority.fetch("generation"),
+              "digest" => authority.fetch("evidence_digest")
             },
             publication: publication
           )
@@ -89,11 +92,24 @@ module Hive
           snapshot = exact_snapshot!(
             task, cfg, git_gateway: git_gateway, worktree_root: worktree_root
           )
+          request_from_snapshot(task, cfg, snapshot)
+        end
+
+        def publication_context(task, cfg, git_gateway:, worktree_root:)
+          snapshot = exact_snapshot!(
+            task, cfg, git_gateway: git_gateway, worktree_root: worktree_root
+          )
+          authority = {
+            "generation" => snapshot.fetch("manifest").dig("task", "generation"),
+            "evidence_digest" => snapshot.fetch("manifest").dig("evidence_revision", "digest"),
+            "review_receipt_id" => snapshot.fetch("review").fetch("receipt_id")
+          }.freeze
+          [ request_from_snapshot(task, cfg, snapshot), authority ]
+        end
+        private_class_method :publication_context
+
+        def request_from_snapshot(task, cfg, snapshot)
           Hive::GithubPublication::Request.new(
-            task: task.slug,
-            generation: snapshot.fetch("manifest").dig("task", "generation"),
-            evidence_digest: snapshot.fetch("manifest").dig("evidence_revision", "digest"),
-            review_receipt_id: snapshot.fetch("review").fetch("receipt_id"),
             worktree_path: snapshot.fetch("owner").fetch("worktree"),
             host: snapshot.fetch("repository_identity").fetch("host"),
             repository: snapshot.fetch("repository_identity").fetch("repository"),
@@ -111,6 +127,7 @@ module Hive
             "invalid_publication_identity", "publication identity is invalid"
           )
         end
+        private_class_method :request_from_snapshot
 
         def publication_state_path(task, generation)
           File.join(

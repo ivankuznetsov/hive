@@ -2,7 +2,9 @@ require "hive/refactor_patrol/transition_evidence"
 
 module Hive
   module RefactorPatrol
-    # Diagnostic discovery/action block transitions outside a live claim.
+    # Diagnostic discovery block transitions outside a live claim. The action
+    # branch remains only to validate historical v4 records; no runtime caller
+    # schedules it.
     class DiscoveryBlockTransitions
       def initialize(context:)
         @context = context

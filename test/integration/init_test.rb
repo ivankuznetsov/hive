@@ -2169,7 +2169,7 @@ class InitTest < Minitest::Test
     end
   end
 
-  def test_init_renders_recommended_refactor_patrol_with_auto_fix_and_issue_output
+  def test_init_renders_recommended_refactor_patrol_as_discovery_only
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         out, _err = capture_io { Hive::Commands::Init.new(dir).call }
@@ -2177,10 +2177,12 @@ class InitTest < Minitest::Test
         resolved = Hive::Config.load(dir)
 
         assert_equal true, raw.dig("refactor_patrol", "enabled")
-        assert_equal true, raw.dig("refactor_patrol", "auto_fix", "enabled")
+        refute raw.fetch("refactor_patrol").key?("auto_fix")
         assert_nil raw.dig("refactor_patrol", "commands", "public_contract")
-        assert_equal false, raw.dig("refactor_patrol", "issue_filing", "enabled")
+        refute raw.fetch("refactor_patrol").key?("issue_filing")
         assert_equal true, resolved.dig("refactor_patrol", "enabled")
+        assert_equal false, resolved.dig("refactor_patrol", "auto_fix", "enabled")
+        assert_equal false, resolved.dig("refactor_patrol", "issue_filing", "enabled")
         assert_nil resolved.dig("refactor_patrol", "commands", "public_contract")
         assert_includes out, "architecture patrol"
         assert_includes out, "enabled"
@@ -2195,8 +2197,8 @@ class InitTest < Minitest::Test
         raw = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
 
         assert_equal false, raw.dig("refactor_patrol", "enabled")
-        assert_equal false, raw.dig("refactor_patrol", "auto_fix", "enabled")
-        assert_equal false, raw.dig("refactor_patrol", "issue_filing", "enabled")
+        refute raw.fetch("refactor_patrol").key?("auto_fix")
+        refute raw.fetch("refactor_patrol").key?("issue_filing")
       end
     end
   end

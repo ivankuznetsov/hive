@@ -125,7 +125,7 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 | `brainstorm_prompt.md.erb` | `Stages::Brainstorm.run!` | `project_name`, `task_folder`, `idea_text`, `user_supplied_tag` |
 | `plan_prompt.md.erb` | `Stages::Plan.run!` | `project_name`, `task_folder`, `brainstorm_text`, `user_supplied_tag` |
 | `execute_prompt.md.erb` | `Stages::Execute.run!` (impl-only since ADR-014) | `project_name`, `worktree_path`, `task_folder`, `plan_text`, `user_supplied_tag` |
-| `open_pr_prompt.md.erb` | `Stages::OpenPr.run!` | `project_name`, `task_folder`, `worktree_path`, `slug`, `branch`, `plan_text`, `execute_output_text`, `user_supplied_tag` |
+| `open_pr_prompt.md.erb` | `Stages::OpenPr.run!` | `project_name`, `task_folder`, `worktree_path`, `authoring_path`, `slug`, `branch`, `base_branch`, `plan_text`, `execute_output_text`, `user_supplied_tag` |
 | `artifacts_prompt.md.erb` | `Stages::Artifacts.run!` | `project_name`, `task_folder`, `worktree_path`, `artifact_file`, `user_supplied_tag` |
 | `review_prompt.md.erb` | (legacy — was used by the U9-removed `Stages::Execute#run_review_pass`. Retained for backwards compat; the active 6-review prompts are the reviewer / triage / fix / ci_fix / browser_test ones below.) | n/a |
 | `fix_prompt.md.erb` | `Stages::Review#spawn_fix_agent` (Phase 4) | `project_name`, `worktree_path`, `task_folder`, `pass`, `accepted_findings`, `task_slug`, `triage_bias`, `reviewer_sources`, `user_supplied_tag` |
@@ -150,11 +150,15 @@ As of commit `ce3f7978`, the prompt's scoped-edit rule has one deliberate except
 
 The runner determines completion for agent-owned marker files from the marker
 written into the state file, not from the agent process returning to an idle
-prompt. The tmux-sensitive agent-owned templates `plan_prompt.md.erb`,
-`open_pr_prompt.md.erb`, `artifacts_prompt.md.erb`, and
+prompt. The tmux-sensitive marker-owning templates `plan_prompt.md.erb` and
 `finalize_prompt.md.erb` therefore end with a "Completion - REQUIRED" section
 that tells the agent to write the exact terminal marker as the last line and not
 yield until that marker exists.
+
+`open_pr_prompt.md.erb` is metadata-only: the agent writes bounded
+`pr-draft.json`, while the shared publication controller writes `pr.md` and its
+terminal marker. `artifacts_prompt.md.erb` is similarly controller-owned after
+multi-role evidence validation, so neither template grants marker authority.
 
 `execute_prompt.md.erb` and `review_prompt.md.erb` are intentionally excluded
 because those stages are runner-owned marker paths: the runner stamps `task.md`,

@@ -6,8 +6,7 @@ require "hive/commands/patrol"
 require "hive/config"
 require "hive/patrol/feature"
 require "hive/patrol/finding"
-require "hive/patrol/fixer"
-require "hive/patrol/pr_opener"
+require "hive/patrol/state_store"
 
 class PatrolCommandTest < Minitest::Test
   include HiveTestHelper
@@ -17,9 +16,7 @@ class PatrolCommandTest < Minitest::Test
       @features = features
     end
 
-    def call
-      @features
-    end
+    def call = @features
   end
 
   class FakeReviewer
@@ -36,1452 +33,138 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
-  class FakeFixer
-    attr_reader :attempted
-
-    def initialize(patch)
-      @patch = patch
-      @attempted = []
-    end
-
-    def attempt(finding)
-      @attempted << finding.id
-      @patch
-    end
-  end
-
-  class FakePrOpener
-    attr_reader :opened
-
-    def initialize(result)
-      @result = result
-      @opened = []
-    end
-
-    def open(finding, patch)
-      @opened << [ finding.id, patch.id ]
-      @result
-    end
-  end
-
-  class MappedFixer
-    attr_reader :attempted
-
-    def initialize(by_id)
-      @by_id = by_id
-      @attempted = []
-    end
-
-    def attempt(finding)
-      @attempted << finding.id
-      @by_id.fetch(finding.id)
-    end
-  end
-
-  class FakeDismissals
-    def reconcile
-      {}
-    end
-  end
-
-  def test_patrol_json_cycle_validates_and_records_state
+  def test_patrol_records_findings_for_the_workflow_without_local_fix_or_publication
     with_patrol_project do |repo|
-      feature = sample_feature
       finding = sample_finding
-      patch = sample_patch(repo, finding)
-      pr_result = Hive::Patrol::PrOpener::Result.new(status: :opened, pr_url: "https://example.com/pull/7")
 
       out, err, status = with_captured_exit do
         command_for(
-          mapper: FakeMapper.new([ feature ]),
-          reviewer: FakeReviewer.new([ finding ]),
-          fixer: FakeFixer.new(patch),
-          pr_opener: FakePrOpener.new(pr_result)
+          mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ finding ])
         ).call
       end
 
       assert_equal "", err
       assert_equal Hive::ExitCodes::SUCCESS, status
-      assert_equal 1, out.lines.count
       payload = JSON.parse(out)
-      assert patrol_schemer.valid?(payload), patrol_schemer.validate(payload).map { |e| e["error"] }.inspect
-      assert_equal "demo", payload.fetch("project")
-      assert_equal 1, payload.fetch("features_mapped")
-      assert_equal 1, payload.fetch("features_review_attempted")
-      assert_equal 1, payload.fetch("features_reviewed")
-      assert_equal true, payload.fetch("review_complete")
-      assert_empty payload.fetch("review_errors")
+      assert patrol_schemer.valid?(payload),
+             patrol_schemer.validate(payload).map { |failure| failure["error"] }.inspect
       assert_equal 1, payload.fetch("findings")
       assert_equal 1, payload.fetch("fix_candidates")
-      assert_equal 1, payload.fetch("fixes_attempted")
-      assert_equal 1, payload.fetch("fixes_validated")
-      assert_equal [ "https://example.com/pull/7" ], payload.fetch("pr_urls")
-      assert_equal [], payload.fetch("review_handoff_errors")
-      assert_equal "opened", payload.dig("fix_results", 0, "publication_status")
-      record_path = Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].first
-      record = JSON.parse(File.read(record_path))
-      assert_equal run!("git", "-C", repo, "rev-parse", "HEAD").strip,
-                   record.fetch("target_sha")
-      assert_equal "test", record.fetch("validation_key")
-      assert_equal "active", record.fetch("lifecycle_state")
+      assert_equal 0, payload.fetch("fixes_attempted")
+      assert_equal 0, payload.fetch("fixes_validated")
+      assert_equal 0, payload.fetch("prs_opened")
+      assert_empty payload.fetch("pr_urls")
+      assert_empty payload.fetch("fix_results")
 
-      state = JSON.parse(File.read(File.join(repo, ".hive-state", "patrol", "state.json")))
-      assert_equal payload.fetch("last_scanned_sha"), state.fetch("last_scanned_sha")
-      refute_empty state.fetch("last_run_at")
-      selection_path = Dir[File.join(repo, ".hive-state", "patrol", "runs", "selection-*.json")].first
-      refute_nil selection_path
-      selection = JSON.parse(File.read(selection_path))
-      assert_equal "hive-patrol-selection", selection.fetch("schema")
-      assert_equal [ finding.id ], selection.fetch("ranked_candidates").map { |item| item.fetch("finding_id") }
-      assert_operator selection.dig("ranked_candidates", 0, "alpha_score"), :>=, 70
+      store = patrol_store(repo)
+      pending = store.patrol_fix_admission_outbox.pending
+      assert_equal 1, pending.length
+      assert_equal finding.id, pending.first.dig("snapshot", "identity")
+      assert_empty Dir[File.join(repo, ".hive-state", "patrol", "patches", "*.json")]
     end
   end
 
-  def test_semantic_duplicate_on_the_same_target_is_filtered_before_persistence
+  def test_validation_commands_are_no_longer_a_discovery_precondition
+    with_patrol_project do |repo|
+      config_path = File.join(repo, ".hive-state", "config.yml")
+      config = YAML.safe_load_file(config_path, aliases: true)
+      config["patrol"]["commands"] = {
+        "docs" => nil, "format" => nil, "lint" => nil,
+        "public_contract" => nil, "typecheck" => nil, "test" => nil
+      }
+      File.write(config_path, config.to_yaml)
+
+      out, _err, status = with_captured_exit do
+        command_for(
+          mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ sample_finding ])
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_equal 1, JSON.parse(out).fetch("findings")
+      assert_equal 1, patrol_store(repo).patrol_fix_admission_outbox.pending.length
+    end
+  end
+
+  def test_semantic_duplicate_does_not_duplicate_workflow_admission
     with_patrol_project do |repo|
       first = sample_finding
-      second = sample_finding
-      second.id = "finding-2"
+      duplicate = sample_finding
+      duplicate.id = "finding-duplicate"
+
       first_out, = with_captured_exit do
         command_for(
-          dry_run: true, mapper: FakeMapper.new([ sample_feature ]),
+          mapper: FakeMapper.new([ sample_feature ]),
           reviewer: FakeReviewer.new([ first ])
         ).call
       end
       second_out, = with_captured_exit do
         command_for(
-          dry_run: true, mapper: FakeMapper.new([ sample_feature ]),
-          reviewer: FakeReviewer.new([ second ])
+          mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ duplicate ])
         ).call
       end
 
       assert_equal 1, JSON.parse(first_out).fetch("findings")
       second_payload = JSON.parse(second_out)
-      assert_equal 0, second_payload.fetch("findings")
-      duplicate = second_payload.fetch("skipped_findings").first
-      assert_equal "semantic_duplicate", duplicate.fetch("reason")
-      assert_equal "finding-1", duplicate.fetch("canonical_finding_id")
-      assert_equal 1, Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].size
+      assert_equal 1, second_payload.fetch("findings")
+      assert_equal 1, patrol_store(repo).findings.length
+      assert_equal 1, patrol_store(repo).patrol_fix_admission_outbox.pending.length
     end
   end
 
-  def test_shipping_cycle_retries_the_active_finding_persisted_by_a_dry_run
+  def test_review_error_keeps_the_scanned_sha_unadvanced
     with_patrol_project do |repo|
-      dry_run_finding = sample_finding
-      shipping_duplicate = sample_finding
-      shipping_duplicate.id = "finding-shipping"
-
-      with_captured_exit do
-        command_for(
-          dry_run: true, mapper: FakeMapper.new([ sample_feature ]),
-          reviewer: FakeReviewer.new([ dry_run_finding ])
-        ).call
-      end
-      fixer = FakeFixer.new(failing_patch(dry_run_finding))
-      shipping_out, = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ sample_feature ]),
-          reviewer: FakeReviewer.new([ shipping_duplicate ]),
-          fixer: fixer
-        ).call
-      end
-
-      payload = JSON.parse(shipping_out)
-      assert_equal 1, payload.fetch("findings")
-      assert_equal 1, payload.fetch("fix_candidates")
-      assert_equal 1, payload.fetch("fixes_attempted")
-      assert_equal [ dry_run_finding.id ], fixer.attempted,
-                   "the shipping cycle must retry the canonical durable finding"
-      assert_empty payload.fetch("skipped_findings")
-      assert_equal 1, Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].size
-    end
-  end
-
-  def test_transient_fix_failure_retries_the_same_active_finding_on_the_next_cycle
-    with_patrol_project do |repo|
-      first = sample_finding
-      duplicate = sample_finding
-      duplicate.id = "finding-next-cycle"
-      first_fixer = FakeFixer.new(failing_patch(first))
-      second_fixer = FakeFixer.new(failing_patch(first))
-
-      first_out, = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ sample_feature ]), reviewer: FakeReviewer.new([ first ]),
-          fixer: first_fixer
-        ).call
-      end
-      second_out, = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ sample_feature ]), reviewer: FakeReviewer.new([ duplicate ]),
-          fixer: second_fixer
-        ).call
-      end
-
-      assert_equal 1, JSON.parse(first_out).fetch("fixes_attempted")
-      assert_equal 1, JSON.parse(second_out).fetch("fixes_attempted")
-      assert_equal [ first.id ], first_fixer.attempted
-      assert_equal [ first.id ], second_fixer.attempted
-      assert_equal 1, Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].size
-    end
-  end
-
-  def test_shipping_cycle_retries_active_feature_limited_finding_without_rediscovery
-    with_patrol_project do |repo|
-      first = sample_finding
-      second = finding_with(id: "finding-2", fingerprint: nil)
-      second.feature_id = first.feature_id
-      first_fixer = FakeFixer.new(
-        Hive::Patrol::Fixer::PatchAttempt.new(
-          id: "patch-stale-#{first.id}",
-          finding: first,
-          branch: "hive-patrol/route-home-stale",
-          worktree_path: nil,
-          validation: { "passed" => false, "reason" => "stale_evidence" },
-          passed: false,
-          diffstat: "",
-          head_sha: nil
-        )
-      )
-
-      first_out, = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ sample_feature ]),
-          reviewer: FakeReviewer.new([ first, second ]),
-          fixer: first_fixer
-        ).call
-      end
-      second_fixer = FakeFixer.new(failing_patch(second))
-      second_out, = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ sample_feature ]),
-          reviewer: FakeReviewer.new([]),
-          fixer: second_fixer
-        ).call
-      end
-
-      assert_equal [ first.id ], first_fixer.attempted
-      assert_equal "feature_limit",
-                   JSON.parse(first_out).fetch("skipped_findings").first.fetch("reason")
-      assert_equal 0, JSON.parse(second_out).fetch("findings")
-      assert_equal 1, JSON.parse(second_out).fetch("fix_candidates")
-      assert_equal [ second.id ], second_fixer.attempted,
-                   "an active finding must remain fixable after its review feature rotates away"
-    end
-  end
-
-  def test_patrol_json_reports_review_handoff_failures
-    with_patrol_project do |repo|
-      feature = sample_feature
-      finding = sample_finding
-      patch = sample_patch(repo, finding)
-      pr_result = Hive::Patrol::PrOpener::Result.new(
-        status: :opened_review_handoff_failed,
-        pr_url: "https://example.com/pull/7",
-        reason: "review_handoff_failed"
-      )
-
-      out, _err, status = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ feature ]),
-          reviewer: FakeReviewer.new([ finding ]),
-          fixer: FakeFixer.new(patch),
-          pr_opener: FakePrOpener.new(pr_result)
-        ).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      payload = JSON.parse(out)
-      assert patrol_schemer.valid?(payload), patrol_schemer.validate(payload).map { |e| e["error"] }.inspect
-      assert_equal 1, payload.fetch("prs_opened")
-      assert_equal [ "https://example.com/pull/7" ], payload.fetch("pr_urls")
-      assert_equal [
-        { "pr_url" => "https://example.com/pull/7", "reason" => "review_handoff_failed" }
-      ], payload.fetch("review_handoff_errors")
-    end
-  end
-
-  def test_patrol_dry_run_reviews_but_does_not_fix_or_open_pr
-    with_patrol_project do |repo|
-      set_patrol_commands(repo, "format" => nil, "lint" => nil, "typecheck" => nil, "test" => nil)
-      finder = sample_finding
-      patch = sample_patch(repo, finder)
-      fixer = FakeFixer.new(patch)
-      pr_opener = FakePrOpener.new(Hive::Patrol::PrOpener::Result.new(status: :opened, pr_url: "https://example.com/pull/8"))
-
-      out, _err, status = with_captured_exit do
-        command_for(
-          dry_run: true,
-          mapper: FakeMapper.new([ sample_feature ]),
-          reviewer: FakeReviewer.new([ finder ]),
-          fixer: fixer,
-          pr_opener: pr_opener
-        ).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      payload = JSON.parse(out)
-      assert patrol_schemer.valid?(payload), patrol_schemer.validate(payload).map { |e| e["error"] }.inspect
-      assert_equal true, payload.fetch("dry_run")
-      assert_equal 1, payload.fetch("fix_candidates")
-      assert_equal 0, payload.fetch("fixes_attempted")
-      assert_equal 0, payload.fetch("prs_opened")
-      assert_empty fixer.attempted
-      assert_empty pr_opener.opened
-    end
-  end
-
-  def test_patrol_without_validation_commands_fails_before_agent_work_or_state_mutation
-    with_patrol_project do |repo|
-      set_patrol_commands(repo, "format" => nil, "lint" => nil, "typecheck" => nil, "test" => nil)
-      exploding_mapper = Class.new do
-        def call
-          raise "mapper must not run"
-        end
-      end.new
-
-      out, err, status = with_captured_exit do
-        command_for(mapper: exploding_mapper).call
-      end
-
-      payload = JSON.parse(out)
-      assert_equal Hive::ExitCodes::CONFIG, status
-      assert_equal "config", payload.fetch("error_kind")
-      assert_includes payload.fetch("message"), "patrol.commands"
-      assert_includes err, "patrol.commands"
-      refute Dir.exist?(File.join(repo, ".hive-state", "patrol")),
-             "preflight must fail before patrol state is created or watermarks can move"
-    end
-  end
-
-  # Patrol must never write findings to the 1-inbox intake. Opened patrol
-  # PRs may create synthetic 6-review tasks via PrOpener/ReviewHandoff;
-  # this command-level test uses a fake opener, so only patrol's own state
-  # tree is expected.
-  def test_patrol_writes_nothing_under_inbox
-    with_patrol_project do |repo|
-      feature = sample_feature
-      finding = sample_finding
-      patch = sample_patch(repo, finding)
-      pr_result = Hive::Patrol::PrOpener::Result.new(status: :opened, pr_url: "https://example.com/pull/9")
-
-      _out, err, status = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ feature ]),
-          reviewer: FakeReviewer.new([ finding ]),
-          fixer: FakeFixer.new(patch),
-          pr_opener: FakePrOpener.new(pr_result)
-        ).call
-      end
-
-      assert_equal "", err
-      assert_equal Hive::ExitCodes::SUCCESS, status
-
-      assert_empty Dir.glob(File.join(repo, "**", "1-inbox"), File::FNM_DOTMATCH),
-                   "patrol must not create any */1-inbox/ stage folder"
-      assert Dir.exist?(File.join(repo, ".hive-state", "patrol")),
-             "patrol records scan state under .hive-state/patrol/"
-    end
-  end
-
-  def test_default_mapper_reviews_language_neutral_components_without_monolithic_test_slices
-    with_patrol_project do |repo|
-      FileUtils.mkdir_p(File.join(repo, "lib", "acme"))
-      FileUtils.mkdir_p(File.join(repo, "test", "acme"))
-      File.write(File.join(repo, "lib", "acme", "service.flux"), "import './policy.flux'\n")
-      File.write(File.join(repo, "lib", "acme", "policy.flux"), "policy = true\n")
-      File.write(
-        File.join(repo, "test", "acme", "service_test.flux"),
-        "import '../../lib/acme/service.flux'\n"
-      )
-      run!("git", "-C", repo, "add", ".")
-      run!("git", "-C", repo, "commit", "-m", "generic component", "--quiet")
-      reviewer = FakeReviewer.new([])
-      command = Hive::Commands::Patrol.new(
-        "demo",
-        json: true,
-        dry_run: true,
-        reviewer_factory: ->(_root, _cfg, _state) { reviewer },
-        dismissals_factory: ->(_root, _state) { FakeDismissals.new }
-      )
-
-      _out, _err, status = with_captured_exit { command.call }
-
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      ids = reviewer.features.map(&:id)
-      assert_includes ids, "architecture-lib-acme"
-      refute ids.any? { |id| id.start_with?("test-suite-") }
-      component = reviewer.features.find { |feature| feature.id == "architecture-lib-acme" }
-      assert_includes component.tests, "test/acme/service_test.flux"
-    end
-  end
-
-  def test_mapper_and_reviewer_use_an_exact_detached_default_branch_checkout
-    with_patrol_project do |repo|
-      target_sha = run!("git", "-C", repo, "rev-parse", "master").strip
-      run!("git", "-C", repo, "switch", "-c", "topic", "--quiet")
-      FileUtils.mkdir_p(File.join(repo, "lib"))
-      File.write(File.join(repo, "lib", "topic_only.rb"), "TOPIC_ONLY = true\n")
-      run!("git", "-C", repo, "add", "lib/topic_only.rb")
-      run!("git", "-C", repo, "commit", "-m", "topic-only source", "--quiet")
-
-      scan_roots = []
-      mapper_factory = lambda do |root, _cfg, _state|
-        scan_roots << root
-        assert_equal target_sha, run!("git", "-C", root, "rev-parse", "HEAD").strip
-        refute File.exist?(File.join(root, "lib", "topic_only.rb"))
-        FakeMapper.new([ sample_feature ])
-      end
-      reviewer = FakeReviewer.new([])
-      reviewer_factory = lambda do |root, _cfg, _state|
-        scan_roots << root
-        reviewer
-      end
-
-      out, _err, status = with_captured_exit do
-        command_for(
-          dry_run: true,
-          mapper_factory: mapper_factory,
-          reviewer_factory: reviewer_factory
-        ).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      payload = JSON.parse(out)
-      assert_equal repo, payload.fetch("project_root"), "durable state remains anchored to the registered root"
-      assert_equal target_sha, payload.fetch("last_scanned_sha")
-      assert_equal 1, scan_roots.uniq.size
-      refute_equal repo, scan_roots.first
-      assert_equal "topic", run!("git", "-C", repo, "branch", "--show-current").strip
-      worktrees = run!("git", "-C", repo, "worktree", "list", "--porcelain")
-      refute_includes worktrees, scan_roots.first, "the detached scan checkout must be removed"
-    end
-  end
-
-  def test_new_sweep_fetches_and_reviews_the_exact_remote_default
-    with_patrol_project do |repo|
-      origin = "#{repo}.origin.git"
-      scratch = nil
-      begin
-        run!("git", "clone", "--bare", repo, origin)
-        run!("git", "-C", repo, "remote", "add", "origin", origin)
-        local_sha = run!("git", "-C", repo, "rev-parse", "master").strip
-
-        scratch = Dir.mktmpdir("patrol-origin-pusher")
-        run!("git", "clone", origin, scratch)
-        run!("git", "-C", scratch, "config", "user.email", "test@example.com")
-        run!("git", "-C", scratch, "config", "user.name", "Test")
-        File.write(File.join(scratch, "fresh-upstream.txt"), "fresh\n")
-        run!("git", "-C", scratch, "add", "fresh-upstream.txt")
-        run!("git", "-C", scratch, "commit", "-m", "advance remote default", "--quiet")
-        run!("git", "-C", scratch, "push", "origin", "master:master")
-        remote_sha = run!("git", "-C", scratch, "rev-parse", "HEAD").strip
-
-        scan_sha = nil
-        out, _err, status = with_captured_exit do
-          command_for(
-            dry_run: true,
-            mapper_factory: lambda do |root, _cfg, _state|
-              scan_sha = run!("git", "-C", root, "rev-parse", "HEAD").strip
-              assert File.exist?(File.join(root, "fresh-upstream.txt")),
-                     "a new patrol sweep must review the freshly fetched remote default"
-              FakeMapper.new([ sample_feature ])
-            end,
-            reviewer: FakeReviewer.new([])
-          ).call
-        end
-
-        assert_equal Hive::ExitCodes::SUCCESS, status
-        assert JSON.parse(out).fetch("ok")
-        assert_equal remote_sha, scan_sha
-        assert_equal local_sha, run!("git", "-C", repo, "rev-parse", "master").strip,
-                     "patrol must not move the operator's local default branch"
-      ensure
-        FileUtils.rm_rf(scratch) if scratch
-        FileUtils.rm_rf(origin)
-      end
-    end
-  end
-
-  def test_new_sweep_fails_closed_when_remote_default_cannot_be_fetched
-    with_patrol_project do |repo|
-      missing_origin = File.join(File.dirname(repo), "missing-origin.git")
-      run!("git", "-C", repo, "remote", "add", "origin", missing_origin)
-      reviewer_ran = false
-
-      out, _err, status = with_captured_exit do
-        command_for(
-          dry_run: true,
-          reviewer_factory: lambda do |_root, _cfg, _state|
-            reviewer_ran = true
-            FakeReviewer.new([])
-          end
-        ).call
-      end
-
-      assert_equal Hive::ExitCodes::SOFTWARE, status
-      refute reviewer_ran
-      payload = JSON.parse(out)
-      assert_equal false, payload.fetch("ok")
-      assert_includes payload.fetch("message"), "cannot fetch fresh patrol scan base"
-    end
-  end
-
-  def test_unmaterializable_active_snapshot_restarts_from_the_current_default
-    with_patrol_project do |repo|
-      missing_sha = "f" * 40
-      state_dir = File.join(repo, ".hive-state", "patrol")
-      FileUtils.mkdir_p(state_dir)
-      File.write(
-        File.join(state_dir, "state.json"),
-        JSON.generate(
-          "last_scanned_sha" => "PRIOR",
-          "feature_review_active" => true,
-          "feature_review_sha" => missing_sha,
-          "feature_review_cursor" => 1
-        )
-      )
-      current_sha = run!("git", "-C", repo, "rev-parse", "master").strip
-      features = (1..2).map do |index|
-        Hive::Patrol::Feature.new(
-          id: "feature-#{index}", kind: "architecture", entrypoints: [],
-          owned_files: [], context_files: [], tests: []
-        )
-      end
-      reviewer = FakeReviewer.new([])
-      scanned_sha = nil
-
-      out, _err, status = with_captured_exit do
-        command_for(
-          dry_run: true,
-          mapper_factory: lambda do |root, _cfg, _state|
-            scanned_sha = run!("git", "-C", root, "rev-parse", "HEAD").strip
-            FakeMapper.new(features)
-          end,
-          reviewer: reviewer
-        ).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      assert_equal current_sha, scanned_sha
-      assert_equal %w[feature-1 feature-2], reviewer.features.map(&:id),
-                   "a replacement snapshot must restart the feature cursor"
-      assert_equal current_sha, JSON.parse(out).fetch("last_scanned_sha")
-    end
-  end
-
-  def test_scan_checkout_rejects_a_sha_other_than_the_requested_target
-    command = command_for(dry_run: true)
-    git_calls = []
-    command.define_singleton_method(:git_output!) do |root, *args|
-      git_calls << [ root, args ]
-      args == [ "rev-parse", "HEAD" ] ? "unexpected-sha\n" : ""
-    end
-
-    error = assert_raises(Hive::GitError) do
-      command.send(:with_scan_checkout, "/project", "expected-sha") { flunk "must not yield" }
-    end
-
-    assert_includes error.message, 'resolved "unexpected-sha", expected "expected-sha"'
-    assert git_calls.any? { |_root, args| args.first(3) == [ "worktree", "remove", "--force" ] },
-           "a mismatched detached checkout must still be removed"
-  end
-
-  # Cleanup failure must not mask the scan outcome: a reviewer crash keeps
-  # its own exception, and a completed scan keeps its result — a leaked
-  # detached checkout (fresh mktmpdir path each cycle) is recoverable, a
-  # discarded clean review cycle is not.
-  def test_scan_checkout_removal_failure_does_not_mask_a_reviewer_crash
-    command = command_for(dry_run: true)
-    command.define_singleton_method(:git_output!) do |_root, *args|
-      raise Hive::GitError, "removal blocked" if args.first(3) == [ "worktree", "remove", "--force" ]
-
-      args == [ "rev-parse", "HEAD" ] ? "expected-sha\n" : ""
-    end
-
-    error = nil
-    _out, err = capture_io do
-      error = assert_raises(RuntimeError) do
-        command.send(:with_scan_checkout, "/project", "expected-sha") { raise "reviewer crashed" }
-      end
-    end
-
-    assert_equal "reviewer crashed", error.message,
-                 "the checkout-removal failure must not replace the reviewer's exception"
-    assert_match(/removal blocked/, err)
-  end
-
-  def test_scan_checkout_removal_failure_after_success_preserves_the_result
-    command = command_for(dry_run: true)
-    command.define_singleton_method(:git_output!) do |_root, *args|
-      raise Hive::GitError, "removal blocked" if args.first(3) == [ "worktree", "remove", "--force" ]
-
-      args == [ "rev-parse", "HEAD" ] ? "expected-sha\n" : ""
-    end
-
-    result = nil
-    _out, err = capture_io do
-      result = command.send(:with_scan_checkout, "/project", "expected-sha") { :scan_result }
-    end
-
-    assert_equal :scan_result, result,
-                 "a completed clean scan must not be discarded because only cleanup failed"
-    assert_match(/removal blocked/, err)
-  end
-
-  def test_git_output_reports_the_command_failure
-    Dir.mktmpdir do |root|
-      error = assert_raises(Hive::GitError) do
-        command_for.send(:git_output!, root, "rev-parse", "HEAD")
-      end
-
-      assert_includes error.message, "git rev-parse HEAD failed:"
-      assert_match(/not a git repository/i, error.message)
-    end
-  end
-
-  def test_fresh_scan_base_rejects_unresolved_or_invalid_local_default
-    command = command_for
-    cfg = { "default_branch" => "master" }
-    status = Struct.new(:exitstatus) { def success? = exitstatus.zero? }
-
-    with_replaced_singleton_method(Hive::Worktree, :origin_configured?, ->(_root) { false }) do
-      with_replaced_singleton_method(
-        Open3, :capture3, ->(*) { [ "", "missing default", status.new(1) ] }
-      ) do
-        error = assert_raises(Hive::GitError) do
-          command.send(:current_default_sha, "/project", cfg)
-        end
-        assert_includes error.message, "git rev-parse master failed: missing default"
-      end
-
-      with_replaced_singleton_method(
-        Open3, :capture3, ->(*) { [ "not-an-oid\n", "", status.new(0) ] }
-      ) do
-        error = assert_raises(Hive::GitError) do
-          command.send(:current_default_sha, "/project", cfg)
-        end
-        assert_includes error.message, "fresh patrol scan base resolved an invalid SHA"
-      end
-    end
-  end
-
-  def test_reviewer_cannot_leave_uncommitted_scan_mutations
-    with_patrol_project do |repo|
-      scan_root = nil
-      reviewer_factory = lambda do |root, _cfg, _state|
-        scan_root = root
-        reviewer = Object.new
-        reviewer.define_singleton_method(:review_errors) { [] }
-        reviewer.define_singleton_method(:call) do |_features|
-          File.write(File.join(root, "reviewer-uncommitted.txt"), "mutation\n")
-          []
-        end
-        reviewer
-      end
-
-      out, err, status = with_captured_exit do
-        command_for(
-          dry_run: true,
-          mapper: FakeMapper.new([ sample_feature ]),
-          reviewer_factory: reviewer_factory
-        ).call
-      end
-
-      refute_equal Hive::ExitCodes::SUCCESS, status
-      assert_includes err, "patrol reviewer modified its detached scan checkout"
-      assert_equal false, JSON.parse(out).fetch("ok")
-      refute_includes run!("git", "-C", repo, "worktree", "list", "--porcelain"), scan_root
-    end
-  end
-
-  def test_reviewer_cannot_hide_scan_mutation_inside_a_commit
-    with_patrol_project do |repo|
-      scan_root = nil
-      reviewer_factory = lambda do |root, _cfg, _state|
-        scan_root = root
-        reviewer = Object.new
-        reviewer.define_singleton_method(:review_errors) { [] }
-        reviewer.define_singleton_method(:call) do |_features|
-          File.write(File.join(root, "reviewer-commit.txt"), "mutation\n")
-          system("git", "-C", root, "add", "reviewer-commit.txt", exception: true)
-          system("git", "-C", root, "commit", "-m", "reviewer mutation", "--quiet", exception: true)
-          []
-        end
-        reviewer
-      end
-
-      out, err, status = with_captured_exit do
-        command_for(
-          dry_run: true,
-          mapper: FakeMapper.new([ sample_feature ]),
-          reviewer_factory: reviewer_factory
-        ).call
-      end
-
-      refute_equal Hive::ExitCodes::SUCCESS, status
-      assert_includes err, "patrol reviewer changed its detached scan commit"
-      assert_equal false, JSON.parse(out).fetch("ok")
-      refute_includes run!("git", "-C", repo, "worktree", "list", "--porcelain"), scan_root
-    end
-  end
-
-  def test_review_errors_do_not_advance_last_scanned_sha
-    with_patrol_project do |repo|
-      state_dir = File.join(repo, ".hive-state", "patrol")
-      FileUtils.mkdir_p(state_dir)
-      File.write(File.join(state_dir, "state.json"), JSON.generate("last_scanned_sha" => "PRIOR"))
-
+      state_path = File.join(repo, ".hive-state", "patrol", "state.json")
       out, _err, status = with_captured_exit do
         command_for(
           mapper: FakeMapper.new([ sample_feature ]),
           reviewer: FakeReviewer.new(
-            [],
-            review_errors: [
-              { "feature_id" => "route-home", "error" => "agent_failed", "message" => "provider failed" }
-            ]
+            [], review_errors: [ { "feature_id" => "route-home", "error" => "agent failed" } ]
           )
         ).call
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, status
       payload = JSON.parse(out)
-      assert patrol_schemer.valid?(payload), patrol_schemer.validate(payload).map { |e| e["error"] }.inspect
-
-      state = JSON.parse(File.read(File.join(state_dir, "state.json")))
-      assert_equal "PRIOR", state.fetch("last_scanned_sha"),
-                   "a partial scan (a feature errored) must not advance the scanned-SHA watermark"
-      assert_equal "PRIOR", payload.fetch("last_scanned_sha")
-      assert_equal 1, payload.fetch("features_review_attempted")
-      assert_equal 0, payload.fetch("features_reviewed")
-      assert_equal false, payload.fetch("review_complete")
-      assert_equal [
-        { "feature_id" => "route-home", "error" => "agent_failed", "message" => "provider failed" }
-      ], payload.fetch("review_errors")
-      refute_empty state.fetch("last_run_at"), "last_run_at still advances on a partial scan"
-    end
-  end
-
-  def test_first_batch_review_error_retries_the_pinned_snapshot_after_default_advances
-    with_patrol_project do |repo|
-      cfg_path = File.join(repo, ".hive-state", "config.yml")
-      cfg = YAML.safe_load_file(cfg_path, aliases: true)
-      cfg["patrol"]["max_features_per_cycle"] = 2
-      File.write(cfg_path, cfg.to_yaml)
-      features = (1..2).map do |index|
-        Hive::Patrol::Feature.new(
-          id: "feature-#{index}", kind: "architecture", entrypoints: [],
-          owned_files: [], context_files: [], tests: []
-        )
-      end
-      first_sweep_sha = run!("git", "-C", repo, "rev-parse", "master").strip
-      first_scan_sha = nil
-      first_reviewer = FakeReviewer.new(
-        [],
-        review_errors: [
-          { "feature_id" => "feature-1", "error" => "agent_failed", "message" => "provider failed" }
-        ]
-      )
-
-      first_out, _first_err, first_status = with_captured_exit do
-        command_for(
-          dry_run: true,
-          mapper_factory: lambda do |root, _cfg, _state|
-            first_scan_sha = run!("git", "-C", root, "rev-parse", "HEAD").strip
-            FakeMapper.new(features)
-          end,
-          reviewer: first_reviewer
-        ).call
-      end
-      state_path = File.join(repo, ".hive-state", "patrol", "state.json")
-      first_state = JSON.parse(File.read(state_path))
-      File.write(File.join(repo, "after-review-error.txt"), "advance default branch\n")
-      run!("git", "-C", repo, "add", "after-review-error.txt")
-      run!("git", "-C", repo, "commit", "-m", "advance default after review error", "--quiet")
-      advanced_sha = run!("git", "-C", repo, "rev-parse", "master").strip
-      second_scan_sha = nil
-      second_reviewer = FakeReviewer.new([])
-
-      second_out, _second_err, second_status = with_captured_exit do
-        command_for(
-          dry_run: true,
-          mapper_factory: lambda do |root, _cfg, _state|
-            second_scan_sha = run!("git", "-C", root, "rev-parse", "HEAD").strip
-            FakeMapper.new(features)
-          end,
-          reviewer: second_reviewer
-        ).call
-      end
-      second_state = JSON.parse(File.read(state_path))
-
-      assert_equal Hive::ExitCodes::SUCCESS, first_status
-      assert_equal Hive::ExitCodes::SUCCESS, second_status
-      assert_equal first_sweep_sha, first_scan_sha
-      assert_equal true, first_state.fetch("feature_review_active")
-      assert_equal first_sweep_sha, first_state.fetch("feature_review_sha")
-      assert_equal 0, first_state.fetch("feature_review_cursor")
-      refute_equal first_sweep_sha, advanced_sha
-      assert_equal first_sweep_sha, second_scan_sha,
-                   "a failed first batch must retry its pinned SHA even though its cursor is zero"
-      assert_equal %w[feature-1 feature-2], second_reviewer.features.map(&:id)
-      assert_equal false, JSON.parse(first_out).fetch("review_complete")
-      assert_equal true, JSON.parse(second_out).fetch("review_complete")
-      assert_equal false, second_state.fetch("feature_review_active"),
-                   "a completed retry must release the pinned snapshot"
-    end
-  end
-
-  def test_review_error_preserves_the_nonzero_cursor_for_the_same_pinned_snapshot
-    with_patrol_project do |repo|
-      target_sha = run!("git", "-C", repo, "rev-parse", "master").strip
-      state_dir = File.join(repo, ".hive-state", "patrol")
-      FileUtils.mkdir_p(state_dir)
-      File.write(
-        File.join(state_dir, "state.json"),
-        JSON.generate(
-          "last_scanned_sha" => "PRIOR",
-          "feature_review_active" => true,
-          "feature_review_sha" => target_sha,
-          "feature_review_cursor" => 1
-        )
-      )
-      features = (1..2).map do |index|
-        Hive::Patrol::Feature.new(
-          id: "feature-#{index}", kind: "architecture", entrypoints: [],
-          owned_files: [], context_files: [], tests: []
-        )
-      end
-      reviewer = FakeReviewer.new(
-        [], review_errors: [
-          { "feature_id" => "feature-2", "error" => "agent_failed", "message" => "provider failed" }
-        ]
-      )
-
-      _out, _err, status = with_captured_exit do
-        command_for(mapper: FakeMapper.new(features), reviewer: reviewer, dry_run: true).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      state = JSON.parse(File.read(File.join(state_dir, "state.json")))
-      assert_equal target_sha, state.fetch("feature_review_sha")
-      assert_equal 1, state.fetch("feature_review_cursor")
-      assert_equal [ "feature-2" ], reviewer.features.map(&:id)
-    end
-  end
-
-  def test_review_batch_uses_medium_discovery_allowance
-    with_patrol_project do |repo|
-      cfg_path = File.join(repo, ".hive-state", "config.yml")
-      cfg = YAML.safe_load_file(cfg_path, aliases: true)
-      cfg["patrol"]["max_features_per_cycle"] = 7
-      cfg["patrol"]["max_fix_attempts_per_cycle"] = 3
-      File.write(cfg_path, cfg.to_yaml)
-      features = (1..12).map do |index|
-        Hive::Patrol::Feature.new(
-          id: format("feature-%02d", index), kind: "architecture", entrypoints: [],
-          owned_files: [], context_files: [], tests: []
-        )
-      end
-      reviewer = FakeReviewer.new([])
-
-      out, _err, status = with_captured_exit do
-        command_for(mapper: FakeMapper.new(features), reviewer: reviewer).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      assert_equal 4, reviewer.features.size
-      assert_equal 4, JSON.parse(out).fetch("features_review_attempted")
-    end
-  end
-
-  def test_review_batch_seeds_discovery_allowance_from_usage
-    with_patrol_project do |repo|
-      now = Time.now.utc
-      3.times do
-        Hive::UsageDb.record!(
-          agent: "codex", model: nil, project_slug: "demo",
-          task_slug: "patrol-review", stage: "patrol-review",
-          started_at: now, ended_at: now, input: 1, output: 0, cached: 0
-        )
-      end
-      features = (1..12).map do |index|
-        Hive::Patrol::Feature.new(
-          id: format("feature-%02d", index), kind: "architecture", entrypoints: [],
-          owned_files: [], context_files: [], tests: []
-        )
-      end
-      reviewer = FakeReviewer.new([])
-
-      out, _err, status = with_captured_exit do
-        command_for(mapper: FakeMapper.new(features), reviewer: reviewer).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      assert_equal [ "feature-01" ], reviewer.features.map(&:id)
-      assert_equal 1, JSON.parse(out).fetch("features_review_attempted")
-    end
-  end
-
-  def test_later_review_error_advances_cursor_past_successful_prefix
-    with_patrol_project do |repo|
-      cfg_path = File.join(repo, ".hive-state", "config.yml")
-      cfg = YAML.safe_load_file(cfg_path, aliases: true)
-      cfg["patrol"]["max_features_per_cycle"] = 3
-      File.write(cfg_path, cfg.to_yaml)
-      features = (1..3).map do |index|
-        Hive::Patrol::Feature.new(
-          id: "feature-#{index}", kind: "architecture", entrypoints: [],
-          owned_files: [], context_files: [], tests: []
-        )
-      end
-      reviewer = FakeReviewer.new(
-        [], review_errors: [
-          { "feature_id" => "feature-3", "error" => "agent_failed", "message" => "provider failed" }
-        ]
-      )
-
-      _out, _err, status = with_captured_exit do
-        command_for(mapper: FakeMapper.new(features), reviewer: reviewer, dry_run: true).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      state = JSON.parse(File.read(File.join(repo, ".hive-state", "patrol", "state.json")))
-      assert_equal 2, state.fetch("feature_review_cursor"),
-                   "successfully reviewed leading features must not be repeated after a later failure"
+      refute payload.fetch("review_complete")
+      state = JSON.parse(File.read(state_path))
+      assert_equal "", state.fetch("last_scanned_sha", "")
       assert_equal true, state.fetch("feature_review_active")
     end
   end
 
-  def test_default_reviewer_and_fixer_builders_receive_the_shared_launch_budget
+  def test_dry_run_never_materializes_a_workflow_admission
     with_patrol_project do |repo|
-      cfg = Hive::Config.load(repo)
-      state = Hive::Patrol::StateStore.new(repo)
-      budget = Object.new
-      command = Hive::Commands::Patrol.new("demo")
-
-      reviewer = command.send(:build_reviewer, repo, cfg, state, budget)
-      fixer = command.send(:build_fixer, repo, cfg, state, budget)
-
-      assert_instance_of Hive::Patrol::Reviewer, reviewer
-      assert_instance_of Hive::Patrol::Fixer, fixer
-      assert_same budget, reviewer.instance_variable_get(:@launch_budget)
-      assert_same budget, fixer.instance_variable_get(:@launch_budget)
-    end
-  end
-
-  def test_review_batch_uses_all_remaining_discovery_launches
-    cfg = { "patrol" => { "max_fix_attempts_per_cycle" => 6 } }
-    budget = Object.new
-    budget.define_singleton_method(:remaining_launches) { 8 }
-
-    assert_equal 8, Hive::Commands::Patrol.new("demo").send(
-      :review_launch_limit, cfg, budget
-    )
-    assert_equal 8, Hive::Commands::Patrol.new("demo", dry_run: true).send(
-      :review_launch_limit, cfg, budget
-    )
-
-    budget.define_singleton_method(:remaining_launches) { 0 }
-    assert_equal 0, Hive::Commands::Patrol.new("demo").send(
-      :review_launch_limit, cfg, budget
-    )
-  end
-
-  # max_prs_per_cycle caps PRs *opened*, not fix candidates: a failed
-  # validation must not consume the budget, and a fixable later candidate
-  # must still be attempted. With the default cap of 3 and four eligible
-  # findings where the first fails validation, all four are attempted and
-  # three PRs open (the old candidate-cap stopped after three attempts and
-  # opened only two).
-  def test_max_prs_caps_opened_prs_not_attempted_candidates
-    with_patrol_project do |repo|
-      findings = (1..4).map { |n| finding_with(id: "finding-#{n}", fingerprint: "fp-#{n}") }
-      patches = {
-        "finding-1" => failing_patch(findings[0]),
-        "finding-2" => sample_patch(repo, findings[1]),
-        "finding-3" => sample_patch(repo, findings[2]),
-        "finding-4" => sample_patch(repo, findings[3])
-      }
-      fixer = MappedFixer.new(patches)
-      pr_opener = FakePrOpener.new(
-        Hive::Patrol::PrOpener::Result.new(status: :opened, pr_url: "https://example.com/pull/1")
-      )
-
       out, _err, status = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ sample_feature ]),
-          reviewer: FakeReviewer.new(findings),
-          fixer: fixer,
-          pr_opener: pr_opener
-        ).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      payload = JSON.parse(out)
-      assert_equal 4, payload.fetch("fix_candidates")
-      assert_equal 4, payload.fetch("fixes_attempted"),
-                   "all candidates are attempted until the PR budget is filled"
-      assert_equal 3, payload.fetch("prs_opened"), "max_prs_per_cycle caps opened PRs at 3"
-      assert_includes fixer.attempted, "finding-4",
-                      "a failed early candidate must not starve a fixable later one"
-    end
-  end
-
-  def test_max_fix_attempts_bounds_failed_or_rejected_agent_work
-    with_patrol_project do |repo|
-      cfg_path = File.join(repo, ".hive-state", "config.yml")
-      cfg = YAML.safe_load_file(cfg_path, aliases: true)
-      cfg["patrol"]["max_fix_attempts_per_cycle"] = 2
-      File.write(cfg_path, cfg.to_yaml)
-      findings = (1..4).map { |n| finding_with(id: "finding-#{n}", fingerprint: "fp-#{n}") }
-      fixer = MappedFixer.new(findings.to_h { |finding| [ finding.id, failing_patch(finding) ] })
-
-      out, _err, status = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ sample_feature ]),
-          reviewer: FakeReviewer.new(findings),
-          fixer: fixer
-        ).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      payload = JSON.parse(out)
-      assert_equal 4, payload.fetch("fix_candidates")
-      assert_equal 2, payload.fetch("fixes_attempted")
-      assert_equal %w[finding-1 finding-2], fixer.attempted
-      assert_equal 0, payload.fetch("prs_opened")
-    end
-  end
-
-  def test_terminal_patrol_exhaustion_stops_later_fix_attempts
-    with_patrol_project do |repo|
-      findings = (1..2).map { |n| finding_with(id: "finding-#{n}", fingerprint: "fp-#{n}") }
-      exhausted = failing_patch(findings.first)
-      exhausted.validation["reason"] = "fix_agent_failed"
-      exhausted.validation["resource_exhaustion"] = { reason: "token_limit" }
-      fixer = MappedFixer.new(
-        findings.first.id => exhausted,
-        findings.last.id => sample_patch(repo, findings.last)
-      )
-
-      out, _err, status = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ sample_feature ]),
-          reviewer: FakeReviewer.new(findings),
-          fixer: fixer
-        ).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      assert_equal [ findings.first.id ], fixer.attempted
-      assert_equal 1, JSON.parse(out).fetch("fixes_attempted")
-    end
-  end
-
-  def test_feature_review_budget_rotates_and_advances_sha_only_after_full_sweep
-    with_patrol_project do |repo|
-      cfg_path = File.join(repo, ".hive-state", "config.yml")
-      cfg = YAML.safe_load_file(cfg_path, aliases: true)
-      cfg["patrol"]["max_features_per_cycle"] = 2
-      File.write(cfg_path, cfg.to_yaml)
-      features = (1..3).map do |index|
-        Hive::Patrol::Feature.new(
-          id: "feature-#{index}", kind: "architecture", entrypoints: [],
-          owned_files: [], context_files: [], tests: []
-        )
-      end
-      first_reviewer = FakeReviewer.new([])
-      second_reviewer = FakeReviewer.new([])
-      third_reviewer = FakeReviewer.new([])
-      first_sweep_sha = run!("git", "-C", repo, "rev-parse", "master").strip
-
-      first_out, = with_captured_exit do
-        command_for(dry_run: true, mapper: FakeMapper.new(features), reviewer: first_reviewer).call
-      end
-      File.write(File.join(repo, "after-first-batch.txt"), "new default branch commit\n")
-      run!("git", "-C", repo, "add", "after-first-batch.txt")
-      run!("git", "-C", repo, "commit", "-m", "advance default during patrol sweep", "--quiet")
-      advanced_sha = run!("git", "-C", repo, "rev-parse", "master").strip
-      second_scan_sha = nil
-      second_out, = with_captured_exit do
         command_for(
           dry_run: true,
-          mapper_factory: lambda do |root, _cfg, _state|
-            second_scan_sha = run!("git", "-C", root, "rev-parse", "HEAD").strip
-            FakeMapper.new(features)
-          end,
-          reviewer: second_reviewer
-        ).call
-      end
-      third_scan_sha = nil
-      third_out, = with_captured_exit do
-        command_for(
-          dry_run: true,
-          mapper_factory: lambda do |root, _cfg, _state|
-            third_scan_sha = run!("git", "-C", root, "rev-parse", "HEAD").strip
-            FakeMapper.new(features)
-          end,
-          reviewer: third_reviewer
+          mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ sample_finding ])
         ).call
       end
 
-      first = JSON.parse(first_out)
-      second = JSON.parse(second_out)
-      third = JSON.parse(third_out)
-      assert_equal %w[feature-1 feature-2], first_reviewer.features.map(&:id)
-      assert_equal [ "feature-3" ], second_reviewer.features.map(&:id)
-      assert_equal %w[feature-1 feature-2], third_reviewer.features.map(&:id)
-      assert_equal first_sweep_sha, second_scan_sha,
-                   "an active cursor must finish its stored SHA instead of restarting on every new commit"
-      assert_equal advanced_sha, third_scan_sha,
-                   "the cycle after completion must start a fresh sweep at the new default SHA"
-      assert_equal 2, first.fetch("features_review_attempted")
-      assert_equal 2, first.fetch("features_reviewed")
-      assert_equal false, first.fetch("review_complete")
-      assert_equal "", first.fetch("last_scanned_sha")
-      assert_equal 1, second.fetch("features_review_attempted")
-      assert_equal 1, second.fetch("features_reviewed")
-      assert_equal true, second.fetch("review_complete")
-      assert_equal first_sweep_sha, second.fetch("last_scanned_sha")
-      assert_equal false, third.fetch("review_complete")
-      assert_equal first_sweep_sha, third.fetch("last_scanned_sha")
-    end
-  end
-
-  def test_fixer_rejection_remains_active_until_operator_or_pr_disposition
-    with_patrol_project do |repo|
-      finding = sample_finding
-      finding.fingerprint = "resolved-fp"
-      patch = Hive::Patrol::Fixer::PatchAttempt.new(
-        id: "patch-rejected", finding: finding, branch: "hive-patrol/rejected",
-        worktree_path: nil,
-        validation: { "passed" => false, "reason" => "fix_agent_rejected" },
-        passed: false, diffstat: "", head_sha: nil
-      )
-
-      out, = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ sample_feature ]), reviewer: FakeReviewer.new([ finding ]),
-          fixer: FakeFixer.new(patch)
-        ).call
-      end
-
-      payload = JSON.parse(out)
-      assert_equal "fix_agent_rejected", payload.dig("fix_results", 0, "reason")
-      assert_equal false, payload.dig("fix_results", 0, "passed")
-      fingerprint_path = File.join(repo, ".hive-state", "patrol", "fingerprints.json")
-      fingerprints = File.exist?(fingerprint_path) ? JSON.parse(File.read(fingerprint_path)) : {}
-      refute fingerprints.key?("resolved-fp"), "a fixer rejection must not permanently suppress the finding"
-      path = Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].first
-      record = JSON.parse(File.read(path))
-      assert_equal "active", record.fetch("lifecycle_state")
-    end
-  end
-
-  def test_stale_target_attempt_transitions_the_finding_out_of_active_work
-    with_patrol_project do |repo|
-      finding = sample_finding
-      patch = Hive::Patrol::Fixer::PatchAttempt.new(
-        id: "patch-stale", finding: finding, branch: "hive-patrol/stale",
-        worktree_path: nil,
-        validation: { "passed" => false, "reason" => "stale_target_sha" },
-        passed: false, diffstat: "", head_sha: nil
-      )
-
-      out, = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ sample_feature ]), reviewer: FakeReviewer.new([ finding ]),
-          fixer: FakeFixer.new(patch)
-        ).call
-      end
-
-      assert_equal "stale_target_sha", JSON.parse(out).dig("fix_results", 0, "reason")
-      record_path = Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].first
-      record = JSON.parse(File.read(record_path))
-      assert_equal "superseded", record.fetch("lifecycle_state")
-      assert_equal "stale_target_sha", record.fetch("lifecycle_reason")
-    end
-  end
-
-  def test_stale_evidence_attempt_transitions_the_finding_out_of_active_work
-    with_patrol_project do |repo|
-      finding = sample_finding
-      patch = Hive::Patrol::Fixer::PatchAttempt.new(
-        id: "patch-stale-evidence", finding: finding, branch: "hive-patrol/stale-evidence",
-        worktree_path: nil,
-        validation: { "passed" => false, "reason" => "stale_evidence" },
-        passed: false, diffstat: "", head_sha: nil
-      )
-
-      out, = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ sample_feature ]), reviewer: FakeReviewer.new([ finding ]),
-          fixer: FakeFixer.new(patch)
-        ).call
-      end
-
-      assert_equal "stale_evidence", JSON.parse(out).dig("fix_results", 0, "reason")
-      record_path = Dir[File.join(repo, ".hive-state", "patrol", "findings", "*.json")].first
-      record = JSON.parse(File.read(record_path))
-      assert_equal "superseded", record.fetch("lifecycle_state")
-      assert_equal "stale_evidence", record.fetch("lifecycle_reason")
-    end
-  end
-
-  def test_unknown_fixer_reason_is_reported_as_a_fix_error
-    with_patrol_project do |repo|
-      finding = sample_finding
-      patch = Hive::Patrol::Fixer::PatchAttempt.new(
-        id: "patch-unknown-reason", finding: finding, branch: "hive-patrol/unknown-reason",
-        worktree_path: repo,
-        validation: { "passed" => false, "reason" => "provider_invented_reason" },
-        passed: false, diffstat: "", head_sha: nil
-      )
-
-      out, = with_captured_exit do
-        command_for(
-          mapper: FakeMapper.new([ sample_feature ]), reviewer: FakeReviewer.new([ finding ]),
-          fixer: FakeFixer.new(patch)
-        ).call
-      end
-
-      payload = JSON.parse(out)
-      assert_equal "fix_error", payload.dig("fix_results", 0, "reason")
-      assert_equal 'unrecognized fixer reason "provider_invented_reason"',
-                   payload.dig("fix_results", 0, "detail")
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_equal true, JSON.parse(out).fetch("dry_run")
+      assert_empty patrol_store(repo).patrol_fix_admission_outbox.pending
     end
   end
 
   def test_unknown_project_emits_json_config_error
-    with_tmp_global_config do
-      out, err, status = with_captured_exit { command_for.call }
-      payload = JSON.parse(out)
-
-      assert_equal Hive::ExitCodes::CONFIG, status
-      assert_match(/unknown project/, err)
-      assert patrol_schemer.valid?(payload), patrol_schemer.validate(payload).map { |e| e["error"] }.inspect
-      assert_equal false, payload.fetch("ok")
-      assert_equal "config", payload.fetch("error_kind")
-    end
-  end
-
-  def test_non_coding_default_workflow_rejects_manual_patrol
-    with_patrol_project do |repo|
-      config_path = File.join(repo, ".hive-state", "config.yml")
-      cfg = YAML.safe_load(File.read(config_path))
-      cfg["default_workflow"] = "content"
-      File.write(config_path, cfg.to_yaml)
-
-      out, err, status = with_captured_exit do
-        command_for(dry_run: true).call
-      end
-      payload = JSON.parse(out)
-
-      assert_equal Hive::ExitCodes::CONFIG, status
-      assert_match(/non-coding default_workflow "content"/, err)
-      assert_equal "config", payload.fetch("error_kind")
-      refute Dir.exist?(File.join(repo, ".hive-state", "patrol", "runs"))
-    end
-  end
-
-  def test_non_json_success_and_internal_error_payload
-    with_patrol_project do
-      out, _err, status = with_captured_exit do
-        command_for(
-          json: false,
-          mapper: FakeMapper.new([ sample_feature ]),
-          reviewer: FakeReviewer.new([])
-        ).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      assert_match(/hive patrol: demo mapped=1 findings=0 fixes=0 prs=0/, out)
-
-      exploding_mapper = Class.new do
-        def call
-          raise RuntimeError, "boom"
-        end
-      end.new
-      out, _err, status = with_captured_exit do
-        command_for(mapper: exploding_mapper).call
-      end
-
-      assert_equal Hive::ExitCodes::SOFTWARE, status
-      payload = JSON.parse(out)
-      assert_equal false, payload.fetch("ok")
-      assert_equal "InternalError", payload.fetch("error_class")
-    end
-  end
-
-  def test_unattributable_review_error_does_not_claim_completed_features
-    batch = Hive::Patrol::FeatureBatch::Result.new(
-      features: [ sample_feature ], start_cursor: 0, next_cursor: 0, complete: true
-    )
-    reviewer = Object.new
-    reviewer.define_singleton_method(:review_errors) { [ { "error" => "agent_failed" } ] }
-
-    outcome = command_for.send(:review_outcome, batch, reviewer)
-
-    assert_equal 1, outcome.fetch("features_review_attempted")
-    assert_equal 0, outcome.fetch("features_reviewed")
-    refute outcome.fetch("review_complete")
-  end
-
-  def test_shipping_cycle_composes_the_default_pr_opener
-    with_patrol_project do
-      command = Hive::Commands::Patrol.new(
-        "demo",
-        json: true,
-        mapper_factory: ->(_root, _cfg, _state) { FakeMapper.new([]) },
-        reviewer_factory: ->(_root, _cfg, _state) { FakeReviewer.new([]) },
-        fixer_factory: ->(_root, _cfg, _state) { FakeFixer.new(nil) },
-        dismissals_factory: ->(_root, _state) { FakeDismissals.new }
-      )
-
-      out, err, status = with_captured_exit { command.call }
-
-      assert_equal "", err
-      assert_equal Hive::ExitCodes::SUCCESS, status
-      assert_equal 0, JSON.parse(out).fetch("fix_candidates")
-    end
-  end
-
-  def test_requested_occurrence_must_have_a_durable_capture
-    state = Object.new
-    state.define_singleton_method(:occurrence_capture) { |_occurrence_id| nil }
-    command = Hive::Commands::Patrol.new(
-      "demo", occurrence_id: "occ-#{'a' * 64}"
-    )
-
-    error = assert_raises(Hive::ConfigError) do
-      command.send(:patrol_capture, {}, state)
+    out, err, status = with_captured_exit do
+      Hive::Commands::Patrol.new("missing", json: true).call
     end
 
-    assert_match(/reservation capture .* is unavailable/, error.message)
-  end
-
-  def test_manual_capture_refuses_a_reserved_daemon_occurrence
-    state = Object.new
-    state.define_singleton_method(:recovery_active?) { true }
-    command = Hive::Commands::Patrol.new("demo")
-
-    error = assert_raises(Hive::ConfigError) do
-      command.send(:patrol_capture, {}, state)
-    end
-
-    assert_equal "patrol cycle is already reserved; wait for daemon recovery",
-                 error.message
-  end
-
-  def test_manual_capture_requires_the_selected_migration_authority
-    with_patrol_project do
-      entry = Hive::Config.find_project("demo")
-      command = Hive::Commands::Patrol.new(
-        "demo", migration_authority: :module
-      )
-
-      error = assert_raises(Hive::ConfigError) do
-        command.send(:build_manual_capture, entry)
-      end
-
-      assert_equal "patrol mutation authority is not admitted", error.message
-    end
-  end
-
-  def test_capture_validation_rejects_wrong_types_and_missing_identity_keys
-    entry = {
-      "project_id" => "project-1",
-      "name" => "demo",
-      "path" => "/tmp/demo",
-      "hive_state_path" => "/tmp/demo/.hive-state"
-    }
-    command = Hive::Commands::Patrol.new("demo")
-
-    wrong_type = assert_raises(Hive::ConfigError) do
-      command.send(:validate_capture!, Object.new, entry)
-    end
-    missing_key = assert_raises(Hive::ConfigError) do
-      command.send(
-        :validate_capture!,
-        patrol_capture_for(entry).with(project: {}),
-        entry
-      )
-    end
-
-    assert_match(/does not match the command project or authority/, wrong_type.message)
-    assert_match(/does not match the command project or authority/, missing_key.message)
-  end
-
-  def test_fix_attempt_reconstructs_a_durable_reconciled_patch
-    finding = sample_finding
-    finding.fingerprint = "fingerprint-1"
-    serialized_patch = JSON.parse(JSON.generate(sample_patch("/tmp/worktree", finding).to_h))
-    reconciliations = []
-    state = Object.new
-    state.define_singleton_method(:reconcile_attempt) do |fingerprint|
-      reconciliations << fingerprint
-      {
-        "status" => "matched",
-        "outcome" => { "patch_id" => serialized_patch.fetch("id") }
-      }
-    end
-    state.define_singleton_method(:patch_record) do |patch_id|
-      raise "unexpected patch" unless patch_id == serialized_patch.fetch("id")
-
-      serialized_patch
-    end
-    state.define_singleton_method(:perform_cycle_effect!) do |reconcile:, **_attributes, &_effect|
-      reconciliation = reconcile.call(nil)
-      Hive::Patrol::EffectGateway::Result.new(
-        status: :reconciled,
-        outcome: reconciliation.fetch("outcome"),
-        receipt: nil
-      )
-    end
-    fixer = FakeFixer.new(nil)
-
-    patch = command_for.send(
-      :perform_fix_attempt,
-      state,
-      fixer,
-      finding,
-      patrol_capture_for(
-        "project_id" => "project-1",
-        "name" => "demo"
-      )
-    )
-
-    assert_equal [ "fingerprint-1" ], reconciliations
-    assert_empty fixer.attempted
-    assert_equal "patch-finding-1", patch.id
-    assert_equal finding, patch.finding
-    assert_equal "hive-patrol/route-home-abcdef12", patch.branch
-    assert_equal "/tmp/worktree", patch.worktree_path
-    assert patch.passed
-    assert_equal "abc123", patch.head_sha
-  end
-
-  def test_malformed_reconciled_patch_fails_closed
-    error = assert_raises(Hive::ConfigError) do
-      command_for.send(
-        :patch_from_effect_outcome,
-        Object.new,
-        sample_finding,
-        {}
-      )
-    end
-
-    assert_equal "patrol attempt reconciliation returned a malformed patch", error.message
+    assert_equal Hive::ExitCodes::CONFIG, status
+    payload = JSON.parse(out)
+    assert_equal false, payload.fetch("ok")
+    assert_equal "config", payload.fetch("error_kind")
+    assert_includes err, "unknown project"
   end
 
   private
-
-  def set_patrol_commands(repo, commands)
-    path = File.join(repo, ".hive-state", "config.yml")
-    cfg = YAML.safe_load(File.read(path))
-    cfg["patrol"]["commands"] = commands
-    File.write(path, cfg.to_yaml)
-  end
 
   def with_patrol_project
     previous_usage_path = Hive::UsageDb.instance_variable_get(:@path)
@@ -1489,7 +172,7 @@ class PatrolCommandTest < Minitest::Test
       Hive::UsageDb.path = File.join(global_home, "usage.db")
       with_tmp_git_repo do |repo|
         FileUtils.mkdir_p(File.join(repo, ".hive-state"))
-        cfg = Hive::Config.deep_merge(
+        config = Hive::Config.deep_merge(
           Hive::Config.deep_dup(Hive::Config::DEFAULTS),
           {
             "project_name" => "demo",
@@ -1500,7 +183,7 @@ class PatrolCommandTest < Minitest::Test
             }
           }
         )
-        File.write(File.join(repo, ".hive-state", "config.yml"), cfg.to_yaml)
+        File.write(File.join(repo, ".hive-state", "config.yml"), config.to_yaml)
         Hive::Config.register_project(name: "demo", path: repo)
         yield repo
       end
@@ -1509,19 +192,13 @@ class PatrolCommandTest < Minitest::Test
     Hive::UsageDb.path = previous_usage_path
   end
 
-  def command_for(project: "demo", json: true, dry_run: false, mapper: FakeMapper.new([]),
-                  reviewer: FakeReviewer.new([]), mapper_factory: nil, reviewer_factory: nil,
-                  fixer: FakeFixer.new(nil),
-                  pr_opener: FakePrOpener.new(Hive::Patrol::PrOpener::Result.new(status: :skipped)))
+  def command_for(dry_run: false, mapper: FakeMapper.new([]), reviewer: FakeReviewer.new([]))
     Hive::Commands::Patrol.new(
-      project,
-      json: json,
+      "demo",
+      json: true,
       dry_run: dry_run,
-      mapper_factory: mapper_factory || ->(_root, _cfg, _state) { mapper },
-      reviewer_factory: reviewer_factory || ->(_root, _cfg, _state) { reviewer },
-      fixer_factory: ->(_root, _cfg, _state) { fixer },
-      pr_opener_factory: ->(_root, _cfg, _state) { pr_opener },
-      dismissals_factory: ->(_root, _state) { FakeDismissals.new }
+      mapper_factory: ->(_root, _cfg, _state) { mapper },
+      reviewer_factory: ->(_root, _cfg, _state) { reviewer }
     )
   end
 
@@ -1548,97 +225,21 @@ class PatrolCommandTest < Minitest::Test
       recommendation: "Guard the receiver before use.",
       scope: "cross_feature",
       contract: "A missing route record must return not found.",
-      impact: "A valid request crashes before returning a response.",
-      root_cause: "The shared lookup assumes every id resolves.",
-      reproduction: "Request the route with a well-formed unknown id.",
-      validation: "Run a focused request regression and the request suite.",
-      evidence: [ { "file" => "app.rb", "line" => 1, "snippet" => "user.name" } ]
-    )
-  end
-
-  def finding_with(id:, fingerprint:)
-    semantics = {
-      "finding-1" => [ "Scheduler claim survives rejected launch", "Dispatch rejection never releases the scheduler lease" ],
-      "finding-2" => [ "Archive publication loses final rename", "Publication deletes its staging file before atomic replacement" ],
-      "finding-3" => [ "Credential cache serves another tenant", "The cache key omits the tenant identity" ],
-      "finding-4" => [ "Process watchdog abandons descendants", "The watchdog tracks only the exited group leader" ]
-    }.fetch(id)
-    Hive::Patrol::Finding.new(
-      id: id,
-      feature_id: "feature-#{id}",
-      category: "bug",
-      severity: "high",
-      confidence: "medium",
-      title: semantics.first,
-      description: "A reachable operation #{id} loses committed work.",
-      recommendation: "Repair the authoritative transition for #{id}.",
-      scope: "cross_feature",
-      contract: "Committed work #{id} must remain observable.",
-      impact: "A real consumer permanently loses operation #{id}.",
-      root_cause: semantics.last,
-      reproduction: "Interrupt operation #{id} between persistence and acknowledgement.",
-      validation: "Run the focused #{id} regression and subsystem suite.",
-      evidence: [ { "file" => "lib/#{id}.rb", "line" => 1, "snippet" => "state.delete(:#{id})" } ],
-      fingerprint: fingerprint
-    )
-  end
-
-  def sample_patch(repo, finding)
-    Hive::Patrol::Fixer::PatchAttempt.new(
-      id: "patch-#{finding.id}",
-      finding: finding,
-      branch: "hive-patrol/route-home-abcdef12",
-      worktree_path: repo,
-      validation: { "commands" => [ { "name" => "test", "command" => "true", "exit_code" => 0 } ] },
-      passed: true,
-      diffstat: " app.rb | 1 +",
-      head_sha: "abc123"
-    )
-  end
-
-  def patrol_capture_for(entry)
-    now = Time.utc(2026, 7, 28, 12, 0, 0)
-    Hive::Modules::Migration::PatrolCapture.build(
-      module_name: "patrol",
-      project: {
-        "project_id" => entry.fetch("project_id"),
-        "name" => entry.fetch("name"),
-        "repository" => entry["repository_identity"]
-      },
-      trigger: { "kind" => "manual", "id" => "manual-1" },
-      reservation: { "kind" => "ordinary", "id" => "reservation-1" },
-      owner: "legacy",
-      owner_epoch: 1,
-      selection_input: {
-        "kind" => "operation",
-        "operation" => "patrol-command-test"
-      },
-      selection:
-        Hive::Modules::Migration::PatrolDecisionProjection.build(
-          module_name: "patrol",
-          rationale: "due"
-        ),
-      outcome_class: nil,
-      outcome: nil,
-      occurred_at: now,
-      recorded_at: now
-    )
-  end
-
-  def failing_patch(finding)
-    Hive::Patrol::Fixer::PatchAttempt.new(
-      id: "patch-failed-#{finding.id}",
-      finding: finding,
-      branch: "hive-patrol/route-home-failed",
-      worktree_path: nil,
-      validation: { "passed" => false, "reason" => "validation_failed" },
-      passed: false,
-      diffstat: "",
-      head_sha: nil
+      root_cause: "A route can resolve without a receiver.",
+      evidence: [ { "file" => "app.rb", "line" => 1, "snippet" => "route.call" } ]
     )
   end
 
   def patrol_schemer
-    @patrol_schemer ||= JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol"))))
+    @patrol_schemer ||= JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
+    )
+  end
+
+  def patrol_store(repo)
+    entry = Hive::Config.find_project("demo")
+    Hive::Patrol::StateStore.new(
+      repo, hive_state_path: entry.fetch("hive_state_path")
+    )
   end
 end

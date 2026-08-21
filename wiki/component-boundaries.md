@@ -164,11 +164,11 @@ retirement fence, and durable recovery backoff, but no product work or delivery
 state. Both product gateways compose the same admission, sender, and
 receipt-projection collaborators without inheriting from a shared product
 superclass. `TransitionGateway` is a persistence-free Architecture
-Patrol port: it routes `job`, `discovery`, and `action` mutations into the
-architecture gateway but can only mutate by invoking JobStore. ActionRunner and
-the scheduler delegate transition identities, claim fencing, reconciliation,
-and occurrence finalization to bounded coordinators while retaining product
-decisions and cadence. Command and daemon manifest intake share
+Patrol port: it routes `job` and `discovery` mutations into the architecture
+gateway but can only mutate by invoking JobStore. The scheduler delegates
+transition identities, discovery-claim fencing, reconciliation, and occurrence
+finalization to bounded coordinators while retaining cadence. Command and
+daemon manifest intake share
 `ArchitectureIntakeTransitions`; `ArchitectureOccurrenceStore` validates the
 job scope over the shared journal from the immutable occurrence pointer in the
 v4 JobStore aggregate. There is no binding sidecar or compatibility lookup.

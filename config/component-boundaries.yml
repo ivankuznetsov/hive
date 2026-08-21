@@ -422,10 +422,6 @@ components:
       - lib/hive/modules/migration/report_migration.rb
       - lib/hive/modules/migration/report_projection.rb
       - lib/hive/patrol/effect_gateway.rb
-      - lib/hive/refactor_patrol/action_claim_transitions.rb
-      - lib/hive/refactor_patrol/action_plan_transitions.rb
-      - lib/hive/refactor_patrol/action_transition_context.rb
-      - lib/hive/refactor_patrol/action_transitions.rb
       - lib/hive/refactor_patrol/architecture_intake_transitions.rb
       - lib/hive/refactor_patrol/architecture_occurrence_lifecycle.rb
       - lib/hive/refactor_patrol/architecture_occurrence_store.rb
@@ -442,14 +438,14 @@ components:
       - lib/hive/refactor_patrol/transition_gateway.rb
     state_contracts:
       - "StateStore and JobStore expose the only product recovery APIs over one OccurrenceJournal facade; OccurrenceRecordStore is the sole occurrence-cell lock/read/write owner"
-      - "JobStore v4 owns the immutable job-to-occurrence and intake-transition identities; discovery attempts, actions, and diagnostic episodes append exact transition identities"
+      - "JobStore v4 owns the immutable job-to-occurrence and intake-transition identities; discovery attempts and diagnostic episodes append exact transition identities"
       - "Canonical occurrence records atomically bind prepared or uncertain delivery, terminal outcomes, and ordered projection outbox bytes; persisted sender leases and PID authority do not exist"
       - "A committed or reconciled ordinary Patrol pull request atomically appends its exact terminal receipt bytes as a typed publication outbox entry; StateStore alone projects that entry to one immutable publication_binding before tuple acknowledgement"
       - "EvidenceStore is an append-only bounded observational projection under module-runtime/migration/patrol-evidence and is never consulted for retry"
       - "PatrolEvidenceReceipt is the canonical immutable qualification input; PatrolEvidenceVerifier compares the full fault-step and typed-artifact values plus every authority-sensitive identity with independently supplied expected bindings before creating its non-public verified token"
       - "PatrolEffectIndex is a bounded pure run-wide duplicate projection, and PatrolQualification counts unique trigger/repository/SHA/change-window decision identities and derives immutable completeness and diversity findings without executing scenarios or recovering effects"
       - "ReportProjection merges deterministic and installed-live qualifications without mutation authority, except that an exact superseding contradiction may invalidate its qualified lane; ReportMigration alone converts the complete released v1 report shape while validating and crash-repairing immutable source, archive, and receipt provenance"
-      - "ActionRunner and RefactorPatrolScheduler decide product work; composed action/discovery transition coordinators own durable transition identities, claim fences, and replay"
+      - "RefactorPatrolScheduler decides discovery work; discovery transition coordinators own durable transition identities, claim fences, and replay"
       - "JobStoreFiles is the sole descriptor-confined physical I/O port for live v4 jobs, query indexes, quarantine evidence, and action locks; JobQueryIndex owns only their bounded logical projection"
       - "JobStore authority is fixed at refactor_patrol/v4; construction and read-only queries do not create state, while the first mutation lazily creates only v4 and never inspects opaque v3 jobs"
     schema_contracts:
@@ -496,10 +492,6 @@ components:
       - Hive::Modules::Migration::OccurrenceRecordValidator
       - Hive::Modules::Migration::StableProcessLock
       - Hive::Patrol::EffectGateway
-      - Hive::RefactorPatrol::ActionClaimTransitions
-      - Hive::RefactorPatrol::ActionPlanTransitions
-      - Hive::RefactorPatrol::ActionTransitionContext
-      - Hive::RefactorPatrol::ActionTransitions
       - Hive::RefactorPatrol::ArchitectureIntakeTransitions
       - Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle
       - Hive::RefactorPatrol::ArchitectureOccurrenceStore
@@ -526,10 +518,6 @@ components:
       - Hive::Modules::Migration::OccurrenceRecordValidator
       - Hive::Modules::Migration::StableProcessLock
       - Hive::Patrol::EffectGateway
-      - Hive::RefactorPatrol::ActionClaimTransitions
-      - Hive::RefactorPatrol::ActionPlanTransitions
-      - Hive::RefactorPatrol::ActionTransitionContext
-      - Hive::RefactorPatrol::ActionTransitions
       - Hive::RefactorPatrol::ArchitectureIntakeTransitions
       - Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle
       - Hive::RefactorPatrol::ArchitectureOccurrenceStore
@@ -552,7 +540,6 @@ components:
           - lib/hive/daemon/refactor_patrol_scheduler.rb
           - lib/hive/modules/adapters/architecture_patrol.rb
           - lib/hive/modules/adapters/patrol.rb
-          - lib/hive/refactor_patrol/action_runner.rb
         reason: "Product composition roots and observational adapters project the append-only evidence facade; they cannot use it as retry authority."
       - constant: Hive::Modules::Migration::OccurrenceJournal
         files:
@@ -562,10 +549,6 @@ components:
         files:
           - lib/hive/patrol/state_store.rb
         reason: "Ordinary Patrol StateStore is the sole composition root for its product gateway."
-      - constant: Hive::RefactorPatrol::ActionTransitions
-        files:
-          - lib/hive/refactor_patrol/action_runner.rb
-        reason: "ActionRunner is the sole composition root for action transition coordinators."
       - constant: Hive::RefactorPatrol::ArchitectureIntakeTransitions
         files:
           - lib/hive/commands/refactor_patrol.rb
@@ -590,10 +573,6 @@ components:
           - lib/hive/commands/refactor_patrol.rb
           - lib/hive/daemon/refactor_patrol_scheduler.rb
         reason: "Manual and daemon discovery paths compose the same discovery transition facade."
-      - constant: Hive::RefactorPatrol::EffectGateway
-        files:
-          - lib/hive/refactor_patrol/action_runner.rb
-        reason: "ActionRunner composes the architecture product gateway for hosted action effects."
       - constant: Hive::RefactorPatrol::JobStore
         files:
           - lib/hive/commands/refactor_patrol.rb
@@ -601,11 +580,7 @@ components:
           - lib/hive/daemon/refactor_patrol_scheduler.rb
           - lib/hive/daemon/patrol_fix_operational_projection.rb
           - lib/hive/modules/migration/coordinator.rb
-          - lib/hive/refactor_patrol/action_runner.rb
-          - lib/hive/refactor_patrol/canonical_action_catalog.rb
-          - lib/hive/refactor_patrol/family_store.rb
-          - lib/hive/refactor_patrol/repository_ownership.rb
-        reason: "Explicit command, scheduler, operational projection, migration, action, catalog, family, and ownership composition roots construct the public architecture aggregate facade; lexical aliases are enforced too."
+        reason: "Explicit command, scheduler, operational projection, migration, catalog, family, and ownership composition roots construct the public architecture aggregate facade; lexical aliases are enforced too."
       - constant: Hive::RefactorPatrol::JobQueryIndex
         files:
           - lib/hive/refactor_patrol/job_store.rb
@@ -626,11 +601,9 @@ components:
       - lib/hive/modules/adapters/patrol.rb
       - lib/hive/modules/migration/patrols.rb
       - lib/hive/modules/migration/report.rb
-      - lib/hive/patrol/pr_opener.rb
       - lib/hive/patrol/state_store.rb
-      - lib/hive/refactor_patrol/action_runner.rb
       - lib/hive/refactor_patrol/job_store.rb
-    mutation_authority: "The separate ordinary and architecture gateways authorize product sinks; ordinary Patrol StateStore is the sole non-admitted projector of an already-authorized pull-request publication receipt, explicit intake, discovery, and action transition facades are the only semantic JobStore mutator call sites, and shared values, OccurrenceJournal, EvidenceStore, verification, duplicate indexing, qualification, and report projection contain no product policy or execution authority."
+    mutation_authority: "Ordinary Patrol StateStore publishes accepted findings to Patrol Fix, while explicit intake and discovery transition facades are the only live semantic JobStore mutator call sites; shared values, OccurrenceJournal, EvidenceStore, verification, duplicate indexing, qualification, and report projection contain no product policy or execution authority."
     recovery_surface: "StateStore and JobStore are the only product recovery authorities over the single OccurrenceJournal mechanic; ordinary Patrol drains typed publication entries before suppression reads and acknowledges only after an exact binding write or no-op, while EvidenceStore remains observation-only and ReportMigration is confined to one-off project-local report schema conversion."
     wiki_page: wiki/modules/patrol.md
     focused_tests:
@@ -652,11 +625,7 @@ components:
       - test/unit/daemon/activation_lock_test.rb
       - test/unit/daemon/operational_snapshot_test.rb
       - test/unit/patrol/effect_gateway_test.rb
-      - test/unit/patrol/fixer_test.rb
-      - test/unit/patrol/pr_opener_test.rb
       - test/unit/patrol/state_store_effect_intents_test.rb
-      - test/unit/refactor_patrol/action_runner_test.rb
-      - test/unit/refactor_patrol/action_transitions_test.rb
       - test/unit/refactor_patrol/architecture_intake_transitions_test.rb
       - test/unit/refactor_patrol/architecture_occurrence_store_test.rb
       - test/unit/refactor_patrol/claim_maintenance_transitions_test.rb
@@ -1134,7 +1103,6 @@ components:
       - lib/hive/worktree.rb
       - lib/hive/stages/agent_report.rb
       - lib/hive/stages/draft_pr_handoff.rb
-      - lib/hive/refactor_patrol/pr_opener.rb
     mutation_authority: "Hive injects credential, transport, branch, PR, and operator-approval policy."
     recovery_surface: "Receipts preserve observed identities; publication failure remains explicit and retryable."
     wiki_page: wiki/modules/agent_git_gate.md
@@ -1145,7 +1113,6 @@ components:
       - test/unit/worktree_test.rb
       - test/unit/stages/agent_report_test.rb
       - test/unit/stages/draft_pr_handoff_test.rb
-      - test/unit/refactor_patrol/pr_opener_test.rb
     migration_exceptions: []
 
   - id: work-ledger

@@ -786,18 +786,20 @@ ultrapatrol/high/medium/low; the legacy shared override is inert. Hive writes
 an atomic reservation to a strict UTC-date ledger immediately before a
 scheduled provider child starts, so controller loss does not reopen the slot
 and neither engine can starve the other. Fix, remediation, review, publication,
-and post-merge work do not consume discovery capacity. Token totals are
+and post-merge work do not consume discovery capacity. Accepted `fix` and
+`discuss` dispositions enter the shared Patrol Fix workflow; Architecture
+Patrol has no action or publication engine. Token totals are
 telemetry only; there is no Patrol token budget or token-based admission.
 Architecture JobStore starts fresh at v4 and never reads or rewrites v3.
 
 **Consequences:** Existing v3 JobStore bytes remain recoverable as files but
-have no runtime continuity. `discuss` creates an issue action; `fix` is PR-first
-with a dormant deterministic-nonfixable issue fallback; `dismiss` creates no
-action. Ordinary transient discovery retries after 60 seconds; provider
+have no runtime continuity. New v4 jobs terminalize after discovery with an
+empty action list. Historical v4 action fields remain queryable but cannot be
+claimed or executed. Ordinary transient discovery retries after 60 seconds; provider
 provider discovery retry deadlines are durable per engine and may cross UTC
 midnight; Hive daily launch exhaustion sleeps until the next UTC day for only
 the exhausted lane. Wall-clock, turn,
-feature/fix/PR, process-custody, and daemon concurrency bounds remain. This
+feature, process-custody, and daemon concurrency bounds remain. This
 decision supersedes ADR-042.
 
 ## ADR-032: Per-stage controls overlay the current durable identity

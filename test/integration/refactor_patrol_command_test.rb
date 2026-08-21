@@ -780,8 +780,8 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_equal Hive::ExitCodes::SUCCESS, second_status, "#{second_out}\n#{second_err}"
       replay = store.jobs.find { |job| job.fetch("job_id").include?("-replay-") }
       refute_nil replay
-      assert_equal true, replay.dig("policy", "auto_fix")
-      assert_equal "classified", replay.fetch("state")
+      assert_equal false, replay.dig("policy", "auto_fix")
+      assert_equal "complete", replay.fetch("state")
       assert_equal [ "replayable" ], replay.dig("dispositions", "fix").map { |entry| entry.fetch("id") }
       assert_equal replay_head, replay.fetch("analysis_sha")
       assert_equal head, original.fetch("analysis_sha")
@@ -929,98 +929,6 @@ class RefactorPatrolCommandTest < Minitest::Test
                    aggregate.dig("dispositions", "fix")
                             .map { |entry| entry.fetch("id") }
       assert JSON.parse(out).fetch("complete")
-    end
-  end
-
-  def test_action_mode_resumes_the_authoritative_job_and_emits_a_strict_v4_projection
-    with_refactor_patrol_project do |repo|
-      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
-      manifest = with_manifest_checksum(pr_manifest(merge_sha: head))
-      path = publish_job_manifest(repo, manifest)
-      cfg = Hive::Config.load(repo)
-      policy = Hive::RefactorPatrol::Policy.capture(cfg, now: Time.utc(2026, 7, 10)).merge(
-        "auto_fix" => false, "issue_filing" => false
-      )
-      item = thesis("report-only", feature_id: "checkout", fingerprint: "fp-report-only")
-      accepted = {
-        "id" => item.id, "feature_id" => item.feature_id,
-        "fingerprint" => item.fingerprint,
-        "route" => "fix",
-        "admissible" => true, "reasons" => [], "thesis" => item.to_h
-      }
-      store, enrolled = enroll_manifest!(
-        repo, manifest, policy: policy,
-        now: Time.utc(2026, 7, 10)
-      )
-      store.write_job!(
-        enrolled.merge(
-          "analysis_sha" => head, "policy" => policy,
-          "state" => "classified", "complete" => false,
-          "dispositions" => { "fix" => [ accepted ], "discuss" => [], "dismiss" => [] },
-          "feature_results" => [], "review_errors" => [], "zero_reason" => nil,
-          "attempts" => [ { "number" => 1, "outcome" => "classified" } ],
-          "actions" => [], "created_at" => "2026-07-10T00:00:00Z",
-          "updated_at" => "2026-07-10T00:00:00Z"
-        )
-      )
-      config_path = File.join(repo, ".hive-state", "config.yml")
-      current_config = YAML.safe_load(File.read(config_path))
-      current_config["default_branch"] = "renamed-main"
-      File.write(config_path, current_config.to_yaml)
-
-      out, err, status = with_captured_exit do
-        command_for(job_manifest: path, actions: true).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
-      payload = JSON.parse(out)
-      assert v4_refactor_schemer.valid?(payload),
-             v4_refactor_schemer.validate(payload).map { |error| error["error"] }.inspect
-      assert payload.fetch("complete")
-      assert_equal "complete", payload.dig("action_status", "state")
-      assert_empty payload.fetch("actions")
-      assert Hive::RefactorPatrol::JobStore.new(repo).read_job(manifest.fetch("job_id")).fetch("complete")
-    end
-  end
-
-  def test_action_mode_counts_completed_feature_with_no_thesis
-    with_refactor_patrol_project do |repo|
-      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
-      manifest = with_manifest_checksum(pr_manifest(merge_sha: head))
-      path = publish_job_manifest(repo, manifest)
-      cfg = Hive::Config.load(repo)
-      policy = Hive::RefactorPatrol::Policy.capture(cfg, now: Time.utc(2026, 7, 10)).merge(
-        "auto_fix" => false, "issue_filing" => false
-      )
-      store, enrolled = enroll_manifest!(
-        repo, manifest, policy: policy,
-        now: Time.utc(2026, 7, 10)
-      )
-      store.write_job!(
-        enrolled.merge(
-          "analysis_sha" => head, "policy" => policy,
-          "state" => "complete", "complete" => true,
-          "dispositions" => { "fix" => [], "discuss" => [], "dismiss" => [] },
-          "feature_results" => [
-            { "feature_id" => "checkout", "complete" => true, "thesis_ids" => [], "errors" => [] }
-          ],
-          "review_errors" => [], "zero_reason" => "no_theses",
-          "attempts" => [ { "number" => 1, "outcome" => "complete" } ],
-          "actions" => [], "created_at" => "2026-07-10T00:00:00Z",
-          "updated_at" => "2026-07-10T00:00:00Z"
-        )
-      )
-
-      out, err, status = with_captured_exit do
-        command_for(job_manifest: path, actions: true).call
-      end
-
-      assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
-      payload = JSON.parse(out)
-      assert payload.fetch("complete")
-      assert_equal 1, payload.fetch("features_mapped")
-      assert_empty payload.fetch("fix")
-      assert_empty payload.fetch("discuss")
     end
   end
 
@@ -1414,8 +1322,6 @@ class RefactorPatrolCommandTest < Minitest::Test
   def test_mode_validation_rejects_ambiguous_or_unsafe_flag_combinations
     cases = [
       [ { result_file: "/tmp/result.json" }, /--result-file requires/ ],
-      [ { actions: true, json: false, job_manifest: "/tmp/job.json" }, /--actions requires/ ],
-      [ { actions: true, job_manifest: "/tmp/job.json", feature: "checkout" }, /--actions cannot be combined/ ],
       [ { pr: "7", json: false }, /PR-scoped mode requires --json/ ],
       [ { pr: "7", job_manifest: "/tmp/job.json" }, /accepts only one/ ]
     ]
@@ -1689,7 +1595,6 @@ class RefactorPatrolCommandTest < Minitest::Test
 
       renewed << token
     end
-    store.define_singleton_method(:renew_action_claim!) { |token, **| renewed << token }
     command.instance_variable_set(:@job_store, store)
     now = Time.utc(2026, 7, 10)
     command.instance_variable_set(:@heartbeat_clock, -> { now })
@@ -1697,8 +1602,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       [ { kind: :discovery, generation: 1 }, { kind: :discovery, generation: 2 } ]
     end
     command.send(:heartbeat_active_claims)
-    command.send(:renew_claim, { kind: :action, generation: 3 }, now)
-    assert_equal [ 2, 3 ], renewed.map { |token| token.fetch(:generation) }
+    assert_equal [ 2 ], renewed.map { |token| token.fetch(:generation) }
 
     transitions = Object.new
     transitions.define_singleton_method(:release) do |**|
@@ -1801,7 +1705,7 @@ class RefactorPatrolCommandTest < Minitest::Test
     )
   end
 
-  def test_job_bound_paths_and_action_aggregate_identity_are_enforced
+  def test_job_bound_paths_are_enforced
     with_refactor_patrol_project do |repo|
       manifest = pr_manifest
       command = Hive::Commands::RefactorPatrol.new(
@@ -1818,39 +1722,7 @@ class RefactorPatrolCommandTest < Minitest::Test
         command.send(:validate_result_file!, repo)
       end
       assert_match(/must be a job-bound file/, error.message)
-
-      aggregate = lifecycle_aggregate(manifest, nil).merge(
-        "source" => source_context(manifest).merge("repository" => "other/repo")
-      )
-      result = Struct.new(:aggregate, :completeness).new(aggregate, {})
-      error = assert_raises(Hive::ConfigError) do
-        command.send(:build_action_payload, { "name" => "demo" }, repo, result)
-      end
-      assert_match(/does not match its immutable manifest/, error.message)
     end
-  end
-
-  def test_action_payload_projects_only_public_receipt_fields
-    manifest = pr_manifest
-    item = thesis("action", fingerprint: "fp-action")
-    action = {
-      "canonical_action_id" => "issue-fp-action", "thesis_id" => item.id,
-      "thesis_fingerprint" => item.fingerprint, "kind" => "issue",
-      "family_id" => "family-1", "owner_job_id" => manifest.fetch("job_id"),
-      "outcome" => "issue_filed", "terminal" => true,
-      "receipts" => { "issue_url" => "https://github.com/acme/demo/issues/9" },
-      "private_claim" => "must-not-leak"
-    }
-    aggregate = lifecycle_aggregate(manifest, item, actions: [ action ])
-    command = Hive::Commands::RefactorPatrol.new("demo", json: true, job_manifest: "job.json")
-    command.instance_variable_set(:@manifest, manifest)
-    result = Struct.new(:aggregate, :completeness).new(aggregate, { "state" => "complete" })
-
-    payload = command.send(:build_action_payload, { "name" => "demo" }, "/repo", result)
-
-    projected = payload.fetch("actions").fetch(0)
-    assert_equal "issue-fp-action", projected.fetch("canonical_action_id")
-    refute projected.key?("private_claim")
   end
 
   def test_error_result_write_failure_does_not_mask_original_error
@@ -1970,14 +1842,6 @@ class RefactorPatrolCommandTest < Minitest::Test
     assert_match(/only one of --list or --show/, error.message)
 
     command = Hive::Commands::RefactorPatrol.new(
-      "demo", json: true, list: true, actions: true
-    )
-    error = assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
-      command.send(:validate_mode!)
-    end
-    assert_match(/cannot be combined/, error.message)
-
-    command = Hive::Commands::RefactorPatrol.new(
       "demo", json: true, list: true, full: true
     )
     error = assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
@@ -2073,7 +1937,7 @@ class RefactorPatrolCommandTest < Minitest::Test
   end
 
   def command_for(project: "demo", json: true, dry_run: false, feature_hint: nil, entrypoint_hint: nil, path_hint: nil, changed_since: nil,
-                  pr: nil, job_manifest: nil, actions: false, result_file: nil, manifest_resolver: nil, features: [], theses_by_feature: {}, reviewer: nil,
+                  pr: nil, job_manifest: nil, result_file: nil, manifest_resolver: nil, features: [], theses_by_feature: {}, reviewer: nil,
                   use_default_mapper: false, repository_ownership: nil, root_observer: nil)
     reviewer ||= FakeReviewer.new(theses_by_feature)
     repository_ownership ||= lambda do |**_arguments|
@@ -2091,7 +1955,6 @@ class RefactorPatrolCommandTest < Minitest::Test
       changed_since: changed_since,
       pr: pr,
       job_manifest: job_manifest,
-      actions: actions,
       result_file: result_file,
       mapper_factory: use_default_mapper ? nil : lambda do |root, _cfg, _state|
         root_observer&.call(:mapper, root)

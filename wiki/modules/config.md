@@ -437,16 +437,16 @@ logical component, then applies the
 same four-file/32 KiB initial review view. The first entrypoint is retained even
 when it alone is larger.
 
-**Architecture patrol separates discovery, review output, and mutation.**
+**Architecture patrol is discovery-only.**
 `Config::DEFAULTS["refactor_patrol"]["enabled"]`, `auto_fix.enabled`, and
 `issue_filing.enabled` are false, so missing or older partial config grants no
 new discovery, mutation, or remote-write authority. Fresh init recommends the
-full workflow, writes that answer explicitly to discovery, auto-fix, and issue
-filing, and uses issues as the fallback review surface. Existing projects opt
-in explicitly.
+discovery engine and writes only that answer. Accepted findings enter the
+shared Patrol Fix workflow. Existing projects opt in explicitly.
 The block also owns an optional refactor identity (`agent`, `model`, `effort`)
 that inherits the resolved execute identity field by field, plus optional
-auto-fix identity overrides that inherit the resolved refactor identity. It
+historical auto-fix identity overrides that can configure downstream Patrol
+Fix identity. It
 also owns confidence/run caps, language-neutral include/exclude rules,
 `docs|format|lint|public_contract|typecheck|test` commands, actual patch caps,
 and the categorical `fix`/`discuss`/`dismiss` route policy. The default

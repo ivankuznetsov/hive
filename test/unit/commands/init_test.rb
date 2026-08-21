@@ -125,7 +125,7 @@ class HiveCommandsInitTest < Minitest::Test
     assert_match(/prompt_template: reviewer_grok_ce_code_review\.md\.erb/, rendered)
   end
 
-  def test_project_config_renders_refactor_patrol_policy_from_choice
+  def test_project_config_renders_discovery_only_refactor_patrol_choice
     enabled = render_fresh_config(
       :coding,
       answers: project_config_answers.merge("refactor_patrol_enabled" => true)
@@ -133,8 +133,8 @@ class HiveCommandsInitTest < Minitest::Test
     enabled_raw = YAML.safe_load(enabled).fetch("refactor_patrol")
 
     assert_equal true, enabled_raw.fetch("enabled")
-    assert_equal true, enabled_raw.dig("auto_fix", "enabled")
-    assert_equal false, enabled_raw.dig("issue_filing", "enabled")
+    refute enabled_raw.key?("auto_fix")
+    refute enabled_raw.key?("issue_filing")
 
     disabled = render_fresh_config(
       :coding,
@@ -142,8 +142,8 @@ class HiveCommandsInitTest < Minitest::Test
     )
     disabled_raw = YAML.safe_load(disabled).fetch("refactor_patrol")
     assert_equal false, disabled_raw.fetch("enabled")
-    assert_equal false, disabled_raw.dig("auto_fix", "enabled")
-    assert_equal false, disabled_raw.dig("issue_filing", "enabled")
+    refute disabled_raw.key?("auto_fix")
+    refute disabled_raw.key?("issue_filing")
   end
 
   def test_refactor_patrol_selector_requires_a_boolean_or_nil

@@ -7,14 +7,14 @@ updated: 2026-08-13
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
-**TLDR**: The autonomous review loop. After 5-open-pr opens a task PR, patrol creates a synthetic `6-review/patrol-.../` task for an opened PR, or `hive review --pr <n>` creates a synthetic `6-review/adhoc-review-pr-<n>/` task for someone else's PR, `Hive::Stages::Review.run!` runs CI on entry, then loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap) and finalises with a browser-test phase. Reviewer and escalation markdown stay authoritative locally and are also mirrored to the GitHub PR as PR-level comments.
+**TLDR**: The autonomous review loop. After 5-open-pr opens a task PR, Patrol Fix workflow routing can enter the same stage, or `hive review --pr <n>` creates a synthetic `6-review/adhoc-review-pr-<n>/` task for someone else's PR. `Hive::Stages::Review.run!` runs CI on entry, then loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap) and finalises with a browser-test phase. Reviewer and escalation markdown stay authoritative locally and are also mirrored to the GitHub PR as PR-level comments.
 
 ## Setup
 
-- **State file**: `task.md` with frontmatter written by 4-execute (`slug`, `started_at`), by patrol handoff (`source: patrol`, finding fingerprint, PR URL), or by ad-hoc PR review (`source: ad-hoc`, PR URL). The runner does NOT track pass count in frontmatter — it derives the current pass by reading `reviews/<reviewer-name>-<NN>.md` filenames and taking the maximum NN.
-- **Worktree pointer**: `worktree.yml` (carried over from 4-execute, written by `Hive::Patrol::ReviewHandoff`, or written by `Hive::Commands::AdhocReview`; missing → exit 1 with "6-review entered without a worktree.yml").
-- **PR pointer**: `pr.md` (carried over from 5-open-pr or written by patrol/ad-hoc handoff). Missing PR metadata only disables GitHub comment mirroring; local review still runs. Ad-hoc tasks record `pr_number`, `base_ref_name`, `head_ref_oid`, `is_cross_repository`, and `state`.
-- **Reviews directory**: `reviews/` (carried over from the normal pipeline or created by patrol/ad-hoc handoff). New per-pass files written here: `<reviewer>-NN.md`, `escalations-NN.md`, `ci-blocked.md` (Phase 1 hard-block), `browser-blocked-NN.md` (Phase 5 warned), `fix-guardrail-NN.md` (post-fix tripped), and `suppressed.md` (operator-visible no-fix suppression list).
+- **State file**: `task.md` with frontmatter written by 4-execute, Patrol Fix routing, or ad-hoc PR review. The runner derives the current pass from `reviews/<reviewer-name>-<NN>.md` filenames.
+- **Worktree pointer**: `worktree.yml` carried from the owning workflow or written by `Hive::Commands::AdhocReview`; missing → exit 1 with "6-review entered without a worktree.yml".
+- **PR pointer**: `pr.md` carried from publication or written by ad-hoc review. Missing PR metadata only disables GitHub comment mirroring; local review still runs.
+- **Reviews directory**: `reviews/`, carried over or created by the workflow/ad-hoc handoff.
 
 ## Pre-flight (`Review.run!`)
 

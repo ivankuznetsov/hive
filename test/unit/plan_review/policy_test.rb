@@ -23,6 +23,17 @@ class PlanReviewPolicyTest < Minitest::Test
     assert_nil result.effective_level
   end
 
+  def test_explicitly_disabled_coding_review_is_not_applicable
+    result = Hive::PlanReview::Policy.evaluate(
+      workflow_id: "coding", signals: signals(skip: false),
+      config: config.merge("enabled" => false)
+    )
+
+    refute result.applicable?
+    assert_nil result.computed_level
+    assert_nil result.effective_level
+  end
+
   def test_skip_requires_affirmative_signals_and_uncertainty_defaults_standard
     skip = Hive::PlanReview::Policy.evaluate(
       workflow_id: "coding", signals: signals(skip: true), config: config

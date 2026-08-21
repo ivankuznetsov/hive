@@ -2057,6 +2057,7 @@ module Hive
       "routes" => %w[primary adversarial verification fallbacks]
     }.freeze
     PLAN_REVIEW_ADAPTERS = %w[ce_doc_review].freeze
+    PLAN_REVIEW_BENCHMARK_OPT_OUT_ENV = "HIVE_BENCH_ALLOW_DISABLED_PLAN_REVIEW"
     PLAN_REVIEW_NAME = /\A[a-z][a-z0-9_]{0,63}\z/
     PLAN_REVIEW_POLICY_KEYS = %w[
       id version action risk paths valid_from valid_until revoked
@@ -2065,7 +2066,9 @@ module Hive
     def validate_plan_review!(cfg, source_path)
       review = cfg.fetch("plan_review")
       validate_closed_mapping!(review, PLAN_REVIEW_KEYS, "plan_review", source_path)
-      unless review["enabled"] == true
+      benchmark_opt_out = review["enabled"] == false &&
+        ENV[PLAN_REVIEW_BENCHMARK_OPT_OUT_ENV] == "1"
+      unless review["enabled"] == true || benchmark_opt_out
         raise ConfigError,
               "plan_review.enabled in #{describe_source(source_path)} must be true; " \
               "built-in coding review cannot be disabled"

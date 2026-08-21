@@ -1270,3 +1270,13 @@ retention policy. A sufficiently long-lived task will eventually reach the
 hard custody ceiling and fail closed before provider launch. Solve this with a
 durable receipt retention/compaction design that preserves authority evidence,
 not by adding another custody topology or raising the hard ceiling again.
+
+## Benchmark-only plan-review opt-out needs live parity proof (2026-08-21)
+
+The local benchmark runtime can now grant an explicit process-local exception
+for projects that serialize `plan_review.enabled: false`; ordinary Hive loads
+still reject that configuration. Unit coverage proves the grant is required,
+but a complete Pi/OpenCode comparison has not yet proven that the benchmark
+runner forwards it through every container and that no plan-review artifacts or
+reviewer calls appear. Keep this boundary local until that fresh campaign proof
+exists.

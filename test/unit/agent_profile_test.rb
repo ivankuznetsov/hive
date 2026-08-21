@@ -722,12 +722,16 @@ class AgentProfileTest < Minitest::Test
         while [ "$SECONDS" -lt "$deadline" ]; do :; done
       SH
       File.chmod(0o755, binary)
-      profile = make_profile(
-        bin_default: binary, env_bin_override_key: nil, min_version: "1.0.0"
-      )
       started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
       with_version_check_timeout(0.1) do
+        # Profiles now capture their typed version timeout at construction so
+        # OpenCode can use a longer cold-start budget without slowing every
+        # provider. Construct under the test override rather than mutating the
+        # default after the profile has already copied it.
+        profile = make_profile(
+          bin_default: binary, env_bin_override_key: nil, min_version: "1.0.0"
+        )
         err = assert_raises(Hive::AgentError) { profile.check_version! }
         assert_match(/version check timed out/, err.message)
       end

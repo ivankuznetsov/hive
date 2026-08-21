@@ -36,8 +36,8 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 
 | Module | File | Purpose |
 |--------|------|---------|
-| `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over action, admission/dependency state, stage/workflow context, mtime debounce, and `answers_pending`. Structured admission errors return `:admission_error` before every stage branch; ordinary blocked rows cannot dispatch or poll for merge. |
-| `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate plus per-project patrol scans), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. `Dispatcher#reload_config!` applies reloaded limits through `update_limits` on this same object so SIGHUP changes admission immediately without discarding runtime state. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); everything else is intentionally in-memory. |
+| `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over action, admission/dependency state, stage/workflow context, mtime debounce, and the brainstorm `answers_pending` / `answers_complete` signals. Structured admission errors return `:admission_error` before every stage branch; ordinary blocked rows cannot dispatch or poll for merge. |
+| `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate plus per-project patrol scans), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. `Dispatcher#reload_config!` applies reloaded limits through `update_limits` on this same object so SIGHUP changes admission immediately without discarding runtime state. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); restored keys retain one-process provenance until a real observation or dispatch consumes them. Everything else is intentionally in-memory. |
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
 | `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed visible rows including `workflow`, canonical `pr_url`, structured `admission_error`, project information, and the summed `hidden_archived_task_count`. Missing or malformed admission state is converted to `dependency_validation_failed`, `blocked: true`, action `admission_error`, and no command. Envelope shape and hidden-count types are hard-validated while forward schema versions remain best-effort. |
 | `Hive::Daemon::OperationalSnapshot` | `lib/hive/daemon/operational_snapshot.rb` | Private daemon-to-status observation channel. `Assembler` first publishes a generation-bound `runtime_ready` acknowledgement after signal installation and inherited-claim recovery, then retains that flag on `started`, `failed`, revalidated `complete`, and shutdown records. Tick completion includes the final aggregate hidden-archive count; SIGHUP recalculates validity from the reloaded poll interval, and recovery receipts are overlaid only when task, stage, marker identity, and lifecycle still match. `Store` atomically persists records under owner-private path/inode checks; the ordinary `Reader` accepts only live-generation complete observations and degrades every other condition to explicit unavailable/stale/invalid evidence. |
@@ -561,29 +561,28 @@ answer with "Try again — another run holds the lock").
 
 The fix gates the resume on whether any questions are still unanswered:
 
-- `Dispatcher#brainstorm_answers_pending?(row)` parses the brainstorm
+- `Dispatcher#brainstorm_answer_state(row)` parses the brainstorm
   file (via the shared `Hive::BrainstormParser`, relocated out of
   `Hive::Bot::` for exactly this reason) for a `2-brainstorm`
-  `needs_input` row and returns true while any `### Q{n}.` lacks an
-  answer. It returns false for every non-brainstorm edit-resume row
-  (execute/review carry no Q&A markers). **Fails open** (resume) on a
-  file that parses to ZERO questions or on an unexpected error — and
-  this is self-healing, not a gap: the Telegram bot locates questions
-  with the *same* parser, so a file with no parseable `### Q{n}.` (empty,
-  agent crashed mid-write, header drift) is one the operator can't answer
-  via the bot either; the recovery is to re-run the brainstorm agent,
-  which regenerates a clean file, and holding would strand it instead.
+  `needs_input` row and returns two signals: `pending` while any
+  `### Q{n}.` lacks an answer, and `complete` only when the document has
+  at least one parsed question and every answer is filled. Non-brainstorm,
+  missing, zero-question, and unparseable files return neither signal and
+  retain the generic mtime-baseline path. The Telegram bot locates questions
+  with the *same* parser, so malformed files can still self-heal after a real
+  edit instead of being held forever as unanswered.
   `parse` is hardened (encoding-scrub + IO-resilient) so a torn
   concurrent read — the bot appends an answer while the daemon parses —
   degrades rather than raises; the residual `:fatal` rescue is deduped
   per `[project, slug]` so a persistently unreadable file can't spam the
   log every tick.
-- `Policy.decide` takes `answers_pending:` and downgrades a would-be
+- `Policy.decide` takes both signals. `answers_pending:` downgrades a would-be
   `:dispatch` to `:wait_for_answers` — but **only** the terminal
-  dispatch. The first-sight `:record_baseline`, `:skip`, and
-  `:wait_for_debounce` outcomes pass through unchanged, so the mtime
-  baseline is still seeded and the **editor-bulk-save** path (all answers
-  in one save → no unanswered slots) resumes normally.
+  dispatch. `answers_complete:` is the narrow first-sight exception: once
+  the final write is older than `edit_debounce_sec`, a non-empty fully
+  answered Q&A dispatches instead of consuming those answers as its initial
+  baseline. A fresh complete write still debounces, and incomplete or
+  structurally unknown rows still seed the normal baseline.
 - The dispatcher logs the hold as `:skipped reason=answers_pending`, and
   `hive status --json` carries an `unanswered_questions` count for the
   row (issue #270) so the hold is observable without tailing the log —
@@ -659,11 +658,19 @@ appear in `daemon.log` so a silent re-strand cannot happen unobserved.
 fails loud at the call site rather than silently re-stranding answered
 tasks across per-project status errors.
 
-**Accepted limitation:** if the daemon is down for the *entire* window
-between a bot-dispatched brainstorm's `WAITING` write and the user's
-answer, no baseline was ever recorded, so the answer becomes the baseline
-on first start and the task waits for the next edit. The daemon is
-normally up, so the window is tiny; the operator can re-save / `touch`.
+When a completed brainstorm is the daemon's first observation — including when
+all answers landed while the daemon was down — the non-empty structural
+`answers_complete` signal prevents the current answered mtime from becoming a
+first-sight baseline. After the normal debounce it resumes without a synthetic
+`touch`, another answer, or an operator-owned retry marker.
+
+Upgrade recovery covers baselines already written by an older daemon. The
+controller marks keys loaded from `daemon_dispatch_baselines.json` as restored
+until this process observes or dispatches them. For a fully answered brainstorm
+only, the dispatcher treats that uncorroborated restored value as first sight
+once. A real dispatch consumes the flag and restores ordinary duplicate-run
+protection; incomplete brainstorms and every non-brainstorm row continue using
+the persisted baseline unchanged.
 
 ## Single-dispatcher: producers write requests, daemon dispatches
 

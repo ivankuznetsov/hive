@@ -59,6 +59,7 @@ module Hive
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file the
       # daemon gates auto-resume on (see `brainstorm_answers_pending?`).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: answer-pending daemon gate only parses coding brainstorm.md
+      EMPTY_BRAINSTORM_ANSWER_STATE = { pending: false, complete: false }.freeze
 
       # @param config [Hash] merged config (Hive::Config.load) — used for
       #   the `daemon` block defaults; per-project enrollment is read from
@@ -1237,17 +1238,29 @@ module Hive
           return
         end
 
+        brainstorm_answers = brainstorm_answer_state(row)
+        baseline_mtime = @controller.last_dispatched_state_file_mtime_for(
+          project: row.project, slug: row.slug
+        )
+        if brainstorm_answers.fetch(:complete) &&
+           @controller.restored_dispatch_baseline_for?(project: row.project, slug: row.slug)
+          # Older daemons could persist a fully answered brainstorm as the
+          # first-sight baseline and strand it forever. Treat a restored,
+          # uncorroborated baseline as first sight exactly once; a successful
+          # dispatch records it in this process and restores the normal brake.
+          baseline_mtime = nil
+        end
         decision = Policy.decide(
           action: row.action,
           stage: row.stage,
           workflow: row.workflow,
           command: row.suggested_command,
           state_file_mtime: row.state_file_mtime,
-          last_dispatched_state_file_mtime:
-            @controller.last_dispatched_state_file_mtime_for(project: row.project, slug: row.slug),
+          last_dispatched_state_file_mtime: baseline_mtime,
           now: now,
           edit_debounce_sec: @edit_debounce_sec,
-          answers_pending: brainstorm_answers_pending?(row),
+          answers_pending: brainstorm_answers.fetch(:pending),
+          answers_complete: brainstorm_answers.fetch(:complete),
           blocked: row.blocked == true,
           admission_error: !row.admission_error.nil?
         )
@@ -1376,43 +1389,42 @@ module Hive
       # True when `row` is a brainstorm `needs_input` row whose
       # `brainstorm.md` still has UNANSWERED questions. Only brainstorm
       # rows carry Q&A markers, so every other edit-resume row (execute /
-      # review WAITING) returns false and behaves exactly as before. The
-      # daemon parses the file directly (the published hive-status schema
-      # carries no question count) via the shared `Hive::BrainstormParser`.
-      #
-      # Fails OPEN (returns false → resume allowed) when the file parses
-      # to ZERO questions or on an unexpected error. This is deliberate
-      # and self-healing, NOT a gap: the Telegram bot locates questions
-      # with the SAME parser, so a file with no parseable `### Q{n}.`
-      # (empty, agent crashed mid-write, or header drift) is one the
-      # operator cannot answer via the bot either — the only way forward
-      # is to re-run the brainstorm agent, which regenerates a clean file.
-      # Holding instead would strand the task. The gate's job is narrow:
-      # block the resume only while there are questions the operator is
-      # actively answering.
+      # review WAITING) returns false and behaves exactly as before.
       def brainstorm_answers_pending?(row)
-        return false unless row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+        brainstorm_answer_state(row).fetch(:pending)
+      end
+
+      # Return the two structural Q&A signals used by the policy: pending when
+      # any answer slot is empty, and complete only for a non-empty document
+      # whose answer slots are all filled. Missing, empty, and unparseable
+      # documents provide neither signal and retain the generic baseline path.
+      def brainstorm_answer_state(row)
+        empty = EMPTY_BRAINSTORM_ANSWER_STATE
+        return empty unless row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
         # The brainstorm Q&A hold is a coding-workflow gate: only the coding
         # `2-brainstorm` stage drives the `### Q{n}.` answer flow. A generic
         # workflow that reuses the `2-brainstorm` dir must take the debounced
         # generic path, not be held as `answers_pending`.
-        return false unless Hive::Workflows.coding_id?(row.workflow)
-        return false unless row.stage == BRAINSTORM_STAGE_DIR
+        return empty unless Hive::Workflows.coding_id?(row.workflow)
+        return empty unless row.stage == BRAINSTORM_STAGE_DIR
 
         path = row.state_file
-        return false unless path && File.exist?(path)
+        return empty unless path
 
         parsed = Hive::BrainstormParser.parse(path)
-        pending = Hive::BrainstormParser.unanswered_questions(parsed).any?
+        unanswered = Hive::BrainstormParser.unanswered_questions(parsed)
         @brainstorm_parse_errors.delete([ row.project, row.slug ])
-        pending
+        {
+          pending: unanswered.any?,
+          complete: parsed.any? && unanswered.empty?
+        }
       rescue StandardError => e
         # `parse` is total (scrubs encoding, swallows IO), so this is a
         # belt-and-suspenders guard. Dedup the log per (project, slug) so
         # a persistently unreadable file can't emit `:fatal` on every
         # ~30s tick forever — only on first sight and on change.
         log_brainstorm_parse_error(row, e)
-        false
+        empty
       end
 
       def log_brainstorm_parse_error(row, error)

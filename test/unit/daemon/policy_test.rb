@@ -525,6 +525,24 @@ class HiveDaemonPolicyTest < Minitest::Test
                         answers_pending: false)
   end
 
+  def test_needs_input_first_sight_dispatches_when_brainstorm_answers_are_complete
+    assert_equal :dispatch,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: T0 - 60,
+                        last_dispatched_state_file_mtime: nil,
+                        answers_complete: true)
+  end
+
+  def test_needs_input_first_sight_complete_answers_still_debounce
+    assert_equal :wait_for_debounce,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: T0 - 5,
+                        last_dispatched_state_file_mtime: nil,
+                        answers_complete: true)
+  end
+
   def test_blocked_takes_precedence_over_answers_pending_on_debounced_resume
     # A debounced edit-resume row that is BOTH dependency-blocked and has
     # unanswered Q&A must resolve to the dependency gate, not the Q&A hold —
@@ -579,7 +597,8 @@ class HiveDaemonPolicyTest < Minitest::Test
 
   def decide(action:, command:, stage: nil, workflow: nil, state_file_mtime: nil,
              last_dispatched_state_file_mtime: nil, now: T0, edit_debounce_sec: 30,
-             answers_pending: false, blocked: false, admission_error: false)
+             answers_pending: false, answers_complete: false, blocked: false,
+             admission_error: false)
     Hive::Daemon::Policy.decide(
       action: action,
       stage: stage,
@@ -590,6 +609,7 @@ class HiveDaemonPolicyTest < Minitest::Test
       now: now,
       edit_debounce_sec: edit_debounce_sec,
       answers_pending: answers_pending,
+      answers_complete: answers_complete,
       blocked: blocked,
       admission_error: admission_error
     )

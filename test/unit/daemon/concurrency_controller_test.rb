@@ -505,6 +505,20 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     end
   end
 
+  def test_restored_baseline_is_distinguished_until_observed_in_this_process
+    with_store do |path|
+      store = Hive::Daemon::DispatchBaselines.new(path: path)
+      store.write({ [ "writero", "add-x" ] => T0 })
+
+      revived = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      assert revived.restored_dispatch_baseline_for?(project: "writero", slug: "add-x")
+
+      revived.observe_state_file_mtime(project: "writero", slug: "add-x", mtime: T0)
+
+      refute revived.restored_dispatch_baseline_for?(project: "writero", slug: "add-x")
+    end
+  end
+
   def test_record_dispatch_baseline_survives_a_simulated_restart
     with_store do |path|
       c = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))

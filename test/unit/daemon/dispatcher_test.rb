@@ -7028,6 +7028,74 @@ end
                  "resumes once every question is answered"
   end
 
+  def test_handle_row_resumes_first_sight_brainstorm_when_all_answers_are_complete
+    dispatcher, supervisor, controller, logger = make_dispatcher
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+    bpath = File.join(folder, "brainstorm.md")
+    File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\nbecause\n### Q2.\nWhy?\n### A2.\nyes\n")
+    r = row(action: "needs_input", stage: "2-brainstorm",
+            command: "hive brainstorm s1 --from 2-brainstorm",
+            state_file: bpath, mtime: T0 - 60, folder: folder)
+
+    dispatcher.send(:handle_row, r, now: T0)
+
+    assert_equal 1, supervisor.spawned.size,
+                 "complete brainstorm answers must resume even before a baseline exists"
+    assert_equal T0 - 60,
+                 controller.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1"),
+                 "the successful dispatch, not first-sight observation, records the mtime"
+    refute(logger.events.any? { |(name, attrs)|
+      name == :skipped && attrs[:reason] == "baseline_recorded"
+    })
+  end
+
+  def test_handle_row_resumes_complete_brainstorm_from_a_restored_baseline_once
+    Dir.mktmpdir("restored-brainstorm-baseline") do |dir|
+      path = File.join(dir, "baselines.json")
+      baseline = T0 - 60
+      Hive::Daemon::DispatchBaselines.new(path: path).write({ [ "p1", "s1" ] => baseline })
+      dispatcher, supervisor, controller, = make_dispatcher(
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+      )
+      folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+      bpath = File.join(folder, "brainstorm.md")
+      File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\nanswered\n")
+      r = row(action: "needs_input", stage: "2-brainstorm",
+              command: "hive brainstorm s1 --from 2-brainstorm",
+              state_file: bpath, mtime: baseline, folder: folder)
+
+      dispatcher.send(:handle_row, r, now: T0)
+
+      assert_equal 1, supervisor.spawned.size,
+                   "a completed Q&A stranded behind a restored baseline must resume"
+      refute controller.restored_dispatch_baseline_for?(project: "p1", slug: "s1"),
+             "a real dispatch must consume the one-shot restart recovery"
+    end
+  end
+
+  def test_handle_row_keeps_restored_baseline_when_brainstorm_answers_are_pending
+    Dir.mktmpdir("restored-pending-brainstorm-baseline") do |dir|
+      path = File.join(dir, "baselines.json")
+      baseline = T0 - 60
+      Hive::Daemon::DispatchBaselines.new(path: path).write({ [ "p1", "s1" ] => baseline })
+      dispatcher, supervisor, controller, = make_dispatcher(
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+      )
+      folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+      bpath = File.join(folder, "brainstorm.md")
+      File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
+      r = row(action: "needs_input", stage: "2-brainstorm",
+              command: "hive brainstorm s1 --from 2-brainstorm",
+              state_file: bpath, mtime: baseline, folder: folder)
+
+      dispatcher.send(:handle_row, r, now: T0)
+
+      assert_empty supervisor.spawned
+      assert controller.restored_dispatch_baseline_for?(project: "p1", slug: "s1"),
+             "pending Q&A must retain both the baseline and its restored provenance"
+    end
+  end
+
   def test_brainstorm_answers_pending_predicate_branches
     dispatcher, = make_dispatcher
     folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
@@ -7035,6 +7103,8 @@ end
     File.write(pending, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
     done = File.join(folder, "done.md")
     File.write(done, "## Round 1\n### Q1.\nWhat?\n### A1.\nanswered\n")
+    empty = File.join(folder, "empty.md")
+    File.write(empty, "# Brainstorm\n\nNo questions yet.\n")
 
     assert dispatcher.send(:brainstorm_answers_pending?,
                            row(action: "needs_input", stage: "2-brainstorm",
@@ -7042,6 +7112,15 @@ end
     refute dispatcher.send(:brainstorm_answers_pending?,
                            row(action: "needs_input", stage: "2-brainstorm",
                                state_file: done, folder: folder))
+    assert_equal({ pending: false, complete: true },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "needs_input", stage: "2-brainstorm",
+                                     state_file: done, folder: folder)))
+    assert_equal({ pending: false, complete: false },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "needs_input", stage: "2-brainstorm",
+                                     state_file: empty, folder: folder)),
+                 "zero parseable questions must not bypass the first-sight baseline")
     # Not a brainstorm stage → no Q&A, never pending.
     refute dispatcher.send(:brainstorm_answers_pending?,
                            row(action: "needs_input", stage: "6-review",

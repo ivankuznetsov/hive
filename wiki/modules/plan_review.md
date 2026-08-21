@@ -125,9 +125,16 @@ can affect revision or approval policy.
 
 Accepted findings are batched into one `PlannerRevision` call using the
 captured planner provider/model/family/effort. That call writes only
-`candidate-plan.md`. Hive then runs one bounded disposition/regression
-verification leg. Each accepted finding requires explicit fingerprint-bound
-verification evidence; absence from a generic critique does not verify it. A
+`candidate-plan.md`. Its ArtifactFirewall custody is passed into the shared
+agent launcher, so the protected snapshot surrounds only the untrusted
+provider process. Hive's own durable session-start/session-finish writes to
+`task-journal.jsonl` and `task-projection.json` occur outside that interval;
+they cannot be misclassified as planner tampering, while provider writes to
+the same anchors still fail closed and are restored. A launcher that returns
+success without invoking the supplied custody is rejected. Hive then runs one
+bounded disposition/regression verification leg. Each accepted finding
+requires explicit fingerprint-bound verification evidence; absence from a
+generic critique does not verify it. A
 remaining or newly discovered blocker stops the lineage; it
 cannot trigger a recursive second revision. In particular, `request-review`
 cannot clear a verification-created finding without a new linked plan

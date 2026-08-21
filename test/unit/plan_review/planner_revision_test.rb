@@ -124,10 +124,12 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
         task:, cfg: Hive::Config::DEFAULTS
       )
 
-      tamper = lambda do |_task, **kwargs|
-        File.write(meta, "changed: true\n")
-        File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
-        { status: :ok, usage: { model: "served-model" } }
+      tamper = lambda do |_task, agent_custody:, **kwargs|
+        agent_custody.call do
+          File.write(meta, "changed: true\n")
+          File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
+          { status: :ok, usage: { model: "served-model" } }
+        end
       end
       with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, tamper) do
         result = runner.call(
@@ -138,7 +140,9 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
         assert_includes result.fetch("diagnostic"), "protected artifacts"
       end
 
-      missing = ->(_task, **) { { status: :failed, error_message: "no candidate" } }
+      missing = lambda do |_task, agent_custody:, **|
+        agent_custody.call { { status: :failed, error_message: "no candidate" } }
+      end
       with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, missing) do
         result = runner.call(
           prompt: "revise", workspace:, output_path: output,
@@ -148,9 +152,11 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
         assert_equal "no candidate", result.fetch("diagnostic")
       end
 
-      success = lambda do |_task, **kwargs|
-        File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
-        { status: :ok, usage: { model: "served-model" } }
+      success = lambda do |_task, agent_custody:, **kwargs|
+        agent_custody.call do
+          File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
+          { status: :ok, usage: { model: "served-model" } }
+        end
       end
       with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, success) do
         result = runner.call(
@@ -161,9 +167,11 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
         assert_equal "served-model", result.dig("actual_route", "model")
       end
 
-      timed_out_complete = lambda do |_task, **kwargs|
-        File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
-        { status: :timeout, timed_out: true }
+      timed_out_complete = lambda do |_task, agent_custody:, **kwargs|
+        agent_custody.call do
+          File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
+          { status: :timeout, timed_out: true }
+        end
       end
       with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, timed_out_complete) do
         result = runner.call(
@@ -176,13 +184,117 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
 
       capture_error = ->(_manifest) { raise Hive::ArtifactFirewall::Error, "capture failed" }
       with_replaced_singleton_method(Hive::ArtifactFirewall, :capture, capture_error) do
-        result = runner.call(
+        invoke_custody = lambda do |_task, agent_custody:, **|
+          agent_custody.call { flunk "provider must not run after custody capture fails" }
+        end
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, invoke_custody) do
+          result = runner.call(
+            prompt: "revise", workspace:, output_path: output,
+            planner_identity:, timeout_sec: 60
+          )
+          assert_equal "terminal_failure", result.fetch("status")
+          assert_equal "capture failed", result.fetch("diagnostic")
+        end
+      end
+    end
+  end
+
+  def test_production_runner_keeps_controller_session_bookkeeping_outside_agent_custody
+    Dir.mktmpdir("hive-plan-revision-controller-bookkeeping") do |root|
+      meta = File.join(root, "meta.yml")
+      journal = File.join(root, "task-journal.jsonl")
+      projection = File.join(root, "task-projection.json")
+      File.write(meta, "id: demo\n")
+      File.write(journal, "before\n")
+      File.write(projection, "before\n")
+      workspace = File.join(root, "workspace")
+      FileUtils.mkdir_p(workspace)
+      File.write(File.join(workspace, "input-plan.md"), "# Plan\n")
+      output = File.join(workspace, "candidate-output.md")
+      task = RunnerTask.new(folder: root, meta_yml_path: meta)
+      runner = Hive::PlanReview::PlannerRevision::HiveRunner.new(
+        task:, cfg: Hive::Config::DEFAULTS
+      )
+      spawn = lambda do |_task, agent_custody:, **kwargs|
+        File.write(journal, "session-start\n")
+        result = agent_custody.call do
+          File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
+          { status: :ok, usage: { model: "served-model" } }
+        end
+        File.write(projection, "session-finish\n")
+        result
+      end
+
+      observed = nil
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        observed = runner.call(
           prompt: "revise", workspace:, output_path: output,
           planner_identity:, timeout_sec: 60
         )
-        assert_equal "terminal_failure", result.fetch("status")
-        assert_equal "capture failed", result.fetch("diagnostic")
       end
+
+      assert_equal "success", observed.fetch("status")
+      assert_equal "session-start\n", File.read(journal)
+      assert_equal "session-finish\n", File.read(projection)
+    end
+  end
+
+  def test_production_runner_rejects_success_when_spawn_skips_agent_custody
+    Dir.mktmpdir("hive-plan-revision-custody-missing") do |root|
+      meta = File.join(root, "meta.yml")
+      File.write(meta, "id: demo\n")
+      workspace = File.join(root, "workspace")
+      FileUtils.mkdir_p(workspace)
+      File.write(File.join(workspace, "input-plan.md"), "# Plan\n")
+      output = File.join(workspace, "candidate-output.md")
+      task = RunnerTask.new(folder: root, meta_yml_path: meta)
+      runner = Hive::PlanReview::PlannerRevision::HiveRunner.new(
+        task:, cfg: Hive::Config::DEFAULTS
+      )
+      spawn = lambda do |_task, **kwargs|
+        File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
+        { status: :ok, usage: { model: "served-model" } }
+      end
+
+      observed = nil
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        observed = runner.call(
+          prompt: "revise", workspace:, output_path: output,
+          planner_identity:, timeout_sec: 60
+        )
+      end
+
+      assert_equal "terminal_failure", observed.fetch("status")
+      assert_includes observed.fetch("diagnostic"), "custody was not invoked"
+    end
+  end
+
+  def test_production_runner_preserves_preflight_failure_before_agent_custody
+    Dir.mktmpdir("hive-plan-revision-preflight") do |root|
+      meta = File.join(root, "meta.yml")
+      File.write(meta, "id: demo\n")
+      workspace = File.join(root, "workspace")
+      FileUtils.mkdir_p(workspace)
+      File.write(File.join(workspace, "input-plan.md"), "# Plan\n")
+      task = RunnerTask.new(folder: root, meta_yml_path: meta)
+      runner = Hive::PlanReview::PlannerRevision::HiveRunner.new(
+        task:, cfg: Hive::Config::DEFAULTS
+      )
+      preflight_failure = lambda do |_task, **|
+        { status: :error, error_message: "provider route preflight failed" }
+      end
+
+      observed = nil
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, preflight_failure) do
+        observed = runner.call(
+          prompt: "revise", workspace:,
+          output_path: File.join(workspace, "candidate-output.md"),
+          planner_identity:, timeout_sec: 60
+        )
+      end
+
+      assert_equal "retryable_failure", observed.fetch("status")
+      assert_equal "provider route preflight failed", observed.fetch("diagnostic")
     end
   end
 

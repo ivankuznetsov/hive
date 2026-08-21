@@ -50,21 +50,29 @@ module Hive
             permitted_writable_roots: [ workspace ],
             required_outputs: { "candidate-plan" => output_path }
           )
-          snapshot = Hive::ArtifactFirewall.capture(manifest)
-          result = nil
-          report = nil
-          begin
-            result = Hive::Stages::Base.spawn_agent(
-              @task,
-              prompt:, add_dirs: [ workspace ], cwd: workspace,
-              max_budget_usd: @cfg.dig("budget_usd", "plan"),
-              timeout_sec:, log_label: "plan-review-revision",
-              profile:, expected_output: output_path, status_mode: :output_file_exists,
-              cfg: @cfg, model: planner_identity["model"], effort: planner_identity["effort"],
-              **scope
-            )
-          ensure
-            report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+          custody = Hive::ArtifactFirewall::AgentCustody.new(manifest)
+          result = Hive::Stages::Base.spawn_agent(
+            @task,
+            prompt:, add_dirs: [ workspace ], cwd: workspace,
+            max_budget_usd: @cfg.dig("budget_usd", "plan"),
+            timeout_sec:, log_label: "plan-review-revision",
+            profile:, expected_output: output_path, status_mode: :output_file_exists,
+            cfg: @cfg, model: planner_identity["model"], effort: planner_identity["effort"],
+            agent_custody: custody, **scope
+          )
+          report = custody.report
+          unless report
+            unless result[:status] == :ok
+              return {
+                "status" => "retryable_failure",
+                "diagnostic" => result[:error_message]
+              }
+            end
+
+            return {
+              "status" => "terminal_failure",
+              "diagnostic" => "planner revision agent custody was not invoked"
+            }
           end
           if report.tampered?
             return {

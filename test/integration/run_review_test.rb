@@ -235,6 +235,39 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_legacy_guardrail_bypass_does_not_release_unchecked_pause
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(
+          dir,
+          cfg_overrides: {
+            "review" => { "fix" => { "guardrail" => { "bypass" => true } } }
+          }
+        )
+        worktree_path = YAML.safe_load(
+          File.read(File.join(folder, "worktree.yml"))
+        )["path"]
+        head_sha = `git -C #{worktree_path} rev-parse HEAD`.strip
+        reviews_dir = File.join(folder, "reviews")
+        FileUtils.mkdir_p(reviews_dir)
+        File.write(
+          File.join(reviews_dir, "fix-guardrail-01.md"),
+          "# Findings\n\n- [ ] dotenv_edit: .env.production:1: password=example\n"
+        )
+        File.write(
+          File.join(folder, "task.md"),
+          "<!-- REVIEW_WAITING reason=fix_guardrail matches=1 head=#{head_sha} pass=1 -->\n"
+        )
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_waiting, marker.name
+        refute File.exist?(File.join(reviews_dir, "fix-success-01.md"))
+      end
+    end
+  end
+
   def test_resume_fix_guardrail_partial_tick_holds_pause
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

@@ -106,6 +106,43 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_migrates_attributed_legacy_dirty_execute_wait_once
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        folder = write_task_folder(
+          stages, "4-execute", "legacy-dirty-260821-abcd", idea: false
+        )
+        Hive::TaskMeta.write(
+          folder, id: 42, slug: File.basename(folder), display_name: "Legacy dirty"
+        )
+        task = Hive::Task.new(folder)
+        Hive::Markers.set(
+          task.state_file, :execute_waiting,
+          reason: "dirty_worktree", attempt_id: "attempt-pi-1"
+        )
+
+        out, = capture_io do
+          migrate_command(dir, daemon_restarter: -> { }).call
+        end
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal :error, marker.name
+        assert_equal "dirty_worktree", marker.attrs.fetch("reason")
+        assert_equal "execute_waiting", marker.attrs.fetch("recovered_from")
+        assert_equal "attempt-pi-1", marker.attrs.fetch("attempt_id")
+        refute_empty marker.attrs.fetch("marker_id")
+        assert_includes out, "upgraded 1 recovery marker"
+
+        second_out, = capture_io do
+          migrate_command(dir, daemon_restarter: -> { }).call
+        end
+        assert_includes second_out, "found nothing to move"
+      end
+    end
+  end
+
   def test_combined_metadata_only_migration_has_a_project_state_commit_message
     message = migrate_command("/tmp/project").send(
       :migrate_commit_message,

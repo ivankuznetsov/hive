@@ -156,6 +156,9 @@ module Hive
                   stages, managed_store: store, cfg: project_config,
                   workflow_generation: workflow_generation
                 )
+                recovery_marker_count += migrate_attributed_dirty_execute_waits(
+                  stages, cfg: project_config
+                )
                 plan_review_requirement_count = backfill_plan_review_requirements(stages)
 
                 if moved.any? || backfilled_count.positive? ||
@@ -387,6 +390,41 @@ module Hive
           next false unless marker.attrs["marker_id"].to_s.empty?
 
           Hive::Markers.upgrade_recovery_marker_id(state_file, observed: marker)
+        end
+      end
+
+      # One-version bridge for execute markers written by pre-autonomy Hive.
+      # Current execute code writes attributed dirty agent work as ERROR
+      # directly, so keeping this rewrite in every daemon tick would turn a
+      # finite state migration into permanent scheduler vocabulary.
+      def migrate_attributed_dirty_execute_waits(stages, cfg:)
+        execute_dir = File.join(stages, "4-execute") # coding-scoped: legacy coding migration
+        return 0 unless Dir.exist?(execute_dir)
+
+        default_workflow = cfg.fetch("default_workflow", "coding")
+        Dir.children(execute_dir).sort.count do |entry|
+          next false unless Hive::Stages.task_slug?(entry)
+
+          folder = File.join(execute_dir, entry)
+          next false unless File.directory?(folder)
+          metadata = Hive::TaskMeta.read(folder)
+          workflow = metadata[:workflow] || default_workflow
+          next false unless Hive::Workflows.coding_id?(workflow)
+
+          state_file = Hive::Task.new(folder).state_file
+          marker = Hive::Markers.current(state_file)
+          next false unless marker.name == :execute_waiting
+          next false unless marker.attrs["reason"].to_s == "dirty_worktree"
+          next false if marker.attrs["attempt_id"].to_s.empty?
+
+          Hive::Markers.set(
+            state_file, :error,
+            marker.attrs.merge(
+              "reason" => "dirty_worktree",
+              "recovered_from" => "execute_waiting"
+            )
+          )
+          true
         end
       end
 

@@ -2,23 +2,74 @@
 
 ## Unreleased
 
+## 0.2.3 - 2026-08-21
+
+- Classify extracted provider failures once at the runtime boundary as
+  `provider_limit`, `rate_limited`, `model_output_limit`, or `provider_error`.
+  HTTP 402/429 payloads are authoritative even when their provider-specific
+  wording does not match an orchestrator's legacy quota phrases.
+
+## 0.2.2 - 2026-08-18
+
+- Deliver built-in Pi prompts through its native non-TTY stdin reader instead
+  of one positional argv element. This prevents implementation-sized prompts
+  from failing at process spawn with the operating system's per-argument
+  `E2BIG` limit; Codex retains its separate stdin-plus-`-` transport.
+- Treat Pi's `stopReason: "length"` as a typed `model_output_limit` failure.
+  Pi exits zero after this provider stop even when the model exhausted its
+  output allowance before writing the requested artifact; callers can now
+  distinguish that incomplete turn from an agent that silently produced
+  0 bytes and tell operators to raise `maxTokens` or lower reasoning effort.
+- Declare Grok's filesystem sandbox flags, so a caller asking for confined
+  execution gets it instead of being told Grok cannot confine. `--sandbox
+  workspace` limits writes to the working directory and `--sandbox read-only`
+  forbids them, both built-in profiles that custom ones extend from
+  `~/.grok/sandbox.toml`; `--always-approve` suppresses the approval prompt a
+  headless run can never answer, leaving the sandbox — not the prompt — as the
+  boundary. Only the Grok profile changes.
+
+## 0.2.1 - 2026-08-17
+
+- Add per-profile provider-error extraction so a refusal a CLI reports on its
+  event stream is distinguishable from an agent that genuinely produced
+  nothing. `extract_provider_error` returns the provider, the HTTP status when
+  the provider supplied one, and the redacted provider text.
+- Add the `pi` extractor for turns that keep the envelope type and carry the
+  refusal in `stopReason`/`errorMessage`, which no event-type match observes.
+  Such turns previously reached the caller as a clean run with empty content
+  while the process exited zero.
+- Default every other profile to the previously assumed shapes — dedicated
+  `error`, `turn.failed`, and `rate_limit_event` events plus failed `result`
+  events — so no existing profile changes behaviour.
+- Read usage from the assistant message and accept the bare
+  `input`/`output`/`cacheRead`/`cacheWrite` spellings, so a provider reporting
+  usage there is metered instead of silently recording nothing. The bare
+  spellings are matched last, leaving a provider that reports explicit
+  `*_tokens` keys with its existing reading.
+
 ## 0.2.0 - 2026-08-15
 
-- Add OpenCode `1.18.16+` as a fifth immutable built-in profile with exact
-  `provider/model` routing and faithful model-variant validation.
-- Add route-aware offline probing for the required run/export flags, selected
-  authentication source, cached model inventory, and exact requested route.
-- Add invocation-owned OpenCode config/data/cache/state overlays with
-  deny-first `read-only` and `workspace-write` policies, explicit credential
-  forwarding, owner-private resources, and idempotent cleanup.
-- Add strict run/export correlation and typed outcomes for completion,
-  authentication/configuration/CLI failure, malformed output, cancellation,
-  and timeout while preserving requested versus actual route identity.
-- Preserve unavailable separately from numeric zero for input, output,
-  cache-read, cache-write, reasoning, and cost evidence.
-- Keep process spawning, streaming, timeout/cancellation supervision,
-  process-tree cleanup, retries, and post-run inspection execution with the
-  caller; the component returns commands and normalizes captured evidence.
+- Add first-class OpenCode `1.18.16+` support alongside the built-in Claude
+  Code, Codex CLI, Pi, and Grok CLI profiles. OpenCode uses the shared request
+  and facade, then adds provider-specific preparation, route probing, and
+  strict result normalization.
+- Route every OpenCode run to an exact `provider/model` and validate model
+  variants, preserving the route the application requested and the route the
+  captured result reports.
+- Prepare owner-private OpenCode config, data, cache, and state overlays for
+  each invocation, with scoped `read-only` and `workspace-write` policies,
+  deliberate credential forwarding, and idempotent cleanup.
+- Check run/export capabilities, selected authentication source, cached model
+  inventory, and the exact requested route locally before an application
+  starts work.
+- Correlate run and sanitized-export evidence into typed outcomes for
+  completion, authentication, configuration, CLI failure, malformed output,
+  cancellation, and timeout.
+- Report input, output, cache-read, cache-write, reasoning, and cost evidence
+  while preserving the difference between unavailable data and numeric zero.
+- Return prepared commands and normalized evidence through lifecycle-safe
+  values that fit an application's existing streaming, timeout, cancellation,
+  retry, and process-supervision stack.
 
 ## 0.1.1 - 2026-08-11
 

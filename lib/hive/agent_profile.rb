@@ -307,9 +307,14 @@ module Hive
       normalized_model =
         Hive::ImplementationIdentity.normalize_model(model, concrete: true)
       requested_effort = Hive::ImplementationIdentity.normalize_effort(effort)
+      native_effort = if Hive::ImplementationIdentity::CONCRETE_MODEL_SENTINELS.include?(requested_effort)
+        nil
+      else
+        requested_effort
+      end
       package_identity = @runtime_profile.identity_arguments(
         model: normalized_model,
-        effort: effort_argument_builder ? requested_effort : nil,
+        effort: effort_argument_builder ? native_effort : nil,
         pin_model: pin_model
       )
       native_arguments = Hive::ImplementationIdentity.validate_native_arguments(
@@ -558,6 +563,10 @@ module Hive
       nil
     end
 
+    def extract_error_event(event)
+      @runtime_profile.extract_error_event(event)
+    end
+
     def extract_usage_event(event)
       @runtime_profile.extract_usage_event(event)
     rescue StandardError
@@ -785,6 +794,7 @@ module Hive
         default_configuration_directory permission_policy_required result_parser
         permission_flags identity_arguments
         raw_cli_arguments_supported? auth_configuration extract_usage_event
+        extract_error_event
         configuration_directory parse_run normalize_captured_result
       ].freeze
 

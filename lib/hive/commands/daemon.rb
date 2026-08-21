@@ -333,7 +333,8 @@ module Hive
           operational_snapshot: operational_snapshot,
           module_runtime: module_runtime,
           module_migration_coordinator: module_migration_coordinator,
-          runtime_ready_callback: -> { activation_lock.release! }
+          runtime_ready_callback: -> { activation_lock.release! },
+          clock: -> { Time.now.utc }
         )
 
         reexec_requested = false

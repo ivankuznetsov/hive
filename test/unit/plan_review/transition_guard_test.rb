@@ -107,7 +107,7 @@ class PlanReviewTransitionGuardTest < Minitest::Test
       File.binwrite(File.join(task.folder, "plan.md"), candidate)
 
       changed_cfg = Marshal.load(Marshal.dump(cfg))
-      changed_cfg["plan_review"]["attempts"]["timeout_sec"] += 1
+      changed_cfg["plan_review"]["adapter"] = "replacement-review-adapter"
       error = assert_raises(Hive::PlanReview::TransitionBlocked) do
         Hive::PlanReview::TransitionGuard.verify!(
           task:, destination: "4-execute", observation:, config: changed_cfg

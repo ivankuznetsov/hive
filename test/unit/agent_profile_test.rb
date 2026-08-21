@@ -241,6 +241,17 @@ class AgentProfileTest < Minitest::Test
     assert result.effort_supported
   end
 
+  def test_identity_arguments_preserve_default_effort_without_rendering_a_flag
+    profile = Hive::AgentProfiles.lookup(:grok)
+
+    result = profile.identity_arguments(model: "grok-4.6", effort: "default")
+
+    assert_equal [ "--model", "grok-4.6" ], result.native_arguments
+    assert_equal "default", result.requested_effort
+    assert_nil result.effective_effort
+    assert result.effort_supported
+  end
+
   def test_identity_arguments_report_unsupported_effort_without_native_argument
     profile = make_profile(model_argument_builder: ->(model) { [ "--model", model ] })
 
@@ -1073,6 +1084,33 @@ class AgentProfileTest < Minitest::Test
     profile = make_profile(usage_extractor: ->(_event) { raise "bad usage payload" })
 
     assert_nil profile.extract_usage_event({ "type" => "result" })
+  end
+
+  # Provider error shape lives with the provider, so Hive's profile is a pure
+  # pass-through here — the runtime profile decides what counts as a refusal.
+  def test_error_extraction_delegates_to_the_runtime_profile
+    runtime_class = Class.new(AgentCliRuntime::Profile) do
+      def extract_error_event(event)
+        event["errorMessage"]
+      end
+    end
+    runtime = runtime_class.new(
+      name: :custom,
+      bin_default: "custom-agent",
+      headless_flag: "-p",
+      version_flag: "--version"
+    )
+    profile = Hive::AgentProfile.new(
+      runtime_profile: runtime,
+      skill_syntax_format: "/%{skill}"
+    )
+
+    assert_equal(
+      "402: Prompt tokens limit exceeded",
+      profile.extract_error_event(
+        { "errorMessage" => "402: Prompt tokens limit exceeded" }
+      )
+    )
   end
 
   def test_runtime_adapter_contains_usage_extractor_failures

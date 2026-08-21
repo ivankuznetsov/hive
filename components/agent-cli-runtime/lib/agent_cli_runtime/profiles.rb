@@ -220,12 +220,17 @@ module AgentCliRuntime
       bin_default: "pi",
       env_bin_override_keys: %w[AGENT_CLI_RUNTIME_PI_BIN HIVE_PI_BIN],
       headless_flag: "-p",
+      # Pi reads a non-TTY stdin stream into its initial message without an
+      # argv placeholder. Keeping the prompt out of argv also avoids Linux's
+      # per-argument size limit on real implementation plans.
+      prompt_style: :piped_stdin,
       output_format_flags: [ "--mode", "json", "--no-session" ],
       version_flag: "--version",
       min_version: "0.70.2",
       model_argument_builder: ->(model) { [ "--model", model ] },
       launcher_identity: "pi-coding-agent/v1",
       usage_extractor: UsageExtractors::PI,
+      error_extractor: ErrorExtractors::PI,
       credential_environment_keys: PI_CREDENTIAL_ENVIRONMENT_KEYS,
       configuration_environment_key: "PI_CODING_AGENT_DIR",
       default_configuration_directory: ".pi/agent",
@@ -250,6 +255,14 @@ module AgentCliRuntime
       headless_flag: "-p",
       prompt_style: :headless_flag_value,
       permission_skip_flag: "--always-approve",
+      # Grok confines the filesystem natively, the same shape codex uses.
+      # `workspace` limits writes to the working directory, `read-only`
+      # forbids them entirely; both are built-in profiles (custom ones extend
+      # them from ~/.grok/sandbox.toml). `--always-approve` suppresses the
+      # interactive approval prompt, which a headless reviewer can never answer
+      # — the sandbox, not the prompt, is what actually bounds the agent.
+      workspace_write_flags: [ "--sandbox", "workspace", "--always-approve" ],
+      read_only_flags: [ "--sandbox", "read-only", "--always-approve" ],
       output_format_flags: [ "--output-format", "streaming-json" ],
       version_flag: "--version",
       min_version: "0.2.90",

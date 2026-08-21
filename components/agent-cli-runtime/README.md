@@ -1,12 +1,31 @@
 # Agent CLI Runtime
 
-`agent-cli-runtime` is a small Ruby library for tools that integrate with
-locally installed headless agent CLIs. It ships immutable profiles for Claude
-Code, Codex CLI, Pi, Grok CLI, and OpenCode and compiles provider-neutral
-requests into argv/stdin. It also reports typed capability evidence, extracts
-usage from provider JSON events, and exposes an honest local diagnostic
-command. OpenCode adds an invocation-owned overlay and strict captured-result
-normalizer while leaving process supervision with the caller.
+Agent CLI Runtime gives Ruby applications one stable integration layer for
+Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. It builds provider-specific
+commands from a shared request model, checks local versions and named
+capabilities, and normalizes usage and results afterward. Centralized profiles,
+environment rules, and parsers make agent providers easier to add, switch, and
+upgrade.
+
+Version 0.2.0 adds first-class OpenCode support with exact `provider/model`
+routing, isolated per-invocation configuration, scoped permission policies,
+offline readiness checks, and typed outcome normalization. See the
+[changelog](CHANGELOG.md) for the complete release notes.
+
+## Why use it?
+
+Agent CLIs disagree on flags, prompt transport, configuration locations,
+permission controls, usage events, and result formats. Agent CLI Runtime keeps
+those differences in versioned profiles so application code can use one
+request and result vocabulary.
+
+- Add or switch agent CLIs without spreading provider conditionals throughout
+  the application.
+- Validate installed versions, capabilities, and exact routes before starting
+  work.
+- Preserve typed usage and outcome evidence across provider-specific output
+  formats.
+- Add custom profiles through the same immutable compatibility contract.
 
 ## Install
 
@@ -41,6 +60,11 @@ Compilation does not execute the returned command. Unsupported requested
 controls raise `AgentCliRuntime::UnsupportedCapability` with typed evidence
 instead of silently widening the request.
 
+Prompt transport is profile-owned. `:stdin` writes the prompt to stdin and
+adds the CLI's conventional `-` argv marker; `:piped_stdin` writes the prompt
+to stdin without a marker for CLIs such as Pi that consume a non-TTY stream
+directly. Built-in Pi therefore keeps arbitrarily large prompts out of argv.
+
 `permission_mode: nil` selects the profile's default non-interactive permission
 flags, which may include a provider's bypass flag. Pass `"read-only"` or
 `"workspace-write"` explicitly when the integration requires that constraint.
@@ -58,12 +82,12 @@ represent.
 - `extract_usage(profile, event)` normalizes provider usage when present and
   returns `nil` when usage is absent or malformed.
 - `observe(profile, result)` normalizes bounded, redacted result metadata.
-- `prepare!(open_code_preparation)` creates and probes an isolated OpenCode
-  overlay and returns a `PreparedInvocation`; it does not spawn OpenCode.
+- `prepare!(open_code_preparation)` returns a `PreparedInvocation` containing
+  an isolated OpenCode overlay, argv, and child environment.
 - `parse_run(profile, stdout:)` parses a successful OpenCode JSONL capture
   into the session and terminal-message identity required for inspection.
-- `prepare_inspection(prepared, parsed_run)` compiles the non-model sanitized
-  session-export command without executing it.
+- `prepare_inspection(prepared, parsed_run)` returns the non-model sanitized
+  session-export invocation.
 - `normalize(profile, captured, requested_route:)` returns one typed OpenCode
   outcome from caller-captured run, termination, and inspection evidence.
 

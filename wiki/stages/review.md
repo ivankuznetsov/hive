@@ -3,7 +3,7 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail,suppression}.rb, lib/hive/commands/adhoc_review.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-08-13
+updated: 2026-08-21
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -44,6 +44,13 @@ Before spawning the Phase 4 fix agent, `prepare_worktree_for_fix` runs `Hive::St
 
 Pass cap (`review.max_passes`, default 2) gates re-entry to Phase 2 — exceeding it sets `REVIEW_STALE pass=NN`. Wall-clock cap (`review.max_wall_clock_sec`, default 5400) is checked at every phase boundary and between reviewers inside `run_reviewers`; each reviewer that accepts a `deadline:` kwarg receives the full remaining wall-clock budget, while its own `timeout_sec` remains the per-reviewer cap. Shared Claude tmux readiness waits count against the current reviewer deadline. Exceeding the outer wall-clock cap sets `REVIEW_STALE reason=wall_clock`.
 
+Mixed reviewer rosters run non-Claude reviewers first, then reuse one tmux
+session for each compatible Claude group. The shared-session launcher accepts
+the common tool-scope keyword shape emitted by `Base.tool_scope_kwargs`; the
+OpenCode-only roots and edit patterns must be empty because a shared session is
+Claude-only. This keeps a successful non-Claude review from being discarded by
+an `unknown keywords` crash when Hive opens the following Claude group.
+
 `mark_working(phase:, pass:)` doubles as the event-bracket emitter: each call closes the previously-open phase event (if any) and opens a new `agent_start` with agent label `phase=<name> pass=<NN>`. An `ensure` block at the bottom of `run!` calls `close_phase_event!` so the trailing `agent_end` always lands — return, raise, and `SystemExit` paths all keep the `events.jsonl` brackets balanced. Per-reviewer spawns nest underneath these phase pairs via their own `Hive::Agent#run!` agent_start/agent_end records (agent label `claude review-stub-reviewer-passNN`). See [[modules/events]].
 
 ## Implementation ownership in repair phases
@@ -60,7 +67,7 @@ This inheritance is deliberately limited to repair work. Reviewer fan-out, triag
 
 ## Phase 1 — CI fix (`Hive::Stages::Review::CiFix`)
 
-Runs `cfg.review.ci.command` (e.g., `bin/ci`) once on entry. The subprocess is launched with `Process.spawn(pgroup: true)` and its combined stdout+stderr is **streamed** through a reader thread with a 256 KB byte-cap applied during read (so a runaway CI cannot OOM the host before the cap kicks in). A per-process timeout from `cfg.timeout_sec.review_ci` (default 3600s) bounds wall time: on expiry the pgid is TERM'd, given a 3s grace, then KILL'd, and the resulting `CommandError` falls through the existing `:error` path. On red exit, the captured log is ANSI-stripped, tail-truncated to the configured line cap, and fed to a fix agent through the per-spawn `<user_supplied>` nonce wrapper. Re-runs CI. Up to `review.ci.max_attempts` (default 3); cap reached → `:stale` → runner writes `reviews/ci-blocked.md` and sets `REVIEW_CI_STALE`. Reviewers do NOT run on red CI.
+Runs `cfg.review.ci.command` (e.g., `bin/ci`) once on entry. The subprocess is launched with `Process.spawn(pgroup: true)` and its combined stdout+stderr is **streamed** through a reader thread with a 256 KB byte-cap applied during read (so a runaway CI cannot OOM the host before the cap kicks in). A per-process timeout from `cfg.timeout_sec.review_ci` (default 3600s) bounds wall time, and an optional `cfg.timeout_sec.review_ci_idle` idle-output deadline kills a CI child that streams nothing (stdout+stderr combined, capped-and-dropped bytes included) for that long — the wall clock stays the runaway backstop while the idle window fails wedges fast. On expiry of either deadline the pgid is TERM'd, given a 3s grace, then KILL'd, and the resulting `CommandError` falls through the existing `:error` path (idle kills carry an `idle-output timeout` message). On red exit, the captured log is ANSI-stripped, tail-truncated to the configured line cap, and fed to a fix agent through the per-spawn `<user_supplied>` nonce wrapper. Re-runs CI. Up to `review.ci.max_attempts` (default 3); cap reached → `:stale` → runner writes `reviews/ci-blocked.md` and sets `REVIEW_CI_STALE`. Reviewers do NOT run on red CI.
 
 `review.ci.command` is project-specific by design — hive doesn't ship a Rubocop/Brakeman driver because that would couple the orchestrator to one ecosystem. The user owns the contract; hive shells out and parses exit code + last-N lines.
 
@@ -158,7 +165,7 @@ After the fix agent returns, `Hive::Stages::Review::FixGuardrail.run!` (ADR-020 
 
 - `shell_pipe_to_interpreter` — curl/wget pipe into sh/bash/python/ruby/node
 - `ci_workflow_edit` — `.github/workflows/`, gitlab-ci, circleci, Jenkinsfile, bitbucket-pipelines, azure-pipelines, travis
-- `secrets_pattern_match` — dispatches to `Hive::SecretPatterns.scan` (AWS, GitHub, OpenAI, Anthropic, Stripe, Slack, JWT, PEM, generic api_key). General password detection requires an actual `:` or `=` assignment delimiter, so prose such as “password resets” is not treated as a credential; explicit SQL, XML, and `--password VALUE` forms remain protected.
+- `secrets_pattern_match` — dispatches to `Hive::SecretPatterns.scan` (AWS, GitHub, OpenAI, Anthropic, Stripe, Slack, JWT, PEM, generic api_key). General password detection recognizes bare and conventionally prefixed names such as `DB_PASSWORD`, and requires an actual `:` or `=` assignment delimiter. An unquoted right-hand side is skipped only when it contains syntactic bracket/call lookup structure; a dot in a literal value is not a lookup, and any string literal on the same line keeps the finding. Test and production paths share this rule.
 - `dotenv_edit` — `.env`, `.env.<environment>` (e.g., `.env.local`, `.env.production`, `.env.test`, `.env.staging`), `secrets.yml`, `credentials.yml(.enc)`, `.npmrc`, `.pypirc`. Template suffixes are deliberately **excluded** so committed templates do not trip the guardrail: `.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.tmpl`, `.env.default`, `.env.defaults`. Projects that genuinely keep secrets in `.env.example` can re-add strict matching via `review.fix.guardrail.patterns_override` (custom `dotenv_template_edit` pattern).
 - `dependency_lockfile_change` — Gemfile.lock, package-lock.json, pnpm-lock, yarn.lock, Cargo.lock, go.sum, poetry.lock, Pipfile.lock, composer.lock, uv.lock
 - `permission_change` — `new mode 100755` raw-diff-header
@@ -173,6 +180,14 @@ Per-project override via `review.fix.guardrail.patterns_override`: `false` to di
 4. **Worktree is clean** — manual edits between trip and approval lead to `REVIEW_ERROR phase=resume reason=approval_dirty_worktree`.
 
 When all four hold, Phase 2/3/4 are skipped for that pass — the prior pass's commits stand, `fix-success-NN.md` is written, marker resets, and the loop advances. **Special-case** for `pass == max_passes`: the approval breaks directly to Phase 5 (browser test) instead of incrementing into `REVIEW_STALE`. Approval is single-shot per pass: a future pass that re-trips the guardrail writes a fresh `fix-guardrail-(NN+1).md` with `[ ]` lines; pass-N approval does not transfer. The `fix-guardrail-NN.md` file is included in `protected_set` during every Phase 4 spawn (alongside `reviews/escalations-NN.md`, `reviews/errors-NN.md`, and the `fix-success-NN.md` sentinel) so a compromised fix agent cannot pre-write all-`[x]` lines to stage an approval token for the next resume.
+
+Project config may waive one exact finding with
+`review.fix.guardrail.waivers: [{pattern: NAME, sha256: DIGEST}]`, where the
+digest is SHA-256 of the detector's full match. Applied waivers are recorded in
+the guardrail report and emit a task event with the exact fingerprints. The old
+global `bypass` key has no release authority, and an already parked
+`REVIEW_WAITING reason=fix_guardrail` still requires checked findings plus the
+existing count, HEAD, and clean-tree validations.
 
 If `marker.attrs["matches"]` is missing or malformed (not a positive Integer string) on a `fix_guardrail` marker, the runner refuses approval with `REVIEW_ERROR phase=resume reason=malformed_marker_matches` — disables a silent count-blind bypass.
 

@@ -88,8 +88,7 @@ module Hive
       def initialize(controller:, logger:, grace_sec: 300,
                      attempt_store: nil, attempt_dispatcher: nil,
                      lost_outcome_store: nil, lost_outcome_processor: nil,
-                     auto_retry_enabled: true,
-                     project_auto_retry_enabled: ->(_project) { true },
+                     project_daemon_enabled: ->(_project) { true },
                      recovery_coordinator: nil,
                      admission_open: -> { true })
         @controller = controller
@@ -99,8 +98,7 @@ module Hive
         @attempt_dispatcher = attempt_dispatcher
         @lost_outcome_store = lost_outcome_store
         @lost_outcome_processor = lost_outcome_processor
-        @auto_retry_enabled = auto_retry_enabled == true
-        @project_auto_retry_enabled = project_auto_retry_enabled
+        @project_daemon_enabled = project_daemon_enabled
         @recovery_coordinator = recovery_coordinator
         @admission_open = admission_open
       end
@@ -110,7 +108,6 @@ module Hive
       # while the outcome sidecar makes repeated ticks idempotent.
       def heal_attempt_losses(attempts, now: Time.now.utc, admission_view: nil)
         return unless admission_open?
-        return unless @auto_retry_enabled
         return unless @attempt_store && @attempt_dispatcher &&
                       @lost_outcome_store && @lost_outcome_processor
 
@@ -128,7 +125,7 @@ module Hive
 
         attempts.each do |attempt|
           break unless admission_open?
-          next unless @project_auto_retry_enabled.call(attempt["project"])
+          next unless @project_daemon_enabled.call(attempt["project"])
 
           outcome = @lost_outcome_processor.process(attempt, now: now)
           next unless outcome["status"] == "ready"
@@ -237,7 +234,7 @@ module Hive
       # suspenders) which would otherwise hide them from this heal pass
       # via `row.action == "error"`. The on-disk marker is unchanged
       # until *we* rewrite it, so it's the authoritative signal here.
-      def heal(rows, now: Time.now, legacy_layout_projects: {}, auto_retry_projects: nil)
+      def heal(rows, now: Time.now, legacy_layout_projects: {}, daemon_enabled_projects: nil)
         return unless admission_open?
 
         rows.each do |row|
@@ -246,8 +243,8 @@ module Hive
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
           if %w[error review_error].include?(row.marker.to_s)
-            heal_recoverable_error_if_auto_recoverable(row, now: now) if auto_retry_allowed?(
-              row, auto_retry_projects
+            heal_recoverable_error_if_auto_recoverable(row, now: now) if daemon_enabled_for_row?(
+              row, daemon_enabled_projects
             )
             next
           end
@@ -281,10 +278,6 @@ module Hive
         @recovery_coordinator.assessment(row, now: now)
       end
 
-      def auto_retry_enabled?
-        @auto_retry_enabled
-      end
-
       def unavailable_recovery_assessment
         {
           due: false,
@@ -305,7 +298,11 @@ module Hive
       def attempt_loss_retry_due?(attempt, outcome, now:)
         limited_at = parse_retry_time(outcome["last_retry_at"]) ||
                      parse_retry_time(attempt["loss"].to_h["at"])
-        Hive::AgentLimit.retry_due?(limited_at: limited_at, now: now)
+        return false unless limited_at
+
+        retry_count = attempt["retry_charge"].to_i
+        delay = @recovery_coordinator.retry_delay_sec(retry_count)
+        now.utc >= limited_at + delay
       end
 
       def parse_retry_time(value)
@@ -314,10 +311,12 @@ module Hive
         nil
       end
 
-      def auto_retry_allowed?(row, projects)
-        @auto_retry_enabled &&
-          !Hive::TerminalOutcome.semantic_error?(marker_attrs_for(row)) &&
-          (projects.nil? || projects.include?(row.project))
+      # No error reason is exempt from healing. Exempting one does not make it
+      # safe, it makes it stuck: it still needs the same retry, performed by
+      # hand at whatever delay someone happens to notice. Project scope still
+      # applies — a project the operator disabled is not worked on at all.
+      def daemon_enabled_for_row?(row, projects)
+        projects.nil? || projects.include?(row.project)
       end
 
       def task_for_attempt(attempt, outcome)

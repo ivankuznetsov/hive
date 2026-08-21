@@ -10,6 +10,7 @@ require "hive/agent_skills"
 require "hive/artifact_firewall"
 require "hive/config"
 require "hive/plan_review/adapters/base"
+require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/result_parser"
 require "hive/plan_review/route_resolver"
 require "hive/plan_review/workspace_scope"
@@ -35,14 +36,15 @@ module Hive
             scope = Hive::PlanReview::WorkspaceScope.launch_kwargs(
               profile:, workspace: cwd, role: request.kind, output_path:
             )
-            manifest = custody_manifest(cwd, output_path)
-            snapshot = Hive::ArtifactFirewall.capture(manifest)
-            result = nil
-            report = nil
-            begin
-              result = Hive::Stages::Base.spawn_agent(
+            custody = Hive::ArtifactFirewall::AgentCustody.new(
+              custody_manifest(cwd, output_path)
+            )
+            result = custody.call do
+              Hive::Stages::Base.spawn_agent(
                 @task,
                 prompt:,
+                # cwd is a disposable detached checkout, so one directory
+                # supplies both repository context and the write boundary.
                 add_dirs: [ cwd ],
                 cwd:,
                 max_budget_usd: @cfg.dig("budget_usd", "plan"),
@@ -56,13 +58,12 @@ module Hive
                 effort: request.reviewer["effort"],
                 **scope
               )
-            ensure
-              report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
             end
-            if report.tampered?
+            tampered = custody.report&.tampered_labels.to_a
+            unless tampered.empty?
               return {
                 "status" => "terminal_failure",
-                "diagnostic" => "reviewer modified protected artifacts: #{report.tampered_labels.join(', ')}"
+                "diagnostic" => "reviewer modified protected artifacts: #{tampered.join(', ')}"
               }
             end
             normalize_result(result, request)
@@ -112,12 +113,30 @@ module Hive
             }
           end
 
+          # Hive journals the review attempt itself — stage entry, agent
+          # session, projection checkpoints — while the reviewer is running.
+          # Those writes land in the task's own bookkeeping files, so holding
+          # them under the firewall made every review fail with "reviewer
+          # modified protected artifacts: task-journal.jsonl,
+          # task-projection.json" for edits the reviewer never made.
+          #
+          # They stay protected everywhere else (the execute-stage firewall is
+          # untouched); here they are excluded because hive is the one writing
+          # them during this exact window. What the reviewer must not touch —
+          # plan.md, meta.yml, and every existing plan-review record — is still
+          # anchored below.
+          ORCHESTRATOR_JOURNALS = %w[task-journal.jsonl task-projection.json].freeze
+
+          # Review history is append-only. Keep every record in one custody
+          # transaction so validation failure cannot skip restoration of a
+          # later batch. Manifest admission remains hard-bounded.
           def custody_manifest(workspace, output_path)
-            protected = Hive::ArtifactFirewall::ORCHESTRATOR_OWNED.to_h do |name|
+            anchored = Hive::ArtifactFirewall::ORCHESTRATOR_OWNED - ORCHESTRATOR_JOURNALS
+            core = anchored.to_h do |name|
               [ name, File.join(@task.folder, name) ]
             end
-            protected["meta.yml"] = @task.meta_yml_path
-            protected["review-input"] = File.join(workspace, "plan.md")
+            core["meta.yml"] = @task.meta_yml_path
+            core["review-input"] = File.join(workspace, "plan.md")
             review_root = File.join(@task.folder, "plan-review")
             if File.directory?(review_root) && !File.symlink?(review_root)
               Dir.glob(File.join(review_root, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
@@ -125,13 +144,18 @@ module Hive
                 next unless File.file?(path) || File.symlink?(path)
 
                 relative = path.delete_prefix("#{review_root}/")
-                protected["plan-review/#{relative}"] = path
+                core["plan-review/#{relative}"] = path
               end
             end
+            writable_roots = [ workspace ]
+            required_outputs = { "review-result" => output_path }
+            manifest_entries = core.length + writable_roots.uniq.length +
+                               required_outputs.length
             Hive::ArtifactFirewall::Manifest.new(
-              root: @task.folder, protected_anchors: protected,
-              permitted_writable_roots: [ workspace ],
-              required_outputs: { "review-result" => output_path }
+              root: @task.folder, protected_anchors: core,
+              permitted_writable_roots: writable_roots,
+              required_outputs: required_outputs,
+              max_entries: [ manifest_entries, Hive::ArtifactFirewall::MAX_ENTRIES ].max
             )
           end
         end
@@ -145,6 +169,8 @@ module Hive
 
         def call(request)
           runner_result = nil
+          disposable = nil
+          disposable_worktree = nil
           validate_snapshot!(request)
           capability = capability_for(request)
           if capability.fetch("status") != "present"
@@ -156,7 +182,8 @@ module Hive
           end
 
           before_digest = request.plan_digest
-          disposable = prepare_disposable(request)
+          disposable_worktree = DisposableWorktree.new(project_root: request.project_root)
+          disposable = prepare_disposable(request, disposable_worktree)
           disposable_plan = File.join(disposable, "plan.md")
           snapshot_bytes = File.binread(disposable_plan)
           output_path = File.join(disposable, OUTPUT_BASENAME)
@@ -195,7 +222,6 @@ module Hive
           end
           validate_output!(output_path, disposable)
           bytes = File.binread(output_path, ResultParser::MAX_BYTES + 1)
-          bytes = normalize_pi_result(bytes, snapshot_bytes, request)
           parsed = ResultParser.parse(
             bytes,
             expected: {
@@ -233,6 +259,8 @@ module Hive
           )
         rescue SystemCallError, IOError => e
           result("terminal_failure", diagnostic: "plan review adapter filesystem failure: #{e.message}")
+        ensure
+          disposable_worktree&.cleanup
         end
 
         private
@@ -276,15 +304,14 @@ module Hive
           end
         end
 
-        def prepare_disposable(request)
+        def prepare_disposable(request, disposable_worktree)
           root = request.output_directory
           FileUtils.mkdir_p(root, mode: 0o700)
           status = File.lstat(root)
           raise InvalidRecord, "plan review output directory is a symlink" if status.symlink?
           raise InvalidRecord, "plan review output path is not a directory" unless status.directory?
 
-          path = File.join(root, "disposable-#{request.attempt_id}")
-          FileUtils.mkdir_p(path, mode: 0o700)
+          path = disposable_worktree.create
           plan_copy = File.join(path, "plan.md")
           bytes = Hive::SecretPatterns.redact(File.binread(request.plan_path))
           File.binwrite(plan_copy, bytes)
@@ -303,45 +330,15 @@ module Hive
             skill_invocation: request.kind == "adversarial" ? nil : capability.fetch("invocation"),
             nonce: SecureRandom.hex(24),
             plan_path: File.join(disposable, "plan.md"),
+            project_root: disposable,
             output_path:,
             level: request.level,
             required_coverage_json: JSON.generate(request.required_coverage),
             attempt_id: request.attempt_id,
             plan_digest: request.plan_digest,
             policy_fingerprint: request.policy_fingerprint,
-            host_computed_anchors: request.reviewer.fetch("provider") == "pi",
-            host_output_mode: request.reviewer.fetch("provider") == "pi",
-            output_basename: OUTPUT_BASENAME,
             verification_findings_json: JSON.pretty_generate(request.verification_findings)
           )
-        end
-
-        def normalize_pi_result(bytes, snapshot_bytes, request)
-          return bytes unless request.reviewer.fetch("provider") == "pi"
-
-          data = JSON.parse(bytes)
-          data["residual_evidence"] = [] unless request.kind == "verification"
-          findings = data["findings"]
-          return bytes unless findings.is_a?(Array)
-
-          lines = snapshot_bytes.to_s.lines(chomp: true)
-          findings.each do |entry|
-            evidence = entry.is_a?(Hash) ? entry["evidence"] : nil
-            next unless evidence.is_a?(Hash) && evidence["path"] == "plan.md"
-
-            start_line = evidence["start_line"]
-            end_line = evidence["end_line"]
-            next unless start_line.is_a?(Integer) && end_line.is_a?(Integer) &&
-                        start_line.positive? && end_line >= start_line
-
-            anchored = lines[(start_line - 1)..(end_line - 1)]
-            next unless anchored&.length == end_line - start_line + 1
-
-            evidence["anchor_digest"] = Digest::SHA256.hexdigest(anchored.join("\n").b)
-          end
-          JSON.generate(data)
-        rescue JSON::ParserError
-          bytes
         end
 
         def validate_output!(path, disposable)

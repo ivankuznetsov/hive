@@ -257,7 +257,12 @@ class DaemonAutoRetryTest < Minitest::Test
     end
   end
 
+  # A fresh failure waits its own step of the ladder, measured from the moment
+  # it was reparked. The step climbs with each charged retry, so the window is
+  # read off the ladder rather than assumed to be one flat cooldown.
   def test_each_fresh_failure_restarts_cooldown_and_retries_never_exhaust
+    ladder = Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC
+
     with_error_row(attrs: { "reason" => "implementer_failed" }) do |row, state_file|
       set_status_rows([ row ])
       instance = dispatcher
@@ -267,21 +272,15 @@ class DaemonAutoRetryTest < Minitest::Test
 
         second_at = T0 + 60
         repark(row, state_file, limited_at: second_at)
-        instance.tick(now: second_at + Hive::AgentLimit.retry_cooldown_sec - 1)
+        instance.tick(now: second_at + ladder[1] - 1)
         assert_equal :error, Hive::Markers.current(state_file).name
-        run_due_recovery(
-          instance,
-          state_file,
-          now: second_at + Hive::AgentLimit.retry_cooldown_sec
-        )
+        run_due_recovery(instance, state_file, now: second_at + ladder[1])
 
-        third_at = second_at + Hive::AgentLimit.retry_cooldown_sec + 60
+        third_at = second_at + ladder[1] + 60
         repark(row, state_file, limited_at: third_at)
-        run_due_recovery(
-          instance,
-          state_file,
-          now: third_at + Hive::AgentLimit.retry_cooldown_sec
-        )
+        instance.tick(now: third_at + ladder[2] - 1)
+        assert_equal :error, Hive::Markers.current(state_file).name
+        run_due_recovery(instance, state_file, now: third_at + ladder[2])
       end
     end
   end

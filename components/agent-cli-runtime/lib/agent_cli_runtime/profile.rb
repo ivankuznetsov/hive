@@ -4,7 +4,7 @@ require "rubygems/version"
 
 module AgentCliRuntime
   class Profile
-    PROMPT_STYLES = %i[positional headless_flag_value stdin].freeze
+    PROMPT_STYLES = %i[positional headless_flag_value stdin piped_stdin].freeze
     WORKSPACE_WRITE_PERMISSION_MODE = "workspace-write".freeze
     READ_ONLY_PERMISSION_MODE = "read-only".freeze
     CAPTURE_TIMEOUT_SECONDS = 10
@@ -37,7 +37,8 @@ module AgentCliRuntime
                    output_format_flags: [], min_version: nil,
                    prompt_style: :positional, model_argument_builder: nil,
                    effort_argument_builder: nil, launcher_identity: nil,
-                   usage_extractor: nil, auth_configuration_probe: nil,
+                   usage_extractor: nil, error_extractor: nil,
+                   auth_configuration_probe: nil,
                    cli_capabilities: {}, raw_cli_arguments_supported: false,
                    credential_environment_keys: [], configuration_environment_key: nil,
                    default_configuration_directory: nil,
@@ -68,6 +69,7 @@ module AgentCliRuntime
       @launcher_identity =
         immutable_string(launcher_identity || "agent-cli-runtime/v1:#{@name}")
       @usage_extractor = usage_extractor || ->(_event) { nil }
+      @error_extractor = error_extractor || ErrorExtractors::DEFAULT
       @auth_configuration_probe = auth_configuration_probe
       @cli_capabilities = normalize_cli_capabilities(cli_capabilities)
       @raw_cli_arguments_supported = raw_cli_arguments_supported == true
@@ -217,6 +219,12 @@ module AgentCliRuntime
 
     def extract_usage_event(event)
       @usage_extractor.call(event)
+    rescue StandardError
+      nil
+    end
+
+    def extract_error_event(event)
+      @error_extractor.call(event)
     rescue StandardError
       nil
     end

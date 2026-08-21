@@ -49,9 +49,14 @@ module Hive
           # 5-second deadline and ended up reported to the operator as
           # "Try again - another run holds the lock" — wrong cause.
           result, holder = try_append(task_folder, brainstorm_path, question_n, answer_text)
+          # Capture the holder BEFORE the deadline check. On a loaded machine a
+          # single try_append can outlast the whole retry budget, so the break
+          # below fires on the very iteration that observed the holder — and
+          # deferring this assignment dropped it, emitting holder: nil in the
+          # one case operators most need the culprit's identity.
+          last_holder = holder if holder
           break if result || Time.now >= deadline
 
-          last_holder = holder if holder
           sleep LOCK_RETRY_SLEEP_SEC
         end
 

@@ -2,7 +2,30 @@ require "test_helper"
 require "hive/config"
 require "hive/plan_review/orchestrator"
 
+require "tmpdir"
+
 class PlanReviewOrchestratorTest < Minitest::Test
+  # A plan containing any non-ASCII character (em dash, arrow, curly quote)
+  # used to crash the whole plan-review stage with
+  # `Encoding::CompatibilityError: incompatible character encodings: UTF-8 and
+  # BINARY`, because plan.md was binread and handed to prompt construction as
+  # ASCII-8BIT. Every webmail.sh plan task died this way 23 times overnight.
+  def test_plan_text_returns_utf8_for_a_plan_with_non_ascii
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "plan.md")
+      File.write(path, "# Plan\n\nUse the port — not the vendor → adapter.\n")
+      orchestrator = Hive::PlanReview::Orchestrator.allocate
+
+      text = orchestrator.send(:plan_text, path)
+
+      assert_equal Encoding::UTF_8, text.encoding
+      assert text.valid_encoding?
+      assert_includes text, "—"
+      # The real failure mode: concatenating with a UTF-8 prompt template.
+      assert_equal "prompt: #{text}", "prompt: " + text
+    end
+  end
+
   Workflow = Struct.new(:id, keyword_init: true)
   Task = Struct.new(
     :folder, :project_root, :slug, :id, :workflow, :meta_yml_path,
@@ -59,6 +82,25 @@ class PlanReviewOrchestratorTest < Minitest::Test
       Hive::PlanReview::PlannerRevision::Result.new(
         outcome: "success", candidate_bytes: @candidate,
         candidate_digest: Digest::SHA256.hexdigest(@candidate),
+        route_receipt: arguments.fetch(:planner_identity), diagnostic: nil
+      )
+    end
+  end
+
+  class SequencedRevision
+    attr_reader :calls
+
+    def initialize(*candidates)
+      @candidates = candidates
+      @calls = []
+    end
+
+    def call(**arguments)
+      @calls << arguments
+      candidate = @candidates.fetch(@calls.length - 1)
+      Hive::PlanReview::PlannerRevision::Result.new(
+        outcome: "success", candidate_bytes: candidate,
+        candidate_digest: Digest::SHA256.hexdigest(candidate),
         route_receipt: arguments.fetch(:planner_identity), diagnostic: nil
       )
     end
@@ -256,38 +298,188 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
-  def test_standard_total_unavailability_degrades_but_mandatory_blocks
-    [ [ standard_plan, "degraded_cleared", "review_unavailable" ],
-      [ mandatory_plan, "blocked", nil ] ].each do |plan, state, degradation|
-      with_task(plan) do |task, cfg|
-        adapter = FakeAdapter.new do |_request|
-          Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported")
-        end
-        projection = orchestrator(task, cfg, adapter:).advance!
-
-        assert_equal state, projection.record.state
-        degradation ? assert_equal(degradation, projection.record["degradation_reason"]) :
-          assert_nil(projection.record["degradation_reason"])
-        assert_equal %w[primary adversarial], adapter.calls.map(&:kind)
+  def test_standard_total_unavailability_degrades
+    with_task(standard_plan) do |task, cfg|
+      adapter = FakeAdapter.new do |_request|
+        Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported")
       end
+      projection = orchestrator(task, cfg, adapter:).advance!
+
+      assert_equal "degraded_cleared", projection.record.state
+      assert_equal "review_unavailable", projection.record["degradation_reason"]
+      assert_equal %w[primary adversarial], adapter.calls.map(&:kind)
     end
   end
 
-  def test_new_verification_finding_blocks_without_a_second_revision
-    revised = standard_plan.sub("# Plan", "# Revised plan")
+  # Mandatory capability failures get cheap re-probes, but an unchanged probe
+  # eventually parks instead of growing current.json forever.
+  def test_mandatory_total_unavailability_parks_after_three_stable_probes
+    with_task(mandatory_plan) do |task, cfg|
+      adapter = FakeAdapter.new do |_request|
+        Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported")
+      end
+      first = orchestrator(task, cfg, adapter:).advance!.record
+      second = orchestrator(task, cfg, adapter:).advance!.record
+      record = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "reviewing", first.state
+      assert_equal "reviewing", second.state
+      assert_equal "blocked", record.state
+      refute record.execution_allowed?
+      assert_equal "reviewer_unlaunchable", record["blockers"].first.fetch("reason")
+      assert_includes record["required_action"], "restore reviewer capability"
+      assert_equal 6, adapter.calls.length
+      counts = record["routes"].filter_map do |route|
+        route["capability_probe_count"] if route["role"] == "primary"
+      end
+      assert_equal [ 1, 2 ], counts
+    end
+  end
+
+  def test_policy_approved_verification_finding_runs_a_second_revision
+    revised_once = standard_plan.sub("# Plan", "# Revised once")
+    revised_twice = standard_plan.sub("# Plan", "# Revised twice")
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["approval_policies"] = [
+        {
+          "id" => "verification_followup", "version" => 1,
+          "action" => "approve_finding", "risk" => "low",
+          "paths" => [ "plan.md" ],
+          "valid_from" => "2026-08-12T00:00:00Z",
+          "valid_until" => "2026-08-13T00:00:00Z", "revoked" => false
+        }
+      ]
+      initial = finding("safe_auto", "Clarify tests")
+      regression = finding("gated_auto", "New regression", line: 2)
+      verification_calls = 0
+      adapter = FakeAdapter.new do |request|
+        findings = if request.kind == "primary"
+          [ initial ]
+        elsif request.kind == "verification" && (verification_calls += 1) == 1
+          [ regression ]
+        else
+          []
+        end
+        successful_result(request, findings:)
+      end
+      revision = SequencedRevision.new(revised_once, revised_twice)
+      runner = orchestrator(task, cfg, adapter:, planner_revision: revision)
+
+      followup = runner.advance!
+
+      assert_equal "revising", followup.record.state
+      assert_equal "approved", followup.record["findings"].last.fetch("lifecycle")
+      assert_equal "policy", followup.record["decisions"].last.fetch("origin")
+
+      projection = runner.advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal 2, revision.calls.length
+      assert_equal revised_once, revision.calls.last.fetch(:plan_bytes)
+      assert_equal 2, adapter.calls.count { |request| request.kind == "verification" }
+      assert_equal revised_twice, File.binread(File.join(task.folder, "plan.md"))
+    end
+  end
+
+  def test_capped_verification_revision_is_a_noop_on_external_reentry
+    candidates = 4.times.map do |index|
+      standard_plan.sub("# Plan", "# Revision #{index + 1}")
+    end
+    with_task(standard_plan) do |task, cfg|
+      residual = finding("safe_auto", "Still needs revision")
+      adapter = FakeAdapter.new do |request|
+        successful_result(
+          request,
+          findings: request.kind == "primary" || request.kind == "verification" ?
+            [ residual ] : []
+        )
+      end
+      revision = SequencedRevision.new(*candidates)
+      runner = orchestrator(task, cfg, adapter:, planner_revision: revision)
+
+      2.times { assert_equal "revising", runner.advance!.record.state }
+      capped = runner.advance!.record
+
+      assert_equal "blocked", capped.state
+      assert_equal Hive::PlanReview::Orchestrator::MAX_VERIFICATION_REVISION_ROUNDS,
+                   revision.calls.length
+      verification_calls = adapter.calls.count { |request| request.kind == "verification" }
+      version = capped.version
+
+      replay = runner.advance!.record
+
+      assert_equal version, replay.version
+      assert_equal capped.to_h, replay.to_h
+      assert_equal Hive::PlanReview::Orchestrator::MAX_VERIFICATION_REVISION_ROUNDS,
+                   revision.calls.length
+      assert_equal verification_calls,
+                   adapter.calls.count { |request| request.kind == "verification" }
+    end
+  end
+
+  def test_repeated_incorporated_finding_reopens_with_its_prior_decision
+    existing = finding("gated_auto", "Still broken")
+    accepted = Hive::PlanReview::Finding.new(
+      existing.to_h.merge(
+        "lifecycle" => "incorporated", "decision_id" => "prd-#{'a' * 64}"
+      )
+    )
+    runner = Hive::PlanReview::Orchestrator.allocate
+
+    findings, = runner.send(
+      :apply_verification, [ accepted.to_h ], [ existing.to_h ], "success", []
+    )
+
+    assert_equal "approved", findings.first.fetch("lifecycle")
+    assert_equal "prd-#{'a' * 64}", findings.first.fetch("decision_id")
+
+    safe = finding("safe_auto", "Safe residual", line: 2)
+    manual = finding("manual", "Manual residual", line: 3)
+    fyi = finding("fyi", "FYI residual", line: 4)
+    reopened = [ safe, manual, fyi ].map do |finding|
+      runner.send(:reopen_verification_finding, finding, finding)
+    end
+    assert_equal %w[open open open], reopened.map { |finding| finding.fetch("lifecycle") }
+  end
+
+  def test_legacy_policy_approval_resets_terminal_verification_before_revising
+    revised_once = standard_plan.sub("# Plan", "# Revised once")
+    revised_twice = standard_plan.sub("# Plan", "# Revised twice")
     with_task(standard_plan) do |task, cfg|
       initial = finding("safe_auto", "Clarify tests")
-      regression = finding("safe_auto", "New regression", line: 2)
-      adapter = success_adapter(
-        primary_findings: [ initial ], verification_findings: [ regression ]
-      )
-      revision = FakeRevision.new(revised)
-      projection = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      regression = finding("gated_auto", "New regression", line: 2)
+      verification_calls = 0
+      adapter = FakeAdapter.new do |request|
+        findings = if request.kind == "primary"
+          [ initial ]
+        elsif request.kind == "verification" && (verification_calls += 1) == 1
+          [ regression ]
+        else
+          []
+        end
+        successful_result(request, findings:)
+      end
+      revision = SequencedRevision.new(revised_once, revised_twice)
+      runner = orchestrator(task, cfg, adapter:, planner_revision: revision)
 
-      assert_equal "blocked", projection.record.state
-      assert_equal 1, revision.calls.length
-      assert_equal 1, adapter.calls.count { |request| request.kind == "verification" }
-      assert_equal standard_plan, File.binread(File.join(task.folder, "plan.md"))
+      assert_equal "awaiting_decision", runner.advance!.record.state
+
+      cfg["plan_review"]["approval_policies"] = [
+        {
+          "id" => "legacy_followup", "version" => 1,
+          "action" => "approve_finding", "risk" => "low", "paths" => [ "plan.md" ],
+          "valid_from" => "2026-08-12T00:00:00Z",
+          "valid_until" => "2026-08-13T00:00:00Z", "revoked" => false
+        }
+      ]
+      projection = runner.advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal 2, revision.calls.length
+      assert_equal 2, adapter.calls.count { |request| request.kind == "verification" }
+      assert projection.record["routes"].any? { |route|
+        route["role"] == "verification" && route["verification_followup"] == true
+      }
     end
   end
 
@@ -609,6 +801,95 @@ class PlanReviewOrchestratorTest < Minitest::Test
       assert_equal "blocked", projection.record.state
       assert projection.record["blockers"].any? { |row|
         row.fetch("reason") == "candidate_verification_terminal_failure"
+      }
+    end
+  end
+
+  def test_incomplete_successful_verification_retries_only_missing_dispositions
+    revised = standard_plan.sub("# Plan", "# Revised")
+    with_task(standard_plan) do |task, cfg|
+      findings = [
+        finding("safe_auto", "Clarify tests"),
+        finding("safe_auto", "Clarify rollback", line: 2)
+      ]
+      verification_calls = 0
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "verification"
+          verification_calls += 1
+          result = successful_result(request)
+          if verification_calls == 1
+            result = Hive::PlanReview::Adapters::Base::Result.new(
+              **result.to_h.merge(
+                residual_evidence: result.residual_evidence.take(1)
+              ).transform_keys(&:to_sym)
+            )
+          end
+          result
+        else
+          successful_result(
+            request, findings: request.kind == "primary" ? findings : []
+          )
+        end
+      end
+      runner = orchestrator(
+        task, cfg, adapter:, planner_revision: FakeRevision.new(revised)
+      )
+
+      incomplete = runner.advance!
+
+      assert_equal "verifying", incomplete.record.state
+      refute incomplete.record.execution_allowed?
+      assert_equal %w[verified incorporated],
+                   incomplete.record["findings"].map { |finding| finding.fetch("lifecycle") }
+      reset = incomplete.record["routes"].last
+      assert_equal "verification", reset.fetch("role")
+      assert_equal true, reset.fetch("recovery_reset")
+      assert_equal true, reset.fetch("incomplete_attestation_retry")
+
+      cleared = runner.advance!
+
+      assert_equal "cleared", cleared.record.state
+      assert cleared.record.execution_allowed?
+      verification_requests = adapter.calls.select { |request| request.kind == "verification" }
+      assert_equal [ 2, 1 ], verification_requests.map { |request|
+        request.verification_findings.length
+      }
+      assert cleared.record["findings"].all? { |finding|
+        finding.fetch("lifecycle") == "verified"
+      }
+    end
+  end
+
+  def test_incomplete_verification_blocks_after_the_transient_retry_bound
+    revised = standard_plan.sub("# Plan", "# Revised")
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 1
+      adapter = FakeAdapter.new do |request|
+        result = successful_result(
+          request,
+          findings: request.kind == "primary" ?
+            [ finding("safe_auto", "Clarify tests") ] : []
+        )
+        next result unless request.kind == "verification"
+
+        Hive::PlanReview::Adapters::Base::Result.new(
+          **result.to_h.merge(residual_evidence: []).transform_keys(&:to_sym)
+        )
+      end
+      runner = orchestrator(
+        task, cfg, adapter:, planner_revision: FakeRevision.new(revised)
+      )
+
+      assert_equal "verifying", runner.advance!.record.state
+
+      exhausted = runner.advance!
+
+      assert_equal "blocked", exhausted.record.state
+      assert_equal "disposition_verification_missing",
+                   exhausted.record["blockers"].first.fetch("reason")
+      assert_equal 2, adapter.calls.count { |request| request.kind == "verification" }
+      assert_equal 1, exhausted.record["routes"].count { |route|
+        route["incomplete_attestation_retry"] == true
       }
     end
   end

@@ -191,7 +191,9 @@ health read per candidate.
 routing policy, Attempts, and Provider Health. It joins bounded current
 decision cells, durable live-attempt account counts, and authoritative scoped
 health inspection. It does not call `Router`, select a route, or acquire an
-admission/task-generation lock.
+admission/task-generation lock. The Attempts decision index returns immutable
+snapshots; projection filtering allocates its own array rather than mutating
+that shared reader result.
 
 Account and model circuits for one route are sampled under one provider-health
 lock hold, without repairing journals or publishing projections. Provider and

@@ -63,6 +63,136 @@ class AttemptsStorageFoundationTest < Minitest::Test
     end
   end
 
+  def test_projection_binding_skips_unrelated_output_and_receipt_validation
+    with_tmp_dir do |root|
+      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
+      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      terminal = terminal_record(
+        source, attempt_id: "projection-proof", request_id: "projection-request"
+      )
+      store.permanent_proofs.publish(terminal)
+      File.unlink(store.permanent_proofs.projection_binding_path_for(terminal.attempt_id))
+
+      replacement = ->(*) { raise "full record validation must not run" }
+      binding = with_replaced_singleton_method(
+        Hive::Attempts::Record, :new, replacement
+      ) do
+        store.fetch_projection_binding(terminal.attempt_id)
+      end
+
+      assert_equal terminal.attempt_id, binding.fetch("attempt_id")
+      assert_equal terminal.task_input_epoch, binding.fetch("task_input_epoch")
+      assert_equal terminal.state, binding.fetch("state")
+      assert_equal terminal.outcome, binding.fetch("outcome")
+      assert_equal Hive::Attempts::PermanentProofStore::PROJECTION_BINDING_KEYS.sort,
+                   binding.keys.sort
+
+      backfilled = store.permanent_proofs.backfill_projection_binding(terminal.attempt_id)
+      assert_equal binding, backfilled
+      assert File.file?(store.permanent_proofs.projection_binding_path_for(terminal.attempt_id))
+
+      File.binwrite(store.permanent_proofs.path_for(terminal.attempt_id), "{")
+      assert_equal binding, store.fetch_projection_binding(terminal.attempt_id)
+    end
+  end
+
+  def test_projection_binding_rejects_malformed_oversized_and_conflicting_sidecars
+    with_tmp_dir do |root|
+      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
+      proof = Hive::Attempts::PermanentProofStore.new(root: File.join(root, "proof"))
+      terminal = terminal_record(
+        source, attempt_id: "binding-proof", request_id: "binding-request"
+      )
+      binding = terminal.to_h.slice(
+        *Hive::Attempts::PermanentProofStore::PROJECTION_BINDING_KEYS
+      )
+
+      invalid_full_record = terminal.to_h.except("schema")
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.send(
+          :parse_projection_binding, JSON.generate(invalid_full_record),
+          expected_attempt_id: terminal.attempt_id
+        )
+      end
+
+      too_large = "{" + (" " * Hive::Attempts::PermanentProofStore::MAX_PROJECTION_BINDING_BYTES) + "}"
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.send(
+          :parse_projection_binding_document, too_large,
+          expected_attempt_id: terminal.attempt_id
+        )
+      end
+
+      invalid_documents = [
+        { "schema" => "wrong", "schema_version" => 1, "binding" => binding },
+        {
+          "schema" => Hive::Attempts::PermanentProofStore::PROJECTION_BINDING_SCHEMA,
+          "schema_version" => 1,
+          "binding" => binding.except("task_slug")
+        }
+      ]
+      invalid_documents.each do |document|
+        assert_raises(Hive::Attempts::StoreError) do
+          proof.send(
+            :parse_projection_binding_document, JSON.generate(document),
+            expected_attempt_id: terminal.attempt_id
+          )
+        end
+      end
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.send(
+          :parse_projection_binding_document, "{",
+          expected_attempt_id: terminal.attempt_id
+        )
+      end
+
+      oversized_binding = binding.merge(
+        "task_slug" => "x" * Hive::Attempts::PermanentProofStore::MAX_PROJECTION_BINDING_BYTES
+      )
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.send(:publish_projection_binding, terminal.attempt_id, oversized_binding)
+      end
+
+      proof.publish(terminal)
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.send(
+          :publish_projection_binding, terminal.attempt_id,
+          binding.merge("task_slug" => "changed-task")
+        )
+      end
+    end
+  end
+
+  def test_projection_binding_validates_each_immutable_field_family
+    with_tmp_dir do |root|
+      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
+      proof = Hive::Attempts::PermanentProofStore.new(root: File.join(root, "proof"))
+      terminal = terminal_record(
+        source, attempt_id: "binding-validation", request_id: "binding-request"
+      )
+      binding = terminal.to_h.slice(
+        *Hive::Attempts::PermanentProofStore::PROJECTION_BINDING_KEYS
+      )
+
+      invalid_bindings = [
+        binding.merge("task_slug" => ""),
+        binding.merge("task_input_epoch" => -1),
+        binding.merge("predecessor_attempt_id" => 1),
+        binding.merge("task_id" => []),
+        binding.merge("outcome" => nil),
+        binding.merge("state" => "lost", "outcome" => "completed")
+      ]
+      invalid_bindings.each do |invalid|
+        assert_raises(Hive::Attempts::InvalidRecord) do
+          proof.send(
+            :validate_projection_binding!, invalid,
+            expected_attempt_id: terminal.attempt_id
+          )
+        end
+      end
+    end
+  end
+
   def test_hot_record_wins_during_interrupted_proof_promotion
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
@@ -225,6 +355,50 @@ class AttemptsStorageFoundationTest < Minitest::Test
 
       2.times { index.refund_tempfail(tempfail) }
       assert_equal 0, index.daily_count(project: "demo", date: NOW.to_date)
+    end
+  end
+
+  # A launch that never produced an agent spent nothing, so it must not spend
+  # a daily slot. Without this, a night of failed handoffs exhausts the day's
+  # budget and locks out the runs that would have succeeded.
+  def test_unstarted_loss_refunds_its_daily_slot
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      index = store.decision_index
+      lost = lost_record(store, attempt_id: "never-ran", request_id: "request-never-ran")
+
+      assert_nil lost["started_at"], "fixture must never have reached running"
+      index.record_acceptance(lost)
+      assert_equal 1, index.daily_count(project: "demo", date: NOW.to_date)
+
+      2.times { index.refund_unstarted(lost) }
+
+      assert_equal 0, index.daily_count(project: "demo", date: NOW.to_date)
+    end
+  end
+
+  # A loss after the agent started keeps its charge: the tokens are already
+  # spent, and the daily cap is a spend bound.
+  def test_loss_after_starting_is_not_refunded
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      index = store.decision_index
+      launching = store.create_launching(
+        **identity(attempt_id: "ran-then-lost", request_id: "request-ran-then-lost"),
+        launch_timeout_sec: 30, now: NOW
+      )
+      claimed = store.claim(
+        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+      running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+      lost = store.mark_lost(running, reason: "owner_gone", now: NOW + 3)
+
+      refute_nil lost["started_at"], "fixture must have reached running"
+      index.record_acceptance(lost)
+
+      assert_raises(Hive::Attempts::StoreError) { index.refund_unstarted(lost) }
+      assert_equal 1, index.daily_count(project: "demo", date: NOW.to_date)
     end
   end
 
@@ -416,11 +590,19 @@ class AttemptsStorageFoundationTest < Minitest::Test
       )
       proof.publish(terminal)
       path = proof.path_for(terminal.attempt_id)
+      binding_path = proof.projection_binding_path_for(terminal.attempt_id)
+      File.unlink(binding_path)
       File.binwrite(path, JSON.generate(launching.to_h) + "\n")
       assert_raises(Hive::Attempts::StoreError) { proof.fetch(terminal.attempt_id) }
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.fetch_projection_binding(terminal.attempt_id)
+      end
 
       File.binwrite(path, "{")
       assert_raises(Hive::Attempts::StoreError) { proof.fetch(terminal.attempt_id) }
+      assert_raises(Hive::Attempts::StoreError) do
+        proof.fetch_projection_binding(terminal.attempt_id)
+      end
     end
   end
 
@@ -479,6 +661,9 @@ class AttemptsStorageFoundationTest < Minitest::Test
         source, attempt_id: "succeeded", request_id: "succeeded-request"
       )
       assert_raises(Hive::Attempts::StoreError) { index.refund_tempfail(succeeded) }
+      # A live attempt has not finished losing yet, so its charge is not free
+      # to give back even though it never reached running.
+      assert_raises(Hive::Attempts::StoreError) { index.refund_unstarted(launching) }
 
       tempfail = terminal_record(
         source,

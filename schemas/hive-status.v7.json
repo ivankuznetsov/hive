@@ -439,7 +439,9 @@
           "properties": {
             "owner": { "type": "string" }, "reason": { "type": "string" },
             "coverage": { "type": "string" },
-            "finding_fingerprint": { "type": "string", "pattern": "^prf-[0-9a-f]{64}$" }
+            "finding_fingerprint": { "type": "string", "pattern": "^prf-[0-9a-f]{64}$" },
+            "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "diagnostic": { "type": ["string", "null"] }
           }
         }
       ]
@@ -460,6 +462,7 @@
         "requested": { "$ref": "#/$defs/PlanReviewRouteIdentity" },
         "actual": { "$ref": "#/$defs/PlanReviewRouteIdentity" },
         "capability_result": { "type": ["string", "null"] },
+        "diagnostic": { "type": ["string", "null"] },
         "independence_verified": { "type": "boolean" },
         "independence_reason": { "type": ["string", "null"] },
         "attempt_id": { "type": ["string", "null"], "pattern": "^pra-[0-9a-f]{64}$" },
@@ -468,6 +471,10 @@
         },
         "retry_at": { "type": ["string", "null"], "format": "date-time" },
         "recovery_reset": { "type": "boolean" },
+        "capability_probe_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "capability_probe_count": { "type": "integer", "minimum": 1 },
+        "verification_followup": { "type": "boolean" },
+        "incomplete_attestation_retry": { "type": "boolean" },
         "attempts": {
           "type": "array",
           "items": {

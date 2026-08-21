@@ -6,6 +6,32 @@ class AttemptsEntrypointTest < Minitest::Test
 
   FakeTask = Struct.new(:slug, :project_root, :project_name, keyword_init: true)
 
+  def test_operator_dispatch_still_defers_on_non_loss_reasons
+    task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
+    deferred = Hive::Attempts::DispatchResult.new(
+      status: :deferred, attempt: nil, receipt: nil,
+      attach_descriptor: nil, reason: "capacity"
+    )
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) { |**_kwargs| deferred }
+    dispatcher.define_singleton_method(:dispatch_successor) do |**_kwargs|
+      flunk "capacity deferral must not be superseded"
+    end
+    config = Hive::Config.merge_defaults({})
+
+    error = assert_raises(Hive::ConcurrentRunError) do
+      Hive::Attempts::Entrypoint.new(
+        store: Object.new, dispatcher: dispatcher,
+        config_loader: ->(_root) { config }
+      ).dispatch(
+        task: task, intended_stage: "4-execute", argv: [ "hive", "run", "/tmp/task" ],
+        request_id: "request-1"
+      )
+    end
+
+    assert_includes error.message, "capacity"
+  end
+
   def test_state_home_falls_back_when_an_injected_store_has_no_root
     entrypoint = Hive::Attempts::Entrypoint.new(store: Object.new)
 

@@ -19,7 +19,7 @@ class AgentCliRuntimePackageTest < Minitest::Test
       manifest = JSON.parse(out.lines.last)
       gem_path = manifest.fetch("gem_path")
       assert File.file?(gem_path)
-      assert_equal "agent-cli-runtime-0.2.0.gem", File.basename(gem_path)
+      assert_equal "agent-cli-runtime-0.2.3.gem", File.basename(gem_path)
       assert_equal Digest::SHA256.file(gem_path).hexdigest,
                    manifest.fetch("sha256")
       assert_equal !dirty.empty?, manifest.fetch("source_dirty")
@@ -53,7 +53,7 @@ class AgentCliRuntimePackageTest < Minitest::Test
       end
 
       _out, err, status = run_preflight(
-        component, "components/agent-cli-runtime/v0.2.0",
+        component, "components/agent-cli-runtime/v0.2.3",
         commit[0, 12], "main"
       )
       refute status.success?
@@ -110,7 +110,7 @@ class AgentCliRuntimePackageTest < Minitest::Test
       git!(repository, "add", ".")
       commit_fixture!(repository, "fixture")
       commit = git!(repository, "rev-parse", "HEAD").strip
-      tag = "components/agent-cli-runtime/v0.2.0"
+      tag = "components/agent-cli-runtime/v0.2.3"
       git!(repository, "tag", tag)
 
       yield repository, component, commit, tag

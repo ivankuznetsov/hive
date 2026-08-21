@@ -412,7 +412,8 @@ applicable boundary. A coding plan row exposes the shared
 task generation and plan/policy digests, computed/effective level,
 state/outcome/degradation, attempt identity, complete coverage and finding
 counts, exact blockers and owner, retry time, one required action, sanitized
-planner/reviewer route receipts, safe artifact references, freshness, and
+planner/reviewer route receipts (including a nullable, redacted capability
+diagnostic), safe artifact references, freshness, and
 `execution_allowed`.
 
 Status validates every referenced artifact before projecting clearance. A

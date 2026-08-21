@@ -311,6 +311,7 @@ module Hive
               next record
             end
 
+            abandon_regenerable_effects!(record, now: now)
             assert_terminal_effects!(record, capture)
             record["phase"] = "finalized"
             record["final_capture"] = capture.to_h
@@ -326,6 +327,17 @@ module Hive
 
         def effect_receipt_ids(occurrence_id)
           @effects.terminal_receipt_ids(occurrence_id)
+        end
+
+        def terminal_effects?(occurrence_id)
+          record = fetch(occurrence_id)
+          malformed!("patrol occurrence is missing") unless record
+
+          record.fetch("effects").values.all? do |cell|
+            TERMINAL_STATES.include?(cell.fetch("state"))
+          end
+        rescue KeyError
+          malformed!("patrol occurrence is malformed")
         end
 
         def pending_outbox(occurrence_id)
@@ -644,6 +656,35 @@ module Hive
           )
         end
 
+        # Sinks whose product the next scan simply recreates: patch, finding
+        # and state files are derived from the repository, not from anything
+        # the journal is uniquely holding. An intent that died before its
+        # receipt therefore describes work that either landed (and will be
+        # rewritten identically) or never happened (and will be redone).
+        #
+        # Only externally visible sinks — pull_request, branch, review_handoff
+        # — are unrepeatable, and those still block: opening the same PR twice
+        # is the harm the journal exists to prevent.
+        REGENERABLE_SINKS = %w[state finding].freeze
+
+        # A stranded local effect must never keep an occurrence from
+        # finalizing. Before this, one prepared patch note deadlocked its
+        # occurrence permanently: it could not settle (no recovery path
+        # covered that sink), so the occurrence could not finalize, so it
+        # could not retire, so patrol re-ran it every cycle forever and held
+        # a dispatch slot the whole time.
+        def abandon_regenerable_effects!(record, now: Time.now.utc)
+          record.fetch("effects").each_value do |cell|
+            next if TERMINAL_STATES.include?(cell.fetch("state"))
+            next unless REGENERABLE_SINKS.include?(cell.dig("semantic", "sink").to_s)
+
+            cell["state"] = "abandoned"
+            cell["outcome"] = { "reason" => "regenerable_effect_abandoned" }
+            cell["terminal_receipt_id"] = nil if cell.key?("terminal_receipt_id")
+            cell["updated_at"] = @validator.timestamp(now) if cell.key?("updated_at")
+          end
+        end
+
         def assert_terminal_effects!(record, capture)
           cells = record.fetch("effects").values
           unless cells.all? do |cell|
@@ -653,8 +694,8 @@ module Hive
               "patrol occurrence has nonterminal effects"
             )
           end
-          expected = cells.map do |cell|
-            cell.fetch("terminal_receipt_id")
+          expected = cells.filter_map do |cell|
+            cell.fetch("terminal_receipt_id", nil)
           end.sort
           unless expected == capture.effect_ids.sort
             malformed!(

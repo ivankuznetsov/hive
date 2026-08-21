@@ -443,7 +443,38 @@ class StagesCouncilTest < Minitest::Test
         marker = Hive::Markers.current(task.state_file)
         assert_equal({ commit: "round_waiting", status: :waiting }, result)
         assert_equal "max_rounds", marker.attrs.fetch("reason")
+        assert_equal "1", marker.attrs.fetch("round")
         assert_equal 2, captured.length, "revise must not run after max_rounds is reached"
+      end
+    end
+  end
+
+  # `round` is re-derived from the triage files already on disk, so a council
+  # resumed past its budget used to pay for a whole reviewer round before the
+  # end-of-body check noticed. One stage reached round 11 against max_rounds 3
+  # that way: eight rounds of reviewers bought nothing, and the operator never
+  # saw the waiting marker that should have asked them nine rounds earlier.
+  def test_a_council_resumed_past_its_budget_spawns_nothing
+    with_tmp_dir do |project|
+      workflow = council_workflow(exit_rule: :consensus, max_rounds: 2, revise: true)
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      (1..5).each do |round|
+        File.write(File.join(reviews, format("triage-%02d.md", round)), "round #{round}\n")
+      end
+
+      with_stubbed_spawn([]) do |captured|
+        result = Hive::Stages::Council.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "round_waiting", status: :waiting }, result)
+        assert_equal "max_rounds", marker.attrs.fetch("reason")
+        assert_equal "2", marker.attrs.fetch("round")
+        assert_empty captured, "a council already past its budget must not spawn a reviewer"
+        assert_equal File.join(reviews, "triage-05.md"), marker.attrs.fetch("triage"),
+                     "the operator must be pointed at the most recent verdict"
       end
     end
   end

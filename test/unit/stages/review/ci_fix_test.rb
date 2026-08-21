@@ -437,6 +437,62 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  def test_ci_idle_output_timeout_kills_a_silent_command_before_the_wall_clock
+    with_ci_dir do |dir, task_folder|
+      # Prints once, then goes silent far beyond the idle window while the
+      # wall clock still has plenty of headroom.
+      ci = write_ci_script(dir, %(echo started; sleep 30; echo never_printed))
+      cfg = cfg_with(ci,
+                     "review" => { "ci" => { "max_attempts" => 1 } },
+                     "timeout_sec" => { "review_ci" => 30, "review_ci_idle" => 0.3 })
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = Hive::Stages::Review::CiFix.run!(
+        cfg: cfg,
+        ctx: make_ctx(dir, task_folder)
+      )
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_equal :error, result.status
+      assert_match(/no output for 0.3s \(idle-output timeout\)/, result.error_message)
+      assert_operator elapsed, :<, 10,
+                      "idle deadline must fire long before the 30s wall clock"
+    end
+  end
+
+  def test_ci_progressing_output_defers_the_idle_deadline
+    with_ci_dir do |dir, task_folder|
+      ci = write_ci_script(dir, <<~SH.strip)
+        for i in $(seq 1 8); do
+          echo tick
+          sleep 0.1
+        done
+        exit 0
+      SH
+      cfg = cfg_with(ci,
+                     "review" => { "ci" => { "max_attempts" => 1 } },
+                     "timeout_sec" => { "review_ci" => 30, "review_ci_idle" => 0.5 })
+
+      result = Hive::Stages::Review::CiFix.run!(
+        cfg: cfg,
+        ctx: make_ctx(dir, task_folder)
+      )
+
+      assert_equal :green, result.status, result.error_message.inspect
+    end
+  end
+
+  def test_ci_non_positive_idle_timeout_disables_the_idle_deadline
+    with_tmp_dir do |dir|
+      run = Hive::Stages::Review::CiFix.run_ci_once(
+        [ "ruby", "-e", "sleep 0.3" ], dir, 1024, 30, idle_timeout_sec: 0
+      )
+
+      assert_instance_of Hive::Stages::Review::CiFix::Run, run
+      assert_equal 0, run.exit_code
+    end
+  end
+
   def test_ci_output_byte_cap_during_read
     with_ci_dir do |dir, task_folder|
       # 1 MB cap configured; emit ~3 MB. The reader must stop appending

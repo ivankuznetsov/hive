@@ -173,6 +173,16 @@ class SecretPatternsTest < Minitest::Test
     refute_match_any("Rate limits apply to password resets, confirmations, and sign-ins.")
   end
 
+  def test_test_password_literal_remains_a_detected_assignment
+    assert_match_name('operator.password = "password"', :password_assignment)
+  end
+
+  def test_runtime_test_password_literals_remain_detected
+    [ "correct", "system-password" ].each do |value|
+      assert_match_name(%(password: "#{value}"), :password_assignment)
+    end
+  end
+
   def test_high_signal_password_forms_remain_protected
     samples = {
       "ALTER USER app PASSWORD 's3cretpassphrase42';" => :password_sql,

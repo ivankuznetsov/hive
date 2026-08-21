@@ -6,9 +6,17 @@ class AgentCliRuntimeGemspecTest < Minitest::Test
 
   def test_public_identity_and_inventory
     spec = Gem::Specification.load(GEMSPEC)
+    description = spec.description.gsub(/\s+/, " ").strip
 
     assert_equal "agent-cli-runtime", spec.name
-    assert_equal Gem::Version.new("0.2.0"), spec.version
+    assert_equal Gem::Version.new("0.2.3"), spec.version
+    # Facts are pinned exactly; prose stays free-form but must name every
+    # supported CLI so the metadata cannot silently drop a provider.
+    refute_empty spec.summary
+    %w[Claude Codex Pi Grok OpenCode].each do |cli|
+      assert_includes "#{spec.summary} #{description}", cli,
+                      "gem metadata must mention #{cli}"
+    end
     assert_equal Gem::Requirement.new(">= 3.4.0"), spec.required_ruby_version
     assert_equal [ "agent-runtime" ], spec.executables
     assert_equal "MIT", spec.license
@@ -37,9 +45,10 @@ class AgentCliRuntimeGemspecTest < Minitest::Test
     assert_includes readme, "PreparedInvocation#cleanup!"
     refute_match(/~> 0\.1\./, readme)
     assert_match(
-      /\A# Changelog\n\n## Unreleased\n\n## 0\.2\.0 - 2026-08-15\n/,
+      /\A# Changelog\n\n## Unreleased\n\n## 0\.2\.3 - 2026-08-21\n/,
       changelog
     )
+    assert_includes changelog, "first-class OpenCode `1.18.16+` support"
   end
 
   def test_public_links_use_the_distribution_mirror_and_canonical_issue_tracker

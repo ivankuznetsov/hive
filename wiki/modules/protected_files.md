@@ -3,7 +3,7 @@ title: Hive::ArtifactFirewall
 type: module
 source: lib/hive/artifact_firewall.rb, lib/hive/protected_files.rb
 created: 2026-04-26
-updated: 2026-07-26
+updated: 2026-08-21
 tags: [security, artifacts, custody, integrity, orchestrator]
 ---
 
@@ -58,6 +58,13 @@ The public immutable values are:
 The public errors are `Error`, `InvalidManifest`, `CaptureError`, and
 `InvalidSnapshot`. Manifest/snapshot binding prevents validating one manifest
 and then restoring through a different policy observation.
+
+`Manifest.new(..., max_entries:)` defaults to 128 total entries across
+protected anchors, required outputs, and permitted writable roots, and rejects
+any consumer request above the hard 4096-entry ceiling. Consumers with a known,
+exact authority inventory may widen the per-instance aggregate admission
+bound; capture, validation, restoration, and reporting still run through one
+code path and one snapshot. There is no multi-manifest custody wrapper.
 
 `validate_required_outputs(manifest)` is the read-only polling seam used by
 headless `Hive::Agent` and `Hive::ClaudeLauncher`. It replaces the former
@@ -159,9 +166,19 @@ Artifact Firewall, and Safe Agent Git Gate remain three separate guarantees.
 Hive keeps stage semantics above the facade:
 
 - `Stages::Execute` supplies its implementation-owned writable worktree and
-  task-control anchors; tampering retains `implementer_tampered`.
+  task-control anchors in one exact-inventory manifest; tampering retains
+  `implementer_tampered`, while the hard manifest ceiling exposes unbounded
+  receipt growth instead of hiding it behind batches.
 - `Stages::OpenPr` and `Stages::Finalize` protect controller task state around
-  body-authoring spawns and retain their current error markers.
+  body-authoring spawns and retain their current error markers. Open PR keeps
+  the complete controller-owned anchor set, including `task-journal.jsonl` and
+  `task-projection.json`, in its provider-call manifest. The daemon's terminal
+  execute-attempt observer acquires the ordinary task ownership lock before it
+  appends or rebuilds those files. If open PR or any other stage owns the task,
+  the observer returns `:pending` immediately and retries after release. This
+  prevents legitimate late controller bookkeeping from entering the custody
+  window without weakening provider tamper detection or restricting reviewer
+  repository, shell, or network access.
 - `Stages::Artifacts` gives every outcome-evidence inference, producer, and
   reviewer role its own `AgentCustody` boundary. Durable session activity,
   usage, and context receipts are controller bookkeeping outside that

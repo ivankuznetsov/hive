@@ -7,6 +7,10 @@ module Hive
     LEVELS = %w[skip standard mandatory].freeze
     LEVEL_RANK = LEVELS.each_with_index.to_h.freeze
     CLASSIFIER_VERSION = 1
+    RECOVERY_RESET_ROUTE_KEYS = %w[
+      role requested actual capability_result
+      independence_verified independence_reason
+    ].freeze
 
     class Error < Hive::Error; end
     class InvalidPlan < Error; end
@@ -59,6 +63,13 @@ module Hive
         value.each { |child| deep_freeze(child) }
       end
       value.freeze
+    end
+
+    def recovery_reset_route(route, attributes = {})
+      route.slice(*RECOVERY_RESET_ROUTE_KEYS).merge(
+        "outcome" => "retryable_failure", "retry_at" => nil,
+        "recovery_reset" => true
+      ).merge(attributes)
     end
   end
 end

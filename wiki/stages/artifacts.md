@@ -3,7 +3,7 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-08-14
+updated: 2026-08-21
 tags: [stage, artifacts, evidence, review]
 ---
 
@@ -219,6 +219,14 @@ and reviewer capability. Legacy media follows in a visibly labelled
 - Integrity, role-launch, source-drift, or malformed-output failures use
   `ERROR reason=outcome_evidence_invalid` and retain their bounded diagnostic;
   they remain ordinary recoverable stage errors.
+- A role process that returns a typed provider failure keeps that envelope at
+  the controller boundary. Quota and credit failures publish
+  `ERROR reason=limits_reached provider=<profile> retry_after=<iso8601>` and
+  return `commit=limits_reached`, so daemon recovery observes the normal
+  provider cooldown instead of immediately replaying an expensive inference,
+  producer, or reviewer prompt. Other typed provider failures retain
+  `reason=provider_error`, the provider, status code when supplied, and a
+  bounded message rather than being mislabeled as invalid evidence.
 
 ## Backlinks
 

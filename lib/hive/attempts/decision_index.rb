@@ -153,12 +153,37 @@ module Hive
         record
       end
 
+      # An attempt that never reached `running` has no `started_at`, which
+      # means no agent ever spawned and not one token was spent. Charging it a
+      # daily slot makes a launch that failed cost exactly as much budget as a
+      # full run, so a night of failed handoffs can exhaust the day and lock
+      # out the work that would have succeeded.
+      #
+      # This is the same principle the TEMPFAIL refund already encodes — "we
+      # did not actually do work" — applied to the other way that happens.
+      # Attempts lost *after* starting keep their charge: the agent ran, the
+      # tokens are gone, and the cap is a spend bound.
+      def refund_unstarted(record)
+        unless record.state == "lost"
+          raise StoreError, "daily accounting unstarted refund requires a lost record"
+        end
+        unless record["started_at"].nil?
+          raise StoreError, "daily accounting unstarted refund requires an attempt that never ran"
+        end
+
+        mark_refunded(record)
+      end
+
       def refund_tempfail(record)
         terminal!(record)
         unless record.receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
           raise StoreError, "daily accounting refund requires a TEMPFAIL receipt"
         end
 
+        mark_refunded(record)
+      end
+
+      def mark_refunded(record)
         key = accounting_key(accepted_date(record))
         update_entry(DAILY_ACCOUNTING, key) do |current|
           unless current

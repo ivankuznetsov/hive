@@ -1297,7 +1297,7 @@ class AgentTest < Minitest::Test
           input: 100, output: 50, cached: 50,
           cache_read: 20, cache_write: 30, reasoning: nil,
           input_includes_cache_read: false, input_includes_cache_write: false,
-          output_includes_reasoning: nil, model: "claude-opus-4-7"
+          output_includes_reasoning: nil, model: "claude-opus-4-7", provider_reported_cost: nil
         },
         result[:usage]
       )
@@ -1548,7 +1548,7 @@ class AgentTest < Minitest::Test
           input: 27, output: 4_439, cached: nil,
           cache_read: 15_554, cache_write: nil, reasoning: nil,
           input_includes_cache_read: false, input_includes_cache_write: nil,
-          output_includes_reasoning: nil, model: nil
+          output_includes_reasoning: nil, model: nil, provider_reported_cost: nil
         },
         result.fetch(:usage)
       )
@@ -1768,6 +1768,46 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_model_output_limit_sets_structured_error_marker_for_state_file_agents
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5
+      )
+      result = {
+        resource_exhaustion: {
+          reason: "model_output_limit", observed: 8_192, limit: nil
+        }
+      }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, result.fetch(:status)
+      assert_equal "model_output_limit", marker.attrs.fetch("reason")
+      assert_equal "8192", marker.attrs.fetch("observed_output_tokens")
+      assert_equal "raise_model_max_tokens_or_lower_reasoning_effort",
+                   marker.attrs.fetch("remedy")
+    end
+  end
+
+  def test_unknown_resource_exhaustion_reason_fails_closed
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5
+      )
+      detail = { reason: "future_limit", observed: 1, limit: 1 }
+
+      assert_raises(Hive::AgentError) do
+        agent.handle_exit(resource_exhaustion: detail)
+      end
+      assert_raises(Hive::AgentError) do
+        agent.send(:resource_exhaustion_marker_attrs, detail)
+      end
+    end
+  end
+
   def test_profile_without_usage_extractor_returns_no_usage
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -1879,6 +1919,46 @@ class AgentTest < Minitest::Test
       assert_equal "-", argv[-1]
       refute_includes argv, "large prompt body"
       assert_equal "large prompt body", File.read(stdin_log)
+    end
+  end
+
+  def test_pi_profile_pipes_large_prompt_without_an_argv_placeholder
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      fake_pi = File.join(dir, "fake-pi")
+      argv_log = File.join(dir, "argv.log")
+      stdin_log = File.join(dir, "stdin.log")
+      File.write(fake_pi, <<~SH)
+        #!/usr/bin/env bash
+        printf '%s\n' "$@" > "#{argv_log}"
+        cat > "#{stdin_log}"
+        exit 0
+      SH
+      File.chmod(0o755, fake_pi)
+      profile = Hive::AgentProfile.new(
+        name: :pi,
+        bin_default: fake_pi,
+        headless_flag: "-p",
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}",
+        prompt_style: :piped_stdin,
+        status_detection_mode: :exit_code_only
+      )
+      prompt = "p" * (256 * 1024)
+
+      result = Hive::Agent.new(
+        task: task,
+        prompt: prompt,
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        profile: profile,
+        status_mode: :exit_code_only
+      ).run!
+
+      assert_equal :ok, result[:status]
+      assert_equal [ "-p" ], File.read(argv_log).lines.map(&:chomp)
+      assert_equal prompt, File.binread(stdin_log)
     end
   end
 
@@ -2235,6 +2315,28 @@ class AgentTest < Minitest::Test
     end
   end
 
+  # The profile extractor only speaks JSON events. A CLI that prints its quota
+  # wall as a bare line leaves `extract_provider_error` with nothing to read, so
+  # the raw-line fallback is what has to catch it — otherwise a plain-text limit
+  # regresses to a generic exit_code=1 the moment provider extraction is added.
+  def test_captures_usage_limit_from_a_plain_text_stream_line
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] =
+        "You've hit your usage limit. Visit .../usage to purchase more credits."
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_match(/usage limit/i, result[:limit_text].to_s,
+                   "a non-JSON limit line must still reach limit_text")
+      assert_equal :error, result[:status]
+      assert_match(/\Alimits reached for claude:/, result[:error_message].to_s)
+      assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs["reason"]
+    end
+  end
+
   def test_does_not_classify_limit_language_inside_successful_command_output
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -2286,6 +2388,238 @@ class AgentTest < Minitest::Test
       assert_equal :error, result[:status]
       assert_match(/\Alimits reached for codex:/, result[:error_message])
       refute_match(/expected output file missing/, result[:error_message])
+    end
+  end
+
+  def test_pi_model_output_truncation_is_not_reported_as_missing_output
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      event = {
+        "type" => "message_end",
+        "message" => {
+          "role" => "assistant",
+          "provider" => "openrouter",
+          "model" => "deepseek/deepseek-v4-pro",
+          "usage" => { "input" => 8_079, "output" => 8_192 },
+          "stopReason" => "length",
+          "rawStopReason" => "length"
+        }
+      }
+      output = File.join(task.folder, "missing-review.json")
+
+      with_env(
+        "HIVE_PI_BIN" => FAKE_BIN,
+        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event)
+      ) do
+        result = Hive::Agent.new(
+          task: task,
+          prompt: "review the plan",
+          max_budget_usd: nil,
+          timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:pi),
+          status_mode: :output_file_exists,
+          expected_output: output
+        ).run!
+
+        assert_equal 0, result[:exit_code]
+        assert_equal :error, result[:status]
+        assert_equal "model_output_limit", result[:error_reason]
+        assert_equal "model_output_limit", result.dig(:resource_exhaustion, :reason)
+        assert_equal 8_192, result.dig(:resource_exhaustion, :observed)
+        assert_match(/maximum output tokens/, result[:error_message])
+        refute_match(/expected output file missing/, result[:error_message])
+      end
+    end
+  end
+
+  def test_pi_zero_exit_provider_failure_is_not_reported_as_success
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      event = {
+        "type" => "message_end",
+        "message" => {
+          "role" => "assistant",
+          "content" => [],
+          "provider" => "openrouter",
+          "model" => "deepseek/deepseek-v4-pro",
+          "stopReason" => "error",
+          "errorMessage" => "Upstream error from DigitalOcean: stream failed"
+        }
+      }
+
+      with_env(
+        "HIVE_PI_BIN" => FAKE_BIN,
+        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event)
+      ) do
+        result = Hive::Agent.new(
+          task: task,
+          prompt: "implement the plan",
+          max_budget_usd: nil,
+          timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:pi),
+          status_mode: :exit_code_only
+        ).run!
+
+        assert_equal 0, result[:exit_code]
+        assert_equal :error, result[:status]
+        assert_equal "provider_error", result[:error_reason]
+        assert_equal :provider_error, result.dig(:provider_error, :kind)
+        assert_equal :pi, result.dig(:provider_error, :provider)
+        assert_equal "Upstream error from DigitalOcean: stream failed",
+                     result[:error_message]
+      end
+    end
+  end
+
+  # A provider failure in :state_file_marker mode must leave a durable ERROR
+  # marker behind, not just a failed result hash: the owning stage rereads the
+  # marker to decide its retry, and an unmarked zero-exit turn reads as success.
+  def test_state_file_marker_records_a_provider_error_marker
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = {
+        timed_out: false,
+        exit_code: 0,
+        final_message: "",
+        provider_error: {
+          kind: :provider_error,
+          provider: :pi,
+          status_code: 502,
+          message: "Upstream error from DigitalOcean: stream failed"
+        }
+      }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "provider_error", marker.attrs.fetch("reason")
+      assert_equal "pi", marker.attrs.fetch("provider")
+      assert_equal "502", marker.attrs.fetch("status_code")
+      assert_equal "Upstream error from DigitalOcean: stream failed",
+                   marker.attrs.fetch("message")
+      assert_equal :error, result[:status]
+      assert_equal "provider_error", result[:error_reason]
+    end
+  end
+
+  # An empty errorMessage still has to produce a readable marker: the stage and
+  # the operator both read this text, so it must never render as a blank reason.
+  def test_state_file_marker_provider_error_falls_back_to_a_generic_message
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = {
+        timed_out: false,
+        exit_code: 0,
+        final_message: "",
+        provider_error: { kind: :provider_error, provider: :pi, message: "" }
+      }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "provider reported a failed turn", marker.attrs.fetch("message")
+      refute marker.attrs.key?("status_code"),
+             "a missing status code must be compacted out of the marker"
+      assert_equal "provider reported a failed turn", result[:error_message]
+    end
+  end
+
+  def test_pi_zero_exit_typed_quota_failure_keeps_limits_classification
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      event = {
+        "type" => "message_end",
+        "message" => {
+          "stopReason" => "error",
+          "errorMessage" => "429 rate limit reached"
+        }
+      }
+
+      with_env(
+        "HIVE_PI_BIN" => FAKE_BIN,
+        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event)
+      ) do
+        result = Hive::Agent.new(
+          task: task,
+          prompt: "review the plan",
+          max_budget_usd: nil,
+          timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:pi),
+          status_mode: :output_file_exists,
+          expected_output: File.join(task.folder, "missing-review.json")
+        ).run!
+
+        assert_equal 0, result[:exit_code]
+        assert_equal :error, result[:status]
+        assert_equal "limits_reached", result[:error_reason]
+        assert_match(/limits reached for pi/i, result[:error_message])
+        refute_match(/expected output file missing/, result[:error_message])
+      end
+    end
+  end
+
+  def test_pi_zero_exit_402_is_a_limit_even_when_wording_does_not_match_legacy_patterns
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      event = {
+        "type" => "message_end",
+        "message" => {
+          "stopReason" => "error",
+          "errorMessage" =>
+            "402: {\"message\":\"Prompt tokens limit exceeded: 25770 > 8471\",\"code\":402}"
+        }
+      }
+
+      with_env(
+        "HIVE_PI_BIN" => FAKE_BIN,
+        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event)
+      ) do
+        result = Hive::Agent.new(
+          task: task, prompt: "implement", max_budget_usd: nil, timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:pi), status_mode: :exit_code_only
+        ).run!
+
+        assert_equal :provider_limit, result.dig(:provider_error, :kind)
+        assert_equal "limits_reached", result[:error_reason]
+        assert result[:retry_at]
+      end
+    end
+  end
+
+  def test_completed_evidence_beats_an_earlier_provider_error
+    [ :state_file_marker, :output_file_exists ].each do |mode|
+      with_tmp_dir do |dir|
+        task = make_task(dir)
+        kwargs = {}
+        if mode == :state_file_marker
+          File.write(task.state_file, "<!-- COMPLETE -->\n")
+        else
+          output = File.join(task.folder, "review.json")
+          File.write(output, "{}\n")
+          kwargs = { status_mode: mode, expected_output: output }
+        end
+        agent = Hive::Agent.new(
+          task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5, **kwargs
+        )
+        result = {
+          timed_out: false, exit_code: 0, final_message: "done",
+          provider_error: {
+            kind: :provider_error, provider: :pi, status_code: 502,
+            message: "transient upstream error"
+          }
+        }
+
+        agent.handle_exit(result)
+
+        assert_equal(mode == :state_file_marker ? :complete : :ok, result[:status])
+        refute result.key?(:error_reason)
+      end
     end
   end
 

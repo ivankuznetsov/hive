@@ -257,6 +257,11 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       "failure origin" => recovery_payload.merge("failure_origin" => ""),
       "nullable strings" => recovery_payload.merge("blocked_reason" => true),
       "retry count" => recovery_payload.merge("retry_count" => -1),
+      "identical failure count" => recovery_payload.merge("identical_failure_count" => -1),
+      "failure fingerprint" => recovery_payload.merge("failure_fingerprint" => "not-a-sha"),
+      "failure attempt history" => recovery_payload.merge(
+        "failure_attempt_history" => [ "" ]
+      ),
       "timestamp" => recovery_payload.merge("next_eligible_at" => "not-a-time")
     }
 
@@ -738,6 +743,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       assert_equal 1, Q.remove_terminal_recoveries(
         project: "hive",
         slug: "other-task",
+        expected_stage: "4-execute",
         state_home: dir
       )
       assert_nil Q.fetch("recent-terminal", state_home: dir)
@@ -764,6 +770,32 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_terminal_recovery_supersession_is_stage_scoped
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      %w[3-plan 4-execute].each_with_index do |stage, index|
+        Q.write_request!(
+          project: "hive", slug: "same-task",
+          argv: [ "hive", "run", "same-task", "--json" ],
+          requestor: "healer", trigger: "recovery",
+          request_id: "terminal-#{index}", task_generation: "c" * 64,
+          expected_stage: stage, expected_marker_name: "error",
+          expected_marker_id: "marker-a",
+          recovery: recovery_payload(
+            phase: "terminal", terminal_at: Time.utc(2026, 7, 25, 12).iso8601(6)
+          ),
+          state_home: dir
+        )
+      end
+
+      assert_equal 1, Q.remove_terminal_recoveries(
+        project: "hive", slug: "same-task", expected_stage: "4-execute",
+        state_home: dir
+      )
+      refute_nil Q.fetch("terminal-0", state_home: dir)
+      assert_nil Q.fetch("terminal-1", state_home: dir)
+    end
+  end
+
   def test_recovery_queue_reads_and_updates_tolerate_a_disappearing_directory
     with_replaced_singleton_method(
       Q, :request_files, ->(_dir) { raise Errno::ENOENT, "gone" }
@@ -780,9 +812,14 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       assert_equal 0, Q.recovery_retry_count(
         project: "hive", slug: "task", state_home: "/tmp/hive-missing"
       )
+      assert_nil Q.latest_terminal_recovery(
+        project: "hive", slug: "task", expected_stage: "4-execute",
+        state_home: "/tmp/hive-missing"
+      )
       assert_nil Q.fetch("missing", state_home: "/tmp/hive-missing")
       assert_equal 0, Q.remove_terminal_recoveries(
-        project: "hive", slug: "task", state_home: "/tmp/hive-missing"
+        project: "hive", slug: "task", expected_stage: "4-execute",
+        state_home: "/tmp/hive-missing"
       )
       assert_equal 0, Q.prune_terminal_recoveries(state_home: "/tmp/hive-missing")
       refute Q.update_recovery!(

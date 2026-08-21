@@ -56,6 +56,38 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     end
   end
 
+  def test_terminal_effects_reports_only_fully_settled_occurrences
+    with_journal do |journal|
+      intent = effect_intent
+      assert journal.terminal_effects?(intent.occurrence_id)
+
+      journal.prepare_effect!(intent, now: NOW)
+      refute journal.terminal_effects?(intent.occurrence_id)
+
+      journal.deny_effect!(
+        intent, outcome: { "reason" => "revoked" }, now: NOW + 1
+      )
+      assert journal.terminal_effects?(intent.occurrence_id)
+    end
+  end
+
+  # Record validation already rejects a record without effect states, so this
+  # covers the second line of defence: terminal_effects? must fail closed on
+  # its own rather than leak a raw KeyError to a recovery caller.
+  def test_terminal_effects_fails_closed_on_a_record_without_effects
+    with_journal do |journal|
+      intent = effect_intent
+      journal.prepare_effect!(intent, now: NOW)
+      journal.define_singleton_method(:fetch) { |_id| { "id" => "occ-1" } }
+
+      error = assert_raises(Hive::ConfigError) do
+        journal.terminal_effects?(intent.occurrence_id)
+      end
+
+      assert_equal "patrol occurrence is malformed", error.message
+    end
+  end
+
   def test_recovery_active_is_one_view_for_reserved_and_pending_projection
     with_journal do |journal|
       occurrence_id = patrol_capture.occurrence_id
@@ -1684,6 +1716,21 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       }
       assert_invalid_record(validator, invalid_nonterminal)
 
+      abandoned = mutable(prepared)
+      abandoned_cell = abandoned.dig("effects", prepared_intent.intent_id)
+      abandoned_cell["state"] = "abandoned"
+      abandoned_cell["outcome"] = {
+        "reason" => "regenerable_effect_abandoned"
+      }
+      assert validator.validate!(
+        abandoned, expected_id: patrol_capture.occurrence_id
+      )
+      invalid_abandoned = mutable(abandoned)
+      invalid_abandoned.dig("effects", prepared_intent.intent_id)["outcome"] = {
+        "reason" => "wrong"
+      }
+      assert_invalid_record(validator, invalid_abandoned)
+
       orphan = receipt(prepared_intent, "denied", {})
       orphan_entry = outbox_entry(
         sequence: 1,
@@ -2513,6 +2560,73 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         capture_entry.fetch("bytes")
       )
       assert_invalid_record(validator, wrong_effect_binding)
+    end
+  end
+
+  # A patch/finding/state file is recreated by the next scan, so an intent
+  # that died before its receipt must never keep an occurrence from
+  # finalizing. One stranded patch note used to deadlock its occurrence
+  # forever: it could not settle, so the occurrence could not finalize, so it
+  # could not retire, so patrol re-ran it every cycle and held a dispatch slot.
+  def test_a_stranded_local_effect_does_not_block_finalizing
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      record = {
+        "effects" => {
+          "intent-committed" => {
+            "state" => "committed",
+            "semantic" => { "sink" => "state", "target" => "patches/patch-ok" }
+          },
+          "intent-stranded-patch" => {
+            "state" => "prepared",
+            "semantic" => { "sink" => "state", "target" => "patches/patch-stuck" }
+          },
+          "intent-stranded-finding" => {
+            "state" => "dispatch_uncertain",
+            "semantic" => { "sink" => "finding", "target" => "findings/f-1" }
+          }
+        }
+      }
+
+      journal.send(:abandon_regenerable_effects!, record)
+
+      assert_equal %w[
+        intent-committed intent-stranded-patch intent-stranded-finding
+      ], record.fetch("effects").keys
+      %w[intent-stranded-patch intent-stranded-finding].each do |intent_id|
+        cell = record.dig("effects", intent_id)
+        assert_equal "abandoned", cell.fetch("state")
+        assert_equal "regenerable_effect_abandoned", cell.dig("outcome", "reason")
+      end
+    end
+  end
+
+  # The journal exists to stop an unrepeatable action happening twice. Those
+  # must still block, or an interrupted run could open the same PR again.
+  def test_a_stranded_external_effect_still_blocks
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      record = {
+        "effects" => {
+          "intent-pr" => {
+            "state" => "prepared",
+            "semantic" => { "sink" => "pull_request", "target" => "pulls/7" }
+          },
+          "intent-branch" => {
+            "state" => "prepared",
+            "semantic" => { "sink" => "branch", "target" => "heads/fix" }
+          },
+          "intent-handoff" => {
+            "state" => "prepared",
+            "semantic" => { "sink" => "review_handoff", "target" => "handoff/1" }
+          }
+        }
+      }
+
+      journal.send(:abandon_regenerable_effects!, record)
+
+      assert_equal 3, record.fetch("effects").size,
+                   "unrepeatable sinks must keep blocking finalization"
     end
   end
 

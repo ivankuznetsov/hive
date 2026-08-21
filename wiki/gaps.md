@@ -1303,3 +1303,45 @@ One visual-custody contract defect was fixed, and a post-fix CLI inference rerun
 restored the omitted compatibility outcome and split one broad claim into three.
 Keep the gap open until at least one exact-range Web package and one CLI/TUI
 package are fully accepted without weakening the 4/4 false-completion result.
+
+## Controller receipt retention remains unbounded (2026-08-21)
+
+Artifact custody now uses one manifest with a 128-entry default and a hard
+4096-entry ceiling; execute and plan review may widen that manifest only to
+their exact current protected inventory. This deletes multi-manifest batching
+but makes the actual deferred wall explicit: context receipts, activity
+operations, and plan-review attempt records currently have no compaction or
+retention policy. A sufficiently long-lived task will eventually reach the
+hard custody ceiling and fail closed before provider launch. Solve this with a
+durable receipt retention/compaction design that preserves authority evidence,
+not by adding another custody topology or raising the hard ceiling again.
+
+## Patrol Fix has no interrupted-attempt recovery (2026-08-21)
+
+Ordinary patrol used to settle a process-interrupted local fix attempt in
+`Patrol::Fixer#recover_interrupted_attempt`: adopt the exact patch receipt, or
+prove the deterministic checkout disposable before recording
+`interrupted_fix_attempt`. Consolidating discovery and fixing removed both
+`Patrol::Fixer` and `RefactorPatrol::Fixer`, and the unified
+[[modules/patrol]] Fix workflow has no equivalent — a killed Patrol Fix child
+can leave a worktree and branch behind with no receipt, for either source.
+`Commands::Patrol` no longer calls `recover_pending_fix_attempts!` at all.
+
+This is a known regression against `main`, not a resolved gap. The replacement
+belongs in the Patrol Fix stage machinery (worktree generations plus the
+admission store already hold the durable identity the old proof reconstructed
+from Git), so port it there rather than reviving the deleted engines. Keep this
+gap open until Patrol Fix proves an interrupted local generation either
+adoptable or disposable before reuse, and preserves dirty, broken-registration,
+or uniquely committed residue as operator-owned.
+
+## Open PR custody documentation lost detail in the publication merge (2026-08-21)
+
+`wiki/stages/open-pr.md` was rewritten around the shared
+`Hive::GithubPublication` engine while `main` independently documented the
+open-pr agent custody window and the pre-push secret-scan ordering. The merge
+kept the consolidated engine description, so the custody anchor set, the
+`open_pr_tampered` restore contract, and the ownership-lock interaction with a
+late terminal execute observation are no longer described on the page even
+though the behaviour still exists in `lib/hive/stages/open_pr.rb`. Re-document
+those steps against the consolidated engine.

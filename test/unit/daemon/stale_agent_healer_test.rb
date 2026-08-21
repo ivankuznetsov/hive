@@ -43,12 +43,13 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   end
 
   class FakeRecoveryCoordinator
-    attr_reader :assessments, :requests
+    attr_reader :assessments, :requests, :retry_delay_counts
     attr_accessor :assessment_result, :request_status, :request_error
 
     def initialize
       @assessments = []
       @requests = []
+      @retry_delay_counts = []
       @assessment_result = {
         due: true,
         retry_at: NOW,
@@ -81,6 +82,11 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         retry_count: 1,
         provider_hint: nil
       )
+    end
+
+    def retry_delay_sec(retry_count)
+      @retry_delay_counts << retry_count
+      120
     end
   end
 
@@ -125,6 +131,56 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     assert events.all? { |_name, attributes| attributes[:request_id] == "coordinated-1" }
   end
 
+  def test_legacy_dirty_execute_wait_is_not_runtime_healer_vocabulary
+    with_marker_file do |state_file|
+      attrs = {
+        "reason" => "dirty_worktree",
+        "attempt_id" => "attempt-pi-1",
+        "task_generation" => "generation-1",
+        "ownership_generation" => "generation-1"
+      }
+      Hive::Markers.set(state_file, :execute_waiting, attrs)
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "4-execute",
+        workflow: "coding",
+        marker: "execute_waiting",
+        marker_attrs: attrs,
+        action: "needs_input",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert_equal :execute_waiting, Hive::Markers.current(state_file).name
+      assert_empty @coordinator.requests
+      assert_empty @logger.events
+    end
+  end
+
+  def test_unattributed_execute_dirty_wait_remains_a_human_pause
+    with_marker_file do |state_file|
+      attrs = { "reason" => "dirty_worktree" }
+      Hive::Markers.set(state_file, :execute_waiting, attrs)
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "4-execute",
+        workflow: "coding",
+        marker: "execute_waiting",
+        marker_attrs: attrs,
+        action: "needs_input",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert_equal :execute_waiting, Hive::Markers.current(state_file).name
+      assert_empty @coordinator.requests
+    end
+  end
+
   def test_blocked_receipt_uses_the_same_coordinator_projection
     @coordinator.request_status = "blocked"
 
@@ -152,6 +208,20 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
                  assessment.fetch(:safety_reason)
   end
 
+  def test_attempt_loss_retry_uses_the_shared_recovery_ladder
+    limited_at = NOW - 120
+    attempt = { "retry_charge" => 3, "loss" => {} }
+    outcome = { "last_retry_at" => limited_at.iso8601(6) }
+
+    refute @healer.send(
+      :attempt_loss_retry_due?, attempt, outcome, now: NOW - 1
+    )
+    assert @healer.send(
+      :attempt_loss_retry_due?, attempt, outcome, now: NOW
+    )
+    assert_equal [ 3, 3 ], @coordinator.retry_delay_counts
+  end
+
   def test_cooldown_and_safety_are_decided_only_by_coordinator
     with_error_marker do |row, state_file|
       @coordinator.assessment_result = {
@@ -176,22 +246,17 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_live_owner_global_switch_and_project_switch_block_submission
+  def test_live_owner_and_project_switch_block_submission
     with_error_marker do |row, _state_file|
       row.live_task_lock = true
       heal([ row ])
       assert_empty @coordinator.requests
     end
 
-    with_error_marker do |row, _state_file|
-      build_healer(auto_retry_enabled: false).heal([ row ], now: NOW)
-      assert_empty @coordinator.requests
-    end
-
     with_error_marker(project: "held") do |row, _state_file|
       build_healer(
-        project_auto_retry_enabled: ->(project) { project != "held" }
-      ).heal([ row ], now: NOW, auto_retry_projects: { "other" => true })
+        project_daemon_enabled: ->(project) { project != "held" }
+      ).heal([ row ], now: NOW, daemon_enabled_projects: { "other" => true })
       assert_empty @coordinator.requests
     end
   end
@@ -204,7 +269,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       recovery_coordinator: @coordinator
     )
     assert healer.instance_variable_get(
-      :@project_auto_retry_enabled
+      :@project_daemon_enabled
     ).call("any-project")
 
     with_error_marker do |row, _state_file|
@@ -214,13 +279,12 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     assert_equal 1, @coordinator.requests.size
   end
 
-  def test_terminal_outcome_errors_are_never_submitted_for_automatic_recovery
+  def test_terminal_outcome_errors_are_assessed_like_any_other_error
     %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
       with_error_marker(reason: reason, extra_attrs: { "outcome" => "blocked" }) do |row, state_file|
         heal([ row ])
 
-        assert_empty @coordinator.assessments, reason
-        assert_empty @coordinator.requests, reason
+        refute_empty @coordinator.assessments, reason
         marker = Hive::Markers.current(state_file)
         assert_equal :error, marker.name
         assert_equal reason, marker.attrs.fetch("reason")
@@ -780,14 +844,12 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   def build_healer(controller: @controller,
                    recovery_coordinator: @coordinator,
-                   auto_retry_enabled: true,
-                   project_auto_retry_enabled: ->(_project) { true })
+                   project_daemon_enabled: ->(_project) { true })
     Hive::Daemon::StaleAgentHealer.new(
       controller: controller,
       logger: @logger,
       grace_sec: 300,
-      auto_retry_enabled: auto_retry_enabled,
-      project_auto_retry_enabled: project_auto_retry_enabled,
+      project_daemon_enabled: project_daemon_enabled,
       recovery_coordinator: recovery_coordinator
     )
   end

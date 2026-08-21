@@ -57,6 +57,97 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_changed_generation_waits_for_live_stage_owner_instead_of_attaching
+    with_dispatcher do |dispatcher, launcher, task|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      File.write(task.state_file, "changed\n<!-- WAITING -->\n")
+      changed = dispatch(dispatcher, task, request_id: "request-two")
+
+      assert_equal :deferred, changed.status
+      assert_equal "in_flight", changed.reason
+      assert_equal first.attempt.attempt_id, changed.attempt.attempt_id
+      assert_nil changed.attach_descriptor
+      assert_equal 1, launcher.launched.size
+    end
+  end
+
+  def test_plan_review_attempt_generation_advances_with_review_projection
+    with_dispatcher do |dispatcher, launcher, task, store|
+      task.stage_index = 3
+      task.stage_name = "plan"
+      task.folder = File.dirname(task.state_file)
+      task.project_root = task.folder
+      review_dir = File.join(task.folder, "plan-review")
+      FileUtils.mkdir_p(review_dir)
+      current_path = File.join(review_dir, "current.json")
+      review_id = "pr-#{'a' * 64}"
+      File.write(
+        current_path,
+        JSON.generate("review_id" => review_id, "state" => "verifying", "version" => 1)
+      )
+      dispatcher.instance_variable_set(:@task_resolver, ->(_request) { task })
+      dispatcher.define_singleton_method(:provider_for) { |_task| "pi" }
+      request = lambda do |id|
+        FakeRequest.new(
+          slug: task.slug, project: "demo",
+          argv: [ "hive", "plan-review-run", task.slug ], request_id: id,
+          inherited_outputs: []
+        )
+      end
+
+      first = dispatcher.dispatch_request(request.call("review-one"), now: NOW)
+      terminalize_attempt(
+        store, launcher, first, outcome: "succeeded", exit_status: 0, now: NOW + 3
+      )
+      replay = dispatcher.dispatch_request(request.call("review-two"), now: NOW + 4)
+      File.write(
+        current_path,
+        JSON.generate("review_id" => review_id, "state" => "verifying", "version" => 2)
+      )
+      retry_result = dispatcher.dispatch_request(request.call("review-three"), now: NOW + 5)
+
+      assert_equal :terminal_replay, replay.status
+      assert_equal :accepted, retry_result.status
+      refute_equal first.attempt.task_generation, retry_result.attempt.task_generation
+      assert_equal 2, launcher.launched.length
+    end
+  end
+
+  # The review projection is the plan-review progress token's only moving
+  # part, so an absent or unreadable current.json must still yield a stable,
+  # distinct token. Failing closed to the artifact token would make a
+  # markerless review replay forever; raising would strand the dispatch.
+  def test_plan_review_progress_token_survives_missing_and_unreadable_projection
+    with_dispatcher do |dispatcher, _launcher, task|
+      task.folder = File.dirname(task.state_file)
+      review_argv = [ "hive", "plan-review-run", task.slug ]
+      base = dispatcher.send(:command_progress_token, [ "hive", "run", task.slug ], task)
+
+      missing = dispatcher.send(:command_progress_token, review_argv, task)
+
+      assert_equal missing, dispatcher.send(:command_progress_token, review_argv, task),
+                   "a missing projection must hash deterministically"
+      refute_equal base, missing,
+                   "the review token must not collapse onto the artifact token"
+
+      # A directory in place of current.json raises EISDIR -- a SystemCallError
+      # the ENOENT/ENOTDIR guard deliberately does not swallow.
+      FileUtils.mkdir_p(
+        File.join(
+          task.folder, Hive::PlanReview::Store::ROOT_BASENAME,
+          Hive::PlanReview::Store::CURRENT_BASENAME
+        )
+      )
+
+      unreadable = dispatcher.send(:command_progress_token, review_argv, task)
+
+      assert_equal unreadable, dispatcher.send(:command_progress_token, review_argv, task),
+                   "an unreadable projection must hash deterministically"
+      refute_equal missing, unreadable
+      refute_equal base, unreadable
+    end
+  end
+
   def test_launch_context_is_captured_after_attempt_creation_and_before_handoff
     events = []
     provenance = Object.new
@@ -631,9 +722,11 @@ class AttemptsDispatcherTest < Minitest::Test
       first = dispatch(dispatcher, task, request_id: "request-one")
       lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
 
+      # An ordinary dispatch adopts the loss rather than deferring behind it:
+      # nothing else mints the successor, so deferring parks the task forever.
       ordinary = dispatch(dispatcher, task, request_id: "request-two")
-      assert_equal "attempt_lost", ordinary.reason
-      assert_equal lost.attempt_id, ordinary.attempt.attempt_id
+      assert_equal :accepted, ordinary.status
+      assert_equal lost.attempt_id, ordinary.attempt["predecessor_attempt_id"]
     end
 
     with_dispatcher do |dispatcher, _launcher, task|
@@ -926,10 +1019,13 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal :terminal_replay, replay.status
       assert_equal failed.receipt, replay.receipt
       assert_equal :accepted, retry_result.status
-      assert_equal "attempt_lost", blocked.reason
-      assert_equal :accepted, successor.status
-      assert_equal lost.attempt_id, successor.attempt["predecessor_attempt_id"]
-      assert_equal 1, successor.attempt["retry_charge"]
+      # The ordinary dispatch adopts the loss, so it becomes the successor...
+      assert_equal :accepted, blocked.status
+      assert_equal lost.attempt_id, blocked.attempt["predecessor_attempt_id"]
+      # ...and an explicit second successor for the same loss spawns nothing
+      # new, which is what keeps adoption from racing anything.
+      assert_equal :existing_live, successor.status
+      assert_equal blocked.attempt.attempt_id, successor.attempt.attempt_id
     end
   end
 

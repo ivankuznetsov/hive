@@ -587,23 +587,31 @@ module Hive
         bindings.all? do |binding|
           next false unless binding.is_a?(Hash) && @attempt_store
 
-          attempt = @attempt_store.fetch(binding["attempt_id"])
+          attempt = fetch_attempt_binding(binding["attempt_id"])
           task = binding["task"]
           attempt && task.is_a?(Hash) &&
             attempt["task_slug"] == task["slug"] &&
             (task["id"].nil? || attempt["task_id"].to_s == task["id"].to_s) &&
             attempt["intended_stage"] == binding["stage"] &&
-            attempt.task_input_epoch == binding["task_generation"] &&
+            attempt_value(attempt, :task_input_epoch) == binding["task_generation"] &&
             attempt_value(attempt, :state) == binding["state"] &&
             attempt_value(attempt, :outcome) == binding["outcome"] &&
             attempt_value(attempt, :lease_version) == binding["lease_version"] &&
             attempt["accepted_at"] == binding["accepted_at"] &&
             attempt["predecessor_attempt_id"] == binding["predecessor_attempt_id"] &&
             (binding["ownership_generation"].nil? ||
-             attempt.ownership_generation == binding["ownership_generation"])
+             attempt_value(attempt, :ownership_generation) == binding["ownership_generation"])
         end
       rescue Hive::Error, SystemCallError, IOError
         false
+      end
+
+      def fetch_attempt_binding(attempt_id)
+        if @attempt_store.respond_to?(:fetch_projection_binding)
+          @attempt_store.fetch_projection_binding(attempt_id)
+        else
+          @attempt_store.fetch(attempt_id)
+        end
       end
 
       def attempt_value(attempt, name)

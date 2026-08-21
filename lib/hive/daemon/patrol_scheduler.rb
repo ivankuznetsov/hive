@@ -728,6 +728,16 @@ module Hive
           )
           return
         end
+        unless store.terminal_effects?(provisional.occurrence_id)
+          @events << {
+            status: :blocked,
+            project: entry.fetch("name"),
+            occurrence_id: provisional.occurrence_id,
+            recovery: "effect_settlement",
+            blocker: "nonterminal_effects"
+          }
+          return
+        end
 
         success = exit_code == Hive::ExitCodes::SUCCESS &&
                   envelope.is_a?(Hash) && envelope["ok"] == true

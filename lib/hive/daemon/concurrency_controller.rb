@@ -75,6 +75,13 @@ module Hive
         # the persisted store so a restart keeps the baselines the next
         # tick compares against (fail-closed: {} if absent/corrupt).
         @last_dispatched_mtime = @dispatch_state ? @dispatch_state.load : {}
+        # A restored baseline has not yet been corroborated by this daemon
+        # process. Keep that provenance in memory until a real observation or
+        # dispatch consumes it. This lets the dispatcher recover a completed
+        # brainstorm stranded by an older daemon that persisted the answered
+        # file as its first-sight baseline, without weakening ordinary
+        # same-process duplicate-dispatch protection.
+        @restored_dispatch_baseline_keys = @last_dispatched_mtime.keys.to_set
       end
 
       # Apply SIGHUP-reloaded budget limits without replacing the controller.
@@ -194,6 +201,10 @@ module Hive
         @last_dispatched_mtime[[ project, slug ]]
       end
 
+      def restored_dispatch_baseline_for?(project:, slug:)
+        @restored_dispatch_baseline_keys.include?([ project, slug ])
+      end
+
       # Update the recorded mtime without consuming a dispatch slot.
       # Used by the Dispatcher in three flows: (a) when Policy returns
       # `:record_baseline` on a first-sight `kind: edit` row, the
@@ -208,7 +219,9 @@ module Hive
       def observe_state_file_mtime(project:, slug:, mtime:)
         return if mtime.nil?
 
-        @last_dispatched_mtime[[ project, slug ]] = mtime
+        key = [ project, slug ]
+        @last_dispatched_mtime[key] = mtime
+        @restored_dispatch_baseline_keys.delete(key)
         persist_dispatch_baselines!
       end
 
@@ -218,6 +231,7 @@ module Hive
       # exits with TEMPFAIL — see record_completion).
       def record_dispatch(pid:, project:, slug:, stage:, command:,
                           started_at:, state_file_mtime:, kind: :task)
+        @restored_dispatch_baseline_keys.delete([ project, slug ])
         @running[pid] = {
           project: project,
           slug: slug,
@@ -265,6 +279,7 @@ module Hive
 
           live.include?([ project, slug ])
         end
+        @restored_dispatch_baseline_keys.select! { |key| @last_dispatched_mtime.key?(key) }
         persist_dispatch_baselines! if @last_dispatched_mtime.size != before
       end
 

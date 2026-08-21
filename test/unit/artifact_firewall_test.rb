@@ -468,7 +468,7 @@ class ArtifactFirewallTest < Minitest::Test
       error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
         build_manifest(dir, roots: roots)
       end
-      assert_includes error.message, "permitted_writable_roots exceeds"
+      assert_includes error.message, "manifest exceeds max_entries"
 
       long_path = "a" * (Hive::ArtifactFirewall::MAX_PATH_BYTES + 1)
       error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
@@ -765,15 +765,77 @@ class ArtifactFirewallTest < Minitest::Test
     end
   end
 
+  def test_manifest_accepts_a_larger_explicit_entry_limit
+    with_tmp_dir do |dir|
+      count = Hive::ArtifactFirewall::MAX_ENTRIES + 5
+      protected = count.times.to_h do |index|
+        [ "anchor-#{index}", File.join(dir, "anchor-#{index}") ]
+      end
+      protected.each_value { |path| File.write(path, "trusted\n") }
+
+      manifest = build_manifest(dir, protected:, max_entries: count)
+      custody = Hive::ArtifactFirewall::AgentCustody.new(manifest)
+      custody.call { File.write(protected.fetch("anchor-132"), "forged\n") }
+
+      assert_equal count, manifest.max_entries
+      assert custody.report.tampered?
+      assert custody.report.restored?
+      assert_equal "trusted\n", File.read(protected.fetch("anchor-132"))
+    end
+  end
+
+  def test_manifest_rejects_entry_limits_above_the_hard_cap
+    with_tmp_dir do |dir|
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        build_manifest(
+          dir,
+          max_entries: Hive::ArtifactFirewall::HARD_MAX_ENTRIES + 1
+        )
+      end
+
+      assert_includes error.message, Hive::ArtifactFirewall::HARD_MAX_ENTRIES.to_s
+    end
+  end
+
+  def test_manifest_entry_limit_applies_to_the_aggregate_inventory
+    with_tmp_dir do |dir|
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        build_manifest(
+          dir,
+          protected: { "anchor-a" => "a", "anchor-b" => "b" },
+          outputs: { "output-a" => "c", "output-b" => "d" },
+          roots: %w[root-a root-b],
+          max_entries: 5
+        )
+      end
+
+      assert_includes error.message, "manifest exceeds max_entries"
+      assert_includes error.message, "6 > 5"
+    end
+  end
+
+  def test_manifest_rejects_a_non_integer_entry_limit
+    with_tmp_dir do |dir|
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        build_manifest(dir, max_entries: "many")
+      end
+
+      assert_includes error.message, "max_entries must be an integer"
+    end
+  end
+
   private
 
-  def build_manifest(dir, protected: {}, outputs: {}, roots: [], redactor: Hive::SecretPatterns.method(:redact))
+  def build_manifest(dir, protected: {}, outputs: {}, roots: [],
+                     redactor: Hive::SecretPatterns.method(:redact),
+                     max_entries: Hive::ArtifactFirewall::MAX_ENTRIES)
     Hive::ArtifactFirewall::Manifest.new(
       root: dir,
       protected_anchors: protected,
       permitted_writable_roots: roots,
       required_outputs: outputs,
-      redactor: redactor
+      redactor: redactor,
+      max_entries: max_entries
     )
   end
 end

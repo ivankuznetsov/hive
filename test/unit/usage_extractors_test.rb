@@ -28,7 +28,7 @@ class UsageExtractorsTest < Minitest::Test
         input: 0, output: 0, cached: 0, cache_read: 0, cache_write: 0,
         reasoning: nil, input_includes_cache_read: false,
         input_includes_cache_write: false, output_includes_reasoning: nil,
-        model: nil
+        model: nil, provider_reported_cost: nil
       },
       result
     )
@@ -53,7 +53,7 @@ class UsageExtractorsTest < Minitest::Test
         input: 123, output: 45, cached: 13, cache_read: 6, cache_write: 7,
         reasoning: nil, input_includes_cache_read: false,
         input_includes_cache_write: false, output_includes_reasoning: nil,
-        model: "claude-opus-4-7[1m]"
+        model: "claude-opus-4-7[1m]", provider_reported_cost: nil
       },
       result
     )
@@ -77,7 +77,7 @@ class UsageExtractorsTest < Minitest::Test
         input: 3, output: 2, cached: 5, cache_read: 1, cache_write: 4,
         reasoning: nil, input_includes_cache_read: false,
         input_includes_cache_write: false, output_includes_reasoning: nil,
-        model: nil
+        model: nil, provider_reported_cost: nil
       },
       result
     )
@@ -104,7 +104,7 @@ class UsageExtractorsTest < Minitest::Test
         input: 30, output: 4, cached: nil, cache_read: 70, cache_write: nil,
         reasoning: nil, input_includes_cache_read: false,
         input_includes_cache_write: nil, output_includes_reasoning: nil,
-        model: "claude-opus-4-8"
+        model: "claude-opus-4-8", provider_reported_cost: nil
       },
       result
     )
@@ -135,7 +135,7 @@ class UsageExtractorsTest < Minitest::Test
         input: 1000, output: 200, cached: 300, cache_read: nil,
         cache_write: nil, reasoning: nil, input_includes_cache_read: nil,
         input_includes_cache_write: nil, output_includes_reasoning: nil,
-        model: "gpt-5-codex"
+        model: "gpt-5-codex", provider_reported_cost: nil
       },
       result
     )
@@ -163,7 +163,7 @@ class UsageExtractorsTest < Minitest::Test
         input: 40, output: 20, cached: nil, cache_read: 10,
         cache_write: nil, reasoning: nil, input_includes_cache_read: nil,
         input_includes_cache_write: nil, output_includes_reasoning: nil,
-        model: "pi-model"
+        model: "pi-model", provider_reported_cost: nil
       },
       result
     )
@@ -173,5 +173,81 @@ class UsageExtractorsTest < Minitest::Test
     result = PI.call(event("type" => "task.completed"))
 
     assert_nil result
+  end
+
+  # Verbatim shape from a real pi run: usage sits on the assistant message and
+  # uses bare input/output/cacheRead spellings. The extractor previously read
+  # neither, so every pi run in the usage database was unmetered — zero rows
+  # against thousands for claude, codex and grok.
+  def test_pi_reports_usage_from_the_assistant_message
+    result = PI.call(event(
+      "type" => "message_end",
+      "message" => {
+        "role" => "assistant",
+        "provider" => "openrouter",
+        "model" => "deepseek/deepseek-v4-pro",
+        "usage" => {
+          "input" => 14_206, "output" => 759,
+          "cacheRead" => 148_864, "cacheWrite" => 0,
+          "totalTokens" => 163_829
+        },
+        "stopReason" => "stop"
+      }
+    ))
+
+    refute_nil result, "pi usage must be read from the assistant message"
+    assert_equal 14_206, result.fetch(:input)
+    assert_equal 759, result.fetch(:output)
+    assert_equal 148_864, result.fetch(:cache_read)
+    assert_equal 0, result.fetch(:cache_write)
+    assert_equal "deepseek/deepseek-v4-pro", result.fetch(:model)
+  end
+
+  # OpenRouter bills the account directly and reports the exact charge for the
+  # turn. That observed amount is the only cost available for a model the
+  # pricing catalog does not carry, so it must survive extraction as a float —
+  # rounding a fraction-of-a-cent charge to an integer would zero it.
+  def test_provider_reported_cost_is_carried_through_as_money
+    result = PI.call(event(
+      "type" => "message_end",
+      "message" => {
+        "provider" => "openrouter",
+        "model" => "deepseek/deepseek-v4-pro",
+        "usage" => {
+          "input" => 14_206, "output" => 759,
+          "cost" => {
+            "input" => 0.00617961, "output" => 0.00066033,
+            "cacheRead" => 0.000539632, "cacheWrite" => 0,
+            "total" => 0.007379572
+          }
+        }
+      }
+    ))
+
+    assert_in_delta 0.007379572, result.fetch(:provider_reported_cost), 1e-9
+  end
+
+  def test_a_provider_that_reports_no_cost_stays_unpriced
+    result = CLAUDE.call(event(
+      "type" => "result",
+      "usage" => { "input_tokens" => 5, "output_tokens" => 6 }
+    ))
+
+    assert_nil result.fetch(:provider_reported_cost)
+  end
+
+  # The bare spellings are matched last, so a provider that reports explicit
+  # *_tokens keys keeps its own reading even when both are present.
+  def test_explicit_token_keys_still_win_over_the_bare_spellings
+    result = CLAUDE.call(event(
+      "type" => "result",
+      "usage" => {
+        "input_tokens" => 11, "output_tokens" => 22,
+        "input" => 999, "output" => 888
+      }
+    ))
+
+    assert_equal 11, result.fetch(:input)
+    assert_equal 22, result.fetch(:output)
   end
 end

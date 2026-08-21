@@ -58,8 +58,9 @@ module Hive
       TERMINAL_RECOVERY_PRUNE_INTERVAL_SEC = 60 * 60
 
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file the
-      # daemon gates auto-resume on (see `brainstorm_answers_pending?`).
+      # daemon gates auto-resume on (see `brainstorm_answer_state`).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: answer-pending daemon gate only parses coding brainstorm.md
+      EMPTY_BRAINSTORM_ANSWER_STATE = { pending: false, complete: false }.freeze
 
       # @param config [Hash] merged config (Hive::Config.load) — used for
       #   the `daemon` block defaults; per-project enrollment is read from
@@ -85,7 +86,8 @@ module Hive
                      plan_approval: Hive::Daemon::PlanApproval,
                      module_runtime: nil,
                      module_migration_coordinator: nil,
-                     runtime_ready_callback: nil)
+                     runtime_ready_callback: nil,
+                     clock: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -106,6 +108,7 @@ module Hive
         @lost_outcome_processor = lost_outcome_processor
         @operational_snapshot = operational_snapshot
         @runtime_ready_callback = runtime_ready_callback
+        @clock = clock
         @module_runtime = module_runtime
         @module_migration_coordinator = module_migration_coordinator
         @attempt_snapshot = nil
@@ -153,8 +156,7 @@ module Hive
           attempt_dispatcher: @attempt_dispatcher,
           lost_outcome_store: @lost_outcome_store,
           lost_outcome_processor: @lost_outcome_processor,
-          auto_retry_enabled: auto_retry_enabled?,
-          project_auto_retry_enabled: ->(project) { project_enabled?(project) },
+          project_daemon_enabled: ->(project) { project_enabled?(project) },
           recovery_coordinator: @recovery_coordinator,
           admission_open: -> { admission_open? }
         )
@@ -223,7 +225,7 @@ module Hive
         @dispatch_result_state_home = dispatch_result_state_home
         # `[project, slug] → last-logged error signature` for the
         # brainstorm-gate parse-error log dedup (see
-        # `brainstorm_answers_pending?`).
+        # `brainstorm_answer_state`).
         @brainstorm_parse_errors = {}
         # `op-label → last-logged error signature` for the global-digest
         # scheduler tick/complete :fatal dedup, mirroring the brainstorm-gate
@@ -420,7 +422,7 @@ module Hive
             rows_eligible_for_error_recovery(result.rows),
             now: now,
             legacy_layout_projects: @legacy_layout_projects,
-            auto_retry_projects: enabled_auto_retry_projects(result.rows)
+            daemon_enabled_projects: daemon_enabled_projects_for(result.rows)
           )
         rescue StandardError => e
           @logger.event(:fatal,
@@ -1308,25 +1310,7 @@ module Hive
           )
           return
         end
-        if %w[error review_error].include?(row.marker.to_s) &&
-           Hive::TerminalOutcome.semantic_error?(row.marker_attrs)
-          @logger.event(
-            :skipped,
-            project: row.project,
-            slug: row.slug,
-            stage: row.stage,
-            action: row.action,
-            reason: "semantic_terminal_error"
-          )
-          observe_operational_disposition(
-            row,
-            decision: :semantic_terminal_error,
-            owner: "operator",
-            reason: "terminal outcome errors require an explicit guarded retry"
-          )
-          return
-        end
-        if auto_retry_error_row?(row)
+        if retryable_error_row?(row)
           assessment = @stale_agent_healer.retry_assessment(row, now: now)
           decision, owner, reason = retry_disposition(row, assessment)
           @logger.event(
@@ -1350,17 +1334,29 @@ module Hive
           return
         end
 
+        brainstorm_answers = brainstorm_answer_state(row)
+        baseline_mtime = @controller.last_dispatched_state_file_mtime_for(
+          project: row.project, slug: row.slug
+        )
+        if brainstorm_answers.fetch(:complete) &&
+           @controller.restored_dispatch_baseline_for?(project: row.project, slug: row.slug)
+          # Older daemons could persist a fully answered brainstorm as the
+          # first-sight baseline and strand it forever. Treat a restored,
+          # uncorroborated baseline as first sight exactly once; a successful
+          # dispatch records it in this process and restores the normal brake.
+          baseline_mtime = nil
+        end
         decision = Policy.decide(
           action: row.action,
           stage: row.stage,
           workflow: row.workflow,
           command: row.suggested_command,
           state_file_mtime: row.state_file_mtime,
-          last_dispatched_state_file_mtime:
-            @controller.last_dispatched_state_file_mtime_for(project: row.project, slug: row.slug),
+          last_dispatched_state_file_mtime: baseline_mtime,
           now: now,
           edit_debounce_sec: @edit_debounce_sec,
-          answers_pending: brainstorm_answers_pending?(row),
+          answers_pending: brainstorm_answers.fetch(:pending),
+          answers_complete: brainstorm_answers.fetch(:complete),
           blocked: row.blocked == true,
           admission_error: !row.admission_error.nil?
         )
@@ -1453,7 +1449,7 @@ module Hive
 
       def merge_reconciliation_blocks_recovery?(row)
         return false unless @merge_watcher
-        return false unless auto_retry_error_row?(row)
+        return false unless retryable_error_row?(row)
 
         @merge_watcher.recovery_blocked?(
           project: row.project, slug: row.slug
@@ -1486,46 +1482,37 @@ module Hive
         )
       end
 
-      # True when `row` is a brainstorm `needs_input` row whose
-      # `brainstorm.md` still has UNANSWERED questions. Only brainstorm
-      # rows carry Q&A markers, so every other edit-resume row (execute /
-      # review WAITING) returns false and behaves exactly as before. The
-      # daemon parses the file directly (the published hive-status schema
-      # carries no question count) via the shared `Hive::BrainstormParser`.
-      #
-      # Fails OPEN (returns false → resume allowed) when the file parses
-      # to ZERO questions or on an unexpected error. This is deliberate
-      # and self-healing, NOT a gap: the Telegram bot locates questions
-      # with the SAME parser, so a file with no parseable `### Q{n}.`
-      # (empty, agent crashed mid-write, or header drift) is one the
-      # operator cannot answer via the bot either — the only way forward
-      # is to re-run the brainstorm agent, which regenerates a clean file.
-      # Holding instead would strand the task. The gate's job is narrow:
-      # block the resume only while there are questions the operator is
-      # actively answering.
-      def brainstorm_answers_pending?(row)
-        return false unless row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+      # Return the two structural Q&A signals used by the policy: pending when
+      # any answer slot is empty, and complete only for a non-empty document
+      # whose answer slots are all filled. Missing, empty, and unparseable
+      # documents provide neither signal and retain the generic baseline path.
+      def brainstorm_answer_state(row)
+        empty = EMPTY_BRAINSTORM_ANSWER_STATE
+        return empty unless row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
         # The brainstorm Q&A hold is a coding-workflow gate: only the coding
         # `2-brainstorm` stage drives the `### Q{n}.` answer flow. A generic
         # workflow that reuses the `2-brainstorm` dir must take the debounced
         # generic path, not be held as `answers_pending`.
-        return false unless Hive::Workflows.coding_id?(row.workflow)
-        return false unless row.stage == BRAINSTORM_STAGE_DIR
+        return empty unless Hive::Workflows.coding_id?(row.workflow)
+        return empty unless row.stage == BRAINSTORM_STAGE_DIR
 
         path = row.state_file
-        return false unless path && File.exist?(path)
+        return empty unless path
 
         parsed = Hive::BrainstormParser.parse(path)
-        pending = Hive::BrainstormParser.unanswered_questions(parsed).any?
+        unanswered = Hive::BrainstormParser.unanswered_questions(parsed)
         @brainstorm_parse_errors.delete([ row.project, row.slug ])
-        pending
+        {
+          pending: unanswered.any?,
+          complete: parsed.any? && unanswered.empty?
+        }
       rescue StandardError => e
         # `parse` is total (scrubs encoding, swallows IO), so this is a
         # belt-and-suspenders guard. Dedup the log per (project, slug) so
         # a persistently unreadable file can't emit `:fatal` on every
         # ~30s tick forever — only on first sight and on change.
         log_brainstorm_parse_error(row, e)
-        false
+        empty
       end
 
       def log_brainstorm_parse_error(row, error)
@@ -1535,7 +1522,7 @@ module Hive
 
         @brainstorm_parse_errors[key] = signature
         @logger.event(:fatal,
-                      message: "brainstorm_answers_pending? raised: #{signature}",
+                      message: "brainstorm_answer_state raised: #{signature}",
                       project: row.project, slug: row.slug, keeping_previous: true)
       end
 
@@ -1862,7 +1849,7 @@ module Hive
       def operational_recovery_snapshot(queue_state: operational_queue_state)
         {
           "coordinator" => {
-            "enabled" => auto_retry_enabled?,
+            "enabled" => true,
             "receipts" => durable_recovery_receipts(queue_state: queue_state)
           }
         }
@@ -2550,6 +2537,7 @@ module Hive
       def dispatch_request!(req, now:)
         return :shutdown unless admission_open?
 
+        now = current_dispatch_time(now)
         command = Shellwords.join(req.argv)
         state_file_path = resolve_request_state_file_path(req)
         preclaim_dispatch_request(req, now: now)
@@ -2914,6 +2902,16 @@ module Hive
 
           request = delivery.request
           if request.recovery&.fetch("phase", nil) == "terminal"
+            if @recovery_coordinator.repair_failed_terminal_marker(request, refresh: false)
+              @logger.event(
+                :marker_healed,
+                project: request.project, slug: request.slug,
+                stage: request.expected_stage,
+                reason: "recovery_attempt_failed",
+                attempt_id: request.recovery["attempt_id"],
+                request_id: request.request_id
+              )
+            end
             acknowledge_attempt_finalization(attempt_id, :request_delivery)
             next
           end
@@ -3256,6 +3254,14 @@ module Hive
       def dispatch_durable_command(command, project:, slug:, stage:, now:, trigger:, request_id:)
         return :shutdown unless admission_open?
 
+        # A full daemon tick can take longer than the attempt launch window
+        # when recovery and status backlogs are large. The tick timestamp is a
+        # coherent observation time for policy, but it must not become the
+        # creation time of an attempt launched minutes later: doing so mints a
+        # claim deadline that is already expired before the wrapper starts.
+        # Production injects a wall clock; deterministic unit callers that do
+        # not inject one retain the supplied timestamp.
+        now = current_dispatch_time(now)
         argv = Shellwords.split(command)
         request = Hive::Daemon::DispatchRequestQueue::Request.new(
           request_id: request_id || Hive::Daemon::DispatchRequestQueue.generate_request_id,
@@ -3316,6 +3322,10 @@ module Hive
           )
         end
         result
+      end
+
+      def current_dispatch_time(fallback)
+        @clock ? @clock.call.utc : fallback
       end
 
       def log_attempt_admission(result)
@@ -3404,14 +3414,11 @@ module Hive
         @external_active_agent_counts.fetch(project, 0)
       end
 
-      def auto_retry_enabled?
-        @daemon_cfg.fetch("auto_retry", {}).fetch("enabled", true) == true
-      end
-
-      def auto_retry_error_row?(row)
-        auto_retry_enabled? &&
-          !Hive::TerminalOutcome.semantic_error?(row.marker_attrs) &&
-          %w[error review_error].include?(row.marker.to_s)
+      # Every error marker is retryable. Exempting a class of error does not
+      # make it safe, it makes it stuck: the exempt reason still needs the
+      # same retry, just performed by hand at an unpredictable delay.
+      def retryable_error_row?(row)
+        %w[error review_error].include?(row.marker.to_s)
       end
 
       def retry_disposition(row, assessment)
@@ -3445,9 +3452,7 @@ module Hive
         ]
       end
 
-      def enabled_auto_retry_projects(rows)
-        return {} unless auto_retry_enabled?
-
+      def daemon_enabled_projects_for(rows)
         Array(rows).each_with_object({}) do |row, enabled|
           project = row.project.to_s
           enabled[project] = true if project_enabled?(project)
@@ -3491,8 +3496,7 @@ module Hive
           attempt_dispatcher: @attempt_dispatcher,
           lost_outcome_store: @lost_outcome_store,
           lost_outcome_processor: @lost_outcome_processor,
-          auto_retry_enabled: daemon_cfg.fetch("auto_retry", {}).fetch("enabled", true) == true,
-          project_auto_retry_enabled: ->(project) { project_enabled?(project) },
+          project_daemon_enabled: ->(project) { project_enabled?(project) },
           recovery_coordinator: @recovery_coordinator,
           admission_open: -> { admission_open? }
         )

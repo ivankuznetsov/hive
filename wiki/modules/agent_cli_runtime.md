@@ -3,15 +3,17 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-08-15
+updated: 2026-08-16
 tags: [agent, runtime, component, gem, cli]
 ---
 
-**TLDR**: `agent-cli-runtime` is the first independently versioned gem kept in
-the Hive monorepo. It exposes provider-neutral profiles, invocation
-compilation, local prerequisite evidence, usage extraction, and normalized
-results for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. Hive remains
-the primary consumer; the gem does not own orchestration or Hive policy.
+**TLDR**: `agent-cli-runtime` gives Ruby applications one stable integration
+layer for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. Its versioned
+profiles centralize provider-specific commands, local capability checks,
+environment rules, usage extraction, and result normalization so consumers
+can add, switch, and upgrade agent CLIs behind one request and result
+vocabulary. It is the first independently versioned gem kept in the Hive
+monorepo, with Hive as its primary consumer and orchestration policy owner.
 
 ## Public surface
 
@@ -39,6 +41,11 @@ Requested controls fail closed with `UnsupportedCapability` when a profile
 cannot represent them. Provider profiles and extractors are public,
 SemVer-governed behavior; orchestration policy stays injectable or outside the
 package.
+
+The prompt transport distinguishes stdin with an argv marker (`:stdin`, used
+by Codex) from a raw non-TTY pipe (`:piped_stdin`, used by Pi). Pi's native
+pipe reader constructs the initial message from stdin, so implementation-sized
+prompts never occupy one operating-system-limited argv element.
 
 OpenCode adds a stricter, additive preparation surface because its safe
 headless contract depends on an invocation-owned configuration overlay. An
@@ -86,14 +93,18 @@ truncation evidence is carried separately from final-message bytes. Legacy
 profile extraction and observation are unchanged.
 
 The public facade includes `compile`, `prepare!`, `require_capability!`,
-`extract_usage`, `observe`, `probe`, and `probe_all`. It accepts built-in names
-or custom `Profile` objects, preserves `UnknownProvider` as a typed caller
-error, exposes custom CLI capabilities in static probe evidence, and rejects
-custom names that collide with the standard capability vocabulary. Missing
-usage stays `nil`; terminal events without counters do not become measured
-zero-token events. Observable results also carry an optional immutable
-`provider_signal` supplied by a trusted caller. The component does not classify
-that signal or own provider-health policy.
+`extract_usage`, `extract_provider_error`, `observe`, `probe`, and `probe_all`.
+It accepts built-in names or custom `Profile` objects, preserves
+`UnknownProvider` as a typed caller error, exposes custom CLI capabilities in
+static probe evidence, and rejects custom names that collide with the standard
+capability vocabulary. Missing usage stays `nil`; terminal events without
+counters do not become measured zero-token events. Pi's zero-exit
+`stopReason: "error"` refusals and `stopReason: "length"` incomplete turns are
+normalized separately: the latter carries `kind: model_output_limit`, so Hive
+reports model-output exhaustion instead of blaming a missing artifact.
+Observable results also carry an optional immutable `provider_signal` supplied
+by a trusted caller. The component does not classify that signal or own
+provider-health policy.
 
 For compatibility with Hive's trusted legacy headless launches,
 `permission_mode: nil` still selects a legacy provider's bypass flag. OpenCode

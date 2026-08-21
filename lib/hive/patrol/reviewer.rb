@@ -10,6 +10,7 @@ require "hive/patrol/agent_launch"
 require "hive/patrol/review_error_details"
 require "hive/patrol/source_reader"
 require "hive/patrol/state_store"
+require "hive/patrol/shutdown"
 require "hive/patrol/launch_budget"
 require "hive/patrol/validator"
 require "hive/stages/base"
@@ -59,7 +60,15 @@ module Hive
       end
 
       def call(features)
-        features.flat_map { |feature| review_feature(feature) }
+        features.flat_map do |feature|
+          # Between features is the one boundary with nothing in flight. The
+          # reviewer is a pure producer, so stopping here costs the remaining
+          # findings of this cycle and nothing else — far cheaper than being
+          # SIGKILLed mid-agent once the daemon's grace window expires.
+          next [] if Hive::Patrol::Shutdown.requested?
+
+          review_feature(feature)
+        end
       end
 
       private

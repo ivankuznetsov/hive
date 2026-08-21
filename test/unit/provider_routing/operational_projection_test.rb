@@ -8,7 +8,7 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
 
   class DecisionIndex
     def initialize(rows = []) = @rows = rows
-    def routing_decisions(limit:) = @rows.first(limit)
+    def routing_decisions(limit:) = @rows.first(limit).freeze
   end
 
   AttemptStore = Data.define(:scan_result, :decision_index) do

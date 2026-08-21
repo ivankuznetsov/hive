@@ -188,6 +188,33 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_makes_agent_owned_dirty_progress_recoverable
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(
+        task,
+        "path" => File.join(dir, "worktree"),
+        "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "base", branch: task.slug, dirty: true, ancestor_result: true
+      )
+
+      result = with_fake_git_and_spawn(git, status: :ok) do
+        Hive::Stages::Execute.run_pass(
+          task, execute_cfg("pi"), File.join(dir, "worktree")
+        )
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "execute_dirty_worktree", status: :error }, result)
+      assert_equal :error, marker.name
+      assert_equal "dirty_worktree", marker.attrs.fetch("reason")
+    end
+  end
+
   def test_run_pass_marks_error_when_ancestor_check_raises
     with_tmp_dir do |dir|
       task = build_task(dir)
@@ -258,6 +285,37 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal :error, marker.name
       assert_equal "limits_reached", marker.attrs["reason"]
       assert_equal "codex", marker.attrs["provider"]
+      assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+    end
+  end
+
+  def test_run_pass_preserves_typed_zero_exit_402_limit_classification
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(
+        task, "path" => File.join(dir, "worktree"), "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = {
+        status: :error,
+        exit_code: 0,
+        error_reason: "limits_reached",
+        limit_text: "Prompt tokens limit exceeded: 25770 > 8471",
+        error_message:
+          '402: {"message":"Prompt tokens limit exceeded: 25770 > 8471","code":402}',
+        provider_error: { kind: :provider_limit, provider: :pi, status_code: 402 }
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("pi"), File.join(dir, "worktree"))
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "limits_reached", status: :error }, run_result)
+      assert_equal "limits_reached", marker.attrs.fetch("reason")
+      assert_equal "pi", marker.attrs.fetch("provider")
       assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
     end
   end
@@ -372,6 +430,46 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_batches_growing_controller_receipts_without_dropping_custody
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug,
+                    "execute_base_head" => "base")
+      receipt_dir = File.join(task.folder, "context-receipts")
+      FileUtils.mkdir_p(receipt_dir)
+      receipt_count = Hive::ArtifactFirewall::MAX_ENTRIES + 5
+      receipt_count.times do |index|
+        File.write(File.join(receipt_dir, format("receipt-%03d.launch.json", index)), "trusted\n")
+      end
+      tampered = File.join(receipt_dir, format("receipt-%03d.launch.json", receipt_count - 1))
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      launched = false
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            launched = true
+            agent_custody.call do
+              File.write(tampered, "agent forged\n")
+              { status: :ok }
+            end
+          }
+        ) do
+          result = Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
+
+          assert_equal({ commit: "implementer_tampered", status: :error }, result)
+        end
+      end
+
+      assert launched
+      assert_equal "trusted\n", File.binread(tampered)
+      assert_includes Hive::Markers.current(task.state_file).attrs.fetch("files"),
+                      File.basename(tampered)
+    end
+  end
+
   def test_run_pass_keeps_controller_journal_writes_outside_implementer_custody
     with_tmp_dir do |dir|
       task = build_task(dir)
@@ -438,6 +536,86 @@ class HiveStagesExecuteTest < Minitest::Test
       end
 
       assert_equal original_plan, File.binread(File.join(task.folder, "plan.md"))
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "implementer_tampered", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_run_pass_marks_spawn_exception_as_recoverable_implementation_failure
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(
+        task,
+        "path" => File.join(dir, "worktree"),
+        "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "base", branch: task.slug, dirty: false, ancestor_result: true
+      )
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            agent_custody.call { raise Errno::E2BIG, "pi" }
+          }
+        ) do
+          assert_raises(Errno::E2BIG) do
+            Hive::Stages::Execute.run_pass(
+              task, execute_cfg("pi"), File.join(dir, "worktree")
+            )
+          end
+        end
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "implementer_failed", marker.attrs.fetch("reason")
+      assert_equal "pi", marker.attrs.fetch("provider")
+      assert_equal "exception", marker.attrs.fetch("status")
+      assert_equal "Errno::E2BIG", marker.attrs.fetch("exception_class")
+      assert_equal "Argument list too long - pi", marker.attrs.fetch("message")
+    end
+  end
+
+  def test_run_pass_does_not_write_a_marker_when_custody_validation_fails
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(
+        task,
+        "path" => File.join(dir, "worktree"),
+        "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "base", branch: task.slug, dirty: false, ancestor_result: true
+      )
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::ArtifactFirewall, :validate_and_restore,
+          ->(_manifest, _snapshot) { raise Hive::ArtifactFirewall::InvalidSnapshot, "broken" }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Stages::Execute, :spawn_implementation,
+            lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+              agent_custody.call { { status: :ok } }
+            }
+          ) do
+            assert_raises(Hive::ArtifactFirewall::InvalidSnapshot) do
+              Hive::Stages::Execute.run_pass(
+                task, execute_cfg("pi"), File.join(dir, "worktree")
+              )
+            end
+          end
+        end
+      end
+
+      assert_equal :none, Hive::Markers.current(task.state_file).name
     end
   end
 

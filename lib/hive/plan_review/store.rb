@@ -126,6 +126,33 @@ module Hive
         record
       end
 
+      # Semantic attempt progress owned by plan review. Attempt dispatch needs
+      # only the identity and CAS version of the state machine, never a byte
+      # hash of incidental formatting or diagnostics in current.json.
+      def progress_token
+        bytes = File.binread(current_path, MAX_JSON_BYTES + 1)
+        raise InvalidRecord, "current projection is empty" if bytes.nil?
+        raise InvalidRecord, "current projection exceeds the size limit" if bytes.bytesize > MAX_JSON_BYTES
+
+        projection = JSON.parse(bytes)
+        unless projection.is_a?(Hash) &&
+               projection["review_id"].to_s.match?(/\Apr-[0-9a-f]{64}\z/) &&
+               projection["version"].is_a?(Integer) && projection["version"].positive?
+          raise InvalidRecord, "current projection identity is invalid"
+        end
+        Hive::CanonicalJSON.digest(
+          "owner" => "plan_review",
+          "review_id" => projection["review_id"],
+          "version" => projection["version"]
+        )
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        Hive::CanonicalJSON.digest("owner" => "plan_review", "state" => "missing")
+      rescue InvalidRecord, JSON::ParserError, SystemCallError, IOError, TypeError => e
+        Hive::CanonicalJSON.digest(
+          "owner" => "plan_review", "state" => "unreadable", "error" => e.class.name
+        )
+      end
+
       def read_reference(reference)
         validate_reference!(reference)
         path = reference_path(reference.fetch("path"))

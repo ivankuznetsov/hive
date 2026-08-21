@@ -1005,10 +1005,14 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       state.prepare_effect!(intent, now: T0)
       state.mark_dispatch_uncertain!(intent, now: T0)
 
-      assert_raises(Hive::ConfigError) do
-        sched.complete(project: "p1", exit_code: 1, now: T0 + 1)
-      end
+      sched.complete(project: "p1", exit_code: 1, now: T0 + 1)
+
       refute sched.pending?("p1")
+      blocked = sched.drain_events.fetch(0)
+      assert_equal :blocked, blocked.fetch(:status)
+      assert_equal "p1", blocked.fetch(:project)
+      assert_equal occurrence_id, blocked.fetch(:occurrence_id)
+      assert_equal "nonterminal_effects", blocked.fetch(:blocker)
       recovery = sched.candidates(now: T0 + 2).fetch(0)
       assert_equal occurrence_id,
                    recovery.fetch(:recovery_occurrence_id)

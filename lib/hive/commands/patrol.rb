@@ -16,6 +16,7 @@ require "hive/patrol/reviewer"
 require "hive/patrol/decision_projection"
 require "hive/patrol/state_store"
 require "hive/patrol/launch_budget"
+require "hive/patrol/shutdown"
 require "hive/workflows"
 require "hive/worktree"
 
@@ -60,6 +61,10 @@ module Hive
       def call
         return list_findings if @list
 
+        # The daemon SIGTERMs this child on shutdown and SIGKILLs it once the
+        # grace window expires. Honour the signal so a restart stops between
+        # units of work instead of mid-agent.
+        Hive::Patrol::Shutdown.install_trap!
         emit(run_cycle)
       rescue Hive::Error => e
         emit_error(e)

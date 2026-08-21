@@ -30,7 +30,7 @@ module Hive
           raise Hive::StageError, "fix worktree HEAD changed before validation" unless actual_head == expected_head
           raise Hive::StageError, "fix worktree is dirty before validation" unless git_status(owner.fetch("worktree")).empty?
           commands = selected_commands(manifest, fix, cfg || {})
-          runner = command_runner || lambda { |path, rows| Hive::Patrol::Validator.new.validate_selected(path, rows) }
+          runner = command_runner || lambda { |path, rows| default_validator(cfg || {}).validate_selected(path, rows) }
           result = runner.call(owner.fetch("worktree"), commands)
           final_head = git_head(owner.fetch("worktree"))
           raise Hive::StageError, "validation changed the worktree HEAD" unless final_head == expected_head
@@ -40,6 +40,17 @@ module Hive
           )
           receipt = store.append!(build_receipt(manifest, payload))
           complete(receipt)
+        end
+
+        # Validation runs the operator's own commands, so it needs both
+        # deadlines: the wall-clock cap and the idle-output cap that kills a
+        # silent run before it burns the whole budget.
+        def default_validator(cfg)
+          Hive::Patrol::Validator.new(
+            timeout_sec: cfg.dig("timeout_sec", "patrol") ||
+              Hive::Patrol::Validator::DEFAULT_TIMEOUT_SEC,
+            idle_timeout_sec: cfg.dig("timeout_sec", "patrol_idle")
+          )
         end
 
         def selected_commands(manifest, fix, cfg)

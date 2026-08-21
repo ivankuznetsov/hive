@@ -1,5 +1,7 @@
 require "open3"
 
+require "hive/output_pulse"
+
 module Hive
   module Patrol
     class Validator
@@ -7,10 +9,14 @@ module Hive
       DEFAULT_TIMEOUT_SEC = 600
       DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024
       TERM_GRACE_SEC = 0.5
+      # Smallest wait slice while polling the child for completion, so tiny
+      # test timeouts stay accurate without busy-waiting in production.
+      WAIT_SLICE_SEC = 0.05
 
       CommandResult = Struct.new(
         :name, :command, :exit_code, :signal, :stdout, :stderr, :timed_out,
-        :output_truncated, :started_at, :finished_at, :duration_ms, :provenance,
+        :timeout_reason, :output_truncated,
+        :started_at, :finished_at, :duration_ms, :provenance,
         keyword_init: true
       ) do
         def passed?
@@ -26,6 +32,7 @@ module Hive
             "stdout" => tail(stdout),
             "stderr" => tail(stderr),
             "timed_out" => timed_out == true,
+            "timeout_reason" => timeout_reason,
             "output_truncated" => output_truncated == true
           }
         end
@@ -40,6 +47,10 @@ module Hive
         end
       end
 
+      def self.monotonic
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
       def self.configured_names(commands)
         commands ||= {}
         COMMAND_NAMES.select do |name|
@@ -48,10 +59,21 @@ module Hive
         end
       end
 
+      # `timeout_sec` is the wall-clock backstop: it bounds total runtime (and
+      # therefore cost) no matter what the child prints. `idle_timeout_sec`
+      # is the wedge detector: when set, a child that produces no stdout or
+      # stderr for that long is killed immediately instead of holding the
+      # patrol cycle until the wall-clock cap. Progressing suites print as
+      # they run, so a generous wall clock plus a short idle window fails
+      # hangs fast without punishing slow-but-live validation. Nil or
+      # non-positive disables the idle deadline (the historical behavior).
       def initialize(commands = nil, timeout_sec: DEFAULT_TIMEOUT_SEC,
+                     idle_timeout_sec: nil,
                      max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES, **command_keywords)
         @commands = (commands || {}).merge(command_keywords)
         @timeout_sec = timeout_sec.to_f
+        idle = idle_timeout_sec.to_f
+        @idle_timeout_sec = idle.positive? ? idle : nil
         @max_output_bytes = max_output_bytes.to_i
       end
 
@@ -119,9 +141,11 @@ module Hive
           "bash", "-lc", command, chdir: worktree_path, pgroup: true
         )
         stdin.close
-        out_reader = Thread.new { bounded_read(stdout) }
-        err_reader = Thread.new { bounded_read(stderr) }
-        timed_out = !waiter.join(@timeout_sec)
+        pulse = Hive::OutputPulse.new
+        out_reader = Thread.new { bounded_read(stdout, pulse) }
+        err_reader = Thread.new { bounded_read(stderr, pulse) }
+        timeout_reason = await_completion(waiter, pulse)
+        timed_out = !timeout_reason.nil?
         terminate(waiter) if timed_out
         out, out_truncated = reader_value(out_reader, stdout)
         err, err_truncated = reader_value(err_reader, stderr)
@@ -137,6 +161,7 @@ module Hive
         CommandResult.new(
           name: name, command: command, exit_code: exit_code, signal: signal,
           stdout: out, stderr: err, timed_out: timed_out,
+          timeout_reason: timeout_reason,
           output_truncated: out_truncated || err_truncated,
           started_at: started_at, finished_at: Time.now.utc,
           duration_ms: ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_monotonic) * 1000).round,
@@ -145,7 +170,7 @@ module Hive
       rescue SystemCallError => e
         CommandResult.new(
           name: name, command: command, exit_code: 127, signal: nil, stdout: "", stderr: e.message,
-          timed_out: false, output_truncated: false,
+          timed_out: false, timeout_reason: nil, output_truncated: false,
           started_at: started_at || Time.now.utc, finished_at: Time.now.utc,
           duration_ms: started_monotonic ? ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_monotonic) * 1000).round : 0,
           provenance: provenance
@@ -154,11 +179,33 @@ module Hive
         [ stdin, stdout, stderr ].compact.each { |io| io.close unless io.closed? }
       end
 
-      def bounded_read(io)
+      # Waits for the child to exit. Returns nil on completion, or the name
+      # of the deadline that expired first: "wall_clock" (total runtime cap)
+      # or "idle_output" (no stdout/stderr for @idle_timeout_sec).
+      def await_completion(waiter, pulse)
+        deadline = self.class.monotonic + @timeout_sec
+        loop do
+          now = self.class.monotonic
+          return "wall_clock" if now >= deadline
+
+          idle_remaining = nil
+          if @idle_timeout_sec
+            idle_deadline = pulse.last + @idle_timeout_sec
+            return "idle_output" if now >= idle_deadline
+
+            idle_remaining = idle_deadline - now
+          end
+          wait = [ deadline - now, idle_remaining ].compact.min.clamp(WAIT_SLICE_SEC, 1.0)
+          return nil if waiter.join(wait)
+        end
+      end
+
+      def bounded_read(io, pulse = nil)
         buffer = +"".b
         truncated = false
         loop do
           chunk = io.readpartial(4096)
+          pulse&.touch
           buffer << chunk
           next unless buffer.bytesize > @max_output_bytes
 

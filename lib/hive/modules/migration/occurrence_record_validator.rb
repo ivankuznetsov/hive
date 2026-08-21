@@ -14,10 +14,10 @@ module Hive
         OCCURRENCE_ID = /\Aocc-[0-9a-f]{64}\z/
         INTENT_ID = /\Aintent-[0-9a-f]{64}\z/
         DELIVERY_STATES = %w[
-          prepared dispatch_uncertain committed reconciled denied failed
+          prepared dispatch_uncertain committed reconciled denied failed abandoned
         ].freeze
         TERMINAL_STATES = %w[
-          committed reconciled denied failed
+          committed reconciled denied failed abandoned
         ].freeze
         OUTBOX_KINDS = %w[receipt publication capture event].freeze
         PUBLICATION_SCOPE_KEYS = %w[
@@ -292,7 +292,13 @@ module Hive
             end
           end
           terminal_id = cell.fetch("terminal_receipt_id")
-          if TERMINAL_STATES.include?(cell.fetch("state"))
+          if cell.fetch("state") == "abandoned"
+            unless terminal_id.nil? && cell.fetch("outcome") == {
+              "reason" => "regenerable_effect_abandoned"
+            }
+              malformed!("patrol effect abandoned state is malformed")
+            end
+          elsif TERMINAL_STATES.include?(cell.fetch("state"))
             value = receipts[terminal_id]
             unless value &&
                    cell.fetch("receipt_ids").include?(terminal_id) &&
@@ -485,7 +491,7 @@ module Hive
               "patrol finalized occurrence has a nonterminal effect"
             )
           end
-          expected = effects.map do |cell|
+          expected = effects.filter_map do |cell|
             cell.fetch("terminal_receipt_id")
           end.sort
           actual = capture(

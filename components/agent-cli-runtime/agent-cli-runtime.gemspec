@@ -5,13 +5,14 @@ Gem::Specification.new do |spec|
   spec.version = AgentCliRuntime::VERSION
   spec.authors = [ "Ivan Kuznetsov" ]
   spec.email = [ "ivan@ikuznetsov.com" ]
-  spec.summary = "Provider-neutral contracts for installed agent CLIs"
+  spec.summary =
+    "One Ruby API for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode"
   spec.description = <<~DESC
-    Agent CLI Runtime provides immutable profiles, invocation compilation,
-    local prerequisite probes, capability evidence, usage extraction, and
-    result normalization for Claude Code, Codex CLI, Pi, Grok CLI, and
-    OpenCode. It does not spawn agents or claim live provider health, quota,
-    or credential validity.
+    Agent CLI Runtime gives Ruby applications one stable integration layer for
+    local coding-agent CLIs. It builds provider-specific commands from a shared
+    request model, checks local versions and named capabilities, and normalizes
+    usage and results afterward. Centralized profiles, environment rules, and
+    parsers make agent providers easier to add, switch, and upgrade.
   DESC
   spec.homepage = "https://github.com/ivankuznetsov/agent-cli-runtime"
   spec.license = "MIT"

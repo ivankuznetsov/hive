@@ -11,8 +11,9 @@ Webmail plan: the model completed substantial repository analysis and composed
 a seventeen-unit plan in its response stream, but the upstream stream went idle
 before Pi made its first write tool call. Three provider retries therefore left
 no durable plan bytes for Hive's workflow retry to resume. A prompt-only first
-fix reproduced the same behavior in live dogfood; making the initial checkpoint
-controller-owned removes that first-write dependency.
+fix reproduced the same multi-minute zero-byte window in live dogfood before it
+eventually completed; making the initial checkpoint controller-owned removes
+that first-write dependency even when the model later succeeds.
 
 The checkpoint is provider-neutral and keeps the recovery boundary simple: Hive
 continues to own retries, the terminal marker continues to own stage completion,

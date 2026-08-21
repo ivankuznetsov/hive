@@ -31,14 +31,17 @@ tags: [stage, plan, llm-wiki, ce-plan, critique, dependencies]
 
 Agent must not modify any file other than `plan.md`. Must not execute code in the project (execution happens in 4-execute).
 
-Long plans are checkpointed directly in `plan.md`. Before extensive research or
-drafting, the planner writes a useful non-terminal outline, then refines it in
-place. Intermediate checkpoints deliberately contain neither `<!-- WAITING -->`
-nor `<!-- COMPLETE -->`; those markers remain terminal stage authority and are
-written only after the plan is ready. If a provider stream fails, the recovery
-retry preserves and improves the checkpoint instead of beginning again with an
-empty file. This is especially important for Pi routes whose provider can end a
-long response after substantial reasoning but before the first tool call.
+Long plans are checkpointed directly in `plan.md`. Before launching the agent,
+Hive atomically seeds an empty or marker-only artifact with the five required
+section headings and non-terminal placeholders. Existing plan or feedback bytes
+always win. The planner must update and refine that checkpoint as it works.
+Intermediate checkpoints deliberately contain neither `<!-- WAITING -->` nor
+`<!-- COMPLETE -->`; those markers remain terminal stage authority and are
+written only after the plan is ready. If a provider stream fails, replacing
+`AGENT_WORKING` with `ERROR` preserves the body so the recovery retry begins
+from a structured artifact. This is especially important for Pi routes whose
+provider can end a long response after substantial reasoning but before the
+first tool call.
 
 If planning identifies a known prerequisite, the agent writes it as optional
 top-level YAML frontmatter using the same scalar syntax as task metadata:

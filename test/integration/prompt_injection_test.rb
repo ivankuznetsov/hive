@@ -162,7 +162,7 @@ class PromptInjectionTest < Minitest::Test
         )
       )
 
-      assert_includes prompt, "non-terminal outline"
+      assert_includes prompt, "Hive creates a non-terminal outline"
       assert_match(/Do not hold the\s+complete plan only in one long model response/, prompt)
       assert_includes prompt, "preserve and improve useful plan bytes already on disk"
       assert_includes prompt, "Those markers are terminal and belong only on the final write"

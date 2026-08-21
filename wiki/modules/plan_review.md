@@ -93,6 +93,12 @@ adapter-contract version participates in the policy fingerprint, so shipping a
 corrected prompt/parser contract gives an unchanged plan a fresh review instead
 of replaying a verdict Hive never successfully parsed.
 
+The disposable revision workspace starts with a controller-owned, non-terminal
+copy of the immutable input plan. Long-form planners edit that checkpoint in
+place instead of holding a replacement document until their first full write.
+Only a candidate ending in `<!-- COMPLETE -->` is accepted or salvaged, so the
+seed can preserve useful progress without authorizing an unchanged revision.
+
 Reviewers run from that disposable checkout with search, shell, and network access so
 they can verify a plan against code, wiki context, history, and referenced
 contracts instead of checking only the document against itself. Codex and Grok

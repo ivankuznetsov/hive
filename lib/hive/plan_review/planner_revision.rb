@@ -84,6 +84,9 @@ module Hive
           end
           output_valid = report.required_outputs_valid?
           complete_candidate = output_valid && Hive::Markers.current(output_path).name == :complete
+          # A complete custody-validated candidate is durable evidence even when
+          # the provider's terminal status is lost. `read_candidate!` repeats
+          # the marker validation before accepting the candidate.
           artifact_override = result[:status] != :ok && complete_candidate
           unless (result[:status] == :ok && output_valid) || artifact_override
             return { "status" => "retryable_failure", "diagnostic" => result[:error_message] }
@@ -157,8 +160,10 @@ module Hive
         ) do |workspace|
           input_path = File.join(workspace, "input-plan.md")
           output_path = File.join(workspace, "candidate-output.md")
-          File.binwrite(input_path, Hive::SecretPatterns.redact(plan_bytes.to_s))
+          redacted_plan = Hive::SecretPatterns.redact(plan_bytes.to_s)
+          File.binwrite(input_path, redacted_plan)
           File.chmod(0o600, input_path)
+          seed_candidate!(output_path, redacted_plan)
           prompt = render_prompt(
             input_path:, output_path:, findings:, review_id:, planner_identity:,
             planner_authority:
@@ -178,6 +183,21 @@ module Hive
       end
 
       private
+
+      # A planner revision is another long-form Pi workload. Starting with no
+      # output recreates the ordinary plan-stage failure: the provider can
+      # spend minutes reasoning, then lose the stream before its first full
+      # write. Seed the candidate from the immutable input without its terminal
+      # marker so the agent can make bounded edits in place. The checkpoint can
+      # never be accepted or salvaged as a completed revision on its own.
+      def seed_candidate!(path, plan_bytes)
+        text = plan_bytes.to_s.dup.force_encoding(Encoding::UTF_8)
+        raise InvalidRecord, "planner revision input is invalid UTF-8" unless text.valid_encoding?
+
+        checkpoint = text.sub(/(?:\r?\n)?<!-- COMPLETE -->\r?\n?\z/, "\n")
+        File.binwrite(path, checkpoint)
+        File.chmod(0o600, path)
+      end
 
       def render_prompt(input_path:, output_path:, findings:, review_id:, planner_identity:,
                         planner_authority:)

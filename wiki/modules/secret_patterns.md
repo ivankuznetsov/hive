@@ -20,6 +20,7 @@ Hive::SecretPatterns::PATTERNS    # → frozen Hash<Symbol, Regexp>
 Hive::SecretPatterns.scan(text)   # → [{name: :aws_access_key, snippet: "AKIA..."}, …]
 Hive::SecretPatterns.match?(text) # → boolean, short-circuiting on the first match
 Hive::SecretPatterns.redact(text) # → String with each match replaced by "[REDACTED:<name>]"
+Hive::SecretPatterns.obvious_test_password_fixture?(path:, hit:) # → boolean
 ```
 
 `scan` snippets are truncated to 80 characters. Callers that only need a
@@ -53,9 +54,15 @@ record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes 
   pattern dispatches to `SecretPatterns.scan` for added lines in the post-fix
   diff. Its source-code context suppresses only obvious dynamic password
   references such as `password: params[:password]` and
-  `password: ENV.fetch(...)`; literal password assignments still trip, and the
-  lower-level scanner continues to redact dynamic references conservatively in
+  `password: ENV.fetch(...)`. It also permits a small allowlist of unmistakable
+  placeholder values such as `password` only under `test/` or `spec/`; arbitrary
+  test literals and every production-path literal still trip. The lower-level
+  scanner continues to detect and redact all of these forms conservatively in
   logs and diagnostics.
+- `Hive::Stages::AutoCommit` — scans exact staged blobs before an autonomous
+  residue/fix commit. It uses the same narrow test-placeholder predicate as the
+  post-fix guardrail, preventing fake fixture credentials from parking a review
+  while keeping arbitrary literals fail-closed.
 - `Hive::TaskAction#diagnostic` — calls `SecretPatterns.redact` on the bounded summary / detail before emission to JSON consumers (TUI, bot, daemon).
 - `Hive::DiagnosisAgent#artifact_body` — calls `SecretPatterns.redact` on the agent-produced body before writing `diagnostics/red-status.md`.
 - `Hive::Stages::DraftPrHandoff` — scans the exact new commit/object range, final changed files, repair report, and projected PR title/body before any publication; quarantined reports are redacted before Hive appends its marker.

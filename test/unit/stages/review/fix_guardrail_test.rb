@@ -272,6 +272,38 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_obvious_password_fixture_in_test_tree_does_not_trip_the_secret_guardrail
+    with_two_commits(
+      file: "test/integration/login_test.rb",
+      content: "@operator.password = \"password\"\n"
+    ) do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+
+      assert_equal :clean, result.status
+      assert_empty result.matches
+    end
+  end
+
+  def test_non_placeholder_password_in_test_tree_still_trips_the_secret_guardrail
+    with_two_commits(
+      file: "test/integration/login_test.rb",
+      content: "@operator.password = \"project-secret-42\"\n"
+    ) do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+
+      assert_equal :tripped, result.status
+      assert(result.matches.any? do |match|
+        match.pattern_name == "secrets_pattern_match.password_assignment"
+      end)
+    end
+  end
+
   # --- dotenv_edit -----------------------------------------------------
 
   def test_trips_on_dotenv_edit

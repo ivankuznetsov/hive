@@ -248,7 +248,10 @@ module Hive
           end
 
           introduced = introduced_secret_names(
-            worktree_path, secret_match_fingerprints(blob[:stdout]), head_object_ids[entry[:path]]
+            worktree_path,
+            secret_match_fingerprints(blob[:stdout], path: entry[:path]),
+            head_object_ids[entry[:path]],
+            path: entry[:path]
           )
           return introduced unless introduced[:success]
           names = introduced[:names]
@@ -262,14 +265,15 @@ module Hive
         { success: true, violations: violations.uniq }
       end
 
-      def introduced_secret_names(worktree_path, staged_hits, head_object_id)
+      def introduced_secret_names(worktree_path, staged_hits, head_object_id, path: nil)
         return { success: true, names: staged_hits.map { |hit| hit[:name] }.uniq } unless head_object_id
 
         head_blob = bounded_blob(worktree_path, head_object_id)
         return head_blob unless head_blob[:success]
         return { success: true, names: staged_hits.map { |hit| hit[:name] }.uniq } if head_blob[:oversized]
 
-        baseline = secret_match_fingerprints(head_blob[:stdout]).map { |hit| hit[:fingerprint] }.tally
+        baseline = secret_match_fingerprints(head_blob[:stdout], path: path)
+                   .map { |hit| hit[:fingerprint] }.tally
         introduced = staged_hits.filter_map do |hit|
           fingerprint = hit[:fingerprint]
           if baseline.fetch(fingerprint, 0).positive?
@@ -281,12 +285,15 @@ module Hive
         { success: true, names: introduced.uniq }
       end
 
-      def secret_match_fingerprints(content)
+      def secret_match_fingerprints(content, path: nil)
         text = content.to_s.dup.force_encoding(Encoding::UTF_8).scrub("?")
         Hive::SecretPatterns::PATTERNS.flat_map do |name, pattern|
           matches = []
           text.scan(pattern) do
             match = Regexp.last_match[0]
+            hit = { name: name, snippet: match }
+            next if Hive::SecretPatterns.obvious_test_password_fixture?(path: path, hit: hit)
+
             matches << { name: name, fingerprint: [ name, Digest::SHA256.hexdigest(match) ] }
           end
           matches

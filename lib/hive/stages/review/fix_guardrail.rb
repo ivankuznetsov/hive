@@ -228,6 +228,9 @@ module Hive
               if name == :secrets_pattern_match
                 Hive::SecretPatterns.scan(added).each do |hit|
                   next if dynamic_password_reference?(hit)
+                  next if Hive::SecretPatterns.obvious_test_password_fixture?(
+                    path: current_file, hit: hit
+                  )
 
                   matches << Match.new(
                     pattern_name: "secrets_pattern_match.#{hit[:name]}",

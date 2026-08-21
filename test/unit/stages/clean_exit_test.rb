@@ -255,6 +255,44 @@ class HiveStagesCleanExitTest < Minitest::Test
     end
   end
 
+  def test_obvious_password_fixture_in_test_tree_is_auto_committed
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "test", "integration"))
+      File.write(
+        File.join(worktree, "test", "integration", "login_test.rb"),
+        "@operator.password = \"password\"\n"
+      )
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :auto_committed, result[:status]
+      assert_empty `git -C #{worktree} status --porcelain`
+    end
+  end
+
+  def test_non_placeholder_password_in_test_tree_returns_safety_violation
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "test", "integration"))
+      File.write(
+        File.join(worktree, "test", "integration", "login_test.rb"),
+        "@operator.password = \"project-secret-42\"\n"
+      )
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :safety_violation, result[:status]
+      assert_match(/secret detectors/, result[:message])
+    end
+  end
+
   def test_new_secret_shaped_path_is_rejected_and_redacted
     with_tmp_dir do |worktree|
       init_git(worktree)

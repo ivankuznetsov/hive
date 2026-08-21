@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-20
+updated: 2026-08-21
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -18,7 +18,7 @@ the operational migration as release-proven.
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
-## OpenCode live validation (updated 2026-08-15)
+## OpenCode live validation (updated 2026-08-21)
 
 OpenCode `1.18.16+` now has deterministic fixtures, a guarded installed-CLI
 offline smoke, fake-CLI Hive execute and native Compound Engineering plan
@@ -30,6 +30,14 @@ on an explicit backend/model, selected config, credential environment key, and
 operator opt-in. Until that gate is supplied, real model transport and live
 provider permission behavior remain unverified; an offline inventory check is
 not equivalent to a model request.
+
+The Ox Alpha benchmark now supplies authenticated live OpenRouter transport and
+has exercised OpenCode `1.18.18` with the Compound Engineering plugin under
+parallel load. A successful OpenCode export can transiently end with incomplete
+JSON immediately after a large session closes, so Hive now validates the export
+syntax and retries that non-model inspection up to three bounded attempts before
+failing closed. Final six-task generation and dual-judge completion remain open
+until the benchmark artifacts are assembled and validated.
 
 ## Parallel Hive web CI exact-head evidence (2026-08-14)
 

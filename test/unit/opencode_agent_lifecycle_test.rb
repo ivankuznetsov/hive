@@ -94,6 +94,49 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_malformed_sanitized_export_is_retried_before_failing_the_run
+    with_fixture(mode: :inspection_malformed_once) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-retry-260821-aaaa")
+      result = with_agent_constant(
+        :OPENCODE_INSPECTION_RETRY_DELAY_SECONDS, 0
+      ) do
+        with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+          build_agent(
+            task, fixture,
+            invocation_root: File.join(fixture.fetch(:dir), "invocation-retry")
+          ).run!
+        end
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :completed, result.fetch(:normalized_outcome_kind)
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal 2, calls.count { |line| line.start_with?("export ses_") }
+    end
+
+    with_fixture(mode: :inspection_malformed) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-malformed-260821-aaaa")
+      result = with_agent_constant(
+        :OPENCODE_INSPECTION_RETRY_DELAY_SECONDS, 0
+      ) do
+        with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+          build_agent(
+            task, fixture,
+            invocation_root: File.join(fixture.fetch(:dir), "invocation-malformed")
+          ).run!
+        end
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal :malformed_output, result.fetch(:normalized_outcome_kind)
+      assert_match(/remained malformed after 3 attempts/,
+                   result.fetch(:inspection_diagnostic))
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal Hive::Agent::OPENCODE_INSPECTION_JSON_ATTEMPTS,
+                   calls.count { |line| line.start_with?("export ses_") }
+    end
+  end
+
   def test_pre_spawn_failure_still_cleans_the_prepared_overlay
     with_fixture(mode: :remove_after_probe) do |fixture|
       task = make_task(fixture.fetch(:dir))
@@ -530,6 +573,14 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
           if #{mode == :inspection_failure}
             warn "export unavailable"
             exit 1
+          end
+          export_calls = File.readlines(#{calls.dump}).count do |line|
+            line.start_with?("export ses_")
+          end
+          if #{mode == :inspection_malformed} ||
+             (#{mode == :inspection_malformed_once} && export_calls == 1)
+            print #{export_output.byteslice(0, export_output.bytesize / 2).dump}
+            exit 0
           end
           print #{export_output.dump}
         else

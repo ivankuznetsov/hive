@@ -6,6 +6,10 @@
   or misreported as an empty terminal message.
 - Kept the drain bounded and retained the close, join, and kill fallback for a
   genuinely hung or defensive IO path.
+- Validate successful sanitized exports as complete JSON and retry the local,
+  non-model export inspection up to three bounded attempts. This handles the
+  live OpenCode race where a large export exited zero but ended mid-object;
+  persistently malformed evidence still fails closed with a bounded diagnostic.
 - Accepted a correlated tool-only OpenCode terminal step with empty prose as a
   completed normalized run. Sanitized export, terminal finish evidence, and
   the stage's required artifact remain mandatory, so an empty or partial

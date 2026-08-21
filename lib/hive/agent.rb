@@ -22,6 +22,8 @@ module Hive
     TERMINATION_GRACE_SECONDS = 3
     COMPLETION_EVENT_GRACE_SECONDS = 3
     OPENCODE_INSPECTION_TIMEOUT_SECONDS = 10
+    OPENCODE_INSPECTION_JSON_ATTEMPTS = 3
+    OPENCODE_INSPECTION_RETRY_DELAY_SECONDS = 0.5
     OPENCODE_CAPTURE_DRAIN_SECONDS = 30
     OPENCODE_CAPTURE_BYTES =
       AgentCliRuntime::OpenCode::ResultParser::MAX_RUN_BYTES + 1
@@ -930,6 +932,30 @@ module Hive
     end
 
     def capture_opencode_inspection(inspection)
+      OPENCODE_INSPECTION_JSON_ATTEMPTS.times do |attempt|
+        captured = capture_opencode_inspection_once(inspection)
+        return captured unless captured.fetch(:success)
+
+        begin
+          JSON.parse(captured.fetch(:stdout))
+          return captured
+        rescue JSON::ParserError => e
+          if attempt + 1 == OPENCODE_INSPECTION_JSON_ATTEMPTS
+            return captured.merge(
+              success: false,
+              diagnostic: AgentCliRuntime::Redactor.diagnostic(
+                "OpenCode sanitized export remained malformed after " \
+                "#{OPENCODE_INSPECTION_JSON_ATTEMPTS} attempts: #{e.message}"
+              )
+            )
+          end
+
+          sleep(OPENCODE_INSPECTION_RETRY_DELAY_SECONDS * (attempt + 1))
+        end
+      end
+    end
+
+    def capture_opencode_inspection_once(inspection)
       stdout_reader, stdout_writer = IO.pipe
       stderr_reader, stderr_writer = IO.pipe
       stdout_capture = { data: +"", truncated: false }

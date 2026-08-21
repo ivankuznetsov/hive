@@ -62,6 +62,23 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_sanitized_export_uses_a_regular_file_to_avoid_lost_stdout_tails
+    with_fixture(mode: :inspection_requires_regular_file) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-file-260821-aaaa")
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invocation-file")
+        ).run!
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :completed, result.fetch(:normalized_outcome_kind)
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal 1, calls.count { |line| line.start_with?("export ses_") }
+    end
+  end
+
   def test_nonzero_malformed_timeout_and_inspection_failure_skip_or_bound_inspection
     {
       auth_failure: [ :authentication_failure, 0 ],
@@ -577,6 +594,11 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
           if #{mode == :inspection_failure}
             warn "export unavailable"
             exit 1
+          end
+          if #{mode == :inspection_requires_regular_file} &&
+             !STDOUT.stat.file?
+            print #{export_output.byteslice(0, export_output.bytesize / 2).dump}
+            exit 0
           end
           export_calls = File.readlines(#{calls.dump}).count do |line|
             line.start_with?("export ses_")

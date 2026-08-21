@@ -956,14 +956,17 @@ module Hive
     end
 
     def capture_opencode_inspection_once(inspection)
-      stdout_reader, stdout_writer = IO.pipe
+      # OpenCode 1.18 writes the complete export with one process.stdout.write
+      # and exits without awaiting the write callback. Bun can therefore drop
+      # the tail when stdout is a pipe (large real sessions repeatedly stopped
+      # at 245,760 bytes), even while Hive drains the pipe concurrently. A
+      # regular file makes that write synchronous without retaining the
+      # sanitized transcript after this method returns.
+      export_file = Tempfile.new([ "hive-opencode-export-", ".json" ])
+      export_file.binmode
+      export_file.unlink
       stderr_reader, stderr_writer = IO.pipe
-      stdout_capture = { data: +"", truncated: false }
       stderr_capture = { data: +"", truncated: false }
-      stdout_thread = capture_bounded_stream(
-        stdout_reader, stdout_capture,
-        AgentCliRuntime::OpenCode::ResultParser::MAX_EXPORT_BYTES + 1
-      )
       stderr_thread = capture_bounded_stream(
         stderr_reader, stderr_capture, FINAL_MESSAGE_TAIL_BYTES
       )
@@ -971,10 +974,9 @@ module Hive
         inspection.environment_for(env: opencode_preparation_environment)
           .merge(selected_base_environment),
         *inspection.argv,
-        chdir: @cwd, pgroup: true, out: stdout_writer, err: stderr_writer,
+        chdir: @cwd, pgroup: true, out: export_file, err: stderr_writer,
         unsetenv_others: true
       )
-      stdout_writer.close
       stderr_writer.close
       pgid = begin
         Process.getpgid(pid)
@@ -1001,14 +1003,20 @@ module Hive
         end
         sleep 0.05
       end
-      finish_capture_thread(stdout_thread, stdout_reader, capture: stdout_capture)
       finish_capture_thread(stderr_thread, stderr_reader, capture: stderr_capture)
-      success = status&.success? == true && !stdout_capture.fetch(:truncated)
+      export_file.rewind
+      export_limit = AgentCliRuntime::OpenCode::ResultParser::MAX_EXPORT_BYTES
+      stdout = export_file.read(export_limit + 1).to_s
+      export_truncated = stdout.bytesize > export_limit
+      success = status&.success? == true && !export_truncated
       diagnostic = unless success
         AgentCliRuntime::Redactor.diagnostic(
           if inspection_timed_out
             "OpenCode sanitized export inspection timed out after " \
               "#{OPENCODE_INSPECTION_TIMEOUT_SECONDS} seconds"
+          elsif export_truncated
+            "OpenCode sanitized export exceeded the #{export_limit}-byte " \
+              "inspection limit"
           elsif stderr_capture.fetch(:data).empty?
             "OpenCode sanitized export inspection failed"
           else
@@ -1018,14 +1026,12 @@ module Hive
       end
       {
         success: success,
-        stdout: stdout_capture.fetch(:data),
+        stdout: stdout,
         diagnostic: diagnostic
       }
     ensure
-      close_opencode_ios(
-        stdout_writer, stderr_writer, stdout_reader, stderr_reader
-      )
-      [ stdout_thread, stderr_thread ].each do |thread|
+      close_opencode_ios(export_file, stderr_writer, stderr_reader)
+      [ stderr_thread ].each do |thread|
         thread.kill if thread&.alive?
       end
     end

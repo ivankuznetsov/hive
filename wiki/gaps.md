@@ -33,14 +33,16 @@ not equivalent to a model request.
 
 The Ox Alpha benchmark now supplies authenticated live OpenRouter transport and
 has exercised OpenCode `1.18.18` with the Compound Engineering plugin under
-parallel load. A successful OpenCode export can transiently end with incomplete
-JSON immediately after a large session closes, so Hive now validates the export
-syntax and retries that non-model inspection up to three bounded attempts before
-failing closed. Large exports also receive a 60-second process deadline, and an
-inspection failure now remains the surfaced task diagnostic instead of degrading
-to a generic missing-evidence message. Final six-task generation and dual-judge
-completion remain open until the benchmark artifacts are assembled and
-validated.
+parallel load. Repeated exports ending near the same JSON position were traced
+to OpenCode issuing one unawaited large stdout write: a controlled reproduction
+wrote only 245,760 of 983,152 bytes through a pipe, while regular-file stdout
+produced complete parseable JSON. Hive now sends sanitized export stdout to an
+unlinked private regular file, enforces the parser's four-MiB bound while
+reading it, and still fails closed on malformed evidence. Exports retain a
+60-second process deadline, and an inspection failure remains the surfaced task
+diagnostic instead of degrading to a generic missing-evidence message. Final
+six-task generation and dual-judge completion remain open until the benchmark
+artifacts are assembled and validated.
 
 ## Parallel Hive web CI exact-head evidence (2026-08-14)
 

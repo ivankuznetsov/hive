@@ -71,13 +71,15 @@ inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that
 inspection as appropriate.
 
-OpenCode's JSON output is drained for up to 30 seconds after the owned process
-exits. Large sanitized exports can keep the capture pipe active after process
-wait returns; the former two-second drain could kill a healthy capture thread
-mid-object and hand the parser an artificial EOF or empty terminal message. If
-the bounded drain still expires, Hive marks the capture truncated before
-closing and terminating the thread, so normalization fails explicitly instead
-of treating partial JSON as a provider response.
+OpenCode's streamed run JSON is drained for up to 30 seconds after the owned
+process exits. If that bounded drain expires, Hive marks the capture truncated
+before closing and terminating the thread, so normalization fails explicitly
+instead of treating partial JSON as a provider response. The post-run sanitized
+export uses an unlinked, private regular temporary file rather than a pipe.
+OpenCode 1.18.18 emits the entire export through one unawaited stdout write;
+under a pipe, large live exports could exit zero after writing only a valid
+prefix. A regular file makes the write synchronous, after which Hive reads at
+most the parser's four-MiB limit and deletes the data when inspection returns.
 
 Cleanup runs from the process owner's `ensure` path after preparation, spawn,
 inspection, or normalization failures. Only the prepared invocation's owned

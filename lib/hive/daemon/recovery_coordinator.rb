@@ -189,7 +189,7 @@ module Hive
       end
 
       def assessment(row, now: Time.now.utc, retry_count: nil)
-        retry_count = durable_retry_count(row) if retry_count.nil?
+        retry_count = retry_count_for_failure(row, marker_attrs(row)) if retry_count.nil?
         observed_at = value(row, :state_file_mtime)
         eligible_at = observed_at && observed_at + retry_delay_sec(retry_count)
         safe, safety_reason = @safety.call(row)

@@ -544,7 +544,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       "provider" => "pi", "message" => "agent left uncommitted changes",
       "attempt_id" => "attempt-current"
     }
-    with_fixture(marker_attrs: attrs, mtime: NOW - 3600) do |coordinator, row, state_home|
+    with_fixture(marker_attrs: attrs, mtime: NOW - 6) do |coordinator, row, state_home|
       old_row = row.to_h.merge("evidence" => [ dirty_commit_evidence("a" * 40) ])
       old_fingerprint = coordinator.send(:failure_fingerprint, old_row, attrs)
       write_terminal_recovery_history(
@@ -556,10 +556,14 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         "evidence" => [ dirty_commit_evidence("b" * 40) ]
       )
 
+      assessment = coordinator.assessment(progressed_row, now: NOW)
+
       receipt = coordinator.request(
         row: progressed_row, requestor: "healer", request_id: "progressed", now: NOW
       )
 
+      assert assessment.fetch(:due)
+      assert_equal NOW - 1, assessment.fetch(:retry_at)
       assert_equal "queued", receipt.status
       request = Q.fetch("progressed", state_home: state_home)
       assert_equal 1, receipt.retry_count

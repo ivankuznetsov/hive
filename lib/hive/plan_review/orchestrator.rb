@@ -541,6 +541,20 @@ module Hive
         max_attempts = 1 + Integer(@cfg.dig("plan_review", "attempts", "max_transient"))
         route = latest_route(record, role)
         if route && TRANSIENT_OUTCOMES.include?(route["outcome"])
+          if stale_planner_revision_contract?(route)
+            reset = Hive::PlanReview.recovery_reset_route(
+              route,
+              "planner_revision_contract_version" => PlannerRevision::RESULT_CONTRACT_VERSION,
+              "contract_upgrade_recovery" => true,
+              "diagnostic" => "planner result adjudication changed; retrying under the current contract"
+            )
+            record = publish_transition(
+              record, state: "revising",
+              required_action: "retry planner revision under the current result contract",
+              routes: record["routes"] + [ reset ]
+            )
+            route = reset
+          end
           if attempts_in_current_run(record, role) >= max_attempts
             exhausted = PlannerRevision::Result.new(
               outcome: route.fetch("outcome"), candidate_bytes: nil,
@@ -957,8 +971,16 @@ module Hive
           "actual" => actual, "capability_result" => "present",
           "independence_verified" => false, "independence_reason" => "same_plan_authority",
           "outcome" => revision.outcome, "attempt_id" => attempt_id,
-          "retry_at" => retry_at
+          "retry_at" => retry_at,
+          "planner_revision_contract_version" => PlannerRevision::RESULT_CONTRACT_VERSION
         }.compact
+      end
+
+      def stale_planner_revision_contract?(route)
+        Integer(route["planner_revision_contract_version"] || 0) <
+          PlannerRevision::RESULT_CONTRACT_VERSION
+      rescue ArgumentError, TypeError
+        true
       end
 
       def planner_identity(record)

@@ -149,6 +149,10 @@ disposition/regression verification leg. A custody-verified, bounded candidate
 ending in the exact `COMPLETE` marker remains authoritative completion evidence
 when a provider's terminal telemetry is malformed or truncated. Missing,
 non-terminal, oversized, invalid, or tampered candidates still fail closed.
+Planner-revision attempt receipts carry the result-adjudication contract
+version. When an exhausted transient series predates the running contract,
+Hive opens one new bounded attempt series automatically; a fixed harness can
+therefore recover without an operator manufacturing a linked plan generation.
 Each accepted finding
 requires explicit fingerprint-bound verification evidence; absence from a
 generic critique does not verify it. A

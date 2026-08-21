@@ -13,6 +13,7 @@ module Hive
   module PlanReview
     class PlannerRevision
       MAX_CANDIDATE_BYTES = 1024 * 1024
+      RESULT_CONTRACT_VERSION = 2
 
       Result = Data.define(:outcome, :candidate_bytes, :candidate_digest, :route_receipt, :diagnostic) do
         def success? = outcome == "success"

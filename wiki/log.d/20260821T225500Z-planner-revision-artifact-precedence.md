@@ -13,3 +13,10 @@ tampered outputs retain their existing failure behavior.
 
 A regression test covers the observed OpenCode malformed-export failure after
 a complete candidate was written.
+
+Attempt receipts also record the planner-result contract version. An exhausted
+transient series written under an older contract receives one automatic,
+bounded recovery reset after Hive upgrades. This lets the daemon apply the
+new artifact-precedence rule to a fresh attempt instead of leaving the task
+blocked on an obsolete controller decision or requiring a synthetic plan
+generation.

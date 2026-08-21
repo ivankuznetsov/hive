@@ -25,11 +25,28 @@ locked exact-byte epoch fencing, rollback before the first new-authority
 effect, source re-read and digest verification, task materialization before
 source acknowledgement, final authority verification, and reconstruction of
 both source adapters in one daemon after restart. This is not live dogfood.
-The admission scheduler currently invokes the semantic provider synchronously
-inside its daemon tick after its workflow-capacity check. Final lifecycle
-dogfood must measure that behavior with a real configured provider and decide
-whether U11 should move that launch behind the existing child supervisor; the
-current local proof does not claim asynchronous provider custody.
+U11 has four release blockers at the current admission runtime seam:
+
+- `Hive::Daemon::PatrolFixRuntime#candidate_provider` scans every stage folder
+  and can pass more than `AdmissionStore::MAX_CANDIDATES` (64), so a large
+  Patrol Fix project fails admission instead of supplying bounded candidate
+  context with exact stale-set revalidation.
+- That same scan raises when any unrelated task has unreadable admission
+  metadata, allowing one non-Patrol task to poison Patrol admission.
+- Candidate evidence contains only identity, digest, and target revision. It
+  does not supply the bounded finding/remediation evidence an LLM needs for a
+  meaningful semantic-root comparison.
+- `PatrolFixSemanticDecisionRunner` executes synchronously inside the daemon
+  tick after the workflow-capacity check instead of under the existing
+  `ChildSupervisor` custody and completion protocol.
+
+U10 deliberately exposes these as gaps rather than hiding them in status or
+adding another coordinator. U11 must add bounded candidate paging/context,
+exact candidate-set revalidation, unrelated-corruption isolation, and
+supervised provider custody with focused greater-than-64, stale-set,
+unreadable-neighbour, meaningful-evidence, restart, and timeout tests. The
+current local proof does not claim those behaviors or asynchronous provider
+custody.
 
 ## Patrol v4 needs installed fleet dogfood (2026-08-14)
 

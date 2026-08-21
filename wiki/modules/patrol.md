@@ -413,6 +413,30 @@ owned by their exact focused tests. Full independent U3b qualification,
 installed/live U3c evidence, catalogue promotion, and mutator cutover therefore
 remain unproven.
 
+## Unified operational projection
+
+The daemon is the sole source-composition edge for Patrol operations. Once per
+project and tick, `Hive::Daemon::PatrolFixOperationalProjection` reads the
+bounded ordinary-discovery, Architecture-discovery, admission, workflow,
+migration, successor, publication, post-merge, and existing usage authorities
+and emits one `hive-patrol-fix-operational-projection` v1 document. Status,
+Watch, TUI, bot, and web pass through that validated document; they do not
+reopen Patrol or Architecture stores and infer their own state.
+
+The projection separates scheduled discovery allowances from normal workflow
+concurrency, keeps ordinary and Architecture lanes independent, and counts
+conversion cohorts by unique mechanical `root_key` values so aliases do not
+inflate results. PR-created and currently-open PR counts remain distinct.
+Provider holds are reported as current intervals only; historical stage latency
+is emitted only where durable stage or publication timestamps exist. The
+nullable current-UTC-day token section is telemetry only and never affects
+allowances, admission, or dispatch. A failed source read makes only its bounded
+section unavailable and adds a redacted diagnostic.
+
+The projection is observational. Every operator mutation still goes through a
+generation-guarded `OperationalAction`; web and bot do not gain a new write
+path.
+
 ## Safety invariants
 
 - Patrol is opt-in at the scheduler gate AND at config resolution: a missing patrol section, a missing `mode:`, `patrol.mode: off`, or `patrol.enabled: false` all leave patrol disabled and prevent daemon dispatch, and the daemon still requires `daemon.enabled`.

@@ -244,6 +244,7 @@ class ComponentBoundariesTest < Minitest::Test
       Hive::PatrolFix::Migration::Inventory
       Hive::PatrolFix::Migration::Reconciler
       Hive::PatrolFix::Migration::SemanticGroup
+      Hive::PatrolFix::OperationalProjection
       Hive::PatrolFix::Projection
       Hive::PatrolFix::PublicationReceipt
       Hive::PatrolFix::ReceiptStore

@@ -5,4 +5,6 @@ refactor_patrol:
   auto_fix:
     enabled: true
   issue_filing:
-    enabled: true
+    # Legacy read/migration compatibility only. Findings now enter the
+    # unified Patrol-fix workflow and publish pull requests, never issues.
+    enabled: false

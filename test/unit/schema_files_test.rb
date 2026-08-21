@@ -18,6 +18,7 @@ require "hive/commands/prune"
 require "hive/commands/run"
 require "hive/commands/stage_action"
 require "hive/commands/status"
+require "hive/patrol_fix/operational_projection"
 require "hive/plan_review"
 require "hive/agent_skills/inspector"
 require "hive/agent_skills/provisioner"
@@ -570,6 +571,7 @@ class SchemaFilesTest < Minitest::Test
           "path" => "/tmp/alpha",
           "hive_state_path" => "/tmp/alpha/.hive-state",
           "tasks" => [],
+          "patrol_fix" => patrol_fix_operational_projection("alpha"),
           "legacy_stage_dirs" => [
             { "stage_dir" => "5-review", "task_count" => 2 },
             { "stage_dir" => "6-pr",     "task_count" => 1 }
@@ -585,6 +587,7 @@ class SchemaFilesTest < Minitest::Test
           "path" => "/tmp/beta",
           "hive_state_path" => "/tmp/beta/.hive-state",
           "tasks" => [],
+          "patrol_fix" => patrol_fix_operational_projection("beta"),
           "legacy_stage_dirs" => [],
           "legacy_migrate_command" => nil
         }
@@ -676,6 +679,7 @@ class SchemaFilesTest < Minitest::Test
           "path" => "/tmp/demo",
           "hive_state_path" => "/tmp/demo/.hive-state",
           "tasks" => [ task_with_pr, task_without_pr, held_task, held_task_null ],
+          "patrol_fix" => patrol_fix_operational_projection("demo"),
           "legacy_stage_dirs" => [],
           "legacy_migrate_command" => nil
         }
@@ -3119,5 +3123,12 @@ class SchemaFilesTest < Minitest::Test
       intent: intent, status: "committed",
       outcome: { "finding_id" => "finding-1" }, recorded_at: now
     ).to_h
+  end
+
+  def patrol_fix_operational_projection(project)
+    Hive::PatrolFix::OperationalProjection.unavailable(
+      project: project, tasks: [], now: Time.utc(2026, 6, 15),
+      source: "daemon", code: "fixture_unavailable", summary: "fixture projection"
+    )
   end
 end

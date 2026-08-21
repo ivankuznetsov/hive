@@ -195,6 +195,13 @@ Config errors emit `ok: false`, `error_kind: "config"`, and exit 78. A missing `
 
 The always-on behavior comes from [[modules/daemon]]: `Hive::Daemon::PatrolScheduler` checks opt-in projects on a slow cadence and returns `hive patrol <project> --json` dispatches. The dispatcher still applies `daemon.enabled`, legacy-layout, dry-run, and concurrency gates before spawning the child.
 
+Daemon snapshots also carry one bounded, schema-validated Patrol Fix
+operational row per project. `hive status --json`, Watch, TUI, bot, and web
+consume that same row for discovery, admission, workflow-stage, migration,
+successor, publication, post-merge, and current-day usage telemetry. Those
+interfaces do not rescan Patrol stores, and the telemetry never acts as a token
+budget or dispatch gate.
+
 ## Module compatibility
 
 `hive patrol` is the frozen 0.x argument/output serializer for the first-party

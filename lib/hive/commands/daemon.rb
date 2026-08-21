@@ -321,6 +321,7 @@ module Hive
           patrol_scheduler: patrol_scheduler,
           refactor_patrol_scheduler: refactor_patrol_scheduler,
           patrol_fix_admission_scheduler: patrol_fix_admission_scheduler,
+          patrol_fix_runtime: patrol_fix_runtime,
           patrol_arbiter: patrol_arbiter,
           answer_digest_scheduler: answer_digest_scheduler,
           dry_run: @dry_run,

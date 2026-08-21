@@ -96,6 +96,29 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
     end
   end
 
+  def test_operational_records_are_bounded_to_root_cohort_and_retry_facts
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "ordinary-finding-1-v1", snapshot: source_snapshot, now: NOW)
+      prepared = store.prepare_decision!(
+        "ordinary-finding-1-v1", candidates: [ candidate("task-a") ],
+        current_head: "2" * 40, now: NOW
+      )
+      store.record_decision!(
+        "ordinary-finding-1-v1", candidate_digest: prepared.fetch("candidate_digest"),
+        decision: "same_root", candidate_identity: "task-a", rationale: "same root",
+        evidence: [ "Same failing owner." ], model_receipt: "provider:receipt", now: NOW
+      )
+
+      row = store.operational_records.fetch(0)
+      assert_equal %w[candidates created_at decision occurrence_id retry status task], row.keys.sort
+      assert_equal({ "kind" => "task", "identity" => "task-a" }, row.fetch("candidates").first)
+      assert_equal({ "decision" => "same_root", "candidate_identity" => "task-a" }, row.fetch("decision"))
+      refute_includes JSON.generate(row), "Same failing owner"
+      assert row.frozen?
+    end
+  end
+
   private
 
   def source_snapshot(identity: "finding-1")

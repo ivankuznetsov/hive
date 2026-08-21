@@ -75,6 +75,7 @@ module Hive
                      merge_watcher: nil, refactor_patrol_merge_reconciler: nil,
                      patrol_scheduler: nil, refactor_patrol_scheduler: nil,
                      patrol_fix_admission_scheduler: nil,
+                     patrol_fix_runtime: nil,
                      patrol_arbiter: nil, answer_digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
@@ -95,6 +96,7 @@ module Hive
         @patrol_scheduler = patrol_scheduler
         @refactor_patrol_scheduler = refactor_patrol_scheduler
         @patrol_fix_admission_scheduler = patrol_fix_admission_scheduler
+        @patrol_fix_runtime = patrol_fix_runtime
         @patrol_arbiter = patrol_arbiter
         @answer_digest_scheduler = answer_digest_scheduler
         @dry_run = dry_run
@@ -1683,6 +1685,9 @@ module Hive
           controller: @controller.operational_snapshot(now: completed_at),
           queue: operational_queue_snapshot(now: completed_at, queue_state: queue_state),
           discovery_allowances: operational_discovery_allowance_snapshot(now: completed_at),
+          patrol_fix_projects: operational_patrol_fix_projects(
+            tasks: verification.rows, now: completed_at
+          ),
           recoveries: operational_recovery_snapshot(queue_state: queue_state),
           now: completed_at
         )
@@ -1703,6 +1708,18 @@ module Hive
         @patrol_scheduler.discovery_allowance_snapshot(now: now)
       rescue StandardError => e
         { "status" => "unavailable", "reason" => e.class.name }
+      end
+
+      def operational_patrol_fix_projects(tasks:, now:)
+        return {} unless @patrol_fix_runtime&.respond_to?(:operational_projections)
+
+        @patrol_fix_runtime.operational_projections(tasks: tasks, now: now)
+      rescue StandardError => e
+        @logger.event(
+          :patrol_fix_operational_projection_failed,
+          error: "#{e.class}: #{e.message}"
+        )
+        {}
       end
 
       def publish_operational_snapshot(method, phase:, **attributes)

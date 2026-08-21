@@ -4,7 +4,7 @@
   "title": "Hive Patrol Fix Projection (v1)",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "schema_version", "state", "stage", "task_generation", "evidence_revision", "sources", "aliases", "issues", "successor", "decision", "outcome", "blocker_owner", "validation", "review", "publication", "archived", "diagnostic", "action"],
+  "required": ["schema", "schema_version", "state", "stage", "task_generation", "evidence_revision", "sources", "aliases", "issues", "successor", "decision", "outcome", "blocker_owner", "validation", "review", "publication", "timing", "archived", "diagnostic", "action"],
   "properties": {
     "schema": {"const": "hive-patrol-fix-projection"},
     "schema_version": {"const": 1},
@@ -22,11 +22,23 @@
     "validation": {"anyOf": [{"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/validationPayload"}, {"type": "null"}]},
     "review": {"anyOf": [{"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/reviewDecisionPayload"}, {"type": "null"}]},
     "publication": {"anyOf": [{"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/publicationPayload"}, {"type": "null"}]},
+    "timing": {"$ref": "#/$defs/timing"},
     "archived": {"type": "boolean"},
     "diagnostic": {"anyOf": [{"$ref": "#/$defs/diagnostic"}, {"type": "null"}]},
     "action": {"$ref": "#/$defs/action"}
   },
   "$defs": {
+    "timing": {
+      "type": "object", "additionalProperties": false,
+      "required": ["started_at", "stage_started_at", "parked_seconds", "parked_since", "rework_count"],
+      "properties": {
+        "started_at": {"type": ["string", "null"], "format": "date-time"},
+        "stage_started_at": {"type": ["string", "null"], "format": "date-time"},
+        "parked_seconds": {"type": "integer", "minimum": 0},
+        "parked_since": {"type": ["string", "null"], "format": "date-time"},
+        "rework_count": {"type": "integer", "minimum": 0}
+      }
+    },
     "decision": {
       "type": "object", "additionalProperties": false,
       "required": ["receipt_id", "stage", "payload"],

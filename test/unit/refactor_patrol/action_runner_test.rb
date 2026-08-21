@@ -1,5 +1,7 @@
 require "test_helper"
 require "hive/refactor_patrol/action_runner"
+require "hive/refactor_patrol/family_store"
+require "hive/refactor_patrol/issue_filer"
 require "hive/refactor_patrol/policy"
 
 class RefactorPatrolActionRunnerTest < Minitest::Test
@@ -131,6 +133,65 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_new_action_snapshot_never_creates_issue_candidates_or_exposes_an_issue_writer
+    with_tmp_dir do |dir|
+      item = thesis(id: "workflow-only", flags: [ "cross_feature_impact" ])
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy("issue_filing" => true),
+        dispositions: dispositions(
+          discuss: [ disposition(item, reasons: [ "cross_feature_impact" ]) ]
+        )
+      )
+      filer = FakeIssueFiler.new(issue_result)
+      runner = build_runner(dir, store: store, issue_filer: filer)
+
+      result = runner.run(job_id: "job-1")
+
+      assert result.complete?
+      assert_empty result.actions
+      assert_empty filer.calls
+      refute_respond_to runner, :issue_filer
+      source = File.read(File.expand_path("../../../lib/hive/refactor_patrol/action_runner.rb", __dir__))
+      refute_includes source, ".publish("
+      refute_includes source, "IssueFiler.new"
+      refute_includes source, "issue_create_intent"
+      refute_includes source, "github_issues"
+      refute_includes source, 'sink: "issue"'
+    end
+  end
+
+  def test_legacy_issue_action_is_parked_without_remote_effect
+    with_tmp_dir do |dir|
+      item = thesis(id: "legacy-issue", flags: [ "cross_feature_impact" ])
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy("issue_filing" => true),
+        dispositions: dispositions(
+          discuss: [ disposition(item, reasons: [ "cross_feature_impact" ]) ]
+        )
+      )
+      family_id = FakeFamilyStore.new.resolve(
+        thesis: item, source: source(7), dry_run: false
+      ).family_id
+      store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => item.id, "kind" => "issue", "family_id" => family_id }
+        ],
+        now: T0
+      )
+      filer = FakeIssueFiler.new(issue_result)
+
+      result = build_runner(dir, store: store, issue_filer: filer).run(job_id: "job-1")
+
+      refute result.complete?
+      assert_equal "issue_creation_retired",
+                   result.completeness.fetch("runner_events").last.fetch("outcome")
+      assert_empty filer.calls
+    end
+  end
+
   class BareRemoteRecoveryGh
     attr_reader :pushes, :created
 
@@ -236,7 +297,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_initializes_only_snapshotted_actions_and_reconstructs_language_neutral_theses
+  def test_issue_only_snapshot_finishes_without_actions_or_family_resolution
     with_tmp_dir do |dir|
       store = write_classified_job(
         dir,
@@ -264,11 +325,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       result = runner.run(job_id: "job-1")
 
       assert result.complete?
-      assert_equal %w[issue issue], result.actions.map { |action| action.fetch("kind") }
-      assert_equal %w[go-fix ts-issue], family_store.calls.map { |call| call.fetch(:thesis).id }.sort
-      orders = family_store.calls.find { |call| call.fetch(:thesis).id == "ts-issue" }
-      assert_equal %w[src/orders/index.ts src/orders/service.ts],
-                   orders.fetch(:thesis).feature_boundary.fetch("owned_files")
+      assert_empty result.actions
+      assert_empty family_store.calls
       assert_empty runner.fixer.calls, "current auto-fix must not broaden a false snapshot"
     end
   end
@@ -307,14 +365,14 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       assert result.complete?
       assert_equal %i[fix pr], order
       assert_empty filer.calls
-      assert_equal %w[issue_not_needed pr_opened], result.actions.map { |action| action.fetch("outcome") }.sort
+      assert_equal [ "pr_opened" ], result.actions.map { |action| action.fetch("outcome") }
       fix = result.actions.find { |action| action.fetch("kind") == "fix" }
       attempt = fix.dig("receipts", "publication_attempts").values.first
       assert_equal "create_pr", attempt.dig("pr_create_intent", "operation")
     end
   end
 
-  def test_mixed_job_creates_one_pr_one_issue_and_keeps_suppression_exactly_once
+  def test_mixed_job_creates_one_pr_and_leaves_discuss_finding_for_unified_workflow
     with_tmp_dir do |dir|
       accepted = thesis(id: "accepted-mixed")
       flagged = thesis(
@@ -350,9 +408,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       assert_equal "hive-refactor/#{fix_action.fetch('canonical_action_id')}",
                    opener.calls.first.fetch(:patch).branch
       assert_equal 1, opener.calls.size
-      assert_equal 1, filer.calls.size
-      assert_equal %w[issue_created issue_not_needed pr_opened],
-                   first.actions.map { |action| action.fetch("outcome") }.sort
+      assert_empty filer.calls
+      assert_equal [ "pr_opened" ], first.actions.map { |action| action.fetch("outcome") }
       assert_equal [ "suppressed-mixed" ], first.aggregate.dig("dispositions", "dismiss")
                                                     .map { |item| item.fetch("id") }
     end
@@ -378,7 +435,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       assert_empty result.aggregate.fetch("actions")
       assert_empty runner.fixer.calls
       assert_empty runner.pr_opener.calls
-      assert_empty runner.issue_filer.calls
+      refute_respond_to runner, :issue_filer
     end
   end
 
@@ -452,7 +509,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_deterministic_validation_failure_can_file_one_strategic_issue_after_fix
+  def test_deterministic_validation_failure_does_not_substitute_an_issue
     with_tmp_dir do |dir|
       item = thesis(id: "accepted-validation-failure")
       store = write_classified_job(
@@ -479,14 +536,13 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       result = runner.run(job_id: "job-1")
 
       assert result.complete?
-      assert_equal %i[fix issue], order
-      assert_equal [ "validation_failed" ], filer.calls.first.fetch(:reasons)
-      assert_match(/\Aissue-[a-f0-9]{64}\z/, filer.calls.first.fetch(:canonical_action_id))
-      assert_equal %w[issue_created validation_failed], result.actions.map { |action| action.fetch("outcome") }.sort
+      assert_equal [ :fix ], order
+      assert_empty filer.calls
+      assert_equal [ "validation_failed" ], result.actions.map { |action| action.fetch("outcome") }
     end
   end
 
-  def test_docs_missing_validation_routes_to_issue_without_invoking_fixer
+  def test_docs_missing_validation_creates_no_legacy_action
     with_tmp_dir do |dir|
       item = thesis(
         id: "docs-missing-validation",
@@ -509,8 +565,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       assert result.complete?
       assert_empty runner.fixer.calls
       assert_empty runner.pr_opener.calls
-      assert_equal [ "missing_docs_validation" ], filer.calls.first.fetch(:reasons)
-      assert_equal [ "issue_created" ], result.actions.map { |action| action.fetch("outcome") }
+      assert_empty filer.calls
+      assert_empty result.actions
     end
   end
 
@@ -536,7 +592,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       second = runner.run(job_id: "job-1")
       assert second.complete?
       assert_equal "no_diff", second.actions.find { |action| action.fetch("kind") == "fix" }.fetch("outcome")
-      assert_equal "issue_not_needed", second.actions.find { |action| action.fetch("kind") == "issue" }.fetch("outcome")
+      assert_equal [ "fix" ], second.actions.map { |action| action.fetch("kind") }
       assert_empty filer.calls
     end
   end
@@ -669,7 +725,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_closed_unmerged_refactor_pr_routes_the_accepted_thesis_to_an_issue
+  def test_closed_unmerged_refactor_pr_does_not_substitute_an_issue
     with_tmp_dir do |dir|
       item = thesis(id: "closed-pr")
       store = write_classified_job(
@@ -691,10 +747,9 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       ).run(job_id: "job-1")
 
       assert result.complete?
-      assert_equal 1, filer.calls.size
-      assert_includes filer.calls.first.fetch(:reasons), "closed_without_merge"
-      assert_equal %w[closed_without_merge issue_created],
-                   result.actions.map { |action| action.fetch("outcome") }.sort
+      assert_empty filer.calls
+      assert_equal [ "closed_without_merge" ],
+                   result.actions.map { |action| action.fetch("outcome") }
     end
   end
 
@@ -955,7 +1010,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         assert File.directory?(File.join(
           registered_state, "module-runtime", "migration", "patrol-evidence"
         )), state_path
-        assert File.directory?(File.join(
+        refute File.exist?(File.join(
           registered_state, "refactor_patrol", "v2", "families"
         )), state_path
         refute Dir.exist?(File.join(dir, ".hive-state")), state_path
@@ -1470,7 +1525,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_issue_create_fence_rejects_replaced_claim_after_intent
+  def test_issue_create_sink_is_absent_even_when_legacy_policy_is_enabled
     with_tmp_dir do |dir|
       item = thesis(id: "stale-issue-create", flags: [ "cross_feature_impact" ])
       store = write_classified_job(
@@ -1478,34 +1533,17 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         policy: snapshot_policy("issue_filing" => true),
         dispositions: dispositions(discuss: [ disposition(item, reasons: [ "cross_feature_impact" ]) ])
       )
-      creates = 0
-      success = issue_result
-      filer = Object.new
-      filer.define_singleton_method(:publish) do |record_intent:, authorize_create:, canonical_action_id:, **|
-        raise "intent failed" unless record_intent.call == true
-        action = store.read_job("job-1").fetch("actions").find do |candidate|
-          candidate.fetch("canonical_action_id") == canonical_action_id
-        end
-        claim = action.fetch("claims").last
-        old_token = {
-          job_id: "job-1", canonical_action_id: canonical_action_id,
-          owner: claim.fetch("owner"), generation: claim.fetch("generation")
-        }
-        store.release_action!(old_token, outcome: "interleaved", now: T0, backoff_sec: 0)
-        store.claim_action!("job-1", canonical_action_id, owner: "replacement", now: T0)
-        creates += 1 if authorize_create.call
-        success
-      end
+      filer = FakeIssueFiler.new(issue_result)
 
       result = build_runner(dir, store: store, issue_filer: filer).run(job_id: "job-1")
 
-      assert_equal "stale_claim", result.completeness.fetch("reason")
-      assert_equal 0, creates
-      assert store.read_job("job-1").dig("actions", 0, "receipts", "creation_intent")
+      assert result.complete?
+      assert_empty result.actions
+      assert_empty filer.calls
     end
   end
 
-  def test_successful_fix_suppresses_issue_for_another_thesis_in_the_same_family
+  def test_successful_fix_does_not_create_an_issue_for_another_thesis
     with_tmp_dir do |dir|
       accepted = thesis(id: "accepted-family")
       flagged = thesis(id: "flagged-family", flags: [ "cross_feature_impact" ])
@@ -1526,8 +1564,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       ).run(job_id: "job-1")
 
       assert result.complete?
-      assert_equal %w[issue_not_needed pr_opened], result.actions.map { |item| item.fetch("outcome") }.sort
-      assert_equal 1, result.actions.map { |item| item["family_id"] }.compact.uniq.size
+      assert_equal [ "pr_opened" ], result.actions.map { |item| item.fetch("outcome") }
+      assert_empty result.actions.map { |item| item["family_id"] }.compact
       assert_empty filer.calls
     end
   end
@@ -1742,7 +1780,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_duplicate_added_after_intent_is_caught_by_the_final_issue_fence
+  def test_issue_only_job_never_reaches_the_legacy_remote_filer
     with_tmp_dir do |dir|
       other = File.join(File.dirname(dir), "late-duplicate-owner")
       flagged = thesis(id: "late-duplicate", flags: [ "cross_feature_impact" ])
@@ -1789,14 +1827,13 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         repository_ownership: ownership
       ).run(job_id: "job-1")
 
-      refute result.complete?
+      assert result.complete?
       assert_equal 0, remote_requests
-      assert_equal "authority_revoked", result.actions.first.fetch("outcome")
-      assert result.actions.first.dig("receipts", "creation_intent")
+      assert_empty result.actions
     end
   end
 
-  def test_repository_drift_reconciles_an_issue_before_blocking_an_unstarted_fix
+  def test_repository_drift_does_not_resume_a_legacy_issue_intent
     with_tmp_dir do |dir|
       untouched = thesis(id: "untouched-fix", fingerprint: "fp-untouched-fix")
       continued = thesis(
@@ -1847,9 +1884,9 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       ).run(job_id: "job-1")
 
       refute result.complete?
-      assert_equal 1, filer.calls.size
+      assert_empty filer.calls
       assert_empty fixer.calls
-      assert_equal "issue_created",
+      assert_equal "remote_outcome_unknown",
                    result.actions.find { |action| action.fetch("kind") == "issue" }.fetch("outcome")
       assert_equal "queued",
                    result.actions.find { |action| action.fetch("kind") == "fix" }.fetch("outcome")
@@ -1991,7 +2028,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_dry_run_previews_family_routing_with_zero_writes_or_effects
+  def test_dry_run_omits_legacy_issue_candidates_with_zero_writes_or_effects
     with_tmp_dir do |dir|
       store = write_classified_job(
         dir,
@@ -2011,13 +2048,13 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
 
       refute result.complete?
       assert result.dry_run
-      assert_equal "would_initialize", result.actions.first.fetch("outcome")
-      assert_equal true, family_store.calls.first.fetch(:dry_run)
+      assert_empty result.actions
+      assert_empty family_store.calls
       assert_equal before, File.binread(job_path(store, "job-1"))
       assert_empty store.read_job("job-1").fetch("actions")
       assert_empty runner.fixer.calls
       assert_empty runner.pr_opener.calls
-      assert_empty runner.issue_filer.calls
+      refute_respond_to runner, :issue_filer
     end
   end
 
@@ -2133,7 +2170,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_ambiguous_family_fails_closed_without_completing_or_freezing_the_action_snapshot
+  def test_issue_only_job_does_not_consult_legacy_family_store
     with_tmp_dir do |dir|
       store = write_classified_job(
         dir,
@@ -2151,12 +2188,11 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       first = runner.run(job_id: "job-1")
       second = runner.run(job_id: "job-1")
 
-      refute first.complete?
-      refute second.complete?
-      assert_equal "family_ambiguous", first.completeness.fetch("reason")
-      assert_equal "family_ambiguous", first.actions.first.fetch("outcome")
+      assert first.complete?
+      assert second.complete?
+      assert_empty first.actions
       assert_empty store.read_job("job-1").fetch("actions")
-      assert_equal 2, family_store.calls.size
+      assert_empty family_store.calls
     end
   end
 
@@ -2230,7 +2266,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_reuses_exact_cross_registration_issue_proof_without_filing_again
+  def test_legacy_cross_registration_issue_proof_remains_readable_but_is_not_reused
     with_tmp_dir do |root|
       old_root = File.join(root, "old")
       new_root = File.join(root, "new")
@@ -2289,12 +2325,11 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       result = runner.run(job_id: "job-2")
 
       assert result.complete?
-      action = result.actions.first
-      assert_equal action_id, action.fetch("canonical_action_id")
-      assert_equal "issue_created", action.fetch("outcome")
-      assert_equal "old", action.dig("receipts", "canonical_action_link", "owner", "registration")
-      assert_equal "https://github.com/acme/polyglot/issues/73", action.dig("receipts", "issue_url")
-      assert_empty runner.issue_filer.calls
+      assert_empty result.actions
+      legacy = old_store.read_job("job-1").fetch("actions").first
+      assert_equal action_id, legacy.fetch("canonical_action_id")
+      assert_equal "https://github.com/acme/polyglot/issues/73", legacy.dig("receipts", "issue_url")
+      refute_respond_to runner, :issue_filer
     end
   end
 
@@ -2532,7 +2567,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_family_store_failure_is_reported_without_freezing_an_action_snapshot
+  def test_issue_only_job_does_not_open_the_legacy_family_store
     with_tmp_dir do |dir|
       store = write_classified_job(
         dir,
@@ -2543,13 +2578,13 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         ])
       )
       family_store = Object.new
-      family_store.define_singleton_method(:resolve) { |**| raise IOError, "family state unavailable" }
+      family_store.define_singleton_method(:resolve) { |**| raise "must not be called" }
       runner = build_runner(dir, store: store, family_store: family_store)
 
       result = runner.run(job_id: "job-1")
 
-      assert_equal "family_resolution_failed", result.completeness.fetch("reason")
-      assert_includes result.actions.first.fetch("error"), "family state unavailable"
+      assert result.complete?
+      assert_empty result.actions
       assert_empty store.read_job("job-1").fetch("actions")
     end
   end
@@ -2694,7 +2729,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_fix_issue_and_settlement_guards_release_invalid_adapter_states
+  def test_fix_and_settlement_guards_release_invalid_adapter_states
     with_tmp_dir do |dir|
       released = []
       finished = []
@@ -2740,42 +2775,6 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       runner.define_singleton_method(:publication_state) { |*| :invalid }
       runner.send(:process_fix, token, aggregate, action, item)
       assert_includes released, "invalid_creation_intent"
-
-      issue_action = action.merge("kind" => "issue", "family_id" => "af1")
-      runner.define_singleton_method(:transition_denial_reason) { |*| "policy_changed" }
-      runner.send(:process_issue, token, aggregate, issue_action, item, [])
-      assert_includes released, "policy_changed"
-      runner.define_singleton_method(:transition_denial_reason) { |*| nil }
-      runner.define_singleton_method(:current_action) { |_token| issue_action }
-      runner.define_singleton_method(:publication_state) { |*| :invalid }
-      runner.send(:process_issue, token, aggregate, issue_action, item, [])
-      assert_includes released, "invalid_creation_intent"
-
-      no_family = {
-        "actions" => [ action.merge("terminal" => true, "outcome" => "failed") ]
-      }
-      route = runner.send(:issue_route, no_family, issue_action.except("family_id"),
-                          { thesis: item, disposition: "fix", item: {} })
-      assert_nil route.fetch(:outcome)
-      assert_equal "failed", route.fetch(:reasons).first
-      route = runner.send(
-        :issue_route,
-        { "actions" => [], "policy" => snapshot_policy("auto_fix" => false) },
-        issue_action,
-        { thesis: item, disposition: "fix", item: {} }
-      )
-      assert_nil route.fetch(:outcome)
-      assert_equal [ "auto_fix_disabled" ], route.fetch(:reasons)
-      assert_equal "issue_not_needed",
-                   runner.send(:issue_route,
-                               { "actions" => [], "policy" => snapshot_policy("auto_fix" => true) },
-                               issue_action,
-                               { thesis: item, disposition: "fix", item: {} }).fetch(:outcome)
-
-      runner.define_singleton_method(:claim_action) { |*| token }
-      runner.define_singleton_method(:effect_authorized?) { |*| false }
-      runner.send(:finish_local_issue, aggregate, issue_action, "issue_not_needed")
-      assert_includes released, "authority_revoked"
 
       runner.send(:settle, token, fix_result("no_diff", terminal: true), adapter: :fix)
       assert_includes finished, "no_diff"
@@ -2847,21 +2846,10 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       }
       token = { job_id: "job-1", canonical_action_id: "issue-action", continuation_only: false }
 
-      callback = runner.send(:publication_intent_callback, token, "issue", aggregate, action)
-      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
-        callback.call(phase: "issue_create_intent", payload: { "bad" => true })
-      end
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         runner.send(:persist_publication_phase, token, "issue", "unknown", {})
       end
-      assert_nil runner.send(
-        :expected_publication_payload, "issue", "unknown", aggregate, action, nil,
-        expected_remote_oid: nil
-      )
-      malformed = action.merge(
-        "receipts" => { "creation_intent" => { "payload" => {}, "recorded_at" => "never" } }
-      )
-      assert_equal :invalid, runner.send(:publication_state, malformed, aggregate, action)
+      assert_equal :invalid, runner.send(:publication_state, action, aggregate, action)
 
       blocked_decision = Hive::RefactorPatrol::RepositoryOwnership::Decision.new(
         authority: :blocked, reason: "repository_identity_drift", evidence: {}
@@ -2917,83 +2905,27 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_publication_phase_and_legacy_projection_defensive_branches
+  def test_publication_attempt_projection_defensive_branches
     with_tmp_dir do |dir|
-      receipts = []
-      intents = []
-      store = Object.new
-      store.define_singleton_method(:record_action_receipt!) do |_token, key:, value:, **|
-        receipts << [ key, value ]
-      end
-      store.define_singleton_method(:record_creation_intent!) do |_token, intent:, **|
-        intents << intent
-      end
-      runner = build_runner(dir, store: store)
-      token = { job_id: "job-1", canonical_action_id: "issue-action" }
+      runner = build_runner(dir, store: Object.new)
       aggregate = { "job_id" => "job-1", "source" => source(7) }
-      issue_action = {
+      action = {
         "canonical_action_id" => "issue-action", "kind" => "issue",
         "family_id" => "af1", "thesis_fingerprint" => "fp", "receipts" => {}
       }
 
-      runner.send(
-        :persist_publication_phase, token, "issue", Hive::RefactorPatrol::PrOpener::PUSH_COMPLETE,
-        { "operation" => "push_branch_complete" }
-      )
-      runner.define_singleton_method(:current_action) do |_token|
-        issue_action.merge("receipts" => { "creation_intent" => {} })
-      end
-      runner.send(
-        :persist_publication_phase, token, "issue", Hive::RefactorPatrol::PrOpener::PR_CREATE_INTENT,
-        { "operation" => "create_pr" }
-      )
-      runner.define_singleton_method(:current_action) { |_token| issue_action }
-      runner.send(
-        :persist_publication_phase, token, "issue", Hive::RefactorPatrol::PrOpener::PR_CREATE_INTENT,
-        { "operation" => "create_pr" }
-      )
-      assert_equal 2, receipts.size
-      assert_equal 1, intents.size
-
-      malformed_patch_history = issue_action.merge(
+      malformed_patch_history = action.merge(
         "receipts" => { Hive::RefactorPatrol::PublicationAttempt::ATTEMPTS_KEY => [] }
       )
       assert_equal :invalid, runner.send(
         :patch_from_receipts, malformed_patch_history, aggregate, thesis(id: "fix")
       )
 
-      %w[push_branch create_pr].each do |operation|
-        candidate = issue_action.merge(
-          "receipts" => {
-            "creation_intent" => {
-              "payload" => { "operation" => operation },
-              "recorded_at" => "2026-07-12T10:00:00Z"
-            }
-          }
-        )
-        assert_equal :invalid, runner.send(
-          :publication_state, candidate, aggregate, issue_action
-        )
-      end
-      [ Hive::RefactorPatrol::PrOpener::PUSH_COMPLETE,
-        Hive::RefactorPatrol::PrOpener::PR_CREATE_INTENT ].each do |phase|
-        candidate = issue_action.merge(
-          "receipts" => { phase => { "operation" => "unexpected" } }
-        )
-        assert_equal :invalid, runner.send(
-          :publication_state, candidate, aggregate, issue_action
-        )
-      end
-      nil_phase = issue_action.merge(
-        "receipts" => { Hive::RefactorPatrol::PrOpener::PUSH_COMPLETE => nil }
-      )
-      assert_equal(
-        { Hive::RefactorPatrol::PrOpener::PUSH_COMPLETE => nil },
-        runner.send(:publication_state, nil_phase, aggregate, issue_action)
-      )
+      assert_equal :invalid,
+                   runner.send(:publication_state, action, aggregate, action)
 
       patch = validated_patch(fingerprint: "fp")
-      fix_action = issue_action.merge(
+      fix_action = action.merge(
         "canonical_action_id" => "fix-action", "kind" => "fix",
         "thesis_fingerprint" => "fp"
       )
@@ -3082,7 +3014,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       patch = validated_patch(fingerprint: "fingerprint-1")
       publication = runner.send(
         :publication_effect_executor,
-        token, "issue", aggregate, action
+        token, "fix", aggregate, action, patch
       )
       handoff = runner.send(
         :handoff_effect_executor,
@@ -3093,8 +3025,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         Hive::RefactorPatrol::JobStore::InconsistentRecord
       ) do
         publication.call(
-          phase: "issue_create_intent",
-          payload: { "operation" => "create_issue", "mutated" => true }
+          phase: Hive::RefactorPatrol::PrOpener::PR_CREATE_INTENT,
+          payload: { "operation" => "create_pr", "mutated" => true }
         ) { {} }
       end
       handoff_error = assert_raises(
@@ -3202,15 +3134,6 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
           {}
         )
       )
-      assert_equal(
-        { "issue_url" => "https://github.com/acme/demo/issues/1" },
-        runner.send(
-          :publication_effect_outcome,
-          "issue",
-          "https://github.com/acme/demo/issues/1",
-          {}
-        )
-      )
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         runner.send(:publication_effect_outcome, "unknown", nil, {})
       end
@@ -3231,14 +3154,6 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
           { "pr_url" => "https://github.com/acme/demo/pull/1" }
         )
       )
-      assert_equal(
-        "https://github.com/acme/demo/issues/1",
-        runner.send(
-          :publication_effect_value,
-          "issue",
-          { "issue_url" => "https://github.com/acme/demo/issues/1" }
-        )
-      )
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         runner.send(:publication_effect_value, "unknown", {})
       end
@@ -3254,10 +3169,10 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
   def test_publication_executor_recovers_a_previously_delivered_effect
     with_tmp_dir do |dir|
       runner = build_runner(dir, store: Object.new)
-      payload = { "operation" => "create_issue" }
+      payload = { "operation" => "create_pr" }
       gateway = Object.new
       result = Struct.new(:outcome).new(
-        { "issue_url" => "https://github.com/acme/demo/issues/7" }
+        { "pr_url" => "https://github.com/acme/demo/pull/7" }
       )
       gateway.define_singleton_method(:perform!) do |**|
         result
@@ -3269,10 +3184,10 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       runner.define_singleton_method(:effect_capture) { |*| :capture }
       runner.define_singleton_method(:effect_descriptor) do |*, **|
         {
-          sink: "issue",
+          sink: "pull_request",
           target: "acme/demo",
-          idempotency_key: "issue:job-1",
-          capability: "github_issues"
+          idempotency_key: "pr:job-1",
+          capability: "github_pull_requests"
         }
       end
       runner.define_singleton_method(:build_effect_gateway) do |*, **|
@@ -3290,17 +3205,17 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       executor = runner.send(
         :publication_effect_executor,
         token,
-        "issue",
+        "fix",
         { "job_id" => "job-1" },
         { "canonical_action_id" => "action-1" }
       )
 
       value = executor.call(
-        phase: "issue_create_intent",
+        phase: Hive::RefactorPatrol::PrOpener::PR_CREATE_INTENT,
         payload: payload
       ) { flunk("recovered effect must not redeliver") }
 
-      assert_equal "https://github.com/acme/demo/issues/7", value
+      assert_equal "https://github.com/acme/demo/pull/7", value
     end
   end
 
@@ -3351,7 +3266,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         continuation_only: false
       }
       aggregate = { "source" => source(7) }
-      issue_action = {
+      action = {
         "canonical_action_id" => "action-1",
         "family_id" => "family-1"
       }
@@ -3359,28 +3274,20 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       capture_error = assert_raises(
         Hive::RefactorPatrol::JobStore::InconsistentRecord
       ) do
-        runner.send(:effect_capture, token, aggregate, issue_action)
+        runner.send(:effect_capture, token, aggregate, action)
       end
-      issue = runner.send(
-        :effect_descriptor,
-        token, "issue", "issue_create_intent", {},
-        aggregate, issue_action, attempt_id: nil
-      )
       phase_error = assert_raises(
         Hive::RefactorPatrol::JobStore::InconsistentRecord
       ) do
         runner.send(
           :effect_descriptor,
           token, "fix", "unknown", {},
-          aggregate, issue_action, attempt_id: nil
+          aggregate, action, attempt_id: nil
         )
       end
 
       assert_equal "architecture patrol effect occurrence is unavailable",
                    capture_error.message
-      assert_equal "issue", issue.fetch(:sink)
-      assert_equal "acme/polyglot:family-1", issue.fetch(:target)
-      assert_equal "github_issues", issue.fetch(:capability)
       assert_equal "architecture patrol effect phase is unsupported",
                    phase_error.message
     end
@@ -3465,11 +3372,6 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       )
       assert runner.send(
         :claim_effect_authorized?,
-        token, "issue", capability_context: context,
-        capability: "github_issues"
-      )
-      assert runner.send(
-        :claim_effect_authorized?,
         token, "fix", capability_context: context,
         capability: "review_handoff"
       )
@@ -3482,9 +3384,6 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         [
           [ :require_repository_write! ],
           [ :require_github_mutation!, "pull_requests" ],
-          [ :require_external_command!, "gh" ],
-          [ :require_network_host!, "api.github.com" ],
-          [ :require_github_mutation!, "issues" ],
           [ :require_external_command!, "gh" ],
           [ :require_network_host!, "api.github.com" ],
           [ :require_filesystem_write!, ".hive-state/stages/**" ]

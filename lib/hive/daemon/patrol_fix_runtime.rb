@@ -1,5 +1,7 @@
 require "open3"
+require "hive/agent_limit"
 require "hive/config"
+require "hive/daemon/patrol_fix_operational_projection"
 require "hive/daemon/patrol_fix_semantic_decision_runner"
 require "hive/git_ops"
 require "hive/patrol/fix_admission_outbox"
@@ -53,16 +55,41 @@ module Hive
 
       def initialize(registry: -> { Hive::Config.registered_projects },
                      config_loader: ->(path) { Hive::Config.load(path) },
-                     decision_runner_factory: nil)
+                     decision_runner_factory: nil,
+                     operational_projection: Hive::Daemon::PatrolFixOperationalProjection.new)
         @registry = registry
         @config_loader = config_loader
+        @operational_projection = operational_projection
         @decision_runner_factory = decision_runner_factory || lambda do |**arguments|
           Hive::Daemon::PatrolFixSemanticDecisionRunner.new(**arguments)
         end
-        @sources = build_sources.freeze
+        @entries = @registry.call.map { |raw| normalize_entry(raw) }.freeze
+        @sources = build_sources(@entries).freeze
       end
 
       attr_reader :sources
+
+      # The daemon is the sole owner of source-store reads. All interfaces
+      # receive these bounded project rows through OperationalSnapshot.
+      def operational_projections(tasks:, now: Time.now.utc)
+        task_rows = Array(tasks).group_by { |row| value(row, :project).to_s }
+        @entries.to_h do |entry|
+          name = entry.fetch("name")
+          normalized_tasks = Array(task_rows[name]).map { |row| operational_task(row) }
+          projection = begin
+            @operational_projection.call(
+              project: entry, config: @config_loader.call(entry.fetch("path")),
+              tasks: normalized_tasks, now: now
+            )
+          rescue StandardError => error
+            @operational_projection.unavailable(
+              project: entry, tasks: normalized_tasks, now: now,
+              source: "runtime", code: "runtime_projection_unavailable", error: error
+            )
+          end
+          [ name, projection ]
+        end
+      end
 
       def admission_store(source:, **)
         Hive::PatrolFix::AdmissionStore.new(
@@ -103,9 +130,8 @@ module Hive
 
       private
 
-      def build_sources
-        @registry.call.flat_map do |raw|
-          entry = normalize_entry(raw)
+      def build_sources(entries)
+        entries.flat_map do |entry|
           [
             Source.new(
               entry: entry,
@@ -171,6 +197,30 @@ module Hive
                 "cannot resolve Patrol-fix admission head: #{error.to_s.strip[0, 256]}"
         end
         out.strip
+      end
+
+      def operational_task(row)
+        attrs = value(row, :marker_attrs)
+        held = if attrs.is_a?(Hash) && Hive::AgentLimit.held?(value(row, :marker), attrs)
+          {
+            "provider" => Hive::AgentLimit.held_provider(attrs),
+            "retry_after" => Hive::AgentLimit.retry_after_time(attrs)&.iso8601
+          }
+        end
+        {
+          "slug" => value(row, :slug).to_s,
+          "stage" => value(row, :stage).to_s,
+          "patrol_fix" => value(row, :patrol_fix),
+          "held" => held
+        }
+      end
+
+      def value(row, key)
+        return row.public_send(key) if row.respond_to?(key)
+        return row[key] if row.respond_to?(:key?) && row.key?(key)
+        return row[key.to_s] if row.respond_to?(:key?) && row.key?(key.to_s)
+
+        nil
       end
     end
   end

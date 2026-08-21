@@ -122,7 +122,7 @@ module Hive
           @observations = {}
           @store.write(
             base_record(phase: "started", now: now).merge(
-              "discovery_allowances" => nil, "tasks" => []
+              "discovery_allowances" => nil, "patrol_fix_projects" => nil, "tasks" => []
             )
           )
           tick_sequence
@@ -139,6 +139,7 @@ module Hive
               "reason" => nil,
               "capacity" => {}, "queue" => {},
               "discovery_allowances" => {},
+              "patrol_fix_projects" => {},
               "provider_holds" => [], "recoveries" => {},
               "tasks" => []
             )
@@ -165,6 +166,7 @@ module Hive
               "capacity" => nil,
               "queue" => nil,
               "discovery_allowances" => nil,
+              "patrol_fix_projects" => nil,
               "provider_holds" => [],
               "recoveries" => {},
               "tasks" => []
@@ -174,6 +176,7 @@ module Hive
 
         def complete(initial_rows:, final_rows:, controller:, queue:, recoveries:,
                      discovery_allowances: {},
+                     patrol_fix_projects: {},
                      initial_hidden_archived_task_count: 0,
                      final_hidden_archived_task_count: 0,
                      now: Time.now.utc)
@@ -205,6 +208,7 @@ module Hive
               "capacity" => controller || {},
               "queue" => queue || {},
               "discovery_allowances" => discovery_allowances || {},
+              "patrol_fix_projects" => patrol_fix_projects || {},
               "provider_holds" => holds,
               "recoveries" => recoveries || {},
               "tasks" => tasks
@@ -221,6 +225,7 @@ module Hive
             base_record(phase: "complete", now: now).merge(
               "reason" => nil,
               "capacity" => {}, "queue" => {}, "discovery_allowances" => {},
+              "patrol_fix_projects" => {},
               "provider_holds" => [],
               "recoveries" => {}, "tasks" => [],
               "shutdown" => {
@@ -317,7 +322,9 @@ module Hive
             "dependency_stage" => nullable_string(value(row, :dependency_stage)),
             "blocked" => value(row, :blocked) == true,
             "admission_error" => canonical_record(value(row, :admission_error))
-          }
+          }.merge(
+            "patrol_fix" => canonical_record(value(row, :patrol_fix))
+          )
         end
 
         def record_fingerprint(record)
@@ -645,6 +652,7 @@ module Hive
             "capacity" => nil,
             "queue" => nil,
             "discovery_allowances" => nil,
+            "patrol_fix_projects" => nil,
             "provider_holds" => [],
             "tasks" => []
           )

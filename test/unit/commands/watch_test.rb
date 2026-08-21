@@ -469,12 +469,12 @@ class CommandsWatchTest < Minitest::Test
 
   def test_human_output_escapes_controls_and_epipe_exits_cleanly
     unsafe = task(
-      project: "a\e[2J", state: "waiting_on_you", owner: "operator",
-      reason: "choose\nnow"
+      project: "demo", state: "waiting_on_you", owner: "operator",
+      reason: "choose\e[2J\nnow"
     )
     output = StringIO.new
     build_watch(
-      source: FakeSource.new(snapshot(unsafe)), targets: [ "a\e[2J:task" ],
+      source: FakeSource.new(snapshot(unsafe)), targets: [ "demo:task" ],
       output: output, json_lines: false
     ).call
     assert_includes output.string, "\\x1B"
@@ -639,6 +639,7 @@ class CommandsWatchTest < Minitest::Test
       "action_id" => "workflow.advance", "risk_class" => "routine_idempotent",
       "confirmation_required" => true, "observation_token" => "drop"
     }
+    enriched["patrol_fix"] = { "stage" => "4-review", "successor" => nil }
 
     events, = run_json_watch(source: FakeSource.new(snapshot(enriched)), targets: [ "demo:task" ])
     projected = events.first.fetch("targets").first
@@ -649,6 +650,44 @@ class CommandsWatchTest < Minitest::Test
       "action_id" => "workflow.advance", "risk_class" => "routine_idempotent",
       "confirmation_required" => true
     }, projected.fetch("action_policy"))
+    assert_equal enriched.fetch("patrol_fix"), projected.fetch("patrol_fix")
+  end
+
+  def test_archived_target_preserves_patrol_fix_publication
+    archived = legacy_task(action: "archived")
+    archived["patrol_fix"] = {
+      "stage" => "6-done", "decision" => { "route" => "fix" },
+      "successor" => nil, "publication" => { "state" => "open" }
+    }
+    events, = run_json_watch(
+      source: FakeSource.new(snapshot(nil, archived: [ archived ])),
+      targets: [ "demo:task" ]
+    )
+
+    assert_equal archived.fetch("patrol_fix"),
+                 events.first.dig("targets", 0, "patrol_fix")
+    assert_equal patrol_fix_project("demo"),
+                 events.first.dig("patrol_fix_projects", "demo")
+  end
+
+  def test_project_projection_is_exact_bounded_pass_through_and_fingerprinted
+    first = patrol_fix_project("demo")
+    second = Marshal.load(Marshal.dump(first))
+    second["tokens"] = second.fetch("tokens").merge(
+      "available" => true, "input" => 1, "output" => 2, "cached" => 3,
+      "total" => 3, "launches" => 1, "unmetered_launches" => 0
+    )
+    source = FakeSource.new(
+      snapshot(task, project_projections: { "demo" => first }),
+      snapshot(task, project_projections: { "demo" => second })
+    )
+
+    events, = run_json_watch(source: source, targets: [ "demo:task" ], max_events: 2)
+
+    assert_equal %w[initial transition final], events.map { |event| event.fetch("event") }
+    assert_equal first, events.first.dig("patrol_fix_projects", "demo")
+    assert_equal second, events[1].dig("patrol_fix_projects", "demo")
+    assert_watch_schema(events)
   end
 
   def test_default_signal_handlers_are_installed_for_the_bounded_call
@@ -749,7 +788,7 @@ class CommandsWatchTest < Minitest::Test
     }
   end
 
-  def snapshot(*rows, archived: [])
+  def snapshot(*rows, archived: [], project_projections: {})
     active = rows.compact
     legacy_rows = active.map do |row|
       legacy_task(
@@ -758,6 +797,14 @@ class CommandsWatchTest < Minitest::Test
         stage: row.dig("position", "stage")
       )
     end + archived
+    project_names = (legacy_rows.map { |row| row.fetch("project") } + [ "demo" ]).uniq
+    projects = project_names.map do |name|
+      {
+        "name" => name,
+        "patrol_fix" => project_projections.fetch(name) { patrol_fix_project(name) },
+        "tasks" => legacy_rows.select { |row| row.fetch("project") == name }
+      }
+    end
     Hive::Commands::Watch::SourceSnapshot.new(
       operational: {
         "schema" => "hive-operational-status",
@@ -771,8 +818,16 @@ class CommandsWatchTest < Minitest::Test
         "schema" => "hive-status",
         "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
         "ok" => true,
-        "projects" => [ { "name" => "demo", "tasks" => legacy_rows } ]
+        "projects" => projects
       }
+    )
+  end
+
+  def patrol_fix_project(project)
+    Hive::PatrolFix::OperationalProjection.unavailable(
+      project: project, tasks: [], now: Time.utc(2026, 7, 20, 12),
+      source: "daemon_snapshot", code: "snapshot_unavailable",
+      summary: "Patrol-fix snapshot is unavailable"
     )
   end
 

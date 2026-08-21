@@ -11,6 +11,7 @@ module Hive
     autoload :TaskManifest, "hive/patrol_fix/task_manifest"
     autoload :ReceiptStore, "hive/patrol_fix/receipt_store"
     autoload :Projection, "hive/patrol_fix/projection"
+    autoload :OperationalProjection, "hive/patrol_fix/operational_projection"
     autoload :Runner, "hive/patrol_fix/runner"
     autoload :SourceSnapshot, "hive/patrol_fix/source_snapshot"
     autoload :AdmissionStore, "hive/patrol_fix/admission_store"

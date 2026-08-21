@@ -239,6 +239,15 @@ Hermetic coverage lives in `test/unit/workflows/content_test.rb`,
 `test/integration/content_workflow_stage_test.rb`, and
 `test/integration/content_workflow_e2e_test.rb`.
 
+## Patrol Fix workflow projection
+
+Patrol Fix uses the normal task workflow concurrency for
+Inbox/Fix/Validate/Review/Publish/Done after discovery admission. Discovery
+allowances stay outside workflow capacity. The common daemon-owned operational
+projection reports the active stage, parked/provider state, rework and
+rejection outcomes, successor linkage, and exact PR-created/open fields without
+giving any status adapter a second task-state interpretation or mutation path.
+
 ## Durable human stages
 
 `Hive::Workflow::Stage` accepts `kind: :human` plus immutable named

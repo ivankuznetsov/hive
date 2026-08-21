@@ -135,6 +135,20 @@ class PatrolFixProjectionTest < Minitest::Test
     end
   end
 
+  def test_timing_projects_durable_receipt_boundaries_and_parked_intervals
+    with_task do |dir, _manifest, receipts|
+      receipts.append!(decision_receipt(route: "blocked", stage: "review", id: "decision-1"))
+      receipts.append!(reopen_receipt(outcome_receipt_id: "decision-1"))
+
+      projected = Hive::PatrolFix::Projection.new(task_folder: dir, stage: "4-review").to_h
+
+      assert_equal "2026-08-20T12:00:00Z", projected.dig("timing", "started_at")
+      assert_equal 60, projected.dig("timing", "parked_seconds")
+      assert_nil projected.dig("timing", "parked_since")
+      assert_equal 0, projected.dig("timing", "rework_count")
+    end
+  end
+
   private
 
   def with_task(successor: nil)

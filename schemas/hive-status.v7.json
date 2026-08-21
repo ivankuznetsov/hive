@@ -51,7 +51,7 @@
     "Project": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "path", "hive_state_path", "tasks"],
+      "required": ["name", "path", "hive_state_path", "tasks", "patrol_fix"],
       "properties": {
         "name": { "type": "string" },
         "path": { "type": "string" },
@@ -61,6 +61,7 @@
           "enum": ["missing_project_path", "not_initialised", "project_load_failed"]
         },
         "tasks": { "type": "array", "items": { "$ref": "#/$defs/Task" } },
+        "patrol_fix": { "$ref": "#/$defs/PatrolFixOperationalProjection" },
         "config_summary": {
           "type": "object",
           "additionalProperties": false,
@@ -90,6 +91,25 @@
         },
         "legacy_migrate_command": { "type": ["string", "null"] },
         "hidden_archived_task_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "PatrolFixOperationalProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "project", "generated_at", "completeness", "diagnostics", "discovery", "admission", "workflow", "migration", "delivery", "tokens"],
+      "properties": {
+        "schema": {"const": "hive-patrol-fix-operational-projection"},
+        "schema_version": {"const": 1},
+        "project": {"type": "string", "minLength": 1},
+        "generated_at": {"type": "string", "format": "date-time"},
+        "completeness": {"enum": ["complete", "partial"]},
+        "diagnostics": {"type": "array", "maxItems": 16},
+        "discovery": {"type": "object"},
+        "admission": {"type": "object"},
+        "workflow": {"type": "object"},
+        "migration": {"type": "object"},
+        "delivery": {"type": "object"},
+        "tokens": {"type": "object"}
       }
     },
     "AdmissionError": {

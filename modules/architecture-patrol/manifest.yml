@@ -86,6 +86,6 @@ templates:
 docs:
   - "README.md"
 files:
-  "README.md": "ececda34faa53626eed7eef2c3c84f4cc5f77a697c955d5fb0c1d70fa38ef9f6"
-  "templates/refactor-patrol.yml": "dc64ee66282374b8cc39c4769c005c1649982739e91fb4686cc0ffa04ebaac42"
-release_sha256: "c5275de8ce33184be51fa1a22f63612eceb080406aafb3519996ed089ee7c6b4"
+  "README.md": "fdf5913e5e37c2b9cf8895be0cdd26aca9424b25f8bb855bdcc7c5ec46613747"
+  "templates/refactor-patrol.yml": "2cc38868acdd2c1db566a024c976b1ab4a68c8fc9d53cddb2bdae26249816da5"
+release_sha256: "7c9ba3a9567e2c8d22299c0301e4435e34b1bbc1f4060ad1f90793fc465a960b"

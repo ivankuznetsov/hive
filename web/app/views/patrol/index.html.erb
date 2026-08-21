@@ -43,11 +43,11 @@
             <% ordinary.items.each do |finding| %>
               <article class="patrol-row">
                 <div class="patrol-row-title">
-                  <strong><%= finding["title"].presence || finding["category"].to_s.humanize %></strong>
-                  <span class="tag"><%= finding["lifecycle_state"].to_s.presence || "active" %></span>
+                  <strong><%= finding["title"].presence || finding["identity"] %></strong>
+                  <span class="tag"><%= finding["state"] %></span>
                 </div>
                 <p class="patrol-meta"><%= finding["severity"] %> · <%= finding["confidence"] %> confidence · <%= finding["feature_id"] %></p>
-                <% if finding["description"].present? %><p><%= truncate(finding["description"], length: 280) %></p><% end %>
+                <% if finding["summary"].present? %><p><%= truncate(finding["summary"], length: 280) %></p><% end %>
               </article>
             <% end %>
           </div>
@@ -82,24 +82,22 @@
             <% architecture.items.each do |job| %>
               <article class="patrol-row">
                 <div class="patrol-row-title">
-                  <strong><%= job.fetch("job_id") %></strong>
+                  <strong><%= job.fetch("identity") %></strong>
                   <span class="tag"><%= job.fetch("state") %></span>
                 </div>
                 <p class="patrol-meta">
-                  <%= link_to "PR ##{job.dig('source', 'number')}", job.dig("source", "url"), target: "_blank", rel: "noopener noreferrer" %>
-                  · <%= job.dig("counts", "fix") %> fix
-                  · <%= job.dig("counts", "discuss") %> discuss
-                  · <%= job.dig("counts", "pending_actions") %> pending actions
+                  <% if job.dig("source", "url").present? %>
+                    <%= link_to "PR ##{job.dig('source', 'number')}", job.dig("source", "url"), target: "_blank", rel: "noopener noreferrer" %>
+                    ·
+                  <% end %>
+                  <%= job["route"].presence || "observed" %>
                 </p>
-                <% reasons = Array(job["blockers"]).map { |blocker| blocker["reason"] }.compact.uniq %>
-                <% if reasons.any? %><p>Blocked: <%= reasons.join(", ") %></p><% end %>
-                <% if Array(job["findings"]).any? %>
+                <% if job["blocker"].present? %><p>Blocked: <%= job["blocker"] %></p><% end %>
+                <% if Array(job["evidence"]).any? %>
                   <ul class="patrol-findings">
-                    <% job.fetch("findings").each do |finding| %>
+                    <% job.fetch("evidence").each do |evidence| %>
                       <li>
-                        <span class="tag"><%= finding.fetch("route") %></span>
-                        <strong><%= finding["problem"].presence || finding["id"] %></strong>
-                        <% if finding["proposed_refactor"].present? %> — <%= truncate(finding["proposed_refactor"], length: 220) %><% end %>
+                        <%= truncate(evidence, length: 220) %>
                       </li>
                     <% end %>
                   </ul>

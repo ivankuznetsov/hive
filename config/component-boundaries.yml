@@ -239,6 +239,7 @@ components:
         - Hive::PatrolFix::TaskManifest
         - Hive::PatrolFix::ReceiptStore
         - Hive::PatrolFix::Projection
+        - Hive::PatrolFix::OperationalProjection
         - Hive::PatrolFix::PublicationReceipt
         - Hive::PatrolFix::SemanticAdmission
         - Hive::PatrolFix::SourceSnapshot
@@ -282,6 +283,7 @@ components:
       - lib/hive/patrol_fix/task_manifest.rb
       - lib/hive/patrol_fix/receipt_store.rb
       - lib/hive/patrol_fix/projection.rb
+      - lib/hive/patrol_fix/operational_projection.rb
       - lib/hive/patrol_fix/publication_receipt.rb
       - lib/hive/patrol_fix/runner.rb
       - lib/hive/patrol_fix/admission_store.rb
@@ -309,6 +311,7 @@ components:
       - schemas/hive-patrol-fix-task-manifest.v1.json
       - schemas/hive-patrol-fix-receipt.v1.json
       - schemas/hive-patrol-fix-projection.v1.json
+      - schemas/hive-patrol-fix-operational-projection.v1.json
       - schemas/hive-patrol-fix-migration-semantic-decision.v1.json
       - schemas/hive-patrol-fix-migration-disposition-manifest.v1.json
       - schemas/hive-patrol-fix-migration-cutover-state.v1.json
@@ -316,6 +319,7 @@ components:
       - "The strict task manifest binds every source revision and one canonical task generation while append-only receipts bind exact evidence generation"
       - "Equivalent evidence may add provenance within a generation; materially changed evidence advances exactly one generation and invalidates old receipts"
       - "Projection fails closed with bounded diagnostics, keeps parked outcomes non-done, and requires an exact current publication receipt for done"
+      - "One bounded project operational projection combines source-edge discovery observations with core admission, workflow, migration, delivery, and telemetry-only token state"
       - "Source-owned handoffs feed one strict admission occurrence; deterministic intent precedes task capture, exact binding precedes source acknowledgement, and replay repairs every incomplete boundary"
       - "Semantic admission snapshots and revalidates the bounded candidate set without holding a durable store lock across provider reasoning"
       - "Local fix generations bind exact evidence, base, owned worktree, branch, clean committed head, and bounded diff without remote authentication or publication"
@@ -328,6 +332,7 @@ components:
       - "Migration application re-reads each source by immutable identity, binds one task per semantic group, acknowledges every member last, and verifies the complete authorities before commit"
     schema_contracts:
       - "Manifest, decision, receipt, and projection contracts are versioned, bounded, and reject unknown fields"
+      - "The dedicated operational projection schema is the cached validation authority shared by status and interface pass-through consumers"
       - "Source provenance includes source engine, identity, target revision, evidence, affected code, reproduction guidance, discovery run, and semantic lineage"
       - "Source snapshots, outbox records, and admission records are canonical, size bounded, digest bound, and reject secret-like material"
       - "Migration semantic decisions bind the complete candidate-set digest and current head; opaque Architecture v3 bytes remain a separate count and digest inventory"
@@ -380,6 +385,11 @@ components:
       - lib/hive/stages/patrol_fix/publish.rb
       - lib/hive/patrol/migration_inventory.rb
       - lib/hive/refactor_patrol/migration_inventory.rb
+      - lib/hive/commands/status.rb
+      - lib/hive/commands/watch.rb
+      - lib/hive/daemon/patrol_fix_operational_projection.rb
+      - lib/hive/operational_status.rb
+      - web/app/models/patrol_overview.rb
     mutation_authority: "Strict task-local manifest replacement, append-only decision/fix/validation/publication/reopen receipts, stable receipt-gated stage/route-transition journals, and reciprocal coding-successor relations only."
     recovery_surface: "Projects generation-guarded reopen eligibility, replays incomplete route actions, and reconciles exactly one linked coding successor; no scheduler, adapter, issue, or remote-publication authority."
     wiki_page: wiki/modules/patrol.md
@@ -387,6 +397,7 @@ components:
       - test/unit/patrol_fix/task_manifest_test.rb
       - test/unit/patrol_fix/receipt_store_test.rb
       - test/unit/patrol_fix/projection_test.rb
+      - test/unit/patrol_fix/operational_projection_test.rb
       - test/unit/patrol_fix/publication_receipt_test.rb
       - test/unit/patrol_fix/task_action_test.rb
       - test/unit/patrol_fix/worktree_receipt_test.rb
@@ -621,12 +632,13 @@ components:
           - lib/hive/commands/refactor_patrol.rb
           - lib/hive/daemon/refactor_patrol_merge_reconciler.rb
           - lib/hive/daemon/refactor_patrol_scheduler.rb
+          - lib/hive/daemon/patrol_fix_operational_projection.rb
           - lib/hive/modules/migration/coordinator.rb
           - lib/hive/refactor_patrol/action_runner.rb
           - lib/hive/refactor_patrol/canonical_action_catalog.rb
           - lib/hive/refactor_patrol/family_store.rb
           - lib/hive/refactor_patrol/repository_ownership.rb
-        reason: "Explicit command, scheduler, migration, action, catalog, family, and ownership composition roots construct the public architecture aggregate facade; lexical aliases are enforced too."
+        reason: "Explicit command, scheduler, operational projection, migration, action, catalog, family, and ownership composition roots construct the public architecture aggregate facade; lexical aliases are enforced too."
       - constant: Hive::RefactorPatrol::JobQueryIndex
         files:
           - lib/hive/refactor_patrol/job_store.rb
@@ -639,6 +651,7 @@ components:
       - lib/hive/commands/patrol.rb
       - lib/hive/commands/refactor_patrol.rb
       - lib/hive/daemon/patrol_scheduler.rb
+      - lib/hive/daemon/patrol_fix_operational_projection.rb
       - lib/hive/daemon/refactor_patrol_merge_reconciler.rb
       - lib/hive/daemon/refactor_patrol_scheduler.rb
       - lib/hive/daemon/status_report.rb

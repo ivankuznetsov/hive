@@ -5,6 +5,7 @@ require "hive/recovery"
 require "hive/workflows"
 require "hive/task_closure"
 require "hive/terminal_outcome"
+require "hive/patrol_fix/operational_projection"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
@@ -46,6 +47,7 @@ module Hive
       @scheduler_join_issues = []
       @scheduler_join_issue_keys = {}
       scheduler = scheduler_payload(projects)
+      patrol_fix = patrol_fix_payload(projects, scheduler)
       issues.concat(scheduler.fetch("issues"))
       attempt_storage = attempt_storage_payload
       issues.concat(attempt_storage_issues(attempt_storage))
@@ -58,6 +60,9 @@ module Hive
         scheduler.fetch("status"),
         scheduler_join_complete: @scheduler_join_issues.empty?
       )
+      if completeness == "complete" && patrol_fix.any? { |projection| projection["completeness"] == "partial" }
+        completeness = "partial"
+      end
       counts = STATES.to_h { |state| [ state, tasks.count { |row| row.fetch("state") == state } ] }
 
       {
@@ -92,6 +97,7 @@ module Hive
         "daemon" => daemon_payload(projects, scheduler, attempt_storage: attempt_storage),
         "attempt_storage" => attempt_storage,
         "scheduler" => scheduler.reject { |key, _| key == "issues" },
+        "patrol_fix" => patrol_fix,
         "archive" => archive_payload(archived),
         "issues" => issues,
         "tasks" => tasks
@@ -309,6 +315,25 @@ module Hive
       }
     end
 
+    def patrol_fix_payload(projects, scheduler)
+      snapshot_projects = if scheduler["status"] == "current" && @daemon_snapshot.is_a?(Hash)
+        @daemon_snapshot["patrol_fix_projects"]
+      end
+      projects.map do |project|
+        name = project.fetch("name")
+        projection = snapshot_projects.is_a?(Hash) ? snapshot_projects[name] : project["patrol_fix"]
+        if Hive::PatrolFix::OperationalProjection.valid_document?(projection, project: name)
+          projection
+        else
+          Hive::PatrolFix::OperationalProjection.unavailable(
+            project: name, tasks: project.fetch("tasks", []), now: @now,
+            source: "operational_status", code: "projection_invalid",
+            summary: "Patrol-fix operational projection is missing or invalid"
+          )
+        end
+      end
+    end
+
     def attempt_storage_payload
       value = @daemon_snapshot.is_a?(Hash) ? @daemon_snapshot["attempt_storage"] : nil
       return value if value.is_a?(Hash)
@@ -476,7 +501,8 @@ module Hive
         "blocked_by" => row["blocked_by"],
         "dependency_stage" => row["dependency_stage"],
         "blocked" => row["blocked"] == true,
-        "admission_error" => row["admission_error"]
+        "admission_error" => row["admission_error"],
+        "patrol_fix" => row["patrol_fix"]
       }
       actual = {
         "folder" => observed.dig("identity", "folder"),
@@ -494,7 +520,8 @@ module Hive
         "blocked_by" => observed["blocked_by"],
         "dependency_stage" => observed["dependency_stage"],
         "blocked" => observed["blocked"],
-        "admission_error" => observed["admission_error"]
+        "admission_error" => observed["admission_error"],
+        "patrol_fix" => observed["patrol_fix"]
       }
       expected.all? do |key, value|
         other = actual[key]

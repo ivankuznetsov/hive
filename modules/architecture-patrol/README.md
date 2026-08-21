@@ -21,7 +21,8 @@ compatible throughout Hive 0.x.
 
 The merged-PR manifest remains immutable enqueue provenance. A distinct
 finalized scheduler capture is emitted only after the authoritative JobStore
-checkpoint or release, and branch, issue, pull-request, and review-handoff
-mutations pass through the Architecture Patrol gateway while its live claim
-and migration ownership are valid. Scheduled current-main results and
-merged-PR JobStore recovery remain separate durable authorities.
+checkpoint or release. New findings enter the common Patrol-fix workflow,
+which may publish pull requests after validation and review. Architecture
+Patrol no longer creates GitHub issues; historical issue links remain readable
+as provenance during migration. Scheduled current-main results and merged-PR
+JobStore recovery remain separate durable authorities.

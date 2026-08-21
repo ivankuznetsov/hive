@@ -3,6 +3,7 @@ require "json"
 require "time"
 require "timeout"
 require "hive/commands/status"
+require "hive/patrol_fix/operational_projection"
 require "hive/config"
 require "hive/terminal_text"
 
@@ -389,6 +390,7 @@ module Hive
         selected = @selection.to_h do |selection|
           [ [ selection.project, selection.slug ], true ]
         end
+        @patrol_fix_projects = patrol_fix_projects(snapshot)
         active = Hash.new { |hash, key| hash[key] = [] }
         Array(snapshot.operational["tasks"]).each do |row|
           key = [ row.dig("identity", "project"), row.dig("identity", "slug") ]
@@ -426,6 +428,26 @@ module Hive
         end
         @selection = promoted_selections
         targets
+      end
+
+      def patrol_fix_projects(snapshot)
+        rows = Array(snapshot.full_graph["projects"])
+        @selection.map(&:project).uniq.sort.to_h do |project_name|
+          matches = rows.select { |row| row["name"] == project_name }
+          unless matches.one?
+            raise StatusUnavailableError,
+                  "status returned #{matches.length} project rows for #{project_name.inspect}"
+          end
+          projection = matches.first["patrol_fix"]
+          unless Hive::PatrolFix::OperationalProjection.valid_document?(
+            projection, project: project_name
+          )
+            raise StatusUnavailableError,
+                  "status returned an invalid Patrol-fix projection for #{project_name.inspect}"
+          end
+
+          [ project_name, projection ]
+        end
       end
 
       def selection_for_entries!(entries, target)
@@ -545,6 +567,7 @@ module Hive
             "marker" => row.dig("position", "marker")
           },
           "provider" => provider_subset(row["provider"]),
+          "patrol_fix" => row["patrol_fix"],
           "freshness" => {
             "scheduler_status" => row.dig("freshness", "scheduler_status") || "unavailable"
           },
@@ -570,6 +593,7 @@ module Hive
           "reason_codes" => [ "archived" ],
           "position" => { "stage" => row["stage"], "marker" => row["marker"] },
           "provider" => nil,
+          "patrol_fix" => row["patrol_fix"],
           "freshness" => { "scheduler_status" => "not_applicable" },
           "liveness_status" => "not_running",
           "terminality" => { "settled" => true, "completion" => true },
@@ -590,6 +614,7 @@ module Hive
           "reason_codes" => [ "task_disappeared" ],
           "position" => nil,
           "provider" => nil,
+          "patrol_fix" => nil,
           "freshness" => { "scheduler_status" => "unavailable" },
           "liveness_status" => nil,
           "terminality" => { "settled" => false, "completion" => false },
@@ -656,7 +681,10 @@ module Hive
       end
 
       def semantic_fingerprint(targets)
-        ::Digest::SHA256.hexdigest(JSON.generate(targets))
+        ::Digest::SHA256.hexdigest(JSON.generate(
+          "targets" => targets,
+          "patrol_fix_projects" => @patrol_fix_projects || {}
+        ))
       end
 
       def event_payload(event, sequence, targets, reason: nil, message: nil, ok: true)
@@ -672,6 +700,7 @@ module Hive
           "reason" => reason,
           "message" => message,
           "selected_count" => @selection&.size || 0,
+          "patrol_fix_projects" => @patrol_fix_projects || {},
           "targets" => targets
         }
       end

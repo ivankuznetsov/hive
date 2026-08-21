@@ -1,5 +1,7 @@
 require "hive"
 require "hive/commands/status"
+require "hive/patrol_fix/operational_projection"
+require "time"
 
 module Hive
   module Tui
@@ -23,16 +25,17 @@ module Hive
       # otherwise) — agent-facing parity of the text recovery hint.
       ProjectView = Data.define(:name, :path, :hive_state_path, :error, :rows,
                                 :legacy_stage_dirs, :legacy_migrate_command,
-                                :hidden_archived_task_count) do
+                                :hidden_archived_task_count, :patrol_fix) do
         # `legacy_stage_dirs` defaults to `[]` and `legacy_migrate_command`
         # to nil so existing test factories (predating the fields) can keep
         # building ProjectView with the original 5-keyword shape.
         # Production callers in this file always pass them explicitly.
         def initialize(legacy_stage_dirs: [].freeze, legacy_migrate_command: nil,
-                       hidden_archived_task_count: 0, **rest)
+                       hidden_archived_task_count: 0, patrol_fix: nil, **rest)
           super(legacy_stage_dirs: legacy_stage_dirs,
                 legacy_migrate_command: legacy_migrate_command,
-                hidden_archived_task_count: hidden_archived_task_count, **rest)
+                hidden_archived_task_count: hidden_archived_task_count,
+                patrol_fix: patrol_fix, **rest)
         end
       end
 
@@ -187,9 +190,11 @@ module Hive
         payload = payload_keywords if payload.nil? && !payload_keywords.empty?
         payload ||= {}
         project_payloads = Array(payload["projects"])
-        projects = project_payloads.map { |p| build_project_view(p) }
+        projects = project_payloads.map do |project|
+          build_project_view(project, generated_at: payload["generated_at"])
+        end
         archive_projects = Array(archive_payload && archive_payload["projects"]).map do |project|
-          build_project_view(project)
+          build_project_view(project, generated_at: archive_payload["generated_at"])
         end
         new(
           generated_at: payload["generated_at"],
@@ -206,7 +211,7 @@ module Hive
       # JSON order against their unknown peers; within a known group the
       # original JSON order is preserved so Status's mtime-desc ranking
       # within a stage is honoured.
-      def self.build_project_view(payload)
+      def self.build_project_view(payload, generated_at: nil)
         payload ||= {}
         name = payload["name"]
         indexed = Array(payload["tasks"]).map.with_index { |t, i| [ build_row(t, name), i ] }
@@ -223,6 +228,9 @@ module Hive
           rows: sorted.freeze,
           legacy_stage_dirs: Array(payload["legacy_stage_dirs"]).freeze,
           legacy_migrate_command: payload["legacy_migrate_command"],
+          patrol_fix: validated_patrol_fix(
+            payload["patrol_fix"], project: name, generated_at: generated_at
+          ),
           hidden_archived_task_count: normalized_hidden_count(
             payload["hidden_archived_task_count"]
           )
@@ -231,6 +239,26 @@ module Hive
 
       def self.normalized_hidden_count(value)
         value.is_a?(Integer) && value >= 0 ? value : 0
+      end
+
+      def self.validated_patrol_fix(projection, project:, generated_at:)
+        return nil if projection.nil?
+        return projection if Hive::PatrolFix::OperationalProjection.valid_document?(
+          projection, project: project
+        )
+
+        now = Time.iso8601(generated_at.to_s).utc
+        Hive::PatrolFix::OperationalProjection.unavailable(
+          project: project, tasks: [], now: now,
+          source: "status", code: "invalid_patrol_fix_projection",
+          summary: "Patrol Fix operational projection is malformed"
+        )
+      rescue ArgumentError
+        Hive::PatrolFix::OperationalProjection.unavailable(
+          project: project, tasks: [], now: Time.at(0).utc,
+          source: "status", code: "invalid_patrol_fix_projection",
+          summary: "Patrol Fix operational projection is malformed"
+        )
       end
 
       def self.build_row(payload, project_name)
@@ -342,7 +370,8 @@ module Hive
             rows: matched.freeze,
             legacy_stage_dirs: project.legacy_stage_dirs,
             legacy_migrate_command: project.legacy_migrate_command,
-            hidden_archived_task_count: project.hidden_archived_task_count
+            hidden_archived_task_count: project.hidden_archived_task_count,
+            patrol_fix: project.patrol_fix
           ).freeze
         end
         self.class.new(

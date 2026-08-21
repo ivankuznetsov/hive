@@ -17,7 +17,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     :project, :slug, :folder, :workflow, :stage, :marker, :marker_attrs,
     :task_generation, :condition_task_generation, :commit_generation,
     :attempt_id, :state_file_mtime, :action, :depends_on, :blocked_by,
-    :dependency_stage, :blocked, :admission_error,
+    :dependency_stage, :blocked, :admission_error, :patrol_fix,
     keyword_init: true
   )
 
@@ -25,6 +25,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
           slug: "ship-it", marker_attrs: { "marker_id" => "marker-1" },
           state_file_mtime: T0, action: "ready_to_run", depends_on: nil,
           blocked_by: nil, dependency_stage: nil, blocked: false, admission_error: nil,
+          patrol_fix: nil,
           folder: nil)
     folder ||= "/tmp/#{slug}"
     Row.new(
@@ -34,7 +35,8 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       task_generation: task_generation, condition_task_generation: "condition-1",
       commit_generation: 2, attempt_id: "attempt-1", state_file_mtime: state_file_mtime,
       action: action, depends_on: depends_on, blocked_by: blocked_by,
-      dependency_stage: dependency_stage, blocked: blocked, admission_error: admission_error
+      dependency_stage: dependency_stage, blocked: blocked, admission_error: admission_error,
+      patrol_fix: patrol_fix
     )
   end
 
@@ -90,6 +92,12 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
             "architecture" => { "used" => 2, "remaining" => 2 }
           } } ]
         },
+        patrol_fix_projects: {
+          "demo" => {
+            "schema" => "hive-patrol-fix-operational-projection",
+            "schema_version" => 1, "project" => "demo"
+          }
+        },
         recoveries: {}, now: T0 + 1
       )
 
@@ -108,6 +116,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assert_equal 3,
                    snapshot.dig("discovery_allowances", "projects", 0,
                                 "lanes", "ordinary", "remaining")
+      assert_equal "demo", snapshot.dig("patrol_fix_projects", "demo", "project")
       assert_equal "complete", snapshot.dig("attempt_storage", "layout", "migration")
       assert_equal 2, snapshot.fetch("hidden_archived_task_count")
       assert_equal 0o700, File.stat(File.dirname(path)).mode & 0o777

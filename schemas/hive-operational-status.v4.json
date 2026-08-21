@@ -12,7 +12,7 @@
       "additionalProperties": false,
       "required": [
         "schema", "schema_version", "ok", "generated_at", "completeness",
-        "source", "summary", "daemon", "attempt_storage", "scheduler", "archive", "issues", "tasks"
+        "source", "summary", "daemon", "attempt_storage", "scheduler", "patrol_fix", "archive", "issues", "tasks"
       ],
       "properties": {
     "schema": { "const": "hive-operational-status" },
@@ -85,6 +85,10 @@
     "daemon": { "$ref": "#/$defs/Daemon" },
     "attempt_storage": { "$ref": "#/$defs/AttemptStorage" },
     "scheduler": { "$ref": "#/$defs/Scheduler" },
+    "patrol_fix": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/PatrolFixOperationalProjection" }
+    },
     "archive": {
       "type": "object",
       "additionalProperties": false,
@@ -143,6 +147,25 @@
         "candidates": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
         "id": { "type": "string" },
         "path": { "type": "string" }
+      }
+    },
+    "PatrolFixOperationalProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "project", "generated_at", "completeness", "diagnostics", "discovery", "admission", "workflow", "migration", "delivery", "tokens"],
+      "properties": {
+        "schema": {"const": "hive-patrol-fix-operational-projection"},
+        "schema_version": {"const": 1},
+        "project": {"type": "string", "minLength": 1},
+        "generated_at": {"type": "string", "format": "date-time"},
+        "completeness": {"enum": ["complete", "partial"]},
+        "diagnostics": {"type": "array", "maxItems": 16},
+        "discovery": {"type": "object"},
+        "admission": {"type": "object"},
+        "workflow": {"type": "object"},
+        "migration": {"type": "object"},
+        "delivery": {"type": "object"},
+        "tokens": {"type": "object"}
       }
     },
     "Completeness": { "type": "string", "enum": ["complete", "partial", "unknown"] },

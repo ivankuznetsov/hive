@@ -1,6 +1,7 @@
 require "json"
 require "open3"
 require "time"
+require "hive/patrol_fix/operational_projection"
 
 module Hive
   module Bot
@@ -105,8 +106,10 @@ module Hive
       # supervisor prepends a one-line banner to the rendered `/status`
       # reply when present. nil on a clean fetch. Mirrors the daemon's
       # StatusConsumer::Result#warning.
-      Result = Data.define(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning) do
-        def initialize(ok:, rows: [], legacy_stage_dirs: [], error: nil, envelope: nil, warning: nil)
+      Result = Data.define(:ok, :rows, :legacy_stage_dirs, :patrol_fix_projects,
+                           :error, :envelope, :warning) do
+        def initialize(ok:, rows: [], legacy_stage_dirs: [], patrol_fix_projects: {},
+                       error: nil, envelope: nil, warning: nil)
           super
         end
       end
@@ -149,6 +152,7 @@ module Hive
         begin
           rows = extract_rows(doc, now: now)
           legacy_stage_dirs = extract_legacy_stage_dirs(doc)
+          patrol_fix_projects = extract_patrol_fix_projects(doc, now: now)
         rescue StandardError => e
           # ONLY a failure inside best-effort EXTRACTION degrades. On a
           # newer-schema doc this is the tolerated forward-skew path, but we
@@ -167,6 +171,7 @@ module Hive
           ok: true,
           rows: rows,
           legacy_stage_dirs: legacy_stage_dirs,
+          patrol_fix_projects: patrol_fix_projects,
           error: nil,
           envelope: doc,
           warning: (skew == :newer ? forward_skew_warning(doc) : nil)
@@ -280,6 +285,24 @@ module Hive
 
           entry
         end
+      end
+
+      def extract_patrol_fix_projects(doc, now:)
+        Array(doc["projects"]).reject { |project| project["error"] }.to_h do |project|
+          name = project.fetch("name")
+          projection = project["patrol_fix"]
+          projection = invalid_patrol_fix_projection(name, now) unless
+            Hive::PatrolFix::OperationalProjection.valid_document?(projection, project: name)
+          [ name, projection ]
+        end.freeze
+      end
+
+      def invalid_patrol_fix_projection(project, now)
+        Hive::PatrolFix::OperationalProjection.unavailable(
+          project: project, tasks: [], now: now,
+          source: "status", code: "invalid_patrol_fix_projection",
+          summary: "Patrol Fix operational projection is malformed"
+        )
       end
 
       def extract_rows(doc, now:)

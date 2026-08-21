@@ -163,6 +163,27 @@ module Hive
         each_record.select { |record| record.fetch("status") == "blocked" }.freeze
       end
 
+      # Bounded operational input. Deliberately omits source evidence,
+      # rationales, model receipts, and materialization internals: the common
+      # projection needs only root/cohort/status/retry facts and must not turn
+      # an operator refresh into another evidence export.
+      def operational_records
+        each_record.map do |record|
+          decision = record["decision"]
+          {
+            "occurrence_id" => record.fetch("occurrence_id"),
+            "status" => record.fetch("status"),
+            "created_at" => record.fetch("created_at"),
+            "candidates" => record.fetch("candidates").map do |candidate|
+              candidate.slice("kind", "identity")
+            end,
+            "decision" => decision && decision.slice("decision", "candidate_identity"),
+            "task" => record["task"] && record.fetch("task").slice("slug"),
+            "retry" => record["retry"] && record.fetch("retry").slice("retry_at")
+          }
+        end.then { |records| PatrolFix.deep_freeze(records) }
+      end
+
       def with_materialization_lock(&block)
         @directory.with_lock("materialization.lock", &block)
       end

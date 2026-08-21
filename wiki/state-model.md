@@ -643,6 +643,30 @@ time. `PublicationReceipt.adopt` wraps those exact validated bytes without a
 GitHub call. The former five-field existing-PR summary is provenance only and
 is rejected as Done authority.
 
+## Patrol Fix operational projection
+
+`hive-patrol-fix-operational-projection` v1 is the bounded common read model
+for one project's ordinary and Architecture discovery, admission decisions,
+workflow tasks, migration, successors, publication, post-merge activity, and
+current-day usage telemetry. The daemon builds it once from the source
+authorities and stores it under `patrol_fix_projects` in the operational
+snapshot. Consumers validate the complete project document before adopting it;
+missing, cross-project, oversized, or malformed rows become explicitly
+unavailable rather than triggering a source-store fallback.
+
+Conversion cohorts use a mechanical `root_key`: the currently acknowledged or
+bound task slug first, a selected `same_root` candidate identity second, and a
+distinct occurrence identity third. Kind prefixes prevent collisions. Pending
+semantic decisions remain unresolved and partial rather than manufacturing a
+root. Aliases therefore remain visible without counting as additional roots.
+
+Timing uses durable stage-transition and receipt boundaries. Inbox time before
+the first durable decision is unknown, a live provider hold is exposed only as
+its current interval, and a Done latency stops at the publication
+`observed_at`. Sample and unavailable counts make missing history explicit.
+Token counts are nullable current-UTC-day telemetry read from the existing
+usage database; they are not an allowance, budget, or admission authority.
+
 ## Patrol Fix migration cutover
 
 The one-time ordinary/Architecture authority cutover persists canonical

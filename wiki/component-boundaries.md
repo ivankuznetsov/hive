@@ -93,13 +93,17 @@ qualification proof.
 task manifests, reports, exact local worktree generations, validation receipts,
 stable stage and route-transition journals, strict independent-review decisions,
 exactly-once coding-successor relations, projections, semantic admission, and
-idempotent task materialization. Its strict publication receipt validates the
+idempotent task materialization. Its bounded `OperationalProjection` is the
+source-neutral common read model and is validated by the dedicated
+`hive-patrol-fix-operational-projection` schema. Its strict publication receipt validates the
 hosted evidence required by Done but owns no transport effect. It depends
 downward on the Safe Agent Git Gate
 for closed, read-only worktree identity and diff verification and on lower-level
 Task Capture for standard coding successors; it has no issue or remote
 publication authority. Source-owned ordinary and Architecture adapters translate into
-the core without a reverse dependency. Admission persists an exact candidate
+the core without a reverse dependency. The daemon-owned
+`PatrolFixOperationalProjection` is the sole source-reader composition edge and
+remains outside the core. Admission persists an exact candidate
 digest, releases its lock while a provider reasons, rejects stale decisions,
 records materialization intent before task capture, binds the task before
 acknowledging the source, and replays incomplete create/update boundaries. The

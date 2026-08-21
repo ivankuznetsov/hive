@@ -46,8 +46,9 @@ hive refactor-patrol my-project --show JOB_ID --full --json
 
 Fresh terminal and web init recommend discovery (`refactor_patrol.enabled:
 true`) with a default-yes choice and explicitly enable confined auto-fix/PR
-attempts plus reviewable, deduplicated issue fallback. Missing configuration in
-an existing project still resolves all three gates to false, and older
+attempts. GitHub issue creation is disabled; accepted findings enter the
+unified Patrol-fix workflow. Missing configuration in an existing project
+still resolves all three legacy gates to false, and older
 discovery-only configs do not inherit external-effect authority. Fresh headless
 init can resolve the whole architecture-patrol choice before any project-state write
 with `hive init --refactor-patrol` or `hive init --no-refactor-patrol`;
@@ -66,7 +67,7 @@ refactor_patrol:
     enabled: true
     # agent/model/effort inherit the resolved refactor identity unless overridden.
   issue_filing:
-    enabled: true
+    enabled: false # legacy configuration is readable; no new issue mutation
   min_confidence: medium
   commands:
     docs: null
@@ -315,14 +316,13 @@ config/identity/continuation state blocks visibly as
 `repository_identity_unresolved`. The snapshot is never cached across
 transitions.
 
-`--actions` is the daemon resume primitive. `ActionRunner` reconstructs only
-the immutable thesis snapshots stored in the job, resolves semantic families,
-consults the global canonical-action proof archive/catalog, and processes fixes
-before issues. Exact terminal proof from another registration is materialized
-into the local aggregate as `canonical_action_link`, so the action becomes
-terminal without rerunning a fixer, PR adapter, or issue adapter. Its v2
-projection strips internal claims/timestamps while exposing action outcomes and
-completeness in `action_status`.
+`--actions` is the legacy daemon resume primitive. `ActionRunner` reconstructs
+only immutable fix thesis snapshots and can resume fix/PR state; it never plans
+or publishes an issue. Persisted issue actions remain readable and park as
+`issue_creation_retired`. Exact historical terminal proof remains visible in
+the catalog and migration inventory without becoming new effect authority. The
+v2 projection strips internal claims/timestamps while exposing action outcomes
+and completeness in `action_status`.
 
 Manual `--pr` uses this same manifest, policy snapshot, job claim, fencing
 generation, checkpoint, and report path. The first invocation can intentionally
@@ -331,13 +331,9 @@ job is terminal creates an explicit `-replay-N` occurrence with the current
 policy snapshot and a freshly pinned current-default `analysis_sha`, while
 preserving the original job bytes. Canonical action ids
 still prevent duplicate remote effects across replays. Production ids hash the
-normalized source host, repository, action kind, and either the fix fingerprint
-or issue family id. Semantic-family descriptors and ids also include the source
-host when a family is first created, so identical repository slugs on different
-GitHub/GHES hosts cannot share an action or family identity. The resulting
-family id is durable publication identity: later descriptor-algorithm changes
-refresh the rebuildable descriptor from authoritative jobs without renaming the
-family or invalidating an existing issue receipt.
+normalized source host, repository, action kind, and fix fingerprint. Legacy
+issue family ids remain stable read-only identities, so historical receipts can
+be migrated without renaming or loss.
 
 ## Read-only job inspection
 
@@ -415,7 +411,7 @@ fresh generation. Rollover rechecks migration ownership inside the shared
 fence. If the saturated segment still owns an expired claim, normal fenced
 claim recovery runs first and rollover follows on the next scheduler pass.
 
-## Fix and issue routing
+## Fix and workflow routing
 
 Only current `fix` theses can reach `Fixer`.
 The job's enqueue-time policy must have allowed auto-fix. New policy snapshots
@@ -470,13 +466,11 @@ patch and repeats the full audit; movement overlapping any actual patch path rer
 from current clean trunk. Registered trunk is never reset, pulled, edited, or
 committed by patrol.
 
-Issue routing is intentionally exceptional rather than the normal destination
-for architectural findings. Dependency changes, public-contract changes, and
-deterministic validation or safety failures are the cases where human design
-participation is likely to help. Complete behavior-preserving theses—including
-cross-feature and docs-only work—prefer an automatic fix PR when that separate
-consent gate is enabled, leaving acceptance to normal review rather than
-requiring a pre-implementation issue discussion.
+Architecture findings are not routed to GitHub issues. New accepted findings
+enter the unified `patrol-fix` workflow, where the LLM Inbox gate chooses a fix,
+rejection, block, or escalation. The workflow performs fix, validation,
+independent review, and PR publication. The legacy `issue_filing` configuration
+shape and issue receipts remain readable only for migration provenance.
 
 `PrOpener` reconciles the complete same-branch PR set by exact action marker,
 head SHA, base, repository, and GitHub host. Each validated patch generation
@@ -540,32 +534,11 @@ immediately before enqueueing `6-review`. An OPEN or MERGED publication is
 successful only after that mandatory handoff; an externally CLOSED-unmerged PR
 terminates as `closed_without_merge`. Patrol never merges the PR itself.
 
-`discuss` routes initialize issue actions directly. `fix` routes initialize a
-fix plus a dormant semantic-family issue fallback: a successful PR or no-diff
-result suppresses the issue, a deterministic non-fixable result activates it,
-and a transient failure keeps retrying the fix. The issue records follow-up
-approval as pending and includes the source PR, thesis, evidence, proposed
-refactor, architecture effects, route reasons, and required validation. Semantic families
-deduplicate reworded occurrences across jobs. A successful fix in any thesis
-of a family suppresses the family issue. Family JSON is a rebuildable
-projection from authoritative job aggregates, not independent completion
-state.
-
-Reconciliation reads the complete paginated open-and-closed issue inventory
-for the exact host/repository. It checks the current v2 marker first. Only when
-no exact marker exists does it parse markerless historical
-`refactor-patrol:` bodies, requiring one feature identity, thesis and
-fingerprint identity, all problem/cost/refactor/evidence sections, and
-file-and-line evidence before deriving a semantic descriptor. Every candidate
-must be pairwise family-compatible or reconciliation fails closed. Receipts
-record `match_kind: v2_marker` or `legacy_semantic`, keeping compatibility
-visible without letting loose title similarity suppress a new issue.
-
-Both issue and PR publication derive the target host and `owner/repo` from the
-source PR, including GitHub Enterprise. Bodies are bounded and secret-scanned.
-Creation intent is durable and exact; after an ambiguous result, automated
-recovery reconciles open/closed remote objects and never submits a second
-create request.
+New Architecture action snapshots contain fix actions only. A persisted legacy
+issue action is parked as `issue_creation_retired`; `ActionRunner` exposes no
+issue writer and contains no issue publication sink. Complete historical issue
+inventories, action receipts, and semantic-family records remain accepted by
+the read-only migration/catalog paths so cutover does not erase provenance.
 
 If the registered repository identity later changes, only the individual
 actions already carrying remote intent/URL/handoff evidence may reconcile that

@@ -73,6 +73,7 @@ module Hive
           "validation" => validation&.fetch("payload", nil),
           "review" => last_decision && last_decision["stage"] == "review" ? last_decision.fetch("payload") : nil,
           "publication" => publication&.fetch("payload", nil),
+          "timing" => timing_projection(receipts, current, decision),
           "archived" => done && publication && state == "current" ? true : false,
           "diagnostic" => diagnostic,
           "action" => action_for(
@@ -129,6 +130,48 @@ module Hive
         }
       end
 
+      def timing_projection(receipts, current, current_decision)
+        starts = receipts.map { |receipt| receipt.fetch("recorded_at") }
+        parked_seconds = 0
+        parked_since = nil
+        parked = {}
+        receipts.each do |receipt|
+          if receipt["kind"] == "decision" && PARKED_ROUTES.include?(receipt.dig("payload", "route"))
+            parked[receipt.fetch("receipt_id")] = receipt.fetch("recorded_at")
+          elsif receipt["kind"] == "reopen"
+            opened = parked.delete(receipt.dig("payload", "outcome_receipt_id"))
+            parked_seconds += elapsed_seconds(opened, receipt.fetch("recorded_at")) if opened
+          end
+        end
+        if current_decision && PARKED_ROUTES.include?(current_decision.dig("payload", "route"))
+          parked_since = current_decision.fetch("recorded_at")
+        end
+        {
+          "started_at" => starts.min,
+          "stage_started_at" => stage_started_at(current),
+          "parked_seconds" => parked_seconds,
+          "parked_since" => parked_since,
+          "rework_count" => receipts.count do |receipt|
+            receipt["kind"] == "decision" && receipt.dig("payload", "route") == "rework"
+          end
+        }
+      end
+
+      def stage_started_at(receipts)
+        boundary = case stage
+        when "2-fix" then receipts.reverse.find { |receipt| receipt["kind"] == "decision" && receipt["stage"] == "inbox" }
+        when "3-validate" then receipts.reverse.find { |receipt| receipt["kind"] == "fix" }
+        when "4-review" then receipts.reverse.find { |receipt| receipt["kind"] == "validation" }
+        when "5-publish" then receipts.reverse.find { |receipt| receipt["kind"] == "decision" && receipt["stage"] == "review" }
+        when "6-done" then receipts.reverse.find { |receipt| receipt["kind"] == "publication" }
+        end
+        boundary&.fetch("recorded_at", nil)
+      end
+
+      def elapsed_seconds(started_at, finished_at)
+        [ (Time.iso8601(finished_at) - Time.iso8601(started_at)).to_i, 0 ].max
+      end
+
       def action_for(state:, done:, outcome:, decision:, fix:, validation:, publication:)
         return action("invalid", runnable: false, reopen: false) if state == "invalid"
         return action("done", runnable: false, reopen: false) if done
@@ -175,6 +218,10 @@ module Hive
             "evidence_revision" => nil, "sources" => [], "aliases" => [], "issues" => [],
             "successor" => nil, "decision" => nil, "outcome" => nil, "blocker_owner" => "hive",
             "validation" => nil, "review" => nil, "publication" => nil,
+            "timing" => {
+              "started_at" => nil, "stage_started_at" => nil,
+              "parked_seconds" => 0, "parked_since" => nil, "rework_count" => 0
+            },
             "archived" => false, "diagnostic" => { "summary" => summary },
             "action" => {
               "kind" => "invalid", "runnable" => false,

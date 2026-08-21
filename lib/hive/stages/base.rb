@@ -961,7 +961,7 @@ module Hive
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
                       routing_resolution: nil, routing_arguments: nil,
                       additional_read_roots: [], additional_write_roots: [],
-                      opencode_edit_patterns: [],
+                      opencode_edit_patterns: [], opencode_permission_policy: nil,
                       implementation_stage: nil,
                       defer_implementation_observation: false,
                       resource_guards: nil, agent_custody: nil,
@@ -1111,6 +1111,7 @@ module Hive
               additional_read_roots: additional_read_roots,
               additional_write_roots: additional_write_roots,
               opencode_edit_patterns: opencode_edit_patterns,
+              opencode_permission_policy: opencode_permission_policy,
               isolate_environment: isolate_environment
             ).run!
             agent_result[:hive_observation_id] = observation.session_id if

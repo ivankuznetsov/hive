@@ -26,3 +26,12 @@ project-prepared profile. It consequently instructed the operator to install a
 plugin already present in `agents.opencode.plugins`. `HiveRunner` now exposes a
 capability probe backed by its project config, and `CeDocReview` selects it by
 default; custom test/embedding probes remain injectable.
+
+Once that probe admitted the route, launch exposed a second channel mismatch:
+plan review compiled its tool contract as Claude `allowed_tools`, which
+OpenCode correctly rejects in favor of a typed permission overlay. The review
+workspace now supplies an explicit deny-first OpenCode policy. It permits
+read/search, the pinned review skill, shell, and web access; edits are limited
+to the detached checkout, external directories remain denied, and subagents or
+interactive questions remain unavailable. `Stages::Base.spawn_agent` now
+threads that typed policy into the existing prepared-invocation seam.

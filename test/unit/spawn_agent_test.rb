@@ -205,6 +205,33 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_typed_opencode_permission_policy_reaches_agent
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      policy = Hive::AgentRuntime::OpenCodePermissionPolicy.new(
+        "*" => "deny", "read" => "allow"
+      )
+      captured = nil
+      agent = Object.new
+      agent.define_singleton_method(:run!) { { status: :ok } }
+
+      constructor = lambda do |**kwargs|
+        captured = kwargs
+        agent
+      end
+      with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+        with_replaced_singleton_method(Hive::Agent, :new, constructor) do
+          Hive::Stages::Base.spawn_agent(
+            task, prompt: "review", max_budget_usd: nil, timeout_sec: 5,
+            opencode_permission_policy: policy
+          )
+        end
+      end
+
+      assert_same policy, captured.fetch(:opencode_permission_policy)
+    end
+  end
+
   # claude.permission_mode is a Claude-only setting. A non-claude (codex)
   # profile spawn that now receives cfg: (rebase / reviewers all thread it
   # through) must NOT gain a --permission-mode flag;

@@ -54,6 +54,25 @@ class PlanReviewWorkspaceScopeTest < Minitest::Test
     end
   end
 
+  def test_opencode_uses_a_typed_full_review_policy
+    scope = Hive::PlanReview::WorkspaceScope.launch_kwargs(
+      profile: Hive::AgentProfiles.lookup(:opencode),
+      workspace: "/tmp/review", role: "primary"
+    )
+
+    assert_nil scope.fetch(:permission_mode)
+    assert_nil scope.fetch(:allowed_tools)
+    assert_nil scope.fetch(:disallowed_tools)
+    policy = scope.fetch(:opencode_permission_policy)
+    assert_instance_of Hive::AgentRuntime::OpenCodePermissionPolicy, policy
+    assert_equal "allow", policy.rules.fetch("bash")
+    assert_equal "allow", policy.rules.fetch("webfetch")
+    assert_equal "allow", policy.rules.fetch("websearch")
+    assert_equal "allow", policy.rules.dig("edit", "**")
+    assert_equal "deny", policy.rules.dig("external_directory", "*")
+    assert_equal "deny", policy.rules.fetch("task")
+  end
+
   # The reviewer must be able to read the code, search it, shell out (the
   # finding format needs SHA-256), and fetch referenced docs.
   def test_reviewers_get_the_tools_review_actually_requires

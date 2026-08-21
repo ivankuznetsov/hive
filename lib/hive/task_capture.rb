@@ -132,9 +132,7 @@ module Hive
     end
 
     def find_idempotent_task!
-      matches = Dir.glob(
-        File.join(@hive_state, "stages", "*", "*", Hive::TaskMeta::FILENAME)
-      ).filter_map do |path|
+      matches = idempotency_metadata_paths.filter_map do |path|
         folder = File.dirname(path)
         read = Hive::TaskMeta.read_for_admission(folder)
         unless read.status == :ok
@@ -163,6 +161,12 @@ module Hive
         value: @idempotency_key
       )
     end
+
+    def idempotency_metadata_paths
+      Dir.glob(File.join(@hive_state, "stages", "*", "*", Hive::TaskMeta::FILENAME))
+    end
+
+    def idempotency_key = @idempotency_key
 
     def create_candidate!(task_dir, stable_selection:)
       created = false

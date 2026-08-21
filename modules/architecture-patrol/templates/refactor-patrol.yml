@@ -1,4 +1,0 @@
-# Scheduled current-main discovery derives its independent Architecture Patrol
-# allowance from patrol.mode. Merged-PR discovery does not consume it.
-refactor_patrol:
-  enabled: true

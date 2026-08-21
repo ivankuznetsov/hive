@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema", "schema_version", "ok", "event", "sequence",
-    "observed_at", "reason", "message", "selected_count", "patrol_fix_projects", "targets"
+    "observed_at", "reason", "message", "selected_count", "targets"
   ],
   "properties": {
     "schema": { "const": "hive-watch-event" },
@@ -26,11 +26,6 @@
     },
     "message": { "type": ["string", "null"] },
     "selected_count": { "type": "integer", "minimum": 0, "maximum": 100 },
-    "patrol_fix_projects": {
-      "type": "object",
-      "maxProperties": 100,
-      "additionalProperties": { "$ref": "#/$defs/PatrolFixOperationalProjection" }
-    },
     "targets": {
       "type": "array",
       "maxItems": 100,
@@ -38,24 +33,6 @@
     }
   },
   "$defs": {
-    "PatrolFixOperationalProjection": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["schema", "schema_version", "project", "generated_at", "completeness", "diagnostics", "discovery", "admission", "workflow", "delivery", "tokens"],
-      "properties": {
-        "schema": {"const": "hive-patrol-fix-operational-projection"},
-        "schema_version": {"const": 1},
-        "project": {"type": "string", "minLength": 1},
-        "generated_at": {"type": "string", "format": "date-time"},
-        "completeness": {"enum": ["complete", "partial"]},
-        "diagnostics": {"type": "array", "maxItems": 16},
-        "discovery": {"type": "object"},
-        "admission": {"type": "object"},
-        "workflow": {"type": "object"},
-        "delivery": {"type": "object"},
-        "tokens": {"type": "object"}
-      }
-    },
     "State": {
       "enum": [
         null, "unknown", "running", "needs_repair", "waiting_on_you",
@@ -68,7 +45,7 @@
       "required": [
         "target", "project", "slug", "present", "archived", "state",
         "blocker_owner", "reason", "reason_codes", "position", "provider",
-        "freshness", "liveness_status", "terminality", "action_policy", "patrol_fix"
+        "freshness", "liveness_status", "terminality", "action_policy"
       ],
       "properties": {
         "target": { "type": "string", "pattern": "^.+:.+$" },
@@ -113,9 +90,6 @@
               }
             }
           ]
-        },
-        "patrol_fix": {
-          "type": ["object", "null"]
         },
         "freshness": {
           "type": "object",

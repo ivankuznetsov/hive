@@ -5,7 +5,7 @@ require "pathname"
 require "hive/patrol_fix/projection"
 
 class PatrolFixProjectionTest < Minitest::Test
-  def test_rejected_inbox_is_parked_and_exposes_a_generation_guarded_reopen
+  def test_rejected_inbox_is_parked_and_non_runnable
     with_task do |dir, manifest, receipts|
       receipts.append!(decision_receipt(route: "reject", stage: "inbox"))
 
@@ -16,8 +16,6 @@ class PatrolFixProjectionTest < Minitest::Test
       assert_equal "inbox_gate", projected.fetch("blocker_owner")
       assert_equal "parked", projected.dig("action", "kind")
       refute projected.dig("action", "runnable")
-      assert projected.dig("action", "reopen_eligible")
-      assert_equal 1, projected.dig("action", "generation")
       assert JSONSchemer.schema(
         Pathname.new(Hive::Schemas.schema_path("hive-patrol-fix-projection"))
       ).valid?(projected)

@@ -177,6 +177,23 @@ class PatrolLaunchBudgetTest < Minitest::Test
     end
   end
 
+  def test_mode_projection_supplies_allowance_when_the_explicit_knob_is_absent
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = File.join(dir, "usage.db")
+      expected = { "low" => 2, "high" => 8, "ultrapatrol" => 16, "off" => 0 }
+
+      expected.each do |mode, allowance|
+        subject = Hive::Patrol::LaunchBudget.new(
+          dir, cfg: { "patrol" => { "mode" => mode } },
+          project_id: "project-#{mode}", project_name: "demo",
+          engine: :ordinary, clock: -> { NOW }
+        )
+
+        assert_equal allowance, subject.allowance_snapshot.fetch(:limit), mode
+      end
+    end
+  end
+
   def test_observed_utc_dates_are_retained_across_forward_jump_and_rollback
     with_tmp_dir do |dir|
       Hive::UsageDb.path = File.join(dir, "usage.db")

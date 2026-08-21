@@ -1295,30 +1295,6 @@ class RefactorPatrolCommandTest < Minitest::Test
     assert_equal :unresolved, resolver.call({})
   end
 
-  def test_manual_discovery_waits_for_automatic_capacity_rollover
-    command = command_for
-    effects = Array.new(
-      Hive::Modules::Migration::PatrolEvidence::MAX_EFFECTS_PER_OCCURRENCE -
-        Hive::RefactorPatrol::DiscoveryCapacity::MAX_EFFECTS_PER_CLAIM
-    ) { {} }
-    store = Object.new
-    store.define_singleton_method(:occurrence_for_job) do |_job_id|
-      { "effects" => effects }
-    end
-    command.instance_variable_set(:@job_store, store)
-
-    error = assert_raises(Hive::ConfigError) do
-      command.send(
-        :assert_manual_discovery_capacity!, { "job_id" => "job-1" }
-      )
-    end
-
-    assert_equal(
-      "refactor patrol occurrence is awaiting automatic capacity rollover",
-      error.message
-    )
-  end
-
   def test_mode_validation_rejects_ambiguous_or_unsafe_flag_combinations
     cases = [
       [ { result_file: "/tmp/result.json" }, /--result-file requires/ ],
@@ -1544,41 +1520,6 @@ class RefactorPatrolCommandTest < Minitest::Test
 
       assert first.fetch("job_id").end_with?("-replay-1")
       assert second.fetch("job_id").end_with?("-replay-2")
-    end
-  end
-
-  def test_manual_replay_final_recheck_and_write_share_patrol_ownership_lock
-    with_refactor_patrol_project do |repo|
-      original = with_manifest_checksum(pr_manifest)
-      command = Hive::Commands::RefactorPatrol.new("demo")
-      inside_ownership_lock = false
-      checks = []
-      writes = []
-      original_write = Hive::AtomicFile.method(:write)
-      command.define_singleton_method(:assert_manual_replay_allowed!) do |*, **|
-        checks << inside_ownership_lock
-      end
-
-      lock = lambda do |*, **, &block|
-        inside_ownership_lock = true
-        block.call
-      ensure
-        inside_ownership_lock = false
-      end
-      write = lambda do |*arguments, **keywords|
-        writes << inside_ownership_lock
-        original_write.call(*arguments, **keywords)
-      end
-      with_replaced_singleton_method(
-        Hive::Modules::Migration::Patrols, :with_migration_lock, lock
-      ) do
-        with_replaced_singleton_method(Hive::AtomicFile, :write, write) do
-          command.send(:publish_manual_replay_manifest!, repo, original)
-        end
-      end
-
-      assert_equal [ true, true ], checks
-      assert_equal [ true ], writes
     end
   end
 
@@ -2100,10 +2041,7 @@ class RefactorPatrolCommandTest < Minitest::Test
 
   def enroll_manifest!(repo, manifest, policy:, now:)
     store = Hive::RefactorPatrol::JobStore.new(repo)
-    transitions =
-      Hive::RefactorPatrol::ArchitectureIntakeTransitions.new(
-        config_loader: ->(path) { Hive::Config.load(path) }
-      )
+    transitions = Hive::RefactorPatrol::ArchitectureIntakeTransitions.new
     aggregate = transitions.enqueue(
       entry: { "path" => repo, "name" => "demo" },
       store: store,

@@ -2,21 +2,17 @@ require "json"
 require "digest"
 require "time"
 require "uri"
-require "forwardable"
 require "hive/config"
-require "hive/refactor_patrol/architecture_occurrence_store"
-require "hive/refactor_patrol/job_occurrence_lifecycle"
 require "hive/refactor_patrol/claim_transitions"
 require "hive/refactor_patrol/job_indexes"
 require "hive/refactor_patrol/job_query_index"
 require "hive/refactor_patrol/job_record_validator"
 require "hive/refactor_patrol/job_store_files"
 require "hive/refactor_patrol/state_paths"
-require "hive/modules/migration/patrols"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/refactor_patrol/publication_attempt"
 require "hive/refactor_patrol/thesis"
-require "hive/refactor_patrol/fix_admission_outbox"
+require "hive/refactor_patrol/fix_admission_adapter"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -124,7 +120,7 @@ module Hive
 
       DISCOVERY_ATTEMPT_KIND = "discovery_claim".freeze
       ACTIVE_CLAIM_STATES = %w[claimed running].freeze
-      attr_reader :project_root, :root, :patrol_fix_admission_outbox
+      attr_reader :project_root, :root, :patrol_fix_admission_adapter
 
       class << self
         def root_for(project_root, hive_state_path: nil)
@@ -187,7 +183,7 @@ module Hive
       end
 
       def initialize(project_root, hive_state_path: nil,
-                     patrol_fix_admission_outbox: nil)
+                     patrol_fix_admission_adapter: nil)
         @project_root = File.expand_path(project_root)
         hive_state_root = File.expand_path(hive_state_path || ".hive-state", @project_root)
         @root = self.class.root_for(@project_root, hive_state_path: hive_state_root)
@@ -211,123 +207,10 @@ module Hive
           inconsistent_record: InconsistentRecord,
           max_entries: JobStoreFiles::MAX_JOB_ENTRIES
         )
-        @architecture_occurrences = ArchitectureOccurrenceStore.new(
-          root: @root,
-          job_reader: method(:read_job),
-          id_validator: method(:validate_id!),
-          corrupt_record: CorruptRecord,
-          inconsistent_record: InconsistentRecord
-        )
-        @patrol_fix_admission_outbox = patrol_fix_admission_outbox ||
-          Hive::RefactorPatrol::FixAdmissionOutbox.new(
-            root: File.join(@root, "patrol-fix-outbox")
+        @patrol_fix_admission_adapter = patrol_fix_admission_adapter ||
+          Hive::RefactorPatrol::FixAdmissionAdapter.for_project(
+            project_root: @project_root, hive_state_path: hive_state_root
           )
-        @occurrence_lifecycle = JobOccurrenceLifecycle.new(
-          inconsistent_record: InconsistentRecord,
-          record_validator: @record_validator,
-          aggregate_reader: lambda do |job|
-            job.is_a?(Hash) ? json_copy(job) : read_job(job)
-          end,
-          job_path: method(:job_path),
-          before_mutation: method(:prepare_current_namespace!),
-          architecture_occurrences: -> { @architecture_occurrences }
-        )
-      end
-
-      # Architecture Patrol owns one current durable occurrence segment per
-      # job. A saturated segment is finalized before this pointer advances;
-      # finished claims retain their historical occurrence identity while all
-      # active work is fenced to the current segment.
-      extend Forwardable
-      def_delegators :@occurrence_lifecycle,
-                    :reserve_manifest_occurrence!, :reserve_occurrence!,
-                    :reserve_successor_occurrence!, :occurrence_for_job,
-                    :occurrence, :occurrence_capture,
-                    :occurrence_terminalized?,
-                    :each_recovery_active_occurrence, :recovery_active?,
-                    :rebuild_recovery_index!, :recovery_backoff,
-                    :record_recovery_failure!,
-                    :clear_recovery_failure!, :prepare_effect!, :effect_state,
-                    :effect_intent, :recorded_effect_transitions,
-                    :unsettled_recorded_transitions,
-                    :deny_unrecorded_prepared_effects_for_rollover!,
-                    :assert_recorded_transitions_terminal!,
-                    :with_effect_sender_lock, :mark_dispatch_uncertain!,
-                    :reset_effect_prepared!, :settle_effect!, :deny_effect!,
-                    :effect_receipt, :terminal_effect_receipt_ids,
-                    :finalize_occurrence!, :drain_occurrence_outbox!
-
-      def rollover_occurrence!(job_id, from:, to:, now: Time.now)
-        from_id = from.to_s
-        to_id = to.to_s
-        mutate_job(
-          job_id,
-          occurrence_rollover: { from: from_id, to: to_id }
-        ) do |aggregate, path|
-          unless aggregate.fetch("occurrence_id") == from_id
-            raise InconsistentRecord.new(
-              "refactor patrol occurrence rollover fence is stale",
-              path: path
-            )
-          end
-          if active_discovery_attempt(aggregate) ||
-             aggregate.fetch("actions").any? do |action|
-               active_action_claim(action)
-             end
-            raise InconsistentRecord.new(
-              "refactor patrol occurrence cannot roll with an active claim",
-              path: path
-            )
-          end
-          aggregate["occurrence_id"] = to_id
-          aggregate["updated_at"] = now.utc.iso8601
-          aggregate
-        end
-      end
-
-      # Capacity rollover may retire only a discovery claim whose recorded
-      # process identity is provably gone. This job-local transition
-      # does not allocate another occurrence effect, so a completely full
-      # journal can still recover without weakening the live-claim fence.
-      def resolve_inactive_discovery_for_rollover!(
-        job_id, occurrence_id:, now: Time.now,
-        claim_liveness_resolver: nil
-      )
-        mutate_job(job_id) do |aggregate, path|
-          active = active_discovery_attempt(aggregate)
-          next aggregate unless active
-          unless active.fetch("occurrence_id") == occurrence_id.to_s
-            raise InconsistentRecord.new(
-              "refactor patrol occurrence cannot roll with an active claim",
-              path: path
-            )
-          end
-          resolved = begin
-            claim_liveness_resolver&.call(json_copy(active))
-          rescue StandardError
-            :unresolved
-          end
-          unless resolved == :resolved
-            raise InconsistentRecord.new(
-              "refactor patrol occurrence cannot roll with an active claim",
-              path: path
-            )
-          end
-
-          @claim_transitions.finish!(
-            active,
-            state: "superseded",
-            outcome: "effect_capacity_rollover",
-            now: now,
-            touch_heartbeat: false
-          )
-          aggregate["state"] = "blocked"
-          aggregate["updated_at"] = now.utc.iso8601
-          aggregate
-        end
-      rescue ArgumentError, KeyError => e
-        raise InconsistentRecord,
-              "refactor patrol claim has invalid evidence (#{e.message})"
       end
 
       def record_job_transition_rejection!(job_id, operation:, generation:,
@@ -2127,7 +2010,7 @@ module Hive
         raise InconsistentRecord, "refactor patrol claim has invalid evidence (#{e.message})"
       end
 
-      def mutate_job(job_id, occurrence_rollover: nil)
+      def mutate_job(job_id)
         prepare_current_namespace!
         id = validate_id!(job_id)
         path = job_path(id)
@@ -2148,18 +2031,9 @@ module Hive
             result = yield aggregate, path
             replacement, return_value = result.is_a?(Array) ? result : [ result, result ]
             validate_job!(replacement, path: path)
-            if occurrence_rollover
-              @record_validator.validate_occurrence_rollover!(
-                existing,
-                replacement,
-                path,
-                **occurrence_rollover
-              )
-            else
-              validate_transition!(
-                existing, replacement, path, action_api: true
-              )
-            end
+            validate_transition!(
+              existing, replacement, path, action_api: true
+            )
             atomic_write(path, replacement) unless replacement == existing
             return_value
           end
@@ -2257,7 +2131,7 @@ module Hive
               raise InconsistentRecord, "completed thesis #{item.fetch('id').inspect} changed during discovery resume"
             end
             unless existing
-              @patrol_fix_admission_outbox.publish_disposition!(aggregate, item)
+              @patrol_fix_admission_adapter.publish_disposition!(aggregate, item)
               aggregate.dig("dispositions", name) << item
             end
           end

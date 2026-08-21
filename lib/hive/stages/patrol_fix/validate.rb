@@ -2,7 +2,6 @@ require "digest"
 require "time"
 require "hive/patrol/validator"
 require "hive/patrol_fix/receipt_store"
-require "hive/patrol_fix/runner"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/validation_receipt"
 require "hive/patrol_fix/worktree_receipt"
@@ -108,5 +107,3 @@ module Hive
     end
   end
 end
-
-Hive::PatrolFix::Runner.register("validate", Hive::Stages::PatrolFix::Validate.method(:run!))

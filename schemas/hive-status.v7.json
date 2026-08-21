@@ -51,7 +51,7 @@
     "Project": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "path", "hive_state_path", "tasks", "patrol_fix"],
+      "required": ["name", "path", "hive_state_path", "tasks"],
       "properties": {
         "name": { "type": "string" },
         "path": { "type": "string" },
@@ -61,7 +61,6 @@
           "enum": ["missing_project_path", "not_initialised", "project_load_failed"]
         },
         "tasks": { "type": "array", "items": { "$ref": "#/$defs/Task" } },
-        "patrol_fix": { "$ref": "#/$defs/PatrolFixOperationalProjection" },
         "config_summary": {
           "type": "object",
           "additionalProperties": false,
@@ -91,24 +90,6 @@
         },
         "legacy_migrate_command": { "type": ["string", "null"] },
         "hidden_archived_task_count": { "type": "integer", "minimum": 0 }
-      }
-    },
-    "PatrolFixOperationalProjection": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["schema", "schema_version", "project", "generated_at", "completeness", "diagnostics", "discovery", "admission", "workflow", "delivery", "tokens"],
-      "properties": {
-        "schema": {"const": "hive-patrol-fix-operational-projection"},
-        "schema_version": {"const": 1},
-        "project": {"type": "string", "minLength": 1},
-        "generated_at": {"type": "string", "format": "date-time"},
-        "completeness": {"enum": ["complete", "partial"]},
-        "diagnostics": {"type": "array", "maxItems": 16},
-        "discovery": {"type": "object"},
-        "admission": {"type": "object"},
-        "workflow": {"type": "object"},
-        "delivery": {"type": "object"},
-        "tokens": {"type": "object"}
       }
     },
     "AdmissionError": {
@@ -153,7 +134,7 @@
         "condition_task_generation",
          "commit_generation", "current_attempt", "conditions", "condition_history",
          "evidence", "closure", "condition_overrides", "condition_gate", "condition_migration", "condition_provenance",
-         "shadow_audit", "condition_warning", "plan_review", "patrol_fix", "auto_residue", "unanswered_questions", "action",
+         "shadow_audit", "condition_warning", "plan_review", "auto_residue", "unanswered_questions", "action",
          "action_label", "suggested_command", "outcomes",
         "next_action", "diagnostic"
       ],
@@ -287,12 +268,6 @@
             { "$ref": "#/$defs/PlanReviewSummary" }
           ]
         },
-        "patrol_fix": {
-          "oneOf": [
-            { "type": "null" },
-            { "$ref": "hive-patrol-fix-projection.v1.json" }
-          ]
-        },
         "implementation_identity": {
           "oneOf": [
             { "$ref": "#/$defs/ImplementationIdentity" },
@@ -315,7 +290,6 @@
             "ready_to_finalize", "ready_to_archive", "ready_to_advance",
             "ready_to_run", "recover_draft_pr", "review_parked", "needs_input", "recover_execute",
             "recover_review", "agent_running", "archived", "manual_steering",
-            "patrol_fix_rejected", "patrol_fix_blocked", "patrol_fix_escalated",
             "plan_reviewing", "plan_review_retry", "plan_review_decision",
             "plan_review_degraded", "plan_review_unsupported", "plan_review_blocked",
             "error", "admission_error"

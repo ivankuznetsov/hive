@@ -86,7 +86,7 @@ enforcement and must leave the registered checkout byte-for-byte unchanged. A st
 budget leaves later slices resumable, and every cited file/line/snippet is
 verified against the pinned checkout's real bytes before a thesis is admissible.
 The mutation boundary is separate from discovery. Every accepted thesis is
-published to the source-owned Patrol Fix outbox. The shared Patrol Fix workflow
+reserved directly in the project Patrol Fix `AdmissionStore`. The shared Patrol Fix workflow
 owns semantic admission, isolated editing, validation, review, and
 publication. Architecture Patrol itself does not edit code, create issues,
 push branches, or open pull requests.

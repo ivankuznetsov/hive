@@ -2,13 +2,13 @@ require_relative "fix_test"
 require "hive/stages/patrol_fix/review"
 
 class PatrolFixReviewStageTest < Minitest::Test
+  include HiveTestHelper
+
   def test_failed_validation_is_untrusted_context_for_one_independent_publish_decision
     with_review_task do |task, worktree_root, _manifest, fix, validation|
+      captured = nil
       runner = lambda do |**values|
-        prompt = values.fetch(:prompt)
-        assert_includes prompt, "untrusted_patrol_review"
-        assert_includes prompt, "\"verdict\":\"failed\""
-        assert_includes prompt, "Allowed routes: publish, rework, escalate, reject, blocked"
+        captured = values
         File.write(values.fetch(:output_path), JSON.generate(
           "schema" => "hive-patrol-fix-review-report", "schema_version" => 1,
           "route" => "publish", "rationale" => "The failure is unrelated and bounded.",
@@ -18,11 +18,22 @@ class PatrolFixReviewStageTest < Minitest::Test
         { status: :ok, custody: :clean }
       end
 
-      result = Hive::Stages::PatrolFix::Review.run!(
-        task, {}, agent_runner: runner, worktree_root: worktree_root
-      )
+      result = with_replaced_singleton_method(
+        Hive::Stages::ManagedAgentCustody, :launch_agent, runner
+      ) do
+        Hive::Stages::PatrolFix::Review.run!(task, {}, worktree_root: worktree_root)
+      end
 
       assert_equal :complete, result.fetch(:status)
+      assert_includes captured.fetch(:prompt), "untrusted_patrol_review"
+      assert_includes captured.fetch(:prompt), "\"verdict\":\"failed\""
+      assert_includes captured.fetch(:prompt),
+                      "Allowed routes: publish, rework, escalate, reject, blocked"
+      assert_equal "patrol_review", captured.fetch(:actor)
+      assert_equal "stages.review", captured.fetch(:slot)
+      assert_equal [ captured.fetch(:cwd), task.folder ], captured.fetch(:add_dirs)
+      assert_equal "review", captured.fetch(:stage)
+      assert_equal "patrol-fix-review", captured.fetch(:log_label)
       receipt = result.fetch(:receipt)
       assert_equal "publish", receipt.dig("payload", "route")
       assert_equal fix.fetch("receipt_id"), receipt.dig("payload", "fix_receipt_id")
@@ -198,52 +209,6 @@ class PatrolFixReviewStageTest < Minitest::Test
       assert_equal :parked, result.fetch(:status)
       assert_equal [ "review-escalate-1" ], calls
       refute result.key?(:moved_task_folder)
-    end
-  end
-
-  def test_operator_reopen_advances_generation_and_explicitly_carries_unchanged_validation
-    with_review_task do |task, worktree_root, manifest, fix, validation|
-      store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
-      blocked = receipt(
-        manifest, "decision", "review",
-        {
-          "route" => "blocked", "rationale" => "Await operator context.",
-          "evidence" => [ "Patch and validation are otherwise current." ],
-          "blocker_owner" => "operator",
-          "head_revision" => fix.dig("payload", "head_revision"),
-          "diff_digest" => fix.dig("payload", "diff_digest"),
-          "fix_receipt_id" => fix.fetch("receipt_id"),
-          "validation_receipt_id" => validation.fetch("receipt_id")
-        },
-        "review-blocked-1"
-      )
-      store.append!(blocked)
-      transition = Hive::PatrolFix::Transition.new(
-        task, worktree_root: worktree_root, commit: ->(**) { :committed }
-      )
-      transition.reopen!(outcome_receipt_id: blocked.fetch("receipt_id"), operator: "action")
-      runner = lambda do |**values|
-        File.write(values.fetch(:output_path), JSON.generate(
-          "schema" => "hive-patrol-fix-review-report", "schema_version" => 1,
-          "route" => "publish", "rationale" => "Operator context resolves the block.",
-          "evidence" => [ "The unchanged validation remains exact." ],
-          "blocker_owner" => "review_gate"
-        ))
-        { status: :ok, custody: :clean }
-      end
-
-      result = Hive::Stages::PatrolFix::Review.run!(
-        task, {}, agent_runner: runner, worktree_root: worktree_root,
-        transition: transition
-      )
-
-      assert_equal 2, result.dig(:receipt, "task", "generation")
-      assert_equal fix.fetch("receipt_id"), result.dig(:receipt, "payload", "fix_receipt_id")
-      assert_equal validation.fetch("receipt_id"),
-                   result.dig(:receipt, "payload", "validation_receipt_id")
-      reopen = store.read_all.find { |row| row["kind"] == "reopen" }
-      assert_equal [ fix.fetch("receipt_id"), validation.fetch("receipt_id") ],
-                   reopen.dig("payload", "carried_receipts")
     end
   end
 

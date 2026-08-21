@@ -54,13 +54,6 @@ class TuiSnapshotTest < Minitest::Test
     }
   end
 
-  def unavailable_patrol_fix(project)
-    Hive::PatrolFix::OperationalProjection.unavailable(
-      project: project, tasks: [], now: Time.utc(2026, 8, 21, 12),
-      source: "test", code: "unavailable", summary: "Unavailable in fixture"
-    )
-  end
-
   def test_from_payload_preserves_all_task_fields_verbatim
     payload = sample_payload([
                                {
@@ -121,38 +114,6 @@ class TuiSnapshotTest < Minitest::Test
     snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([]))
     assert_equal [], snapshot.projects
     assert_equal [], snapshot.rows
-  end
-
-  def test_project_patrol_fix_projection_is_preserved_through_filter_and_scope
-    projection = unavailable_patrol_fix("alpha")
-    payload = sample_payload([ {
-      "name" => "alpha", "path" => "/tmp/alpha",
-      "hive_state_path" => "/tmp/alpha/.hive-state",
-      "patrol_fix" => projection, "tasks" => [ sample_task(slug: "first-task") ]
-    } ])
-
-    snapshot = Hive::Tui::Snapshot.from_payload(payload)
-
-    assert_same projection, snapshot.projects.first.patrol_fix
-    assert_same projection, snapshot.filter_by_slug("first").projects.first.patrol_fix
-    assert_same projection, snapshot.scope_to_project_index(1).projects.first.patrol_fix
-  end
-
-  def test_malformed_project_patrol_fix_projection_degrades_to_unavailable
-    payload = sample_payload([ {
-      "name" => "alpha", "path" => "/tmp/alpha",
-      "hive_state_path" => "/tmp/alpha/.hive-state",
-      "patrol_fix" => { "tokens" => {} }, "tasks" => []
-    } ])
-
-    projection = Hive::Tui::Snapshot.from_payload(payload).projects.first.patrol_fix
-
-    assert_equal "partial", projection.fetch("completeness")
-    assert_equal "invalid_patrol_fix_projection",
-                 projection.dig("diagnostics", 0, "code")
-    assert Hive::PatrolFix::OperationalProjection.valid_document?(
-      projection, project: "alpha"
-    )
   end
 
   def test_from_payload_defaults_missing_additive_mtimes_to_nil

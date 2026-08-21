@@ -50,13 +50,6 @@ class HiveBotStatusWatcherTest < Minitest::Test
     }
   end
 
-  def unavailable_patrol_fix(project)
-    Hive::PatrolFix::OperationalProjection.unavailable(
-      project: project, tasks: [], now: Time.utc(2026, 8, 21, 12),
-      source: "test", code: "unavailable", summary: "Unavailable in fixture"
-    )
-  end
-
   def task(slug:, marker: "waiting", attrs: {}, action: "needs_input")
     {
       "stage" => "2-brainstorm",
@@ -113,37 +106,6 @@ class HiveBotStatusWatcherTest < Minitest::Test
       assert_equal "attempt-b", row.current_attempt
       assert_equal "conditions", row.condition_migration.fetch("effective")
       assert_equal [ "wiki/a.md" ], row.auto_residue.fetch("paths")
-    end
-  end
-
-  def test_fetch_preserves_common_project_patrol_fix_projection
-    payload = envelope([])
-    projection = unavailable_patrol_fix("hive")
-    payload.dig("projects", 0)["patrol_fix"] = projection
-
-    with_fake_status(JSON.generate(payload)) do |bin|
-      result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch
-
-      assert_equal projection, result.patrol_fix_projects.fetch("hive")
-    end
-  end
-
-  def test_fetch_replaces_malformed_project_patrol_fix_projection
-    payload = envelope([])
-    payload.dig("projects", 0)["patrol_fix"] = { "tokens" => {} }
-
-    with_fake_status(JSON.generate(payload)) do |bin|
-      result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch(
-        now: Time.utc(2026, 8, 21, 12)
-      )
-
-      projection = result.patrol_fix_projects.fetch("hive")
-      assert_equal "partial", projection.fetch("completeness")
-      assert_equal "invalid_patrol_fix_projection",
-                   projection.dig("diagnostics", 0, "code")
-      assert Hive::PatrolFix::OperationalProjection.valid_document?(
-        projection, project: "hive"
-      )
     end
   end
 

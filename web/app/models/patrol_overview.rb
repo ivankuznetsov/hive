@@ -1,56 +1,137 @@
-require "hive/patrol_fix/operational_projection"
+require "digest"
+require "hive/patrol/finding_query"
+require "hive/refactor_patrol/job_query"
+require "hive/refactor_patrol/job_store"
 
-# Read-only web adapter over the daemon-owned common Patrol projection.
-# It never opens ordinary or Architecture Patrol stores.
 class PatrolOverview
+  ITEM_LIMIT = 25
+  ARCHITECTURE_DETAIL_LIMIT = 5
+  ARCHITECTURE_FINDINGS_PER_JOB = 3
   Section = Data.define(
     :enabled, :health, :total, :counts, :items, :last_run_at,
-    :truncated, :allowance, :error
+    :truncated, :error
   )
 
   attr_reader :project
 
-  def initialize(project)
+  def initialize(project, ordinary_query: nil, architecture_query: nil,
+                 logger: Rails.logger)
     @project = project
-    candidate = project["patrol_fix"]
-    @projection = if Hive::PatrolFix::OperationalProjection.valid_document?(
-      candidate, project: project.name
-    )
-      candidate
+    @logger = logger
+    @ordinary_query = ordinary_query || begin
+      store = Hive::Patrol::StateStore.new(
+        project.path, hive_state_path: project.hive_state_path
+      )
+      Hive::Patrol::FindingQuery.new(store)
+    end
+    @architecture_query = architecture_query || begin
+      store = Hive::RefactorPatrol::JobStore.new(
+        project.path, hive_state_path: project.hive_state_path
+      )
+      Hive::RefactorPatrol::JobQuery.new(store)
     end
   end
 
-  def ordinary = section("ordinary")
-  def architecture = section("architecture")
-  def admission = @projection&.fetch("admission", {}) || {}
-  def workflow = @projection&.fetch("workflow", {}) || {}
-  def delivery = @projection&.fetch("delivery", {}) || {}
-  def tokens = @projection&.fetch("tokens", {}) || {}
-  def post_merge = @projection&.dig("discovery", "post_merge") || {}
+  def ordinary
+    return disabled_section unless ordinary_enabled?
+
+    payload = @ordinary_query.list_envelope(
+      project: project.name, project_root: project.path
+    )
+    active = payload.fetch("counts").fetch("active", 0)
+    health = if active.positive?
+      "attention"
+    elsif payload.fetch("feature_review_active")
+      "running"
+    elsif payload["last_run_at"]
+      "healthy"
+    else
+      "idle"
+    end
+    Section.new(
+      enabled: true, health: health, total: payload.fetch("count"),
+      counts: payload.fetch("counts"), items: payload.fetch("findings"),
+      last_run_at: payload["last_run_at"], truncated: payload.fetch("truncated"),
+      error: nil
+    )
+  rescue StandardError => error
+    error_section(error)
+  end
+
+  def architecture
+    return disabled_section unless architecture_enabled?
+
+    payload = @architecture_query.recent_projection(
+      project: project.name, project_root: project.path, limit: ITEM_LIMIT
+    )
+    jobs = architecture_findings(payload.fetch("jobs"))
+    counts = jobs.group_by { |job| job.fetch("state") }.transform_values(&:size)
+    health = if jobs.any? { |job| job.fetch("state") == "blocked" }
+      "attention"
+    elsif jobs.any? { |job| %w[queued analyzing classified acting].include?(job.fetch("state")) }
+      "running"
+    elsif jobs.any?
+      "healthy"
+    else
+      "idle"
+    end
+    Section.new(
+      enabled: true, health: health, total: payload.fetch("count"),
+      counts: counts, items: jobs,
+      last_run_at: jobs.map { |job| job["updated_at"] }.compact.max,
+      truncated: payload.fetch("truncated") == true, error: nil
+    )
+  rescue StandardError => error
+    error_section(error)
+  end
 
   private
 
-  def section(engine)
-    return unavailable_section unless @projection
+  def ordinary_enabled? = project.config.dig("patrol", "mode").to_s != "off"
+  def architecture_enabled? = project.config.dig("refactor_patrol", "enabled") == true
 
-    lane = @projection.dig("discovery", engine)
-    return unavailable_section unless lane.is_a?(Hash)
+  def architecture_findings(jobs)
+    remaining = ARCHITECTURE_DETAIL_LIMIT
+    jobs.map do |job|
+      projected = job.dup
+      next projected unless remaining.positive? &&
+                            %w[fix discuss].sum { |route| job.dig("counts", route).to_i }.positive?
 
+      remaining -= 1
+      detail = @architecture_query.show_envelope(
+        project: project.name, project_root: project.path,
+        job_id: job.fetch("job_id"), limit: 1
+      )
+      dispositions = detail.dig("job", "dispositions") || {}
+      projected["findings"] = %w[fix discuss].flat_map do |route|
+        Array(dispositions[route]).map do |item|
+          thesis = item["thesis"].is_a?(Hash) ? item.fetch("thesis") : {}
+          {
+            "id" => item["id"], "route" => route,
+            "problem" => thesis["problem"],
+            "proposed_refactor" => thesis["proposed_refactor"]
+          }
+        end
+      end.first(ARCHITECTURE_FINDINGS_PER_JOB)
+      projected
+    end
+  end
+
+  def disabled_section
     Section.new(
-      enabled: lane.fetch("enabled"), health: lane.fetch("health"),
-      total: lane.fetch("total"), counts: lane.fetch("counts"),
-      items: lane.fetch("items"), last_run_at: lane["last_run_at"],
-      truncated: lane.fetch("truncated"),
-      allowance: lane.fetch("allowance"),
-      error: lane.fetch("health") == "unavailable" ?
-        "Patrol data is temporarily unavailable." : nil
+      enabled: false, health: "disabled", total: 0, counts: {}, items: [],
+      last_run_at: nil, truncated: false, error: nil
     )
   end
 
-  def unavailable_section
+  def error_section(error)
+    diagnostic = Digest::SHA256.hexdigest("#{error.class.name}\0#{error.message}").first(12)
+    @logger.warn(
+      "patrol overview unavailable: #{error.class.name} diagnostic=#{diagnostic}"
+    )
     Section.new(
       enabled: true, health: "unavailable", total: 0, counts: {}, items: [],
-      last_run_at: nil, truncated: false, allowance: {},
+      last_run_at: nil, truncated: false,
       error: "Patrol data is temporarily unavailable."
     )
   end

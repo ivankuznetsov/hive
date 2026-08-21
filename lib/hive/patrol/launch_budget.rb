@@ -6,6 +6,7 @@ require "securerandom"
 require "time"
 
 require "hive/atomic_file"
+require "hive/config"
 require "hive/managed_directory"
 require "hive/usage_db"
 
@@ -70,10 +71,14 @@ module Hive
           root: @ledger_root, label: "Patrol discovery allowance ledger"
         )
         patrol_cfg = cfg.is_a?(Hash) && cfg["patrol"].is_a?(Hash) ? cfg.fetch("patrol") : {}
-        @max_agent_spawns_per_day = if patrol_cfg["mode"].to_s == "off"
+        mode = patrol_cfg["mode"].to_s
+        @max_agent_spawns_per_day = if mode == "off"
           0
         else
           patrol_cfg["scheduled_discovery_launches_per_engine_per_day"] ||
+            Hive::Config::PATROL_MODE_KNOBS.dig(
+              mode, "scheduled_discovery_launches_per_engine_per_day"
+            ) ||
             DEFAULT_MAX_AGENT_SPAWNS_PER_DAY
         end
       end

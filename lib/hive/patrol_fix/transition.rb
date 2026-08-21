@@ -18,7 +18,7 @@ module Hive
       SCHEMA_VERSION = 1
       INTENT_FILENAME = "route-intent.json".freeze
       MAX_INTENT_BYTES = 32 * 1024
-      ROUTES = %w[rework reopen].freeze
+      ROUTES = %w[rework].freeze
       class InvalidTransition < Hive::Error; end
 
       def initialize(task, worktree_root: nil, commit: nil, clock: -> { Time.now.utc })
@@ -44,29 +44,6 @@ module Hive
           action_id: decision.fetch("receipt_id"), route: "rework",
           stage: "review", destination: "2-fix", operator: "controller:review",
           carried_receipts: []
-        )
-        apply_intent(intent)
-      end
-
-      def reopen!(outcome_receipt_id:, operator:)
-        folder = current_task_folder
-        store = ReceiptStore.new(task_folder: folder)
-        outcome = store.read_all.find { |row| row.fetch("receipt_id") == outcome_receipt_id.to_s }
-        unless outcome && outcome.fetch("kind") == "decision" &&
-               Projection::PARKED_ROUTES.include?(outcome.dig("payload", "route"))
-          raise InvalidTransition, "reopen outcome receipt is not a parked semantic decision"
-        end
-        manifest = TaskManifest.new(task_folder: folder).read
-        unless outcome.fetch("task") == manifest.fetch("task") &&
-               outcome.fetch("evidence_revision") == manifest.fetch("evidence_revision")
-          raise InvalidTransition, "reopen outcome is not current"
-        end
-        stage = outcome.fetch("stage")
-        carried = stage == "review" ? review_evidence_ids(store, manifest) : []
-        intent = begin_intent(
-          action_id: outcome.fetch("receipt_id"), route: "reopen",
-          stage: stage, destination: "#{@task.stage_index}-#{@task.stage_name}",
-          operator: operator, carried_receipts: carried
         )
         apply_intent(intent)
       end
@@ -214,33 +191,6 @@ module Hive
         destination
       rescue SystemCallError, IOError => e
         raise InvalidTransition, "route transition move failed: #{e.message}"
-      end
-
-      def review_evidence_ids(store, manifest)
-        rows = store.read_all.select do |row|
-          row.fetch("task") == manifest.fetch("task") &&
-            row.fetch("evidence_revision") == manifest.fetch("evidence_revision")
-        end
-        fix = rows.find { |row| row["kind"] == "fix" && row["stage"] == "fix" }
-        validation = rows.find { |row| row["kind"] == "validation" && row["stage"] == "validate" }
-        unless fix && validation &&
-               validation.dig("payload", "worktree_head") == fix.dig("payload", "head_revision") &&
-               outcome_review_binding?(store, manifest, fix, validation)
-          raise InvalidTransition, "review reopen requires exact current fix and validation receipts"
-        end
-        [ fix.fetch("receipt_id"), validation.fetch("receipt_id") ]
-      end
-
-      def outcome_review_binding?(store, manifest, fix, validation)
-        decision = store.read_all.find do |row|
-          row["kind"] == "decision" && row["stage"] == "review" &&
-            row.fetch("task") == manifest.fetch("task") &&
-            row.fetch("evidence_revision") == manifest.fetch("evidence_revision")
-        end
-        decision && decision.dig("payload", "fix_receipt_id") == fix.fetch("receipt_id") &&
-          decision.dig("payload", "validation_receipt_id") == validation.fetch("receipt_id") &&
-          decision.dig("payload", "head_revision") == fix.dig("payload", "head_revision") &&
-          decision.dig("payload", "diff_digest") == fix.dig("payload", "diff_digest")
       end
 
       def validate_decision!(decision, route:)

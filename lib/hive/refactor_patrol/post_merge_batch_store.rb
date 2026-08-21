@@ -56,14 +56,13 @@ module Hive
 
         @directory.prepare!
         @directory.with_lock(LOCK_FILE) do
-          batches = authoritative_records
+          batches = compact_for_capacity!(each_record_unlocked.to_a)
           claimed = claimed_chunks(batches)
           primary_unit = first_unclaimed_unit(primary, mapped, claimed)
           raise Conflict, "post-merge occurrence is already fully claimed" unless primary_unit
 
           members = select_members(primary, primary_unit, records, mapped, claimed)
           record = build_record(members, sha, instant)
-          raise Invalid, "post-merge batch inventory exceeds #{MAX_RECORDS}" if batches.size >= MAX_RECORDS
 
           @directory.atomic_write(
             record_relative(record.fetch("batch_id")), canonical_json(record), mode: 0o600
@@ -103,7 +102,7 @@ module Hive
         return [] if Array(classifications).empty?
 
         records = normalize_classifications(classifications)
-        claimed = claimed_chunks(authoritative_records)
+        claimed = claimed_chunks(each_record.to_a)
         records.filter_map do |record|
           mappings = { record.fetch("occurrence_id") => snapshot_path_mappings(record) }
           record.fetch("occurrence_id") if first_unclaimed_unit(record, mappings, claimed)
@@ -186,9 +185,19 @@ module Hive
       def each_record
         return enum_for(__method__) unless block_given?
         return unless File.directory?(@directory.root)
+
+        @directory.with_lock(LOCK_FILE, shared: true) do
+          each_record_unlocked { |record| yield record }
+        end
+      end
+
+      private
+
+      def each_record_unlocked
+        return enum_for(__method__) unless block_given?
+
         names = @directory.each_child("records", missing: true).to_a
           .select { |name| /\A[0-9a-f]{64}\.json\z/.match?(name) }.sort
-        raise Invalid, "post-merge batch inventory exceeds #{MAX_RECORDS}" if names.size > MAX_RECORDS
         names.each do |name|
           id = name.delete_suffix(".json")
           yield parse_record(
@@ -197,8 +206,6 @@ module Hive
           )
         end
       end
-
-      private
 
       def normalize_classifications(classifications, require_unclaimed: true)
         records = Array(classifications)
@@ -315,7 +322,80 @@ module Hive
         }
       end
 
-      def authoritative_records = each_record.to_a
+      def compact_for_capacity!(records)
+        required = records.size - MAX_RECORDS + 1
+        return records if required <= 0
+
+        removable_components = consumed_components(records).sort_by do |component|
+          component.map { |record| record.fetch("materialized_at") || record.fetch("created_at") }.min
+        end
+        removed = {}
+        removable_components.each do |component|
+          component.each do |record|
+            id = record.fetch("batch_id")
+            relative = record_relative(id)
+            bytes = @directory.read(relative, max_bytes: MAX_RECORD_BYTES)
+            @directory.unlink(
+              relative, expected_digest: Digest::SHA256.hexdigest(bytes),
+              max_bytes: MAX_RECORD_BYTES
+            )
+            removed[id] = true
+          end
+          break if removed.size >= required
+        end
+        if removed.size < required
+          raise Invalid, "post-merge batch capacity contains in-flight work"
+        end
+
+        records.reject { |record| removed.key?(record.fetch("batch_id")) }
+      end
+
+      def consumed_components(records)
+        by_id = records.to_h { |record| [ record.fetch("batch_id"), record ] }
+        occurrence_batches = Hash.new { |hash, key| hash[key] = [] }
+        records.each do |record|
+          record.fetch("members").each do |member|
+            occurrence_batches[member.fetch("occurrence_id")] << record.fetch("batch_id")
+          end
+        end
+
+        remaining = by_id.keys.to_h { |id| [ id, true ] }
+        components = []
+        until remaining.empty?
+          pending = [ remaining.keys.first ]
+          ids = []
+          until pending.empty?
+            id = pending.shift
+            next unless remaining.delete(id)
+
+            ids << id
+            by_id.fetch(id).fetch("members").each do |member|
+              pending.concat(occurrence_batches.fetch(member.fetch("occurrence_id")))
+            end
+          end
+          component = ids.map { |id| by_id.fetch(id) }
+          components << component if consumed_component?(component)
+        end
+        components
+      end
+
+      def consumed_component?(records)
+        return false unless records.all? { |record| record.fetch("status") == "finalized" }
+
+        chunks = Hash.new { |hash, key| hash[key] = { count: nil, indexes: [] } }
+        records.each do |record|
+          record.fetch("members").each do |member|
+            occurrence = chunks[member.fetch("occurrence_id")]
+            occurrence[:count] ||= member.fetch("chunk_count")
+            return false unless occurrence.fetch(:count) == member.fetch("chunk_count")
+
+            occurrence.fetch(:indexes) << member.fetch("chunk_index")
+          end
+        end
+        chunks.values.all? do |occurrence|
+          occurrence.fetch(:indexes).uniq.sort == (1..occurrence.fetch(:count)).to_a
+        end
+      end
 
       def parse_record(bytes, expected_batch_id: nil)
         record = JSON.parse(bytes)

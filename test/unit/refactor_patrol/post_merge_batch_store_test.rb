@@ -135,10 +135,83 @@ class RefactorPatrolPostMergeBatchStoreTest < Minitest::Test
     end
   end
 
+  def test_claim_compacts_only_fully_consumed_batch_groups
+    with_max_records(1) do
+      with_tmp_dir do |dir|
+        store = build_store(dir)
+        first_record = classification("a", number: 10, paths: %w[lib/a.rb], merged_at: T0)
+        first = claim(store, first_record, analysis_sha: "f" * 40)
+        finalize(store, first)
+
+        second_record = classification("b", number: 11, paths: %w[lib/b.rb], merged_at: T0 + 1)
+        second = claim(store, second_record, analysis_sha: "e" * 40)
+
+        assert_nil store.fetch(first.fetch("batch_id"))
+        assert_equal second, store.fetch(second.fetch("batch_id"))
+      end
+    end
+  end
+
+  def test_finalized_partial_occurrence_is_retained_with_its_in_flight_chunk
+    with_max_records(2) do
+      with_tmp_dir do |dir|
+        store = build_store(dir)
+        paths = 513.times.map { |index| "lib/features/#{index}.rb" }
+        split = classification("a", number: 10, paths: paths, merged_at: T0)
+        first = claim(store, split, analysis_sha: "f" * 40)
+        finalize(store, first)
+        second = claim(store, split, analysis_sha: "e" * 40)
+        newcomer = classification("b", number: 11, paths: %w[lib/new.rb], merged_at: T0 + 1)
+
+        error = assert_raises(Hive::RefactorPatrol::PostMergeBatchStore::Invalid) do
+          claim(store, newcomer, analysis_sha: "d" * 40)
+        end
+
+        assert_match(/in-flight work/, error.message)
+        assert store.fetch(first.fetch("batch_id"))
+        assert store.fetch(second.fetch("batch_id"))
+      end
+    end
+  end
+
   private
 
   def build_store(dir)
     Hive::RefactorPatrol::PostMergeBatchStore.new(root: File.join(dir, "batches"))
+  end
+
+  def claim(store, record, analysis_sha:)
+    store.claim!(
+      primary_occurrence_id: record.fetch("occurrence_id"),
+      classifications: [ record ], analysis_sha: analysis_sha,
+      mappings: {
+        record.fetch("occurrence_id") => mapped(
+          record.dig("snapshot", "changed_paths"), "slice-shared"
+        )
+      },
+      now: T0
+    )
+  end
+
+  def finalize(store, batch)
+    store.mark_materialized!(
+      batch.fetch("batch_id"), job_id: batch.fetch("owner_job_id"),
+      manifest_checksum: "a" * 64, now: T0
+    )
+    store.finalize!(
+      batch.fetch("batch_id"), job_id: batch.fetch("owner_job_id"),
+      manifest_checksum: "a" * 64
+    )
+  end
+
+  def with_max_records(limit)
+    original = Hive::RefactorPatrol::PostMergeBatchStore::MAX_RECORDS
+    Hive::RefactorPatrol::PostMergeBatchStore.send(:remove_const, :MAX_RECORDS)
+    Hive::RefactorPatrol::PostMergeBatchStore.const_set(:MAX_RECORDS, limit)
+    yield
+  ensure
+    Hive::RefactorPatrol::PostMergeBatchStore.send(:remove_const, :MAX_RECORDS)
+    Hive::RefactorPatrol::PostMergeBatchStore.const_set(:MAX_RECORDS, original)
   end
 
   def mapped(paths, slice_id)

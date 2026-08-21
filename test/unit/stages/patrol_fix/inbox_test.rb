@@ -5,12 +5,14 @@ require "hive/task"
 require "hive/stages/patrol_fix/inbox"
 
 class PatrolFixInboxStageTest < Minitest::Test
+  include HiveTestHelper
+
   def test_reinvestigates_current_head_and_records_a_controller_bound_reject_without_worktree
     with_task do |task, manifest|
       head = git(task.project_root, "rev-parse", "HEAD").strip
+      captured = nil
       runner = lambda do |**kwargs|
-        assert_equal head, kwargs.fetch(:head_revision)
-        assert_includes kwargs.fetch(:prompt), "untrusted_patrol_finding"
+        captured = kwargs
         File.write(kwargs.fetch(:output_path), JSON.generate(
           "schema" => "hive-patrol-fix-inbox-report", "schema_version" => 1,
           "route" => "reject", "rationale" => "The current code no longer reproduces it.",
@@ -20,9 +22,20 @@ class PatrolFixInboxStageTest < Minitest::Test
         { status: :ok, custody: :clean }
       end
 
-      result = Hive::Stages::PatrolFix::Inbox.run!(task, {}, agent_runner: runner)
+      result = with_replaced_singleton_method(
+        Hive::Stages::ManagedAgentCustody, :launch_agent, runner
+      ) do
+        Hive::Stages::PatrolFix::Inbox.run!(task, {})
+      end
 
       assert_equal :parked, result.fetch(:status)
+      assert_includes captured.fetch(:prompt), "untrusted_patrol_finding"
+      assert_equal "patrol_review", captured.fetch(:actor)
+      assert_equal "stages.inbox", captured.fetch(:slot)
+      assert_equal task.project_root, captured.fetch(:cwd)
+      assert_equal [ task.project_root, task.folder ], captured.fetch(:add_dirs)
+      assert_equal "inbox", captured.fetch(:stage)
+      assert_equal "patrol-fix-inbox", captured.fetch(:log_label)
       receipt = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).read_all.fetch(0)
       assert_equal "reject", receipt.dig("payload", "route")
       assert_equal head, receipt.dig("payload", "head_revision")

@@ -1,92 +1,156 @@
 require "test_helper"
 
 class PatrolOverviewTest < ActiveSupport::TestCase
-  FakeProject = Struct.new(:name, :attributes) do
-    def [](key) = attributes[key]
-  end
+  FakeProject = Data.define(:name, :path, :hive_state_path, :config)
 
-  test "both sections pass through the common bounded projection" do
-    projection = operational_projection
+  test "ordinary and architecture sections read their bounded native queries" do
+    ordinary = Object.new
+    ordinary.define_singleton_method(:list_envelope) do |project:, project_root:|
+      raise "wrong ordinary identity" unless [ project, project_root ] == [ "demo", "/repo" ]
+      {
+        "count" => 1, "counts" => { "active" => 1 },
+        "findings" => [ { "id" => "finding-1" } ], "truncated" => false,
+        "last_run_at" => "2026-08-21T12:00:00Z",
+        "feature_review_active" => false
+      }
+    end
+    architecture = Object.new
+    job = architecture_job("complete")
+    architecture.define_singleton_method(:recent_projection) do |project:, project_root:, limit:|
+      raise "wrong architecture identity" unless
+        [ project, project_root, limit ] == [ "demo", "/repo", PatrolOverview::ITEM_LIMIT ]
+      {
+        "count" => 1, "truncated" => false,
+        "jobs" => [ job ]
+      }
+    end
+    architecture.define_singleton_method(:show_envelope) do |job_id:, limit:, **|
+      raise "wrong detail identity" unless [ job_id, limit ] == [ "job-complete", 1 ]
+      {
+        "job" => {
+          "dispositions" => {
+            "fix" => [ {
+              "id" => "thesis-1",
+              "thesis" => {
+                "problem" => "Ownership is split",
+                "proposed_refactor" => "Use one owner"
+              }
+            } ],
+            "discuss" => []
+          }
+        }
+      }
+    end
+
     overview = PatrolOverview.new(
-      FakeProject.new("demo", { "patrol_fix" => projection })
+      project, ordinary_query: ordinary, architecture_query: architecture
     )
 
-    assert_equal projection.dig("discovery", "ordinary", "items"), overview.ordinary.items
-    assert_equal projection.dig("discovery", "architecture", "items"), overview.architecture.items
     assert_equal "attention", overview.ordinary.health
-    assert_equal "running", overview.architecture.health
-    assert_equal projection.fetch("workflow"), overview.workflow
-    assert_equal projection.fetch("delivery"), overview.delivery
-    assert_equal 3, overview.ordinary.allowance.fetch("remaining")
+    assert_equal [ "finding-1" ], overview.ordinary.items.map { |item| item.fetch("id") }
+    assert_equal "healthy", overview.architecture.health
+    assert_equal "Ownership is split",
+                 overview.architecture.items.first.fetch("findings").first.fetch("problem")
   end
 
-  test "missing or cross-project projection fails closed" do
-    projection = operational_projection.merge("project" => "other")
+  test "disabled lanes do not read stores" do
+    unreadable = Object.new
+    unreadable.define_singleton_method(:list_envelope) { |**| raise "must not read" }
+    unreadable.define_singleton_method(:recent_projection) { |**| raise "must not read" }
+    disabled = project(
+      "patrol" => { "mode" => "off" },
+      "refactor_patrol" => { "enabled" => false }
+    )
+
     overview = PatrolOverview.new(
-      FakeProject.new("demo", { "patrol_fix" => projection })
+      disabled, ordinary_query: unreadable, architecture_query: unreadable
+    )
+
+    assert_equal "disabled", overview.ordinary.health
+    assert_equal "disabled", overview.architecture.health
+  end
+
+  test "source failures are isolated and diagnostics do not disclose details" do
+    secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+    ordinary = Object.new
+    ordinary.define_singleton_method(:list_envelope) { |**| raise "#{secret} at /private/file" }
+    architecture = Object.new
+    architecture.define_singleton_method(:recent_projection) do |**|
+      { "count" => 0, "truncated" => false, "jobs" => [] }
+    end
+    logged = nil
+    logger = Object.new
+    logger.define_singleton_method(:warn) { |message| logged = message }
+
+    overview = PatrolOverview.new(
+      project, ordinary_query: ordinary,
+      architecture_query: architecture, logger: logger
     )
 
     assert_equal "unavailable", overview.ordinary.health
-    assert_equal "unavailable", overview.architecture.health
-    assert_equal "Patrol data is temporarily unavailable.", overview.ordinary.error
+    assert_equal "idle", overview.architecture.health
+    refute_includes logged, secret
+    refute_includes logged, "/private/file"
+    assert_match(/RuntimeError diagnostic=[a-f0-9]{12}\z/, logged)
   end
 
-  test "web adapter never opens discovery stores" do
-    source = File.read(Rails.root.join("app/models/patrol_overview.rb"))
+  test "architecture preserves query order and bounds detail expansion" do
+    jobs = 7.downto(1).map do |number|
+      architecture_job("complete").merge("job_id" => "job-#{number}")
+    end
+    details = []
+    architecture = Object.new
+    architecture.define_singleton_method(:recent_projection) do |limit:, **|
+      raise "unbounded query" unless limit == PatrolOverview::ITEM_LIMIT
+      { "count" => jobs.length, "truncated" => true, "jobs" => jobs }
+    end
+    architecture.define_singleton_method(:show_envelope) do |job_id:, limit:, **|
+      raise "unbounded detail" unless limit == 1
+      details << job_id
+      {
+        "job" => {
+          "dispositions" => {
+            "fix" => 4.times.map do |index|
+              {
+                "id" => "#{job_id}-#{index}",
+                "thesis" => { "problem" => "problem-#{index}" }
+              }
+            end,
+            "discuss" => []
+          }
+        }
+      }
+    end
 
-    refute_includes source, "StateStore"
-    refute_includes source, "JobStore"
-    refute_includes source, "FindingQuery"
-    refute_includes source, "JobQuery"
+    section = PatrolOverview.new(project, architecture_query: architecture).architecture
+
+    assert_equal jobs.map { |job| job.fetch("job_id") },
+                 section.items.map { |job| job.fetch("job_id") }
+    assert_equal %w[job-7 job-6 job-5 job-4 job-3], details
+    assert_equal PatrolOverview::ARCHITECTURE_FINDINGS_PER_JOB,
+                 section.items.fetch(0).fetch("findings").length
+    refute section.items.fetch(5).key?("findings")
+    assert section.truncated
   end
 
   private
 
-  def operational_projection
-    Hive::PatrolFix::OperationalProjection.new(
-      project: "demo", tasks: [], admissions: [],
-      discovery: {
-        "ordinary" => lane("ordinary", "attention", ordinary_item),
-        "architecture" => lane("architecture", "running", architecture_item),
-        "post_merge" => { "queued" => 1 }, "coverage" => {}
-      }, now: Time.utc(2026, 8, 21, 12)
-    ).to_h
-  end
-
-  def lane(engine, health, item)
-    {
-      "enabled" => true, "health" => health, "total" => 1,
-      "counts" => { item.fetch("state") => 1 }, "last_run_at" => nil,
-      "truncated" => false,
-      "allowance" => {
-        "engine" => engine, "utc_date" => "2026-08-21", "limit" => 4,
-        "used" => 1, "remaining" => 3, "status" => "available", "retry_at" => nil
-      }, "items" => [ item ]
-    }
-  end
-
-  def ordinary_item
-    item("ordinary_patrol", "finding-1", "active").merge(
-      "title" => "Repair login", "summary" => "Login can crash"
+  def project(config = nil)
+    FakeProject.new(
+      name: "demo", path: "/repo", hive_state_path: "/state",
+      config: config || {
+        "patrol" => { "mode" => "medium" },
+        "refactor_patrol" => { "enabled" => true }
+      }
     )
   end
 
-  def architecture_item
-    item("architecture_patrol", "job-1", "analyzing").merge(
-      "title" => "Consolidate ownership", "route" => "fix",
-      "source" => {
-        "kind" => "pull_request", "id" => "42",
-        "url" => "https://github.com/acme/demo/pull/42", "number" => 42
-      }, "evidence" => [ "Duplicate owner" ]
-    )
-  end
-
-  def item(engine, identity, state)
+  def architecture_job(state)
     {
-      "engine" => engine, "identity" => identity, "state" => state,
-      "title" => nil, "summary" => nil, "route" => nil, "severity" => nil,
-      "confidence" => nil, "feature_id" => nil, "target_revision" => nil,
-      "source" => nil, "updated_at" => nil, "evidence" => [], "blocker" => nil
+      "job_id" => "job-#{state}", "state" => state, "complete" => true,
+      "source" => { "number" => 7, "url" => "https://github.com/acme/demo/pull/7" },
+      "counts" => { "fix" => 1, "discuss" => 0, "pending_actions" => 0 },
+      "blockers" => [], "updated_at" => "2026-08-21T12:00:00Z"
     }
   end
 end

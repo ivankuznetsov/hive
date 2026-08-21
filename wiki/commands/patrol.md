@@ -10,7 +10,7 @@ tags: [command, patrol, review, findings]
 **TLDR**: `hive patrol` is a discovery command. It reviews a clean snapshot of
 the registered project's default branch, records accepted findings under
 `.hive-state/patrol/`, and publishes them to the shared Patrol Fix admission
-outbox. It does not edit code, create worktrees, push branches, open pull
+store. It does not edit code, create worktrees, push branches, open pull
 requests, or create review tasks.
 
 ## Usage
@@ -26,7 +26,7 @@ hive patrol my-project --list --json
 The project must be registered, use the `coding` default workflow, and have
 Patrol enabled. `--list` reads the bounded finding projection without starting
 a review. `--dry-run` maps and reviews but does not persist findings, cursors,
-or outbox entries.
+or admission records.
 
 ## Discovery lifecycle
 
@@ -41,8 +41,8 @@ or outbox entries.
 5. Semantically deduplicate findings against the durable registry. Same-target
    terminal findings remain suppressed; a finding on a newer target starts a
    new recurrence lineage.
-6. Persist each newly active finding and publish its immutable candidate
-   snapshot directly to the Patrol Fix source outbox.
+6. Persist each newly active finding and reserve its immutable candidate
+   snapshot directly in the project Patrol Fix `AdmissionStore`.
 7. Update the feature cursor and `last_scanned_sha` only when the corresponding
    review scope completed cleanly, then rebuild the bounded query projection.
 
@@ -80,8 +80,8 @@ store.
 ## Scheduling and migration
 
 `Hive::Daemon::PatrolScheduler` decides when ordinary discovery is due and
-dispatches this command. The source outbox is drained independently by
-`Hive::Daemon::PatrolFixAdmissionScheduler`; discovery allowance and workflow
+dispatches this command. The project `AdmissionStore` is drained independently
+by `Hive::Daemon::PatrolFixAdmissionScheduler`; discovery allowance and workflow
 capacity are separate concerns.
 
 Historical local findings can be imported once with

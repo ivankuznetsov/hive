@@ -69,40 +69,7 @@ class PatrolFixTaskActionTest < Minitest::Test
     end
   end
 
-  def test_common_operational_reopen_is_generation_guarded_and_appends_one_receipt
-    with_task("inbox") do |task, receipts|
-      receipts.append!(decision_receipt(route: "blocked", stage: "inbox", id: "decision-1"))
-      fresh = Hive::OperationalAction.descriptor_for_task(task, project: "demo")
-      assert_equal "patrol_fix.reopen", fresh.fetch("action_id")
-      factory = lambda do |current|
-        Hive::PatrolFix::Transition.new(current, commit: ->(**) { :committed })
-      end
-      executor = Hive::OperationalAction::Executor.new(patrol_fix_transition_factory: factory)
-      executor.send(
-        :execute_patrol_fix_reopen,
-        task,
-        project_name: "demo",
-        action_id: fresh.fetch("action_id"),
-        target: fresh.fetch("target"),
-        observation_token: fresh.fetch("observation_token")
-      )
-
-      projection = Hive::PatrolFix::Projection.new(task_folder: task.folder, stage: "1-inbox").to_h
-      assert_nil projection.fetch("outcome")
-      assert_equal "ready", projection.dig("action", "kind")
-      assert_equal 2, projection.fetch("task_generation")
-      assert_equal %w[decision reopen], receipts.read_all.map { |receipt| receipt.fetch("kind") }
-      assert_raises(Hive::StaleOperationalObservation) do
-        executor.send(
-          :execute_patrol_fix_reopen, task, project_name: "demo",
-          action_id: fresh.fetch("action_id"), target: fresh.fetch("target"),
-          observation_token: fresh.fetch("observation_token")
-        )
-      end
-    end
-  end
-
-  def test_status_operational_tui_and_bot_share_the_same_bounded_projection
+  def test_status_consumers_use_the_frozen_standard_task_contract
     with_task("review") do |task, receipts, root|
       receipts.append!(decision_receipt(route: "blocked", stage: "review"))
       project = {
@@ -113,25 +80,22 @@ class PatrolFixTaskActionTest < Minitest::Test
       payload = status.json_payload([ project ], now: Time.utc(2026, 8, 20, 12, 5))
       row = payload.dig("projects", 0, "tasks", 0)
 
-      assert_equal "patrol_fix_blocked", row.fetch("action")
-      assert_equal "review_gate", row.dig("patrol_fix", "blocker_owner")
-      assert_equal "blocked", row.dig("patrol_fix", "outcome", "kind")
+      assert_equal "needs_input", row.fetch("action")
+      refute row.key?("patrol_fix")
 
       operational = status.operational_payload(
         [ project ], status_payload: payload, scheduler_snapshot: nil,
         now: Time.utc(2026, 8, 20, 12, 5)
       ).fetch("tasks").first
-      assert_equal row.fetch("patrol_fix"), operational.fetch("patrol_fix")
-      assert_equal "operator", operational.fetch("blocker_owner")
-      assert_equal "patrol_fix.reopen", operational.dig("action", "action_id")
+      refute operational.key?("patrol_fix")
 
       tui_row = Hive::Tui::Snapshot.from_payload(payload).rows.first
-      assert_equal row.fetch("patrol_fix"), tui_row.patrol_fix
+      assert_equal "needs_input", tui_row.action_key
 
       bot_row = Hive::Bot::StatusWatcher.new.send(
         :extract_rows, payload, now: Time.utc(2026, 8, 20, 12, 5)
       ).first
-      assert_equal row.fetch("patrol_fix"), bot_row.patrol_fix
+      assert_equal "needs_input", bot_row.action
       assert_equal task.slug, bot_row.slug
     end
   end

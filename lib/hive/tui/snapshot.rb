@@ -1,6 +1,5 @@
 require "hive"
 require "hive/commands/status"
-require "hive/patrol_fix/operational_projection"
 require "time"
 
 module Hive
@@ -25,17 +24,16 @@ module Hive
       # otherwise) — agent-facing parity of the text recovery hint.
       ProjectView = Data.define(:name, :path, :hive_state_path, :error, :rows,
                                 :legacy_stage_dirs, :legacy_migrate_command,
-                                :hidden_archived_task_count, :patrol_fix) do
+                                :hidden_archived_task_count) do
         # `legacy_stage_dirs` defaults to `[]` and `legacy_migrate_command`
         # to nil so existing test factories (predating the fields) can keep
         # building ProjectView with the original 5-keyword shape.
         # Production callers in this file always pass them explicitly.
         def initialize(legacy_stage_dirs: [].freeze, legacy_migrate_command: nil,
-                       hidden_archived_task_count: 0, patrol_fix: nil, **rest)
+                       hidden_archived_task_count: 0, **rest)
           super(legacy_stage_dirs: legacy_stage_dirs,
                 legacy_migrate_command: legacy_migrate_command,
-                hidden_archived_task_count: hidden_archived_task_count,
-                patrol_fix: patrol_fix, **rest)
+                hidden_archived_task_count: hidden_archived_task_count, **rest)
         end
       end
 
@@ -102,7 +100,6 @@ module Hive
         :task_lock_id,
         :implementation_identity,
         :plan_review,
-        :patrol_fix,
         :auto_residue,
         :unanswered_questions
       ) do
@@ -131,7 +128,7 @@ module Hive
                        observation_mtime: nil, folder_mtime: nil, live_task_lock: false,
                        task_lock_pid: nil, task_lock_process_start_time: nil, task_lock_id: nil,
                        implementation_identity: nil,
-                       plan_review: nil, patrol_fix: nil, auto_residue: nil,
+                       plan_review: nil, auto_residue: nil,
                        unanswered_questions: 0, outcomes: [], depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
                        blocked: false, admission_error: nil, held: nil, **rest)
@@ -168,7 +165,6 @@ module Hive
                 task_lock_id: task_lock_id,
                 implementation_identity: implementation_identity,
                 plan_review: plan_review,
-                patrol_fix: patrol_fix,
                 auto_residue: auto_residue,
                 unanswered_questions: unanswered_questions,
                 outcomes: outcomes, **rest)
@@ -228,9 +224,6 @@ module Hive
           rows: sorted.freeze,
           legacy_stage_dirs: Array(payload["legacy_stage_dirs"]).freeze,
           legacy_migrate_command: payload["legacy_migrate_command"],
-          patrol_fix: validated_patrol_fix(
-            payload["patrol_fix"], project: name, generated_at: generated_at
-          ),
           hidden_archived_task_count: normalized_hidden_count(
             payload["hidden_archived_task_count"]
           )
@@ -239,26 +232,6 @@ module Hive
 
       def self.normalized_hidden_count(value)
         value.is_a?(Integer) && value >= 0 ? value : 0
-      end
-
-      def self.validated_patrol_fix(projection, project:, generated_at:)
-        return nil if projection.nil?
-        return projection if Hive::PatrolFix::OperationalProjection.valid_document?(
-          projection, project: project
-        )
-
-        now = Time.iso8601(generated_at.to_s).utc
-        Hive::PatrolFix::OperationalProjection.unavailable(
-          project: project, tasks: [], now: now,
-          source: "status", code: "invalid_patrol_fix_projection",
-          summary: "Patrol Fix operational projection is malformed"
-        )
-      rescue ArgumentError
-        Hive::PatrolFix::OperationalProjection.unavailable(
-          project: project, tasks: [], now: Time.at(0).utc,
-          source: "status", code: "invalid_patrol_fix_projection",
-          summary: "Patrol Fix operational projection is malformed"
-        )
       end
 
       def self.build_row(payload, project_name)
@@ -315,7 +288,6 @@ module Hive
           task_lock_id: payload["task_lock_id"],
           implementation_identity: payload["implementation_identity"],
           plan_review: payload["plan_review"],
-          patrol_fix: payload["patrol_fix"],
           auto_residue: payload["auto_residue"],
           unanswered_questions: payload["unanswered_questions"].to_i
         ).freeze
@@ -370,8 +342,7 @@ module Hive
             rows: matched.freeze,
             legacy_stage_dirs: project.legacy_stage_dirs,
             legacy_migrate_command: project.legacy_migrate_command,
-            hidden_archived_task_count: project.hidden_archived_task_count,
-            patrol_fix: project.patrol_fix
+            hidden_archived_task_count: project.hidden_archived_task_count
           ).freeze
         end
         self.class.new(

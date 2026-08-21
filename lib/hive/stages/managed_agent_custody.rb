@@ -1,5 +1,6 @@
 require "open3"
 require "hive/artifact_firewall"
+require "hive/stages/base"
 
 module Hive
   module Stages
@@ -16,6 +17,56 @@ module Hive
           permitted_writable_roots: [ root, worktree_path ],
           required_outputs: required_outputs
         )
+      end
+
+      def launch_agent(task:, cfg:, prompt:, output_path:, protected_files:,
+                       actor:, slot:, cwd:, add_dirs:, stage:, log_label:)
+        validate_regular_or_absent!(task.folder, protected_files)
+        output_label = File.basename(output_path)
+        prepare_output!(output_path, label: output_label)
+        profile = Hive::Stages::Base.stage_profile(cfg, "patrol")
+        prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
+          cfg, actor, task, profile,
+          prompt: prompt, base_add_dirs: add_dirs,
+          managed_slot: slot, managed_outputs: [ output_path ],
+          mark_permission_error: false
+        )
+        protected_task_paths = protected_files.to_h do |name|
+          [ name, File.join(task.folder, name) ]
+        end
+        custody = Hive::ArtifactFirewall::AgentCustody.new(
+          manifest(
+            root: task.folder, worktree_path: cwd,
+            protected_task_paths: protected_task_paths,
+            required_outputs: { output_label => output_path }
+          )
+        )
+        result = Hive::Stages::Base.spawn_agent(
+          task, prompt: prompt, add_dirs: scope.fetch(:add_dirs), cwd: cwd,
+          **Hive::Stages::Base.stage_resource_limits(
+            cfg, task.workflow.stage_named(stage)
+          ),
+          log_label: log_label, profile: profile,
+          **Hive::Stages::Base.model_launch_arguments(
+            cfg, actor, profile,
+            current: Hive::Stages::Base.model_routing_current(cfg["patrol"])
+          ),
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
+          status_mode: :exit_code_only, cfg: cfg, agent_custody: custody
+        )
+        report = custody.report
+        custody_status = if report&.tampered?
+          :tampered
+        elsif report&.required_outputs_valid? == false
+          :invalid_output
+        else
+          :clean
+        end
+        {
+          status: result.is_a?(Hash) ? result[:status] : :error,
+          custody: custody_status,
+          diagnostic: report&.diagnostic
+        }
       end
 
       def validate_regular_or_absent!(root, names)

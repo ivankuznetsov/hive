@@ -12,35 +12,21 @@ class PatrolFixTaskMaterializerTest < Minitest::Test
   include HiveTestHelper
   NOW = Time.utc(2026, 8, 20, 12)
 
-  def test_crash_after_task_creation_replays_one_task_and_acknowledges_source_last
+  def test_crash_after_task_creation_replays_one_task_and_acknowledges_admission_last
     with_initialized_project do |project_root|
-      store = admission_store(project_root)
+      store = admission_store(project_root, klass: OneShotAcknowledgementFailureStore)
       decide_distinct(store, "ordinary-finding-1-v1", source_snapshot)
-      acknowledgements = 0
-      crashing_ack = lambda do |_record, _binding|
-        acknowledgements += 1
-        raise "crash before source acknowledgement"
-      end
 
       assert_raises(RuntimeError) do
-        materializer(project_root, store, source_acknowledger: crashing_ack).call(
-          "ordinary-finding-1-v1"
-        )
+        materializer(project_root, store).call("ordinary-finding-1-v1")
       end
       assert_equal "bound", store.fetch("ordinary-finding-1-v1").fetch("status")
       assert_equal 1, patrol_fix_tasks(project_root).length
 
-      result = materializer(
-        project_root, store,
-        source_acknowledger: lambda do |_record, binding|
-          acknowledgements += 1
-          "ordinary-ack:#{binding.fetch('slug')}"
-        end
-      ).call("ordinary-finding-1-v1")
+      result = materializer(project_root, store).call("ordinary-finding-1-v1")
 
       assert_equal false, result.created
       assert_equal true, result.acknowledged
-      assert_equal 2, acknowledgements
       assert_equal "acknowledged", store.fetch("ordinary-finding-1-v1").fetch("status")
       assert_equal 1, patrol_fix_tasks(project_root).length
     end
@@ -217,14 +203,13 @@ class PatrolFixTaskMaterializerTest < Minitest::Test
     end
   end
 
-  def admission_store(project_root)
-    Hive::PatrolFix::AdmissionStore.new(
+  def admission_store(project_root, klass: Hive::PatrolFix::AdmissionStore)
+    klass.new(
       root: File.join(project_root, ".hive-state", "patrol-fix", "admissions")
     )
   end
 
-  def materializer(project_root, store, source_acknowledger: nil,
-                   candidate_provider: nil, current_head: nil,
+  def materializer(project_root, store, candidate_provider: nil, current_head: nil,
                    task_capture_factory: nil, git_ops: nil)
     Hive::PatrolFix::TaskMaterializer.new(
       project_root: project_root,
@@ -234,7 +219,6 @@ class PatrolFixTaskMaterializerTest < Minitest::Test
         descriptor: Hive::Workflows::Registry.fetch(:"patrol-fix"),
         pin: true, managed: nil, managed_cfg: {}, authored_digest: nil
       },
-      source_acknowledger: source_acknowledger || ->(_record, binding) { "ack:#{binding.fetch('slug')}" },
       candidate_provider: candidate_provider, current_head: current_head,
       task_capture_factory: task_capture_factory, git_ops: git_ops,
       clock: -> { NOW }
@@ -335,5 +319,15 @@ class PatrolFixTaskMaterializerTest < Minitest::Test
     end
 
     def run_git!(*args) = @delegate.run_git!(*args)
+  end
+
+  class OneShotAcknowledgementFailureStore < Hive::PatrolFix::AdmissionStore
+    def acknowledge!(...)
+      unless defined?(@failed_once)
+        @failed_once = true
+        raise "crash before admission acknowledgement"
+      end
+      super
+    end
   end
 end

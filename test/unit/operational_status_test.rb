@@ -1,7 +1,6 @@
 require "test_helper"
 require "json_schemer"
 require "hive/operational_status"
-require "hive/patrol_fix/operational_projection"
 
 class OperationalStatusTest < Minitest::Test
   STATES = %w[
@@ -1153,7 +1152,6 @@ class OperationalStatusTest < Minitest::Test
       "capacity" => { "global" => { "used" => 2, "available" => 0 } },
       "queue" => { "pending" => 1 },
       "provider_holds" => [],
-      "patrol_fix_projects" => { "demo" => patrol_fix_projection },
       "tasks" => [ {
         "identity" => {
           "project" => "demo", "slug" => source_task.fetch("slug"),
@@ -1215,8 +1213,7 @@ class OperationalStatusTest < Minitest::Test
       [ {
         "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state",
         "tasks" => tasks, "legacy_stage_dirs" => [], "legacy_migrate_command" => nil,
-        "hidden_archived_task_count" => hidden_count,
-        "patrol_fix" => patrol_fix_projection
+        "hidden_archived_task_count" => hidden_count
       } ]
     end
     {
@@ -1286,25 +1283,5 @@ class OperationalStatusTest < Minitest::Test
     }
     row["held"] = held if held
     row
-  end
-
-  def patrol_fix_projection
-    lane = lambda do |engine|
-      {
-        "enabled" => true, "health" => "healthy", "total" => 0,
-        "counts" => {}, "last_run_at" => nil, "truncated" => false,
-        "allowance" => {
-          "engine" => engine, "utc_date" => "2026-07-20", "limit" => 4,
-          "used" => 0, "remaining" => 4, "status" => "available", "retry_at" => nil
-        }, "items" => []
-      }
-    end
-    Hive::PatrolFix::OperationalProjection.new(
-      project: "demo", tasks: [], admissions: [],
-      discovery: {
-        "ordinary" => lane.call("ordinary"), "architecture" => lane.call("architecture"),
-        "post_merge" => {}, "coverage" => {}
-      }, now: Time.utc(2026, 7, 20, 10)
-    ).to_h
   end
 end

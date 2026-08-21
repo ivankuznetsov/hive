@@ -3,15 +3,15 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-08-20
+updated: 2026-08-21
 tags: [architecture, components, boundaries, monorepo]
 ---
 
-**TLDR**: Hive keeps reusable mechanisms in this monorepo and makes their
-supported Ruby seams explicit before considering gems. The machine-readable
-catalog records ownership, entry points, contracts, dependencies, consumers,
-state and recovery responsibilities, maturity, and focused tests. Hive remains
-the first and primary consumer.
+**TLDR**: The machine-readable component catalog defines supported entry
+points, ownership, dependencies, consumers, state, recovery, and clean-load
+requirements. Hive remains the first consumer. Patrol migration/effect evidence
+is no longer a component; Patrol Fix is the only retained Patrol component
+boundary.
 
 ## Current catalog
 
@@ -20,41 +20,29 @@ the first and primary consumer.
 | Provider Health | `candidate` | `require "hive/provider_health"` → `Hive::ProviderHealth` | [[modules/provider_health]] |
 | Provider Routing Policy | `candidate` | `require "hive/provider_routing"` → `Hive::ProviderRouting` | [[modules/provider_routing]] |
 | Provider Routing Operations | `candidate` | `require "hive/provider_routing/operational_projection"` → `Hive::ProviderRouting::OperationalProjection` | [[modules/provider_routing]] |
-| Patrol Effect Evidence | `candidate` (U3a protocol complete; reduced installed/live smoke source-pinned; full U3b/U3c proof pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Patrol Fix Workflow Core | `boundary-ready` | `require "hive/patrol_fix"` → `Hive::PatrolFix` | [[modules/patrol]] |
-| Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
-| Workflow Creator Values | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_text_safety"` → `HiveLiveAgentProof::WorkflowCreator::TextSafety` | [[component-boundaries]] |
-| Workflow Creator | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_evidence"` → `HiveLiveAgentProof::WorkflowCreatorEvidence` | [[component-boundaries]] |
-| Workflow Creator Execution | `boundary-ready` (deterministic U14 substrate) | `require "./packaging/live_agent_skills/workflow_creator_execution"` → `HiveLiveAgentProof::WorkflowCreatorExecution` | [[component-boundaries]] |
-| Workflow Creator Live Orchestration | `boundary-ready` (U15 runner; authenticated exact-head proof remains optional and authorization-gated) | `require "./packaging/live_agent_skills/workflow_creator_live_setup"` → `HiveLiveAgentProof::WorkflowCreatorLiveSetup` | [[component-boundaries]] |
+| Attempts admission / future RunReceipt | `candidate` | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
-| Agent ABI | `boundary-ready`; consumes published `agent-cli-runtime` | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
+| Agent ABI | `boundary-ready` | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
 | Skillpack | `boundary-ready` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
 | Safe Agent Git Gate | `boundary-ready` | `require "hive/agent_git_gate"` → `Hive::AgentGitGate` | [[modules/agent_git_gate]] |
 | WorkLedger | `boundary-ready` | `require "hive/work_ledger"` → `Hive::WorkLedger` | [[state-model]] |
+| Workflow Creator Values | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_text_safety"` → `HiveLiveAgentProof::WorkflowCreator::TextSafety` | [[component-boundaries]] |
+| Workflow Creator | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_evidence"` → `HiveLiveAgentProof::WorkflowCreatorEvidence` | [[component-boundaries]] |
+| Workflow Creator Live Orchestration | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_live_setup"` → `HiveLiveAgentProof::WorkflowCreatorLiveSetup` | [[component-boundaries]] |
+| Workflow Creator Execution | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_execution"` → `HiveLiveAgentProof::WorkflowCreatorExecution` | [[component-boundaries]] |
 
-`candidate` means the current code is mapped, but callers, dependencies, or
-policy still need refactoring before the seam is supported. `boundary-ready`
-means the entry point, allowed dependency direction, consumer construction
-rules, and clean-process load are enforced. It does not mean that a component
-has earned a gem, version, repository, or release.
+`candidate` means the seam is mapped but not yet supported for extraction.
+`boundary-ready` means dependency direction, construction rules, and
+clean-process loading are enforced. It does not authorize a gem, package,
+version, tag, or release.
 
-## Final graph audit
+## Graph audit
 
-The catalog retains sixteen components: eleven are `boundary-ready`; Provider
-Health, Provider Routing Policy, Provider Routing Operations, Attempts, and
-Patrol Effect Evidence remain `candidate`.
-Patrol retains one bounded U3 exception for deterministic public-path and
-independently authorized installed/live proof. Workflow Creator is composed
-through its U1b typed publication facade, Workflow Creator Execution supplies
-the stable deterministic U14 custody seam, and Workflow Creator Live
-Orchestration owns the U15 provider/setup/evidence sequence above it.
-Every retained entry point has focused clean-process load proof, every
-catalog-owned path and focused test resolves inside this repository, and the
-direct-construction guards pass against all production Ruby sources.
-
-The component dependency graph has eleven edges:
+The catalog retains fifteen components: eleven are `boundary-ready`; Provider
+Health, Provider Routing Policy, Provider Routing Operations, and Attempts
+remain `candidate`. There are no migration exceptions.
 
 ```mermaid
 flowchart LR
@@ -62,569 +50,48 @@ flowchart LR
   workflow_execution[Workflow Creator Execution] --> workflow_core[Workflow Creator]
   workflow_live[Workflow Creator Live Orchestration] --> workflow_execution
   workflow_live --> workflow_core
-  workflow_core[Workflow Creator] --> workflow_values[Workflow Creator Values]
-  patrol_effects[Patrol Effect Evidence - candidate]
+  workflow_core --> workflow_values[Workflow Creator Values]
   patrol_fix[Patrol Fix Workflow Core] --> git_gate[Safe Agent Git Gate]
-  attempts[Attempts admission - candidate] --> provider_health[Provider Health - candidate]
-  attempts --> provider_routing[Provider Routing Policy - candidate]
-  routing_operations[Provider Routing Operations - candidate] --> attempts
+  attempts[Attempts] --> provider_health[Provider Health]
+  attempts --> provider_routing[Provider Routing Policy]
+  routing_operations[Provider Routing Operations] --> attempts
   routing_operations --> provider_health
   routing_operations --> provider_routing
-  user_service[UserService]
-  artifact_firewall[Agent Artifact Firewall]
-  work_ledger[WorkLedger]
 ```
 
-All other cataloged components depend only on explicitly allowed lower-level
-Hive primitives. Provider Health uses `Hive::OutputReference`, while Provider
-Routing Policy uses `Hive::PointStorage`; their compatibility names under
-`Hive::Attempts` remain for existing Attempts callers but do not create upward
-component edges. `Hive::PointStorage` requires its caller-supplied domain error
-class to inherit from `StandardError`; invalid boundary configuration raises
-`ArgumentError` before managed-directory failures can be translated through it.
-The source audit found no retained experimental facade outside
-the catalog: each promoted facade is owned by a catalog row and used by Hive,
-while Provider Health, Provider Routing Policy, Provider Routing Operations,
-Attempts, and Patrol Effect Evidence are deliberately retained as guarded
-candidates rather than being promoted ahead of their remaining lifecycle or
-qualification proof.
+All other dependencies are explicit lower-level Hive primitives. Every retained
+entry point has focused clean-load proof, and the production construction scan
+enforces internal-owner boundaries.
 
-`Patrol Fix Workflow Core` owns strict source snapshots, admission occurrences,
-task manifests, reports, exact local worktree generations, validation receipts,
-stable stage and route-transition journals, strict independent-review decisions,
-exactly-once coding-successor relations, projections, semantic admission, and
-idempotent task materialization. Its bounded `OperationalProjection` is the
-source-neutral common read model and is validated by the dedicated
-`hive-patrol-fix-operational-projection` schema. Its strict publication receipt validates the
-hosted evidence required by Done but owns no transport effect. It depends
-downward on the Safe Agent Git Gate
-for closed, read-only worktree identity and diff verification and on lower-level
-Task Capture for standard coding successors; it has no issue or remote
-publication authority. Source-owned ordinary and Architecture adapters translate into
-the core without a reverse dependency. The daemon-owned
-`PatrolFixOperationalProjection` is the sole source-reader composition edge and
-remains outside the core. Admission persists an exact candidate
-digest, releases its lock while a provider reasons, rejects stale decisions,
-records materialization intent before task capture, binds the task before
-acknowledging the source, and replays incomplete create/update boundaries. The
-daemon admission controller is a consumer outside the component and is
-independent of discovery scheduling and allowances. Accepted source records
-enter the workflow directly; the core has no cutover gate or source epoch.
+## Patrol Fix boundary
 
-The workflow-owned Publish stage is above this core. It composes the separate
-`Hive::GithubPublication` mechanism, which lives outside both `Hive::Stages`
-and `Hive::PatrolFix`, with the Safe Agent Git Gate and an injected GitHub
-gateway. That mechanism owns only immutable publication identity, complete
-all-state reconciliation, expected-absence push leases, intent-versus-attempt
-recovery, and exact hosted observation. It has no LLM, task-routing, issue,
-review-handoff, ready, merge, close, or PR-edit authority. Coding Draft PR and
-both legacy Patrol publishers retain their existing adapters and behavior.
+`Patrol Fix Workflow Core` owns strict source snapshots, direct admission,
+task manifests, semantic decisions, task materialization, exact worktree
+generations, validation/review/publication receipts, route transitions, and
+projections. Thin ordinary and Architecture adapters translate source records
+and reserve them directly in one project `AdmissionStore`.
 
-Controller-owned Inbox re-investigates the current repository head and accepts
-only a closed semantic decision. Fix creates or recovers one exact, no-fetch
-local worktree generation based on that decision head; trusted/YOLO agent
-execution remains an operator posture, while controller custody ignores and
-restores agent-written task, receipt, and publication artifacts. A clean
-committed descendant becomes a generation/evidence/base/head/diff-bound fix
-receipt. Validate executes only configured commands or structured commands
-deliberately selected by the fixer, records bounded redacted timing and result
-evidence even on failure, marks receipt-level truncation while digesting omitted
-redacted bytes, and never executes reproduction prose. Receipt-backed
-advances journal intent under a stable slug lock outside the moving task folder,
-shared by stage execution and evidence-generation updates, so intent-before-move
-and moved-before-acknowledgement retries reconcile without generation drift.
+The component has no discovery scheduler, occurrence journal, effect delivery,
+migration ownership, shadow comparison, cutover, rollback, status schema, or
+remote transport. It depends downward on Safe Agent Git Gate and normal task
+capture. The workflow-owned Publish stage composes the separate
+`Hive::GithubPublication` mechanism.
 
-Independent Review receives only a controller-resolved exact manifest,
-generation, evidence digest, clean worktree HEAD/diff, fix receipt, and
-validation receipt, with all repository/finding bytes delimited as untrusted
-data. Its strict receipt is durable before routing. Rework and operator reopen
-advance generation under the same stable slug lock before another decision can
-occupy the unique stage/generation tuple. Rework rotates and reuses worktree
-custody but never carries validation; a review-stage operator reopen may carry
-the unchanged fix/validation receipt IDs explicitly. The default cap allows two
-completed rework cycles, after which `rework` is absent from the prompt/parser.
-Escalation keeps the origin parked and uses lower-level Task Capture to create or
-reconcile one reciprocal standard coding task; replay repairs either link and
-never calls a GitHub issue gateway.
+## Boundary enforcement
 
-This is an internal architecture verdict, not a packaging verdict. None of the
-eleven ready components currently has the named non-Hive adopter and independent
-package proof required by the standalone-gem plan.
+The contract validates:
 
-`Patrol Effect Evidence` owns the immutable cross-product capture, selection,
-intent, and receipt values, the single lower-level occurrence facade, bounded
-observational indices, and the two deliberately separate product gateways.
-Separate ordinary and architecture projectors validate their own input
-vocabularies before producing the strict shared selection value; terminal
-outcome is a different capture field. The facade composes one pure validator,
-one occurrence store that alone writes work/effect/outbox records, one bounded
-coordination-state writer, one outbox, and one effect state machine. The
-coordination cell owns compacted sequence fences, the bounded non-sequence
-retirement fence, and durable recovery backoff, but no product work or delivery
-state. Both product gateways compose the same admission, sender, and
-receipt-projection collaborators without inheriting from a shared product
-superclass. `TransitionGateway` is a persistence-free Architecture
-Patrol port: it routes `job` and `discovery` mutations into the architecture
-gateway but can only mutate by invoking JobStore. The scheduler delegates
-transition identities, discovery-claim fencing, reconciliation, and occurrence
-finalization to bounded coordinators while retaining cadence. Command and
-daemon manifest intake share
-`ArchitectureIntakeTransitions`; `ArchitectureOccurrenceStore` validates the
-job scope over the shared journal from the immutable occurrence pointer in the
-v4 JobStore aggregate. There is no binding sidecar or compatibility lookup.
-StateStore and JobStore expose the separate product recovery APIs over the one
-streamed occurrence journal. Terminal outcomes and canonical projection bytes
-commit together; sequenced completions compact through high-water/floor state,
-and a saturated non-sequence fence retains terminal proof rather than replaying.
-EvidenceStore is never consulted to decide a retry or mutation.
-U3a extends this same candidate row with exactly six pure or schema-conversion
-owners: receipt, independent verifier, bounded effect index, qualification,
-report projection, and report migration. Their dependency chain is one-way
-from U2 public values toward report projection; the migration owner alone also
-depends on the existing report storage facade. The six do not construct a
-scheduler, runner, provider, process-custody component, recovery store,
-qualification runtime, or the deferred `ModulePackage::ManagedStore`,
-`Commands::Module::Lifecycle`, and `Modules::Dispatcher` U5-U7 owners. Report and Patrols
-share one descriptor-confined `.mutation.lock`; schema conversion archives the
-exact released v1 bytes, read-only probes validate source/archive/receipt
-linkage, and interrupted receipt publication resumes only under that lock.
-Report replacement, contradiction invalidation, and forward/reverse conversion
-use digest CAS without acquiring cutover, rollback, retry, redispatch, or
-effect-recovery authority. Qualification counts unique comparable
-trigger/repository/SHA/change-window decision identities, and verifier tokens
-can be constructed only after full independent binding checks.
-Ordinary Patrol publication recovery additionally treats a durable binding or
-uncertain-effect seed as custody of one exact validated patch. If its receipt
-is missing, mismatched, or unreadable, Fixer stops without resetting the
-branch, rerunning the agent, minting another patch, or deleting the worktree.
-A terminal PR effect permits error cleanup only after the projected binding
-is byte-for-byte equivalent to the complete binding derived from its terminal
-receipt and matches the attempted patch; absent, partial, or conflicting
-bindings retain the checkout for operator-visible recovery.
+- unique component IDs and owned paths;
+- declared component and lower-level Hive dependencies;
+- explicit public values and forbidden internal constructions;
+- named construction sites where a consumer must instantiate an internal
+  collaborator;
+- clean-process entry-point loading;
+- candidate versus boundary-ready migration-exception rules;
+- consistency between this inventory and the YAML catalog.
 
-`JobStore` authority is fixed directly at `refactor_patrol/v4`. Construction
-and read-only queries do not create state; the first authoritative mutation
-lazily prepares only the v4 managed directory. Runtime never probes, reads,
-hashes, moves, deletes, or interprets v3 JobStore bytes. The other live
-Architecture Patrol owners under `refactor_patrol/v2` remain independent and
-unchanged; the global terminal-proof catalog also remains separate.
+## Backlinks
 
-The Patrol row has a non-empty construction boundary. Shared stores and
-mechanisms, both product gateways, and intake/discovery/action/claim-maintenance
-coordinators are forbidden outside their exact command, scheduler, state, and
-action-runner composition roots. A separate static source contract allows
-JobStore semantic mutators only inside those transition ports. This enforces
-dependency direction; it is not runtime isolation.
-
-The row remains `candidate`. U3a now proves the bounded value, verification,
-duplicate-index, qualification, report-v2, and one-off report-conversion
-contracts in focused tests, but does not produce qualification. U3b still owns
-the committed deterministic scenario catalogue, independent controls, pure
-collector, and complete both-module fault matrix; U3c still owns independently
-authorized installed/live candidate, project, artifact, credential, sandbox,
-process-custody, and publication proof. The packaging-only reduced U3c harness
-now composes those custody checks through exactly five evidence owners and the
-existing E2E controller's read-only `external_smoke` entry, but it creates no
-catalog component, admission facade, report lane, recovery owner, or promotion
-authority. Candidate execution consumes an independently admitted read-only
-source mount while build mutations remain in sandbox state; host composition
-binds a canonical expiring authorization to the registered project's live
-repository/HEAD/state and retains only a closed terminal result. That exception is not permission for
-another recovery store, compatibility effect map, qualification runner, or
-cutover claim.
-
-`Hive::Attempts::API` is the guarded reference admission slice. Its public
-result contracts, focused clean-load proof, and exact internal construction
-sites are enforced while it remains a `candidate`. U8 removed its former
-catalog dependency and reciprocal-source exception by recognizing
-`TaskProjection` as a Hive adapter rather than WorkLedger-owned source.
-Attempts intentionally remains the guarded reference instead of claiming that
-its full lifecycle is a supported component boundary: the slice does not
-publish raw storage, reconciliation, supervision, capacity, loss-policy,
-cancellation, export, or generic lifecycle operations.
-`OutcomeEvidence::Store` is an authorized read-only `Attempts::Store` consumer
-solely for binding an evidence generation to the owning durable attempt; it does
-not publish or mutate Attempts lifecycle state.
-
-`Hive::TaskActivity` is the single authorized task-audit validation facade that
-constructs the canonical attempt store outside the Attempts-owned tree. Runtime
-session, provenance, and stage collectors pass their authenticated attempt
-context to `TaskActivity.for_context`; they do not construct the internal store
-or append task journals independently. Read-only task workspace composition
-reuses the store already owned by `TaskProjection::Store`. This keeps forward
-workspace capture inside the existing Attempts construction boundary without
-turning audit projection into another admission or lifecycle surface. See
-[[modules/task_workspace]].
-
-`Workflow Creator Values` is the boundary-ready values-and-projection seam. Its
-singular entry point is
-`HiveLiveAgentProof::WorkflowCreator::TextSafety`; loading it real-requires the
-sibling `Values` leaf so both public modules become available. `Values.capture`
-accepts exact core JSON-shaped Ruby values and returns an anonymous frozen
-snapshot exposing only fresh recursively frozen owned values and compact
-canonical UTF-8 bytes. Unsupported subclasses, non-finite floats, ambiguous or
-invalid encodings, normalized-key collisions, cycles, and declared depth, node,
-source-byte, canonical-byte, logical-work, and integer-bit ceilings fail through
-one fixed secret-free error.
-
-`Workflow Creator Core` is its first production consumer and the only upward
-component edge. The core owns an immutable schema-v1 vocabulary and validates
-failed, primary, installed-closure, and declarative execution receipts only
-after caller values have been imported into owned snapshots. Successful
-validation returns the primary snapshot. Its nine-command plan assigns one
-semantic label to each position. Because `hive new` owns slug generation,
-position 7 is an explicit `{created_slug}` template: the execution receipt binds
-argument 1 to the `slug` field returned by position 6, and the primary task row
-must carry that same value. Failure construction separately
-captures stable inputs and diagnostic detail, substitutes a fixed omitted-detail
-marker when projection exceeds its bounded work ceiling, and snapshots only the
-internally constructed result afterward. It owns no retention, publication,
-process, provider, credential, archive I/O, or recovery authority.
-
-`WorkflowCreatorBundle` is the component's bounded custody owner above that
-semantic facade. `proof.rb` requires only this owner, which requires the Core;
-the Core never requires upward into custody or proof. Source admission accepts
-exactly the four vocabulary-named canonical JSON files from an owner-private
-directory through no-follow, single-link, current-owner, size-bounded,
-identity-stable descriptors. It validates both installation manifests, the
-primary and exact bundle records, then the execution receipt through the Core's
-public facade. Attestation retains those exact four bytes. Verification repeats
-the same validation from the retained evidence directory, where platform JSON
-may coexist, and compares the independently captured attested primary by
-canonical bytes. Before retention, the incumbent attestor applies its raw
-credential-pattern scan to every admitted member, so the aggregate scan count
-describes bytes that were actually scanned. No one-file compatibility path
-remains.
-
-`WorkflowCreatorEvidence` is the composed component entry point and the only
-constructor of the private `WorkflowCreatorReceiptPublisher`. Its public API
-accepts a bundle directory, derives the primary target exclusively from the
-frozen creator vocabulary, and publishes only canonical non-passing receipts
-admitted by the semantic core. Initialization descriptor-tightens a newly
-created regular staging inode to 0600 before writing any bytes, fsyncs it, and
-uses descriptor-relative no-clobber linking. A bounded cooperative
-directory lock serializes complete initialization and replacement transitions.
-Exact retries and one-link or two-link interrupted states converge; different bytes,
-unsafe types or permissions, excess or outside-prefix links, parent rebinding,
-and native failures fail through typed evidence errors. Replacement revalidates
-the expected identity and bytes under a cooperative lock on the held target
-directory descriptor immediately before descriptor-relative rename,
-and a retry after rename re-fsyncs the exact desired target. Directory scanning
-is bounded and FIFO/special entries use no-follow, nonblocking opens. The boundary
-assumes all supported writers use the facade; arbitrary same-user raw filesystem
-mutation is outside its cooperative contract and does not justify a second
-cross-platform exchange subsystem in U1b. The protected smoke adapter currently
-emits an explicit non-passing U14-custody gap
-even after its model loop succeeds; U14/U15 retain execution and live-claim
-authority.
-
-The approved U1a1c budget re-scope permits only named private semantic-helper
-decomposition. Its ceilings are 140/7/4 for the facade, 260/15/24 for the
-contract, 235/14/20 for execution, 635/36/48 for U1a1c, and 1135/70/104 for the
-Values/TextSafety/Core composition (lines/callables/decisions). The U1a2 bundle
-owner is independently capped at 220/10/28 and currently measures 146/10/26. Public APIs,
-owned files, responsibilities, dependency direction, and decision ceilings did
-not widen.
-
-`TextSafety` projects exact frozen plain strings and arrays produced through a
-snapshot's `value`. That plain-shape check is a documented internal ownership
-contract, not authentication of object origin. `text` makes bounded valid UTF-8,
-`safe_relative_path?` rejects absolute, ambiguous, control-bearing, or traversal
-paths without segment splitting, `secret_findings` reports exact-secret indexes
-before fixed credential-pattern labels, and `redact` merges overlapping ranges
-into one marker. Inputs, outputs, and exact secrets are capped at 4,096 bytes;
-exact-secret lists are capped at 64. Public failures normalize to a fixed
-secret-free error with no cause. Each leaf captures its own private core-method
-handles, and focused subprocess proof covers both load orders and post-load core
-replacement. The sources load without JSON, I/O, workflow, process, credential,
-or provider dependencies.
-
-The Values seam and composed Workflow Creator are boundary-ready, have production
-consumers, and retain no migration exception. U1a2 adds proof custody and
-independent retained verification; U1b adds the fixed non-passing receipt
-publication boundary, but neither claims provider/process custody or that the live
-workflow already emits the complete bundle.
-The exact R43 proof is 298 lines / 20 callables / 32 decisions for `Values`, 200
-lines / 14 callables / 23 decisions for `TextSafety`, and 498 / 34 / 55 when
-composed. The Values source retains its leaf-local `Ripper.lex` no-require proof;
-the TextSafety entry point has exactly one downward `require_relative` to Values.
-This is not generic Ruby grammar, require-path analysis, or provenance security.
-
-`WorkflowCreatorExecution` is the boundary-ready U14 entry point above exactly
-six runtime owners: execution/session composition, installed closure, audit
-gateway, archive admission, Linux process supervision, and bounded capture. Its
-only component dependency is Workflow Creator Core; it imports no Hive runtime
-dependency. `start!` returns one typed session exposing `gateway_path`,
-`workspace_path`, the two closed outer model-loop launch methods, `draft!`,
-`finish!`, `result`, and `close`. It exposes no generic archive reader,
-installation scanner, receipt publisher, process runner, or cleanup machinery.
-
-Construction is correspondingly narrow. `WorkflowCreatorExecution` alone may
-construct `WorkflowCreatorGateway` and `WorkflowCreator::ProcessSupervisor`;
-the supervisor alone may construct `WorkflowCreator::Capture`. The Core's
-private `WorkflowCreatorReceiptPublisher` remains private: the evidence facade
-constructs it for the primary receipt, while execution may construct it only
-for the three vocabulary-fixed support filenames
-`candidate-installed-manifest.json`, `openclaw-installed-manifest.json`, and
-`execution-receipt.json`. The downstream `proof.rb` consumer observes those
-members only through `WorkflowCreatorBundle`'s exact retained-bundle
-revalidation. `finish!` now performs that same full retained-bundle check before
-returning `passed`; a missing or divergent independently written primary leaves
-the support publication retryable but non-passing. U14 cannot publish
-`openclaw-workflow-creator.json`.
-
-The mutation boundary is exact. Callers supply candidate/OpenClaw roots,
-versions, manifests, inventories, executable/launcher/lock/package paths,
-environment, and secrets. U14 may validate those bytes, admit only the two
-fixed archive labels, create one absent owner-private proof workspace, serialize
-the nine Vocabulary command positions through its fixed local gateway, launch
-the two fixed outer labels only with their vocabulary-bound prompts, capture
-bounded redacted output, supervise teardown, publish the three support members,
-and remove only the workspace whose current device/inode still matches its
-creation row. The owner-executable wrapper stays inside the stable private
-candidate closure while its private socket lives in the owner-private parent
-outside the model workspace;
-permanent gateway poison admits no later command. Final rescans must match the
-pre-launch installation snapshots.
-It cannot choose or expose a
-provider, model, credential, installed version, workflow policy, primary-receipt
-writer, or passing/live classification.
-
-Process custody is deliberately Linux-only: the supervisor depends on child
-subreaping and `/proc` ancestry and fails closed elsewhere. Focused proof covers
-caller loss while the trusted custody root remains alive, including containment,
-TERM/KILL escalation, output drain, descendant reaping, and one teardown receipt
-per launch. It does not claim survival after an external actor SIGKILLs that
-trusted custody root itself, and coherent arbitrary same-UID compromise remains
-outside the contract. Boundary readiness therefore means the deterministic U14
-substrate is stable; it does not itself claim an authenticated provider run.
-
-`WorkflowCreatorLiveSetup` is the U15 composition entry point. It admits the
-exact candidate artifacts and installed candidate/OpenClaw runtimes, creates
-small immutable identity closures, projects the exact candidate `/hive` skill,
-prepares one private initialized project, installs and reads back the exact
-SQLite-backed OpenClaw execution policy, and returns only closed runner
-callables. Hive initialization runs against an ordinary main checkout, then
-setup atomically relocates its Git directory into the control root and leaves
-only Git's pointer file behind. It removes the otherwise active managed LLM-wiki
-post-commit hook before relocation because the bounded proof does not run wiki
-refreshes. Candidate homes, that separate Git directory,
-OpenClaw state/config, and approvals stay in the control root, while U14's
-socket stays in the owner-private workspace parent; the model sees only the
-disposable worktree.
-Exact Git, skill, config, and approval identities are
-rechecked at every candidate command and around both model loops.
-Setup accepts immutable external toolchain files owned only by the current
-runner or root; copied identity members are always recreated under the runner's
-private closure.
-`WorkflowCreatorLiveRunner` selects the provider from the committed model
-prefix, exposes exactly the selected credential to the two U14-supervised
-OpenClaw launches, strips provider and repository authority from tool children,
-requires real `openclaw skills info hive --json` discovery and the exact final
-operational task row, observes the authored graph/task/fixture effects, and
-finalizes the U1b primary receipt. The workflow and smoke remain adapters. An authenticated
-passing artifact is still exact-head and explicit-authorization evidence; the
-catalog row does not make that optional network proof a normal CI gate.
-
-The `Agent ABI` is boundary-ready below orchestration. The published
-`agent-cli-runtime` gem owns provider profiles, compilation, bounded probes,
-capability checks, usage decoding, redaction, and observable-result values.
-`Hive::AgentRuntime` forwards those mechanisms while preserving its request,
-probe, error, and result constants; `AgentProfile.new(...)` and
-`AgentProfiles.register` remain extension points. Hive's adapters own model
-routing, skills, defaults, subscription bindings, status detection, process
-lifetime, retries, artifact acceptance, and stage success. Hive derives its
-subscription-only child-environment scrub from the package profile inventory;
-the package itself remains neutral about which supported authentication mode a
-consumer selects.
-
-The `Agent Artifact Firewall` is boundary-ready below stage policy. Its
-immutable manifest declares protected anchors, permitted writable roots,
-required regular outputs, and an injectable redactor. Snapshot, typed
-validation, bounded reporting, descriptor-bound baseline identities,
-protected-parent substitution checks, and verified safe restore sit below the
-facade; execute, open-PR, finalize, review, and managed-worktree adapters
-continue to choose paths and markers. Headless Agent and interactive Claude
-expected-output polling also use the regular-file admission seam.
-`Hive::ProtectedFiles` is now an internal compatibility engine and production
-consumers cannot bypass the facade. The guarantee is same-user application
-custody only: it is not an OS sandbox, a write monitor, a multi-file
-transaction, or the Safe Agent Git Gate.
-
-`Hive::SecretPatterns` remains shared lower-level Hive infrastructure rather
-than component-owned state. The Artifact Firewall uses it for bounded
-diagnostics and accepts an injected redactor; the Agent ABI now uses the
-package-owned redactor.
-
-The canonical package source lives at `components/agent-cli-runtime/` and
-publishes the neutral `AgentCliRuntime` namespace plus the bounded
-`agent-runtime` diagnostic executable. Hive declares the compatible 0.2.x
-dependency, resolves the component path in monorepo development, resolves the
-RubyGems release in packaged Web installs, and contains no second provider
-runtime implementation. See [[modules/agent_cli_runtime]] for the public
-surface and release boundary.
-
-OpenCode support is published in `agent-cli-runtime` 0.2.0 and Hive requires
-that 0.2.x line. Candidate validation alone does not authorize a version
-choice, component tag, RubyGems or mirror publication, deployment, or a
-downstream Hive release; this dependency advanced only after independent
-registry, checksum, install, probe, and mirror verification.
-
-The Web bundle resolves both monorepo gems by path. Source checkouts default to
-`..` for Hive and `../components/agent-cli-runtime` for the component; managed
-archives export the installed roots through `HIVE_CLI_ROOT` and
-`HIVE_AGENT_CLI_RUNTIME_ROOT`. This keeps source Web on the reviewed component
-ABI without making the extracted Web archive depend on a missing checkout.
-
-Its public standalone repository is deliberately a one-way distribution
-projection. Scheduled main snapshots and manually requested release snapshots
-record the exact Hive component commit. The canonical checkout owns projection
-logic and the release workflow independently reconstructs the expected tag tree
-before publication. Repository-scoped deploy-key authentication lets canonical
-administration updates include workflow files without granting cross-repository
-access; immutable mirror tag rules protect the verified result. Development,
-issues, pull requests, version selection, and RubyGems publication remain owned
-by this monorepo. The mirror improves focused discovery without creating a
-second source of truth.
-
-`Hive::UserService` is also a promoted `boundary-ready` component. Its
-Definition, Plan, Status, and Result values keep file drift, stale observation,
-atomic replacement, backups, manager operations, and removal below one clean
-entry point. The daemon, bot, web, setup, init, status, and uninstall surfaces
-remain Hive-owned adapters for templates, policy, messages, JSON, prompts, and
-global sequencing.
-
-`Skillpack` is boundary-ready around canonical compilation and atomic
-projection. The clean entry point exposes deterministic `Projection`,
-`ProjectionReport`, and `Plan` values plus typed validation, unsafe-path,
-stale-plan, and foreign-content errors. `render`, `inspect`, and `plan` are
-non-mutating; `apply` accepts only a preview-bound plan and revalidates it
-before a private staged whole-directory swap. OpenClaw, Claude, Codex, and Pi
-share one closed projection registry. Hive configuration, workflow target
-selection, native plugin/package inventory, consent, CLI JSON, and
-presentation remain lazily loaded Hive adapters above that mechanism.
-Production commands and web code require only the facade; the catalog rejects
-new direct requires or construction of the compiler, publisher, inspector,
-provisioner, target resolver, command runner, manifest, or adapter registry.
-This internal boundary is not a gem or a publication commitment.
-
-The `Safe Agent Git Gate` is boundary-ready around post-agent Git process and
-ref authority. Its clean facade exposes immutable read, remote-observation,
-materialization, and publication receipts; a closed read vocabulary; exact
-detached worktree materialization; and exact expected-OID or expected-absence
-publication with before/after remote proof. Hostile hooks, fsmonitor,
-diff/textconv helpers, inherited config/executable selectors, and forbidden
-transports remain neutralized below the facade. `Hive::ManagedGit` is now the
-private executor and the catalog rejects direct production bypasses.
-
-Hive still owns credentials and transport permission, durable mutation intent,
-branch/PR policy, GitHub API behavior, and operator approval. Refactor patrol's
-append-only publication ledger decides which superseded OID is replaceable;
-the gate only enforces that exact authority. Receipts retain a non-secret
-transport fingerprint rather than URLs or command output. This is Git process
-hardening, not an agent, Git, or operating-system sandbox.
-
-`WorkLedger` is boundary-ready around three policy-light mechanisms: structural
-validation of ordered stage descriptors, locked/fsynced JSONL append with
-idempotency conflict detection and partial-write rollback, and deterministic
-JSONL replay with caller-supplied validation and duplicate-identity rejection.
-The facade returns a narrow `JournalHandle`; its receipts bind descriptor
-identity or exact ledger cursor, last record identity, and SHA-256. The entry
-point loads without Attempts, conditions, task journals, projections,
-workflows, commands, stages, or web runtime.
-
-Receipt strings and record trees are detached, deeply frozen JSON snapshots,
-so mutating a caller-owned input after append or validation cannot rewrite the
-reported durable identity. Replay snapshots its source bytes before invoking
-caller validation. Idempotent lookup checks every matching historical key and
-fails closed if any stored signature conflicts with the requested operation.
-
-WorkLedger deliberately defines no public disk schema. `Hive::Workflow` maps
-its stage structure into the validator, while `Hive::TaskJournal` owns the
-authoritative event envelope and attempt/condition validation and
-`Hive::TaskProjection` owns compatibility replay and projection rules.
-`TaskProjection::Store` remains a Hive composition adapter that may open
-`Hive::Attempts::Store`; it is not WorkLedger source and creates no component
-cycle. Task directories, condition vocabulary, transition and migration
-policy, overlays, snapshots, Git behavior, and operational status all remain
-Hive-owned. Boundary readiness is an internal API verdict, not a public format,
-gem, version, or release commitment.
-
-## Catalog contract
-
-`config/component-boundaries.yml` is the canonical agent-readable inventory.
-Each row names:
-
-- the supported entry point and current public values/errors;
-- owned source paths and explicit component dependencies;
-- state, schema, lock, mutation-authority, and recovery responsibilities;
-- known Hive consumers and internal collaborators;
-- exact existing Hive files allowed to construct a named internal collaborator,
-  with a non-blank architectural reason;
-- the narrative wiki page and focused tests; and
-- reviewed migration exceptions, if any.
-
-Owned paths cannot overlap between components, component dependencies must form
-an acyclic graph, and every path in the catalog must resolve inside the
-repository. A temporary exception must include both a reason and the
-implementation unit that removes it. A `boundary-ready` component cannot keep
-an exception or depend on a `candidate` component. A consumer list may be
-empty only for a `candidate` with exactly one bounded migration exception;
-hierarchical plan identifiers such as `U1a1c` are valid removal units.
-
-## Enforcement
-
-`test/support/component_boundary_contract.rb` is test-only architecture
-tooling. U1 establishes this catalog and promotion guard; for every
-`boundary-ready` row it:
-
-1. parses literal Ruby `require` and `require_relative` calls and rejects upward
-   dependencies on Hive commands, stages, web, release, or CLI code;
-2. maps every component-owned Ruby file to its require path and rejects
-   undeclared direct component dependencies;
-3. for every row that declares forbidden constructions, scans production Ruby
-   outside the component's owned paths and rejects literal `Constant.new`
-   construction of listed internals except exact file/constant pairs recorded
-   as current composition or compatibility sites; stale or newly listed-file
-   authorizations fail validation; and
-4. loads each ready entry point—and any explicitly requested candidate entry
-   point—in a fresh Ruby process, verifies the documented
-   constant, and rejects unrelated commands, stages, web code, or files owned
-   by undeclared components.
-
-Run the focused contract with:
-
-```bash
-bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
-```
-
-Workflow Creator Values now clean-loads through its repository-relative catalog
-entry point without widening the generic loader. Its Values no-require proof, composed
-R43 proof, direct entry-point load-order proof, and projection behavior live in
-`test/unit/packaging/workflow_creator_values_test.rb` and
-`test/unit/packaging/workflow_creator_text_safety_test.rb`; semantic-core proof
-lives in `test/unit/packaging/workflow_creator_core_test.rb`, while exact source
-and retained bundle custody is covered by
-`test/unit/packaging/live_agent_proof_test.rb`. Publication state, crash,
-concurrency, path, special-file, native-platform, and cleanup proof lives in
-`test/unit/packaging/workflow_creator_evidence_test.rb`.
-
-The syntax scan is an architecture regression guard, not a Ruby sandbox. Its
-construction rule covers literal parenthesized and parenthesis-free
-`Constant.new` calls, not aliases or factory
-methods. Construction authorization is file-granular: it rejects a named
-internal from a newly listed file, but it does not distinguish multiple call
-sites for that internal inside an already authorized composition root. It does
-not claim to stop dynamic requires, reflection, monkeypatching, or arbitrary
-same-user code. Those limits must not be weakened into security claims.
-
-## Changing a boundary
-
-Change one component per PR. Update its catalog row, focused consumer tests,
-narrative wiki page, this page, and a `wiki/log.d/` fragment together. Promote
-to `boundary-ready` only after clean loading, dependency direction, direct
-consumer routing, focused tests, the broad Hive suite, and exact-head hosted CI
-all pass. Packaging remains a separate decision gated by demonstrated non-Hive
-demand and explicit release authority. Agent CLI Runtime has passed that gate
-with HiveBench as the named adopter; no other catalog row inherits that
-decision.
+- [[architecture]]
+- [[modules/patrol]]
+- [[testing]]

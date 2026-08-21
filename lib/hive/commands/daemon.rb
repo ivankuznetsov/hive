@@ -33,7 +33,6 @@ require "hive/attempts/finalization_maintenance"
 require "hive/conditions/attempt_observer"
 require "hive/modules/event_publisher"
 require "hive/modules/daemon_runtime"
-require "hive/modules/migration/coordinator"
 require "hive/commands/service_installer/result_presenter"
 require "hive/recovery/migration"
 
@@ -239,17 +238,13 @@ module Hive
           store: Hive::Daemon::PrMergeReconciliationStore.new(dry_run: @dry_run),
           dry_run: @dry_run
         )
-        patrol_scheduler = Hive::Daemon::PatrolScheduler.new(
-          event_publisher: module_event_publisher
-        )
+        patrol_scheduler = Hive::Daemon::PatrolScheduler.new
         refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-          dry_run: @dry_run,
-          event_publisher: module_event_publisher
+          dry_run: @dry_run
         )
         patrol_fix_runtime = Hive::Daemon::PatrolFixRuntime.new
         patrol_fix_admission_scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
           sources: -> { patrol_fix_runtime.sources },
-          admission_store_factory: patrol_fix_runtime.method(:admission_store),
           semantic_admission_factory: patrol_fix_runtime.method(:semantic_admission),
           task_materializer_factory: patrol_fix_runtime.method(:task_materializer),
           capacity_available: lambda do |source:, now:, **|
@@ -278,10 +273,6 @@ module Hive
         )
         module_runtime = Hive::Modules::DaemonRuntime.new(
           attempt_store: attempt_store, attempt_dispatcher: attempts_api
-        )
-        module_migration_coordinator = Hive::Modules::Migration::Coordinator.new(
-          supervisor: supervisor, attempt_store: attempt_store,
-          dry_run: @dry_run
         )
         attempt_process_identity = Hive::Attempts::ProcessIdentity.new
         condition_observer = Hive::Conditions::AttemptObserver.new(
@@ -321,7 +312,6 @@ module Hive
           patrol_scheduler: patrol_scheduler,
           refactor_patrol_scheduler: refactor_patrol_scheduler,
           patrol_fix_admission_scheduler: patrol_fix_admission_scheduler,
-          patrol_fix_runtime: patrol_fix_runtime,
           patrol_arbiter: patrol_arbiter,
           answer_digest_scheduler: answer_digest_scheduler,
           dry_run: @dry_run,
@@ -332,7 +322,6 @@ module Hive
           lost_outcome_processor: lost_outcome_processor,
           operational_snapshot: operational_snapshot,
           module_runtime: module_runtime,
-          module_migration_coordinator: module_migration_coordinator,
           runtime_ready_callback: -> { activation_lock.release! },
           clock: -> { Time.now.utc }
         )

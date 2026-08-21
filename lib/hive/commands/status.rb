@@ -27,7 +27,6 @@ require "hive/process_kill"
 require "hive/operational_action"
 require "hive/operational_status"
 require "hive/daemon/operational_snapshot"
-require "hive/patrol_fix/operational_projection"
 require "hive/terminal_text"
 require "hive/tui/views/hyperlink"
 require "hive/events"
@@ -95,10 +94,12 @@ module Hive
         [ "idle", "READY / IDLE" ]
       ].freeze
       OPERATIONAL_BAND_LIMIT = 5
+      ADDITIVE_PATROL_FIX_ACTIONS = %w[
+        patrol_fix_rejected patrol_fix_blocked patrol_fix_escalated
+      ].freeze
 
       def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false,
-                     operational: false, full: false,
-                     operational_snapshot_reader: Hive::Daemon::OperationalSnapshot::Reader.new)
+                     operational: false, full: false)
         @json = json
         @diagnose = diagnose
         @project = project
@@ -108,7 +109,6 @@ module Hive
         @archive = archive
         @operational = operational
         @full = full
-        @operational_snapshot_reader = operational_snapshot_reader
         @next_retention_boundary = nil
       end
 
@@ -349,15 +349,13 @@ module Hive
       end
 
       def operational_status(projects, scheduler_snapshot:, status_payload:, now: Time.now.utc)
+        source = status_payload || json_payload(projects, now: now)
         project_context = operational_project_context(projects)
         if scheduler_snapshot.equal?(AUTO_SCHEDULER_SNAPSHOT)
           scheduler_snapshot = if project_context.any? { |_name, context| context["daemon_enabled"] == true }
-            @operational_snapshot_reader.read(now: now)
+            Hive::Daemon::OperationalSnapshot::Reader.new.read(now: now)
           end
         end
-        source = status_payload || json_payload(
-          projects, now: now, operational_snapshot: scheduler_snapshot
-        )
         Hive::OperationalStatus.new(
           status_payload: source,
           project_context: project_context,
@@ -372,8 +370,7 @@ module Hive
       # `tasks[].attrs` is the marker's attribute map.
       def json_payload(projects, stages: nil, exclude_archived: false, admission_context: nil,
                        now: Time.now.utc, workflow_generations: nil,
-                       include_archive_index: false,
-                       operational_snapshot: AUTO_SCHEDULER_SNAPSHOT)
+                       include_archive_index: false)
         now = now.utc
         @next_retention_boundary = nil
         workflow_generations ||= capture_workflow_generations(projects)
@@ -384,54 +381,25 @@ module Hive
           projects, workflow_generations: workflow_generations
         )
         archive_backfiller = shared_archive_backfiller
-        project_payloads = projects.map do |p|
-          project_payload_or_degraded(
-            p,
-            project_count: projects.size,
-            stages: stages,
-            exclude_archived: exclude_archived,
-            admission_context: admission_context,
-            now: now,
-            workflow_generation: workflow_generation_for(p, workflow_generations),
-            archive_backfiller: archive_backfiller,
-            include_archive_index: include_archive_index
-          )
-        end
-        snapshot = if operational_snapshot.equal?(AUTO_SCHEDULER_SNAPSHOT)
-          @operational_snapshot_reader.read(now: now)
-        else
-          operational_snapshot
-        end
-        project_payloads.each do |payload|
-          payload["patrol_fix"] = patrol_fix_project_projection(payload, snapshot, now: now)
-        end
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
           "ok" => true,
           "generated_at" => now.iso8601,
-          "projects" => project_payloads
+          "projects" => projects.map do |p|
+            project_payload_or_degraded(
+              p,
+              project_count: projects.size,
+              stages: stages,
+              exclude_archived: exclude_archived,
+              admission_context: admission_context,
+              now: now,
+              workflow_generation: workflow_generation_for(p, workflow_generations),
+              archive_backfiller: archive_backfiller,
+              include_archive_index: include_archive_index
+            )
+          end
         }
-      end
-
-      def patrol_fix_project_projection(project, snapshot, now:)
-        name = project.fetch("name").to_s
-        if snapshot.is_a?(Hash) && snapshot["status"] == "current"
-          projection = snapshot.dig("patrol_fix_projects", name)
-          return projection if Hive::PatrolFix::OperationalProjection.valid_document?(
-            projection, project: name
-          )
-          code = "daemon_project_projection_missing"
-          summary = "Current daemon observation has no Patrol-fix projection for this project"
-        else
-          code = "daemon_projection_unavailable"
-          reason = snapshot.is_a?(Hash) ? snapshot["reason"].to_s : "missing"
-          summary = "Patrol-fix source observations are unavailable (#{reason.empty? ? 'unknown' : reason})"
-        end
-        Hive::PatrolFix::OperationalProjection.unavailable(
-          project: name, tasks: project.fetch("tasks", []), now: now,
-          source: "daemon", code: code, summary: summary
-        )
       end
 
       # Isolate per-project failures. A single project with a malformed
@@ -678,7 +646,6 @@ module Hive
           "closure" => row.dig(:projection_data, "closure"),
           "condition_warning" => row[:condition_warning],
           "plan_review" => row[:plan_review],
-          "patrol_fix" => row[:patrol_fix],
           "implementation_identity" => row[:implementation_identity],
           "auto_residue" => Hive::Events.clean_exit_summary(row[:folder]),
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
@@ -690,7 +657,7 @@ module Hive
           # SCHEMA_VERSIONS policy in lib/hive.rb — no version bump (mirrors
           # `live_task_lock`).
           "unanswered_questions" => unanswered_question_count(row),
-          "action" => row[:action_key],
+          "action" => versioned_action_key(row[:action_key]),
           "action_label" => row[:action_label],
           "suggested_command" => row[:suggested_command],
           "outcomes" => row[:outcomes] || [],
@@ -725,6 +692,13 @@ module Hive
         Hive::BrainstormParser.unanswered_questions(Hive::BrainstormParser.parse(path)).size
       rescue StandardError
         0
+      end
+
+      def versioned_action_key(action_key)
+        return Hive::Schemas::TaskActionKind::NEEDS_INPUT if
+          ADDITIVE_PATROL_FIX_ACTIONS.include?(action_key.to_s)
+
+        action_key
       end
 
       def diagnose_call

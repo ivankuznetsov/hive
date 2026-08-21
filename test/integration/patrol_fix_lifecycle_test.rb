@@ -5,8 +5,6 @@ require "hive/commands/init"
 require "hive/commands/approve"
 require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/daemon/patrol_fix_candidate_inventory"
-require "hive/patrol/fix_admission_outbox"
-require "hive/refactor_patrol/fix_admission_outbox"
 require "hive/patrol_fix/admission_store"
 require "hive/patrol_fix/semantic_admission"
 require "hive/patrol_fix/source_snapshot"
@@ -28,6 +26,7 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
     :duration_ms, :exit_code, :timed_out, :output_truncated, :provenance,
     keyword_init: true
   )
+  ProjectSource = Struct.new(:project, :entry, :store)
 
   class LocalGit
     attr_reader :pushes
@@ -84,26 +83,23 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
         capture_io { Hive::Commands::Init.new(project, agent_skill_preflight: false).call }
         hive_state = File.join(project, ".hive-state")
         head = git(project, "rev-parse", "HEAD").strip
-        ordinary = Hive::Patrol::FixAdmissionOutbox.new(
-          root: File.join(hive_state, "patrol", "patrol-fix-outbox")
-        )
-        architecture = Hive::RefactorPatrol::FixAdmissionOutbox.new(
-          root: File.join(hive_state, "refactor-patrol", "patrol-fix-outbox")
-        )
-        ordinary_entry = ordinary.store.publish!(
-          occurrence_id: "ordinary:finding-1", snapshot: snapshot("ordinary_patrol", "finding-1", head),
-          now: NOW
-        )
-        architecture_entry = architecture.store.publish!(
-          occurrence_id: "architecture:thesis-1", snapshot: snapshot("architecture_patrol", "thesis-1", head),
-          now: NOW
-        )
         admission = Hive::PatrolFix::AdmissionStore.new(
           root: File.join(hive_state, "patrol-fix", "admissions")
         )
+        source = ProjectSource.new(
+          "patrol-fix-lifecycle", { "name" => "patrol-fix-lifecycle" }, admission
+        )
+        ordinary_entry = admission.reserve!(
+          occurrence_id: "ordinary:finding-1", snapshot: snapshot("ordinary_patrol", "finding-1", head),
+          now: NOW
+        )
+        architecture_entry = admission.reserve!(
+          occurrence_id: "architecture:thesis-1", snapshot: snapshot("architecture_patrol", "thesis-1", head),
+          now: NOW
+        )
 
         drive_admission_with_restarts(
-          project, [ ordinary, architecture ], admission,
+          project, source, admission,
           [ ordinary_entry.fetch("occurrence_id"), architecture_entry.fetch("occurrence_id") ]
         )
 
@@ -111,8 +107,7 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
         manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
         assert_equal %w[architecture_patrol ordinary_patrol],
                      manifest.fetch("sources").map { |source| source.fetch("engine") }.sort
-        assert_empty ordinary.pending
-        assert_empty architecture.pending
+        assert_empty admission.pending
 
         run_inbox(task)
         task = advance(task, "2-fix")
@@ -160,7 +155,7 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
           task_folder: task.folder, stage: "6-done"
         ).to_h.dig("action", "kind")
 
-        escalation_entry = architecture.store.publish!(
+        escalation_entry = admission.reserve!(
           occurrence_id: "architecture:thesis-escalate",
           snapshot: snapshot(
             "architecture_patrol", "thesis-escalate", git(project, "rev-parse", "HEAD").strip,
@@ -168,7 +163,7 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
           ), now: NOW + 300
         )
         drive_admission_with_restarts(
-          project, [ architecture ], admission,
+          project, source, admission,
           [ escalation_entry.fetch("occurrence_id") ]
         )
         escalation_task = one_patrol_fix_task(hive_state)
@@ -206,11 +201,11 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
     )
   end
 
-  def drive_admission_with_restarts(project, sources, admission, occurrence_ids)
+  def drive_admission_with_restarts(project, source, admission, occurrence_ids)
     services = {}
     observed = []
     12.times do |index|
-      scheduler = admission_scheduler(project, sources, admission, services)
+      scheduler = admission_scheduler(project, source, services)
       events = scheduler.tick(now: NOW + index)
       observed << events.map { |event| [ event.source, event.status, event.reason ] }
       dispatch = events.find { |event| event.status == :decision_dispatch }
@@ -224,20 +219,20 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
           envelope: { "ok" => true }, now: NOW + index
         )
       end
-      return if sources.zip(occurrence_ids).all? do |source, occurrence_id|
-        source.acknowledged?(occurrence_id)
+      return if occurrence_ids.all? do |occurrence_id|
+        admission.fetch(occurrence_id).fetch("status") == "acknowledged"
       end
     end
     states = occurrence_ids.map { |id| admission.fetch(id)&.slice("status", "retry") }
-    flunk "Patrol Fix handoffs did not converge: events=#{observed.inspect} states=#{states.inspect}"
+    flunk "Patrol Fix admissions did not converge: events=#{observed.inspect} states=#{states.inspect}"
   end
 
-  def admission_scheduler(project, sources, admission, services)
+  def admission_scheduler(project, source, services)
     hive_state = File.join(project, ".hive-state")
     inventory = Hive::Daemon::PatrolFixCandidateInventory.new(hive_state_path: hive_state)
     current_head = -> { git(project, "rev-parse", "HEAD").strip }
     Hive::Daemon::PatrolFixAdmissionScheduler.new(
-      sources: sources, admission_store: admission, capacity_available: ->(**) { true },
+      sources: [ source ], capacity_available: ->(**) { true },
       semantic_command_factory: ->(_token) { "hive __patrol-fix-semantic-decision" },
       semantic_admission_factory: lambda do |store:, entry:, **|
         service = Hive::PatrolFix::SemanticAdmission.new(
@@ -257,14 +252,13 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
         )
         services[entry.fetch("occurrence_id")] = service
       end,
-      task_materializer_factory: lambda do |store:, source_acknowledger:, **|
+      task_materializer_factory: lambda do |store:, **|
         Hive::PatrolFix::TaskMaterializer.new(
           project_root: project, hive_state: hive_state, store: store,
           workflow_info: {
             descriptor: Hive::Workflows::Registry.fetch(:"patrol-fix"), pin: true,
             managed: nil, managed_cfg: {}, authored_digest: nil
           },
-          source_acknowledger: source_acknowledger,
           candidate_provider: inventory.method(:call), current_head: current_head,
           clock: -> { NOW }
         )

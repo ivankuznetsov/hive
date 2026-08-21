@@ -98,30 +98,6 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
     end
   end
 
-  def test_operational_records_are_bounded_to_root_cohort_and_retry_facts
-    Dir.mktmpdir do |dir|
-      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
-      store.reserve!(occurrence_id: "ordinary-finding-1-v1", snapshot: source_snapshot, now: NOW)
-      prepared = store.prepare_decision!(
-        "ordinary-finding-1-v1", candidates: [ candidate("task-a") ],
-        current_head: "2" * 40, now: NOW
-      )
-      store.record_decision!(
-        "ordinary-finding-1-v1", candidate_digest: prepared.fetch("candidate_digest"),
-        reservation_id: prepared.dig("decision_reservation", "reservation_id"),
-        decision: "same_root", candidate_identity: "task-a", rationale: "same root",
-        evidence: [ "Same failing owner." ], model_receipt: "provider:receipt", now: NOW
-      )
-
-      row = store.operational_records.fetch(0)
-      assert_equal %w[candidates created_at decision occurrence_id retry status task], row.keys.sort
-      assert_equal({ "kind" => "task", "identity" => "task-a" }, row.fetch("candidates").first)
-      assert_equal({ "decision" => "same_root", "candidate_identity" => "task-a" }, row.fetch("decision"))
-      refute_includes JSON.generate(row), "Same failing owner"
-      assert row.frozen?
-    end
-  end
-
   def test_decision_reservation_binds_full_inventory_context_and_fences_an_expired_child
     Dir.mktmpdir do |dir|
       store = Hive::PatrolFix::AdmissionStore.new(root: dir)
@@ -208,7 +184,132 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
     end
   end
 
+  def test_one_store_drives_replay_through_task_binding_and_acknowledgement
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      occurrence = "ordinary-finding-1-v1"
+      store.reserve!(occurrence_id: occurrence, snapshot: source_snapshot, now: NOW)
+      prepared = store.prepare_decision!(
+        occurrence, candidates: [], current_head: "2" * 40, now: NOW
+      )
+      store.record_decision!(
+        occurrence, candidate_digest: prepared.fetch("candidate_digest"),
+        reservation_id: prepared.dig("decision_reservation", "reservation_id"),
+        decision: "distinct", rationale: "Different root",
+        evidence: [ "No exact candidate" ], model_receipt: "fake:distinct", now: NOW
+      )
+      assert_equal [ occurrence ], store.pending.map { |record| record.fetch("occurrence_id") }
+
+      binding = {
+        "slug" => "repair-refresh-abc123", "generation" => 1,
+        "evidence_digest" => "a" * 64
+      }
+      store.begin_materialization!(
+        occurrence,
+        intent: binding.merge(
+          "idempotency_key" => occurrence, "input_fingerprint" => "b" * 64
+        ),
+        now: NOW
+      )
+      store.bind_task!(occurrence, task: binding, now: NOW)
+      assert_equal "bound", store.pending.fetch(0).fetch("status")
+
+      acknowledged = store.acknowledge!(occurrence, now: NOW)
+      replay = store.acknowledge!(occurrence, now: NOW + 60)
+
+      assert_equal acknowledged, replay
+      assert_match(/\Aadmission:[0-9a-f]{64}\z/,
+                   acknowledged.dig("acknowledgement", "receipt_id"))
+      assert_empty store.pending
+    end
+  end
+
+  def test_pending_skips_live_semantic_leases_without_hiding_new_work
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "a-live-decision", snapshot: source_snapshot, now: NOW)
+      store.prepare_decision!(
+        "a-live-decision", candidates: [], current_head: "2" * 40,
+        lease_expires_at: NOW + 60, now: NOW
+      )
+      store.reserve!(
+        occurrence_id: "b-new-work", snapshot: source_snapshot(identity: "finding-2"), now: NOW
+      )
+
+      assert_equal "b-new-work", store.pending(limit: 1, now: NOW).fetch(0).fetch("occurrence_id")
+      assert_equal "a-live-decision",
+                   store.pending(limit: 1, now: NOW + 61).fetch(0).fetch("occurrence_id")
+    end
+  end
+
+  def test_capacity_compacts_only_acknowledged_records_before_reserving
+    with_max_records(1) do
+      Dir.mktmpdir do |dir|
+        store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+        reserve_and_acknowledge(store, "old-terminal")
+
+        current = store.reserve!(
+          occurrence_id: "new-pending", snapshot: source_snapshot(identity: "finding-2"), now: NOW
+        )
+
+        assert_nil store.fetch("old-terminal")
+        assert_equal "new-pending", current.fetch("occurrence_id")
+        assert_equal [ "new-pending" ], store.pending.map { |record| record.fetch("occurrence_id") }
+      end
+    end
+  end
+
+  def test_capacity_rejects_a_new_reservation_without_wedging_active_work
+    with_max_records(1) do
+      Dir.mktmpdir do |dir|
+        store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+        store.reserve!(occurrence_id: "active", snapshot: source_snapshot, now: NOW)
+
+        assert_raises(Hive::PatrolFix::AdmissionStore::Conflict) do
+          store.reserve!(
+            occurrence_id: "overflow", snapshot: source_snapshot(identity: "finding-2"), now: NOW
+          )
+        end
+        assert_equal [ "active" ], store.pending.map { |record| record.fetch("occurrence_id") }
+      end
+    end
+  end
+
   private
+
+  def reserve_and_acknowledge(store, occurrence)
+    store.reserve!(occurrence_id: occurrence, snapshot: source_snapshot, now: NOW)
+    prepared = store.prepare_decision!(
+      occurrence, candidates: [], current_head: "2" * 40, now: NOW
+    )
+    store.record_decision!(
+      occurrence, candidate_digest: prepared.fetch("candidate_digest"),
+      reservation_id: prepared.dig("decision_reservation", "reservation_id"),
+      decision: "distinct", rationale: "Different root", evidence: [ "No candidate" ],
+      model_receipt: "provider:distinct", now: NOW
+    )
+    binding = {
+      "slug" => "repair-#{occurrence}", "generation" => 1,
+      "evidence_digest" => source_snapshot.evidence_digest
+    }
+    store.begin_materialization!(
+      occurrence,
+      intent: binding.merge("idempotency_key" => occurrence, "input_fingerprint" => "b" * 64),
+      now: NOW
+    )
+    store.bind_task!(occurrence, task: binding, now: NOW)
+    store.acknowledge!(occurrence, now: NOW)
+  end
+
+  def with_max_records(limit)
+    original = Hive::PatrolFix::AdmissionStore::MAX_RECORDS
+    Hive::PatrolFix::AdmissionStore.send(:remove_const, :MAX_RECORDS)
+    Hive::PatrolFix::AdmissionStore.const_set(:MAX_RECORDS, limit)
+    yield
+  ensure
+    Hive::PatrolFix::AdmissionStore.send(:remove_const, :MAX_RECORDS)
+    Hive::PatrolFix::AdmissionStore.const_set(:MAX_RECORDS, original)
+  end
 
   def source_snapshot(identity: "finding-1")
     Hive::PatrolFix::SourceSnapshot.build(

@@ -639,8 +639,6 @@ class CommandsWatchTest < Minitest::Test
       "action_id" => "workflow.advance", "risk_class" => "routine_idempotent",
       "confirmation_required" => true, "observation_token" => "drop"
     }
-    enriched["patrol_fix"] = { "stage" => "4-review", "successor" => nil }
-
     events, = run_json_watch(source: FakeSource.new(snapshot(enriched)), targets: [ "demo:task" ])
     projected = events.first.fetch("targets").first
 
@@ -650,67 +648,22 @@ class CommandsWatchTest < Minitest::Test
       "action_id" => "workflow.advance", "risk_class" => "routine_idempotent",
       "confirmation_required" => true
     }, projected.fetch("action_policy"))
-    assert_equal enriched.fetch("patrol_fix"), projected.fetch("patrol_fix")
   end
 
-  def test_archived_target_preserves_patrol_fix_publication
-    archived = legacy_task(action: "archived")
-    archived["patrol_fix"] = {
-      "stage" => "6-done", "decision" => { "route" => "fix" },
-      "successor" => nil, "publication" => { "state" => "open" }
+  def test_skewed_patrol_fix_additions_do_not_enter_frozen_watch_events
+    enriched = task
+    enriched["patrol_fix"] = { "future_section" => [ Object.new ] }
+    source_snapshot = snapshot(enriched)
+    source_snapshot.full_graph.fetch("projects").first["patrol_fix"] = {
+      "project" => "demo", "future_section" => "unknown"
     }
+
     events, = run_json_watch(
-      source: FakeSource.new(snapshot(nil, archived: [ archived ])),
-      targets: [ "demo:task" ]
+      source: FakeSource.new(source_snapshot), targets: [ "demo:task" ]
     )
 
-    assert_equal archived.fetch("patrol_fix"),
-                 events.first.dig("targets", 0, "patrol_fix")
-    assert_equal patrol_fix_project("demo"),
-                 events.first.dig("patrol_fix_projects", "demo")
-  end
-
-  def test_project_projection_is_exact_bounded_pass_through_and_fingerprinted
-    first = patrol_fix_project("demo")
-    second = Marshal.load(Marshal.dump(first))
-    second["tokens"] = second.fetch("tokens").merge(
-      "available" => true, "input" => 1, "output" => 2, "cached" => 3,
-      "total" => 3, "launches" => 1, "unmetered_launches" => 0
-    )
-    source = FakeSource.new(
-      snapshot(task, project_projections: { "demo" => first }),
-      snapshot(task, project_projections: { "demo" => second })
-    )
-
-    events, = run_json_watch(source: source, targets: [ "demo:task" ], max_events: 2)
-
-    assert_equal %w[initial transition final], events.map { |event| event.fetch("event") }
-    assert_equal first, events.first.dig("patrol_fix_projects", "demo")
-    assert_equal second, events[1].dig("patrol_fix_projects", "demo")
-    assert_watch_schema(events)
-  end
-
-  def test_project_projection_clock_changes_do_not_emit_semantic_transitions
-    first = Marshal.load(Marshal.dump(patrol_fix_project("demo")))
-    first.dig("discovery", "coverage", "ordinary").merge!(
-      "observed_at" => "2026-07-20T11:00:00Z", "age_seconds" => 3_600
-    )
-    clock_only = Marshal.load(Marshal.dump(first))
-    clock_only["generated_at"] = "2026-07-20T12:00:01Z"
-    clock_only.dig("workflow", "latency")["total_seconds"] = 1
-    clock_only.dig("workflow", "latency", "by_stage", "1-inbox")["total_seconds"] = 1
-    clock_only.dig("discovery", "coverage", "ordinary")["age_seconds"] = 3_601
-    waiting = task(state: "waiting_on_you", owner: "operator", reason: "choose")
-    source = FakeSource.new(
-      snapshot(task, project_projections: { "demo" => first }),
-      snapshot(task, project_projections: { "demo" => clock_only }),
-      snapshot(waiting, project_projections: { "demo" => clock_only })
-    )
-
-    events, = run_json_watch(source: source, targets: [ "demo:task" ])
-
-    assert_equal %w[initial transition final], events.map { |event| event.fetch("event") }
-    assert_equal "waiting_on_you", events[1].dig("targets", 0, "state")
+    refute events.first.key?("patrol_fix_projects")
+    refute events.first.fetch("targets").first.key?("patrol_fix")
     assert_watch_schema(events)
   end
 
@@ -812,7 +765,7 @@ class CommandsWatchTest < Minitest::Test
     }
   end
 
-  def snapshot(*rows, archived: [], project_projections: {})
+  def snapshot(*rows, archived: [])
     active = rows.compact
     legacy_rows = active.map do |row|
       legacy_task(
@@ -821,14 +774,6 @@ class CommandsWatchTest < Minitest::Test
         stage: row.dig("position", "stage")
       )
     end + archived
-    project_names = (legacy_rows.map { |row| row.fetch("project") } + [ "demo" ]).uniq
-    projects = project_names.map do |name|
-      {
-        "name" => name,
-        "patrol_fix" => project_projections.fetch(name) { patrol_fix_project(name) },
-        "tasks" => legacy_rows.select { |row| row.fetch("project") == name }
-      }
-    end
     Hive::Commands::Watch::SourceSnapshot.new(
       operational: {
         "schema" => "hive-operational-status",
@@ -842,16 +787,8 @@ class CommandsWatchTest < Minitest::Test
         "schema" => "hive-status",
         "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
         "ok" => true,
-        "projects" => projects
+        "projects" => [ { "name" => "demo", "tasks" => legacy_rows } ]
       }
-    )
-  end
-
-  def patrol_fix_project(project)
-    Hive::PatrolFix::OperationalProjection.unavailable(
-      project: project, tasks: [], now: Time.utc(2026, 7, 20, 12),
-      source: "daemon_snapshot", code: "snapshot_unavailable",
-      summary: "Patrol-fix snapshot is unavailable"
     )
   end
 

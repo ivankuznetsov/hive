@@ -203,6 +203,29 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_discard_removes_a_registered_detached_worktree
+    with_initialized_project do |dir, root|
+      wt = Hive::Worktree.new(dir, "discard-registered", worktree_root: root)
+      wt.create_detached_exact!(base_sha: run!("git", "-C", dir, "rev-parse", "HEAD").strip)
+
+      assert_equal :removed, wt.discard!(force: true)
+      refute File.exist?(wt.path)
+      refute wt.registered?
+    end
+  end
+
+  def test_discard_removes_an_unregistered_partial_directory
+    with_initialized_project do |dir, root|
+      wt = Hive::Worktree.new(dir, "discard-partial", worktree_root: root)
+      FileUtils.mkdir_p(wt.path)
+      File.write(File.join(wt.path, "partial"), "bytes")
+
+      assert_equal :removed, wt.discard!(force: true)
+      refute File.exist?(wt.path)
+      refute wt.registered?
+    end
+  end
+
   def test_create_exact_pins_the_requested_commit_without_moving_registered_head
     with_initialized_project do |dir, root|
       pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip

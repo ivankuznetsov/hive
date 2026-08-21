@@ -59,7 +59,6 @@ module Hive
                      heartbeat_clock: -> { Time.now },
                      heartbeat_resolver: Hive::RefactorPatrol::ClaimLivenessResolver.new,
                      project_entry: nil, capability_context: nil,
-                     occurrence_id: nil, module_execution: nil,
                      scheduled_slice: nil,
                      config_loader: ->(path) { Hive::Config.load(path) })
         @project = project
@@ -107,16 +106,11 @@ module Hive
         @heartbeat_resolver = heartbeat_resolver
         @project_entry = project_entry
         @capability_context = capability_context
-        @occurrence_id = occurrence_id
-        @module_execution = module_execution
         @scheduled_slice = scheduled_slice
         @feature_hint = @scheduled_slice.fetch("feature_id") if @scheduled_slice
         @config_loader = config_loader
         @architecture_intake_transitions =
-          Hive::RefactorPatrol::ArchitectureIntakeTransitions.new(
-            config_loader: @config_loader,
-            module_execution: @module_execution
-          )
+          Hive::RefactorPatrol::ArchitectureIntakeTransitions.new
         @claim_maintenance_transitions =
           Hive::RefactorPatrol::ClaimMaintenanceTransitions.new
       end
@@ -551,8 +545,7 @@ module Hive
             manifest: @manifest,
             policy: Hive::RefactorPatrol::Policy.capture(cfg),
             now: Time.now,
-            dry_run: @dry_run,
-            required_occurrence_id: @occurrence_id
+            dry_run: @dry_run
           )
         else
           @job_store.read_job(@manifest.fetch("job_id"))
@@ -568,8 +561,7 @@ module Hive
             manifest: @manifest,
             policy: Hive::RefactorPatrol::Policy.capture(cfg),
             now: Time.now,
-            dry_run: @dry_run,
-            required_occurrence_id: @occurrence_id
+            dry_run: @dry_run
           )
         end
         unless aggregate.fetch("source") == source_pr_context
@@ -593,12 +585,9 @@ module Hive
         # Incomplete occurrences still reuse their durable analysis_sha.
         pin_checkout!(project_root, cfg)
         prepare_discovery_transition_coordinator!
-        assert_manual_discovery_capacity!(aggregate)
         @manual_claim_token = @manual_discovery_transitions.claim(
           entry: @transition_entry,
           store: @job_store,
-          capture: @job_store.respond_to?(:occurrence_capture) ?
-            @job_store.occurrence_capture(aggregate.fetch("job_id")) : nil,
           aggregate: aggregate,
           analysis_sha: @checkout_snapshot.fetch("analysis_sha"),
           now: Time.now
@@ -607,23 +596,6 @@ module Hive
           raise Hive::ConfigError, "refactor patrol job is already claimed by another worker"
         end
         @durable_aggregate = @job_store.read_job(aggregate.fetch("job_id"))
-      end
-
-      def assert_manual_discovery_capacity!(aggregate)
-        return unless @job_store.respond_to?(:occurrence_for_job)
-
-        occurrence = @job_store.occurrence_for_job(
-          aggregate.fetch("job_id")
-        )
-        return unless occurrence
-        return unless Hive::RefactorPatrol::DiscoveryCapacity.exhausted?(
-          effect_count: occurrence.fetch("effects").size,
-          effect_limit:
-            Hive::Modules::Migration::PatrolEvidence::MAX_EFFECTS_PER_OCCURRENCE
-        )
-
-        raise Hive::ConfigError,
-              "refactor patrol occurrence is awaiting automatic capacity rollover"
       end
 
       def prepare_discovery_transition_coordinator!
@@ -678,69 +650,46 @@ module Hive
                                              owner_process_start_time:,
                                              claim_resolver:)
         Hive::RefactorPatrol::DiscoveryTransitions.new(
-          config_loader: @config_loader,
-          module_execution: @module_execution,
           owner: owner,
           owner_pid: owner_pid,
           owner_process_start_time: owner_process_start_time,
           lease_sec: @heartbeat_lease_sec,
-          claim_resolver: claim_resolver,
-          reservation_error: Hive::ConfigError,
-          occurrence_lifecycle: nil,
-          claim_operation: "manual-discovery-claim",
-          operation_prefix: ""
+          claim_resolver: claim_resolver
         )
       end
 
       def publish_manual_replay_manifest!(project_root, original,
                                           hive_state_path: File.join(project_root, ".hive-state"))
-        Hive::Modules::Migration::Patrols.with_migration_lock(
-          project_root, hive_state_path: hive_state_path, shared: true
-        ) do
-          assert_manual_replay_allowed!(project_root, hive_state_path)
-          root = File.join(
-            hive_state_path, "refactor_patrol", "v2", "manifests"
-          )
-          FileUtils.mkdir_p(root)
-          File.open(File.join(root, "manual-replays.lock"), File::RDWR | File::CREAT, 0o600) do |lock|
-            lock.flock(File::LOCK_EX)
-            base = original.fetch("job_id").to_s[0, 100]
-            sequence = Dir.glob(File.join(root, "#{base}-replay-*.json")).filter_map do |path|
-              File.basename(path, ".json")[/\A#{Regexp.escape(base)}-replay-(\d+)\z/, 1]&.to_i
-            end.max.to_i + 1
-            job_id = "#{base}-replay-#{sequence}"
-            payload = original.merge("job_id" => job_id).reject do |key, _value|
-              key == "manifest_checksum"
-            end
-            manifest = payload.merge(
-              "manifest_checksum" => Hive::RefactorPatrol::PrManifest.checksum(payload)
-            )
-            Hive::RefactorPatrol::PrManifest.validate!(
-              manifest,
-              expected_job_id: job_id,
-              registration: original.dig("source", "registration"),
-              default_branch: original.dig("source", "base_branch")
-            )
-            assert_manual_replay_allowed!(project_root, hive_state_path)
-            Hive::AtomicFile.write(
-              File.join(root, "#{job_id}.json"),
-              "#{JSON.pretty_generate(manifest)}\n", mode: 0o600
-            )
-            File.open(root, File::RDONLY) { |directory| directory.fsync }
-            manifest
-          end
-        end
-      end
-
-      def assert_manual_replay_allowed!(project_root, hive_state_path)
-        ownership = Hive::Modules::Migration::Patrols.ownership_snapshot(
-          project_root, "architecture-patrol",
-          hive_state_path: hive_state_path
+        root = File.join(
+          hive_state_path, "refactor_patrol", "v2", "manifests"
         )
-        return if ownership["admission"] == true
-
-        raise Hive::ConfigError,
-              "Architecture Patrol does not own replay admission"
+        FileUtils.mkdir_p(root)
+        File.open(File.join(root, "manual-replays.lock"), File::RDWR | File::CREAT, 0o600) do |lock|
+          lock.flock(File::LOCK_EX)
+          base = original.fetch("job_id").to_s[0, 100]
+          sequence = Dir.glob(File.join(root, "#{base}-replay-*.json")).filter_map do |path|
+            File.basename(path, ".json")[/\A#{Regexp.escape(base)}-replay-(\d+)\z/, 1]&.to_i
+          end.max.to_i + 1
+          job_id = "#{base}-replay-#{sequence}"
+          payload = original.merge("job_id" => job_id).reject do |key, _value|
+            key == "manifest_checksum"
+          end
+          manifest = payload.merge(
+            "manifest_checksum" => Hive::RefactorPatrol::PrManifest.checksum(payload)
+          )
+          Hive::RefactorPatrol::PrManifest.validate!(
+            manifest,
+            expected_job_id: job_id,
+            registration: original.dig("source", "registration"),
+            default_branch: original.dig("source", "base_branch")
+          )
+          Hive::AtomicFile.write(
+            File.join(root, "#{job_id}.json"),
+            "#{JSON.pretty_generate(manifest)}\n", mode: 0o600
+          )
+          File.open(root, File::RDONLY) { |directory| directory.fsync }
+          manifest
+        end
       end
 
       def checkpoint_manual_discovery!(payload)

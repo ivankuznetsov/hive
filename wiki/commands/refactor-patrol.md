@@ -10,7 +10,7 @@ tags: [command, refactor-patrol, architecture, json, daemon]
 **TLDR**: `hive refactor-patrol` discovers evidence-backed architecture theses
 and routes each one to `fix`, `discuss`, or `dismiss`. Accepted `fix` and
 `discuss` dispositions are published to the shared Patrol Fix admission
-outbox. Architecture Patrol does not implement fixes, file issues, create
+store. Architecture Patrol does not implement fixes, file issues, create
 branches, publish pull requests, or hand work directly to review.
 
 ## Usage
@@ -56,7 +56,8 @@ aggregate, generation-fenced discovery claim, feature checkpoints, and
 completion envelope. Completed discovery always terminalizes the job; there is
 no action phase.
 
-The source outbox snapshots accepted dispositions after discovery. The shared
+The source adapter reserves accepted dispositions directly in the project
+`AdmissionStore` after discovery. The shared
 Patrol Fix workflow independently decides which candidate to materialize and
 then owns implementation, validation, review, and publication.
 
@@ -66,7 +67,7 @@ then owns implementation, validation, review, and publication.
 immutable discovery manifests. `Hive::Daemon::RefactorPatrolScheduler` handles
 classification, discovery, checkpointing, retries, and post-merge bookkeeping.
 Scheduled current-main scans use the Architecture Patrol launch lane and
-publish their completed dispositions through the same source outbox.
+reserve their completed dispositions through the same source adapter.
 
 The runtime has no action candidate selection, action reservation, fixer,
 issue filer, branch creator, PR opener, or review handoff. Historical action

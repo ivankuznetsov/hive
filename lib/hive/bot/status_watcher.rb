@@ -1,7 +1,6 @@
 require "json"
 require "open3"
 require "time"
-require "hive/patrol_fix/operational_projection"
 
 module Hive
   module Bot
@@ -12,7 +11,7 @@ module Hive
                         :condition_task_generation, :commit_generation, :current_attempt,
                         :conditions, :condition_history, :evidence, :condition_overrides, :condition_gate,
                         :condition_migration, :condition_provenance, :shadow_audit,
-                        :condition_warning, :patrol_fix, :auto_residue) do
+                        :condition_warning, :auto_residue) do
         def initialize(project:, slug:, id: nil, display_name: nil, project_path: nil, hive_state_path: nil,
                        stage: nil, workflow: nil, marker: nil, attrs: {}, folder: nil,
                        state_file: nil, pr_url: nil, state_file_mtime: nil, age_seconds: nil,
@@ -21,7 +20,7 @@ module Hive
                        commit_generation: nil, current_attempt: nil, conditions: [],
                        condition_history: [], evidence: [], condition_overrides: [], condition_gate: nil,
                        condition_migration: nil, condition_provenance: {}, shadow_audit: {},
-                       condition_warning: nil, patrol_fix: nil, auto_residue: nil)
+                       condition_warning: nil, auto_residue: nil)
           # Explicit-keyword super (matching Snapshot::Row) rather than the
           # bare positional form, so a future member-order change in the
           # Data.define above can't silently misbind constructor arguments.
@@ -38,7 +37,7 @@ module Hive
             condition_overrides: condition_overrides,
             condition_gate: condition_gate, condition_migration: condition_migration,
             condition_provenance: condition_provenance, shadow_audit: shadow_audit,
-            condition_warning: condition_warning, patrol_fix: patrol_fix, auto_residue: auto_residue
+            condition_warning: condition_warning, auto_residue: auto_residue
           )
         end
       end
@@ -106,9 +105,9 @@ module Hive
       # supervisor prepends a one-line banner to the rendered `/status`
       # reply when present. nil on a clean fetch. Mirrors the daemon's
       # StatusConsumer::Result#warning.
-      Result = Data.define(:ok, :rows, :legacy_stage_dirs, :patrol_fix_projects,
+      Result = Data.define(:ok, :rows, :legacy_stage_dirs,
                            :error, :envelope, :warning) do
-        def initialize(ok:, rows: [], legacy_stage_dirs: [], patrol_fix_projects: {},
+        def initialize(ok:, rows: [], legacy_stage_dirs: [],
                        error: nil, envelope: nil, warning: nil)
           super
         end
@@ -152,7 +151,6 @@ module Hive
         begin
           rows = extract_rows(doc, now: now)
           legacy_stage_dirs = extract_legacy_stage_dirs(doc)
-          patrol_fix_projects = extract_patrol_fix_projects(doc, now: now)
         rescue StandardError => e
           # ONLY a failure inside best-effort EXTRACTION degrades. On a
           # newer-schema doc this is the tolerated forward-skew path, but we
@@ -171,7 +169,6 @@ module Hive
           ok: true,
           rows: rows,
           legacy_stage_dirs: legacy_stage_dirs,
-          patrol_fix_projects: patrol_fix_projects,
           error: nil,
           envelope: doc,
           warning: (skew == :newer ? forward_skew_warning(doc) : nil)
@@ -287,24 +284,6 @@ module Hive
         end
       end
 
-      def extract_patrol_fix_projects(doc, now:)
-        Array(doc["projects"]).reject { |project| project["error"] }.to_h do |project|
-          name = project.fetch("name")
-          projection = project["patrol_fix"]
-          projection = invalid_patrol_fix_projection(name, now) unless
-            Hive::PatrolFix::OperationalProjection.valid_document?(projection, project: name)
-          [ name, projection ]
-        end.freeze
-      end
-
-      def invalid_patrol_fix_projection(project, now)
-        Hive::PatrolFix::OperationalProjection.unavailable(
-          project: project, tasks: [], now: now,
-          source: "status", code: "invalid_patrol_fix_projection",
-          summary: "Patrol Fix operational projection is malformed"
-        )
-      end
-
       def extract_rows(doc, now:)
         rows = []
         Array(doc["projects"]).each do |project_doc|
@@ -344,7 +323,6 @@ module Hive
               condition_provenance: task["condition_provenance"] || {},
               shadow_audit: task["shadow_audit"] || {},
               condition_warning: task["condition_warning"],
-              patrol_fix: task["patrol_fix"],
               auto_residue: task["auto_residue"]
             )
           end

@@ -6,8 +6,8 @@ require "digest"
 require "json"
 require "time"
 require "hive/patrol/finding"
+require "hive/patrol/fix_admission_adapter"
 require "hive/patrol/state_store"
-require "hive/patrol_fix/source_snapshot"
 require "hive/patrol_fix/task_manifest"
 require "hive/task_capture"
 require "hive/task_meta"
@@ -16,10 +16,15 @@ require "hive/workflows"
 module Hive
   module Scripts
     class MigratePatrolFindings
-      MAX_TEXT_BYTES = 16 * 1024
-      MAX_SHORT_TEXT_BYTES = 512
-      PATH_BYTES = 1_024
       DEFAULT_ACCEPTED_AT = Time.at(0).utc
+
+      class PatrolTaskCapture < Hive::TaskCapture
+        private
+
+        def idempotency_metadata_paths
+          super.select { |path| File.binread(path).include?(idempotency_key) }
+        end
+      end
 
       def initialize(project_root, dry_run: false, out: $stdout)
         @project_root = File.expand_path(project_root)
@@ -31,7 +36,8 @@ module Hive
       def call
         validate_project!
         entries = active_findings.map { |finding| entry_for(finding) }
-        existing = existing_tasks
+        candidate_keys = entries.to_h { |entry| [ entry.fetch(:idempotency_key), true ] }
+        existing = existing_tasks(candidate_keys)
         ensure_no_conflicts!(entries, existing)
 
         created = 0
@@ -89,56 +95,9 @@ module Hive
       end
 
       def source_snapshot(finding)
-        data = finding.to_h
-        Hive::PatrolFix::SourceSnapshot.build(
-          engine: "ordinary_patrol",
-          identity: data.fetch("id").to_s,
-          title: text(data["title"], fallback: "Patrol finding #{data.fetch('id')}", max: 2_048),
-          summary: text(data["description"] || data["root_cause"],
-                        fallback: "Accepted Patrol finding", max: MAX_TEXT_BYTES),
-          target_revision: data.fetch("target_sha").to_s,
-          evidence: evidence(data),
-          affected_code: affected_code(data),
-          reproduction_guidance: text(
-            data["reproduction"] || data["validation"] || data["recommendation"],
-            fallback: "Reproduce and validate the accepted Patrol finding.", max: MAX_TEXT_BYTES
-          ),
-          discovery_run: text(data["validation_key"] || data["fingerprint"],
-                              fallback: data.fetch("id").to_s, max: MAX_SHORT_TEXT_BYTES),
-          semantic_lineage: semantic_lineage(data),
-          aliases: [], external_issues: [], existing_pull_requests: [],
-          accepted_at: accepted_at(data).iso8601
+        Hive::Patrol::FixAdmissionAdapter.snapshot_for(
+          finding, accepted_at: DEFAULT_ACCEPTED_AT
         )
-      end
-
-      def evidence(data)
-        values = Array(data["evidence"]).map { |value| bounded_json_text(value) }.reject(&:empty?)
-        values << text(data["root_cause"] || data["description"],
-                       fallback: "Accepted Patrol evidence", max: MAX_TEXT_BYTES) if values.empty?
-        values.first(Hive::PatrolFix::SourceSnapshot::MAX_EVIDENCE)
-      end
-
-      def affected_code(data)
-        scope = data["scope"].is_a?(Hash) ? data.fetch("scope") : {}
-        candidates = Array(scope["paths"]) + Array(scope["files"]) +
-                     Array(data["evidence"]).filter_map do |item|
-                       item.is_a?(Hash) && (item["path"] || item["file"] || item[:path] || item[:file])
-                     end
-        paths = candidates.map(&:to_s).select { |path| safe_path?(path) }.uniq
-        (paths.empty? ? [ "unknown" ] : paths).first(Hive::PatrolFix::SourceSnapshot::MAX_PATHS)
-      end
-
-      def semantic_lineage(data)
-        values = [ data["fingerprint"], data["feature_id"], data["root_cause"] ]
-          .compact.map { |value| text(value, fallback: nil, max: MAX_SHORT_TEXT_BYTES) }.compact.uniq
-        (values.empty? ? [ data.fetch("id").to_s ] : values).first(Hive::PatrolFix::SourceSnapshot::MAX_LINEAGE)
-      end
-
-      def accepted_at(data)
-        value = data["lifecycle_updated_at"].to_s
-        value.empty? ? DEFAULT_ACCEPTED_AT : Time.iso8601(value).utc
-      rescue ArgumentError
-        DEFAULT_ACCEPTED_AT
       end
 
       def slug_for(finding)
@@ -149,13 +108,20 @@ module Hive
         "patrol-#{stem[0, 44].sub(/-+\z/, '')}-#{digest}"
       end
 
-      def existing_tasks
+      def existing_tasks(candidate_keys)
         Dir.glob(File.join(@hive_state, "stages", "*", "*", Hive::TaskMeta::FILENAME)).each_with_object({}) do |path, result|
           read = Hive::TaskMeta.read_for_admission(File.dirname(path))
-          raise Hive::ConfigError, "cannot inspect task metadata at #{path}: #{read.error || read.status}" unless read.status == :ok
+          unless read.status == :ok
+            bytes = File.binread(path)
+            next unless candidate_keys.any? { |key, _present| bytes.include?(key) }
+
+            raise Hive::ConfigError,
+                  "cannot inspect candidate Patrol finding metadata at #{path}: " \
+                    "#{read.error || read.status}"
+          end
 
           key = read.data[:idempotency_key]
-          next unless key
+          next unless candidate_keys.key?(key)
           raise Hive::ConfigError, "duplicate task idempotency key #{key.inspect}" if result.key?(key)
 
           result[key] = read.data
@@ -177,7 +143,7 @@ module Hive
       end
 
       def capture(entry)
-        Hive::TaskCapture.new(
+        PatrolTaskCapture.new(
           project_root: @project_root,
           hive_state: @hive_state,
           workflow_info: {
@@ -190,27 +156,6 @@ module Hive
           input_fingerprint: entry.fetch(:input_fingerprint),
           git_ops: Hive::GitOps.new(@project_root)
         )
-      end
-
-      def bounded_json_text(value)
-        raw = value.is_a?(String) ? value : JSON.generate(value)
-        text(raw, fallback: "", max: MAX_TEXT_BYTES)
-      rescue JSON::GeneratorError, TypeError
-        ""
-      end
-
-      def text(value, fallback:, max:)
-        result = value.to_s.strip
-        result = fallback.to_s if result.empty? && fallback
-        return nil if result.empty?
-
-        result.byteslice(0, max).to_s.encode("UTF-8", invalid: :replace, undef: :replace, replace: "?")
-          .gsub(/[\u0000-\u001f\u007f]/, " ").strip
-      end
-
-      def safe_path?(path)
-        !path.empty? && !path.start_with?("/") && !path.include?("\\") &&
-          !path.split("/").include?("..") && path.bytesize <= PATH_BYTES
       end
     end
   end

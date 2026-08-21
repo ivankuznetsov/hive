@@ -15,9 +15,9 @@ require "hive/task_meta"
 
 module Hive
   module PatrolFix
-    # Executes the durable half of admission. The source callback is deliberately
-    # last: an acknowledged occurrence always names an already-durable task and
-    # evidence generation, while a crash before acknowledgement can safely replay.
+    # Executes the durable half of admission. AdmissionStore is the only
+    # acknowledgement authority: it records completion only after the exact task
+    # binding is durable, and a crash before that write safely replays the binding.
     class TaskMaterializer
       Result = Data.define(:task_folder, :slug, :generation, :created, :acknowledged)
 
@@ -25,7 +25,7 @@ module Hive
       class InvalidAdmission < Error; end
       class MissingTask < Error; end
 
-      def initialize(project_root:, hive_state:, store:, workflow_info:, source_acknowledger:,
+      def initialize(project_root:, hive_state:, store:, workflow_info:,
                      task_capture_factory: nil, git_ops: nil,
                      candidate_provider: nil, current_head: nil,
                      clock: -> { Time.now.utc })
@@ -33,7 +33,6 @@ module Hive
         @hive_state = File.expand_path(hive_state)
         @store = store
         @workflow_info = workflow_info
-        @source_acknowledger = source_acknowledger
         @task_capture_factory = task_capture_factory || ->(**args) { Hive::TaskCapture.new(**args) }
         @git_ops = git_ops || Hive::GitOps.new(@project_root)
         @candidate_provider = candidate_provider
@@ -41,7 +40,7 @@ module Hive
         @clock = clock
       end
 
-      def call(occurrence_id, acknowledge: true)
+      def call(occurrence_id)
         created = false
         binding = nil
         task_folder = nil
@@ -62,10 +61,7 @@ module Hive
         if record.fetch("status") == "acknowledged"
           return result(task_folder, binding, created: false, acknowledged: true)
         end
-        return result(task_folder, binding, created: created, acknowledged: false) unless acknowledge
-
-        receipt_id = @source_acknowledger.call(record, binding)
-        @store.acknowledge!(occurrence_id, source_receipt_id: receipt_id, now: @clock.call)
+        @store.acknowledge!(occurrence_id, now: @clock.call)
         result(task_folder, binding, created: created, acknowledged: true)
       end
 

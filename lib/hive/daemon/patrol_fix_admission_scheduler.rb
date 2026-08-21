@@ -18,16 +18,12 @@ module Hive
       RETRY_BACKOFF_SEC = [ 60, 300, 900 ].freeze
       DECISION_LEASE_SEC = 7_200
 
-      def initialize(sources: [], admission_store: nil,
-                     admission_store_factory: nil,
-                     semantic_admission_factory: nil,
+      def initialize(sources: [], semantic_admission_factory: nil,
                      task_materializer_factory: nil,
                      semantic_command_factory: nil,
                      capacity_available: ->(**) { true },
                      retry_policy: nil, clock: -> { Time.now.utc }, limit: 16)
         @sources = sources
-        @admission_store = admission_store
-        @admission_store_factory = admission_store_factory
         @semantic_admission_factory = semantic_admission_factory
         @task_materializer_factory = task_materializer_factory
         @semantic_command_factory = semantic_command_factory || method(:semantic_command)
@@ -42,13 +38,14 @@ module Hive
       def tick(now: @clock.call)
         events = []
         remaining = @limit
-        source_ports.each do |source|
+        project_sources.each do |source|
           break if remaining.zero?
           entries = begin
-            source.pending(limit: remaining, now: now)
+            store_for(source).pending(limit: remaining, now: now)
           rescue StandardError => error
             events << event(
               source, nil, :failed,
+              source_name: source.respond_to?(:project) ? source.project.to_s : "",
               reason: "source_unavailable: #{error.class}: #{bounded_error(error)}"
             )
             next
@@ -75,9 +72,12 @@ module Hive
         source = source_for_token(token)
         return event_from_token(token, :stale, reason: "source_unavailable") unless source
 
-        store = store_for(source, {})
+        store = store_for(source)
         record = store.fetch(token.fetch(:occurrence_id))
-        if record && %w[decided blocked materializing bound acknowledged].include?(record.fetch("status"))
+        if record&.fetch("status") == "blocked"
+          return event_from_token(token, :blocked, reason: "insufficient_evidence")
+        end
+        if record && %w[decided materializing bound acknowledged].include?(record.fetch("status"))
           return event_from_token(token, :decision_completed)
         end
         reservation = record && record["decision_reservation"]
@@ -93,9 +93,6 @@ module Hive
           token.fetch(:occurrence_id), reservation_id: token.fetch(:reservation_id),
           reason: "provider_failure", error_class: error.error_class,
           retry_at: retry_at, now: now
-        )
-        source.defer!(
-          occurrence_id: token.fetch(:occurrence_id), retry_at: retry_at, now: now
         )
         event_from_token(token, :retry_wait, retry_at: retry_at, reason: "provider_failure")
       rescue Hive::PatrolFix::AdmissionStore::StaleDecision
@@ -115,7 +112,7 @@ module Hive
         source = source_for_token(token)
         return event_from_token(token, :stale, reason: "source_unavailable") unless source
 
-        store_for(source, {}).cancel_unlaunched_decision!(
+        store_for(source).cancel_unlaunched_decision!(
           token.fetch(:occurrence_id), reservation_id: token.fetch(:reservation_id), now: now
         )
         event_from_token(token, :cancelled, reason: "not_launched")
@@ -127,20 +124,24 @@ module Hive
 
       def process(source, entry, now:)
         occurrence_id = entry.fetch("occurrence_id")
-        snapshot = Hive::PatrolFix::SourceSnapshot.new(entry.fetch("snapshot"))
-        store = store_for(source, entry)
-        record = store.fetch(occurrence_id) || store.reserve!(
-          occurrence_id: occurrence_id, snapshot: snapshot, now: now
-        )
+        store = store_for(source)
+        record = store.fetch(occurrence_id)
+        raise Hive::PatrolFix::AdmissionStore::Conflict, "admission occurrence is missing" unless record
+        snapshot = Hive::PatrolFix::SourceSnapshot.new(record.fetch("source"))
+        source_name = snapshot.to_h.fetch("engine")
         if record&.fetch("status") == "blocked"
-          source.park!(occurrence_id: occurrence_id, now: now)
-          return event(source, occurrence_id, :blocked, reason: "insufficient_evidence")
+          return event(
+            source, occurrence_id, :blocked, source_name: source_name,
+            reason: "insufficient_evidence"
+          )
         end
         if record&.fetch("status") == "retry_wait"
           retry_at = Time.iso8601(record.dig("retry", "retry_at"))
           if retry_at > now
-            source.defer!(occurrence_id: occurrence_id, retry_at: retry_at, now: now)
-            return event(source, occurrence_id, :retry_wait, retry_at: retry_at)
+            return event(
+              source, occurrence_id, :retry_wait,
+              source_name: source_name, retry_at: retry_at
+            )
           end
           if record.dig("retry", "reason") == "materialization_failure"
             record = store.resume_materialization_retry!(occurrence_id, now: now)
@@ -149,13 +150,19 @@ module Hive
 
         unless recovery_without_capacity?(record) ||
                @capacity_available.call(source: source, entry: entry, record: record, now: now)
-          return event(source, occurrence_id, :capacity_blocked, reason: "workflow_capacity")
+          return event(
+            source, occurrence_id, :capacity_blocked,
+            source_name: source_name, reason: "workflow_capacity"
+          )
         end
 
         if record&.fetch("status") == "deciding"
           expires_at = Time.iso8601(record.dig("decision_reservation", "expires_at"))
           if expires_at > now
-            return event(source, occurrence_id, :decision_in_flight, retry_at: expires_at)
+            return event(
+              source, occurrence_id, :decision_in_flight,
+              source_name: source_name, retry_at: expires_at
+            )
           end
           record = store.expire_decision!(occurrence_id, now: now)
         end
@@ -165,76 +172,72 @@ module Hive
             semantic = require_factory!(@semantic_admission_factory, "semantic admission").call(
               store: store, source: source, entry: entry, snapshot: snapshot
             )
-            reservation_id = decision_reservation_id(source, occurrence_id)
+            reservation_id = decision_reservation_id(source_name, occurrence_id)
             record = semantic.prepare(
               occurrence_id: occurrence_id, snapshot: snapshot,
               reservation_id: reservation_id,
               lease_expires_at: now + DECISION_LEASE_SEC, now: now
             )
           rescue Hive::PatrolFix::AdmissionStore::StaleDecision
-            return event(source, occurrence_id, :stale, reason: "candidate_digest_changed")
+            return event(
+              source, occurrence_id, :stale, source_name: source_name,
+              reason: "candidate_digest_changed"
+            )
           rescue StandardError => error
             return defer_failure(
-              source, store, occurrence_id, error, now: now,
+              source, store, occurrence_id, error, source_name: source_name, now: now,
               reason: "provider_failure"
             )
           end
           if record.fetch("status") == "deciding"
             token = dispatch_token(
-              source, occurrence_id, record.dig("decision_reservation", "reservation_id")
+              source, source_name, occurrence_id,
+              record.dig("decision_reservation", "reservation_id")
             )
             return event(
               source, occurrence_id, :decision_dispatch,
+              source_name: source_name,
               command: @semantic_command_factory.call(token), dispatch_token: token
             )
           end
         end
 
         if record.fetch("status") == "blocked"
-          source.park!(occurrence_id: occurrence_id, now: now)
-          return event(source, occurrence_id, :blocked, reason: "insufficient_evidence")
-        end
-
-        acknowledger = lambda do |_admission_record, binding|
-          source.acknowledge!(
-            occurrence_id: occurrence_id, admission_id: occurrence_id,
-            task: binding, now: @clock.call
+          return event(
+            source, occurrence_id, :blocked, source_name: source_name,
+            reason: "insufficient_evidence"
           )
         end
+
         begin
           materializer = require_factory!(@task_materializer_factory, "task materializer").call(
-            store: store, source: source, entry: entry, snapshot: snapshot,
-            source_acknowledger: acknowledger
+            store: store, source: source, entry: entry, snapshot: snapshot
           )
           result = materializer.call(occurrence_id)
         rescue StandardError => error
           return defer_failure(
-            source, store, occurrence_id, error, now: now,
+            source, store, occurrence_id, error, source_name: source_name, now: now,
             reason: "materialization_failure"
           )
         end
-        begin
-          source.settle!(occurrence_id: occurrence_id, now: now)
-        rescue StandardError => error
-          return event(source, occurrence_id, :failed,
-                       reason: "settlement_failure: #{error.class}: #{bounded_error(error)}")
-        end
-        event(source, occurrence_id, :acknowledged, task_slug: result.slug)
+        event(
+          source, occurrence_id, :acknowledged,
+          source_name: source_name, task_slug: result.slug
+        )
       rescue StandardError => error
-        event(source, occurrence_id, :failed,
+        event(source, occurrence_id, :failed, source_name: source_name,
               reason: "#{error.class}: #{bounded_error(error)}")
       end
 
-      def source_ports
+      def project_sources
         value = @sources.respond_to?(:call) ? @sources.call : @sources
         Array(value)
       end
 
-      def store_for(source, entry)
-        return @admission_store if @admission_store
-        require_factory!(@admission_store_factory, "admission store").call(
-          source: source, entry: entry
-        )
+      def store_for(source)
+        return source.store if source.respond_to?(:store)
+
+        raise Hive::ConfigError, "Patrol Fix admission store is unavailable"
       end
 
       def recovery_without_capacity?(record)
@@ -256,29 +259,31 @@ module Hive
         nil
       end
 
-      def defer_failure(source, store, occurrence_id, error, now:, reason:)
+      def defer_failure(source, store, occurrence_id, error, source_name:, now:, reason:)
         retry_at = @retry_policy.call(store.fetch(occurrence_id), error, now)
         store.record_retry!(
           occurrence_id, reason: reason,
           error_class: error.class.name.to_s.empty? ? "StandardError" : error.class.name,
           retry_at: retry_at, now: now
         )
-        source.defer!(occurrence_id: occurrence_id, retry_at: retry_at, now: now)
-        event(source, occurrence_id, :retry_wait, retry_at: retry_at, reason: reason)
-      end
-
-      def decision_reservation_id(source, occurrence_id)
-        Digest::SHA256.hexdigest(
-          [ source.source, occurrence_id, SecureRandom.hex(32) ].join("\0")
+        event(
+          source, occurrence_id, :retry_wait, source_name: source_name,
+          retry_at: retry_at, reason: reason
         )
       end
 
-      def dispatch_token(source, occurrence_id, reservation_id)
+      def decision_reservation_id(source_name, occurrence_id)
+        Digest::SHA256.hexdigest(
+          [ source_name, occurrence_id, SecureRandom.hex(32) ].join("\0")
+        )
+      end
+
+      def dispatch_token(source, source_name, occurrence_id, reservation_id)
         project = source.respond_to?(:project) ? source.project.to_s : ""
         {
           kind: :patrol_fix_semantic_admission,
           project: project,
-          source: source.source.to_s,
+          source: source_name,
           occurrence_id: occurrence_id,
           reservation_id: reservation_id
         }.freeze
@@ -301,9 +306,11 @@ module Hive
       end
 
       def source_for_token(token)
-        source_ports.find do |item|
-          item.source.to_s == token.fetch(:source).to_s &&
-            (!item.respond_to?(:project) || item.project.to_s == token.fetch(:project).to_s)
+        project_sources.find do |item|
+          next false if item.respond_to?(:project) &&
+                        item.project.to_s != token.fetch(:project).to_s
+          record = store_for(item).fetch(token.fetch(:occurrence_id))
+          record&.dig("source", "engine") == token.fetch(:source).to_s
         end
       end
 
@@ -323,9 +330,9 @@ module Hive
         Hive::SecretPatterns.redact(error.message.to_s)[0, 256]
       end
 
-      def event(source, occurrence_id, status, task_slug: nil, retry_at: nil, reason: nil,
-                command: nil, dispatch_token: nil)
-        Event.new(source: source.source, occurrence_id: occurrence_id,
+      def event(source, occurrence_id, status, source_name:, task_slug: nil,
+                retry_at: nil, reason: nil, command: nil, dispatch_token: nil)
+        Event.new(source: source_name, occurrence_id: occurrence_id,
                   status: status, task_slug: task_slug,
                   retry_at: retry_at&.utc&.iso8601, reason: reason,
                   command: command, dispatch_token: dispatch_token)

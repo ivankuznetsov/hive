@@ -5,13 +5,17 @@ require "hive/task"
 require "hive/stages/patrol_fix/fix"
 
 class PatrolFixFixStageTest < Minitest::Test
+  include HiveTestHelper
+
   def test_creates_one_local_generation_and_records_only_a_clean_committed_fix
     with_fix_task do |task, worktree_root|
+      captured = nil
       runner = lambda do |**kwargs|
-        worktree = kwargs.fetch(:owner).fetch("worktree")
+        captured = kwargs
+        worktree = kwargs.fetch(:cwd)
         File.write(File.join(worktree, "app.rb"), "puts :fixed\n")
-        git(worktree, "add", "app.rb")
-        git(worktree, "commit", "-m", "Fix defect")
+        PatrolFixStageFixture.git(worktree, "add", "app.rb")
+        PatrolFixStageFixture.git(worktree, "commit", "-m", "Fix defect")
         File.write(kwargs.fetch(:output_path), JSON.generate(
           "schema" => "hive-patrol-fix-fix-report", "schema_version" => 1,
           "status" => "fixed", "summary" => "Fixed and committed the root cause.",
@@ -20,10 +24,17 @@ class PatrolFixFixStageTest < Minitest::Test
         { status: :ok, custody: :clean }
       end
 
-      result = Hive::Stages::PatrolFix::Fix.run!(
-        task, {}, agent_runner: runner, worktree_root: worktree_root
-      )
+      result = with_replaced_singleton_method(
+        Hive::Stages::ManagedAgentCustody, :launch_agent, runner
+      ) do
+        Hive::Stages::PatrolFix::Fix.run!(task, {}, worktree_root: worktree_root)
+      end
       assert_equal :complete, result.fetch(:status)
+      assert_equal "patrol_fix", captured.fetch(:actor)
+      assert_equal "stages.fix", captured.fetch(:slot)
+      assert_equal [ captured.fetch(:cwd), task.folder ], captured.fetch(:add_dirs)
+      assert_equal "fix", captured.fetch(:stage)
+      assert_equal "patrol-fix-fix", captured.fetch(:log_label)
       receipt = result.fetch(:receipt)
       assert_equal "fix", receipt.fetch("kind")
       assert_equal "agent", receipt.dig("payload", "validation_commands", 0, "provenance")

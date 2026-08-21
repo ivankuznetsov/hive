@@ -18,7 +18,6 @@ require "hive/commands/prune"
 require "hive/commands/run"
 require "hive/commands/stage_action"
 require "hive/commands/status"
-require "hive/patrol_fix/operational_projection"
 require "hive/plan_review"
 require "hive/agent_skills/inspector"
 require "hive/agent_skills/provisioner"
@@ -29,8 +28,6 @@ require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/attempts/record"
 require "hive/provider_health"
-require "hive/modules/migration/patrol_decision_projection"
-require "hive/modules/migration/patrol_evidence"
 require "tmpdir"
 
 # Schema files under schemas/ are the published artefact for external
@@ -492,8 +489,14 @@ class SchemaFilesTest < Minitest::Test
                "generic workflow stage dirs are runtime-registered, so stage must not be a coding enum"
     assert_equal Hive::Commands::Status::ICON.keys.map(&:to_s).sort,
                  doc.dig("$defs", "Task", "properties", "marker", "enum").sort
-    assert_equal Hive::Schemas::TaskActionKind::ALL.sort,
+    versioned_actions = Hive::Schemas::TaskActionKind::ALL -
+      Hive::Commands::Status::ADDITIVE_PATROL_FIX_ACTIONS
+    assert_equal versioned_actions.sort,
                  doc.dig("$defs", "Task", "properties", "action", "enum").sort
+    Hive::Commands::Status::ADDITIVE_PATROL_FIX_ACTIONS.each do |action|
+      assert_equal Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+                   Hive::Commands::Status.new.send(:versioned_action_key, action)
+    end
   end
 
   def test_plan_review_route_diagnostics_validate_in_status_contracts
@@ -565,7 +568,7 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_status_schema_matches_tui_snapshot_row_keys
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
     schema_properties = doc.dig("$defs", "Task", "properties").keys
-    snapshot_row_keys = Hive::Tui::Snapshot::Row.members.map(&:to_s) - [ "project_name" ]
+    snapshot_row_keys = Hive::Tui::Snapshot::Row.members.map(&:to_s) - %w[project_name]
     snapshot_row_keys = snapshot_row_keys.map { |key| key == "action_key" ? "action" : key }
 
     assert_empty snapshot_row_keys - schema_properties,
@@ -630,7 +633,6 @@ class SchemaFilesTest < Minitest::Test
           "path" => "/tmp/alpha",
           "hive_state_path" => "/tmp/alpha/.hive-state",
           "tasks" => [],
-          "patrol_fix" => patrol_fix_operational_projection("alpha"),
           "legacy_stage_dirs" => [
             { "stage_dir" => "5-review", "task_count" => 2 },
             { "stage_dir" => "6-pr",     "task_count" => 1 }
@@ -646,7 +648,6 @@ class SchemaFilesTest < Minitest::Test
           "path" => "/tmp/beta",
           "hive_state_path" => "/tmp/beta/.hive-state",
           "tasks" => [],
-          "patrol_fix" => patrol_fix_operational_projection("beta"),
           "legacy_stage_dirs" => [],
           "legacy_migrate_command" => nil
         }
@@ -738,7 +739,6 @@ class SchemaFilesTest < Minitest::Test
           "path" => "/tmp/demo",
           "hive_state_path" => "/tmp/demo/.hive-state",
           "tasks" => [ task_with_pr, task_without_pr, held_task, held_task_null ],
-          "patrol_fix" => patrol_fix_operational_projection("demo"),
           "legacy_stage_dirs" => [],
           "legacy_migrate_command" => nil
         }
@@ -3026,158 +3026,5 @@ class SchemaFilesTest < Minitest::Test
       assert schemer.valid?(payload),
              "hive-act ErrorPayload must accept #{kind}: #{schemer.validate(payload).to_a.inspect}"
     end
-  end
-
-  def test_patrol_evidence_receipt_schema_is_strict_and_composes_u2_values
-    path = Hive::Schemas.schema_path(
-      "hive-patrol-evidence-receipt", version: 1
-    )
-    assert File.file?(path), "schema file missing: #{path}"
-    assert_equal path,
-                 Hive::Schemas.schema_path("hive-patrol-evidence-receipt")
-    schemer = JSONSchemer.schema(Pathname(path))
-    payload = patrol_evidence_receipt_payload
-
-    assert_empty schemer.validate(payload).to_a
-    refute schemer.valid?(payload.merge("unexpected" => true))
-    refute schemer.valid?(payload.merge("candidate_sha" => "not-a-sha"))
-    refute schemer.valid?(
-      payload.merge("effects" => payload.fetch("effects") + [ {} ])
-    )
-    nested = JSON.parse(JSON.generate(payload))
-    nested.fetch("capture").fetch("project")["unexpected"] = true
-    refute schemer.valid?(nested)
-    nested = JSON.parse(JSON.generate(payload))
-    nested.fetch("capture").fetch("trigger")["kind"] = "unknown"
-    refute schemer.valid?(nested)
-
-    with_effect = JSON.parse(JSON.generate(payload))
-    with_effect["effects"] = [
-      JSON.parse(JSON.generate(patrol_effect_receipt_payload))
-    ]
-    assert_empty schemer.validate(with_effect).to_a
-    with_effect.fetch("effects").first.fetch("intent")["unexpected"] = true
-    refute schemer.valid?(with_effect)
-  end
-
-  def test_module_migration_report_v2_accepts_partial_lanes_and_rejects_v1
-    legacy_path = Hive::Schemas.schema_path(
-      "hive-module-migration-report", version: 1
-    )
-    path = Hive::Schemas.schema_path(
-      "hive-module-migration-report", version: 2
-    )
-    assert_equal path,
-                 Hive::Schemas.schema_path("hive-module-migration-report")
-    assert_equal 1,
-                 JSON.parse(File.read(legacy_path))
-                   .dig("oneOf", 0, "properties", "schema_version", "const")
-    assert File.file?(path), "schema file missing: #{path}"
-    schemer = JSONSchemer.schema(JSON.parse(File.read(path)))
-    payload = {
-      "schema" => "hive-module-migration-report",
-      "schema_version" => 2,
-      "report_id" => "report-#{'a' * 64}",
-      "generated_at" => "2026-08-03T12:00:00.000000Z",
-      "candidate_sha" => "b" * 40,
-      "scenario_manifest_digest" => "c" * 64,
-      "status" => "evidence_required",
-      "lanes" => {
-        "deterministic" => nil,
-        "installed_live" => nil
-      },
-      "blockers" => [ "deterministic:evidence_required" ],
-      "supersedes" => nil,
-      "migration" => {
-        "source_schema_version" => 1,
-        "source_digest" => "d" * 64,
-        "archive_digest" => "d" * 64,
-        "disposition" => "evidence_required"
-      }
-    }
-
-    assert_empty schemer.validate(payload).to_a
-    error = Hive::Schemas::ErrorEnvelope.build(
-      schema: "hive-module-migration-report",
-      error: Hive::ConfigError.new("reviewer is required"),
-      error_kind: "error"
-    )
-    assert_empty schemer.validate(error).to_a
-    refute schemer.valid?(payload.merge("schema_version" => 1))
-    refute schemer.valid?(payload.merge("unexpected" => true))
-    refute schemer.valid?(
-      payload.merge("lanes" => payload.fetch("lanes").merge("extra" => nil))
-    )
-  end
-
-  private
-
-  def patrol_evidence_receipt_payload
-    now = Time.utc(2026, 8, 3, 12)
-    selection = Hive::Modules::Migration::PatrolDecisionProjection.build(
-      module_name: "patrol", rationale: "due"
-    )
-    capture = Hive::Modules::Migration::PatrolCapture.build(
-      module_name: "patrol",
-      project: {
-        "project_id" => "project-1", "name" => "demo",
-        "repository" => "owner/demo"
-      },
-      trigger: { "kind" => "manual", "id" => "manual-1" },
-      reservation: { "kind" => "ordinary", "id" => "reservation-1" },
-      owner: "legacy", owner_epoch: 1,
-      selection_input: { "kind" => "operation", "operation" => "test" },
-      selection: selection, outcome_class: "completed",
-      outcome: { "rationale" => "completed", "finding_ids" => [] },
-      occurred_at: now, recorded_at: now
-    )
-    {
-      "schema" => "hive-patrol-evidence-receipt",
-      "schema_version" => 1,
-      "receipt_id" => "evidence-#{'0' * 64}",
-      "run_id" => "run-1",
-      "candidate_sha" => "1" * 40,
-      "catalog_digest" => "2" * 64,
-      "source_digest" => "3" * 64,
-      "manifest_digest" => "4" * 64,
-      "configuration_digest" => "5" * 64,
-      "scenario_manifest_digest" => "6" * 64,
-      "repository" => {
-        "id" => "owner/demo", "sha" => "7" * 40,
-        "change_window" => "window-1"
-      },
-      "capture" => capture.to_h,
-      "module_projection" => selection.to_h,
-      "decision_class" => "positive_finding",
-      "effects" => [],
-      "fault_steps" => [ "restart_after_decision" ],
-      "artifacts" => [
-        { "kind" => "comparison", "digest" => "8" * 64 }
-      ],
-      "reviewer" => "reviewer-1",
-      "generated_at" => now.iso8601(6),
-      "reviewed_at" => (now + 1).iso8601(6)
-    }
-  end
-
-  def patrol_effect_receipt_payload
-    now = Time.utc(2026, 8, 3, 12)
-    intent = Hive::Modules::Migration::EffectIntent.build(
-      module_name: "patrol", occurrence_id: "occ-#{'a' * 64}",
-      authority: "legacy", owner_epoch: 1, sink: "finding",
-      target: "finding-1", idempotency_key: "finding-1",
-      capability: "finding_write", created_at: now
-    )
-    Hive::Modules::Migration::EffectReceipt.build(
-      intent: intent, status: "committed",
-      outcome: { "finding_id" => "finding-1" }, recorded_at: now
-    ).to_h
-  end
-
-  def patrol_fix_operational_projection(project)
-    Hive::PatrolFix::OperationalProjection.unavailable(
-      project: project, tasks: [], now: Time.utc(2026, 6, 15),
-      source: "daemon", code: "fixture_unavailable", summary: "fixture projection"
-    )
   end
 end

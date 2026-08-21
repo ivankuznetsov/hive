@@ -6,7 +6,6 @@ require "hive/github_publication"
 require "hive/git_ops"
 require "hive/patrol_fix/publication_receipt"
 require "hive/patrol_fix/receipt_store"
-require "hive/patrol_fix/runner"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/worktree_snapshot"
 require "hive/patrol_fix/worktree_receipt"
@@ -345,5 +344,3 @@ module Hive
     end
   end
 end
-
-Hive::PatrolFix::Runner.register("publish", Hive::Stages::PatrolFix::Publish.method(:run!))

@@ -5,7 +5,6 @@ require "hive/recovery"
 require "hive/workflows"
 require "hive/task_closure"
 require "hive/terminal_outcome"
-require "hive/patrol_fix/operational_projection"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
@@ -47,7 +46,6 @@ module Hive
       @scheduler_join_issues = []
       @scheduler_join_issue_keys = {}
       scheduler = scheduler_payload(projects)
-      patrol_fix = patrol_fix_payload(projects, scheduler)
       issues.concat(scheduler.fetch("issues"))
       attempt_storage = attempt_storage_payload
       issues.concat(attempt_storage_issues(attempt_storage))
@@ -60,9 +58,6 @@ module Hive
         scheduler.fetch("status"),
         scheduler_join_complete: @scheduler_join_issues.empty?
       )
-      if completeness == "complete" && patrol_fix.any? { |projection| projection["completeness"] == "partial" }
-        completeness = "partial"
-      end
       counts = STATES.to_h { |state| [ state, tasks.count { |row| row.fetch("state") == state } ] }
 
       {
@@ -97,7 +92,6 @@ module Hive
         "daemon" => daemon_payload(projects, scheduler, attempt_storage: attempt_storage),
         "attempt_storage" => attempt_storage,
         "scheduler" => scheduler.reject { |key, _| key == "issues" },
-        "patrol_fix" => patrol_fix,
         "archive" => archive_payload(archived),
         "issues" => issues,
         "tasks" => tasks
@@ -315,25 +309,6 @@ module Hive
       }
     end
 
-    def patrol_fix_payload(projects, scheduler)
-      snapshot_projects = if scheduler["status"] == "current" && @daemon_snapshot.is_a?(Hash)
-        @daemon_snapshot["patrol_fix_projects"]
-      end
-      projects.map do |project|
-        name = project.fetch("name")
-        projection = snapshot_projects.is_a?(Hash) ? snapshot_projects[name] : project["patrol_fix"]
-        if Hive::PatrolFix::OperationalProjection.valid_document?(projection, project: name)
-          projection
-        else
-          Hive::PatrolFix::OperationalProjection.unavailable(
-            project: name, tasks: project.fetch("tasks", []), now: @now,
-            source: "operational_status", code: "projection_invalid",
-            summary: "Patrol-fix operational projection is missing or invalid"
-          )
-        end
-      end
-    end
-
     def attempt_storage_payload
       value = @daemon_snapshot.is_a?(Hash) ? @daemon_snapshot["attempt_storage"] : nil
       return value if value.is_a?(Hash)
@@ -388,8 +363,7 @@ module Hive
       end
       action = Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row)
       if daemon_enabled?(project.fetch("name")) &&
-         ![ Hive::OperationalAction::RETRY_ACTION_ID,
-            Hive::OperationalAction::PATROL_FIX_REOPEN_ACTION_ID ].include?(action&.fetch("action_id", nil))
+         action&.fetch("action_id") != Hive::OperationalAction::RETRY_ACTION_ID
         action = nil
       end
       {
@@ -426,7 +400,6 @@ module Hive
         "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
         "closure" => closure_payload(project, row),
         "plan_review" => row["plan_review"],
-        "patrol_fix" => row["patrol_fix"],
         "dependency" => {
           "blocked" => row["blocked"] == true,
           "blocked_by" => row["blocked_by"],
@@ -501,8 +474,7 @@ module Hive
         "blocked_by" => row["blocked_by"],
         "dependency_stage" => row["dependency_stage"],
         "blocked" => row["blocked"] == true,
-        "admission_error" => row["admission_error"],
-        "patrol_fix" => row["patrol_fix"]
+        "admission_error" => row["admission_error"]
       }
       actual = {
         "folder" => observed.dig("identity", "folder"),
@@ -520,8 +492,7 @@ module Hive
         "blocked_by" => observed["blocked_by"],
         "dependency_stage" => observed["dependency_stage"],
         "blocked" => observed["blocked"],
-        "admission_error" => observed["admission_error"],
-        "patrol_fix" => observed["patrol_fix"]
+        "admission_error" => observed["admission_error"]
       }
       expected.all? do |key, value|
         other = actual[key]
@@ -595,7 +566,6 @@ module Hive
       return [ "unknown", "unknown" ] if invalid_task?(row)
       return [ "needs_repair", "hive" ] if stale_liveness?(row)
       return [ "running", "agent" ] if running?(row)
-      return [ "waiting_on_you", "operator" ] if patrol_fix_parked?(row)
       return [ "waiting_on_you", "operator" ] if row["action"] == "plan_review_decision"
       if PLAN_REVIEW_WAIT_ACTIONS.include?(row["action"])
         owner = daemon_enabled?(project["name"]) ? "scheduler" : operational_review_owner(row)
@@ -872,10 +842,6 @@ module Hive
       HUMAN_ACTIONS.include?(row["action"])
     end
 
-    def patrol_fix_parked?(row)
-      row["workflow"] == "patrol-fix" && row.dig("patrol_fix", "action", "kind") == "parked"
-    end
-
     def daemon_plan_approval?(project, row)
       daemon_enabled?(project["name"]) && row["workflow"] == "coding" && row["stage"] == CODING_PLAN_STAGE
     end
@@ -909,10 +875,6 @@ module Hive
         review = row.fetch("plan_review")
         message = review["required_action"] || review["blocker_reason"] || row["action_label"]
         reasons << reason("plan_review_#{review['state']}", message, "plan_review")
-      elsif patrol_fix_parked?(row)
-        outcome = row.dig("patrol_fix", "outcome") || {}
-        message = outcome["rationale"] || row["action_label"] || "patrol-fix task is parked"
-        reasons << reason("patrol_fix_#{outcome['kind'] || 'parked'}", message, "patrol_fix")
       elsif row["admission_error"]
         error = row.fetch("admission_error")
         reasons << reason(error.fetch("reason_code"), error.fetch("safe_correction"), "dependency")

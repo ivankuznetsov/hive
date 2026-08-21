@@ -32,28 +32,6 @@ class PatrolFixTransitionTest < Minitest::Test
     end
   end
 
-  def test_reopen_creates_a_new_generation_and_rebinds_current_review_evidence
-    with_review_task(route: "blocked") do |task, worktree_root, decision|
-      transition = Hive::PatrolFix::Transition.new(
-        task, worktree_root: worktree_root, commit: ->(**) { :committed }
-      )
-
-      transition.reopen!(outcome_receipt_id: decision.fetch("receipt_id"), operator: "action")
-
-      manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
-      assert_equal 2, manifest.dig("task", "generation")
-      receipts = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).read_all
-      current = receipts.select { |row| row.dig("task", "generation") == 2 }
-      assert_equal %w[reopen], current.map { |row| row.fetch("kind") }
-      assert_equal %w[fix-1 validation-1], current.first.dig("payload", "carried_receipts")
-      projected = Hive::PatrolFix::Projection.new(
-        task_folder: task.folder, stage: "4-review"
-      ).to_h
-      assert_nil projected.fetch("outcome")
-      assert_equal "ready", projected.dig("action", "kind")
-    end
-  end
-
   def test_rework_recovery_runs_fix_from_controller_authorization_without_a_second_review
     with_review_task(route: "rework") do |task, worktree_root, decision|
       result = Hive::PatrolFix::Transition.new(
@@ -136,37 +114,6 @@ class PatrolFixTransitionTest < Minitest::Test
         task.hive_state_path, "patrol-fix", "transitions", task.slug, "route-intent.json"
       )))
       assert_equal "completed", intent.fetch("status")
-    end
-  end
-
-  def test_review_reopen_crash_replays_generation_and_evidence_carry_once
-    with_review_task(route: "blocked") do |task, worktree_root, decision|
-      attempts = 0
-      commit = lambda do |**|
-        attempts += 1
-        raise "crash before reopen acknowledgement" if attempts == 1
-      end
-      transition = Hive::PatrolFix::Transition.new(
-        task, worktree_root: worktree_root, commit: commit
-      )
-
-      assert_raises(RuntimeError) do
-        transition.reopen!(
-          outcome_receipt_id: decision.fetch("receipt_id"), operator: "action"
-        )
-      end
-      assert_equal 2, Hive::PatrolFix::TaskManifest.new(
-        task_folder: task.folder
-      ).read.dig("task", "generation")
-
-      recovered = transition.reconcile!
-
-      assert_equal task.folder, recovered.fetch(:task_folder)
-      assert_equal 2, attempts
-      receipts = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).read_all
-      current = receipts.select { |row| row.dig("task", "generation") == 2 }
-      assert_equal 1, current.count { |row| row["kind"] == "reopen" }
-      assert_equal %w[fix-1 validation-1], current.first.dig("payload", "carried_receipts")
     end
   end
 

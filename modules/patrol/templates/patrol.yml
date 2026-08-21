@@ -1,5 +1,0 @@
-patrol:
-  enabled: true
-  mode: medium
-  trigger: timer
-  poll_interval_sec: 14400

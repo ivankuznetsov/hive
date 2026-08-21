@@ -4,14 +4,11 @@ require "securerandom"
 require "time"
 
 require "hive/config"
-require "hive/git_ops"
 require "hive/lock"
 require "hive/managed_directory"
-require "hive/patrol/mapper"
 require "hive/patrol_fix"
-require "hive/refactor_patrol/state_store"
-require "hive/refactor_patrol/fix_admission_outbox"
-require "hive/worktree"
+require "hive/refactor_patrol/fix_admission_adapter"
+require "hive/refactor_patrol/frozen_revision_map_rig"
 
 module Hive
   module RefactorPatrol
@@ -31,45 +28,15 @@ module Hive
       Snapshot = Data.define(:analysis_sha, :feature_ids)
 
       class Snapshotter
+        def initialize(rig: FrozenRevisionMapRig.new)
+          @rig = rig
+        end
+
         def call(entry:, cfg:)
-          root = entry.fetch("path")
-          branch = cfg["default_branch"] || Hive::GitOps.new(root).detect_default_branch
-          worktree = build_worktree(root, cfg)
-          sha = worktree.fetch_strict_origin_base!(branch)
-          worktree.create_detached_exact!(base_sha: sha)
-          features = mapper(worktree.path, cfg, entry).call
+          mapped = @rig.call(entry: entry, cfg: cfg)
           Snapshot.new(
-            analysis_sha: sha,
-            feature_ids: features.map { |feature| feature.id.to_s }.uniq.sort.freeze
-          )
-        ensure
-          worktree&.remove!(force: true) if worktree&.exists?
-        end
-
-        private
-
-        def build_worktree(root, cfg)
-          configured = cfg["worktree_root"] ||
-                       Hive::Worktree.default_worktree_root(File.basename(root))
-          Hive::Worktree.new(
-            root, "map-#{Process.pid}-#{SecureRandom.hex(8)}",
-            worktree_root: File.join(File.expand_path(configured), ".refactor-patrol", "scheduled-map")
-          )
-        end
-
-        def mapper(root, cfg, entry)
-          mapped_cfg = Hive::Config.deep_dup(cfg)
-          mapped_cfg["patrol"] = (mapped_cfg["patrol"] || {}).merge(
-            "include" => cfg.dig("refactor_patrol", "include"),
-            "exclude" => cfg.dig("refactor_patrol", "exclude"),
-            "review" => cfg.dig("refactor_patrol", "review")
-          )
-          Hive::Patrol::Mapper.new(
-            root, cfg: mapped_cfg,
-            state: Hive::RefactorPatrol::StateStore.new(
-              entry.fetch("path"), hive_state_path: entry.fetch("hive_state_path")
-            ),
-            dry_run: true, capabilities: %i[architecture documentation]
+            analysis_sha: mapped.analysis_sha,
+            feature_ids: mapped.features.map { |feature| feature.id.to_s }.uniq.sort.freeze
           )
         end
       end
@@ -77,7 +44,7 @@ module Hive
       def initialize(entry:, cfg:, snapshotter: Snapshotter.new,
                      process_start_reader: Hive::Lock.method(:process_start_time),
                      pid: Process.pid, id_generator: -> { SecureRandom.uuid },
-                     admission_outbox: nil)
+                     admission_adapter: nil)
         @entry = entry
         @cfg = cfg
         @snapshotter = snapshotter
@@ -93,18 +60,20 @@ module Hive
           ),
           label: "scheduled Architecture Patrol cursor"
         )
-        @admission_outbox = admission_outbox || Hive::RefactorPatrol::FixAdmissionOutbox.for_project(
+        @admission_adapter = admission_adapter || Hive::RefactorPatrol::FixAdmissionAdapter.for_project(
           project_root: entry.fetch("path"),
           hive_state_path: entry.fetch("hive_state_path")
         )
       end
 
       def claim(now: Time.now.utc)
+        @directory.prepare!
+        @directory.with_lock(LOCK_FILE) { replay_unconsumed_results(now) }
+
         snapshot = @snapshotter.call(entry: @entry, cfg: @cfg)
         validate_snapshot!(snapshot)
         return nil if snapshot.feature_ids.empty?
 
-        @directory.prepare!
         @directory.with_lock(LOCK_FILE) do
           state = load_state
           return nil if live_claim?(state["claim"])
@@ -135,6 +104,7 @@ module Hive
           record = build_result_record(claim, result, now)
           record = persist_result(record)
           publish_admission(record)
+          mark_result_consumed(record, now)
           state["cursor"] = claim.fetch("feature_id")
           state["sweep_generation"] = claim.fetch("sweep_generation")
           state["claim"] = nil
@@ -145,26 +115,36 @@ module Hive
         mutate_claim(claim_id, now: now) { |state, _claim| state["claim"] = nil }
       end
 
-      # Complete, bounded source inventory for operational projections.
+      # Bounded retained history of scheduled discovery results.
       def each_result
         return enum_for(__method__) unless block_given?
 
         @directory.prepare!
-        names = @directory.each_child("results", missing: true).to_a
-          .select { |name| /\A[0-9a-f]{64}\.json\z/.match?(name) }.sort
-        raise Hive::ConfigError, "scheduled Architecture Patrol result capacity exceeded" if
-          names.size > MAX_RESULTS
-        names.each do |name|
-          bytes = @directory.read("results/#{name}", max_bytes: MAX_RESULT_BYTES)
-          record = JSON.parse(bytes)
-          validate_result_record!(record)
-          yield record
+        @directory.with_lock(LOCK_FILE, shared: true) do
+          result_records.each { |record| yield record }
         end
       rescue JSON::ParserError => e
         raise Hive::ConfigError, "scheduled Architecture Patrol result is unreadable: #{e.message}"
       end
 
       private
+
+      def result_records
+        @directory.each_child("results", missing: true).to_a
+          .select { |name| /\A[0-9a-f]{64}\.json\z/.match?(name) }.sort.map do |name|
+            bytes = @directory.read("results/#{name}", max_bytes: MAX_RESULT_BYTES)
+            JSON.parse(bytes).tap { |record| validate_result_record!(record) }
+          end
+      end
+
+      def replay_unconsumed_results(now)
+        result_records.each do |record|
+          next if record["consumed_at"]
+
+          publish_admission(record)
+          mark_result_consumed(record, now)
+        end
+      end
 
       def mutate_claim(claim_id, now:)
         @directory.prepare!
@@ -239,6 +219,7 @@ module Hive
             "claimed_at" => claim.fetch("claimed_at")
           },
           "created_at" => normalize_time(now).iso8601(6),
+          "consumed_at" => nil,
           "feature_results" => [ feature_result ],
           "dispositions" => dispositions,
           "report" => report
@@ -264,11 +245,7 @@ module Hive
           end
           return parsed
         end
-        result_count = @directory.each_child("results", missing: true).count do |name|
-          /\A[0-9a-f]{64}\.json\z/.match?(name)
-        end
-        raise Hive::ConfigError, "scheduled Architecture Patrol result capacity exceeded" if
-          result_count >= MAX_RESULTS
+        compact_results_for_capacity!
 
         @directory.atomic_write(relative, content, mode: 0o600)
         record
@@ -277,21 +254,64 @@ module Hive
       end
 
       def stable_result_content(record)
-        record.reject { |key, _value| key == "created_at" }.tap do |copy|
+        record.reject { |key, _value| %w[created_at consumed_at].include?(key) }.tap do |copy|
           copy["source"] = copy.fetch("source").reject { |key, _value| key == "claimed_at" }
+        end
+      end
+
+      def mark_result_consumed(record, now)
+        return record if record["consumed_at"]
+
+        consumed = Hive::PatrolFix.deep_copy(record)
+        consumed["consumed_at"] = normalize_time(now).iso8601(6)
+        validate_result_record!(consumed)
+        digest = consumed.fetch("occurrence_id").delete_prefix("architecture-scheduled:")
+        content = "#{JSON.pretty_generate(consumed)}\n"
+        raise Hive::ConfigError, "scheduled Architecture Patrol result is too large" if
+          content.bytesize > MAX_RESULT_BYTES
+        @directory.atomic_write(
+          "results/#{digest}.json", content, mode: 0o600,
+          max_existing_bytes: MAX_RESULT_BYTES
+        )
+        consumed
+      end
+
+      def compact_results_for_capacity!
+        names = @directory.each_child("results", missing: true).to_a
+          .select { |name| /\A[0-9a-f]{64}\.json\z/.match?(name) }
+        required = names.size - MAX_RESULTS + 1
+        return if required <= 0
+
+        removable = names.filter_map do |name|
+          relative = "results/#{name}"
+          bytes = @directory.read(relative, max_bytes: MAX_RESULT_BYTES)
+          record = JSON.parse(bytes)
+          validate_result_record!(record)
+          [ record.fetch("consumed_at"), record.fetch("created_at"), name, bytes ] if
+            record["consumed_at"]
+        end.sort
+        if removable.size < required
+          raise Hive::ConfigError,
+                "scheduled Architecture Patrol result capacity contains unconsumed work"
+        end
+        removable.first(required).each do |_consumed_at, _created_at, name, bytes|
+          @directory.unlink(
+            "results/#{name}", expected_digest: Digest::SHA256.hexdigest(bytes),
+            max_bytes: MAX_RESULT_BYTES
+          )
         end
       end
 
       def publish_admission(record)
         %w[fix discuss dismiss].each do |route|
           record.dig("dispositions", route).each do |disposition|
-            @admission_outbox.publish_disposition!(record, disposition)
+            @admission_adapter.publish_disposition!(record, disposition)
           end
         end
       end
 
       def validate_result_record!(record)
-        expected = %w[analysis_sha created_at dispositions feature_id feature_results job_id map_digest occurrence_id project_id report schema schema_version source sweep_generation]
+        expected = %w[analysis_sha consumed_at created_at dispositions feature_id feature_results job_id map_digest occurrence_id project_id report schema schema_version source sweep_generation]
         source = record["source"] if record.is_a?(Hash)
         report = record["report"] if record.is_a?(Hash)
         dispositions = record["dispositions"] if record.is_a?(Hash)
@@ -302,6 +322,7 @@ module Hive
           OID.match?(record["analysis_sha"].to_s) && valid_id?(record["feature_id"]) &&
           record["sweep_generation"].is_a?(Integer) && record["sweep_generation"] >= 0 &&
           /\A[0-9a-f]{64}\z/.match?(record["map_digest"].to_s) && valid_time?(record["created_at"]) &&
+          (record["consumed_at"].nil? || valid_time?(record["consumed_at"])) &&
           valid_result_source?(source) && valid_result_report?(report, record) &&
           dispositions.is_a?(Hash) && dispositions.keys.sort == %w[discuss dismiss fix] &&
           %w[fix discuss dismiss].all? do |route|

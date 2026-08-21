@@ -18,6 +18,7 @@ module Hive
       MAX_CANDIDATE_BYTES = 6 * 1024
       MAX_CANDIDATE_CONTEXT_BYTES = 192 * 1024
       MAX_EVIDENCE = 64
+      INVENTORY_LOCK = "inventory.lock".freeze
       OCCURRENCE_ID = /\A[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}\z/
       DIGEST = /\A[0-9a-f]{64}\z/
       REVISION = /\A[0-9a-f]{40}\z/
@@ -40,16 +41,27 @@ module Hive
       def reserve!(occurrence_id:, snapshot:, now: Time.now.utc)
         id = occurrence_id!(occurrence_id)
         source = snapshot.is_a?(SourceSnapshot) ? snapshot : SourceSnapshot.parse(snapshot)
-        mutate(id, create: true) do |record|
-          candidate = initial_record(id, source, now)
-          if record
-            unless record.fetch("source_digest") == source.digest &&
-                   record.fetch("source") == source.to_h
+        @directory.prepare!
+        @directory.with_lock(INVENTORY_LOCK) do
+          if (existing = fetch(id))
+            unless existing.fetch("source_digest") == source.digest &&
+                   existing.fetch("source") == source.to_h
               conflict!("admission occurrence identity conflicts with different source bytes")
             end
-            next record
+            next existing
           end
-          candidate
+
+          compact_acknowledged_for_capacity!
+          mutate(id, create: true) do |record|
+            if record
+              unless record.fetch("source_digest") == source.digest &&
+                     record.fetch("source") == source.to_h
+                conflict!("admission occurrence identity conflicts with different source bytes")
+              end
+              next record
+            end
+            initial_record(id, source, now)
+          end
         end
       end
 
@@ -253,27 +265,6 @@ module Hive
         each_record.select { |record| record.fetch("status") == "blocked" }.freeze
       end
 
-      # Bounded operational input. Deliberately omits source evidence,
-      # rationales, model receipts, and materialization internals: the common
-      # projection needs only root/cohort/status/retry facts and must not turn
-      # an operator refresh into another evidence export.
-      def operational_records
-        each_record.map do |record|
-          decision = record["decision"]
-          {
-            "occurrence_id" => record.fetch("occurrence_id"),
-            "status" => record.fetch("status"),
-            "created_at" => record.fetch("created_at"),
-            "candidates" => record.fetch("candidates").map do |candidate|
-              candidate.slice("kind", "identity")
-            end,
-            "decision" => decision && decision.slice("decision", "candidate_identity"),
-            "task" => record["task"] && record.fetch("task").slice("slug"),
-            "retry" => record["retry"] && record.fetch("retry").slice("retry_at")
-          }
-        end.then { |records| PatrolFix.deep_freeze(records) }
-      end
-
       def with_materialization_lock(&block)
         @directory.with_lock("materialization.lock", &block)
       end
@@ -314,21 +305,17 @@ module Hive
         end
       end
 
-      def acknowledge!(occurrence_id, source_receipt_id:, now: Time.now.utc)
-        receipt_id = text!(source_receipt_id, "source acknowledgement receipt", max: 4 * 1024)
+      def acknowledge!(occurrence_id, now: Time.now.utc)
         mutate(occurrence_id) do |record|
-          conflict!("source acknowledgement requires an exact task binding") unless record["task"]
+          conflict!("admission acknowledgement requires an exact task binding") unless record["task"]
           acknowledgement = {
-            "source_receipt_id" => receipt_id,
-            "task_slug" => record.dig("task", "slug"),
-            "evidence_digest" => record.dig("task", "evidence_digest"),
+            "receipt_id" => acknowledgement_receipt(record),
             "acknowledged_at" => timestamp(now)
           }
           if record["acknowledgement"]
             existing = record.fetch("acknowledgement")
-            same = existing.slice("source_receipt_id", "task_slug", "evidence_digest") ==
-                   acknowledgement.slice("source_receipt_id", "task_slug", "evidence_digest")
-            conflict!("source acknowledgement conflicts") unless same
+            conflict!("admission acknowledgement conflicts") unless
+              existing.fetch("receipt_id") == acknowledgement.fetch("receipt_id")
             next record
           end
           record["acknowledgement"] = acknowledgement
@@ -354,9 +341,15 @@ module Hive
         max = Integer(limit)
         raise ArgumentError, "admission limit must be between 1 and 64" unless (1..64).cover?(max)
         each_record.select do |record|
-          next true if record.fetch("status") == "pending"
+          status = record.fetch("status")
+          if status == "deciding"
+            expires_at = record.dig("decision_reservation", "expires_at")
+            next expires_at && Time.iso8601(expires_at) <= now
+          end
+          next true if %w[pending decided materializing bound].include?(status)
+
           retry_at = record.dig("retry", "retry_at")
-          record.fetch("status") == "retry_wait" && retry_at && Time.iso8601(retry_at) <= now
+          status == "retry_wait" && retry_at && Time.iso8601(retry_at) <= now
         end.first(max).freeze
       end
 
@@ -374,6 +367,35 @@ module Hive
       end
 
       private
+
+      def compact_acknowledged_for_capacity!
+        names = @directory.each_child("records", missing: true).to_a.filter_map do |name|
+          next if name.end_with?(".lock")
+          match = /\A(.+)\.json\z/.match(name)
+          corrupt!("admission inventory contains an unknown entry") unless match
+          [ name, match[1] ]
+        end
+        required = names.length - MAX_RECORDS + 1
+        return if required <= 0
+
+        removable = names.filter_map do |name, id|
+          relative = File.join("records", name)
+          bytes = @directory.read(relative, max_bytes: MAX_RECORD_BYTES)
+          record = parse_record(bytes, expected_id: id)
+          next unless record.fetch("status") == "acknowledged"
+
+          [ record.dig("acknowledgement", "acknowledged_at"), record.fetch("created_at"), name, bytes ]
+        end.sort
+        if removable.length < required
+          conflict!("admission capacity contains active work")
+        end
+        removable.first(required).each do |_acknowledged_at, _created_at, name, bytes|
+          @directory.unlink(
+            File.join("records", name),
+            expected_digest: Digest::SHA256.hexdigest(bytes), max_bytes: MAX_RECORD_BYTES
+          )
+        end
+      end
 
       def initial_record(id, snapshot, now)
         time = timestamp(now)
@@ -437,8 +459,8 @@ module Hive
 
       def parse_record(bytes, expected_id:)
         record = JSON.parse(bytes)
-        corrupt!("admission record is not canonical") unless PatrolFix.canonical_json(record) == bytes
-        record = upgrade_v1_record(record) if record["schema_version"] == 1
+        corrupt!("admission record is not canonical") unless
+          PatrolFix.canonical_json(record).b == bytes.b
         validate_record!(record, expected_id: expected_id)
       rescue JSON::ParserError, EncodingError
         corrupt!("admission record is malformed")
@@ -486,7 +508,8 @@ module Hive
         validate_decision!(record["decision"], candidates: candidates) if record["decision"]
         normalize_materialization_intent(record["materialization_intent"]) if record["materialization_intent"]
         normalize_task_binding(record["task"]) if record["task"]
-        validate_acknowledgement!(record["acknowledgement"]) if record["acknowledgement"]
+        validate_acknowledgement!(record["acknowledgement"], record: record) if
+          record["acknowledgement"]
         validate_retry!(record["retry"]) if record["retry"]
         validate_state_invariants!(record, reservation: reservation)
         timestamp_value!(record.fetch("created_at"), "created_at")
@@ -648,34 +671,6 @@ module Hive
         record
       end
 
-      def upgrade_v1_record(record)
-        expected = %w[
-          acknowledgement candidate_digest candidates created_at current_head decision
-          evidence_digest materialization_intent occurrence_id retry schema schema_version
-          source source_digest status task updated_at
-        ]
-        corrupt!("admission v1 record fields are invalid") unless
-          record.is_a?(Hash) && record.keys.sort == expected.sort && record["schema"] == SCHEMA
-        upgraded = PatrolFix.deep_copy(record)
-        candidates = normalize_candidates(upgraded.fetch("candidates"))
-        if upgraded.fetch("status") == "deciding"
-          upgraded.merge!(
-            "status" => "pending", "candidates" => [], "candidate_digest" => nil,
-            "current_head" => nil, "decision" => nil
-          )
-          inventory = nil
-        elsif upgraded["candidate_digest"]
-          inventory = default_inventory(candidates)
-          upgraded["candidate_digest"] = candidate_digest(
-            candidates, current_head: upgraded.fetch("current_head"), inventory: inventory
-          )
-        end
-        upgraded["candidate_inventory"] = inventory
-        upgraded["decision_reservation"] = nil
-        upgraded["schema_version"] = SCHEMA_VERSION
-        upgraded
-      end
-
       def normalize_materialization_intent(intent)
         unless intent.is_a?(Hash) && intent.keys.sort == %w[
           evidence_digest generation idempotency_key input_fingerprint slug
@@ -744,23 +739,14 @@ module Hive
           corrupt!("bound admission lacks task identity") unless task
         end
         corrupt!("admission acknowledgement lacks task identity") if acknowledgement && !task
-        corrupt!("acknowledged admission lacks source receipt") if
+        corrupt!("acknowledged admission lacks a receipt") if
           status == "acknowledged" && !acknowledgement
-        corrupt!("non-acknowledged admission has a source receipt") if
+        corrupt!("non-acknowledged admission has a receipt") if
           status != "acknowledged" && acknowledgement
         if task && intent
           intended = intent.slice("slug", "generation", "evidence_digest")
           corrupt!("admission task binding conflicts with materialization intent") unless
             task == intended
-        end
-        if acknowledgement && task
-          acknowledged = {
-            "slug" => acknowledgement.fetch("task_slug"),
-            "generation" => task.fetch("generation"),
-            "evidence_digest" => acknowledgement.fetch("evidence_digest")
-          }
-          corrupt!("admission acknowledgement conflicts with task binding") unless
-            acknowledged == task
         end
       end
 
@@ -775,15 +761,26 @@ module Hive
         }
       end
 
-      def validate_acknowledgement!(acknowledgement)
+      def validate_acknowledgement!(acknowledgement, record:)
         unless acknowledgement.is_a?(Hash) && acknowledgement.keys.sort ==
-               %w[acknowledged_at evidence_digest source_receipt_id task_slug]
-          corrupt!("source acknowledgement fields are invalid")
+               %w[acknowledged_at receipt_id]
+          corrupt!("admission acknowledgement fields are invalid")
         end
-        text!(acknowledgement.fetch("source_receipt_id"), "source acknowledgement receipt", max: 4 * 1024)
-        text!(acknowledgement.fetch("task_slug"), "acknowledged task slug", max: 64)
-        digest!(acknowledgement.fetch("evidence_digest"), "acknowledged evidence digest")
+        receipt = text!(
+          acknowledgement.fetch("receipt_id"), "admission acknowledgement receipt", max: 128
+        )
+        corrupt!("admission acknowledgement receipt is inconsistent") unless
+          receipt == acknowledgement_receipt(record)
         timestamp_value!(acknowledgement.fetch("acknowledged_at"), "acknowledged_at")
+      end
+
+      def acknowledgement_receipt(record)
+        digest = Digest::SHA256.hexdigest(PatrolFix.canonical_json(
+          "occurrence_id" => record.fetch("occurrence_id"),
+          "source_digest" => record.fetch("source_digest"),
+          "task" => record.fetch("task")
+        ))
+        "admission:#{digest}"
       end
 
       def validate_retry!(retry_record)

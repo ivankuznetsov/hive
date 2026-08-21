@@ -26,7 +26,7 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
     end
   end
 
-  class Outbox
+  class AdmissionAdapter
     attr_reader :published
 
     def initialize
@@ -38,7 +38,7 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
     end
   end
 
-  class FlakyOutbox < Outbox
+  class FlakyAdmissionAdapter < AdmissionAdapter
     def initialize
       super
       @failures = 1
@@ -47,7 +47,7 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
     def publish_disposition!(aggregate, disposition)
       if @failures.positive?
         @failures -= 1
-        raise "outbox unavailable"
+        raise "admission unavailable"
       end
 
       super
@@ -67,7 +67,7 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
     )
   end
 
-  def producer(dir, snapshots:, outbox: Outbox.new, ids: nil,
+  def producer(dir, snapshots:, admission: AdmissionAdapter.new, ids: nil,
                pid: 101, starts: nil)
     generated = Array(ids || %w[claim-1 claim-2 claim-3]).dup
     starts ||= ->(candidate) { candidate == pid ? "start-#{pid}" : nil }
@@ -76,9 +76,9 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
         entry: entry(dir), cfg: {}, snapshotter: snapshots,
         process_start_reader: starts, pid: pid,
         id_generator: -> { generated.shift || "claim-fallback" },
-        admission_outbox: outbox
+        admission_adapter: admission
       ),
-      outbox
+      admission
     ]
   end
 
@@ -137,7 +137,7 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
   def test_result_is_durable_and_admission_is_published_before_cursor_advances
     with_tmp_dir do |dir|
       snapshots = Snapshots.new(snapshot(SHA1, %w[a]))
-      subject, outbox = producer(dir, snapshots: snapshots)
+      subject, admission = producer(dir, snapshots: snapshots)
       claim = subject.claim(now: NOW)
 
       assert subject.complete(claim_id: claim.fetch("id"), result: result(claim), now: NOW)
@@ -146,7 +146,8 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
       record = records.fetch(0)
       assert_equal "scheduled", record.dig("source", "lane")
       assert_equal SHA1, record.fetch("analysis_sha")
-      assert_equal [ "thesis-a" ], outbox.published.map { |_aggregate, item| item.fetch("id") }
+      assert_equal NOW.iso8601(6), record.fetch("consumed_at")
+      assert_equal [ "thesis-a" ], admission.published.map { |_aggregate, item| item.fetch("id") }
 
       next_claim = subject.claim(now: NOW + 60)
       assert_equal "a", next_claim.fetch("feature_id"), "one-slice maps wrap after completion"
@@ -162,7 +163,7 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
   def test_incomplete_result_cannot_advance_or_publish
     with_tmp_dir do |dir|
       snapshots = Snapshots.new(snapshot(SHA1, %w[a]))
-      subject, outbox = producer(dir, snapshots: snapshots)
+      subject, admission = producer(dir, snapshots: snapshots)
       claim = subject.claim(now: NOW)
       invalid = result(claim).merge("review_complete" => false)
 
@@ -170,17 +171,17 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
         subject.complete(claim_id: claim.fetch("id"), result: invalid, now: NOW)
       end
       assert_empty subject.each_result.to_a
-      assert_empty outbox.published
+      assert_empty admission.published
       refute subject.claim(now: NOW + 1), "the still-live owner retains the failed claim"
     end
   end
 
-  def test_result_replay_converges_after_crash_before_outbox_and_cursor
+  def test_unconsumed_result_replays_before_a_fresh_revision_is_claimed
     with_tmp_dir do |dir|
-      outbox = FlakyOutbox.new
+      admission = FlakyAdmissionAdapter.new
       first, = producer(
         dir, snapshots: Snapshots.new(snapshot(SHA1, %w[a])),
-        outbox: outbox, ids: [ "first" ]
+        admission: admission, ids: [ "first" ]
       )
       first_claim = first.claim(now: NOW)
 
@@ -189,23 +190,27 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
           claim_id: first_claim.fetch("id"), result: result(first_claim), now: NOW
         )
       end
-      assert_equal 1, first.each_result.to_a.size, "result bytes precede outbox publication"
+      assert_equal 1, first.each_result.to_a.size, "result bytes precede admission"
       assert first.release(claim_id: first_claim.fetch("id"), now: NOW + 1)
 
       replay, = producer(
-        dir, snapshots: Snapshots.new(snapshot(SHA1, %w[a])),
-        outbox: outbox, ids: [ "second" ]
+        dir, snapshots: Snapshots.new(snapshot(SHA2, %w[b])),
+        admission: admission, ids: [ "second" ]
       )
       replay_claim = replay.claim(now: NOW + 60)
+      assert_equal [ SHA2, "b" ], replay_claim.values_at("analysis_sha", "feature_id")
+      assert_equal [ "thesis-a" ], admission.published.map { |_aggregate, item| item.fetch("id") }
       assert replay.complete(
         claim_id: replay_claim.fetch("id"), result: result(replay_claim), now: NOW + 60
       )
 
       records = replay.each_result.to_a
-      assert_equal 1, records.size
-      assert_equal NOW.iso8601(6), records.fetch(0).fetch("created_at")
-      assert_equal NOW.iso8601(6), records.fetch(0).dig("source", "claimed_at")
-      assert_equal [ "thesis-a" ], outbox.published.map { |_aggregate, item| item.fetch("id") }
+      assert_equal 2, records.size
+      original = records.find { |record| record.fetch("analysis_sha") == SHA1 }
+      assert_equal NOW.iso8601(6), original.fetch("created_at")
+      assert_equal NOW.iso8601(6), original.dig("source", "claimed_at")
+      assert_equal [ "thesis-a", "thesis-b" ],
+                   admission.published.map { |_aggregate, item| item.fetch("id") }
     end
   end
 
@@ -243,5 +248,63 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
       assert first.claim(now: NOW)
       refute second.claim(now: NOW + 1)
     end
+  end
+
+  def test_completed_results_are_compacted_to_the_bounded_inventory
+    with_max_results(1) do
+      with_tmp_dir do |dir|
+        subject, = producer(dir, snapshots: Snapshots.new(snapshot(SHA1, %w[a])))
+        first = subject.claim(now: NOW)
+        assert subject.complete(claim_id: first.fetch("id"), result: result(first), now: NOW)
+
+        second = subject.claim(now: NOW + 60)
+        assert subject.complete(
+          claim_id: second.fetch("id"), result: result(second), now: NOW + 60
+        )
+
+        retained = subject.each_result.to_a
+        assert_equal 1, retained.size
+        assert_equal 1, retained.fetch(0).fetch("sweep_generation")
+      end
+    end
+  end
+
+  def test_replayed_result_becomes_eligible_for_bounded_compaction
+    with_max_results(1) do
+      with_tmp_dir do |dir|
+        subject, = producer(
+          dir, snapshots: Snapshots.new(
+            snapshot(SHA1, %w[a]), snapshot(SHA2, %w[b])
+          ),
+          admission: FlakyAdmissionAdapter.new
+        )
+        first = subject.claim(now: NOW)
+        assert_raises(RuntimeError) do
+          subject.complete(claim_id: first.fetch("id"), result: result(first), now: NOW)
+        end
+        assert subject.release(claim_id: first.fetch("id"), now: NOW + 1)
+
+        second = subject.claim(now: NOW + 60)
+        assert subject.complete(
+          claim_id: second.fetch("id"), result: result(second), now: NOW + 60
+        )
+        retained = subject.each_result.to_a
+        assert_equal 1, retained.size
+        assert_equal SHA2, retained.fetch(0).fetch("analysis_sha")
+        refute_nil retained.fetch(0).fetch("consumed_at")
+      end
+    end
+  end
+
+  private
+
+  def with_max_results(limit)
+    original = Hive::RefactorPatrol::ScheduledSliceProducer::MAX_RESULTS
+    Hive::RefactorPatrol::ScheduledSliceProducer.send(:remove_const, :MAX_RESULTS)
+    Hive::RefactorPatrol::ScheduledSliceProducer.const_set(:MAX_RESULTS, limit)
+    yield
+  ensure
+    Hive::RefactorPatrol::ScheduledSliceProducer.send(:remove_const, :MAX_RESULTS)
+    Hive::RefactorPatrol::ScheduledSliceProducer.const_set(:MAX_RESULTS, original)
   end
 end

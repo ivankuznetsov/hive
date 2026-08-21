@@ -549,9 +549,6 @@ module Hive
         status [NAME]                     Show the shared redacted status model.
         doctor NAME                       Diagnose without repairing state.
         dry-run NAME                      Evaluate a supplied event without writes.
-        migration status|report|cutover|rollback
-                                          Inspect or advance the durable patrol ownership epoch.
-
       Lifecycle mutations are preview-bound. Run with --dry-run first, review
       every hook, setting, binding, and grant, then repeat with --yes and the
       exact --receipt value. Non-interactive callers must explicitly provide
@@ -582,8 +579,6 @@ module Hive
                       desc: "for schedule dry-run: exact five-field cron binding"
     option :occurred_at, type: :string,
                          desc: "for `dry-run`: ISO 8601 occurrence time"
-    option :reviewer, type: :string,
-                      desc: "for `migration report`: reviewer identity recorded in the gate"
     define_method(:module) do |subcommand = nil, subject = nil|
       require "hive/commands/module"
       Hive::Commands::Module.new(
@@ -592,8 +587,7 @@ module Hive
         settings: options[:setting], hooks: options[:hook], grants: options[:grant],
         mappings: options[:mapping], input_bindings: options[:input_binding],
         allow_escalation: options[:allow_escalation],
-        event_name: options[:event], schedule: options[:schedule], occurred_at: options[:occurred_at],
-        reviewer: options[:reviewer]
+        event_name: options[:event], schedule: options[:schedule], occurred_at: options[:occurred_at]
       ).call
     end
 
@@ -1041,17 +1035,14 @@ module Hive
                      desc: "map and review without persisting findings"
     option :list, type: :boolean, default: false,
                   desc: "list bounded recorded finding health without running Patrol"
-    option :occurrence_id, type: :string, hide: true
     def patrol(project)
       require "hive/commands/patrol"
-      command_options = {
+      Hive::Commands::Patrol.new(
+        project,
         json: options[:json],
         dry_run: options[:dry_run],
         list: options[:list]
-      }
-      occurrence_id = options[:occurrence_id]
-      command_options[:occurrence_id] = occurrence_id unless occurrence_id.nil?
-      Hive::Commands::Patrol.new(project, **command_options).call
+      ).call
     end
 
     desc "refactor-patrol PROJECT", "Discover routed refactor theses for a registered project"
@@ -1090,8 +1081,6 @@ module Hive
                           desc: "analyze one immutable merge-intake manifest (daemon/internal)"
     option :result_file, type: :string,
                          desc: "write daemon completion envelope to a fenced result file (internal)"
-    option :occurrence_id, type: :string,
-                           desc: "reuse a durable patrol occurrence (daemon/internal)"
     option :list, type: :boolean, default: false,
                   desc: "list durable architecture-patrol jobs without changing state"
     option :show, type: :string,
@@ -1115,7 +1104,6 @@ module Hive
         pr: options[:pr],
         job_manifest: options[:job_manifest],
         result_file: options[:result_file],
-        occurrence_id: options[:occurrence_id],
         list: options[:list],
         show: options[:show],
         limit: options[:limit],

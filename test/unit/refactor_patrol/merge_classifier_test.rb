@@ -276,6 +276,40 @@ class RefactorPatrolMergeClassifierTest < Minitest::Test
     end
   end
 
+  def test_new_occurrence_compacts_terminal_history_before_in_flight_records
+    with_max_records(2) do
+      with_tmp_dir do |dir|
+        classifier = build_classifier(dir) { |_prompt| decision("feature") }
+        terminal = classifier.call(
+          snapshot(title: "docs: historical", paths: [ "docs/history.md" ]), now: T0
+        )
+        active = classifier.hydrate(alternate_snapshot(18), now: T0 + 1)
+
+        newest = classifier.hydrate(alternate_snapshot(19), now: T0 + 2)
+
+        assert_nil classifier.fetch_occurrence(terminal.fetch("occurrence_id"))
+        assert classifier.fetch_occurrence(active.fetch("occurrence_id"))
+        assert classifier.fetch_occurrence(newest.fetch("occurrence_id"))
+      end
+    end
+  end
+
+  def test_capacity_never_compacts_in_flight_classifications
+    with_max_records(1) do
+      with_tmp_dir do |dir|
+        classifier = build_classifier(dir) { |_prompt| decision("feature") }
+        active = classifier.hydrate(snapshot, now: T0)
+
+        error = assert_raises(Hive::RefactorPatrol::MergeClassifier::Invalid) do
+          classifier.hydrate(alternate_snapshot(18), now: T0 + 1)
+        end
+
+        assert_match(/in-flight work/, error.message)
+        assert classifier.fetch_occurrence(active.fetch("occurrence_id"))
+      end
+    end
+  end
+
   private
 
   def build_classifier(dir, max_attempts: 3, &provider)
@@ -313,5 +347,23 @@ class RefactorPatrolMergeClassifierTest < Minitest::Test
     snapshot(body: "body\n\n#{marker}").merge(
       "publication_provenance" => { "kind" => kind, "marker" => marker }
     )
+  end
+
+  def alternate_snapshot(number)
+    snapshot.merge(
+      "number" => number,
+      "url" => "https://github.com/acme/demo/pull/#{number}",
+      "merge_sha" => number.to_s(16).rjust(40, "0")
+    )
+  end
+
+  def with_max_records(limit)
+    original = Hive::RefactorPatrol::MergeClassifier::MAX_RECORDS
+    Hive::RefactorPatrol::MergeClassifier.send(:remove_const, :MAX_RECORDS)
+    Hive::RefactorPatrol::MergeClassifier.const_set(:MAX_RECORDS, limit)
+    yield
+  ensure
+    Hive::RefactorPatrol::MergeClassifier.send(:remove_const, :MAX_RECORDS)
+    Hive::RefactorPatrol::MergeClassifier.const_set(:MAX_RECORDS, original)
   end
 end

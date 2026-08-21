@@ -158,10 +158,27 @@ module Hive
 
       def each_record
         return enum_for(__method__) unless block_given?
+        return unless File.directory?(@directory.root)
+
+        @directory.with_lock(LOCK_FILE, shared: true) do
+          each_record_unlocked { |record| yield record }
+        end
+      end
+
+      def fetch_occurrence(occurrence_id)
+        id = occurrence_id.to_s
+        raise Invalid, "merge classification occurrence id is invalid" unless DIGEST.match?(id)
+
+        read_record(id)
+      end
+
+      private
+
+      def each_record_unlocked
+        return enum_for(__method__) unless block_given?
 
         names = @directory.each_child("records", missing: true).to_a
           .select { |name| /\A[0-9a-f]{64}\.json\z/.match?(name) }.sort
-        raise Invalid, "merge classification inventory exceeds #{MAX_RECORDS}" if names.size > MAX_RECORDS
 
         names.each do |name|
           id = name.delete_suffix(".json")
@@ -173,12 +190,7 @@ module Hive
         end
       end
 
-      def fetch_occurrence(occurrence_id)
-        id = occurrence_id.to_s
-        raise Invalid, "merge classification occurrence id is invalid" unless DIGEST.match?(id)
-
-        read_record(id)
-      end
+      public
 
       def eligible_records(now: Time.now.utc, limit: 100)
         instant = normalize_time(now)
@@ -308,6 +320,7 @@ module Hive
               raise Retryable.new("merge classification retry is not yet eligible", retry_at: retry_at)
             end
           else
+            compact_for_capacity!
             record = new_record(occurrence_id, snapshot, digest, now)
             append_index(occurrence_id)
           end
@@ -682,6 +695,31 @@ module Hive
       def persist(record)
         validate_record_for_write!(record)
         @directory.atomic_write(record_relative(record.fetch("occurrence_id")), canonical_json(record), mode: 0o600)
+      end
+
+      def compact_for_capacity!
+        names = @directory.each_child("records", missing: true).to_a
+          .select { |name| /\A[0-9a-f]{64}\.json\z/.match?(name) }
+        required = names.size - MAX_RECORDS + 1
+        return if required <= 0
+
+        removable = names.filter_map do |name|
+          relative = "records/#{name}"
+          bytes = @directory.read(relative, max_bytes: MAX_RECORD_BYTES)
+          record = parse_record(bytes, expected_occurrence_id: name.delete_suffix(".json"))
+          terminal = %w[skip blocked].include?(record.fetch("status")) || record["materialization"]
+          [ record.fetch("updated_at"), record.fetch("occurrence_id"), relative, bytes ] if terminal
+        end.sort
+        if removable.size < required
+          raise Invalid, "merge classification capacity contains in-flight work"
+        end
+        removable.first(required).each do |_updated_at, occurrence_id, relative, bytes|
+          @directory.unlink(
+            relative, expected_digest: Digest::SHA256.hexdigest(bytes),
+            max_bytes: MAX_RECORD_BYTES
+          )
+          remove_index(occurrence_id)
+        end
       end
 
       def validate_record_for_write!(record)

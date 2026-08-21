@@ -12,9 +12,8 @@ module Hive
   class OperationalAction
     ACTION_ID = "workflow.advance".freeze
     RETRY_ACTION_ID = "workflow.retry".freeze
-    PATROL_FIX_REOPEN_ACTION_ID = "patrol_fix.reopen".freeze
     CLOSURE_ACTION_ID = "workflow.close_with_evidence".freeze
-    EXECUTABLE_ACTION_IDS = [ ACTION_ID, RETRY_ACTION_ID, PATROL_FIX_REOPEN_ACTION_ID ].freeze
+    EXECUTABLE_ACTION_IDS = [ ACTION_ID, RETRY_ACTION_ID ].freeze
     RISK_CLASS = "routine_idempotent".freeze
 
     SAFE_TASK_ACTIONS = %w[
@@ -33,7 +32,6 @@ module Hive
     TOKEN_FIELDS = %w[
       project slug folder workflow stage marker attrs mtime action
       condition_task_generation commit_generation current_attempt
-      patrol_fix
     ].freeze
 
     STAGE_ACTIONS = {
@@ -101,18 +99,10 @@ module Hive
       end
 
       def action_id_for(row)
-        return PATROL_FIX_REOPEN_ACTION_ID if patrol_fix_reopenable?(row)
         return RETRY_ACTION_ID if recoverable?(row)
         return ACTION_ID if safe?(row)
 
         nil
-      end
-
-      def patrol_fix_reopenable?(row)
-        row["workflow"] == "patrol-fix" &&
-          row.dig("patrol_fix", "state") == "current" &&
-          row.dig("patrol_fix", "action", "reopen_eligible") == true &&
-          row.dig("patrol_fix", "action", "generation") == row.dig("patrol_fix", "task_generation")
       end
 
       def token(project:, row:)
@@ -168,7 +158,6 @@ module Hive
           "attrs" => marker.attrs,
           "mtime" => observation_mtime(task),
           "action" => action.key,
-          "patrol_fix" => action.patrol_fix,
           "condition_task_generation" => projection_data.dig("identity", "task_generation"),
           "commit_generation" => projection_data.dig("identity", "commit_generation"),
           "current_attempt" => projection_data.dig("identity", "attempt_id"),
@@ -226,9 +215,8 @@ module Hive
     # values select no command arguments beyond the registered action ID and
     # exact project/task identity; stage, verb, and guards are recomputed.
     class Executor
-      def initialize(recovery_writer: Hive::Recovery::API, patrol_fix_transition_factory: nil)
+      def initialize(recovery_writer: Hive::Recovery::API)
         @recovery_writer = recovery_writer
-        @patrol_fix_transition_factory = patrol_fix_transition_factory
       end
 
       def execute(action_id:, target:, observation_token:)
@@ -252,14 +240,6 @@ module Hive
             observation_token: observation_token
           )
           return recovery_result(observed, receipt)
-        end
-
-        if action_id == OperationalAction::PATROL_FIX_REOPEN_ACTION_ID
-          execute_patrol_fix_reopen(
-            task, project_name: project_name, action_id: action_id,
-            target: target, observation_token: observation_token
-          )
-          return result_for(project_name, slug)
         end
 
         guard = lambda do |locked_task|
@@ -323,45 +303,6 @@ module Hive
         else
           raise Hive::StaleOperationalObservation,
                 "the current task state has no confirmation-free operational action"
-        end
-      end
-
-      def execute_patrol_fix_reopen(task, project_name:, action_id:, target:, observation_token:)
-        require "hive/lock"
-        require "hive/patrol_fix/projection"
-        require "hive/patrol_fix/stage_transition"
-        require "hive/patrol_fix/transition"
-
-        Hive::PatrolFix::StageTransition.with_lock(task) do
-          Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "patrol-fix-reopen", create: false) do
-            OperationalAction.assert_current!(
-              task,
-              project: project_name,
-              action_id: action_id,
-              target: target,
-              observation_token: observation_token
-            )
-            patrol_fix = Hive::PatrolFix::Projection.new(
-              task_folder: task.folder,
-              stage: "#{task.stage_index}-#{task.stage_name}"
-            ).to_h
-            unless OperationalAction.patrol_fix_reopenable?(
-              "workflow" => task.workflow.id.to_s, "patrol_fix" => patrol_fix
-            )
-              raise Hive::StaleOperationalObservation,
-                    "the patrol-fix outcome is no longer eligible for reopen"
-            end
-
-            transition = if @patrol_fix_transition_factory
-              @patrol_fix_transition_factory.call(task)
-            else
-              Hive::PatrolFix::Transition.new(task)
-            end
-            transition.reopen!(
-              outcome_receipt_id: patrol_fix.dig("outcome", "receipt_id"),
-              operator: "action"
-            )
-          end
         end
       end
 

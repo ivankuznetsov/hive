@@ -1095,15 +1095,10 @@ module Hive
 
           rows = fetch_result.rows
           legacy_stage_dirs = status_legacy_stage_dirs(fetch_result)
-          patrol_fix_projects = status_patrol_fix_projects(fetch_result)
           if result.project && !result.project.to_s.empty?
             filtered_rows = rows.select { |row| row.project == result.project }
             filtered_legacy_stage_dirs = legacy_stage_dirs.select { |row| row.project == result.project }
-            filtered_patrol_fix_projects = patrol_fix_projects.select do |project, _projection|
-              project.to_s == result.project.to_s
-            end
-            if filtered_rows.empty? && filtered_legacy_stage_dirs.empty? &&
-               filtered_patrol_fix_projects.empty?
+            if filtered_rows.empty? && filtered_legacy_stage_dirs.empty?
               safe_send_message(
                 chat_id: update.chat_id,
                 text: project_filter_miss_text(result.project, rows, legacy_stage_dirs)
@@ -1112,7 +1107,6 @@ module Hive
             end
             rows = filtered_rows
             legacy_stage_dirs = filtered_legacy_stage_dirs
-            patrol_fix_projects = filtered_patrol_fix_projects
           end
           if result.slug
             safe_send_message(
@@ -1131,8 +1125,7 @@ module Hive
             end
             safe_send_message(chat_id: update.chat_id,
                               text: render_queue(
-                                rows, legacy_stage_dirs: legacy_stage_dirs,
-                                patrol_fix_projects: patrol_fix_projects
+                                rows, legacy_stage_dirs: legacy_stage_dirs
                               ),
                               parse_mode: :html,
                               reply_markup: status_keyboard(rows))
@@ -1604,13 +1597,12 @@ module Hive
 
       QUEUE_DISPLAY_CAP = 10
 
-      def render_queue(rows, legacy_stage_dirs: [], patrol_fix_projects: {})
+      def render_queue(rows, legacy_stage_dirs: [])
         actionable = actionable_queue_rows(rows)
         legacy_lines = legacy_stage_dirs.map do |row|
           Hive::Bot::Format.html_escape(Hive::Bot::NotificationBuilders.legacy_stage_dirs(row).text)
         end
-        patrol_lines = patrol_fix_summary_lines(patrol_fix_projects)
-        return (legacy_lines + patrol_lines + [ "No active Hive tasks." ]).join("\n") if actionable.empty?
+        return (legacy_lines + [ "No active Hive tasks." ]).join("\n") if actionable.empty?
 
         lines = actionable.first(QUEUE_DISPLAY_CAP).map do |row|
           title = Hive::Bot::Format.html_escape(Hive::Bot::NotificationBuilders.display_title(row))
@@ -1621,35 +1613,7 @@ module Hive
         if actionable.size > QUEUE_DISPLAY_CAP
           lines << "+ #{actionable.size - QUEUE_DISPLAY_CAP} more tasks — open on a laptop for the full list."
         end
-        (legacy_lines + patrol_lines + [ header ] + lines).join("\n")
-      end
-
-      def status_patrol_fix_projects(result)
-        return {} unless result.respond_to?(:patrol_fix_projects)
-        value = result.patrol_fix_projects
-        value.is_a?(Hash) ? value : {}
-      end
-
-      def patrol_fix_summary_lines(projects)
-        Array(projects.to_h.sort_by { |project, _| project.to_s }).first(5).map do |project, row|
-          ordinary = row.dig("discovery", "ordinary", "allowance") || {}
-          architecture = row.dig("discovery", "architecture", "allowance") || {}
-          workflow = row.dig("workflow", "counts") || {}
-          stages = row.dig("workflow", "stages") || {}
-          delivery = row.fetch("delivery", {})
-          # not-a-stage-ref (block): Patrol Fix workflow metrics
-          text = "Patrol #{project}: searches O #{allowance_compact(ordinary)}, " \
-                 "A #{allowance_compact(architecture)}; fixes " \
-                 "#{workflow.fetch('active', 0)} active, #{workflow.fetch('parked', 0)} parked, " \
-                 "#{stages.fetch('6-done', 0)} done; PRs #{delivery.fetch('pr_created', 0)} " \
-                 "created/#{delivery.fetch('pr_open', 0)} open"
-          Hive::Bot::Format.html_escape(text)
-        end
-      end
-
-      def allowance_compact(value)
-        "#{value.fetch('used', '?')}/#{value.fetch('limit', '?')} " \
-          "(#{value.fetch('remaining', '?')} left)"
+        (legacy_lines + [ header ] + lines).join("\n")
       end
 
       def pr_link_or_dash(row)

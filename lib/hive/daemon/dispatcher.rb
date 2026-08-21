@@ -37,7 +37,6 @@ require "hive/install_channel"
 require "hive/commands/update"
 require "hive/attempts/api"
 require "hive/attempts/generation"
-require "hive/modules/migration/coordinator"
 require "hive/terminal_outcome"
 
 module Hive
@@ -76,7 +75,6 @@ module Hive
                      merge_watcher: nil, refactor_patrol_merge_reconciler: nil,
                      patrol_scheduler: nil, refactor_patrol_scheduler: nil,
                      patrol_fix_admission_scheduler: nil,
-                     patrol_fix_runtime: nil,
                      patrol_arbiter: nil, answer_digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
@@ -85,7 +83,6 @@ module Hive
                      operational_snapshot: nil, recovery_coordinator: nil,
                      plan_approval: Hive::Daemon::PlanApproval,
                      module_runtime: nil,
-                     module_migration_coordinator: nil,
                      runtime_ready_callback: nil,
                      clock: nil)
         @config = config
@@ -98,7 +95,6 @@ module Hive
         @patrol_scheduler = patrol_scheduler
         @refactor_patrol_scheduler = refactor_patrol_scheduler
         @patrol_fix_admission_scheduler = patrol_fix_admission_scheduler
-        @patrol_fix_runtime = patrol_fix_runtime
         @patrol_arbiter = patrol_arbiter
         @answer_digest_scheduler = answer_digest_scheduler
         @dry_run = dry_run
@@ -110,7 +106,6 @@ module Hive
         @runtime_ready_callback = runtime_ready_callback
         @clock = clock
         @module_runtime = module_runtime
-        @module_migration_coordinator = module_migration_coordinator
         @attempt_snapshot = nil
         @last_terminal_recovery_prune_at = nil
         @recovery_coordinator = recovery_coordinator || RecoveryCoordinator.new(
@@ -383,17 +378,6 @@ module Hive
         # Project-local module occurrences are already durable at this point.
         # Drain them only from the daemon, after attempt reconciliation and PR
         # intake, so no command-side producer can become a second dispatcher.
-        begin
-          @module_migration_coordinator&.tick(now: now)&.each do |migration_result|
-            @logger.event(:module_migration, **migration_result)
-          end
-        rescue StandardError => e
-          @logger.event(
-            :fatal, message: "module migration raised: #{e.class}: #{e.message}",
-            keeping_previous: true
-          )
-        end
-
         begin
           @module_runtime&.tick(
             now: now, admission_open: -> { admission_open? }
@@ -1733,10 +1717,6 @@ module Hive
           final_hidden_archived_task_count: verification.hidden_archived_task_count,
           controller: @controller.operational_snapshot(now: completed_at),
           queue: operational_queue_snapshot(now: completed_at, queue_state: queue_state),
-          discovery_allowances: operational_discovery_allowance_snapshot(now: completed_at),
-          patrol_fix_projects: operational_patrol_fix_projects(
-            tasks: verification.rows, now: completed_at
-          ),
           recoveries: operational_recovery_snapshot(queue_state: queue_state),
           now: completed_at
         )
@@ -1749,26 +1729,6 @@ module Hive
 
       def operational_snapshot_now
         Time.now.utc
-      end
-
-      def operational_discovery_allowance_snapshot(now:)
-        return {} unless @patrol_scheduler&.respond_to?(:discovery_allowance_snapshot)
-
-        @patrol_scheduler.discovery_allowance_snapshot(now: now)
-      rescue StandardError => e
-        { "status" => "unavailable", "reason" => e.class.name }
-      end
-
-      def operational_patrol_fix_projects(tasks:, now:)
-        return {} unless @patrol_fix_runtime&.respond_to?(:operational_projections)
-
-        @patrol_fix_runtime.operational_projections(tasks: tasks, now: now)
-      rescue StandardError => e
-        @logger.event(
-          :patrol_fix_operational_projection_failed,
-          error: "#{e.class}: #{e.message}"
-        )
-        {}
       end
 
       def publish_operational_snapshot(method, phase:, **attributes)
@@ -1954,28 +1914,7 @@ module Hive
           )
         end
 
-        entry = patrol_dispatch[:migration_entry] || patrol_dispatch[:entry]
-        return dispatch_patrol_with_admission(patrol_dispatch, now: now) unless entry
-
-        architecture = patrol_dispatch[:patrol_kind]&.to_sym == :architecture
-        module_name = architecture ? "architecture-patrol" : "patrol"
-        Hive::Modules::Migration::Patrols.with_admission(
-          entry.fetch("path"), module_name, authority: :legacy,
-          hive_state_path: entry["hive_state_path"]
-        ) do |allowed|
-          unless allowed
-            @logger.event(
-              :skipped, project: patrol_dispatch[:project],
-              slug: patrol_dispatch[:slug] || Hive::Daemon::PatrolScheduler::PATROL_SLUG,
-              stage: patrol_dispatch[:stage], action: "patrol",
-              reason: "migration_ownership_changed"
-            )
-            return
-          end
-          return unless admission_open?
-
-          dispatch_patrol_with_admission(patrol_dispatch, now: now)
-        end
+        dispatch_patrol_with_admission(patrol_dispatch, now: now)
       end
 
       def dispatch_patrol_with_admission(patrol_dispatch, now:)

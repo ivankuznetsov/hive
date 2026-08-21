@@ -1,73 +1,90 @@
-require "hive/refactor_patrol/discovery_block_transitions"
-require "hive/refactor_patrol/discovery_capacity"
-require "hive/refactor_patrol/discovery_claim_transitions"
-require "hive/refactor_patrol/discovery_transition_context"
+require "json"
+require "time"
+require "hive/refactor_patrol/job_store"
 
 module Hive
   module RefactorPatrol
-    # Facade for scheduler discovery transition collaborators.
     class DiscoveryTransitions
-      MAX_FEATURES_PER_CLAIM = DiscoveryCapacity::MAX_FEATURES_PER_CLAIM
-      MAX_EFFECTS_PER_CLAIM = DiscoveryCapacity::MAX_EFFECTS_PER_CLAIM
+      def initialize(owner:, owner_pid:, owner_process_start_time:, lease_sec:,
+                     claim_resolver:, claim_liveness_resolver: nil, **)
+        @owner = owner
+        @owner_pid = owner_pid
+        @owner_process_start_time = owner_process_start_time
+        @lease_sec = lease_sec
+        @claim_resolver = claim_resolver
+        @claim_liveness_resolver = claim_liveness_resolver
+      end
 
-      def initialize(config_loader:, migration_snapshot: nil,
-                     evidence_store_factory: nil, module_execution:, owner:,
-                     owner_pid:, owner_process_start_time:, lease_sec:,
-                     claim_resolver:, claim_liveness_resolver: nil,
-                     reservation_error:,
-                     occurrence_lifecycle:,
-                     claim_operation: "discovery-claim",
-                     operation_prefix: "discovery-",
-                     gateway_factory: nil)
-        @context = DiscoveryTransitionContext.new(
-          config_loader: config_loader,
-          migration_snapshot: migration_snapshot,
-          evidence_store_factory: evidence_store_factory,
-          module_execution: module_execution,
-          owner: owner,
-          occurrence_lifecycle: occurrence_lifecycle,
-          gateway_factory: gateway_factory
+      def claim(store:, aggregate:, analysis_sha:, now:, **)
+        resolution = claim_resolution(aggregate, now)
+        return unless resolution
+
+        resolver, allow_unexpired_recovery = resolution
+        store.claim_discovery!(
+          aggregate.fetch("job_id"),
+          owner: @owner,
+          analysis_sha: analysis_sha,
+          now: now,
+          lease_sec: @lease_sec,
+          claim_resolver: resolver,
+          owner_pid: @owner_pid,
+          owner_process_start_time: @owner_process_start_time,
+          allow_unexpired_recovery: allow_unexpired_recovery
         )
-        @claims = DiscoveryClaimTransitions.new(
-          context: @context,
-          owner_pid: owner_pid,
-          owner_process_start_time: owner_process_start_time,
-          lease_sec: lease_sec,
-          claim_resolver: claim_resolver,
-          claim_liveness_resolver: claim_liveness_resolver,
-          reservation_error: reservation_error,
-          claim_operation: claim_operation,
-          operation_prefix: operation_prefix
+      end
+
+      def release(store:, token:, reason:, now:, backoff_sec:, **)
+        store.release_discovery!(
+          token, reason: reason, now: now, backoff_sec: backoff_sec
         )
-        @blocks = DiscoveryBlockTransitions.new(context: @context)
       end
 
-      def claim(...)
-        @claims.claim(...)
+      def checkpoint(store:, token:, envelope:, now:, backoff_sec:, **)
+        store.checkpoint_discovery!(
+          token, envelope: envelope, now: now, backoff_sec: backoff_sec
+        )
       end
 
-      def release(...)
-        @claims.release(...)
+      def checkpoint_progress(store:, token:, envelope:, now:, lease_sec:, **)
+        store.checkpoint_discovery_progress!(
+          token, envelope: envelope, now: now, lease_sec: lease_sec
+        )
       end
 
-      def checkpoint(...)
-        @claims.checkpoint(...)
+      def block(store:, aggregate:, phase:, reason:, evidence:, now:,
+                backoff_sec:, **)
+        method = phase.to_sym == :action ? :block_actions! : :block_discovery!
+        store.public_send(
+          method, aggregate.fetch("job_id"), reason: reason,
+          evidence: evidence, now: now, backoff_sec: backoff_sec
+        )
       end
 
-      def checkpoint_progress(...)
-        @claims.checkpoint_progress(...)
+      def retire(store:, aggregate:, merge_sha:, trunk_sha:, now:,
+                 claim_resolver: nil, **)
+        store.retire_obsolete_source!(
+          aggregate.fetch("job_id"), merge_sha: merge_sha,
+          trunk_sha: trunk_sha, now: now, claim_resolver: claim_resolver
+        )
       end
 
-      def block(...)
-        @blocks.block(...)
-      end
+      private
 
-      def retire(...)
-        @blocks.retire(...)
-      end
+      def claim_resolution(aggregate, now)
+        active = aggregate.fetch("attempts").reverse_each.find do |attempt|
+          attempt["kind"] == JobStore::DISCOVERY_ATTEMPT_KIND &&
+            JobStore::ACTIVE_CLAIM_STATES.include?(attempt["state"])
+        end
+        return [ @claim_resolver, false ] unless active
 
-      def reconcile_recorded(...)
-        @context.reconcile_recorded(...)
+        expired = Time.iso8601(active.fetch("expires_at")) <= now
+        probe = expired ? @claim_resolver : @claim_liveness_resolver
+        resolved = probe&.call(JSON.parse(JSON.generate(active)))
+        return unless resolved == :resolved
+
+        [ expired ? ->(_claim) { :resolved } : @claim_resolver, !expired ]
+      rescue StandardError
+        nil
       end
     end
   end

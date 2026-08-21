@@ -1,7 +1,7 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/modules/migration/occurrence_*.rb, lib/hive/modules/migration/patrol_*.rb, lib/hive/modules/migration/shadow_*.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
 updated: 2026-08-20
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
@@ -592,16 +592,15 @@ controller resolves the current worktree ownership receipt, clean HEAD, bounded
 diff, fix receipt, and validation receipt before launch and revalidates the
 manifest and those exact bytes immediately before appending the decision.
 
-`rework` and explicit operator `reopen` write a stable slug-scoped route intent
-under `.hive-state/patrol-fix/transitions/<slug>/` before mutation. They advance
-the manifest/evidence generation and append a new-generation `reopen` receipt
+`rework` writes a stable slug-scoped route intent under
+`.hive-state/patrol-fix/transitions/<slug>/` before mutation. It advances the
+manifest/evidence generation and appends a new-generation transition receipt
 before any fresh decision. Rework moves the same folder from Review to Fix,
 rotates the current worktree ownership file, retains the prior generation's
-owned bytes, and carries no validation receipt. A review-stage operator reopen
-stays in Review and may explicitly carry the unchanged fix and validation
-receipt IDs; this provenance is a controller transition, not a newly executed
-validation. A completed route intent remains replayable so a crash after the
-folder move is reconciled from either the old caller path or the new location.
+owned bytes, and carries no validation receipt. A completed route intent remains
+replayable so a crash after the folder move is reconciled from either the old
+caller path or the new location. Parked outcomes expose no custom operational
+action; they remain visible through the standard `needs_input` task contract.
 
 `reject`, `blocked`, and `escalate` are parked non-terminal outcomes. Escalation
 uses a stable source fingerprint to capture one ordinary coding task and stores
@@ -644,131 +643,50 @@ time. `PublicationReceipt.adopt` wraps those exact validated bytes without a
 GitHub call. The former five-field existing-PR summary is provenance only and
 is rejected as Done authority.
 
-## Patrol Fix operational projection
+## Patrol Fix status
 
-`hive-patrol-fix-operational-projection` v1 is the bounded common read model
-for one project's ordinary and Architecture discovery, admission decisions,
-workflow tasks, successors, publication, post-merge activity, and
-current-day usage telemetry. The daemon builds it once from the source
-authorities and stores it under `patrol_fix_projects` in the operational
-snapshot. Consumers validate the complete project document before adopting it;
-missing, cross-project, oversized, or malformed rows become explicitly
-unavailable rather than triggering a source-store fallback.
+Patrol Fix adds no project-level operational read model. Its tasks remain
+ordinary workflow rows in the existing frozen status, operational-status, and
+Watch contracts; daemon scheduling evidence stays in the existing private
+operational snapshot. The TUI and bot consume those standard rows.
 
-Conversion cohorts use a mechanical `root_key`: the currently acknowledged or
-bound task slug first, a selected `same_root` candidate identity second, and a
-distinct occurrence identity third. Kind prefixes prevent collisions. Pending
-semantic decisions remain unresolved and partial rather than manufacturing a
-root. Aliases therefore remain visible without counting as additional roots.
-
-Timing uses durable stage-transition and receipt boundaries. Inbox time before
-the first durable decision is unknown, a live provider hold is exposed only as
-its current interval, and a Done latency stops at the publication
-`observed_at`. Sample and unavailable counts make missing history explicit.
-Token counts are nullable current-UTC-day telemetry read from the existing
-usage database; they are not an allowance, budget, or admission authority.
+The read-only web Patrol page uses bounded native `FindingQuery` and `JobQuery`
+reads so it remains available without a daemon. Those two sections fail
+independently and confer no mutation authority. Cohort, latency, token,
+publication-summary, and discovery-allowance projections are not persisted.
 
 ## Patrol Fix finding import
 
 Patrol Fix has no runtime migration state, source epoch, cutover gate, or
-rollback path. New accepted findings publish directly into source-owned
-outboxes. Historical ordinary findings can be imported once with
+rollback path. New accepted findings reserve directly in the project
+`AdmissionStore`. Historical ordinary findings can be imported once with
 `script/migrate_patrol_findings.rb`; the script creates normal `patrol-fix`
 tasks through `TaskCapture`, preserves the source finding JSON, and is
-deterministically idempotent.
+deterministically idempotent. It scans strict task metadata only for matching
+Patrol Fix idempotency keys, so unrelated malformed task metadata does not block
+the one-time local import.
 
-## Patrol occurrence, selection, and recovery state
+## Patrol discovery state
 
-Ordinary Patrol and Architecture Patrol expose separate product stores over the
-same occurrence protocol. Each occurrence record is the sole effect/outbox
-recovery authority for that product operation. A provisional `PatrolCapture`
-binds project, trigger, reservation, owner epoch, strict `selection_input`, and
-the shared `PatrolDecisionProjection`; it cannot contain an outcome or receipt
-ids. A final capture must retain every immutable field and adds the terminal
-outcome plus exactly the terminal receipt ids. Consequently due/not-due/disabled
-selection cannot be rewritten by a later execution result, and an outcome cannot
-be misread as the scheduling decision.
+Ordinary Patrol persists native scan state and immutable findings under
+`<hive_state_path>/patrol/`. Its `StateStore` owns the cycle lock, feature
+cursor, finding lifecycle, and scan timestamps. The daemon scheduler keeps only
+process-local dispatch ownership plus failure backoff and durable launch-budget
+holds. There is no occurrence journal, effect ledger, projection outbox,
+migration epoch, shadow record, or recovery index.
 
-Each occurrence directory also has one canonical
-`journal-state.json` (`hive-patrol-occurrence-journal-state` v1), capped at
-64 KiB, and one canonical `recovery-index.json`
-(`hive-patrol-occurrence-recovery-index` v1), capped at 512 KiB and 4,096
-active ids. These files are coordination metadata only:
+Architecture Patrol persists immutable manifests and reconciler/classifier
+state under `refactor_patrol/v2/` and current job aggregates under
+`refactor_patrol/v4/`. JobStore is the sole claim/checkpoint/completion
+authority. Its `occurrence_id` and `intake_transition_id` fields are
+deterministic aggregate identities derived from the job ID and manifest
+checksum; no sidecar store or journal is addressed by them.
 
-The occurrence record admits at most 256 terminal effect cells. This is a
-safety envelope, not a unit-of-work counter: ordinary mapping persists its
-complete feature set as one digest-bound, locally retry-safe batch effect, and
-Architecture Patrol retryable action failures wait one hour before minting a
-new claim/release generation. Ordinary retryable discovery waits 60 seconds;
-a structured discovery `token_limit` or `turn_limit` shares the one-hour
-runaway cooldown. A valid action child that changed no job state receives that
-same durable cooldown instead of immediate redispatch. Existing 192-effect
-records remain valid and have bounded recovery headroom. At the reserved
-boundary, Architecture Patrol verifies that every
-predecessor transition is terminal, reserves the exact next attempt generation,
-finalizes and projects the predecessor capture and receipts, then advances the
-job's current occurrence pointer. The successor starts with an empty effect set
-while finished claim history retains its predecessor identity. A crash after
-successor reservation is recovered by deriving and terminalizing its exact
-predecessor before pointer advance, so rollover cannot duplicate a transition
-or restart a child on every daemon tick. The rollover mutation holds the shared
-migration fence and revalidates owner, epoch, and admission. An expired active
-claim is resolved before rollover, using the reserved headroom, and transition
-history remains bounded per claim generation rather than across the lifetime
-of a multi-segment action.
-
-- scheduled ordinary attempts, module events, and Architecture Patrol jobs use
-  canonical window/generation identities with bounded high-water entries and a
-  compacted closed-through floor;
-- non-sequenced manual/direct occurrences use at most 128 exact retirement
-  digests; saturation retains the terminal occurrence and fails closed;
-- a monotonic dirty generation marks possible reserved or projection-pending
-  work before its occurrence write; a generation-matched empty repair clears
-  it so idle scheduler ticks do not reread retained terminal history;
-- `recovery-index.json` locates only exact reserved or projection-pending
-  records. Reservation publishes its id before the authoritative occurrence
-  write, retirement removes it only after the record becomes inactive, and a
-  missing, malformed, stale-generation, or dirty index receives one bounded
-  record-store repair;
-- one normalized recovery-failure cell records generation, operation,
-  occurrence/job identity, bounded UTF-8 error class/message/digest, failure
-  count, and the next 60/300/900-second eligibility boundary.
-- an interrupted ordinary local fix attempt is settled only by adopting its
-  exact persisted patch, or by recording a failed patch after proving the
-  deterministic Patrol checkout is clean, correctly registered, and already
-  contained in the current default branch. The patch is subordinate to the
-  outer attempt rather than a nested effect; non-force removal and an
-  expected-head ref lease prevent work arriving after the proof from being
-  discarded. Otherwise its effect and branch remain recovery-active. Scheduler
-  finalization tests the whole effect set and reports a blocked recovery without
-  aborting the daemon tick.
-
-The journal locks in the fixed order
-identity → journal state → inventory → occurrence record. Inventory views
-take one bounded sorted filename snapshot per full traversal; stateless cursors
-retain their high-water fingerprint validation. The dirty generation is a
-repair fence and the recovery index is a bounded locator, never a second
-recovery authority: occurrence records retain authoritative effects and
-projection outbox bytes, while neither coordination file can authorize work.
-StateStore and JobStore remain the separate product-facing owners, and
-observational EvidenceStore records are never consulted to authorize a retry.
-JobStore establishes its admitted v4 namespace before any architecture
-recovery backoff or active-index repair can write coordination state. Semantic
-family dry-run resolution instead uses a read-only JobStore reader, so a
-preview cannot create that namespace or any other project state.
-Before terminal effect outcomes cross from `EffectDelivery` into either
-product store, every nested string value passes through
-`Hive::SecretPatterns`; journal, evidence, comparison, and replay therefore use
-the same redacted receipt bytes without changing array/object shape or scalar
-types.
-
-Shadow-decision runtime state is v2-only. A native v2 record with
-`migration: null` must satisfy the strict selection/projection/outcome schema.
-The quiescence-fenced one-off converter archives each v1 source as
-non-comparable, writes a v2 diagnostic replacement, and checkpoints exact
-source/archive/replacement digests before completion. A restart adopts a
-replacement only when those bindings match; the completion stamp requires a
-fresh inventory with no remaining live v1 record.
+Accepted ordinary findings and architecture dispositions reserve directly in
+the shared Patrol Fix `AdmissionStore`. Admission records own semantic
+candidate snapshots, decision leases, task-materialization intent, task
+binding, acknowledgement, and retry state. Acknowledgement follows durable
+task binding. Runtime discovery never reads migration or qualification state.
 
 ## Architecture-patrol split-generation state
 
@@ -786,9 +704,7 @@ results, runs, and logs retain their independent v2 owners:
 │   └── logs/
 └── v4/
     ├── jobs/<job-id>.json                # sole current aggregate authority
-    ├── occurrences/records/              # effects and exact receipts
-    ├── occurrences/recovery-index.json   # bounded active-record locator
-    └── indexes/job-query/                # rebuildable ordered query index
+    └── indexes/job-query/                  # rebuildable ordered query index
 ```
 
 A fresh project initializes the v4 namespace on its first authoritative
@@ -886,7 +802,7 @@ clean tree may be reused only at the same exact SHA; a dirty, attached, or
 different-SHA tree fails closed. The worktree is transport, never completion
 authority, and a partial job keeps its durable SHA when the default branch
 advances. A terminal manual replay receives a new current-default SHA after
-its replay occurrence is created. Dry-run occurrences use invocation-unique
+its replay job is created. Dry-run occurrences use invocation-unique
 tree keys so they cannot collide with claimed discovery, and a missing tree
 whose stale Git registration survived an interruption is pruned before the
 deterministic retry materializes it again.
@@ -896,7 +812,7 @@ lease/heartbeat, owner, occurrence, and generation. A stale generation cannot
 checkpoint. Repository ownership is resolved from the enabled registration
 before intake or reservation and is never inferred from old publication
 receipts. Once all feature slices complete, the aggregate is terminal and its
-accepted dispositions are published to the Patrol Fix source outbox.
+accepted dispositions are reserved directly in the Patrol Fix `AdmissionStore`.
 
 Historical v4 action attempts and receipts remain visible through bounded
 `--show` output, but no scheduler or command claims, resumes, or mutates them.

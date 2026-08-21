@@ -1,15 +1,12 @@
 require "digest"
 require "securerandom"
 require "time"
-require "hive/artifact_firewall"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/review_receipt"
-require "hive/patrol_fix/runner"
 require "hive/patrol_fix/successor_materializer"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/transition"
 require "hive/patrol_fix/worktree_snapshot"
-require "hive/stages/base"
 require "hive/stages/managed_agent_custody"
 require "hive/stages/patrol_fix/inbox"
 
@@ -23,7 +20,7 @@ module Hive
         DEFAULT_MAX_REWORKS = 2
         PROTECTED_FILES = Hive::Stages::PatrolFix::Inbox::PROTECTED_FILES.freeze
 
-        def run!(task, cfg = {}, agent_runner: method(:launch_agent), worktree_root: nil,
+        def run!(task, cfg = {}, agent_runner: nil, worktree_root: nil,
                  max_reworks: nil, transition: nil,
                  successor_materializer: nil)
           transition ||= Hive::PatrolFix::Transition.new(task, worktree_root: worktree_root)
@@ -40,11 +37,24 @@ module Hive
           cap = max_reworks.nil? ? cfg.dig("patrol", "max_rework_cycles") : max_reworks
           allowed = allowed_routes(store, cap || DEFAULT_MAX_REWORKS)
           output = File.join(task.folder, REPORT_FILENAME)
-          run = agent_runner.call(
-            task: task, cfg: cfg || {}, prompt: render_prompt(
-              task, manifest, fix, validation, snapshot, allowed, output
-            ), output_path: output, worktree: snapshot.fetch("worktree")
+          prompt = render_prompt(
+            task, manifest, fix, validation, snapshot, allowed, output
           )
+          worktree = snapshot.fetch("worktree")
+          run = if agent_runner
+            agent_runner.call(
+              task: task, cfg: cfg || {}, prompt: prompt,
+              output_path: output, worktree: worktree
+            )
+          else
+            Hive::Stages::ManagedAgentCustody.launch_agent(
+              task: task, cfg: cfg || {}, prompt: prompt, output_path: output,
+              protected_files: PROTECTED_FILES, actor: "patrol_review",
+              slot: "stages.review", cwd: worktree,
+              add_dirs: [ worktree, task.folder ], stage: "review",
+              log_label: "patrol-fix-review"
+            )
+          end
           validate_agent_run!(run)
           report = Hive::PatrolFix::ReviewReceipt.read(output, allowed_routes: allowed)
 
@@ -60,43 +70,6 @@ module Hive
           )
           receipt = store.append!(build_receipt(current_manifest, report, fix, validation))
           finish_route(task, receipt, transition, successor_materializer)
-        end
-
-        def launch_agent(task:, cfg:, prompt:, output_path:, worktree:)
-          Hive::Stages::ManagedAgentCustody.validate_regular_or_absent!(task.folder, PROTECTED_FILES)
-          Hive::Stages::ManagedAgentCustody.prepare_output!(output_path, label: REPORT_FILENAME)
-          profile = Hive::Stages::Base.stage_profile(cfg, "patrol")
-          prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
-            cfg, "patrol_review", task, profile, prompt: prompt,
-            base_add_dirs: [ worktree, task.folder ], managed_slot: "stages.review",
-            managed_outputs: [ output_path ], mark_permission_error: false
-          )
-          task_paths = PROTECTED_FILES.to_h { |name| [ name, File.join(task.folder, name) ] }
-          custody = Hive::ArtifactFirewall::AgentCustody.new(
-            Hive::Stages::ManagedAgentCustody.manifest(
-              root: task.folder, worktree_path: worktree,
-              protected_task_paths: task_paths,
-              required_outputs: { REPORT_FILENAME => output_path }
-            )
-          )
-          result = Hive::Stages::Base.spawn_agent(
-            task, prompt: prompt, add_dirs: scope.fetch(:add_dirs), cwd: worktree,
-            **Hive::Stages::Base.stage_resource_limits(cfg, task.workflow.stage_named("review")),
-            log_label: "patrol-fix-review", profile: profile,
-            **Hive::Stages::Base.model_launch_arguments(
-              cfg, "patrol_review", profile,
-              current: Hive::Stages::Base.model_routing_current(cfg["patrol"])
-            ),
-            **Hive::Stages::Base.tool_scope_kwargs(scope), status_mode: :exit_code_only,
-            cfg: cfg, agent_custody: custody
-          )
-          report = custody.report
-          status = report&.tampered? ? :tampered :
-            (report&.required_outputs_valid? == false ? :invalid_output : :clean)
-          {
-            status: result.is_a?(Hash) ? result[:status] : :error,
-            custody: status, diagnostic: report&.diagnostic
-          }
         end
 
         def render_prompt(task, manifest, fix, validation, snapshot, allowed, output,
@@ -250,5 +223,3 @@ module Hive
     end
   end
 end
-
-Hive::PatrolFix::Runner.register("review", Hive::Stages::PatrolFix::Review.method(:run!))

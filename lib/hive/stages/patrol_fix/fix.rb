@@ -1,9 +1,7 @@
 require "digest"
 require "time"
-require "hive/artifact_firewall"
 require "hive/patrol_fix/fix_report"
 require "hive/patrol_fix/receipt_store"
-require "hive/patrol_fix/runner"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/worktree_receipt"
 require "hive/stages/base"
@@ -18,7 +16,7 @@ module Hive
         REPORT_FILENAME = "patrol-fix-fix-report.json".freeze
         PROTECTED_FILES = Hive::Stages::PatrolFix::Inbox::PROTECTED_FILES.freeze
 
-        def run!(task, cfg = {}, agent_runner: method(:launch_agent), worktree_root: nil)
+        def run!(task, cfg = {}, agent_runner: nil, worktree_root: nil)
           manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
           receipts = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
           decision, rework = fix_authorization(receipts, manifest)
@@ -45,10 +43,22 @@ module Hive
             )
           end
           output = File.join(task.folder, REPORT_FILENAME)
-          run = agent_runner.call(
-            task: task, cfg: cfg || {}, manifest: manifest, owner: owner,
-            prompt: render_prompt(task, manifest, owner, output), output_path: output
-          )
+          prompt = render_prompt(task, manifest, owner, output)
+          run = if agent_runner
+            agent_runner.call(
+              task: task, cfg: cfg || {}, manifest: manifest, owner: owner,
+              prompt: prompt, output_path: output
+            )
+          else
+            worktree = owner.fetch("worktree")
+            Hive::Stages::ManagedAgentCustody.launch_agent(
+              task: task, cfg: cfg || {}, prompt: prompt, output_path: output,
+              protected_files: PROTECTED_FILES, actor: "patrol_fix",
+              slot: "stages.fix", cwd: worktree,
+              add_dirs: [ worktree, task.folder ], stage: "fix",
+              log_label: "patrol-fix-fix"
+            )
+          end
           validate_agent_run!(run)
           report = Hive::PatrolFix::FixReport.read(output)
           raise Hive::StageError, "fix agent parked with partial work; preserving the owned worktree" unless report.status == "fixed"
@@ -60,41 +70,6 @@ module Hive
           )
           receipt = receipts.append!(build_receipt(manifest, payload))
           complete(receipt)
-        end
-
-        def launch_agent(task:, cfg:, manifest:, owner:, prompt:, output_path:)
-          Hive::Stages::ManagedAgentCustody.validate_regular_or_absent!(task.folder, PROTECTED_FILES)
-          Hive::Stages::ManagedAgentCustody.prepare_output!(output_path, label: REPORT_FILENAME)
-          profile = Hive::Stages::Base.stage_profile(cfg, "patrol")
-          prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
-            cfg, "patrol_fix", task, profile, prompt: prompt,
-            base_add_dirs: [ owner.fetch("worktree"), task.folder ],
-            managed_slot: "stages.fix", managed_outputs: [ output_path ],
-            mark_permission_error: false
-          )
-          task_paths = PROTECTED_FILES.to_h { |name| [ name, File.join(task.folder, name) ] }
-          custody = Hive::ArtifactFirewall::AgentCustody.new(
-            Hive::Stages::ManagedAgentCustody.manifest(
-              root: task.folder, worktree_path: owner.fetch("worktree"),
-              protected_task_paths: task_paths,
-              required_outputs: { REPORT_FILENAME => output_path }
-            )
-          )
-          result = Hive::Stages::Base.spawn_agent(
-            task, prompt: prompt, add_dirs: scope.fetch(:add_dirs), cwd: owner.fetch("worktree"),
-            **Hive::Stages::Base.stage_resource_limits(cfg, task.workflow.stage_named("fix")),
-            log_label: "patrol-fix-fix", profile: profile,
-            **Hive::Stages::Base.model_launch_arguments(
-              cfg, "patrol_fix", profile,
-              current: Hive::Stages::Base.model_routing_current(cfg["patrol"])
-            ),
-            **Hive::Stages::Base.tool_scope_kwargs(scope), status_mode: :exit_code_only,
-            cfg: cfg, agent_custody: custody
-          )
-          report = custody.report
-          status = report&.tampered? ? :tampered : (report&.required_outputs_valid? == false ? :invalid_output : :clean)
-          { status: result.is_a?(Hash) ? result[:status] : :error, custody: status,
-            diagnostic: report&.diagnostic }
         end
 
         def render_prompt(task, manifest, owner, output)
@@ -155,5 +130,3 @@ module Hive
     end
   end
 end
-
-Hive::PatrolFix::Runner.register("fix", Hive::Stages::PatrolFix::Fix.method(:run!))

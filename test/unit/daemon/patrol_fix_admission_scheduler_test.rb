@@ -3,7 +3,7 @@ require "tmpdir"
 require "hive/commands/init"
 require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/patrol/finding"
-require "hive/patrol/fix_admission_outbox"
+require "hive/patrol/fix_admission_adapter"
 require "hive/patrol_fix/admission_store"
 require "hive/patrol_fix/semantic_admission"
 require "hive/patrol_fix/task_materializer"
@@ -20,28 +20,33 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
     end
   end
 
-  BrokenSource = Struct.new(:source) do
+  BrokenStore = Class.new do
     def pending(**) = raise(Hive::ConfigError, "corrupt source record")
   end
 
-  HealthyEmptySource = Struct.new(:source, :pending_calls) do
+  HealthyEmptyStore = Struct.new(:pending_calls) do
     def pending(**)
       self.pending_calls += 1
       []
     end
   end
+  ProjectSource = Struct.new(:project, :store)
 
   def test_one_unavailable_source_does_not_stop_other_projects_from_draining
-    healthy = HealthyEmptySource.new("architecture_patrol", 0)
+    healthy_store = HealthyEmptyStore.new(0)
     scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
-      sources: [ BrokenSource.new("ordinary_patrol"), healthy ], clock: -> { NOW }
+      sources: [
+        ProjectSource.new("ordinary-project", BrokenStore.new),
+        ProjectSource.new("architecture-project", healthy_store)
+      ],
+      clock: -> { NOW }
     )
 
     events = scheduler.tick(now: NOW)
 
-    assert_equal 1, healthy.pending_calls
+    assert_equal 1, healthy_store.pending_calls
     assert_equal [ :failed ], events.map(&:status)
-    assert_equal "ordinary_patrol", events.first.source
+    assert_equal "ordinary-project", events.first.source
     assert_match(/source_unavailable: Hive::ConfigError/, events.first.reason)
   end
 
@@ -50,8 +55,8 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
       with_tmp_git_repo do |project_root|
         capture_io { Hive::Commands::Init.new(project_root, agent_skill_preflight: false).call }
         hive_state = File.join(project_root, ".hive-state")
-        source = Hive::Patrol::FixAdmissionOutbox.new(
-          root: File.join(hive_state, "patrol", "patrol-fix-outbox")
+        source = Hive::Patrol::FixAdmissionAdapter.for_project(
+          project_root: project_root, hive_state_path: hive_state
         )
         source.publish_finding!(finding, accepted_at: NOW)
         admission = Hive::PatrolFix::AdmissionStore.new(
@@ -61,7 +66,7 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         provider_calls = 0
         services = []
         scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
-          sources: [ source ], admission_store: admission,
+          sources: [ source ],
           capacity_available: lambda do |**_args|
             capacity_checks += 1
             true
@@ -84,14 +89,14 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
             semantic
           end,
           semantic_command_factory: ->(_token) { "hive __patrol-fix-semantic-decision test" },
-          task_materializer_factory: lambda do |store:, source_acknowledger:, **_args|
+          task_materializer_factory: lambda do |store:, **_args|
             Hive::PatrolFix::TaskMaterializer.new(
               project_root: project_root, hive_state: hive_state, store: store,
               workflow_info: {
                 descriptor: Hive::Workflows::Registry.fetch(:"patrol-fix"),
                 pin: true, managed: nil, managed_cfg: {}, authored_digest: nil
               },
-              source_acknowledger: source_acknowledger, clock: -> { NOW }
+              clock: -> { NOW }
             )
           end,
           clock: -> { NOW }
@@ -113,19 +118,19 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
 
         assert_equal 2, capacity_checks
         assert_equal [ :acknowledged ], events.map(&:status)
-        assert_empty source.pending
+        assert_empty admission.pending
         assert_equal 1, Dir.glob(File.join(hive_state, "stages", "1-inbox", "*", "meta.yml")).length
       end
     end
   end
 
-  def test_insufficient_evidence_parks_the_handoff_without_ack_or_hot_retry
+  def test_insufficient_evidence_blocks_the_admission_without_ack_or_hot_retry
     with_tmp_global_config do
       with_tmp_git_repo do |project_root|
         capture_io { Hive::Commands::Init.new(project_root, agent_skill_preflight: false).call }
         hive_state = File.join(project_root, ".hive-state")
-        source = Hive::Patrol::FixAdmissionOutbox.new(
-          root: File.join(hive_state, "patrol", "patrol-fix-outbox")
+        source = Hive::Patrol::FixAdmissionAdapter.for_project(
+          project_root: project_root, hive_state_path: hive_state
         )
         entry = source.publish_finding!(finding, accepted_at: NOW)
         admission = Hive::PatrolFix::AdmissionStore.new(
@@ -133,7 +138,7 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         )
         services = []
         scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
-          sources: [ source ], admission_store: admission,
+          sources: [ source ],
           semantic_admission_factory: lambda do |store:, **_args|
             semantic = Hive::PatrolFix::SemanticAdmission.new(
               store: store, candidate_provider: ->(_snapshot) { [] },
@@ -162,26 +167,26 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
           occurrence_id: dispatch.occurrence_id,
           reservation_id: dispatch.dispatch_token.fetch(:reservation_id)
         )
-        scheduler.complete(
+        completion = scheduler.complete(
           dispatch_token: dispatch.dispatch_token, exit_code: 0, envelope: { "ok" => true },
           now: NOW + 1
         )
-        assert_equal [ :blocked ], scheduler.tick(now: NOW + 2).map(&:status)
-        assert_empty source.pending
-        refute source.acknowledged?(entry.fetch("occurrence_id"))
+        assert_equal :blocked, completion.status
+        assert_empty admission.pending
+        assert_nil admission.fetch(entry.fetch("occurrence_id"))["acknowledgement"]
         assert_equal "blocked", admission.visible_blocked.first.fetch("status")
         assert_empty scheduler.tick(now: NOW + 60)
       end
     end
   end
 
-  def test_provider_failure_defers_the_source_handoff_until_retry_eligibility
+  def test_provider_failure_defers_the_admission_until_retry_eligibility
     with_tmp_global_config do
       with_tmp_git_repo do |project_root|
         capture_io { Hive::Commands::Init.new(project_root, agent_skill_preflight: false).call }
         hive_state = File.join(project_root, ".hive-state")
-        source = Hive::Patrol::FixAdmissionOutbox.new(
-          root: File.join(hive_state, "patrol", "patrol-fix-outbox")
+        source = Hive::Patrol::FixAdmissionAdapter.for_project(
+          project_root: project_root, hive_state_path: hive_state
         )
         entry = source.publish_finding!(finding, accepted_at: NOW)
         admission = Hive::PatrolFix::AdmissionStore.new(
@@ -190,7 +195,7 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         launches = 0
         services = []
         scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
-          sources: [ source ], admission_store: admission,
+          sources: [ source ],
           semantic_admission_factory: lambda do |store:, **_args|
             semantic = Hive::PatrolFix::SemanticAdmission.new(
               store: store, candidate_provider: ->(_snapshot) { [] },
@@ -223,10 +228,10 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         )
         assert_equal :retry_wait, completion.status
         assert_equal 1, launches
-        assert_empty source.pending(now: NOW + 299)
+        assert_empty admission.pending(now: NOW + 299)
         assert_empty scheduler.tick(now: NOW + 299)
         assert_equal [ entry.fetch("occurrence_id") ],
-                     source.pending(now: NOW + 301).map { |record| record.fetch("occurrence_id") }
+                     admission.pending(now: NOW + 301).map { |record| record.fetch("occurrence_id") }
       end
     end
   end
@@ -239,7 +244,7 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
       retry_at = NOW + 7_200
       services = []
       scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
-        sources: [ source ], admission_store: admission,
+        sources: [ source ],
         semantic_admission_factory: lambda do |store:, **_args|
           semantic = Hive::PatrolFix::SemanticAdmission.new(
             store: store, candidate_provider: ->(_snapshot) { [] },
@@ -272,9 +277,9 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
 
       assert_equal :retry_wait, event.status
       assert_equal retry_at.iso8601, event.retry_at
-      assert_empty source.pending(now: retry_at - 1)
+      assert_empty admission.pending(now: retry_at - 1)
       assert_equal [ entry.fetch("occurrence_id") ],
-                   source.pending(now: retry_at).map { |record| record.fetch("occurrence_id") }
+                   admission.pending(now: retry_at).map { |record| record.fetch("occurrence_id") }
     end
   end
 
@@ -317,20 +322,21 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         now: NOW + 1
       )
       assert_equal [ :retry_wait ], scheduler.tick(now: NOW + 2).map(&:status)
-      assert_empty source.pending(now: NOW + 299)
+      assert_empty admission.pending(now: NOW + 299)
       recovered = scheduler.tick(now: NOW + 302)
       assert_equal [ :acknowledged ], recovered.map(&:status), recovered.map(&:reason).inspect
       assert_equal 1, semantic_launches
       assert_equal 2, materialization_attempts
-      assert_empty source.pending(now: NOW + 302)
+      assert_empty admission.pending(now: NOW + 302)
     end
   end
 
-  def test_source_acknowledgement_reconciles_when_admission_ack_write_fails_once
+  def test_durable_task_reconciles_when_admission_ack_write_fails_once
     with_initialized_scheduler_project do |project_root, hive_state, source, entry|
       admission = OneShotAcknowledgementFailureStore.new(
         root: File.join(hive_state, "patrol-fix", "admissions")
       )
+      source.define_singleton_method(:store) { admission }
       scheduler, services = scheduler_for(
         project_root, source, admission,
         decision_provider: lambda do |_input|
@@ -356,13 +362,14 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
       )
       assert_equal [ :retry_wait ], scheduler.tick(now: NOW + 2).map(&:status)
       occurrence_id = entry.fetch("occurrence_id")
-      assert source.acknowledged?(occurrence_id)
-      assert_empty source.pending(now: NOW + 299)
+      assert_equal "retry_wait", admission.fetch(occurrence_id).fetch("status")
+      assert admission.fetch(occurrence_id).fetch("task")
+      assert_empty admission.pending(now: NOW + 299)
 
       recovered = scheduler.tick(now: NOW + 302)
       assert_equal [ :acknowledged ], recovered.map(&:status), recovered.map(&:reason).inspect
       assert_equal "acknowledged", admission.fetch(occurrence_id).fetch("status")
-      assert_empty source.pending(now: NOW + 302)
+      assert_empty admission.pending(now: NOW + 302)
     end
   end
 
@@ -390,8 +397,7 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         project_root, source, admission, decision_provider: decision,
         materializer_factory: ->(**) { flunk "decision is not materialized in this proof" }
       )
-      waiting = restarted.tick(now: NOW + 60).fetch(0)
-      assert_equal :decision_in_flight, waiting.status
+      assert_empty restarted.tick(now: NOW + 60)
       assert_empty new_services
       assert_equal 0, provider_calls
 
@@ -429,8 +435,8 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
       with_tmp_git_repo do |project_root|
         capture_io { Hive::Commands::Init.new(project_root, agent_skill_preflight: false).call }
         hive_state = File.join(project_root, ".hive-state")
-        source = Hive::Patrol::FixAdmissionOutbox.new(
-          root: File.join(hive_state, "patrol", "patrol-fix-outbox")
+        source = Hive::Patrol::FixAdmissionAdapter.for_project(
+          project_root: project_root, hive_state_path: hive_state
         )
         entry = source.publish_finding!(finding, accepted_at: NOW)
         yield project_root, hive_state, source, entry
@@ -441,7 +447,7 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
   def scheduler_for(project_root, source, admission, decision_provider:, materializer_factory:)
     services = []
     scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
-      sources: [ source ], admission_store: admission,
+      sources: [ source ],
       semantic_admission_factory: lambda do |store:, **_args|
         semantic = Hive::PatrolFix::SemanticAdmission.new(
           store: store, candidate_provider: ->(_snapshot) { [] },
@@ -459,14 +465,14 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
     [ scheduler, services ]
   end
 
-  def real_materializer(project_root, hive_state, store:, source_acknowledger:, **_args)
+  def real_materializer(project_root, hive_state, store:, **_args)
     Hive::PatrolFix::TaskMaterializer.new(
       project_root: project_root, hive_state: hive_state, store: store,
       workflow_info: {
         descriptor: Hive::Workflows::Registry.fetch(:"patrol-fix"),
         pin: true, managed: nil, managed_cfg: {}, authored_digest: nil
       },
-      source_acknowledger: source_acknowledger, clock: -> { NOW }
+      clock: -> { NOW }
     )
   end
 

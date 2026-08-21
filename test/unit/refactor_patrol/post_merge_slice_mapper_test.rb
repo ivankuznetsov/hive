@@ -24,10 +24,8 @@ class RefactorPatrolPostMergeSliceMapperTest < Minitest::Test
       true
     end
 
-    def exists? = @exists
-
-    def remove!(force:)
-      calls << [ :remove, force ]
+    def discard!(force:)
+      calls << [ :discard, force ]
       @exists = false
     end
   end
@@ -60,7 +58,7 @@ class RefactorPatrolPostMergeSliceMapperTest < Minitest::Test
       assert_equal [ "component-checkout" ], result.path_mappings[0].fetch("slice_ids")
       assert_equal %w[component-checkout component-payments], result.path_mappings[1].fetch("slice_ids")
       assert_match(/\Apath-[0-9a-f]{24}\z/, result.path_mappings[2].fetch("slice_ids").one? ? result.path_mappings[2].fetch("slice_ids").first : "")
-      assert_equal [ [ :create, "a" * 40 ], [ :assert, "a" * 40 ], [ :remove, true ] ], worktree.calls
+      assert_equal [ [ :create, "a" * 40 ], [ :assert, "a" * 40 ], [ :discard, true ] ], worktree.calls
     end
   end
 end

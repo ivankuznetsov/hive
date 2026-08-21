@@ -56,20 +56,6 @@ class ModulesEventRoutingTest < Minitest::Test
     assert_equal "owner/repo#7", record.dig(:source, "id")
     assert_equal manifest.fetch("manifest_checksum"), record.dig(:payload, "manifest_digest")
     assert_equal(
-      {
-        "decision" => {
-          "rationale" => "due",
-          "job_id" => manifest.fetch("job_id"),
-          "phase" => "discovery"
-        },
-        "effects" => [
-          { "kind" => "job", "id" => manifest.fetch("job_id") }
-        ]
-      },
-      record.dig(:payload, "legacy_enqueue_provenance"),
-      "the merge event records immutable enqueue provenance, not a later scheduler outcome"
-    )
-    assert_equal(
       "pull-request:owner/repo:7:#{'b' * 40}",
       record.fetch(:idempotency_key)
     )
@@ -84,62 +70,6 @@ class ModulesEventRoutingTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         publisher.send(:project_entry, "demo", "/project")
       end
-    end
-  end
-
-  def test_publisher_links_exact_patrol_captures_to_targeted_schedule_events
-    ledger = RecordingLedger.new
-    publisher = Hive::Modules::EventPublisher.new(
-      ledger_factory: ->(_entry) { ledger }, clock: -> { NOW }
-    )
-    entry = {
-      "name" => "demo",
-      "project_id" => "project-1",
-      "hive_state_path" => "/state"
-    }
-    ordinary = capture("patrol", decision: { "rationale" => "due" })
-    architecture = capture(
-      "architecture-patrol",
-      decision: {
-        "rationale" => "due",
-        "job_id" => "architecture-patrol-reservation",
-        "phase" => "discovery"
-      }
-    )
-
-    publisher.patrol_reserved(entry, ordinary, schedule: "*/10 * * * *")
-    architecture_event = publisher.prepare_architecture_patrol_finalized(
-      entry,
-      architecture,
-      schedule: "*/10 * * * *",
-      target_hook: "scheduled-discovery"
-    )
-    publisher.publish_prepared(entry, architecture_event)
-
-    patrol = ledger.records.fetch(0)
-    assert_equal ordinary.to_h,
-                 patrol.dig(:payload, "legacy_mutator_capture")
-    assert_equal "patrol", patrol.dig(:payload, "target_module")
-    architecture_record = ledger.records.fetch(1)
-    assert_equal architecture.to_h,
-                 architecture_record.dig(:payload, "legacy_mutator_capture")
-    assert_equal "architecture-patrol",
-                 architecture_record.dig(:payload, "target_module")
-    assert_equal "scheduled-discovery",
-                 architecture_record.dig(:payload, "target_hook")
-
-    assert_raises(Hive::ConfigError) do
-      publisher.prepare_patrol_finalized(
-        entry, architecture, schedule: "*/10 * * * *"
-      )
-    end
-    assert_raises(Hive::ConfigError) do
-      publisher.prepare_architecture_patrol_finalized(
-        entry.merge("name" => "other"),
-        architecture,
-        schedule: "*/10 * * * *",
-        target_hook: "scheduled-discovery"
-      )
     end
   end
 
@@ -244,64 +174,4 @@ class ModulesEventRoutingTest < Minitest::Test
   end
 
   private
-
-  def capture(module_name, decision:)
-    identity = "#{module_name}-reservation"
-    architecture = module_name == "architecture-patrol"
-    selection_input = if architecture
-      {
-        "kind" => "candidate",
-        "job_id" => identity,
-        "phase" => "discovery"
-      }
-    else
-      {
-        "kind" => "operation",
-        "operation" => "event-routing"
-      }
-    end
-    projection_attributes = {
-      module_name: module_name,
-      rationale: decision.fetch("rationale")
-    }
-    if architecture
-      projection_attributes.merge!(
-        job_id: identity,
-        phase: "discovery"
-      )
-    end
-    Hive::Modules::Migration::PatrolCapture.build(
-      module_name: module_name,
-      project: {
-        "project_id" => "project-1",
-        "name" => "demo",
-        "repository" => "owner/demo"
-      },
-      trigger: {
-        "kind" => "schedule",
-        "id" => identity,
-        "occurred_at" => NOW.iso8601(6),
-        "schedule" => "event-routing"
-      },
-      reservation: architecture ? {
-        "kind" => "architecture",
-        "id" => identity,
-        "job_id" => identity
-      } : {
-        "kind" => "ordinary",
-        "id" => identity
-      },
-      owner: "legacy",
-      owner_epoch: 1,
-      selection_input: selection_input,
-      selection:
-        Hive::Modules::Migration::PatrolDecisionProjection.build(
-          **projection_attributes
-      ),
-      outcome_class: "completed",
-      outcome: { "rationale" => decision.fetch("rationale") },
-      occurred_at: NOW,
-      recorded_at: NOW
-    )
-  end
 end

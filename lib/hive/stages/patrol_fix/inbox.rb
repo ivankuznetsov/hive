@@ -2,13 +2,10 @@ require "digest"
 require "securerandom"
 require "time"
 require "hive/agent_git_gate"
-require "hive/artifact_firewall"
 require "hive/patrol_fix/inbox_report"
 require "hive/patrol_fix/receipt_store"
-require "hive/patrol_fix/runner"
 require "hive/patrol_fix/successor_materializer"
 require "hive/patrol_fix/task_manifest"
-require "hive/stages/base"
 require "hive/stages/managed_agent_custody"
 
 module Hive
@@ -25,7 +22,7 @@ module Hive
           "patrol-fix-transition.jsonl", "handoff.yml", "pr.md"
         ].freeze
 
-        def run!(task, cfg = {}, agent_runner: method(:launch_agent), successor_materializer: nil)
+        def run!(task, cfg = {}, agent_runner: nil, successor_materializer: nil)
           manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
           store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
           existing = current_decision(store, manifest)
@@ -34,11 +31,21 @@ module Hive
           head = git_read!(task.project_root, :head_oid).strip
           before_status = source_status(task)
           output_path = File.join(task.folder, REPORT_FILENAME)
-          run = agent_runner.call(
-            task: task, cfg: cfg || {},
-            prompt: render_prompt(task, manifest, head, output_path),
-            output_path: output_path, head_revision: head
-          )
+          prompt = render_prompt(task, manifest, head, output_path)
+          run = if agent_runner
+            agent_runner.call(
+              task: task, cfg: cfg || {}, prompt: prompt,
+              output_path: output_path, head_revision: head
+            )
+          else
+            Hive::Stages::ManagedAgentCustody.launch_agent(
+              task: task, cfg: cfg || {}, prompt: prompt, output_path: output_path,
+              protected_files: PROTECTED_FILES, actor: "patrol_review",
+              slot: "stages.inbox", cwd: task.project_root,
+              add_dirs: [ task.project_root, task.folder ], stage: "inbox",
+              log_label: "patrol-fix-inbox"
+            )
+          end
           validate_agent_run!(run)
           current_head = git_read!(task.project_root, :head_oid).strip
           current_status = source_status(task)
@@ -52,48 +59,6 @@ module Hive
           finish_route(task, receipt, successor_materializer)
         rescue Hive::AgentGitGate::Error => e
           raise Hive::StageError, e.message
-        end
-
-        def launch_agent(task:, cfg:, prompt:, output_path:, head_revision:)
-          Hive::Stages::ManagedAgentCustody.validate_regular_or_absent!(task.folder, PROTECTED_FILES)
-          Hive::Stages::ManagedAgentCustody.prepare_output!(output_path, label: REPORT_FILENAME)
-          profile = Hive::Stages::Base.stage_profile(cfg, "patrol")
-          prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
-            cfg, "patrol_review", task, profile,
-            prompt: prompt, base_add_dirs: [ task.project_root, task.folder ],
-            managed_slot: "stages.inbox", managed_outputs: [ output_path ],
-            mark_permission_error: false
-          )
-          task_paths = PROTECTED_FILES.to_h { |name| [ name, File.join(task.folder, name) ] }
-          custody = Hive::ArtifactFirewall::AgentCustody.new(
-            Hive::Stages::ManagedAgentCustody.manifest(
-              root: task.folder, worktree_path: task.project_root,
-              protected_task_paths: task_paths,
-              required_outputs: { REPORT_FILENAME => output_path }
-            )
-          )
-          result = Hive::Stages::Base.spawn_agent(
-            task,
-            prompt: prompt, add_dirs: scope.fetch(:add_dirs), cwd: task.project_root,
-            **Hive::Stages::Base.stage_resource_limits(cfg, task.workflow.stage_named("inbox")),
-            log_label: "patrol-fix-inbox", profile: profile,
-            **Hive::Stages::Base.model_launch_arguments(
-              cfg, "patrol_review", profile,
-              current: Hive::Stages::Base.model_routing_current(cfg["patrol"])
-            ),
-            **Hive::Stages::Base.tool_scope_kwargs(scope),
-            status_mode: :exit_code_only, cfg: cfg, agent_custody: custody
-          )
-          report = custody.report
-          status = if report&.tampered?
-            :tampered
-          elsif report&.required_outputs_valid? == false
-            :invalid_output
-          else
-            :clean
-          end
-          { status: result.is_a?(Hash) ? result[:status] : :error,
-            custody: status, diagnostic: report&.diagnostic }
         end
 
         def render_prompt(task, manifest, head, output_path, boundary_token: nil)
@@ -204,5 +169,3 @@ module Hive
     end
   end
 end
-
-Hive::PatrolFix::Runner.register("inbox", Hive::Stages::PatrolFix::Inbox.method(:run!))

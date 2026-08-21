@@ -463,7 +463,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       patrol_fix_admission_scheduler: nil,
                       attempt_dispatcher: nil, attempt_reconciler: nil,
                       operational_snapshot: nil, module_runtime: nil,
-                      module_migration_coordinator: nil,
                       recovery_coordinator: nil,
                       plan_approval: Hive::Daemon::PlanApproval,
                       runtime_ready_callback: nil, clock: nil)
@@ -518,7 +517,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
       attempt_reconciler: attempt_reconciler,
       operational_snapshot: operational_snapshot,
       module_runtime: module_runtime,
-      module_migration_coordinator: module_migration_coordinator,
       recovery_coordinator: recovery_coordinator,
       plan_approval: plan_approval,
       runtime_ready_callback: runtime_ready_callback,
@@ -731,33 +729,29 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
 
-  def test_module_migration_and_runtime_results_are_logged_while_idle_is_silent
-    migration = FakeModuleTick.new(results: [ { project: "p1", status: :shadowing, blockers: {} } ])
+  def test_module_runtime_results_are_logged_while_idle_is_silent
     runtime = FakeModuleTick.new(results: [
       { project: "idle", status: :idle, decisions: 0, schedules: 0, reason: nil },
       { project: "p1", status: :ok, decisions: 1, schedules: 1, reason: nil }
     ])
     dispatcher, _supervisor, _controller, logger = make_dispatcher(
-      module_runtime: runtime, module_migration_coordinator: migration
+      module_runtime: runtime
     )
 
     dispatcher.tick(now: T0)
 
-    assert_equal [ T0 ], migration.ticks
     assert_equal [ T0 ], runtime.ticks
     assert runtime.admission_open.call,
            "module runtime must share the daemon shutdown admission predicate"
-    assert logger.events.any? { |name, attrs| name == :module_migration && attrs[:project] == "p1" }
     module_events = logger.events.select { |name, _attrs| name == :module_runtime }
     assert_equal [ "p1" ], module_events.map { |_name, attrs| attrs.fetch(:project) }
   end
 
-  def test_module_collaborator_failures_are_isolated_and_later_tick_work_continues
-    migration = FakeModuleTick.new(error: IOError.new("migration disk full"))
+  def test_module_runtime_failures_are_isolated_and_later_tick_work_continues
     runtime = FakeModuleTick.new(error: RuntimeError.new("runtime failed"))
     dispatcher, supervisor, _controller, logger = make_dispatcher(
       rows: [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ],
-      module_runtime: runtime, module_migration_coordinator: migration
+      module_runtime: runtime
     )
 
     dispatcher.tick(now: T0)
@@ -765,7 +759,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
     messages = logger.events.filter_map do |name, attrs|
       attrs[:message] if name == :fatal
     end
-    assert messages.any? { |message| message.include?("module migration raised") }
     assert messages.any? { |message| message.include?("module runtime raised") }
     assert_equal 1, supervisor.spawned.size
   end
@@ -1010,52 +1003,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     assert_equal candidate, patrol.reserved.fetch(0).fetch(:candidate)
     assert_equal "hive patrol p1", supervisor.spawned.fetch(0).fetch(:command)
-  end
-
-  def test_patrol_dispatch_rechecks_migration_ownership_at_spawn_boundary
-    dispatcher, _supervisor, _controller, logger = make_dispatcher
-    candidate = {
-      project: "p1", patrol_kind: :architecture,
-      slug: "refactor-patrol-job-7", stage: "refactor-patrol",
-      migration_entry: {
-        "path" => "/tmp/project", "hive_state_path" => "/tmp/project/.hive-state"
-      }
-    }
-    observed = []
-    blocked = lambda do |project_root, module_name, authority:, hive_state_path:, &block|
-      observed << [ project_root, module_name, authority, hive_state_path ]
-      block.call(false)
-    end
-    with_replaced_singleton_method(
-      Hive::Modules::Migration::Patrols, :with_admission, blocked
-    ) do
-      dispatcher.send(:dispatch_patrol_with_gates, candidate, now: T0)
-    end
-    assert_equal(
-      [
-        "/tmp/project", "architecture-patrol", :legacy,
-        "/tmp/project/.hive-state"
-      ],
-      observed.fetch(0)
-    )
-    assert logger.events.any? do |name, attributes|
-      name == :skipped &&
-        attributes[:reason] == "migration_ownership_changed"
-    end
-
-    admitted = []
-    dispatcher.define_singleton_method(:dispatch_patrol_with_admission) do |value, now:|
-      admitted << [ value, now ]
-    end
-    allowed = lambda do |*_args, **_kwargs, &block|
-      block.call(true)
-    end
-    with_replaced_singleton_method(
-      Hive::Modules::Migration::Patrols, :with_admission, allowed
-    ) do
-      dispatcher.send(:dispatch_patrol_with_gates, candidate, now: T0)
-    end
-    assert_equal [ [ candidate, T0 ] ], admitted
   end
 
   def test_patrol_config_exit_backs_off_without_dropping_project

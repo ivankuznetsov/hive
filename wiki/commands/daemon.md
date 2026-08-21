@@ -133,8 +133,8 @@ hive refactor-patrol PROJECT --job-manifest MANIFEST --json
 ```
 
 Discovery emits `hive-refactor-patrol.v4` to a job-bound result file consumed
-by the supervisor. Completed dispositions are published to the shared Patrol
-Fix source outbox, and the job terminalizes. There is no Architecture Patrol
+by the supervisor. Completed dispositions are reserved directly in the shared
+Patrol Fix `AdmissionStore`, and the job terminalizes. There is no Architecture Patrol
 action phase, fixer, issue filer, PR opener, or review handoff.
 
 `refactor_patrol.enabled` controls discovery. Downstream Patrol Fix admission

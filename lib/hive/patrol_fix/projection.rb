@@ -173,9 +173,9 @@ module Hive
       end
 
       def action_for(state:, done:, outcome:, decision:, fix:, validation:, publication:)
-        return action("invalid", runnable: false, reopen: false) if state == "invalid"
-        return action("done", runnable: false, reopen: false) if done
-        return action("parked", runnable: false, reopen: true) if outcome
+        return action("invalid", runnable: false) if state == "invalid"
+        return action("done", runnable: false) if done
+        return action("parked", runnable: false) if outcome
         ready = case stage
         when "1-inbox" then decision&.dig("payload", "route") == "fix" # not-a-stage-ref: Patrol Fix workflow stage
         when "2-fix" then !fix.nil?
@@ -184,25 +184,12 @@ module Hive
         when "5-publish" then !publication.nil?
         else false
         end
-        return action("advance", runnable: true, reopen: false) if ready
+        return action("advance", runnable: true) if ready
 
-        action("ready", runnable: true, reopen: false)
+        action("ready", runnable: true)
       end
 
-      def action(kind, runnable:, reopen:)
-        {
-          "kind" => kind,
-          "runnable" => runnable,
-          "reopen_eligible" => reopen,
-          "generation" => nil
-        }.tap do |value|
-          value["generation"] = manifest_generation if reopen
-        end
-      end
-
-      def manifest_generation
-        @manifest_generation ||= TaskManifest.new(task_folder: task_folder).read.dig("task", "generation")
-      end
+      def action(kind, runnable:) = { "kind" => kind, "runnable" => runnable }
 
       def stage_name
         stage.split("-", 2).last
@@ -223,10 +210,7 @@ module Hive
               "parked_seconds" => 0, "parked_since" => nil, "rework_count" => 0
             },
             "archived" => false, "diagnostic" => { "summary" => summary },
-            "action" => {
-              "kind" => "invalid", "runnable" => false,
-              "reopen_eligible" => false, "generation" => nil
-            }
+            "action" => { "kind" => "invalid", "runnable" => false }
           }
         )
       end

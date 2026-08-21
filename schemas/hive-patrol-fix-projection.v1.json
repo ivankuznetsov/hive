@@ -70,12 +70,10 @@
     },
     "action": {
       "type": "object", "additionalProperties": false,
-      "required": ["kind", "runnable", "reopen_eligible", "generation"],
+      "required": ["kind", "runnable"],
       "properties": {
         "kind": {"enum": ["ready", "advance", "parked", "done", "invalid"]},
-        "runnable": {"type": "boolean"},
-        "reopen_eligible": {"type": "boolean"},
-        "generation": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]}
+        "runnable": {"type": "boolean"}
       }
     }
   }

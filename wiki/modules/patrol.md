@@ -1,493 +1,172 @@
 ---
 title: Hive::Patrol
 type: module
-source: lib/hive/patrol/, packaging/patrol_evidence/, test/e2e/lib/patrol_qualification.rb
+source: lib/hive/patrol/, lib/hive/refactor_patrol/, lib/hive/patrol_fix/, script/migrate_patrol_findings.rb
 created: 2026-05-28
 updated: 2026-08-21
-tags: [module, patrol, review, worktree, pr, codex]
+tags: [module, patrol, architecture, workflow]
 ---
 
-**TLDR**: `Hive::Patrol::*` discovers ordinary repository findings and stores audit state as plain JSON under `.hive-state/patrol/`. The separately configured Architecture Patrol lives under `Hive::RefactorPatrol::*`. Both publish accepted findings directly into the shared `patrol-fix` workflow; neither discovery engine fixes code or publishes pull requests. Historical findings can be imported once with `script/migrate_patrol_findings.rb`; there is no runtime Patrol Fix migration or cutover subsystem. Token totals remain telemetry rather than admission criteria.
+**TLDR**: Ordinary Patrol and Architecture Patrol are discovery systems. They
+write their own native findings/jobs and reserve accepted work directly in the
+shared `patrol-fix` `AdmissionStore`. They do not fix code, open issues, or
+publish pull requests. There is no Patrol module cutover, shadow comparison,
+occurrence journal, effect delivery layer, or runtime migration subsystem.
+Historical ordinary findings can be imported once with
+`script/migrate_patrol_findings.rb`.
 
-## Module map
-
-| Module | File | Purpose |
-|--------|------|---------|
-| `Hive::Patrol::Mapper` | `lib/hive/patrol/mapper.rb` | Ordinary patrol enables the shared architecture capability: non-overlapping language-neutral source/manifest components with dependency-ranked context and subsystem tests, plus one primary review per command or grouped manifest-script contract. Command paths remain component context, not duplicate evidence anchors. Legacy route/package/monolithic-test slices remain available only to callers that omit that capability. A completed map is handed to `StateStore` as one retry-safe semantic batch instead of consuming one occurrence effect per feature. |
-| `Hive::Patrol::SourceReader` | `lib/hive/patrol/source_reader.rb` | Shared root-confined, regular-file-only, 256 KiB bounded reader used by architecture mapping and review. It resolves tracked symlinks beneath the canonical project root and skips external/device targets before reading. |
-| `Hive::Patrol::Feature` | `lib/hive/patrol/feature.rb` | Durable feature record: `id`, `kind`, `entrypoints`, `owned_files`, `context_files`, and `tests`. |
-| `Hive::Patrol::FeatureBatch` | `lib/hive/patrol/feature_batch.rb` | Selects the deterministic SHA-bound rotating component batch and returns the next persistent cursor. `Commands::Patrol` strictly fetches the explicit remote head for each new sweep, fails closed rather than scanning stale local main when that fetch fails, and records an explicit active snapshot so an in-progress sweep can finish its pinned SHA even when default advances or the first batch errors at cursor zero. If that commit becomes unmaterializable, the command starts from the current default and `FeatureBatch` resets the cursor. |
-| `Hive::Patrol::Reviewer` | `lib/hive/patrol/reviewer.rb` | Requests zero-to-three evidence-backed production defects per feature from an initial view capped at four owned files and 32 KiB; bounded output must match the exact JSON envelope and is accepted atomically only when every admitted item has complete contract/impact/root-cause/scope/reproduction/validation fields, selects an operator-configured validation key, and its confined evidence line contains the supplied snippet. Finding ids include the unique review-run id so audit records are immutable. |
-| `Hive::Patrol::Finding` | `lib/hive/patrol/finding.rb` | Durable finding record with delivery metadata (`scope`, contract, impact, root cause, reproduction, validation, computed alpha score), exact target SHA, selected validation key, and explicit active/resolved/rejected/superseded lifecycle. The published v3 schema carries those fields while the original v1 and pre-lifecycle v2 contracts remain pinned. |
-| `Hive::Patrol::FindingRegistry` | `lib/hive/patrol/finding_registry.rb` | Reconciles existing finding records with target-scoped merged/open fingerprint state and dismissals. Same-target terminal duplicates stay suppressed; shipping runs reuse a same-target active canonical record without persisting the reviewer's duplicate. Newer-target recurrences form a new active lineage, superseding older active matches while preserving resolved/rejected history. Exact-fingerprint and category/token indexes keep admission linear in the relevant semantic bucket, while lifecycle transitions persist the already-loaded record with one timestamp. |
-| `Hive::Patrol::Fingerprint` | `lib/hive/patrol/fingerprint.rb` | Structured findings use a feature-independent semantic SHA over category, primary evidence path, contract, and root cause. Historical v1 findings retain the legacy identity fallback. Stored title/root-cause tokens provide cross-wording similarity across every durable finding, while feature metadata supports outcome calibration. |
-| `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Owns configured validation-name/command selection. Discovery uses the names for evidence binding; the Patrol Fix Validate stage runs the selected operator commands in the workflow worktree. |
-| `Hive::Patrol::AgentLaunch` | `lib/hive/patrol/agent_launch.rb` | Builds the provider-specific Patrol launch envelope shared by ordinary review and fix. Active exact or coarse `models:` routes win; otherwise a Claude-backed launch carries the project-wide `claude.model` / `claude.effort` pin instead of falling through to Claude Code's interactive default. Claude uses a verified minimal review/fix tool set and caps reviews at four completed turns; the fourth is emergency JSON finalization only. No prompt or token estimate participates in launch admission. |
-| `Hive::Patrol::ReviewErrorDetails` | `lib/hive/patrol/review_error_details.rb` | Converts an agent resource-exhaustion result into the shared durable review-error detail envelope used by ordinary and architecture patrol. |
-| `Hive::Patrol::LaunchBudget` | `lib/hive/patrol/launch_budget.rb` | Owns the strict stable-project/UTC-date/engine scheduled-discovery ledger plus best-effort UsageDb telemetry. It atomically reserves one ordinary or Architecture slice before provider spawn, persists lane-specific provider holds, and never charges fix/workflow/post-merge work. The configured `patrol.scheduled_discovery_launches_per_engine_per_day` value is the allowance source; `patrol.mode: off` explicitly produces zero allowance rather than inheriting a mode table entry. UsageDb supplies only one-time attributable legacy seeding; token volume never affects admission. |
-| `Hive::Patrol::BaseStateStore` | `lib/hive/patrol/base_state_store.rb` | Shared JSON lifecycle for ordinary patrol and architecture patrol's legacy reporting state: directory creation, state/fingerprint/dismissal files, run artifacts, and tolerant reads. It delegates atomic replacement to `Hive::AtomicFile` while preserving the stores' prior no-fsync behavior. |
-| `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Defines ordinary discovery collections and owns the cycle/effect recovery boundary. Each newly active finding is written once and published atomically to the ordinary Patrol Fix source outbox. Dry runs create neither findings nor outbox entries. |
-| `Hive::PatrolFix` | `lib/hive/patrol_fix/` | Source-neutral workflow core for strict source snapshots, durable semantic admission, idempotent task materialization, task manifests, strict Inbox/Fix/Review reports, exact local worktree generations, bounded validation and publication receipts, stable stage/route-transition journals, exactly-once coding successors, and common projection. Admission binds the full owned candidate inventory count/digest/current head plus one canonical top-64 context digest. Decision reservations are durable, leased, exact-token fenced, and rejected after expiry; unlocked provider completion must revalidate both inventory and selected context before the parent can materialize or acknowledge a source. Materialization intent is durable before task capture; task/evidence binding precedes source acknowledgement; retry repairs interrupted creates, route actions, reciprocal successor links, and provenance updates. Inbox and Review retain separate schemas/routes but share one strict bounded JSON reader. Review and Publish share one exact worktree snapshot contract for custody, HEAD, clean bytes, bounded diff, and digest binding. An admission existing PR must already carry the full canonical publication payload; the core may wrap those exact bytes without a transport but rejects the old five-field summary as Done authority. The core validates hosted publication evidence but owns no GitHub mutation: the Publish stage above it composes `Hive::GithubPublication`. It has no dependency on either Patrol product, Daemon, UI, or issue mutation. |
-| `Hive::GithubPublication` | `lib/hive/github_publication.rb` | The only branch/PR publication engine, shared by coding `Stages::OpenPr` and Patrol Fix Publish without depending on either namespace. Its durable state contains generic repository/base/branch/head and title/body/diff digests, expected-absence push authority, intent/attempt evidence, exact push observation, and canonical hosted PR observation—never raw content. Inventory is bounded to the exact head branch. Exact adoption covers open, draft, closed, and merged states. A failed absent-branch push and definite `gh pr create` failure may retry; ambiguous candidates and unknown attempted outcomes remain reconciliation-only. |
-| `Hive::Patrol::FixAdmissionOutbox` / `Hive::RefactorPatrol::FixAdmissionOutbox` | `lib/hive/{patrol,refactor_patrol}/fix_admission_outbox.rb` | Source-owned edge adapters that directly snapshot accepted findings/dispositions and retain the exact task acknowledgement. They have no epoch, gate, or migration mode. |
-| `Hive::Daemon::PatrolFixAdmissionScheduler` | `lib/hive/daemon/patrol_fix_admission_scheduler.rb` | Drains source outboxes into shared admission and task materialization under provider retry and normal workflow-capacity checks. One occurrence at a time prepares a leased semantic reservation and returns a hidden child dispatch; the existing `ChildSupervisor` supplies the standard token, capacity, completion, timeout, and restart protocol. Stale or expired child completion cannot settle it, and only the parent continues into task materialization/source acknowledgement. The one normal daemon reconstructs both source adapters plus admission/materialization factories after restart. A provider-supplied quota `retry_at` is never shortened by the local 60/300/900-second retry ladder. It does not consult discovery schedulers, Patrol scan locks, or daily search allowances. |
-| `Hive::Modules::Migration::PatrolDecisionProjection` | `lib/hive/modules/migration/patrol_decision_projection.rb` | Strict shared value for the immutable selection result. Separate ordinary and architecture projectors validate their own input vocabularies before constructing it; terminal outcome and effect evidence are not selection fields. |
-| `Hive::Modules::Migration::OccurrenceJournal` | `lib/hive/modules/migration/occurrence_journal.rb` | Public durable-occurrence facade. It composes a pure `OccurrenceRecordValidator`, one `OccurrenceRecordStore` lock/read/write owner, bounded `OccurrenceJournalState`, typed `OccurrenceOutbox`, `OccurrenceEffects`, stable sender locks, and durable attempt allocation; the final capture must retain the exact selection, reject nonterminal effects, and bind exactly the terminal receipt ids. Receipt and publication entries may share an id, so acknowledgement is bound to the exact `(kind, id, digest)` tuple. `StateStore` and `JobStore` remain the separate product-facing recovery authorities. |
-| `Hive::Modules::Migration::OccurrenceJournalState` | `lib/hive/modules/migration/occurrence_journal_state.rb` | One bounded 64 KiB coordination cell per product journal. It persists compacted schedule high-water/floor fences, a bounded exact fence for non-sequenced terminal captures, and normalized restart-safe recovery backoff; it contains no effect, outbox, or product work state. |
-| `Hive::Modules::Migration::OccurrenceRecoveryIndex` | `lib/hive/modules/migration/occurrence_recovery_index.rb` | Descriptor-confined, bounded locator for exact reserved or projection-pending occurrence ids. Its generation is fenced by `OccurrenceJournalState`; missing, malformed, stale, or dirty state receives one bounded authoritative-record repair. It never authorizes work or stores effect bytes. |
-| `Hive::Modules::Migration::EffectDelivery` | `lib/hive/modules/migration/effect_delivery.rb` | Product-neutral composition facade shared by the two direct-`Object` gateways. `EffectAdmission` owns live owner/config/module-generation/grant/claim policy, `EffectSender` owns stable-lock/fence/reconciliation transitions, and `EffectReceiptLedger` owns terminal replay and observational receipt projection. The occurrence store, not the sender or ledger, mints authoritative receipt bytes. Dependencies point toward the injected product store; none of these collaborators owns persistence. |
-| `Hive::Patrol::EffectGateway` | `lib/hive/patrol/effect_gateway.rb` | Thin ordinary-patrol product port over `EffectDelivery`. It preserves the ordinary `perform!` and reconcile-only adoption API while authorizing ordinary state, finding, attempt, branch, PR, and review-handoff sinks. |
-| `Hive::RefactorPatrol::EffectGateway` | `lib/hive/refactor_patrol/effect_gateway.rb` | Thin Architecture Patrol product port over `EffectDelivery` for discovery/job transitions and occurrence recovery. |
-| `Hive::RefactorPatrol::TransitionGateway` | `lib/hive/refactor_patrol/transition_gateway.rb` | Non-persistent product port that routes architecture `job`, `discovery`, and `action` transitions through the architecture gateway. It writes only by invoking a JobStore transition and replays JobStore after duplicate delivery. |
-| `Hive::RefactorPatrol::ArchitectureOccurrenceStore` | `lib/hive/refactor_patrol/architecture_occurrence_store.rb` | JobStore's product adapter over `OccurrenceJournal`. It resolves the exact current `occurrence_id` held by the v4 job aggregate, validates an exact next-generation successor against its predecessor, and delegates all occurrence/effect state; there is no sidecar binding or fallback index. Recovery takes one validated effect snapshot for the current segment and ignores already-finalized predecessor transitions. |
-| `Hive::RefactorPatrol::JobStore` | `lib/hive/refactor_patrol/job_store.rb` | Architecture Patrol's current-only v4 discovery aggregate and product recovery authority. V3 bytes remain opaque and the first current mutation starts a fresh v4 store. Each job owns one immutable intake transition and one current occurrence pointer; the pointer can advance only through the fenced rollover write after its predecessor is terminal. Finished discovery and diagnostic history retains historical occurrence ids, while an active discovery claim must match the current segment. New jobs complete after discovery with `actions: []`; old action fields remain read-only query compatibility. |
-| `Hive::RefactorPatrol::ArchitectureIntakeTransitions` | `lib/hive/refactor_patrol/architecture_intake_transitions.rb` | Shared command/daemon coordinator for manifest occurrence reservation, exact enqueue reconciliation, and transition identity. A duplicate manifest whose authoritative job already matches returns that aggregate directly, including after occurrence rollover, instead of consuming another transition cell. Callers retain policy and cadence; this collaborator adds no persistence of its own. |
-| `Hive::RefactorPatrol::DiscoveryCapacity` | `lib/hive/refactor_patrol/discovery_capacity.rb` | Defines the twelve-feature discovery slice and its fourteen-effect worst-case journal cost without loading command or transition dependencies. Scheduler admission uses it to roll before launch; manual `--pr` discovery waits for that automatic rollover instead of starting a claim that cannot finish. |
-| `Hive::RefactorPatrol::ClaimLivenessResolver` | `lib/hive/refactor_patrol/claim_liveness_resolver.rb` | Read-only process-identity probe shared by heartbeat, restart admission, and capacity rollover. It distinguishes a gone/reused owner from a matching live owner or child but never sends a signal. A restarted daemon may surface a proven-dead claim before its lease expires, then rechecks the claim under the normal CAS before a new generation; a live or uninspectable owner remains fenced. The separate `ProcessGroupResolver` remains the explicitly terminating expired-claim recovery path. |
-| `Hive::RefactorPatrol::DiscoveryTransitions` | `lib/hive/refactor_patrol/discovery_transitions.rb` | Facade used by `RefactorPatrolScheduler` and its command child: discovery claim/checkpoint/release and diagnostic block transitions live in separate coordinators. The scheduler claims and attaches the exact child process; `--job-manifest` reconstructs the non-claiming command-side coordinator before incrementally checkpointing through that attached token. `ArchitectureOccurrenceLifecycle` alone reserves/finalizes occurrences and recovers capture/event/receipt projections; the scheduler retains cadence, candidate selection, spawn, and envelope handling. |
-| `Hive::RefactorPatrol::ClaimMaintenanceTransitions` | `lib/hive/refactor_patrol/claim_maintenance_transitions.rb` | Narrow non-outcome port for generation-fenced discovery child-process attachment and heartbeat renewal. Command and scheduler roots cannot call those JobStore mutators directly. |
-| `Hive::Modules::Migration::PatrolEvidence` | `lib/hive/modules/migration/patrol_evidence.rb` | Strict immutable ordinary/architecture capture, intent, and receipt values shared only as an observation protocol. `EvidenceStore` appends canonical records, maintains bounded occurrence/intent indices, and repairs them through portable lexicographic pages whose cursors freeze one high-water inventory plus an order-independent filename fingerprint. `ManagedDirectory` rejects linked managed components and descriptor-binds its bounded reads, locks, and atomic writes; evidence remains observation-only and has no mutation or recovery authority. |
-| `Hive::Modules::Migration::PatrolEvidenceReceipt` | `lib/hive/modules/migration/patrol_evidence_receipt.rb` | Canonical immutable U3 qualification input binding one run, candidate, catalogue/source/manifest/configuration/scenario set, repository change window, U2 capture, exact terminal effect receipts, fault steps, artifacts, reviewer, and timestamps. Receipt construction bounds collections before mapping, rejects cross-occurrence effects, rejects non-string or invalid-UTF-8 string fields with `Hive::ConfigError`, and requires captures to bind exactly their committed or reconciled legacy receipts; its JSON schema composes the strict U2 capture, projection, and effect schemas. |
-| `Hive::Modules::Migration::PatrolEvidenceVerifier` | `lib/hive/modules/migration/patrol_evidence_verifier.rb` | Pure verifier that re-parses a receipt and compares every authority-sensitive binding, including the exact receipt identity, complete fault-step set, and each typed artifact with caller-supplied expected values. Expected bindings retain their declared JSON types and are never string-coerced. It never derives expected project, candidate, scenario, artifact, capture, epoch, projection, or effect identities from the receipt it is checking, and only the verifier can construct its verified token. |
-| `Hive::Modules::Migration::PatrolEffectIndex` | `lib/hive/modules/migration/patrol_effect_index.rb` | Bounded immutable run-wide projection over verified effect receipts. Exact receipt replay is counted but idempotent. Distinct committed/reconciled externally observable effects that collide by intent, idempotency key, or semantic identity become qualification findings; local `job`, `discovery`, and `action` JobStore transitions are keyed only by intent and idempotency so a fenced recovery generation may repeat a local target/scope without creating a false semantic collision. `attempted` and `unknown` effects remain visible and block qualification, while denied, known-not-sent, and failed receipts remain non-effects. |
-| `Hive::Modules::Migration::PatrolQualification` | `lib/hive/modules/migration/patrol_qualification.rb` | Pure immutable qualification value. Each module requires at least ten unique comparable trigger/repository/SHA/change-window decision identities spanning at least two decision classes, repository SHAs, and change windows under one configuration digest; timestamp, fault-step, artifact, or exact receipt replay cannot inflate the count, while decision/effect replay counts remain visible. The qualification binds the earliest capture time derived from verified receipts, so later report recovery cannot relabel pre-contradiction observations as fresh. One capture or occurrence cannot be rewrapped into conflicting repository/window decisions. Terminal non-legacy/shadow effects, unsettled effects, duplicate identities, mixed run bindings, and unsuperseded contradictions fail closed. |
-| `Hive::Modules::Migration::ReportProjection` | `lib/hive/modules/migration/report_projection.rb` | Pure report-v2 projection over exactly `deterministic` and `installed_live` qualification lanes. Both lanes must bind the same candidate, catalogue, source, manifest, scenario, and configuration set. Persistence admits only monotonic successor reports: a missing lane may be added; an `evidence_required` lane may advance through a strict same-run receipt superset or a disjoint fresh run; a qualified lane may be exactly invalidated; and recovery from an invalidated report requires new run identities, disjoint receipt sets, and evidence beginning after the latest contradiction in both lanes. Successors preserve migration provenance and every transition remains digest-CAS guarded. The v2 JSON schema accepts both strict persisted projections and the command's shared current-version error envelope. An explicitly migrated empty report records `evidence_required` rather than qualification. |
-| `Hive::Modules::Migration::ReportMigration` | `lib/hive/modules/migration/report_migration.rb` | One-off project-local report converter over the existing `Report` storage facade. It accepts the complete released v1 success, null-configuration, and error-envelope shapes; preserves exact source bytes in a fixed archive; validates source/archive/receipt linkage on read-only probes; repairs a missing receipt only for the initial unsuperseded migration projection under the existing exclusive lock; rejects missing provenance after any successor; binds that immutable receipt to migration provenance rather than mutable later report bytes; uses digest CAS in both directions; and owns no cutover, rollback, retry, or effect recovery. |
-
-`Hive::Modules::Migration::Patrols.deterministic_receipt_for!` is the bounded
-U3b receipt-construction seam. Its exact module/trigger-id selector must resolve
-one comparable terminal shadow record while the exclusive migration lock is held;
-the record supplies the capture, decision projection, and complete
-observational effect set, while caller metadata remains subject to the receipt
-protocol's configuration checks and must exactly match the nonempty repository
-target captured by the product scheduler. Both Patrol products use the same
-host-qualified `host/owner/name` target: ordinary Patrol derives it from the
-registration and Architecture Patrol binds the manifest repository to its PR
-URL host. Missing, ambiguous,
-nonterminal, divergent, duplicate-effect, configuration-mismatched, or
-identity-mismatched evidence fails closed.
-
-New Architecture Patrol captures require the host-qualified target. The
-occurrence store accepts an older owner/name-only project only when the exact
-same immutable capture is already durable (or its job pointer already binds
-that occurrence); replay compatibility cannot create new qualification
-evidence. The deterministic receipt facade requires an exact
-`host/owner/name` target and rejects owner/name-only replay even when caller
-metadata repeats that legacy value.
-
-`Hive::Modules::Migration::Patrols.admit_deterministic_qualification!` remains
-the single production admission path for U3b evidence. It accepts bounded raw
-receipt documents plus independently computed expected bindings, constructs no
-scenario or collector, and owns only verification, deterministic qualification,
-and digest-CAS report-v2 merge.
-
-The internal `hive module migration deterministic-receipt` and
-`deterministic-qualification` actions expose only those two facades. They read
-one exact-key, strict UTF-8 JSON object from bounded stdin; qualification also
-requires `--yes`. They accept no request path and add no runner, store, or
-cutover authority. Their command layer loads only shared lightweight errors,
-not the module lifecycle/store base.
-
-Patrol Fix has no runtime migration or cutover mode. New accepted findings enter
-the source outboxes directly. To import historical ordinary findings once, use
-`ruby script/migrate_patrol_findings.rb PROJECT_ROOT`.
-The script reads active ordinary findings, writes one normal `patrol-fix` task
-per finding through `TaskCapture`, and leaves the original finding JSON in
-place as history. Its deterministic idempotency key makes a rerun a no-op; it
-does not inspect GitHub, create issues or PRs, write an outbox, or maintain a
-cutover ledger. `--dry-run` prints the tasks without changing the project.
-
-The separately invoked reduced installed/live smoke has exactly five
-packaging owners: `Result` owns the canonical bounded schema and claim fences;
-`Candidate` owns streamed archive and exact installed closure/module identity;
-`Sandbox` owns the fixed digest-pinned container and whole-process custody;
-`ProviderProbe` owns one closed host-side authenticated transport check; and
-`Runner` owns manual authority, composition, expected-byte publication, and
-explicit retention cleanup. The existing E2E controller supplies only the
-bounded read-only `external_smoke` operation. The sandbox mounts that exact
-trusted controller script and its secret-pattern support as separate read-only
-files plus a separately admitted read-only candidate source tree; candidate
-builds run only from a writable copy. Installed gemspecs remain opaque hashed
-files and are never evaluated by the trusted controller. Runner binds one
-canonical one-hour authorization to the controller/candidate/image/invocation,
-the live registered project repository/HEAD/state tree, and the observation
-file, then rejects retained authorization replay. Transient archives, source,
-container custody, and controller scratch data stay outside the retained
-result-only evidence directory. The sandbox uses one hashed engine executable
-and a closed environment for probe, execution, and ID-owned teardown; it never
-loads the candidate's controller copy or mounts the controller checkout. This path does not construct
-`PatrolQualification`, write report v2's `installed_live` lane, schedule or
-recover Patrol work, admit evidence for an operator, or authorize cutover.
-
-## State
-
-Patrol state is deliberately inspectable and removable:
+## Runtime shape
 
 ```text
-.hive-state/patrol/
-  features/*.json
-  findings/*.json                 # lifecycle + target/validation identity
-  patches/*.json
-  runs/*/                         # agent transcripts/output
-  runs/selection-*.json           # immutable score/decision audit
-  state.json                      # cycle state only
-  fingerprints.json               # publication mappings only
-  occurrences/occ-*.json          # authoritative occurrence/effect/outbox cells
-  occurrences/journal-state.json  # bounded fences + dirty generation + recovery backoff
-  occurrences/.sender-locks/*.lock # stable live-sender flock authorities
-  occurrences/.attempt-locks/*.lock # schedule-attempt allocation locks
-  occurrences/.journal-state-locks/*.lock
-  occurrences/.inventory-locks/*.lock
-  dismissed.json
-.hive-state/module-runtime/migration/patrol-evidence/
-  captures/*.json
-  receipts/*.json
-  indexes/occurrences/*.json
-  indexes/intents/*.json
-.hive-state/module-runtime/migration/
-  .mutation.lock                 # descriptor-confined Report/Patrols authority
-  report.json                    # strict report-v2 projection at runtime
-  report.v1.archive.json         # exact one-off source bytes
-  report.migration.json          # immutable archive/projection provenance
+ordinary review ──> StateStore finding ──> FixAdmissionAdapter ──┐
+                                                               ├─> AdmissionStore ─> patrol-fix task
+architecture review ─> JobStore disposition ─> FixAdmissionAdapter ─┘
 ```
 
-The managed repository worktree is not edited by fixes. `Fixer` uses [[modules/worktree]] to create a branch named `hive-patrol/<feature-id>-<fingerprint8>` under the project's worktree root. When `patrol.review_prs` is enabled (default), that worktree is kept after PR creation and referenced by a synthetic `6-review` task with display name `Patrol: <finding title>`. When disabled, the successful local worktree is removed after the branch is pushed and the PR opens.
+The adapters translate accepted source bytes into one strict
+`PatrolFix::SourceSnapshot` and call `AdmissionStore#reserve!` directly.
+Reservation is idempotent by occurrence identity and source digest. The
+admission scheduler decides whether a source matches an existing task root or
+needs a new task, records materialization intent, binds the durable task, and
+only then acknowledges the source.
 
-## Patrol PR reviewer (cheap by default)
+No intermediate handoff outbox or project-level Patrol Fix operational
+projection exists. Patrol Fix tasks use the normal task graph, daemon capacity,
+status, TUI, bot, and Watch contracts.
 
-Patrol PRs flow into `6-review` and are reviewed by `patrol.review.reviewers` (a separate set from human PRs' `review.reviewers`) — see [[stages/review]] `run_reviewers` → `patrol_task?` routing. Because patrol opens many PRs per cycle, the **DEFAULT patrol reviewer is the native single-pass `codex review`** adapter (`kind: codex_review`, `name: codex-native-review`), not the multi-persona `ce-code-review` fan-out (6–18 subagents). It runs one tuned, read-only `codex review` and captures stdout into the GFM-checkbox findings file the triage/fix loop already consumes, so the loop is unchanged. See [[modules/reviewers]] `Reviewers::CodexReview` for argv/format details. Operators can override `patrol.review.reviewers` per project to add the ce-code-review fan-out or Claude.
+## Ordinary Patrol
 
-## Ordinary patrol versus architecture patrol
+`Hive::Commands::Patrol` maps a freshly fetched default-branch revision,
+reviews a bounded rotating feature batch, validates evidence, and persists
+immutable findings under:
 
-Ordinary patrol scans the current repository into language-neutral components
-and command-contract features, then attempts globally ranked production-defect
-fixes above the alpha gate. Documentation, test-gap, and maintainability
-observations are excluded from its automatic lane. Architecture patrol
-([[commands/refactor-patrol]]) is triggered by an immutable merged-PR
-occurrence, maps language-neutral feature and documentation slices from that
-merge, and requires every architectural thesis to receive a durable `fix`,
-`discuss`, or `dismiss` route before any separately authorized action.
-Architecture Patrol fetches and pins an exact committed default-branch SHA, then
-runs mapper and reviewer source reads from an ephemeral detached,
-clean worktree. Persistent state and collision ledgers remain rooted in the
-registered project, so a developer's active branch or uncommitted files neither
-alter nor block the analysis. A partial retry rematerializes its original
-pinned SHA even after the default branch advances; an explicit replay of a
-terminal occurrence instead pins the new current-default head. Unclaimed dry
-runs use unique analysis-tree keys, and deterministic claimed retries prune an
-orphaned Git worktree registration when its directory has disappeared.
+```text
+<hive_state_path>/patrol/
+├── state.json
+├── findings/*.json
+├── runs/
+└── logs/
+```
 
-The two mappers retain deliberately different breadth, but both reviewers now
-start from at most four owned files selected with a 32 KiB source budget.
-Ordinary mapping still records four owned plus four context files, while
-architecture keeps six plus six for component context. Context and test paths are not preloaded into the ordinary review
-prompt, and an oversized first entrypoint is retained. Both prompts permit
-only one evidence-driven follow-up round and explicitly prefer an empty result
-to speculation. A Claude review receives only `Read`, `Grep`, `Glob`, and
-`Write`, with slash commands disabled; a fix additionally receives `Bash` and
-`Edit`. The third response must finalize; a fourth is allowed only as emergency
-finalization when the provider misses that contract. After a non-empty output
-artifact and its final usage delta settle in either provider event order, Hive
-terminates the child and lets the existing schema/evidence parser decide
-whether the result is admissible.
+`Hive::Patrol::StateStore` owns only ordinary Patrol state. It does not own
+cross-product occurrences, effect receipts, migration epochs, or projection
+outboxes. The daemon scheduler decides cadence from the configured trigger,
+reserves a direct cycle lock, and launches `hive patrol PROJECT --json`.
+Successful or failed child completion updates scheduler backoff only; the
+command persists the authoritative finding and scan state.
 
-The two systems share only the JSON persistence mechanics in
-`Hive::Patrol::BaseStateStore`; their domain records and proof remain separate.
-They deliberately retain separate namespaces:
-`.hive-state/patrol/` for ordinary patrol and
-`.hive-state/refactor_patrol/v2/` for retained architecture manifests,
-merge classifications, frozen post-merge batches, runs, logs, and result
-receipts. Existing `hive-refactor-patrol-pr-manifest` v2
-artifacts remain readable for redelivery; that narrow manifest compatibility
-does not make old JobStore data readable. Architecture jobs,
-occurrences, and the job-query index live only under
-`.hive-state/refactor_patrol/v4/`. V3 JobStore bytes remain opaque; the first
-current mutation starts an empty v4 store without a compatibility reader.
-`Hive::Daemon::PatrolArbiter` is the shared
-discovery orchestration seam: it alternates ready work under the project's
-`daemon.max_concurrent_patrol_scans` capacity. Enabling architecture discovery
-does not enable ordinary patrol or downstream workflow execution. The
-first-party Architecture module grants no GitHub or network mutation;
-historical action receipts remain read-only provenance. Neither system can
-consume the other's state as proof of completion.
+## Architecture Patrol
 
-## Daemon triggers
+Merged-PR intake and scheduled architecture review remain separate discovery
+sources:
 
-Patrol is **opt-in**. A project with **no patrol section at all** (or a patrol section that omits `mode:`) resolves to `enabled: false` — [[modules/config]] only derives mode knobs when `mode:` is **explicitly present** in the raw config. `medium` is the default offered by the `hive init` *prompt* (which writes an explicit `mode: "medium"` into the rendered template), never a config-resolution default, so legacy projects without a patrol block are never silently enabled.
+- the merge reconciler classifies merged PRs and freezes accepted work into
+  bounded post-merge batches;
+- the scheduler materializes each batch directly into a v4 JobStore aggregate;
+- scheduled slice production reviews one pinned architecture slice and reserves
+  accepted findings directly in Patrol Fix;
+- JobStore discovery claims, checkpoints, cooldowns, and retirement remain the
+  sole lifecycle authority.
 
-Repository patrol is also coding-workflow-only. Ordinary scheduling, merged-PR
-architecture intake, architecture discovery reservation, and direct
-execution all require the project's resolved `default_workflow` to be
-`coding`; a stale or hand-edited enable flag cannot launch either patrol for
-Writing, Architecture, Bench, or another non-coding default. Architecture
-Patrol's read-only `--list` and `--show` queries remain available so prior
-evidence is not hidden, and ordinary recovery can finish projecting an already
-reserved receipt without starting a new repository scan.
+Current state is split intentionally:
 
-`patrol.mode` controls cadence and two independent per-project, per-engine
-UTC-day scheduled-discovery allowances: ordinary and Architecture Patrol each
-receive 16 launches in `ultrapatrol`, 8 in `high`, 4 in `medium`, and 2 in
-`low`. `off` disables ordinary scheduling; separately enabled Architecture
-Patrol retains the default four-launch lane. The retired
-`max_agent_spawns_per_day` key is accepted only as inert legacy config and does
-not alter either lane. There are no Patrol token budgets or token admission
-checks. UsageDb remains telemetry; a strict owner-private allowance ledger next
-to UsageDb is admission authority and is keyed by stable registry `project_id`,
-UTC date, and engine. Per-date shards retain clock-rollback evidence without
-making each launch rewrite the complete history. The ledger records an atomic reservation immediately before each
-scheduled discovery provider spawn, so controller loss cannot reopen a slot.
-Manual and daemon-scheduled discovery share the same engine lane.
+```text
+<hive_state_path>/refactor_patrol/
+├── v2/
+│   ├── reconciler.json
+│   ├── reconciler-progress.json
+│   ├── merge-classifications/
+│   ├── post-merge-batches/
+│   ├── manifests/
+│   ├── results/
+│   ├── runs/
+│   └── logs/
+└── v4/
+    ├── jobs/
+    └── indexes/job-query/
+```
 
-Ordinary review batching is bounded by `max_features_per_cycle` and remaining
-ordinary discovery capacity. Admission, validation, review, publication, and
-merged-PR Architecture discovery do not consume
-scheduled-discovery allowance. Daily exhaustion parks only the exhausted lane
-until the next UTC day. Provider retry deadlines are durable per lane, survive
-daemon restart and UTC rollover, and do not block the other Patrol engine or
-standard workflows. When
-a later review fails, the SHA-bound cursor
-advances past only the proven-clean prefix; the failed feature and remaining
-suffix stay pinned for retry.
+The immutable `occurrence_id` and `intake_transition_id` fields in a v4 job
+are direct aggregate identities. They are not pointers into an occurrence
+journal and do not authorize a migration or replay lane. New intake derives
+both IDs deterministically from the job ID and manifest checksum.
 
-Scheduled Architecture Patrol is no longer sourced from merged-PR JobStore
-rows. Each schedule claim fetches and maps current `main`, selects one stable
-architecture feature ID after its durable cursor, and runs exactly one review
-launch at that pinned SHA. Removed IDs are skipped and newly mapped IDs join the
-ordered cursor. A successful exact-SHA result is persisted as an enumerable
-scheduled-result aggregate and offered to the fix-admission outbox before the
-cursor advances. A coverage-pass generation distinguishes later same-SHA
-sweeps, while crash replay within one pass converges on the same occurrence.
-Merged-PR jobs remain a separate post-merge discovery authority.
+V3 JobStore bytes remain opaque. There is no runtime reader, converter, reset,
+archive, restore, or fallback path. A fresh project creates v4 state on its
+first authoritative mutation; read-only queries do not create state.
 
-Merged PR delivery now settles a durable classifier row before any JobStore
-row exists. Deterministic irrelevant or recursive merges stop there; ambiguous
-merges use a supervised normal-profile LLM gate. Accepted rows bypass scheduled
-allowance and are claimed as frozen current-main batches of overlapping slices
-(eight merges, 512 paths, ten minutes). A larger PR splits into multiple owner
-batches. Only those owners become v4 jobs/events; classifier rows retain the
-one-to-many owner binding, so replay never manufactures staging or alias jobs.
+## Scheduling and capacity
 
-Architecture discovery leases are crash fences, not mandatory restart delays.
-Candidate selection read-only probes an attached worker's PID, process start
-time, and process group. When that exact process is already gone, the new
-daemon may supersede the abandoned generation and resume immediately even if
-its two-hour lease has not expired. A matching live worker, missing identity,
-or failed probe remains fenced; dry runs never perform the probe or mutation.
+Patrol is opt-in and coding-workflow-only. Ordinary and Architecture scheduled
+discovery have separate per-project, per-engine daily launch allowances.
+`UsageDb` is telemetry, not admission authority. Provider resource exhaustion
+parks only the affected lane.
 
-`Hive::Daemon::PatrolScheduler` still consumes the lower-level `patrol.trigger`
-modes. `continuous` dispatches when either the default branch SHA changed or
-`poll_interval_sec` has elapsed, allowing patrol to keep reviewing existing
-feature slices between infrequent merges. A not-yet-due timer wakes at the
-exact `last_run_at + poll_interval_sec` deadline; daemon startup does not push
-that deadline out by another full interval. A due candidate consumes its
-cadence slot only when reservation succeeds, so ordinary Patrol remains
-eligible on the next daemon tick when the shared arbiter gives the current
-slot to Architecture Patrol. Each cycle
-persists a SHA-bound feature cursor; `last_scanned_sha` advances only after the
-full mapped sweep succeeds. `new_commits` therefore keeps dispatching
-successive batches until that sweep completes. `timer` dispatches solely from
-`last_run_at` age.
+The Patrol arbiter alternates ready ordinary and architecture candidates under
+`daemon.max_concurrent_patrol_scans`. Candidate discovery is read-only;
+reservation revalidates current project registration/configuration and acquires
+the native store claim immediately before dispatch.
 
-## First-party module adapters and ownership
+Architecture discovery claims retain PID, process-start-time, process-group,
+lease, heartbeat, owner, and generation. A stale generation cannot checkpoint.
+A new daemon may reclaim a dead exact process; live or unverifiable ownership
+remains fenced.
 
-`modules/patrol` and `modules/architecture-patrol` package the existing engines
-as reviewed first-party modules. Their registered adapters translate immutable
-module trigger snapshots into the existing command/engine seams; package code
-is never loaded. Ordinary Patrol accepts schedule and `task.completed`, while
-Architecture Patrol accepts schedule and `pull_request.merged`. The existing
-merge reconciler remains the only GitHub intake producer.
+## Patrol Fix and publication
 
-The adapters deliberately do not relocate durable product state.
-`.hive-state/patrol/`, `.hive-state/refactor_patrol/`, budgets, findings,
-claims, artifacts, and recovery receipts remain authoritative. A durable migration ownership epoch
-keeps legacy scheduling as the sole mutator during shadow comparison. Cutover
-remains fail-closed until the migration report's current qualification
-requirements, reviewer sign-off, and no unexplained or duplicate effects are
-satisfied; rollback
-restores legacy ownership without moving checkpoints or replaying events.
-Missing or corrupt migration state cannot authorize a module mutator. The
-reviewed legacy configuration is copied into the migration binding with its
-digest and is the only configuration the adapters execute. A shared migration
-lock spans the final legacy ownership check, scheduler reservation, process
-spawn, and Architecture Patrol claim attachment; cutover and rollback take the
-same lock exclusively. Status and doctor surface unadopted, fenced, and corrupt
-migration state rather than reporting an apparently healthy active module.
-The U3a report-v2 projection is evidence-only: current Patrol cutover rejects
-it with a typed operator-boundary error until a separately authorized lifecycle
-slice owns cutover. Interrupted stable upgrades restore both stable admissions
-before normal scheduling resumes.
+Patrol Fix owns the repair workflow:
 
-Shadow comparison consumes exact independently persisted finalized
-`PatrolCapture` records. Selection is immutable occurrence identity, not a
-terminal-status shortcut: `selection_input` is validated by the separate
-ordinary or architecture projector, and both produce the strict shared
-`PatrolDecisionProjection`. Legacy producers persist the decision reached by
-their actual branch/candidate path; only the module side projects the immutable
-primitive input. A deliberately divergent pair therefore produces unexplained
-comparison differences instead of agreeing by construction. The provisional
-capture must have no outcome or effects. Finalization retains the exact
-project, trigger, reservation, owner, selection input, and selection, then adds
-a non-null `outcome_class`, structured outcome, and the exact terminal receipt
-ids. Ordinary scheduling first reserves one authoritative occurrence and
-records disabled, not-due, or due before the child runs. Architecture Patrol
-reserves one occurrence from the strict merge manifest and threads its
-job/phase selection through enqueue, discovery claims, checkpoints, and
-finalization; it does not mint a second scheduler
-occurrence. Missing, malformed, foreign, provisional, provenance-only, or
-schema-import captures remain non-comparable. Module-native cron targets are
-suppressed while legacy or shadow owns either product, preventing a second
-schedule producer.
+1. Inbox re-investigates the current source and makes the semantic admission
+   decision.
+2. Fix creates or recovers one exact local worktree generation.
+3. Validate runs only configured or structured validation commands.
+4. Review records an independent route decision.
+5. Publish uses `Hive::GithubPublication`.
 
-Shadow-history qualification no longer materializes the full directory or
-record set. `BoundedFileInventory` rejects excess and unexpected children
-before record bodies are read, emits restart-portable lexicographic pages, and
-freezes each scan at a cursor-bound high-water mark. `Report` consumes that
-source incrementally into constant-sized per-module aggregates. The one-off v1
-migration uses the same no-follow bounded reader for live evidence, checkpoints,
-and archive collision checks; linked, special, or oversized archives fail
-closed. Its v2 checkpoint binds the SHA-256 of the source, immutable archive,
-and live replacement before a file can advance from pending to migrated.
-Restart can adopt an already-written replacement only when all three bindings
-still match. The completion stamp is written only after a fresh inventory proves
-that no v1 live evidence remains. Migrated v1 records are archived,
-non-comparable diagnostics; new native v2 records are accepted only through the
-strict selection/outcome schema.
+`Hive::GithubPublication` is the single PR-publication mechanism used by
+Patrol Fix and the normal coding open-PR path. It owns durable push/create
+intent, remote reconciliation, expected-absence leases, and exact hosted
+observation. Discovery code has no remote mutation authority. Escalation creates
+one linked standard coding task through `TaskCapture`; it does not create a
+GitHub issue.
 
-`Hive::Modules::CapabilityContext` still preflights installed grants, and each
-mutation reloads the live owner epoch, enabled configuration, installed module
-generation, and effective grants at its separate ordinary/architecture
-gateway while migration admission remains held across the sink. Sender
-liveness is not persisted: a process-local keyed mutex plus a stable, never-unlinked
-`0600` flock file is the sole live-sender authority. The occurrence records
-only `prepared`, `dispatch_uncertain`, or a terminal
-`committed`/`reconciled`/`denied`/`failed` fact. A crash releases the kernel
-lock and leaves `dispatch_uncertain`; exact absence remains unresolved unless
-the product gateway's closed sink contract marks that sink retry-safe
-(`state`/`finding` for ordinary Patrol and `job`/`discovery` for Architecture
-Patrol). The occurrence store mints a terminal receipt once and returns those
-exact bytes on every replay. An ordered outbox keeps failed evidence/event
-projection retryable and
-acknowledges exact typed tuples rather than bare ids. Shadow authority can emit an
-`attempted` evidence receipt but cannot alter StateStore or JobStore.
-StateStore and JobStore are the only product recovery
-authorities; the append-only evidence tree is never a retry input. First-party
-modules receive no consent bypass.
+## One-time historical import
 
-The journal streams its initial bounded filename snapshot and never constructs a
-second recovery inventory. Lock acquisition is ordered
-identity → journal state → inventory → occurrence record. Scheduled ordinary
-attempts, module-hook occurrences, and Architecture Patrol merge/job occurrences
-carry a canonical window plus generation, so completed identities compact into a
-monotonic high-water/floor instead of an ever-growing exact set. Low-volume
-manual/direct captures use a bounded exact-digest fence. When that fence is full,
-the journal retains terminal records and fails closed rather than permitting a
-replay. Recovery failures persist one bounded UTF-8 diagnostic cell with
-60/300/900-second retry backoff; successful generation-matched recovery clears
-it after restart.
+`script/migrate_patrol_findings.rb [PROJECT_ROOT] [--dry-run]` reads active
+ordinary findings from the local native StateStore and creates ordinary
+`patrol-fix` tasks through `TaskCapture`. It is the only Patrol migration
+path. It has no daemon hook, timer, module owner, cutover state, rollback,
+qualification report, or compatibility reader.
 
-This boundary remains an internal `candidate`. The opt-in reduced U3b successor
-under `test/e2e/` can take a prepared disposable project's real persisted
-ordinary and Architecture Patrol shadow records through an archived, privately
-installed candidate's internal receipt and qualification process facade. It neither creates
-those scheduler records nor supplies independent controls: catalogue and
-controller remain same-head test assets. The controller pins and archives the
-candidate before loading its catalogue, digest-binds its executing source to
-the archived copy, closes ambient Git configuration, and rechecks candidate
-HEAD and cleanliness after capture. Shadow/report input uses descriptor-bound
-no-follow reads, count and byte ceilings, and the campaign's monotonic deadline;
-owned process groups are reaped even after a terminal leader result. Retained
-evidence redacts and scans every string through `Hive::SecretPatterns`, and
-typed process outcomes validate status according to their exact kind. Interior atomic crash contracts stay
-owned by their exact focused tests. Full independent U3b qualification,
-installed/live U3c evidence, catalogue promotion, and mutator cutover therefore
-remain unproven.
+The importer is idempotent by
+`patrol-fix:legacy-finding:<finding-id>`. Matching existing tasks are reused;
+conflicting matching metadata fails closed. Unrelated malformed task metadata
+is ignored.
 
-## Unified operational projection
+## Read models
 
-The daemon is the sole source-composition edge for Patrol operations. Once per
-project and tick, `Hive::Daemon::PatrolFixOperationalProjection` reads the
-    bounded ordinary-discovery, Architecture-discovery, admission, workflow,
-    successor, publication, post-merge, and existing usage authorities
-and emits one `hive-patrol-fix-operational-projection` v1 document. Status,
-Watch, TUI, bot, and web pass through that validated document; they do not
-reopen Patrol or Architecture stores and infer their own state.
-
-The projection separates scheduled discovery allowances from normal workflow
-concurrency, keeps ordinary and Architecture lanes independent, and counts
-conversion cohorts by unique mechanical `root_key` values so aliases do not
-inflate results. PR-created and currently-open PR counts remain distinct.
-Provider holds are reported as current intervals only; historical stage latency
-is emitted only where durable stage or publication timestamps exist. The
-nullable current-UTC-day token section is telemetry only and never affects
-allowances, admission, or dispatch. A failed source read makes only its bounded
-section unavailable and adds a redacted diagnostic.
-
-The projection is observational. Every operator mutation still goes through a
-generation-guarded `OperationalAction`; web and bot do not gain a new write
-path.
+The web Patrol page reads bounded `FindingQuery` and `JobQuery` results
+directly. The two lanes fail independently and expose no mutation controls.
+Patrol Fix contributes no project-level status schema; its tasks appear through
+the standard task projections.
 
 ## Safety invariants
 
-- Patrol is opt-in at the scheduler gate AND at config resolution: a missing patrol section, a missing `mode:`, `patrol.mode: off`, or `patrol.enabled: false` all leave patrol disabled and prevent daemon dispatch, and the daemon still requires `daemon.enabled`.
-- Accepted findings enter the unified `patrol-fix` workflow directly and use normal workflow concurrency independently of discovery allowances. The one-time importer creates tasks for historical ordinary findings without preliminary GitHub issues or PRs.
-- Patrol Fix review launches one independent lightweight reviewer against the controller-resolved current manifest, exact clean worktree HEAD/diff, fix receipt, and validation receipt. Repository and finding bytes are delimited untrusted context; only the strict `publish`, `rework`, `escalate`, `reject`, or `blocked` receipt can authorize a route.
-- `rework` durably advances the same task to a new generation before returning it to Fix, rotates the existing worktree custody receipt while preserving prior owned bytes, and makes prior validation ineligible. Two completed rework decisions are allowed by default; after that the controller omits `rework` from both prompt and parser. An operator reopen also advances generation, and only a review-stage reopen may explicitly carry an unchanged exact fix/validation pair into the fresh review generation.
-- `reject`, `blocked`, and `escalate` remain parked and non-done. Escalation creates or reconciles exactly one linked standard coding task through `TaskCapture`; the controller repairs either reciprocal link after interruption and never opens a preliminary GitHub issue.
-- A new sweep scans the exact freshly fetched remote default without moving the operator's local branch; configured-remote fetch failure stops before mapper/reviewer work. PR creation separately re-fetches the default for structured fresh-base reproduction/root-cause proof, configured validation, and secret scanning, so an older pinned review snapshot cannot become an old-base patch.
-- Synthetic `6-review` handoff requires exact hosted base/head identity plus a final live remote base/head check for both first attempts and retries; a stale-base or raced-base PR cannot create a patrol review task.
-- A non-dry-run cycle requires at least one configured validation command before mapping, review, or state mutation. `--dry-run` remains review-only and bypasses that preflight.
-- Each semantic root maps to at most one durable active lineage per target. Same-target terminal duplicates are suppressed; shipping cycles rank the durable active backlog with newly reviewed findings, so a per-feature skip or rotating feature cursor cannot strand retryable work. A newer target may create a recurrence lineage, superseding older active evidence while keeping resolved/rejected history. An open PR still blocks additional variants from the same feature, and one feature normally supplies at most one fix per cycle.
-- A failed patrol-to-review handoff is not treated as an active fingerprint state, so later patrol cycles can retry instead of losing the opened PR from the review queue; an exact existing synthetic task is reconciled instead of duplicated.
-- Every mutating ordinary or architecture sink has one durable semantic intent, one process-and-thread sender lock, and canonical replay bytes. No lease expiry, heartbeat, or PID can authorize a competing sender. Exact absence authorizes redispatch only for the gateway-owned retry-safe local sink set; remote absence remains unresolved.
-- Ordinary schedules, module hooks, and Architecture Patrol merged-PR jobs use canonical window/generation reservations and compacted high-water/floor fences. Concurrent retries reuse one reserved attempt; only a terminal prior attempt advances the generation, stale compacted generations fail closed, and finalized occurrences reject new effect dispatch.
-- Manual/direct non-sequenced occurrences use a bounded exact retirement fence. Saturation retains the terminal occurrence instead of deleting its replay proof; it never authorizes duplicate work.
-- Architecture `job`, `discovery`, and `action` transitions pass through `TransitionGateway`; it owns no files or retry state, and JobStore remains authoritative.
-- Active occurrence recovery uses the bounded `recovery-index.json` locator.
-  Reservation publishes membership before its occurrence record, retirement
-  removes membership only after the record is inactive, and crash recovery
-  performs at most one bounded authoritative scan to repair a missing,
-  malformed, stale, or dirty index. Idle ticks never scan retained terminal
-  history.
-- A daemon-launched `--job-manifest` discovery child reconstructs the same
-  transition coordinator before reviewing. It never claims independently; its
-  incremental checkpoints and heartbeats use only the exact PID/start-time and
-  generation-bound token attached by the scheduler.
-- JobStore runtime and child completion accept v4 only. Construction and
-  read-only queries do not create state; the first mutation lazily creates
-  only v4. Runtime Hive has no v3 parser, converter, reset command, archive
-  layer, package hook, or retry timer. V3 bytes remain ignored by every
-  downstream owner while every other
-  live reconciler owner and the global terminal-proof catalog remain unchanged.
-  Malformed v4 job, occurrence, or query-index evidence fails closed instead
-  of being rewritten.
-- Live v4 jobs, query sidecars, quarantine evidence, and action locks are
-  accessed only through one descriptor-confined `JobStoreFiles` port. A
-  store-wide admission lock enforces the 8,192-job bound before any new
-  per-job lock or query membership is created. Inventory accepts the exact
-  writer-owned `.JOB.json.tmp.PID.HEX` name only while it is a regular file or
-  has vanished during the atomic rename; every other unknown or non-regular
-  entry still fails closed, and special-file probes are nonblocking. The
-  next holder of a job's exclusive lock removes any temporary left by its
-  previous writer, so the bounded inventory can reserve exactly one temporary
-  slot per admitted job. A concurrent job write therefore cannot be
-  misreported as unresolved repository identity, including at store capacity.
-- Ordinary and architecture projection/recovery failures emit bounded project/occurrence/job diagnostics with retry count and next backoff time; durable outbox or exact-transition recovery remains pending while the scheduler backs off.
-- Ordinary child reaping isolates scheduler-completion failures. A worker that
-  exits with a prepared or dispatch-uncertain effect leaves its occurrence
-  reserved for exact recovery and emits one project-scoped fatal diagnostic;
-  it cannot unwind the daemon poll loop or terminate unrelated workers.
-- Closed-unmerged patrol PRs become dismissals and are skipped on future cycles.
-- Agent prompts treat findings, recommendations, and reproduction guidance as data. Unified validation commands come from project config or from a strict structured list deliberately selected by the trusted fixer; raw discovery prose is never copied into a shell command. Each unified decision and receipt binds the current evidence generation and controller-resolved head. Local Fix creates or recovers one exact no-fetch worktree generation, accepts only a clean committed descendant and bounded diff, and performs no GitHub authentication or remote effect. Validation records controller/agent provenance, command digest, timing, exit status, bounded redacted output, and a result digest that incorporates omitted redacted bytes even when a command fails; semantic acceptance remains Review's job. Stage execution, evidence-generation updates, and forward moves share the stable task lock, while the move journals and syncs both stage parents before acknowledging the transition.
-- Review launches use a bounded provider tool context and stop after the
-  completed artifact or four Claude turns; admission uses only the shared daily
-  launch count, while the structured parser still fails closed on malformed or
-  incomplete output.
+- Discovery and repair are separate: accepted findings only reserve workflow
+  admission.
+- Source acknowledgement occurs only after a durable task binding exists.
+- Ordinary and Architecture stores remain independent native authorities.
+- No scheduler, command, doctor, status, TUI, bot, or web path consults Patrol
+  migration ownership or shadow evidence.
+- No legacy Patrol fixer, issue filer, PR opener, review handoff, action runner,
+  or publication engine is runnable.
+- Remote PR publication goes through `Hive::GithubPublication`.
+- Historical import is explicit, local, one-time, and never daemon-triggered.
 
 ## Backlinks
 
 - [[commands/patrol]]
 - [[commands/refactor-patrol]]
 - [[modules/daemon]]
-- [[modules/config]]
-- [[modules/worktree]]
-- [[modules/agent]]
+- [[state-model]]
+- [[testing]]

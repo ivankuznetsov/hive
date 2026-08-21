@@ -40,35 +40,6 @@ class PatrolCapabilityCommandTest < Minitest::Test
     )
   end
 
-  def test_patrol_effect_capabilities_check_the_sink_specific_grants
-    command = Hive::Commands::Patrol.allocate
-    context = RecordingContext.new
-    command.instance_variable_set(:@capability_context, context)
-
-    assert command.send(:effect_capability_allowed?, capability: "filesystem_write")
-    refute command.send(:effect_capability_allowed?, capability: "unknown")
-    assert_equal(
-      [
-        [ :require_filesystem_write!, ".hive-state/patrol/**" ]
-      ],
-      context.calls
-    )
-  end
-
-  def test_patrol_effect_capability_denial_returns_false
-    command = Hive::Commands::Patrol.allocate
-    context = RecordingContext.new
-    context.define_singleton_method(:require_filesystem_write!) do |_path|
-      raise Hive::Modules::CapabilityDenied, "filesystem write denied"
-    end
-
-    refute command.send(
-      :effect_capability_allowed?,
-      capability: "filesystem_write",
-      capability_context: context
-    )
-  end
-
   def test_architecture_patrol_declares_every_observation_and_mutation_capability
     command = Hive::Commands::RefactorPatrol.allocate
     context = RecordingContext.new

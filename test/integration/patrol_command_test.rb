@@ -58,9 +58,9 @@ class PatrolCommandTest < Minitest::Test
       assert_empty payload.fetch("fix_results")
 
       store = patrol_store(repo)
-      pending = store.patrol_fix_admission_outbox.pending
+      pending = store.patrol_fix_admission_adapter.store.pending
       assert_equal 1, pending.length
-      assert_equal finding.id, pending.first.dig("snapshot", "identity")
+      assert_equal finding.id, pending.first.dig("source", "identity")
       assert_empty Dir[File.join(repo, ".hive-state", "patrol", "patches", "*.json")]
     end
   end
@@ -84,7 +84,7 @@ class PatrolCommandTest < Minitest::Test
 
       assert_equal Hive::ExitCodes::SUCCESS, status
       assert_equal 1, JSON.parse(out).fetch("findings")
-      assert_equal 1, patrol_store(repo).patrol_fix_admission_outbox.pending.length
+      assert_equal 1, patrol_store(repo).patrol_fix_admission_adapter.store.pending.length
     end
   end
 
@@ -111,7 +111,7 @@ class PatrolCommandTest < Minitest::Test
       second_payload = JSON.parse(second_out)
       assert_equal 1, second_payload.fetch("findings")
       assert_equal 1, patrol_store(repo).findings.length
-      assert_equal 1, patrol_store(repo).patrol_fix_admission_outbox.pending.length
+      assert_equal 1, patrol_store(repo).patrol_fix_admission_adapter.store.pending.length
     end
   end
 
@@ -148,7 +148,7 @@ class PatrolCommandTest < Minitest::Test
 
       assert_equal Hive::ExitCodes::SUCCESS, status
       assert_equal true, JSON.parse(out).fetch("dry_run")
-      assert_empty patrol_store(repo).patrol_fix_admission_outbox.pending
+      assert_empty patrol_store(repo).patrol_fix_admission_adapter.store.pending
     end
   end
 
@@ -164,88 +164,7 @@ class PatrolCommandTest < Minitest::Test
     assert_includes err, "unknown project"
   end
 
-  def test_manual_capture_refuses_a_reserved_daemon_occurrence
-    state = Object.new
-    state.define_singleton_method(:recovery_active?) { true }
-    command = Hive::Commands::Patrol.new("demo")
-
-    error = assert_raises(Hive::ConfigError) do
-      command.send(:patrol_capture, {}, state)
-    end
-
-    assert_equal "patrol cycle is already reserved; wait for daemon recovery",
-                 error.message
-  end
-
-  def test_manual_capture_requires_the_selected_migration_authority
-    with_patrol_project do
-      entry = Hive::Config.find_project("demo")
-      command = Hive::Commands::Patrol.new(
-        "demo", migration_authority: :module
-      )
-
-      error = assert_raises(Hive::ConfigError) do
-        command.send(:build_manual_capture, entry)
-      end
-
-      assert_equal "patrol mutation authority is not admitted", error.message
-    end
-  end
-
-  def test_capture_validation_rejects_wrong_types_and_missing_identity_keys
-    entry = {
-      "project_id" => "project-1",
-      "name" => "demo",
-      "path" => "/tmp/demo",
-      "hive_state_path" => "/tmp/demo/.hive-state"
-    }
-    command = Hive::Commands::Patrol.new("demo")
-
-    wrong_type = assert_raises(Hive::ConfigError) do
-      command.send(:validate_capture!, Object.new, entry)
-    end
-    missing_key = assert_raises(Hive::ConfigError) do
-      command.send(
-        :validate_capture!,
-        patrol_capture_for(entry).with(project: {}),
-        entry
-      )
-    end
-
-    assert_match(/does not match the command project or authority/, wrong_type.message)
-    assert_match(/does not match the command project or authority/, missing_key.message)
-  end
-
   private
-
-  def patrol_capture_for(entry)
-    now = Time.utc(2026, 7, 28, 12, 0, 0)
-    Hive::Modules::Migration::PatrolCapture.build(
-      module_name: "patrol",
-      project: {
-        "project_id" => entry.fetch("project_id"),
-        "name" => entry.fetch("name"),
-        "repository" => entry["repository_identity"]
-      },
-      trigger: { "kind" => "manual", "id" => "manual-1" },
-      reservation: { "kind" => "ordinary", "id" => "reservation-1" },
-      owner: "legacy",
-      owner_epoch: 1,
-      selection_input: {
-        "kind" => "operation",
-        "operation" => "patrol-command-test"
-      },
-      selection:
-        Hive::Modules::Migration::PatrolDecisionProjection.build(
-          module_name: "patrol",
-          rationale: "due"
-        ),
-      outcome_class: nil,
-      outcome: nil,
-      occurred_at: now,
-      recorded_at: now
-    )
-  end
 
   def with_patrol_project
     previous_usage_path = Hive::UsageDb.instance_variable_get(:@path)

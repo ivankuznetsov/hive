@@ -58,6 +58,28 @@ authorized run on the unchanged exact head can produce authenticated evidence.
 
 ## Local feedback loop
 
+The default fast loop for implementation is `rake coverage:changed` (or the
+equivalent focused files via `bin/test`). It maps git-diff-touched `lib/`
+sources to their mirrored test files, runs only those, and enforces exact
+line coverage on the changed sources; the global 100% gate stays CI's job.
+Mapping is fail-open: an unmapped source warns and relies on per-file
+coverage enforcement as the safety net. `HIVE_COVERAGE_BASE` overrides the
+merge base.
+
+```bash
+bundle exec rake coverage:changed   # changed sources + their focused tests + exact coverage
+bin/test test/unit/example_test.rb  # bundler-free fallback wrapper for focused files
+```
+
+Known-flaky tests are handled by quarantine-with-retry, not skips: entries
+in `test/support/flake_quarantine.rb` (evidence-gated, reason-dated) get one
+in-process retry via minitest-retry; every retry is logged and counted in CI
+failure evidence. A retrying test that still fails fails the suite. The
+nightly seed sweep (`.github/workflows/nightly-flake-sweep.yml`) discovers
+order-dependent flakes across seeds and files a deduplicated tracking issue;
+its per-file timings land through `HIVE_TIMINGS_SOURCE=<json> rake coverage:timings`
+and feed the runtime-based CI shard partition.
+
 During implementation, run the smallest relevant test files directly:
 
 ```bash

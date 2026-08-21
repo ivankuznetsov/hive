@@ -5,6 +5,7 @@ require "json"
 require_relative "test/support/coverage"
 require_relative "test/support/tmp_cleanup"
 require_relative "test/support/shard_partition"
+require_relative "test/support/changed_coverage"
 
 # These expensive outer proofs are intentionally separate from the normal local
 # suite. CI runs them as named merge gates.
@@ -247,6 +248,54 @@ namespace :coverage do
     destination = File.join(root, "test", "support", "shard_timings.json")
     File.write(destination, JSON.pretty_generate(payload))
     puts "Landed shard timings (#{seconds.length} files, seeds #{payload['seeds'].inspect}) -> #{destination}"
+  end
+
+  # Fast local loop: run only the focused tests for git-diff-touched lib
+  # sources and enforce exact line coverage on those sources. The global
+  # 100% gate stays CI's job. HIVE_COVERAGE_BASE overrides the merge base.
+  desc "Run focused tests for changed lib sources with per-file exact coverage"
+  task :changed do
+    base = ENV["HIVE_COVERAGE_BASE"] || `git merge-base HEAD origin/main`.strip
+    abort "could not determine merge base; set HIVE_COVERAGE_BASE" if base.empty?
+
+    sources = HiveChangedCoverage.changed_sources(base: base)
+    if sources.empty?
+      puts "coverage:changed: no changed lib sources versus #{base}; nothing to run"
+      next
+    end
+
+    test_files = HiveChangedCoverage.test_files_for_sources(sources)
+    puts "coverage:changed: #{sources.length} changed source(s), #{test_files.length} focused test file(s)"
+    sources.each { |source| puts "  #{source}" }
+    if test_files.empty?
+      warn "coverage:changed: no focused test files matched; coverage enforcement still applies"
+    end
+
+    root = File.expand_path(__dir__)
+    run_id = "changed-#{Process.pid}-#{SecureRandom.hex(4)}"
+    env_keys = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID RUBYOPT]
+    old_env = env_keys.to_h { |key| [ key, ENV[key] ] }
+
+    begin
+      FileUtils.rm_rf(File.join(root, "coverage", ".resultset", run_id))
+      ENV["HIVE_COVERAGE"] = "1"
+      ENV["HIVE_COVERAGE_ROOT"] = root
+      ENV["HIVE_COVERAGE_RUN_ID"] = run_id
+      ENV["RUBYOPT"] = [ "-I#{File.join(root, 'test')} -rhive_coverage_boot", ENV["RUBYOPT"] ].compact.join(" ")
+
+      argv = [ "bundle", "exec", "ruby", "-Itest", "-Ilib", *test_files ]
+      success = system(*argv, chdir: root)
+      abort "coverage:changed: focused tests failed" unless success
+
+      HiveTestCoverage.configure!(root: root)
+      HiveTestCoverage.report!
+      report = HiveTestCoverage.read_report(File.join(root, "coverage", "coverage.json"))
+      failures = HiveChangedCoverage.enforce(report, sources: sources)
+      abort "coverage:changed failed:\n  - #{failures.join("\n  - ")}" unless failures.empty?
+      puts "coverage:changed: exact line coverage holds for all #{sources.length} changed source(s)"
+    ensure
+      old_env.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    end
   end
 end
 

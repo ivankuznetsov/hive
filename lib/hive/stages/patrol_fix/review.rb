@@ -246,7 +246,6 @@ module Hive
                 "review agent modified controller authority: #{run[:diagnostic].to_s[0, 256]}"
         end
         private_class_method :validate_agent_run!
-
       end
     end
   end

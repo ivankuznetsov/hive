@@ -34,3 +34,11 @@ Preparation now combines those operator-owned declarations with the CLI
 inventory. An exact configured route therefore survives a stale bundled
 catalog, while an undeclared route absent from the inventory still fails
 closed. Regressions pin both sides of that boundary.
+
+The same failed second-round launch then exposed an autonomy deadlock in the
+generic brainstorm retry guard. It treated every answer as unstructured
+operator input, including answers written through Hive's own
+`hive-answer:v1` binding, and published `retry_safety_blocked` instead of
+letting the scheduler consume them. The parser now retains that answer
+provenance. A brainstorm containing only controller-bound answers may retry;
+legacy or manually edited answer bodies remain operator-blocked.

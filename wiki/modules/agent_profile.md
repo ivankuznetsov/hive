@@ -252,6 +252,11 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   source config. `:output_file_exists` remains the generic profile default;
   individual Hive stages continue to select their existing status mode.
 
+If a prepared launch fails after brainstorm answers were recorded, automatic
+recovery distinguishes Hive's `hive-answer:v1` bindings from legacy or manual
+answer text. Fully controller-bound answers are replay-safe and let the daemon
+resume the same round; unbound answer content still requires an operator.
+
 For OpenCode execute, open-PR, review-fix, and review-CI attempts,
 `ImplementationIdentity::Store` appends an
 `implementation_identity_observed` event after the requested identity is

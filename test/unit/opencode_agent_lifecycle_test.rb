@@ -45,6 +45,23 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_tool_only_terminal_step_is_a_completed_run
+    with_fixture(mode: :tool_only) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "tool-only-260812-aaaa")
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invocation-tool-only")
+        ).run!
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :completed, result.fetch(:normalized_outcome_kind)
+      assert_equal "", result.fetch(:final_message)
+      assert result.fetch(:output_completed)
+    end
+  end
+
   def test_nonzero_malformed_timeout_and_inspection_failure_skip_or_bound_inspection
     {
       auth_failure: [ :authentication_failure, 0 ],
@@ -469,6 +486,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       mode == :malformed ? "run-malformed-json.jsonl" :
         (mode == :auth_failure ? "run-auth-error.jsonl" : "run-one-step.jsonl")
     ))
+    run_output = run_output.sub('"text":"Done."', '"text":""') if mode == :tool_only
     export_output = File.read(File.join(
       source_root_for_fixtures, "session-export-matching.json"
     ))

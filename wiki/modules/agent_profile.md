@@ -243,7 +243,10 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   after route-aware capability validation. Hive prepares private XDG/config
   homes, forwards only configured credential names, and maps read-only/scoped
   stage permissions to deny-first OpenCode rules. A successful run is complete
-  only after its terminal message correlates with sanitized session export.
+  only after its terminal assistant record correlates with sanitized session
+  export. The correlated terminal record may have empty prose when a tool-only
+  turn already produced the required artifact; the finish reason, route,
+  usage, session, and message identity remain mandatory.
   `Hive::SkillCheck::OpenCode` resolves project/user skills and explicitly
   configured plugin roots. Setup can atomically add the pinned Compound
   Engineering `3.21.4` plugin entry. Skill-bearing roles verify the selected

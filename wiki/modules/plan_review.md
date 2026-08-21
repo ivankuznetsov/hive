@@ -67,6 +67,12 @@ whole-document/specialist leg. The adversarial leg uses a separate prompt and
 route. Neither reviewer can publish canonical `plan.md`; malformed or free-form
 output has no clearance authority.
 
+The committed capability manifest exposes `ce-doc-review` through every
+Compound Engineering host Hive can route here, including OpenCode's prepared
+plugin overlay. Provider selection therefore cannot pass configuration and
+runtime probing only to fail later because the review skill contract omitted
+that otherwise-supported host.
+
 Reviewers run from that disposable checkout with search, shell, and network access so
 they can verify a plan against code, wiki context, history, and referenced
 contracts instead of checking only the document against itself. Codex and Grok

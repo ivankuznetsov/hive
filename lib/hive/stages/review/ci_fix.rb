@@ -3,6 +3,7 @@ require "fileutils"
 require "shellwords"
 require "digest"
 require "hive/artifact_firewall"
+require "hive/output_pulse"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/reviewers/synthetic_task"
@@ -240,7 +241,7 @@ module Hive
 
           idle = idle_timeout_sec.to_f
           idle = nil unless idle.positive?
-          pulse = idle ? OutputPulse.new : nil
+          pulse = idle ? Hive::OutputPulse.new : nil
           combined = +""
           # Reader keeps draining the pipe so the producer doesn't block
           # or die with SIGPIPE, but appends only up to max_bytes into
@@ -351,32 +352,6 @@ module Hive
         end
 
         Run = Struct.new(:combined, :exit_code)
-
-        # Mutex-guarded monotonic instant of the most recent CI output
-        # chunk. The pipe reader touches it; run_ci_once's wait loop reads
-        # it to enforce the idle-output deadline without any further
-        # coordination between the threads.
-        class OutputPulse
-          def initialize
-            @mutex = Mutex.new
-            @at = monotonic
-          end
-
-          def touch
-            now = monotonic
-            @mutex.synchronize { @at = now }
-          end
-
-          def idle_for
-            monotonic - @mutex.synchronize { @at }
-          end
-
-          private
-
-          def monotonic
-            Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          end
-        end
 
         # Wrap a launch failure as a Result :error directly so the
         # caller doesn't have to distinguish "command exited non-zero"

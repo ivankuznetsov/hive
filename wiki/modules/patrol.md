@@ -23,7 +23,7 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Patrol::Fingerprint` | `lib/hive/patrol/fingerprint.rb` | Structured findings use a feature-independent semantic SHA over category, primary evidence path, contract, and root cause. Historical v1 findings retain the legacy identity fallback. Stored title/root-cause tokens provide cross-wording similarity across every durable finding, while feature metadata supports outcome calibration. |
 | `Hive::Patrol::CandidateSelector` | `lib/hive/patrol/candidate_selector.rb` | Applies production/history/active-feature hard gates, computes deterministic 0–100 alpha from validated proof fields, clusters semantic duplicates even within one feature, maps legacy slice IDs narrowly to current components, enforces per-feature diversity, and returns a globally ranked portfolio. Successful merged history is not treated as negative alpha. |
 | `Hive::Patrol::Fixer` | `lib/hive/patrol/fixer.rb` | Strictly fetches an exact base and directs the agent through four bounded inspect/reproduce/edit/proof responses without post-edit self-validation. A completed `fix.json` ends the agent phase, but only asks Hive to continue: the proof reader rejects unsafe files and caps bytes before parsing, then Hive applies the changed-path guardrail, overlays declared regressions onto an isolated base, requires a normal regression-identified failure and patched pass, and runs every other configured validation under `timeout_sec.patrol`. The selected patched-pass receipt is the validation result for that command and is not executed a second time as “broader” validation. An errored or timed-out run without a completed proof fails closed as `fix_agent_failed`; half-finished changes are never shipped. Agent rejection is an attempt outcome, not durable resolution; reconciliation and failed handoff states reuse the exact validated patch. After a process interruption, the fixer retires an unreceipted checkout only when its exact Patrol branch is clean, its registration and path agree, and its head is already contained in the freshly resolved default branch. Non-force checkout removal plus an expected-head ref lease closes the proof-to-retirement race. It records `interrupted_fix_attempt` as a failed patch; any dirty, mismatched, moved, or uniquely committed branch remains operator-owned. |
-| `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Owns configured validation-name/command selection and runs those operator-configured commands in the fix worktree. Reviewer, selector, command stamping, and fixer all consume the same key discovery. A normal patrol command rejects an empty command set before state mutation or agent work; direct fixer callers still fail closed. |
+| `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Owns configured validation-name/command selection and runs those operator-configured commands in the fix worktree. Reviewer, selector, command stamping, and fixer all consume the same key discovery. A normal patrol command rejects an empty command set before state mutation or agent work; direct fixer callers still fail closed. Each command run is bounded by two independent deadlines: `timeout_sec.patrol` (wall-clock backstop) and, when `timeout_sec.patrol_idle` is set, an idle-output deadline that kills a child producing no stdout/stderr for that long. Either kill records `timed_out` with exit 124 plus a `timeout_reason` of `wall_clock` or `idle_output`; both ordinary and architecture fixers plumb the two knobs. |
 | `Hive::Patrol::PrOpener` | `lib/hive/patrol/pr_opener.rb` | Fail-closed secret-scans the title, body, and exact validated diff; verifies a clean exact local head, remote base, leased push, remote head, and created/existing PR identity; and invokes `ReviewHandoff`. The hosted PR result and a typed publication outbox entry are committed atomically with the terminal effect receipt. `StateStore` alone projects that immutable binding into `reconciliation_pending` before acknowledging the exact outbox tuple. Retries therefore reconcile only the receipted repository/URL/base/head/patch/worktree, retain the worktree until projection and handoff settle, and cannot redispatch the PR effect after a crash. New and retried handoffs require the hosted base OID and perform a final live remote base/head check immediately before task publication. Dynamic publication diagnostics are separate from closed reason codes. |
 | `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree and observed proof so the standard review daemon can run reviewers/triage/fix/browser flow. Mandatory and optional calls use the same fingerprint-locked exact reconciliation, so a retry after rename/fsync ambiguity reuses the matching task and rejects PR/head identity conflicts. Staging/quarantine renames use the shared best-effort directory-fsync policy. |
 | `Hive::Patrol::AgentLaunch` | `lib/hive/patrol/agent_launch.rb` | Builds the provider-specific Patrol launch envelope shared by ordinary review and fix. Active exact or coarse `models:` routes win; otherwise a Claude-backed launch carries the project-wide `claude.model` / `claude.effort` pin instead of falling through to Claude Code's interactive default. Claude uses a verified minimal review/fix tool set and caps reviews at four completed turns; the fourth is emergency JSON finalization only. No prompt or token estimate participates in launch admission. |
@@ -200,6 +200,26 @@ does not enable ordinary patrol or auto-fixing. Deduplicated GitHub issues are
 its default human review surface, with an explicit
 `issue_filing.enabled: false` opt-out; neither system can consume the other's
 state as proof of completion.
+
+## Agent identity resolution
+
+Ordinary patrol reads `patrol.agent` (default `claude`); its review/fix
+launches take model/effort from the `models.patrol_review`/`models.patrol_fix`
+routing registry (parent key `models.patrol`), falling back to the global
+provider block (e.g. `claude.model`) when no routing entry is active —
+`patrol.model` feeds routing *validation* only, not the launch argv.
+Architecture patrol is different: `Hive::RefactorPatrol::AgentIdentity`
+resolves its review identity as a child of the **execute** identity
+(`refactor_patrol.agent`/`model`/`effort` override; omitted fields inherit
+from `execute.*`), and auto-fix inherits from review
+(`refactor_patrol.auto_fix.*` override). A project that pins
+`execute.agent: codex` therefore runs all architecture patrol agents on codex
+unless `refactor_patrol.agent` is set. On a provider *switch* with no explicit
+`model`, the profile's concrete default model comes from the provider's own
+settings (for Claude: `model` in `.claude/settings.json`), which fails closed
+via `normalize_model(concrete: true)` if that value is not a plain model
+identifier (e.g. `claude-fable-5[1m]`) — so an agent override should carry an
+explicit `model:`.
 
 ## Daemon triggers
 

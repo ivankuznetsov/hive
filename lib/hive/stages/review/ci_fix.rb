@@ -3,6 +3,7 @@ require "fileutils"
 require "shellwords"
 require "digest"
 require "hive/artifact_firewall"
+require "hive/output_pulse"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/reviewers/synthetic_task"
@@ -64,6 +65,11 @@ module Hive
           # knob covers both halves of the loop. Default 600s matches
           # Config::DEFAULTS.timeout_sec.review_ci.
           timeout_sec = cfg.dig("timeout_sec", "review_ci") || 600
+          # Optional idle-output deadline (same split as patrol's
+          # timeout_sec.patrol_idle): the wall clock above is the runaway
+          # backstop, while a CI child that prints nothing for this long is
+          # treated as wedged and killed immediately. Unset disables.
+          idle_timeout_sec = cfg.dig("timeout_sec", "review_ci_idle")
 
           attempts = 0
           last_output = nil
@@ -85,7 +91,10 @@ module Hive
             end
 
             attempts += 1
-            run_result = run_ci_once(command, ctx.worktree_path, max_bytes, timeout_sec)
+            run_result = run_ci_once(
+              command, ctx.worktree_path, max_bytes, timeout_sec,
+              idle_timeout_sec: idle_timeout_sec
+            )
             return run_result.to_result(attempts: attempts) if run_result.is_a?(CommandError)
 
             output = clean_output(run_result.combined, tail_lines)
@@ -198,8 +207,11 @@ module Hive
         # *during* the read so a runaway CI command can't OOM the host.
         # On timeout the subprocess group is TERM'd then KILL'd (same
         # pattern as Hive::Agent#spawn_and_wait) and a CommandError is
-        # returned so the caller's :error path covers it.
-        def run_ci_once(command, cwd, max_bytes, timeout_sec)
+        # returned so the caller's :error path covers it. When
+        # idle_timeout_sec is positive, a child that produces no output for
+        # that long is killed the same way — the wall clock stays the
+        # runaway backstop while the idle deadline fails wedges fast.
+        def run_ci_once(command, cwd, max_bytes, timeout_sec, idle_timeout_sec: nil)
           # Always exec directly — no `sh -c` indirection. A String
           # command is shellword-split (so `bin/ci --flag` works as
           # YAML); an Array is exec'd as-is (so paths with spaces or
@@ -227,6 +239,9 @@ module Hive
             return CommandError.new("CI command failed to launch: #{e.message}")
           end
 
+          idle = idle_timeout_sec.to_f
+          idle = nil unless idle.positive?
+          pulse = idle ? Hive::OutputPulse.new : nil
           combined = +""
           # Reader keeps draining the pipe so the producer doesn't block
           # or die with SIGPIPE, but appends only up to max_bytes into
@@ -244,6 +259,10 @@ module Hive
                 next
               end
               break if chunk.nil?
+
+              # Even capped-and-dropped bytes are proof of life for the
+              # idle-output deadline.
+              pulse&.touch
 
               next if capped
 
@@ -276,6 +295,14 @@ module Hive
               reader.join(2)
               reader.kill if reader.alive?
               return CommandError.new("CI command timed out after #{timeout_sec}s")
+            end
+            if pulse && pulse.idle_for >= idle
+              kill_process_group(pgid, pid)
+              reader.join(2)
+              reader.kill if reader.alive?
+              return CommandError.new(
+                "CI command produced no output for #{idle_timeout_sec}s (idle-output timeout)"
+              )
             end
             _, status = Process.wait2(pid, Process::WNOHANG)
             break if status

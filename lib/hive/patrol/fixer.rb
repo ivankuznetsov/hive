@@ -94,7 +94,8 @@ module Hive
         @state = state || default_state_store
         @validator = validator || Validator.new(
           cfg.dig("patrol", "commands"),
-          timeout_sec: cfg.dig("timeout_sec", "patrol") || Validator::DEFAULT_TIMEOUT_SEC
+          timeout_sec: cfg.dig("timeout_sec", "patrol") || Validator::DEFAULT_TIMEOUT_SEC,
+          idle_timeout_sec: cfg.dig("timeout_sec", "patrol_idle")
         )
         @worktree_factory = worktree_factory || method(:build_worktree)
         @agent_runner = agent_runner || method(:run_agent)

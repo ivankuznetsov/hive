@@ -109,6 +109,14 @@ After the first new-authority effect, recovery is forward-only. Re-run
 durable manifest; the operator does not need to retain or reconstruct the
 original preflight envelope.
 
+For a one-time local migration where there are no legacy PRs or architecture
+jobs to reconcile, use `ruby script/migrate_patrol_findings.rb PROJECT_ROOT`.
+The script reads active ordinary findings, writes one normal `patrol-fix` task
+per finding through `TaskCapture`, and leaves the original finding JSON in
+place as history. Its deterministic idempotency key makes a rerun a no-op; it
+does not inspect GitHub, create issues or PRs, write an outbox, or maintain a
+cutover ledger. `--dry-run` prints the tasks without changing the project.
+
 The separately invoked reduced installed/live smoke has exactly five
 packaging owners: `Result` owns the canonical bounded schema and claim fences;
 `Candidate` owns streamed archive and exact installed closure/module identity;

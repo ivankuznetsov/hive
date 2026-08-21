@@ -6,6 +6,10 @@
   or misreported as an empty terminal message.
 - Kept the drain bounded and retained the close, join, and kill fallback for a
   genuinely hung or defensive IO path.
+- Accepted a correlated tool-only OpenCode terminal step with empty prose as a
+  completed normalized run. Sanitized export, terminal finish evidence, and
+  the stage's required artifact remain mandatory, so an empty or partial
+  process capture still fails closed.
 - Made `TaskAction` ignore plan-review projections when the explicit benchmark
   configuration grant has disabled plan review, matching the existing
   transition guard and execute-entry behavior.

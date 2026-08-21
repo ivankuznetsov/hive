@@ -1,5 +1,7 @@
 require "open3"
 
+require "hive/output_pulse"
+
 module Hive
   module Patrol
     class Validator
@@ -41,25 +43,6 @@ module Hive
         def tail(value)
           str = value.to_s
           str[-4000..] || str
-        end
-      end
-
-      # One mutex-guarded monotonic instant of the most recent child output.
-      # Reader threads touch it per chunk; the wait loop reads it to enforce
-      # the idle-output deadline without any further coordination.
-      class OutputPulse
-        def initialize
-          @mutex = Mutex.new
-          @at = Validator.monotonic
-        end
-
-        def touch
-          now = Validator.monotonic
-          @mutex.synchronize { @at = now }
-        end
-
-        def last
-          @mutex.synchronize { @at }
         end
       end
 
@@ -135,7 +118,7 @@ module Hive
           "bash", "-lc", command, chdir: worktree_path, pgroup: true
         )
         stdin.close
-        pulse = OutputPulse.new
+        pulse = Hive::OutputPulse.new
         out_reader = Thread.new { bounded_read(stdout, pulse) }
         err_reader = Thread.new { bounded_read(stderr, pulse) }
         timeout_reason = await_completion(waiter, pulse)

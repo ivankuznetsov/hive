@@ -13,7 +13,10 @@ holding the patrol cycle until the wall-clock cap. `CommandResult` records
 which deadline fired in a new `timeout_reason` field (`wall_clock` /
 `idle_output`); exit code stays 124 and `passed?` semantics are unchanged, so
 fixer fail-closed classification is untouched. Both `Hive::Patrol::Fixer` and
-`Hive::RefactorPatrol::Fixer` plumb the new knob. Unset or non-positive
+`Hive::RefactorPatrol::Fixer` plumb the new knob. The mutex-guarded output
+pulse is the shared `Hive::OutputPulse` (`lib/hive/output_pulse.rb`) so the
+review CI runner can reuse the same thread-coordination primitive. Unset or
+non-positive
 disables the idle deadline (historical behavior). Motivation: on the dogfood
 box, full-suite validation held cycles for the entire wall-clock cap when a
 child wedged; a progressing suite prints continuously, so a short idle window

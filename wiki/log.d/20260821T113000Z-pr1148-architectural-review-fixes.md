@@ -25,6 +25,10 @@ Plan-review identity now includes adapters and reviewers but excludes timeout
 and retry tuning. Plan-review attempts receive a semantic owner progress token,
 stranded regenerable patrol effects remain as terminal `abandoned` audit rows,
 and council max-round exits share one consistent terminal path.
+Durable admission now attaches a request to a live same-stage owner only when
+their task generations match. A different-generation command is deferred as
+`in_flight`, so a queued `plan` rerun cannot disappear into a live
+`plan-review-run` attempt at the same `3-plan` stage.
 Reviewer prompts now reserve finding-lifecycle transitions for Hive and require
 every newly emitted finding to start at `open`; this removes an ambiguity that
 caused a successful Ox review to be rejected after it described a finding as

@@ -780,7 +780,10 @@ capacity saturation creates no recovery request or deadline.
 
 Lease reconciliation refreshes capacity and completion before another
 admission. A different request ID for the same live task generation resolves
-to the existing owner rather than another spawn.
+to the existing owner rather than another spawn. A request whose semantic
+progress produces a different task generation remains queued as `in_flight`
+until that owner exits; it is never attached to a different command simply
+because both commands target the same task stage.
 
 An internal worker or ancillary child that returns an `admission_error` JSON
 envelope with CONFIG exit 78 represents task-local validation state; delivery

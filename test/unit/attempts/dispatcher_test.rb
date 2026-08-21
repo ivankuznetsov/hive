@@ -57,6 +57,20 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_changed_generation_waits_for_live_stage_owner_instead_of_attaching
+    with_dispatcher do |dispatcher, launcher, task|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      File.write(task.state_file, "changed\n<!-- WAITING -->\n")
+      changed = dispatch(dispatcher, task, request_id: "request-two")
+
+      assert_equal :deferred, changed.status
+      assert_equal "in_flight", changed.reason
+      assert_equal first.attempt.attempt_id, changed.attempt.attempt_id
+      assert_nil changed.attach_descriptor
+      assert_equal 1, launcher.launched.size
+    end
+  end
+
   def test_plan_review_attempt_generation_advances_with_review_projection
     with_dispatcher do |dispatcher, launcher, task, store|
       task.stage_index = 3

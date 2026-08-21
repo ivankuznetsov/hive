@@ -235,7 +235,12 @@ deterministic dependency-admission verdict. Replaying the same request returns
 that request's original terminal receipt, including a failure. A different
 request against an unchanged generation may start a fresh attempt after a
 failed/cancelled receipt; only a successful terminal receipt remains the
-semantic owner for later requests. A dependency wait that later becomes clear
+semantic owner for later requests. A live owner is attachable only when its
+task generation matches the new request. When the same task and stage are live
+under a different generation, admission returns `deferred(in_flight)` instead:
+the request stays queued until the old owner exits, then runs its distinct
+command. This prevents a queued plan rerun from being silently attached to an
+older `plan-review-run` merely because both operate at `3-plan`. A dependency wait that later becomes clear
 advances generation instead of replaying the stale exit-75 receipt. A lost
 attempt blocks admission only until its explicit successor exists, so a
 terminally failed successor cannot leave the generation trapped behind a

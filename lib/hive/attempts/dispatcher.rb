@@ -177,7 +177,14 @@ module Hive
             records = view.refresh_for_admission
             semantic_owner = find_semantic_owner(records, generation)
             if semantic_owner&.live?
-              result = live_result(semantic_owner, interactive: interactive)
+              result = if semantic_owner.task_generation == generation.task_generation
+                live_result(semantic_owner, interactive: interactive)
+              else
+                DispatchResult.new(
+                  status: :deferred, attempt: semantic_owner, receipt: nil,
+                  attach_descriptor: nil, reason: "in_flight"
+                )
+              end
               next
             end
 

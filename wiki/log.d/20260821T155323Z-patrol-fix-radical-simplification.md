@@ -48,3 +48,7 @@ Parked Patrol Fix outcomes use the standard non-runnable `needs_input` status.
 The unreachable custom operational reopen action, token fields, executor, and
 eligibility projection fields are removed; only controller-owned Review rework
 advances a task generation.
+
+The generic module-installation E2E fixture now installs its synthetic package
+directly instead of depending on the deleted first-party Patrol package
+directories.

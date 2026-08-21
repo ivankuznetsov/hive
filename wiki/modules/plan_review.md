@@ -109,8 +109,10 @@ review. An unchanged failed capability probe is recorded as operational
 evidence; after three identical observations the review parks as
 `reviewer_unlaunchable` instead of spawning forever. A changed probe resets the
 series and permits a new reviewer launch. Review identity includes adapter,
-reviewer, and route configuration, while attempt timeout and retry tuning are
-operational and do not invalidate an otherwise identical verdict.
+reviewer, route configuration, and the effective `models.plan_review`,
+`models.plan_review_adversarial`, and `models.plan_review_verification`
+overrides. Unrelated stage-model changes plus attempt timeout and retry tuning
+remain operational and do not invalidate an otherwise identical verdict.
 
 ## Findings, revision, and verification
 

@@ -12,3 +12,10 @@ route preparation and then failed as `unsupported` with `key not found:
 review after producing a complete plan; the missing capability was the exact
 whole-document blocker. Exact adversarial model routing remains project config,
 not part of this capability fix.
+
+That same run exposed an identity gap: top-level `models.plan_review*`
+overrides change the model and effort actually launched for each review role,
+but only the raw route row was fingerprinted. Correcting the adversarial model
+therefore replayed the old blocked record. The policy and configuration
+fingerprints now include only the three plan-review routing keys; unrelated
+execute and workflow model choices do not rekey a review.

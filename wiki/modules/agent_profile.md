@@ -235,9 +235,10 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   after route-aware capability validation. Hive prepares private XDG/config
   homes, forwards only configured credential names, and maps read-only/scoped
   stage permissions to deny-first OpenCode rules. Local capability inspection
-  remains bounded at 10 seconds per command except for the verbose model
-  inventory, which gets 30 seconds because a cold hermetic provider catalog can
-  be hundreds of kilobytes before any model invocation starts. Exact custom
+  remains bounded at 10 seconds per command except for the version probe and
+  verbose model inventory, which get 30 seconds because Bun startup under
+  sustained host I/O and a cold hermetic provider catalog can both exceed the
+  generic bound before any model invocation starts. Exact custom
   models and variants declared in the selected provider configuration are
   combined with that inventory: this keeps a new operator-pinned route usable
   when the fetch-disabled bundled catalog is stale, while an undeclared route

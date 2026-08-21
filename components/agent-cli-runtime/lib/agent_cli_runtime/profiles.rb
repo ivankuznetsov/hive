@@ -295,6 +295,9 @@ module AgentCliRuntime
       headless_flag: "run",
       output_format_flags: [ "--format", "json" ],
       version_flag: "--version",
+      # Bun-backed OpenCode startup can exceed the generic 10-second bound
+      # under sustained host I/O even though the executable is healthy.
+      version_check_timeout_sec: 30,
       min_version: "1.18.16",
       model_argument_builder: ->(model) { opencode_model_arguments(model) },
       effort_argument_builder:

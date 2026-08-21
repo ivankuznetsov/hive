@@ -23,9 +23,17 @@ The same dogfood run exposed a separate cold-start failure in the component
 route probe: `opencode models <provider> --verbose` can exceed the generic
 10-second local-inspection deadline while emitting a large hermetic model
 catalog. Agent CLI Runtime now grants only that inventory command 30 seconds;
-version, help, export, and auth probes retain the original 10-second bound. The
+version, help, export, and auth probes initially retained the 10-second bound. The
 component regression records the deadline selected for every probe leg without
 sleeping or invoking a model.
+
+A later daemon-owned retry proved the generic version bound was also too tight
+for OpenCode: `opencode --version` exceeded 10 seconds while the host was under
+sustained I/O pressure, so the completed checkpointed plan could not be
+re-entered. Profiles now carry an explicit version-check deadline. OpenCode
+uses 30 seconds; every other built-in and custom profile retains 10 seconds.
+The timeout stays bounded and the regression asserts the profile split without
+introducing a sleeping test.
 
 A later retry exposed the other half of cold hermetic route readiness: the
 fetch-disabled CLI inventory can omit a newly configured custom model even

@@ -27,6 +27,20 @@ The local fast loop is `rake coverage:changed` (changed lib sources → focused
 tests → exact coverage on those sources) plus the bundler-free `bin/test`
 wrapper, documented in [[testing]].
 
+Two constraints this change set has to respect, both now covered by tests:
+
+- The coverage-shard job's conditional unshallow shells out to bundler, so it
+  must run **after** `ruby/setup-ruby`. Placed before it, every shard dies in
+  seconds with `bundle: command not found` and the coverage aggregator gate
+  reports the failure with no test output to explain it.
+  `CiTestPartitionTest#test_every_workflow_sets_up_ruby_before_shelling_out_to_bundler`
+  asserts the ordering across every workflow file.
+- `HiveFlakeQuarantine.activate!` runs from `test_helper`, so a hard
+  `require "minitest/retry"` would make *every* test file unloadable on a
+  machine with no installed bundle — which would defeat the bundler-free
+  `bin/test` path. It raises under Bundler (CI, `bundle exec`) and degrades to
+  "no retries" with a warning otherwise.
+
 ## Uncertainties
 
 - The two known-flaky tests named during planning (capture-provider seed-order

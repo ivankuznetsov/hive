@@ -33,7 +33,8 @@ module HiveFlakeQuarantine
     # empty list passes a never-matching sentinel because minitest-retry's
     # empty `methods_to_retry` means "retry every failure".
     def activate!
-      require "minitest/retry"
+      return false unless retry_gem_available?
+
       list = effective_list
       Minitest::Retry.use!(
         retry_count: 1,
@@ -65,6 +66,24 @@ module HiveFlakeQuarantine
     end
 
     private
+
+    # Bundler-managed runs (CI, `bundle exec`) must have the gem, so a
+    # LoadError there is a real failure. A plain `ruby -Itest` run without an
+    # installed bundle degrades to "no retries" instead of failing every
+    # suite at load time.
+    def retry_gem_available?
+      return @retry_gem_available unless @retry_gem_available.nil?
+
+      @retry_gem_available = begin
+        require "minitest/retry"
+        true
+      rescue LoadError
+        raise if defined?(Bundler)
+
+        warn "minitest-retry unavailable; flake-quarantine retries disabled for this run"
+        false
+      end
+    end
 
     def effective_list
       @test_override || QUARANTINED_TESTS

@@ -75,6 +75,9 @@ Known-flaky tests are handled by quarantine-with-retry, not skips: entries
 in `test/support/flake_quarantine.rb` (evidence-gated, reason-dated) get one
 in-process retry via minitest-retry; every retry is logged and counted in CI
 failure evidence. A retrying test that still fails fails the suite. The
+retry machinery raises if the gem is missing under Bundler and degrades to
+"no retries" with a warning otherwise, so a machine with no installed bundle
+can still load `test_helper` and run focused files. The
 nightly seed sweep (`.github/workflows/nightly-flake-sweep.yml`) discovers
 order-dependent flakes across seeds and files a deduplicated tracking issue;
 its per-file timings land through `HIVE_TIMINGS_SOURCE=<json> rake coverage:timings`

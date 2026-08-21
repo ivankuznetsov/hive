@@ -205,6 +205,25 @@ class CiTestPartitionTest < Minitest::Test
     end
   end
 
+  def test_every_workflow_sets_up_ruby_before_shelling_out_to_bundler
+    offenders = Dir.glob(File.join(ROOT, ".github", "workflows", "*.yml")).sort.flat_map do |path|
+      workflow = YAML.safe_load_file(path, aliases: true)
+      workflow.fetch("jobs", {}).flat_map do |job_name, job|
+        ruby_ready = false
+        job.fetch("steps", []).filter_map do |step|
+          ruby_ready ||= step["uses"].to_s.start_with?("ruby/setup-ruby")
+          next if ruby_ready || !step["run"].to_s.match?(/(?:\A|[;&|\s])bundle\s/)
+
+          "#{File.basename(path)} / #{job_name} / #{step["name"] || step["run"]}"
+        end
+      end
+    end
+
+    assert_empty offenders,
+      "these steps shell out to bundler before their job sets up Ruby, so they die " \
+        "with `bundle: command not found`"
+  end
+
   def test_brakeman_reads_the_web_gemfile_while_scanning_the_repository_root
     workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
     brakeman = workflow.fetch("jobs").fetch("brakeman")

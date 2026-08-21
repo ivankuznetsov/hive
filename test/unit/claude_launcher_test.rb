@@ -187,7 +187,15 @@ class ClaudeLauncherTest < Minitest::Test
                               cfg: cfg,
                               session_name: "hive-test-session",
                               cwd: task.folder,
-                              add_dirs: []
+                              add_dirs: [],
+                              # Base.tool_scope_kwargs always supplies these
+                              # OpenCode-only fields, including for a Claude
+                              # scope. The shared-session API must accept the
+                              # empty values instead of raising unknown-keyword
+                              # after earlier reviewers have already run.
+                              additional_read_roots: [],
+                              additional_write_roots: [],
+                              opencode_edit_patterns: []
                             ) { |_handle| }
                           end
                         end
@@ -202,6 +210,24 @@ class ClaudeLauncherTest < Minitest::Test
       end
 
       assert_equal %w[--model sonnet --effort medium], captured_flags
+    end
+  end
+
+  def test_shared_session_rejects_nonempty_opencode_scope
+    with_tmp_task do |task|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::ClaudeLauncher.with_shared_session(
+          task: task,
+          cfg: {},
+          session_name: "hive-test-session",
+          cwd: task.folder,
+          add_dirs: [],
+          additional_read_roots: [ task.folder ]
+        ) { |_handle| }
+      end
+
+      assert_equal "shared Claude sessions cannot apply OpenCode filesystem scope",
+                   error.message
     end
   end
 

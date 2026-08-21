@@ -19,6 +19,10 @@ module Hive
       @mutex.synchronize { @at }
     end
 
+    def idle_for
+      monotonic - last
+    end
+
     private
 
     def monotonic

@@ -603,11 +603,11 @@ module Hive
       def task_after_controller_move(task, result)
         destination = result.is_a?(Hash) && result[:moved_task_folder]
         return task unless destination
-        return task unless Hive::Workflows.patrol_fix_id?(task.workflow.id)
+        return task unless task.workflow.controller?
 
         moved = Hive::Task.new(destination, workflow_generation: task.workflow_generation)
         unless moved.project_root == task.project_root && moved.slug == task.slug &&
-               Hive::Workflows.patrol_fix_id?(moved.workflow.id)
+               moved.workflow.controller?
           raise Hive::InvalidTaskPath, "Patrol Fix runner returned a foreign moved task"
         end
         moved
@@ -621,9 +621,9 @@ module Hive
       # vanished source-stage path.
       def task_after_controller_exception(task)
         return task if File.directory?(task.folder)
-        return task unless Hive::Workflows.patrol_fix_id?(task.workflow.id)
+        return task unless task.workflow.controller?
 
-        matches = Hive::PatrolFix::Projection::STAGE_DIRS.filter_map do |stage_dir|
+        matches = task.workflow.stage_dirs.filter_map do |stage_dir|
           folder = File.join(task.hive_state_path, "stages", stage_dir, task.slug)
           folder if File.directory?(folder)
         end

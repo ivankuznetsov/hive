@@ -1,7 +1,7 @@
 require "hive/work_ledger"
 
 module Hive
-  Workflow = Data.define(:id, :stages, :archive_visibility_retention_days, :result)
+  Workflow = Data.define(:id, :stages, :archive_visibility_retention_days, :result, :controller)
 
   # Reopened (not redefined) so the nested Stage/AdvanceVerb constants resolve as
   # Workflow::Stage — Data.define's block can't host constant declarations.
@@ -11,12 +11,13 @@ module Hive
     DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS = 3
     NEVER_ARCHIVE_VISIBILITY_RETENTION = :never
 
-    # :agent selects the agent runner, :council selects the generic document
+    # :agent selects the agent runner, :controller selects a workflow-owned
+    # controller runner, :council selects the generic document
     # council runner, :inert auto-advances with no runner,
     # :execute/:review_council/:finalize drive coding status/action
     # classification (the coding runners are selected by name, not kind — see
     # Stages::Resolver), and nil is the unspecified default.
-    KNOWN_KINDS = [ nil, :agent, :council, :human, :inert, :execute, :review_council, :finalize ].freeze
+    KNOWN_KINDS = [ nil, :agent, :controller, :council, :human, :inert, :execute, :review_council, :finalize ].freeze
 
     # Single source of truth for the council triage artifact default. Referenced
     # by the Council default below, the descriptor parser, and both council
@@ -89,7 +90,7 @@ module Hive
 
     def initialize(id:, stages:,
                    archive_visibility_retention_days: DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS,
-                   result: nil)
+                   result: nil, controller: nil)
       retention = normalize_archive_visibility_retention(
         archive_visibility_retention_days, workflow_id: id
       )
@@ -102,7 +103,7 @@ module Hive
       super(
         id: id, stages: frozen_stages,
         archive_visibility_retention_days: retention,
-        result: normalized_result
+        result: normalized_result, controller: controller
       )
       validate_structure!
     end
@@ -145,6 +146,7 @@ module Hive
     def stage_names = map(&:name).freeze
     def stage_dirs = map(&:dir).freeze
     def draft_pr_handoff? = any? { |stage| stage.handoff == :draft_pr }
+    def controller? = !controller.nil?
 
     # Canonical managed-runtime topology. Configuration snapshots, package
     # validation, and admission all consume these same stable actor slots.
@@ -378,6 +380,10 @@ module Hive
     # one load-time error at the descriptor that introduced the typo. Coding and
     # every test fixture satisfy it with no behavior change.
     def validate_structure!
+      unless controller.nil? || controller.is_a?(Symbol)
+        raise ArgumentError, "workflow #{id.inspect} controller must be a Symbol when present"
+      end
+
       structural_stages = stages.map do |stage|
         {
           name: stage.name,

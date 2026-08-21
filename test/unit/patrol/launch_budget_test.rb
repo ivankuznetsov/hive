@@ -15,8 +15,12 @@ class PatrolLaunchBudgetTest < Minitest::Test
     Hive::UsageDb.path = @old_path
   end
 
-  def config(limit = 4)
-    { "patrol" => { "scheduled_discovery_launches_per_engine_per_day" => limit } }
+  def config(limit = 4, mode: nil)
+    {
+      "patrol" => {
+        "scheduled_discovery_launches_per_engine_per_day" => limit
+      }.tap { |patrol| patrol["mode"] = mode if mode }
+    }
   end
 
   def budget(root, engine:, project_id: "project-1", project_name: "demo",
@@ -152,6 +156,24 @@ class PatrolLaunchBudgetTest < Minitest::Test
       assert_equal 2, high.remaining_launches
       assert_equal 0, budget(dir, engine: :ordinary, limit: 4).remaining_launches
       assert_equal 10, budget(dir, engine: :ordinary, limit: 16).remaining_launches
+    end
+  end
+
+  def test_off_mode_does_not_grant_discovery_allowance
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = File.join(dir, "usage.db")
+      subject = Hive::Patrol::LaunchBudget.new(
+        dir,
+        cfg: config(8, mode: "off"),
+        project_id: "project-1",
+        project_name: "demo",
+        engine: :ordinary,
+        clock: -> { NOW }
+      )
+
+      refute acquire(subject, "patrol-review", id: "disabled")
+      assert_equal 0, subject.remaining_launches
+      assert_equal "daily_agent_spawn_limit", subject.resource_exhaustion.fetch(:reason)
     end
   end
 

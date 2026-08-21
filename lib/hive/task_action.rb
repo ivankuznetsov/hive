@@ -659,7 +659,7 @@ module Hive
     end
 
     def load_patrol_fix
-      return nil unless Hive::Workflows.patrol_fix_id?(task_workflow.id)
+      return nil unless task_workflow.controller?
 
       Hive::PatrolFix::Projection.new(
         task_folder: task.folder,

@@ -26,10 +26,6 @@ module Hive
       }.freeze
       DAILY_EXHAUSTION_REASONS = %w[daily_agent_spawn_limit legacy_attribution_ambiguous].freeze
       DEFAULT_MAX_AGENT_SPAWNS_PER_DAY = 4
-      MODE_LIMITS = {
-        "low" => 2, "medium" => 4, "high" => 8, "ultrapatrol" => 16,
-        "off" => 4
-      }.freeze
       MAX_DAY_BYTES = 2 * 1024 * 1024
       MAX_HOLDS_BYTES = 2 * 1024 * 1024
       MAX_PROJECTS_PER_DAY = 4_096
@@ -73,12 +69,13 @@ module Hive
         @directory = Hive::ManagedDirectory.new(
           root: @ledger_root, label: "Patrol discovery allowance ledger"
         )
-        @max_agent_spawns_per_day =
-          MODE_LIMITS.fetch(
-            cfg.dig("patrol", "mode").to_s,
-            cfg.dig("patrol", "scheduled_discovery_launches_per_engine_per_day") ||
-              DEFAULT_MAX_AGENT_SPAWNS_PER_DAY
-          )
+        patrol_cfg = cfg.is_a?(Hash) && cfg["patrol"].is_a?(Hash) ? cfg.fetch("patrol") : {}
+        @max_agent_spawns_per_day = if patrol_cfg["mode"].to_s == "off"
+          0
+        else
+          patrol_cfg["scheduled_discovery_launches_per_engine_per_day"] ||
+            DEFAULT_MAX_AGENT_SPAWNS_PER_DAY
+        end
       end
 
       # Reserve the discovery slot immediately before the provider child is

@@ -1242,7 +1242,7 @@ module Hive
                 )
                 next
               end
-              marker = if Hive::Workflows.patrol_fix_id?(task.workflow.id)
+              marker = if task.workflow.controller?
                 Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
               else
                 Hive::Markers.current(task.state_file)
@@ -1251,7 +1251,7 @@ module Hive
                 task, marker, project: project_name || project_name_for(task)
               )
               folder_mtime = File.mtime(entry)
-              mtime = if Hive::Workflows.patrol_fix_id?(task.workflow.id)
+              mtime = if task.workflow.controller?
                 folder_mtime
               else
                 File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime

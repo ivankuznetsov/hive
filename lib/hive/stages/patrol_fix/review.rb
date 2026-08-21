@@ -1,7 +1,6 @@
 require "digest"
 require "securerandom"
 require "time"
-require "hive/agent_git_gate"
 require "hive/artifact_firewall"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/review_receipt"
@@ -9,7 +8,7 @@ require "hive/patrol_fix/runner"
 require "hive/patrol_fix/successor_materializer"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/transition"
-require "hive/patrol_fix/worktree_receipt"
+require "hive/patrol_fix/worktree_snapshot"
 require "hive/stages/base"
 require "hive/stages/managed_agent_custody"
 require "hive/stages/patrol_fix/inbox"
@@ -167,52 +166,10 @@ module Hive
         private_class_method :review_evidence
 
         def exact_snapshot!(task, manifest, fix, validation, worktree_root:)
-          custody = Hive::PatrolFix::WorktreeReceipt.new(
-            task_folder: task.folder, project_root: task.project_root, slug: task.slug,
-            worktree_root: worktree_root
+          Hive::PatrolFix::WorktreeSnapshot.capture(
+            task: task, manifest: manifest, fix: fix, validation: validation,
+            worktree_root: worktree_root, phase: :review
           )
-          owner = custody.read
-          custody.validate!(owner)
-          unless owner.fetch("generation") == manifest.dig("task", "generation") &&
-                 owner.fetch("evidence_digest") == manifest.dig("evidence_revision", "digest")
-            raise Hive::StageError, "review worktree custody is stale"
-          end
-          expected_fix_custody = {
-            # A review-stage operator reopen explicitly carries the unchanged
-            # prior fix receipt while rotating current custody to the new
-            # generation. The receipt must retain its execution generation;
-            # every physical custody field must still match exactly.
-            "worktree_generation" => fix.dig("task", "generation"),
-            "worktree" => owner.fetch("worktree"),
-            "branch" => owner.fetch("branch"),
-            "base_revision" => owner.fetch("base_revision")
-          }
-          unless expected_fix_custody.all? { |key, value| fix.dig("payload", key) == value }
-            raise Hive::StageError, "fix receipt does not bind the current worktree custody"
-          end
-          head = git_read!(owner.fetch("worktree"), :head_oid).strip
-          expected = fix.dig("payload", "head_revision")
-          raise Hive::StageError, "fix worktree HEAD changed after validation" unless head == expected
-          unless validation.dig("payload", "worktree_head") == expected
-            raise Hive::StageError, "validation receipt does not bind the current fix HEAD"
-          end
-          unless git_read!(owner.fetch("worktree"), :status).empty?
-            raise Hive::StageError, "fix worktree bytes changed after validation"
-          end
-          diff = Hive::AgentGitGate.read(
-            owner.fetch("worktree"), :diff,
-            base_oid: fix.dig("payload", "base_revision"), head_oid: head,
-            max_stdout_bytes: Hive::PatrolFix::WorktreeReceipt::MAX_DIFF_BYTES
-          )
-          unless diff.success? && !diff.overflow
-            raise Hive::StageError, "review diff is unavailable or oversized"
-          end
-          digest = Digest::SHA256.hexdigest(diff.stdout)
-          raise Hive::StageError, "fix diff changed after validation" unless digest == fix.dig("payload", "diff_digest")
-          { "worktree" => owner.fetch("worktree"), "head_revision" => head,
-            "diff_digest" => digest, "diff" => diff.stdout }
-        rescue Hive::PatrolFix::WorktreeReceipt::InvalidWorktree => e
-          raise Hive::StageError, e.message
         end
         private_class_method :exact_snapshot!
 
@@ -290,12 +247,6 @@ module Hive
         end
         private_class_method :validate_agent_run!
 
-        def git_read!(path, operation)
-          result = Hive::AgentGitGate.read(path, operation)
-          return result.stdout if result.success?
-          raise Hive::StageError, "hardened Git #{operation} failed: #{result.stderr.to_s[0, 256]}"
-        end
-        private_class_method :git_read!
       end
     end
   end

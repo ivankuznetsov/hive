@@ -111,7 +111,7 @@ module Hive
 
       def do_call
         task = resolve_task
-        if Hive::Workflows.patrol_fix_id?(task.workflow.id)
+        if task.workflow.controller?
           require "hive/patrol_fix/stage_transition"
           return Hive::PatrolFix::StageTransition.with_lock(task) do |transition|
             do_call_for(task, patrol_transition: transition)
@@ -293,7 +293,7 @@ module Hive
           task:, destination: dest_stage, config: @plan_review_config
         )
         return if @force
-        if Hive::Workflows.patrol_fix_id?(task.workflow.id)
+        if task.workflow.controller?
           projection = Hive::PatrolFix::Projection.new(
             task_folder: task.folder, stage: "#{task.stage_index}-#{task.stage_name}"
           ).to_h

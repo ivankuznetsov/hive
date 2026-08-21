@@ -9,6 +9,14 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 
 ## Unified Patrol Fix live execution
 
+The current simplification keeps historical Architecture Patrol issue-action and
+policy fields readable for migration/replay compatibility. The retired issue
+effect is still parked fail-closed; removing the persisted vocabulary requires a
+separate schema/cutover decision and is not implied by deleting an unused writer
+constructor. The larger legacy publication-lane deletion and migration collapse
+also remain a distinct cutover-sized change until their restart and upgrade
+recovery contracts are specified.
+
 The Inbox/Fix/Validate/Review/Publish path has focused local proof for exact worktree and
 receipt custody, failed-validation continuation, independent decision parsing,
 generation-safe rework/reopen, parked outcomes, and exactly-once coding

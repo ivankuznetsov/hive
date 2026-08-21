@@ -146,7 +146,7 @@ module Hive
         require "hive/task_action"
         require "hive/task_projection/store"
 
-        marker = if Hive::Workflows.patrol_fix_id?(task.workflow.id)
+        marker = if task.workflow.controller?
           Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
         else
           Hive::Markers.current(task.state_file)
@@ -197,7 +197,7 @@ module Hive
       end
 
       def observation_mtime_source(task)
-        if Hive::Workflows.patrol_fix_id?(task.workflow.id)
+        if task.workflow.controller?
           return task.meta_yml_path if File.exist?(task.meta_yml_path)
           return task.folder
         end

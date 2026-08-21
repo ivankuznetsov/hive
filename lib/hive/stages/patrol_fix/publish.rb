@@ -1,7 +1,6 @@
 require "digest"
 require "json"
 require "time"
-require "hive/agent_git_gate"
 require "hive/atomic_file"
 require "hive/github_publication"
 require "hive/git_ops"
@@ -9,6 +8,7 @@ require "hive/patrol_fix/publication_receipt"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/runner"
 require "hive/patrol_fix/task_manifest"
+require "hive/patrol_fix/worktree_snapshot"
 require "hive/patrol_fix/worktree_receipt"
 require "hive/worktree"
 
@@ -144,34 +144,13 @@ module Hive
             raise Hive::StageError, "publish approval does not bind one exact validated patch"
           end
 
-          custody = Hive::PatrolFix::WorktreeReceipt.new(
-            task_folder: task.folder, project_root: task.project_root,
-            slug: task.slug, worktree_root: worktree_root
+          worktree = Hive::PatrolFix::WorktreeSnapshot.capture(
+            task: task, manifest: manifest, fix: fix, validation: validation,
+            worktree_root: worktree_root, phase: :publish
           )
-          owner = custody.read
-          custody.validate!(owner)
-          unless owner.fetch("generation") == manifest.dig("task", "generation") &&
-                 owner.fetch("evidence_digest") == manifest.dig("evidence_revision", "digest") &&
-                 owner.fetch("worktree") == fix.dig("payload", "worktree") &&
-                 owner.fetch("branch") == fix.dig("payload", "branch") &&
-                 owner.fetch("base_revision") == fix.dig("payload", "base_revision")
-            raise Hive::StageError, "publish worktree custody is stale"
-          end
-          head = git_read!(owner.fetch("worktree"), :head_oid).strip
-          raise Hive::StageError, "reviewed worktree HEAD changed before publication" unless head == expected_head
-          unless git_read!(owner.fetch("worktree"), :status).empty?
-            raise Hive::StageError, "reviewed worktree is dirty before publication"
-          end
-          diff_result = Hive::AgentGitGate.read(
-            owner.fetch("worktree"), :diff,
-            base_oid: owner.fetch("base_revision"), head_oid: head,
-            max_stdout_bytes: Hive::PatrolFix::WorktreeReceipt::MAX_DIFF_BYTES
-          )
-          unless diff_result.success? && !diff_result.overflow
-            raise Hive::StageError, "reviewed diff is unavailable or oversized"
-          end
-          digest = Digest::SHA256.hexdigest(diff_result.stdout)
-          raise Hive::StageError, "reviewed diff changed before publication" unless digest == expected_diff
+          owner = worktree.fetch("owner")
+          head = worktree.fetch("head_revision")
+          digest = worktree.fetch("diff_digest")
           repository_identity = git_gateway.repository_identity(
             worktree_path: owner.fetch("worktree")
           )
@@ -185,11 +164,9 @@ module Hive
             "manifest" => manifest, "review" => review, "fix" => fix,
             "validation" => validation, "owner" => owner,
             "head_revision" => head, "diff_digest" => digest,
-            "diff" => diff_result.stdout, "repository_identity" => repository_identity,
+            "diff" => worktree.fetch("diff"), "repository_identity" => repository_identity,
             "base_branch" => base_branch
           }
-        rescue Hive::PatrolFix::WorktreeReceipt::InvalidWorktree => e
-          raise Hive::StageError, e.message
         end
         private_class_method :exact_snapshot!
 
@@ -339,14 +316,6 @@ module Hive
           )
         end
         private_class_method :default_git_gateway
-
-        def git_read!(path, operation)
-          result = Hive::AgentGitGate.read(path, operation)
-          return result.stdout if result.success?
-
-          raise Hive::StageError, "hardened Git #{operation} failed"
-        end
-        private_class_method :git_read!
 
         def complete(receipt)
           {

@@ -129,7 +129,7 @@ module Hive
 
       def do_call
         task = resolve_task
-        if Hive::Workflows.patrol_fix_id?(task.workflow.id)
+        if task.workflow.controller?
           require "hive/patrol_fix/stage_transition"
           return Hive::PatrolFix::StageTransition.with_lock(task) { run_task(task) }
         end
@@ -187,13 +187,13 @@ module Hive
       end
 
       def task_after_patrol_fix_move(task, result)
-        return task unless Hive::Workflows.patrol_fix_id?(task.workflow.id)
+        return task unless task.workflow.controller?
         destination = result.is_a?(Hash) && result[:moved_task_folder]
         return task unless destination
 
         moved = Hive::Task.new(destination, workflow_generation: task.workflow_generation)
         unless moved.project_root == task.project_root && moved.slug == task.slug &&
-               Hive::Workflows.patrol_fix_id?(moved.workflow.id)
+               moved.workflow.controller?
           raise Hive::InvalidTaskPath, "Patrol Fix runner returned a foreign moved task"
         end
         moved

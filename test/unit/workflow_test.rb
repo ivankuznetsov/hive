@@ -16,6 +16,15 @@ class WorkflowTest < Minitest::Test
     assert_equal :never, never.archive_visibility_retention_days
   end
 
+  def test_patrol_fix_declares_controller_ownership_in_its_descriptor
+    descriptor = Hive::Workflows::PatrolFix::DESCRIPTOR
+
+    assert descriptor.controller?
+    assert_equal :patrol_fix, descriptor.controller
+    assert_equal :controller, descriptor.stage_named("inbox").kind
+    assert_equal :inert, descriptor.stages.last.kind
+  end
+
   def test_archive_visibility_retention_rejects_invalid_direct_values
     stage = Hive::Workflow::Stage.new(name: "done", index: 1, state_file: "done.md", kind: :inert)
 

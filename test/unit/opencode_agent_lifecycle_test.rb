@@ -410,6 +410,39 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_completed_state_artifact_beats_empty_terminal_assistant_message
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "completed-file-260812-aaaa")
+      File.write(task.state_file, "# Complete plan\n<!-- COMPLETE -->\n")
+      agent = build_agent(
+        task, fixture,
+        invocation_root: File.join(fixture.fetch(:dir), "invocation-completed-file"),
+        profile_status: :state_file_marker
+      )
+      route = Hive::AgentRuntime::Route.parse(ROUTE)
+      outcome = Hive::AgentRuntime::NormalizedOutcome.new(
+        provider: :opencode, launcher_identity: "opencode-cli/v1",
+        kind: :malformed_output,
+        termination: Hive::AgentRuntime::TerminationEvidence.new(exit_code: 0),
+        identity: Hive::AgentRuntime::RouteIdentity.new(
+          requested: route, actual: nil, resolution_status: :unobserved
+        ),
+        diagnostic: "OpenCode terminal assistant message is empty"
+      )
+      result = {
+        provider_signal: nil, provider_error: nil, output_completed: false,
+        failure_origin: nil, resource_exhaustion: nil, limit_text: nil,
+        timed_out: false, exit_code: 0, normalized_outcome: outcome
+      }
+
+      agent.send(:handle_exit, result)
+
+      assert_equal :complete, result.fetch(:status)
+      assert_equal :complete, Hive::Markers.current(task.state_file).name
+      refute result.key?(:error_reason)
+    end
+  end
+
   private
 
   def make_task(dir, slug: "opencode-agent-260812-aaaa")

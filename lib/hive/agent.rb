@@ -1215,6 +1215,18 @@ module Hive
         return
       end
 
+      # OpenCode can exit zero after completing its file tool call while its
+      # terminal assistant message is empty. The strict transcript normalizer
+      # correctly labels that chat evidence malformed, but a current terminal
+      # stage artifact is stronger completion evidence: the previous marker
+      # was rotated to AGENT_WORKING before launch, so this marker came from
+      # the current attempt. Keep malformed chat from discarding completed
+      # work; an incomplete file still follows the ordinary failure path.
+      if recovered_normalized_failure?(result)
+        result[:status] = Hive::Markers.current(@task.state_file).name
+        return
+      end
+
       if result[:output_completed] && completed_output_file?
         result[:status] = :ok
         return
@@ -1503,6 +1515,14 @@ module Hive
       when :output_file_exists then completed_output_file?
       else false
       end
+    end
+
+    def recovered_normalized_failure?(result)
+      normalized = result[:normalized_outcome]
+      return false unless normalized && !normalized.completed?
+      return false unless result[:exit_code] == 0
+
+      completed_state_file_artifact?
     end
 
     # Some CLIs report a failed provider turn in their structured event stream

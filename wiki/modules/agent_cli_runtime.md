@@ -93,6 +93,10 @@ Nonzero OpenCode runs that carry an upstream idle-timeout/504 diagnostic are
 normalized as `timed_out` rather than generic `cli_failure`; Hive projects that
 use marker-owned stages record the ordinary transient `timeout` reason while
 preserving any partial artifact bytes for scheduler-owned retry.
+When OpenCode exits zero with an empty terminal assistant message after writing
+a current terminal stage artifact, Hive trusts that controller-scoped artifact;
+the strict malformed transcript remains a failure whenever the artifact itself
+is incomplete.
 Unknown additive event payloads are discarded after binding any supplied
 session identity; only bounded, redacted type summaries survive. Exact
 truncation evidence is carried separately from final-message bytes. Legacy

@@ -410,6 +410,55 @@ class PlanReviewOrchestratorTest < Minitest::Test
 
     assert_equal "approved", findings.first.fetch("lifecycle")
     assert_equal "prd-#{'a' * 64}", findings.first.fetch("decision_id")
+
+    safe = finding("safe_auto", "Safe residual", line: 2)
+    manual = finding("manual", "Manual residual", line: 3)
+    fyi = finding("fyi", "FYI residual", line: 4)
+    reopened = [ safe, manual, fyi ].map do |finding|
+      runner.send(:reopen_verification_finding, finding, finding)
+    end
+    assert_equal %w[open open open], reopened.map { |finding| finding.fetch("lifecycle") }
+  end
+
+  def test_legacy_policy_approval_resets_terminal_verification_before_revising
+    revised_once = standard_plan.sub("# Plan", "# Revised once")
+    revised_twice = standard_plan.sub("# Plan", "# Revised twice")
+    with_task(standard_plan) do |task, cfg|
+      initial = finding("safe_auto", "Clarify tests")
+      regression = finding("gated_auto", "New regression", line: 2)
+      verification_calls = 0
+      adapter = FakeAdapter.new do |request|
+        findings = if request.kind == "primary"
+          [ initial ]
+        elsif request.kind == "verification" && (verification_calls += 1) == 1
+          [ regression ]
+        else
+          []
+        end
+        successful_result(request, findings:)
+      end
+      revision = SequencedRevision.new(revised_once, revised_twice)
+      runner = orchestrator(task, cfg, adapter:, planner_revision: revision)
+
+      assert_equal "awaiting_decision", runner.advance!.record.state
+
+      cfg["plan_review"]["approval_policies"] = [
+        {
+          "id" => "legacy_followup", "version" => 1,
+          "action" => "approve_finding", "risk" => "low", "paths" => [ "plan.md" ],
+          "valid_from" => "2026-08-12T00:00:00Z",
+          "valid_until" => "2026-08-13T00:00:00Z", "revoked" => false
+        }
+      ]
+      projection = runner.advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal 2, revision.calls.length
+      assert_equal 2, adapter.calls.count { |request| request.kind == "verification" }
+      assert projection.record["routes"].any? { |route|
+        route["role"] == "verification" && route["verification_followup"] == true
+      }
+    end
   end
 
   def test_transient_attempt_retries_within_bound_but_unsupported_does_not

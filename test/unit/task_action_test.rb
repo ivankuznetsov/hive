@@ -169,6 +169,62 @@ class TaskActionTest < Minitest::Test
     assert_nil blocked.command
   end
 
+  def test_policy_eligible_awaiting_decision_is_runnable
+    Dir.mktmpdir do |project|
+      task = fake_task(stage_name: "plan", stage_index: 3, project_root: project)
+      FileUtils.mkdir_p(task.folder)
+      gated = Hive::PlanReview::Finding.new(
+        "source" => "whole_document", "classification" => "gated_auto", "risk" => "low",
+        "title" => "Fix boundary", "description" => "Fix the boundary.",
+        "evidence" => {
+          "path" => "plan.md", "start_line" => 1, "end_line" => 1,
+          "anchor_digest" => "a" * 64
+        },
+        "lifecycle" => "open", "display_order" => 1
+      )
+      record = Struct.new(:review_id, :policy_fingerprint) do
+        define_method(:[]) { |key| key == "findings" ? [ gated.to_h ] : nil }
+      end.new("pr-#{'b' * 64}", "c" * 64)
+      store = Object.new
+      store.define_singleton_method(:current_validated) { record }
+      cfg = {
+        "plan_review" => {
+          "approval_policies" => [
+            {
+              "id" => "policy", "version" => 1, "action" => "approve_finding",
+              "risk" => "low", "paths" => [ "plan.md" ],
+              "valid_from" => "2026-08-12T00:00:00Z",
+              "valid_until" => "2026-08-13T00:00:00Z", "revoked" => false
+            }
+          ]
+        }
+      }
+      action = Hive::TaskAction.for(
+        task, marker(:waiting), config: cfg,
+        plan_review: { "state" => "awaiting_decision" },
+        clock: -> { Time.utc(2026, 8, 12, 12) }
+      )
+
+      store_new = Hive::PlanReview::Store.method(:new)
+      Hive::PlanReview::Store.define_singleton_method(:new) { |**| store }
+      assert action.send(:auto_plan_review_decision?)
+      assert_equal "plan_reviewing", action.key
+
+      empty_record = Struct.new(:review_id, :policy_fingerprint) do
+        define_method(:[]) { |key| key == "findings" ? [] : nil }
+      end.new("pr-#{'d' * 64}", "e" * 64)
+      store.define_singleton_method(:current_validated) { empty_record }
+      refute action.send(:auto_plan_review_decision?)
+
+      store.define_singleton_method(:current_validated) do
+        raise Hive::PlanReview::InvalidRecord, "bad"
+      end
+      refute action.send(:auto_plan_review_decision?)
+    ensure
+      Hive::PlanReview::Store.define_singleton_method(:new, store_new) if store_new
+    end
+  end
+
   def test_stale_plan_review_offers_linked_review_recovery_command
     task = fake_task(stage_name: "plan", stage_index: 3)
     action = Hive::TaskAction.for(

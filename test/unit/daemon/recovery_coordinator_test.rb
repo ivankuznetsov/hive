@@ -555,9 +555,13 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       progressed_row = row.to_h.merge(
         "evidence" => [ dirty_commit_evidence("b" * 40) ]
       )
+      invalid_row = row.to_h.merge(
+        "evidence" => [ dirty_commit_evidence("not-a-revision") ]
+      )
 
       assessment = coordinator.assessment(progressed_row, now: NOW)
 
+      assert_equal "", coordinator.send(:dirty_progress_revision, invalid_row, attrs)
       receipt = coordinator.request(
         row: progressed_row, requestor: "healer", request_id: "progressed", now: NOW
       )

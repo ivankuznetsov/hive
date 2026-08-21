@@ -125,8 +125,8 @@ class ReposTest < ActionDispatch::IntegrationTest
                  "an omitted web checkbox value must use the fresh-init discovery recommendation"
     assert_equal true, parsed_config.dig("refactor_patrol", "auto_fix", "enabled"),
                  "recommended architecture patrol must attempt confined fixes"
-    assert_equal true, parsed_config.dig("refactor_patrol", "issue_filing", "enabled"),
-                 "recommended discovery must produce reviewable GitHub issues"
+    assert_equal false, parsed_config.dig("refactor_patrol", "issue_filing", "enabled"),
+                 "issue filing is retired — accepted findings route through the Patrol-fix workflow"
   ensure
     Hive::Commands::Init.define_singleton_method(:new, original_init_new) if original_init_new
   end

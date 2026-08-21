@@ -37,8 +37,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Baseline-catalog tests verify reviewed dependency locks at release tags.
-          fetch-depth: 0
+          # Shallow by default; only the shard that owns baseline-catalog
+          # tests unshallows (see coverage:unshallow_if_needed), because those
+          # tests verify reviewed dependency locks against release tags.
+          fetch-depth: 1
+      - name: Unshallow when this shard owns baseline-catalog tests
+        env:
+          HIVE_COVERAGE_SHARD_INDEX: ${{ matrix.shard }}
+        run: bundle exec rake coverage:unshallow_if_needed
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:

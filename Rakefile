@@ -1,8 +1,10 @@
 require "rake/testtask"
 require "fileutils"
 require "securerandom"
+require "json"
 require_relative "test/support/coverage"
 require_relative "test/support/tmp_cleanup"
+require_relative "test/support/shard_partition"
 
 # These expensive outer proofs are intentionally separate from the normal local
 # suite. CI runs them as named merge gates.
@@ -21,31 +23,29 @@ HIVE_DEFAULT_TEST_FILES = FileList[
   "test/{unit,integration,babysitter}/**/*_test.rb"
 ].exclude(*HIVE_CI_GATE_TESTS.values).to_a.freeze
 HIVE_COVERAGE_SHARD_COUNT = 6
-HIVE_COVERAGE_SHARDS = begin
-  partition_by_bytes = lambda do |files, count|
-    shards = Array.new(count) { [] }
-    shard_bytes = Array.new(count, 0)
-
-    files.sort_by { |path| [ -File.size(path), path ] }.each do |path|
-      shard = shard_bytes.each_index.min_by { |index| [ shard_bytes[index], index ] }
-      shards.fetch(shard) << path
-      shard_bytes[shard] += File.size(path)
-    end
-
-    shards
+HIVE_SHARD_TIMINGS_PATH = File.join(__dir__, "test", "support", "shard_timings.json")
+# Measured per-file runtimes from the nightly flake sweep (see
+# script/flake_sweep.rb and `rake coverage:timings`). Missing, stale, or
+# malformed timings fall back to the historical byte-size partition with a
+# warning; the sweep's warning about files absent from the payload is
+# expected on the first landing.
+hive_shard_timings = begin
+  if File.exist?(HIVE_SHARD_TIMINGS_PATH)
+    payload = JSON.parse(File.read(HIVE_SHARD_TIMINGS_PATH))
+    payload["schema"] == "hive-shard-timings.v1" ? payload.fetch("seconds_per_run") : nil
   end
-
-  # Hosted runs identified the third source-balanced partition as the original
-  # long pole, then exposed the fourth as the remaining long pole. Split those
-  # measured hot partitions while preserving the two faster partitions and
-  # adding only two runners instead of reshuffling or doubling the whole matrix.
-  base_shards = partition_by_bytes.call(HIVE_DEFAULT_TEST_FILES, 4)
-  hot_shards = partition_by_bytes.call(base_shards.fetch(2), 2)
-  tail_shards = partition_by_bytes.call(base_shards.fetch(3), 2)
-  shards = [ base_shards[0], base_shards[1], *hot_shards, *tail_shards ]
-  shards.each(&:freeze)
-  shards.freeze
+rescue JSON::ParserError, StandardError => e
+  warn "shard partition: unusable timings file (#{e.class}); byte-size fallback"
+  nil
 end
+if HiveShardPartition.stale?(HIVE_SHARD_TIMINGS_PATH)
+  warn "shard partition: timings file is older than 14 days; refresh via the nightly sweep"
+end
+HIVE_COVERAGE_SHARDS = HiveShardPartition.partition(
+  files: HIVE_DEFAULT_TEST_FILES,
+  count: HIVE_COVERAGE_SHARD_COUNT,
+  timings: hive_shard_timings,
+)
 HIVE_HOSTILE_TEST_FILES = FileList[
   "test/unit/packaging/workflow_creator_values_test.rb"
 ].to_a.freeze
@@ -163,6 +163,20 @@ namespace :coverage do
     t.warning = false
   end
   Rake::Task["coverage:run_shard"].enhance([ "test:agent_cli_runtime" ]) if coverage_shard_index == 0
+
+  desc "Unshallow the checkout when this shard owns baseline-catalog tests (which need full history)"
+  task :unshallow_if_needed do
+    index = Integer(ENV["HIVE_COVERAGE_SHARD_INDEX"])
+    baseline_files = HIVE_COVERAGE_SHARDS.fetch(index).select do |file|
+      file.include?("packaging/release_candidate_baseline")
+    end
+    if baseline_files.any?
+      puts "shard #{index} owns #{baseline_files.length} baseline-catalog test file(s); unshallowing"
+      sh "git fetch --unshallow --tags"
+    else
+      puts "shard #{index}: no baseline-catalog tests; keeping shallow clone"
+    end
+  end
 
   desc "Collect one deterministic CI coverage shard without applying the final percentage gate"
   task collect: :run_shard do

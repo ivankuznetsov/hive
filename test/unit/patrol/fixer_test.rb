@@ -1101,7 +1101,7 @@ class HivePatrolFixerTest < Minitest::Test
       )
       base_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
       worktree.create_exact!(branch, base_sha: base_sha)
-      _base, expected_head = fixer.send(
+      expected_head = fixer.send(
         :interrupted_attempt_proof!, finding, branch, worktree
       )
       File.write(File.join(worktree.path, "app.rb"), "puts 'late work'\n")

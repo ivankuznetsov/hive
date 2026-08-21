@@ -197,7 +197,11 @@ module Hive
         worktree = @worktree_factory.call(
           finding: finding, branch: branch
         )
-        base_sha, branch_head = interrupted_attempt_proof!(
+        # The proof returns the exact branch head it verified disposable, or
+        # nil when the attempt left no branch at all. Base and head are the
+        # same commit by construction — the proof *is* HEAD == branch head ==
+        # ancestor of default.
+        branch_head = interrupted_attempt_proof!(
           finding, branch, worktree
         )
         retire_interrupted_attempt!(
@@ -216,7 +220,7 @@ module Hive
           },
           passed: false,
           diffstat: "",
-          base_sha: base_sha,
+          base_sha: branch_head || finding_target_sha_or_nil(finding),
           head_sha: nil
         )
         @state.write_patch(patch.id, patch.to_h)
@@ -254,7 +258,7 @@ module Hive
             preserve_interrupted_worktree!("the checkout contains uncommitted work")
           end
         elsif !branch_exists
-          return [ finding_target_sha_or_nil(finding), nil ]
+          return nil
         end
 
         head = git_output!(
@@ -274,7 +278,7 @@ module Hive
             "the Patrol branch contains unique committed work"
           )
         end
-        [ head, head ]
+        head
       rescue PublicationRecoveryError
         raise
       rescue StandardError => error

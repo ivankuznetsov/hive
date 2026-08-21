@@ -683,8 +683,30 @@ module Hive
       def semantic_fingerprint(targets)
         ::Digest::SHA256.hexdigest(JSON.generate(
           "targets" => targets,
-          "patrol_fix_projects" => @patrol_fix_projects || {}
+          "patrol_fix_projects" => semantic_patrol_fix_projects
         ))
+      end
+
+      def semantic_patrol_fix_projects
+        Hive::PatrolFix.deep_copy(@patrol_fix_projects || {}).each_value do |projection|
+          projection.delete("generated_at")
+          projection.dig("discovery", "coverage")&.each_value do |coverage|
+            coverage.delete("age_seconds")
+          end
+          latency = projection.dig("workflow", "latency")
+          next unless latency.is_a?(Hash)
+
+          remove_latency_durations!(latency)
+          latency.fetch("by_stage", {}).each_value do |stage|
+            remove_latency_durations!(stage)
+          end
+        end
+      end
+
+      def remove_latency_durations!(value)
+        %w[total_seconds active_seconds parked_seconds provider_seconds].each do |key|
+          value.delete(key)
+        end
       end
 
       def event_payload(event, sequence, targets, reason: nil, message: nil, ok: true)

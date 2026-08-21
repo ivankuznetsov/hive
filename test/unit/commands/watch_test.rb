@@ -690,6 +690,30 @@ class CommandsWatchTest < Minitest::Test
     assert_watch_schema(events)
   end
 
+  def test_project_projection_clock_changes_do_not_emit_semantic_transitions
+    first = Marshal.load(Marshal.dump(patrol_fix_project("demo")))
+    first.dig("discovery", "coverage", "ordinary").merge!(
+      "observed_at" => "2026-07-20T11:00:00Z", "age_seconds" => 3_600
+    )
+    clock_only = Marshal.load(Marshal.dump(first))
+    clock_only["generated_at"] = "2026-07-20T12:00:01Z"
+    clock_only.dig("workflow", "latency")["total_seconds"] = 1
+    clock_only.dig("workflow", "latency", "by_stage", "1-inbox")["total_seconds"] = 1
+    clock_only.dig("discovery", "coverage", "ordinary")["age_seconds"] = 3_601
+    waiting = task(state: "waiting_on_you", owner: "operator", reason: "choose")
+    source = FakeSource.new(
+      snapshot(task, project_projections: { "demo" => first }),
+      snapshot(task, project_projections: { "demo" => clock_only }),
+      snapshot(waiting, project_projections: { "demo" => clock_only })
+    )
+
+    events, = run_json_watch(source: source, targets: [ "demo:task" ])
+
+    assert_equal %w[initial transition final], events.map { |event| event.fetch("event") }
+    assert_equal "waiting_on_you", events[1].dig("targets", 0, "state")
+    assert_watch_schema(events)
+  end
+
   def test_default_signal_handlers_are_installed_for_the_bounded_call
     traps = []
     trap = lambda do |signal, handler = nil, &block|

@@ -1298,6 +1298,35 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_current_is_not_visible_until_its_change_fingerprints_are_ready
+    with_seeded_project do |_project, _dir|
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      fingerprint_started = Queue.new
+      release_fingerprint = Queue.new
+      original_fingerprint = source.method(:mtime_fingerprint_for)
+      source.define_singleton_method(:mtime_fingerprint_for) do |snapshot|
+        fingerprint_started << true
+        release_fingerprint.pop
+        original_fingerprint.call(snapshot)
+      end
+
+      source.start
+      begin
+        assert wait_for(deadline_seconds: 0.5) { fingerprint_started.length.positive? },
+               "the first refresh must reach change-fingerprint capture"
+        assert_nil source.current,
+                   "readers must not observe a snapshot before its change fingerprints"
+      ensure
+        release_fingerprint << true
+      end
+
+      refute_nil wait_for(deadline_seconds: 0.5) { source.current },
+                 "the snapshot must publish after fingerprint capture completes"
+    ensure
+      source&.stop
+    end
+  end
+
   # Risk #6 removal direction: dropping ONE of several archived folders must
   # update the cache on the next background refresh (the retain-prior guard
   # only holds over an EMPTY archive result, so a shrink to a smaller

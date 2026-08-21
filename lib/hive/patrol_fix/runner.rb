@@ -16,12 +16,8 @@ module Hive
       }.freeze
 
       def run!(task, cfg = nil, **kwargs)
-        if defined?(Hive::PatrolFix::Transition)
-          Hive::PatrolFix::Transition.new(task).reconcile!
-        else
-          require "hive/patrol_fix/transition"
-          Hive::PatrolFix::Transition.new(task).reconcile!
-        end
+        require "hive/patrol_fix/transition"
+        Hive::PatrolFix::Transition.new(task).reconcile!
         load_handler(task.stage_name)
         handler = handlers[task.stage_name]
         unless handler

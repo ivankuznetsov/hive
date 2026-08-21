@@ -3,6 +3,7 @@ require "json"
 require "time"
 require "hive"
 require "hive/managed_directory"
+require "hive/patrol_fix"
 require "hive/refactor_patrol/pr_manifest"
 
 module Hive
@@ -67,7 +68,7 @@ module Hive
           @directory.atomic_write(
             record_relative(record.fetch("batch_id")), canonical_json(record), mode: 0o600
           )
-          deep_copy(record)
+          Hive::PatrolFix.deep_copy(record)
         end
       end
 
@@ -150,14 +151,14 @@ module Hive
             unless record.fetch("manifest_checksum") == manifest_checksum.to_s
               raise Conflict, "post-merge batch materialization changed"
             end
-            return deep_copy(record)
+            return Hive::PatrolFix.deep_copy(record)
           end
           record.merge!(
             "status" => "materialized", "manifest_checksum" => manifest_checksum.to_s,
             "materialized_at" => instant.iso8601(6)
           )
           persist(record)
-          deep_copy(record)
+          Hive::PatrolFix.deep_copy(record)
         end
       end
 
@@ -172,13 +173,13 @@ module Hive
             if record.fetch("status") == "finalized" &&
                record.fetch("owner_job_id") == job_id.to_s &&
                record.fetch("manifest_checksum") == manifest_checksum.to_s
-              return deep_copy(record)
+              return Hive::PatrolFix.deep_copy(record)
             end
             raise Conflict, "post-merge batch finalization changed"
           end
           record["status"] = "finalized"
           persist(record)
-          deep_copy(record)
+          Hive::PatrolFix.deep_copy(record)
         end
       end
 
@@ -231,7 +232,7 @@ module Hive
                  mapped.all? { |entry| valid_path_mapping?(entry) }
             raise Invalid, "post-merge mapping does not match occurrence #{id}"
           end
-          [ id, deep_copy(mapped) ]
+          [ id, Hive::PatrolFix.deep_copy(mapped) ]
         end
       end
 
@@ -410,7 +411,6 @@ module Hive
       def record_relative(batch_id) = "records/#{batch_id}.json"
       def canonical_json(value) = PrManifest.canonical_json(value)
       def normalize_time(value) = value.utc
-      def deep_copy(value) = JSON.parse(JSON.generate(value))
     end
   end
 end

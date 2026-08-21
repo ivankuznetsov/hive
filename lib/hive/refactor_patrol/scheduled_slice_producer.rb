@@ -8,6 +8,7 @@ require "hive/git_ops"
 require "hive/lock"
 require "hive/managed_directory"
 require "hive/patrol/mapper"
+require "hive/patrol_fix"
 require "hive/refactor_patrol/state_store"
 require "hive/refactor_patrol/fix_admission_outbox"
 require "hive/worktree"
@@ -191,7 +192,7 @@ module Hive
       end
 
       def build_result_record(claim, result, now)
-        report = JSON.parse(JSON.generate(result))
+        report = Hive::PatrolFix.deep_copy(result)
         unless report.is_a?(Hash) && report["schema"] == "hive-refactor-patrol" &&
                report["schema_version"] == 4 && report["ok"] == true &&
                report["review_complete"] == true &&

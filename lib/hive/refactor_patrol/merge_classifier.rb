@@ -4,6 +4,7 @@ require "time"
 
 require "hive"
 require "hive/managed_directory"
+require "hive/patrol_fix"
 require "hive/refactor_patrol/pr_manifest"
 
 module Hive
@@ -168,7 +169,7 @@ module Hive
             @directory.read("records/#{name}", max_bytes: MAX_RECORD_BYTES),
             expected_occurrence_id: id
           )
-          yield deep_copy(record)
+          yield Hive::PatrolFix.deep_copy(record)
         end
       end
 
@@ -198,7 +199,7 @@ module Hive
             retry_at = record["retry_at"] && Time.iso8601(record.fetch("retry_at"))
             next if retry_at && retry_at > instant
 
-            records << deep_copy(record)
+            records << Hive::PatrolFix.deep_copy(record)
             break if records.size >= bound
           end
           records
@@ -210,7 +211,7 @@ module Hive
         @directory.with_lock(LOCK_FILE) do
           index = rebuild_index_document
           @directory.atomic_write(INDEX_FILE, canonical_json(index), mode: 0o600)
-          deep_copy(index)
+          Hive::PatrolFix.deep_copy(index)
         end
       end
 
@@ -240,7 +241,7 @@ module Hive
           }
           record["updated_at"] = timestamp(instant)
           persist(record)
-          deep_copy(record)
+          Hive::PatrolFix.deep_copy(record)
         end
       end
 
@@ -250,14 +251,14 @@ module Hive
           record = read_record(occurrence_id.to_s)
           return nil unless record
           claim = record["claim"]
-          return deep_copy(record) unless claim
+          return Hive::PatrolFix.deep_copy(record) unless claim
           unless claim.fetch("reservation_id") == reservation_id.to_s
             raise Conflict, "merge classification claim changed"
           end
           record["claim"] = nil
           record["updated_at"] = timestamp(instant)
           persist(record)
-          deep_copy(record)
+          Hive::PatrolFix.deep_copy(record)
         end
       end
 
@@ -281,13 +282,13 @@ module Hive
                    binding.slice("job_ids", "manifest_checksums")
               raise Conflict, "merge classification materialization changed"
             end
-            return deep_copy(record)
+            return Hive::PatrolFix.deep_copy(record)
           end
           record["materialization"] = binding
           record["updated_at"] = timestamp(instant)
           persist(record)
           remove_index(record.fetch("occurrence_id"))
-          deep_copy(record)
+          Hive::PatrolFix.deep_copy(record)
         end
       end
 
@@ -301,7 +302,7 @@ module Hive
             unless record.fetch("snapshot_digest") == digest && record.fetch("snapshot") == snapshot
               raise Conflict, "merged-PR classification snapshot changed for #{occurrence_id}"
             end
-            return deep_copy(record) if TERMINAL_STATUSES.include?(record.fetch("status"))
+            return Hive::PatrolFix.deep_copy(record) if TERMINAL_STATUSES.include?(record.fetch("status"))
             retry_at = record["retry_at"] && Time.iso8601(record.fetch("retry_at"))
             if retry_at && retry_at > now
               raise Retryable.new("merge classification retry is not yet eligible", retry_at: retry_at)
@@ -321,7 +322,7 @@ module Hive
             )
             persist(record)
             remove_index(occurrence_id)
-            return deep_copy(record)
+            return Hive::PatrolFix.deep_copy(record)
           end
 
           prefilter = deterministic_prefilter(snapshot)
@@ -337,7 +338,7 @@ module Hive
             )
             persist(record)
             remove_index(occurrence_id)
-            return deep_copy(record)
+            return Hive::PatrolFix.deep_copy(record)
           end
 
           unless launch
@@ -347,7 +348,7 @@ module Hive
               "updated_at" => timestamp(now)
             )
             persist(record)
-            return deep_copy(record)
+            return Hive::PatrolFix.deep_copy(record)
           end
 
           attempt = record.fetch("attempts") + 1
@@ -358,7 +359,7 @@ module Hive
               "retry_at" => nil, "updated_at" => timestamp(now)
             )
             persist(record)
-            return deep_copy(record)
+            return Hive::PatrolFix.deep_copy(record)
           end
           record.merge!(
             "status" => "retry_wait", "attempts" => attempt,
@@ -366,7 +367,7 @@ module Hive
             "updated_at" => timestamp(now)
           )
           persist(record)
-          deep_copy(record)
+          Hive::PatrolFix.deep_copy(record)
         end
       end
 
@@ -388,7 +389,7 @@ module Hive
           )
           persist(record)
           remove_index(occurrence_id) if route == "skip"
-          deep_copy(record)
+          Hive::PatrolFix.deep_copy(record)
         end
       end
 
@@ -423,7 +424,7 @@ module Hive
           end
           persist(record)
           remove_index(occurrence_id) if record.fetch("status") == "blocked"
-          deep_copy(record)
+          Hive::PatrolFix.deep_copy(record)
         end
         return result if result.fetch("status") == "blocked"
 
@@ -540,14 +541,14 @@ module Hive
           raise Invalid, "merge classification provider returned invalid #{key}" unless
             valid_text?(value[key], MAX_TEXT_BYTES)
         end
-        deep_copy(value)
+        Hive::PatrolFix.deep_copy(value)
       end
 
       def normalize_snapshot(input)
         unless input.is_a?(Hash) && input.keys.sort == SNAPSHOT_KEYS.sort
           raise Invalid, "merge classification snapshot fields are invalid"
         end
-        value = deep_copy(input)
+        value = Hive::PatrolFix.deep_copy(input)
         %w[repository url base_branch base_sha merge_sha merged_at target_head title author].each do |key|
           value[key] = bounded_utf8(value[key], key, key == "title" ? MAX_TITLE_BYTES : MAX_TEXT_BYTES,
                                     allow_empty: %w[title author].include?(key))
@@ -811,7 +812,6 @@ module Hive
 
       def timestamp(value) = normalize_time(value).iso8601(6)
       def normalize_time(value) = value.is_a?(Time) ? value.utc : Time.iso8601(value.to_s).utc
-      def deep_copy(value) = JSON.parse(JSON.generate(value))
       def canonical_json(value) = JSON.generate(deep_sort(value))
 
       def deep_sort(value)

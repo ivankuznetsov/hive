@@ -319,37 +319,6 @@ module Hive
         ::Digest::SHA256.hexdigest(JSON.generate(input))
       end
 
-      def find_idempotent_task!(hive_state, key, fingerprint)
-        matches = Dir.glob(File.join(hive_state, "stages", "*", "*", Hive::TaskMeta::FILENAME)).filter_map do |path|
-          folder = File.dirname(path)
-          read = Hive::TaskMeta.read_for_admission(folder)
-          unless read.status == :ok
-            raise IdempotencyConflict.new(
-              "cannot prove idempotency while task metadata is unreadable at #{path}: " \
-              "#{read.error || read.status}",
-              value: key
-            )
-          end
-          meta = read.data
-          { folder: folder, meta: meta } if meta[:idempotency_key] == key
-        end
-        return nil if matches.empty?
-        if matches.length > 1
-          raise IdempotencyConflict.new(
-            "idempotency key #{key.inspect} is already attached to multiple tasks; repair metadata before retrying",
-            value: key
-          )
-        end
-
-        match = matches.first
-        return match if match.dig(:meta, :input_fingerprint) == fingerprint
-
-        raise IdempotencyConflict.new(
-          "idempotency key #{key.inspect} was already used for different input or workflow",
-          value: key
-        )
-      end
-
       def emit_task_result(task_folder, workflow, created:)
         task = Hive::Task.new(task_folder)
         action = Hive::TaskAction.for(task, Hive::Markers.current(task.state_file))
@@ -438,17 +407,6 @@ module Hive
         return writer.call(stable_selection) unless stable_selection == :unlocked
 
         store.with_stable_selection(workflow.id.to_s, cfg: managed_cfg, &writer)
-      end
-
-      def with_stable_workflow_selection(workflow_info, hive_state)
-        workflow = workflow_info.fetch(:descriptor)
-        store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
-        store.with_stable_selection(
-          workflow.id.to_s, cfg: workflow_info.fetch(:managed_cfg, {})
-        ) do |current|
-          validate_stable_selection!(workflow_info.fetch(:managed), current)
-          yield current
-        end
       end
 
       def validate_stable_selection!(managed, current)

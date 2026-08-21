@@ -6,6 +6,7 @@ require "hive/patrol/agent_launch"
 require "hive/patrol/launch_budget"
 require "hive/patrol/runner_task"
 require "hive/refactor_patrol/agent_identity"
+require "hive/stages/base"
 
 module Hive
   module Daemon
@@ -65,8 +66,7 @@ module Hive
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
             log_label: STAGE, profile: profile, expected_output: nil,
             status_mode: :exit_code_only, cli_flags: launch.fetch(:cli_flags),
-            identity_arguments: @identity.native_arguments,
-            routing_arguments: @identity.routing_arguments(profile)
+            **Hive::Stages::Base.implementation_launch_arguments(@identity, profile)
           ).run!
         ensure
           @launch_budget.record!(

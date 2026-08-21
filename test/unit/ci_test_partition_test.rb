@@ -140,12 +140,14 @@ class CiTestPartitionTest < Minitest::Test
       assert_equal "coverage (Ruby 3.4)", coverage_gate.fetch("name")
       assert_equal "${{ always() }}", coverage_gate.fetch("if")
       assert_equal "coverage-shards", coverage_gate.fetch("needs")
-      shard_verdict = coverage_gate.fetch("steps").fetch(0)
-      assert_equal "Require every coverage collector", shard_verdict.fetch("name")
+      shard_verdict = coverage_gate.fetch("steps").find { |step| step["name"] == "Require every coverage collector" }
       assert_equal "bash", shard_verdict.fetch("shell")
       assert_equal "${{ needs.coverage-shards.result }}",
                    shard_verdict.dig("env", "HIVE_COVERAGE_SHARDS_RESULT")
       assert_equal 'test "$HIVE_COVERAGE_SHARDS_RESULT" = "success"', shard_verdict.fetch("run")
+      coverage_notice = coverage_gate.fetch("steps").find { |step| step["name"] == "Aggregation-only notice (no tests run in this job)" }
+      assert coverage_notice, "coverage merge job must self-describe as an aggregator"
+      assert_includes coverage_notice.fetch("run"), "GITHUB_STEP_SUMMARY"
       download = coverage_gate.fetch("steps").find { |step| step["name"] == "Download coverage shards" }
       assert_equal DOWNLOAD_ARTIFACT_ACTION, download.fetch("uses")
       assert_equal "coverage-shard-*", download.dig("with", "pattern")
@@ -165,9 +167,7 @@ class CiTestPartitionTest < Minitest::Test
       assert_equal "${{ always() }}", required_gate.fetch("if")
       assert_equal %w[test expensive-test-gates e2e], required_gate.fetch("needs")
 
-      required_step = required_gate.fetch("steps").fetch(0)
-      assert_equal "Require coverage, functional e2e, and expensive proof gates",
-                   required_step.fetch("name")
+      required_step = required_gate.fetch("steps").find { |step| step["name"] == "Require coverage, functional e2e, and expensive proof gates" }
       assert_equal "${{ needs.test.result }}",
                    required_step.fetch("env").fetch("HIVE_COVERAGE_RESULT")
       assert_equal "${{ needs.expensive-test-gates.result }}",
@@ -263,9 +263,11 @@ class CiTestPartitionTest < Minitest::Test
     assert_equal "Hive web (Rails tests + system)", web_gate.fetch("name")
     assert_equal "${{ always() }}", web_gate.fetch("if")
     assert_equal "web-tests", web_gate.fetch("needs")
-    gate_step = web_gate.fetch("steps").fetch(0)
+    gate_step = web_gate.fetch("steps").find { |step| step["name"] == "Require Rails integration, system, and golden-path gates" }
     assert_equal "${{ needs.web-tests.result }}", gate_step.dig("env", "HIVE_WEB_TESTS_RESULT")
     assert_equal 'test "$HIVE_WEB_TESTS_RESULT" = "success"', gate_step.fetch("run")
+    web_notice = web_gate.fetch("steps").find { |step| step["name"] == "Aggregation-only notice (no tests run in this job)" }
+    assert web_notice, "web aggregate job must self-describe as an aggregator"
   end
 
   def test_incident_duration_budget_is_advisory_and_separate_from_functional_e2e

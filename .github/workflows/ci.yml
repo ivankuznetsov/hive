@@ -62,6 +62,14 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 1
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: failure-evidence-shard-${{ matrix.shard }}
+          path: tmp/ci-failure-evidence.json
+          if-no-files-found: ignore
+          retention-days: 14
 
   test:
     name: coverage (Ruby 3.4)

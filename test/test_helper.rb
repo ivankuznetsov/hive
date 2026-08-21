@@ -53,6 +53,11 @@ end
 
 require "hive"
 require_relative "support/workflow_helpers"
+require_relative "support/failure_evidence"
+
+# CI failure evidence: registers on every suite; emits only when running on a
+# hosted runner (CI + GITHUB_STEP_SUMMARY) and only when tests failed.
+Minitest.extensions << HiveFailureEvidence
 
 if ENV.delete("HIVE_REQUIRE_TEST_RUNS") == "1"
   module HiveCiGateRunGuard

@@ -189,7 +189,7 @@ module Hive
       end
 
       def assessment(row, now: Time.now.utc, retry_count: nil)
-        retry_count = durable_retry_count(row) if retry_count.nil?
+        retry_count = retry_count_for_failure(row, marker_attrs(row)) if retry_count.nil?
         observed_at = value(row, :state_file_mtime)
         delay = if marker_attrs(row)["reason"] == "limits_reached"
           Hive::AgentLimit.retry_cooldown_sec

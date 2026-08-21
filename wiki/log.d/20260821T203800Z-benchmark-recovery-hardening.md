@@ -11,7 +11,11 @@ kill and fail-closed timeout behavior remain unchanged.
 signing, ownership, and task-lock guards; the marker still remains for a fresh
 generation-guarded coordinator retry after the residue is committed.
 
+**Action:** Corrected residue-command pointer validation to pass the task's
+project root to `Worktree.canonical_root`. Passing the configured worktree
+directory there caused a second config lookup and bogus roots such as
+`.worktrees.worktrees`, preventing safe recovery even for valid owned pointers.
+
 **Evidence:** `test/unit/agent_profile_test.rb` retains the bounded timeout and
 process cleanup coverage. `test/unit/commands/worktree_test.rb` now pins guarded
 commit recovery from the current execute marker without clearing its marker ID.
-

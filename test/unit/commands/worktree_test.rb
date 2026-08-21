@@ -94,7 +94,7 @@ class HiveCommandsWorktreeTest < Minitest::Test
       end
     end
 
-    assert_equal Hive::Worktree.default_worktree_root(@task.project_name), canonical_input
+    assert_equal @task.project_root, canonical_input
     assert_equal(
       [
         @task.folder,

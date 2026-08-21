@@ -220,7 +220,10 @@ hive worktree repair <slug> --strategy commit|discard [--json]
 ```
 
 Commit recovery reuses the full CleanExit scope, symlink, secret-content, and
-signing policy gates. Discard recovery accepts only normalized paths that are
+signing policy gates. Owned-pointer validation resolves the expected worktree
+root from the task's project root; it never feeds an already-resolved worktree
+directory back into the project-root configuration resolver. Discard recovery
+accepts only normalized paths that are
 currently dirty; without `--paths` it uses the marker's losslessly encoded,
 bounded residue-path array (with legacy comma-delimited fallback). It restores
 tracked paths from `HEAD` and cleans only the named untracked paths. Neither mutation clears the marker: the returned

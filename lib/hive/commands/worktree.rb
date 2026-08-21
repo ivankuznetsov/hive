@@ -124,9 +124,7 @@ module Hive
       def owned_worktree_path(task, cfg)
         return @pointer_resolver.call(task, cfg) if @pointer_resolver
 
-        expected_root = Hive::Worktree.canonical_root(
-          cfg["worktree_root"] || Hive::Worktree.default_worktree_root(task.project_name)
-        )
+        expected_root = Hive::Worktree.canonical_root(task.project_root)
         pointer = Hive::Worktree.read_owned_pointer(
           task.folder,
           project_root: task.project_root,

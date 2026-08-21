@@ -797,6 +797,16 @@ class ArtifactFirewallTest < Minitest::Test
     end
   end
 
+  def test_manifest_rejects_a_non_integer_entry_limit
+    with_tmp_dir do |dir|
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        build_manifest(dir, max_entries: "many")
+      end
+
+      assert_includes error.message, "max_entries must be an integer"
+    end
+  end
+
   private
 
   def build_manifest(dir, protected: {}, outputs: {}, roots: [],

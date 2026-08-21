@@ -257,6 +257,11 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       "failure origin" => recovery_payload.merge("failure_origin" => ""),
       "nullable strings" => recovery_payload.merge("blocked_reason" => true),
       "retry count" => recovery_payload.merge("retry_count" => -1),
+      "identical failure count" => recovery_payload.merge("identical_failure_count" => -1),
+      "failure fingerprint" => recovery_payload.merge("failure_fingerprint" => "not-a-sha"),
+      "failure attempt history" => recovery_payload.merge(
+        "failure_attempt_history" => [ "" ]
+      ),
       "timestamp" => recovery_payload.merge("next_eligible_at" => "not-a-time")
     }
 
@@ -806,6 +811,10 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       )
       assert_equal 0, Q.recovery_retry_count(
         project: "hive", slug: "task", state_home: "/tmp/hive-missing"
+      )
+      assert_nil Q.latest_terminal_recovery(
+        project: "hive", slug: "task", expected_stage: "4-execute",
+        state_home: "/tmp/hive-missing"
       )
       assert_nil Q.fetch("missing", state_home: "/tmp/hive-missing")
       assert_equal 0, Q.remove_terminal_recoveries(

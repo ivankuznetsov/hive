@@ -1684,6 +1684,21 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       }
       assert_invalid_record(validator, invalid_nonterminal)
 
+      abandoned = mutable(prepared)
+      abandoned_cell = abandoned.dig("effects", prepared_intent.intent_id)
+      abandoned_cell["state"] = "abandoned"
+      abandoned_cell["outcome"] = {
+        "reason" => "regenerable_effect_abandoned"
+      }
+      assert validator.validate!(
+        abandoned, expected_id: patrol_capture.occurrence_id
+      )
+      invalid_abandoned = mutable(abandoned)
+      invalid_abandoned.dig("effects", prepared_intent.intent_id)["outcome"] = {
+        "reason" => "wrong"
+      }
+      assert_invalid_record(validator, invalid_abandoned)
+
       orphan = receipt(prepared_intent, "denied", {})
       orphan_entry = outbox_entry(
         sequence: 1,

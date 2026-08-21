@@ -464,6 +464,49 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_disposable_worktree_creation_failure_is_cleaned_and_reported
+    failed = Object.new
+    failed.define_singleton_method(:success?) { false }
+    succeeded = Object.new
+    succeeded.define_singleton_method(:success?) { true }
+
+    with_request do |request, _plan_path|
+      capture = lambda do |*argv|
+        if argv.include?("add")
+          [ "", "cannot add", failed ]
+        else
+          [ "", "", succeeded ]
+        end
+      end
+      error = nil
+      with_replaced_singleton_method(Open3, :capture3, capture) do
+        error = assert_raises(Hive::PlanReview::InvalidRecord) do
+          adapter_for(->(**) { }).send(:prepare_disposable, request)
+        end
+      end
+
+      assert_includes error.message, "could not create a disposable Git worktree"
+      assert_includes error.message, "cannot add"
+    end
+  end
+
+  def test_disposable_cleanup_reports_filesystem_failures
+    Dir.mktmpdir("hive-plan-review-worktree-") do |parent|
+      path = File.join(parent, "checkout")
+      FileUtils.mkdir_p(path)
+      _out, err = capture_io do
+        with_replaced_singleton_method(
+          Open3, :capture3, ->(*) { raise Errno::EIO, "cleanup" }
+        ) do
+          adapter_for(->(**) { }).send(:cleanup_disposable, request_for_cleanup, path)
+        end
+      end
+
+      assert_includes err, "disposable worktree cleanup failed"
+      assert_includes err, "EIO"
+    end
+  end
+
   def test_capability_probe_faults_degrade_to_unsupported_instead_of_raising
     with_request do |request, _plan_path|
       contract = Struct.new(:invocation).new("/ce-doc-review")
@@ -565,6 +608,10 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
   end
 
   private
+
+  def request_for_cleanup
+    Struct.new(:project_root).new(Dir.tmpdir)
+  end
 
   def with_runner
     with_request do |request, _plan_path|

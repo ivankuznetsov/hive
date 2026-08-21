@@ -43,12 +43,13 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   end
 
   class FakeRecoveryCoordinator
-    attr_reader :assessments, :requests
+    attr_reader :assessments, :requests, :retry_delay_counts
     attr_accessor :assessment_result, :request_status, :request_error
 
     def initialize
       @assessments = []
       @requests = []
+      @retry_delay_counts = []
       @assessment_result = {
         due: true,
         retry_at: NOW,
@@ -81,6 +82,11 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         retry_count: 1,
         provider_hint: nil
       )
+    end
+
+    def retry_delay_sec(retry_count)
+      @retry_delay_counts << retry_count
+      120
     end
   end
 
@@ -200,6 +206,20 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     assert_equal false, assessment.fetch(:safe)
     assert_equal "recovery_coordinator_unavailable",
                  assessment.fetch(:safety_reason)
+  end
+
+  def test_attempt_loss_retry_uses_the_shared_recovery_ladder
+    limited_at = NOW - 120
+    attempt = { "retry_charge" => 3, "loss" => {} }
+    outcome = { "last_retry_at" => limited_at.iso8601(6) }
+
+    refute @healer.send(
+      :attempt_loss_retry_due?, attempt, outcome, now: NOW - 1
+    )
+    assert @healer.send(
+      :attempt_loss_retry_due?, attempt, outcome, now: NOW
+    )
+    assert_equal [ 3, 3 ], @coordinator.retry_delay_counts
   end
 
   def test_cooldown_and_safety_are_decided_only_by_coordinator

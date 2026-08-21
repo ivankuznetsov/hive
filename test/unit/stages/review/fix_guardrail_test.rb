@@ -346,6 +346,22 @@ class FixGuardrailTest < Minitest::Test
       end
 
       assert_includes error.message, "pattern and sha256"
+
+      malformed = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Review::FixGuardrail.run!(
+          cfg: cfg(
+            "review" => {
+              "fix" => {
+                "guardrail" => {
+                  "waivers" => [ { "pattern" => "secret", "sha256" => "invalid" } ]
+                }
+              }
+            }
+          ),
+          ctx: make_ctx(dir), base_sha: base, head_sha: head
+        )
+      end
+      assert_includes malformed.message, "pattern and SHA-256"
     end
   end
 

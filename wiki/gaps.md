@@ -1285,3 +1285,13 @@ onto it without design review would risk discarding operator work. Keep
 this gap open until architecture patrol either adopts the same
 proof-before-retirement protocol or documents why its existing
 quarantine flow covers interrupted launches.
+
+## Benchmark-only plan-review opt-out needs live parity proof (2026-08-21)
+
+The local benchmark runtime can now grant an explicit process-local exception
+for projects that serialize `plan_review.enabled: false`; ordinary Hive loads
+still reject that configuration. Unit coverage proves the grant is required,
+but a complete Pi/OpenCode comparison has not yet proven that the benchmark
+runner forwards it through every container and that no plan-review artifacts or
+reviewer calls appear. Keep this boundary local until that fresh campaign proof
+exists.

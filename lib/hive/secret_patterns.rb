@@ -13,6 +13,8 @@ module Hive
       example-password
       fake-password
       dummy-password
+      correct
+      system-password
     ].freeze
     PASSWORD_ASSIGNMENT_VALUE = /\A.*?\b(?:password|passwd|pwd)\b['"]?\s*[:=]\s*(['"]?)([^\s'"]{6,})\1\z/i
 

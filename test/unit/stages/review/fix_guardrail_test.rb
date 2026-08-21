@@ -287,6 +287,21 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_runtime_password_placeholders_in_test_tree_do_not_trip_the_secret_guardrail
+    with_two_commits(
+      file: "test/controllers/sessions_controller_test.rb",
+      content: "password: \"correct\"\npassword = \"system-password\"\n"
+    ) do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+
+      assert_equal :clean, result.status
+      assert_empty result.matches
+    end
+  end
+
   def test_non_placeholder_password_in_test_tree_still_trips_the_secret_guardrail
     with_two_commits(
       file: "test/integration/login_test.rb",

@@ -546,7 +546,18 @@ module Hive
         # Enter path then kicks in for review-stage rows too.
         ACTIONS.fetch(:agent_running)
       when :review_waiting
-        ACTIONS.fetch(:review_waiting)
+        # `review.fix.guardrail.bypass` is an explicit project policy that
+        # already suppresses new post-fix scans. Apply the same policy to an
+        # existing guardrail pause so enabling it makes the row runnable
+        # immediately instead of still requiring an operator to edit the
+        # checkbox artifact. The review runner retains the guarded-HEAD and
+        # clean-worktree checks before it clears the pause.
+        if marker.attrs["reason"].to_s == "fix_guardrail" &&
+           @config.dig("review", "fix", "guardrail", "bypass") == true
+          ACTIONS.fetch(:review_ready)
+        else
+          ACTIONS.fetch(:review_waiting)
+        end
       else
         ACTIONS.fetch(:review_ready)
       end

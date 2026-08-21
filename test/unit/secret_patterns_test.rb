@@ -184,6 +184,16 @@ class SecretPatternsTest < Minitest::Test
     assert_match_name('operator.password = "password"', :password_assignment)
   end
 
+  def test_runtime_test_password_placeholders_are_identified
+    [ "correct", "system-password" ].each do |value|
+      hit = Hive::SecretPatterns.scan(%(password: "#{value}")).fetch(0)
+
+      assert Hive::SecretPatterns.obvious_test_password_fixture?(
+        path: "test/controllers/sessions_controller_test.rb", hit: hit
+      ), value
+    end
+  end
+
   def test_test_password_fixture_requires_an_obvious_value_and_test_path
     realistic_hits = Hive::SecretPatterns.scan('operator.password = "project-secret-42"')
     placeholder_hits = Hive::SecretPatterns.scan('operator.password = "password"')

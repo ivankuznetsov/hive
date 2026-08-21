@@ -323,7 +323,15 @@ module Hive
                        status: :review_error }
             end
 
-            if fix_guardrail_approved?(ctx_pass, expected_matches: expected_matches)
+            # An explicit project-level bypass suppresses new guardrail scans;
+            # it must also release a pause written before the policy changed.
+            # Keep all surrounding integrity checks (well-formed match count,
+            # guarded HEAD, and clean worktree) so bypass means "waive this
+            # class of finding", not "advance a different or dirty tree".
+            guardrail_bypassed =
+              cfg.dig("review", "fix", "guardrail", "bypass") == true
+            if guardrail_bypassed ||
+               fix_guardrail_approved?(ctx_pass, expected_matches: expected_matches)
               if worktree_dirty?(worktree_path)
                 Hive::Markers.set(task.state_file, :review_error,
                                   phase: :resume, reason: "approval_dirty_worktree", pass: pass)

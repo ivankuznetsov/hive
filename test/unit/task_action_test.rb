@@ -385,6 +385,21 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive review demo-260426-aaaa --from 6-review", action.command
   end
 
+  def test_bypassed_fix_guardrail_is_ready_for_automatic_review_resume
+    task = fake_task(stage_name: "review", stage_index: 6)
+    config = {
+      "review" => { "fix" => { "guardrail" => { "bypass" => true } } }
+    }
+    action = Hive::TaskAction.for(
+      task,
+      marker(:review_waiting, "reason" => "fix_guardrail", "pass" => "2"),
+      config: config
+    )
+
+    assert_equal "ready_for_review", action.key
+    assert_equal "hive review demo-260426-aaaa --from 6-review", action.command
+  end
+
   # REVIEW_WORKING is the review stage's in-flight marker. Pre-fix, it
   # fell through to :review_waiting and emitted a runnable
   # `hive review … --from 6-review` command while review was active —

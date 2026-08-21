@@ -173,7 +173,15 @@ Hive keeps stage semantics above the facade:
   partitioned across a `ProtectedAnchorCustodySet`, and tampering in any batch
   retains `implementer_tampered`.
 - `Stages::OpenPr` and `Stages::Finalize` protect controller task state around
-  body-authoring spawns and retain their current error markers.
+  body-authoring spawns and retain their current error markers. Open PR keeps
+  the complete controller-owned anchor set, including `task-journal.jsonl` and
+  `task-projection.json`, in its provider-call manifest. The daemon's terminal
+  execute-attempt observer acquires the ordinary task ownership lock before it
+  appends or rebuilds those files. If open PR or any other stage owns the task,
+  the observer returns `:pending` immediately and retries after release. This
+  prevents legitimate late controller bookkeeping from entering the custody
+  window without weakening provider tamper detection or restricting reviewer
+  repository, shell, or network access.
 - `Stages::Artifacts` gives every outcome-evidence inference, producer, and
   reviewer role its own `AgentCustody` boundary. Durable session activity,
   usage, and context receipts are controller bookkeeping outside that

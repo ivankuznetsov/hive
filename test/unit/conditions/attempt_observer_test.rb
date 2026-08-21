@@ -97,6 +97,59 @@ class ConditionsAttemptObserverTest < Minitest::Test
     end
   end
 
+  def test_live_stage_lock_defers_terminal_delivery_without_blocking_then_retries
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      terminal = terminalize(store, create_attempt(store), outcome: "succeeded")
+      status = Hive::Attempts::ReconciledAttempt.new(
+        attempt: terminal, classification: :terminal,
+        owner_status: :not_applicable, evidence: {}
+      )
+      observer = Hive::Conditions::AttemptObserver.new(
+        store: store, task_locator: ->(_attempt) { task }
+      )
+      journal_path = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      Hive::Lock.with_task_lock(task.folder, op: "open_pr") do
+        assert_equal :pending, observer.observe(status, now: NOW + 3)
+      end
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_operator elapsed, :<, 0.5
+      refute File.exist?(journal_path), "contended delivery must not touch task state"
+      assert_equal :delivered, observer.observe(status, now: NOW + 4)
+      assert File.exist?(journal_path)
+      assert_equal :acknowledged, observer.observe(status, now: NOW + 5)
+    end
+  end
+
+  def test_task_move_during_lock_claim_is_a_quiet_pending_delivery
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      terminal = terminalize(store, create_attempt(store), outcome: "succeeded")
+      status = Hive::Attempts::ReconciledAttempt.new(
+        attempt: terminal, classification: :terminal,
+        owner_status: :not_applicable, evidence: {}
+      )
+      events = []
+      logger = Object.new
+      logger.define_singleton_method(:event) { |*args, **kwargs| events << [ args, kwargs ] }
+      observer = Hive::Conditions::AttemptObserver.new(
+        store: store, logger: logger, task_locator: ->(_attempt) { task }
+      )
+
+      with_replaced_singleton_method(
+        Hive::Lock, :with_task_lock, ->(*, **) { raise Errno::ENOENT, task.folder }
+      ) do
+        assert_equal :pending, observer.observe(status, now: NOW + 3)
+      end
+      assert_empty events
+    end
+  end
+
   def test_custom_workflow_named_execute_is_not_observed
     with_tmp_dir do |dir|
       task = build_task(dir)

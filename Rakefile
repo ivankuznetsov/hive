@@ -283,7 +283,12 @@ namespace :coverage do
       ENV["HIVE_COVERAGE_RUN_ID"] = run_id
       ENV["RUBYOPT"] = [ "-I#{File.join(root, 'test')} -rhive_coverage_boot", ENV["RUBYOPT"] ].compact.join(" ")
 
-      argv = [ "bundle", "exec", "ruby", "-Itest", "-Ilib", *test_files ]
+      argv = [ "ruby", "-Itest", "-Ilib", *test_files ]
+      # Mirror bin/test: prefer the project bundle but keep the fast loop
+      # working in minimal agent sandboxes without an installed bundle.
+      if system("bundle", "check", out: File::NULL, err: File::NULL, chdir: root)
+        argv = [ "bundle", "exec", *argv ]
+      end
       success = system(*argv, chdir: root)
       abort "coverage:changed: focused tests failed" unless success
 

@@ -506,6 +506,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
       assert_equal "queued", receipt.status
       request = Q.fetch("changed", state_home: state_home)
+      assert_equal 1, receipt.retry_count
+      assert_equal 1, request.recovery.fetch("retry_count")
       assert_equal 1, request.recovery.fetch("identical_failure_count")
       refute_equal "f" * 64, request.recovery.fetch("failure_fingerprint")
     end
@@ -560,6 +562,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
       assert_equal "queued", receipt.status
       request = Q.fetch("progressed", state_home: state_home)
+      assert_equal 1, receipt.retry_count
+      assert_equal 1, request.recovery.fetch("retry_count")
       assert_equal 1, request.recovery.fetch("identical_failure_count")
       assert_equal [ "attempt-current" ],
                    request.recovery.fetch("failure_attempt_history")
@@ -590,6 +594,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
       assert_equal "queued", receipt.status
       request = Q.fetch("unchanged", state_home: state_home)
+      assert_equal 3, receipt.retry_count
+      assert_equal 3, request.recovery.fetch("retry_count")
       assert_equal 2, request.recovery.fetch("identical_failure_count")
       assert_equal %w[attempt-previous attempt-current],
                    request.recovery.fetch("failure_attempt_history")

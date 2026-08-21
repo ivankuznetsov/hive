@@ -218,7 +218,7 @@ module Hive
             remediation: value(row, :suggested_command)
           )
         end
-        retry_count = durable_retry_count(row)
+        retry_count = retry_count_for_failure(row, marker_attrs(row))
         assessment = assessment(row, now: now, retry_count: retry_count)
         operator_request = OPERATOR_REQUESTORS.include?(requestor.to_s)
         unless assessment[:retry_at]
@@ -1124,6 +1124,19 @@ module Hive
           project: project, slug: slug, expected_stage: expected_stage,
           runtime_digest: @runtime_digest, state_home: @state_home
         )
+      end
+
+      def retry_count_for_failure(row, attrs)
+        durable = durable_retry_count(row)
+        previous = request_queue.latest_terminal_recovery(
+          project: value(row, :project), slug: value(row, :slug),
+          expected_stage: value(row, :stage), state_home: @state_home
+        )
+        previous_fingerprint = previous&.recovery&.fetch("failure_fingerprint", nil).to_s
+        return durable if previous_fingerprint.empty?
+        return durable if previous_fingerprint == failure_fingerprint(row, attrs)
+
+        0
       end
 
       def failure_evidence_for(row, retry_count:, marker_attrs:)

@@ -61,9 +61,11 @@ owner forwards only the named credential keys and must invoke cleanup from its
 own lifecycle `ensure`.
 
 The OpenCode route-aware probe requires `1.18.16+`, all pinned run/export
-flags, a selected authentication source, and the exact cached
-`provider/model` plus requested variant while remote model fetching and ambient
-project configuration are disabled. Generic `probe(profile)` and
+flags, a selected authentication source, and an exact `provider/model` plus
+requested variant while remote model fetching and ambient project
+configuration are disabled. An exact route declared by the selected overlay is
+authoritative and skips the large verbose CLI inventory; an undeclared route
+must still exist in that bounded local inventory. Generic `probe(profile)` and
 `prepare!(profile)` remain compatible for legacy profiles. OpenCode's ordinary
 `nil`, `read-only`, and `workspace-write` compilation paths fail closed unless
 the prepared overlay supplies its explicit typed policy and trusted `--auto`

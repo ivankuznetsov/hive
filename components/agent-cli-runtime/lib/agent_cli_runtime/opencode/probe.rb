@@ -107,13 +107,15 @@ module AgentCliRuntime
         )
         evidence << evidence(profile, :auth_configuration)
 
-        models_output = capture!(
-          profile, child_env, "models", request.route.provider, "--verbose",
-          timeout_sec: MODEL_INVENTORY_TIMEOUT_SECONDS
-        )
-        inventory_variants = variants_for(models_output, request.route.to_s)
         configured_variants = request.configured_variants
-        if inventory_variants.nil? && configured_variants.nil?
+        inventory_variants = if configured_variants.nil?
+          models_output = capture!(
+            profile, child_env, "models", request.route.provider, "--verbose",
+            timeout_sec: MODEL_INVENTORY_TIMEOUT_SECONDS
+          )
+          variants_for(models_output, request.route.to_s)
+        end
+        if configured_variants.nil? && inventory_variants.nil?
           raise RouteUnavailable,
                 "requested OpenCode route is unavailable in the local model inventory"
         end

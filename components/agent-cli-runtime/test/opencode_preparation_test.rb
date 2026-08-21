@@ -191,6 +191,8 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
 
         assert prepared.probe_result.ready
         assert_equal [ "high" ], prepared.probe_result.available_variants
+        calls = File.readlines(fixture.fetch(:log), chomp: true)
+        refute calls.any? { |line| line.include?("models anthropic --verbose") }
         prepared.cleanup!
       end
     end

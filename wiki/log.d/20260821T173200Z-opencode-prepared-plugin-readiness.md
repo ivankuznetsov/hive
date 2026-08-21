@@ -35,6 +35,12 @@ inventory. An exact configured route therefore survives a stale bundled
 catalog, while an undeclared route absent from the inventory still fails
 closed. Regressions pin both sides of that boundary.
 
+The live retry then showed that merely lengthening the fallback inventory was
+still wrong for an exact configured route: under host load the 393 KB verbose
+catalog hit its 30-second deadline before OpenCode could launch. Preparation
+now skips that inventory when the selected configuration already declares the
+exact model; undeclared routes still require the bounded CLI inventory.
+
 The same failed second-round launch then exposed an autonomy deadlock in the
 generic brainstorm retry guard. It treated every answer as unstructured
 operator input, including answers written through Hive's own

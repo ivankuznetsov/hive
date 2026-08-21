@@ -194,6 +194,9 @@ namespace :coverage do
     root = File.expand_path(__dir__)
     report_path = File.join(root, "coverage", "coverage.json")
     HiveTestCoverage.configure!(root: root)
+    # Evidence export precedes the gate abort so red runs still publish the
+    # complete uncovered-lines list and shard map.
+    HiveTestCoverage.export_shard_map!(HIVE_COVERAGE_SHARDS)
     if ENV.key?("HIVE_COVERAGE_EXPECTED_SHARDS")
       HiveTestCoverage.verify_shard_manifests!(
         expected_shards: Integer(ENV.fetch("HIVE_COVERAGE_EXPECTED_SHARDS")),
@@ -204,6 +207,7 @@ namespace :coverage do
     end
     HiveTestCoverage.report!
     report = HiveTestCoverage.read_report(report_path)
+    HiveTestCoverage.export_evidence!(report, test_files_by_shard: HIVE_COVERAGE_SHARDS)
     abort HiveTestCoverage.failure_message(report) unless HiveTestCoverage.coverage_ok?(report)
   rescue ArgumentError, KeyError, HiveTestCoverage::ShardManifestError => e
     abort "coverage shard manifest error: #{e.message}"

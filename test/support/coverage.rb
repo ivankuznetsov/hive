@@ -6,6 +6,8 @@ require "time"
 module HiveTestCoverage
   DEFAULT_MIN_LINE_PERCENT = 100.0
   SHARD_MANIFEST_SCHEMA = "hive-coverage-shard.v1"
+  UNCOVERED_EVIDENCE_SCHEMA = "hive-coverage-uncovered.v1"
+  SHARD_MAP_SCHEMA = "hive-coverage-shard-map.v1"
 
   class ShardManifestError < StandardError; end
 
@@ -588,6 +590,79 @@ module HiveTestCoverage
   def write_report(report)
     FileUtils.mkdir_p(@coverage_dir)
     File.write(File.join(@coverage_dir, "coverage.json"), JSON.pretty_generate(report))
+  end
+
+  # Complete, untruncated failure evidence for CI agents: every uncovered
+  # executable line, plus the shard-to-test-file mapping for the run. The
+  # human log (print_report) stays capped; this exported form never is.
+  # Called by the merge task before the gate aborts so red runs still publish
+  # evidence. Fail-open: emission problems warn but never mask a gate result.
+  def export_evidence!(report, test_files_by_shard: nil)
+    FileUtils.mkdir_p(@coverage_dir)
+    export_shard_map!(test_files_by_shard) if test_files_by_shard
+    uncovered = Array(value(report, :files))
+      .select { |file| Array(value(file, :uncovered_lines)).any? }
+      .map do |file|
+        {
+          "file" => value(file, :file),
+          "lines" => Array(value(file, :uncovered_lines)),
+          "uncovered_branches" => Array(value(file, :uncovered_branches)).length
+        }
+      end
+    payload = {
+      "schema" => UNCOVERED_EVIDENCE_SCHEMA,
+      "generated_at" => Time.now.utc.iso8601,
+      "ok" => value(report, :ok) == true,
+      "line_covered" => numeric_value(report, :line_covered),
+      "line_total" => numeric_value(report, :line_total),
+      "minimum_line_percent" => minimum_line_percent,
+      "unloaded_files" => Array(value(report, :unloaded_files)),
+      "uncovered" => uncovered
+    }
+    File.write(File.join(@coverage_dir, "uncovered.json"), JSON.pretty_generate(payload))
+
+    write_uncovered_summary!(payload) if ENV["CI"] && ENV["GITHUB_STEP_SUMMARY"]
+  rescue StandardError => e
+    warn "hive coverage: evidence export failed (ignored): #{e.class}: #{e.message}"
+  end
+
+  # Shard membership is computed from file byte sizes at runtime and drifts
+  # every commit; publishing it per run makes "which files ran in shard N" a
+  # one-line lookup. Written independently so it survives a red merge.
+  def export_shard_map!(test_files_by_shard)
+    FileUtils.mkdir_p(@coverage_dir)
+    shard_map = {
+      "schema" => SHARD_MAP_SCHEMA,
+      "shards" => test_files_by_shard.each_with_index.map do |files, index|
+        { "index" => index, "test_files" => Array(files) }
+      end
+    }
+    File.write(File.join(@coverage_dir, "shards.json"), JSON.pretty_generate(shard_map))
+    true
+  rescue StandardError => e
+    warn "hive coverage: shard map export failed (ignored): #{e.class}: #{e.message}"
+    false
+  end
+
+  def write_uncovered_summary!(payload)
+    lines = []
+    unless payload.fetch("uncovered").empty?
+      lines << "### Uncovered executable lines (complete list)"
+      lines << ""
+      payload.fetch("uncovered").each do |entry|
+        lines << "- `#{entry.fetch("file")}`: #{compact_lines(entry.fetch("lines"))}"
+      end
+    end
+    unloaded = payload.fetch("unloaded_files")
+    unless unloaded.empty?
+      lines << "" unless lines.empty?
+      lines << "### Never-loaded executable source files"
+      lines << ""
+      unloaded.each { |file| lines << "- `#{file}`" }
+    end
+    return if lines.empty?
+
+    File.write(ENV.fetch("GITHUB_STEP_SUMMARY"), (lines.join("\n") << "\n"))
   end
 
   def read_report(path)

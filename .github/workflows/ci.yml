@@ -111,6 +111,16 @@ jobs:
           HIVE_COVERAGE_REVISION: ${{ github.sha }}
           HIVE_COVERAGE_WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: bundle exec rake coverage:report
+      - name: Retain coverage evidence (uncovered lines, shard map)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-evidence
+          path: |
+            coverage/uncovered.json
+            coverage/shards.json
+          if-no-files-found: ignore
+          retention-days: 14
 
   expensive-test-gates:
     name: ${{ matrix.name }}

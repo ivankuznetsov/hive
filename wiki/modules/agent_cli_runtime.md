@@ -3,15 +3,17 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-08-15
+updated: 2026-08-16
 tags: [agent, runtime, component, gem, cli]
 ---
 
-**TLDR**: `agent-cli-runtime` is the first independently versioned gem kept in
-the Hive monorepo. It exposes provider-neutral profiles, invocation
-compilation, local prerequisite evidence, usage extraction, and normalized
-results for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. Hive remains
-the primary consumer; the gem does not own orchestration or Hive policy.
+**TLDR**: `agent-cli-runtime` gives Ruby applications one stable integration
+layer for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. Its versioned
+profiles centralize provider-specific commands, local capability checks,
+environment rules, usage extraction, and result normalization so consumers
+can add, switch, and upgrade agent CLIs behind one request and result
+vocabulary. It is the first independently versioned gem kept in the Hive
+monorepo, with Hive as its primary consumer and orchestration policy owner.
 
 ## Public surface
 

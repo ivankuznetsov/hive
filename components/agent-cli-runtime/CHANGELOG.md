@@ -49,21 +49,27 @@
 
 ## 0.2.0 - 2026-08-15
 
-- Add OpenCode `1.18.16+` as a fifth immutable built-in profile with exact
-  `provider/model` routing and faithful model-variant validation.
-- Add route-aware offline probing for the required run/export flags, selected
-  authentication source, cached model inventory, and exact requested route.
-- Add invocation-owned OpenCode config/data/cache/state overlays with
-  deny-first `read-only` and `workspace-write` policies, explicit credential
-  forwarding, owner-private resources, and idempotent cleanup.
-- Add strict run/export correlation and typed outcomes for completion,
-  authentication/configuration/CLI failure, malformed output, cancellation,
-  and timeout while preserving requested versus actual route identity.
-- Preserve unavailable separately from numeric zero for input, output,
-  cache-read, cache-write, reasoning, and cost evidence.
-- Keep process spawning, streaming, timeout/cancellation supervision,
-  process-tree cleanup, retries, and post-run inspection execution with the
-  caller; the component returns commands and normalizes captured evidence.
+- Add first-class OpenCode `1.18.16+` support alongside the built-in Claude
+  Code, Codex CLI, Pi, and Grok CLI profiles. OpenCode uses the shared request
+  and facade, then adds provider-specific preparation, route probing, and
+  strict result normalization.
+- Route every OpenCode run to an exact `provider/model` and validate model
+  variants, preserving the route the application requested and the route the
+  captured result reports.
+- Prepare owner-private OpenCode config, data, cache, and state overlays for
+  each invocation, with scoped `read-only` and `workspace-write` policies,
+  deliberate credential forwarding, and idempotent cleanup.
+- Check run/export capabilities, selected authentication source, cached model
+  inventory, and the exact requested route locally before an application
+  starts work.
+- Correlate run and sanitized-export evidence into typed outcomes for
+  completion, authentication, configuration, CLI failure, malformed output,
+  cancellation, and timeout.
+- Report input, output, cache-read, cache-write, reasoning, and cost evidence
+  while preserving the difference between unavailable data and numeric zero.
+- Return prepared commands and normalized evidence through lifecycle-safe
+  values that fit an application's existing streaming, timeout, cancellation,
+  retry, and process-supervision stack.
 
 ## 0.1.1 - 2026-08-11
 

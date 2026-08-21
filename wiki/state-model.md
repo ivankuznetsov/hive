@@ -639,6 +639,15 @@ of a multi-segment action.
 - one normalized recovery-failure cell records generation, operation,
   occurrence/job identity, bounded UTF-8 error class/message/digest, failure
   count, and the next 60/300/900-second eligibility boundary.
+- an interrupted ordinary local fix attempt is settled only by adopting its
+  exact persisted patch, or by recording a failed patch after proving the
+  deterministic Patrol checkout is clean, correctly registered, and already
+  contained in the current default branch. The patch is subordinate to the
+  outer attempt rather than a nested effect; non-force removal and an
+  expected-head ref lease prevent work arriving after the proof from being
+  discarded. Otherwise its effect and branch remain recovery-active. Scheduler
+  finalization tests the whole effect set and reports a blocked recovery without
+  aborting the daemon tick.
 
 The journal locks in the fixed order
 identity → journal state → inventory → occurrence record. Inventory views

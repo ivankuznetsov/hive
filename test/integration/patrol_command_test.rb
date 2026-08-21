@@ -1461,6 +1461,165 @@ class PatrolCommandTest < Minitest::Test
     assert_equal "abc123", patch.head_sha
   end
 
+  def test_interrupted_fix_attempt_is_failed_before_the_cycle_retries_it
+    with_patrol_project do |repo|
+      entry = Hive::Config.find_project("demo")
+      state = Hive::Patrol::StateStore.new(repo)
+      finding = sample_finding
+      finding.fingerprint = "a" * 64
+      state.write_finding(finding)
+      capture = patrol_capture_for(entry)
+      state.reserve_occurrence!(capture)
+      intent = Hive::Modules::Migration::EffectIntent.build(
+        module_name: "patrol",
+        occurrence_id: capture.occurrence_id,
+        authority: capture.owner,
+        owner_epoch: capture.owner_epoch,
+        sink: "attempt",
+        target: "attempts/#{finding.fingerprint}",
+        idempotency_key: "#{capture.occurrence_id}:attempt:#{finding.fingerprint}",
+        capability: "repository_write",
+        created_at: capture.recorded_at
+      )
+      state.prepare_effect!(intent)
+      state.mark_dispatch_uncertain!(intent)
+      patch = failing_patch(finding)
+      patch.validation["reason"] = "interrupted_fix_attempt"
+      recovered = []
+      fixer = Object.new
+      fixer.define_singleton_method(:recover_interrupted_attempt) do |candidate|
+        recovered << candidate.id
+        state.write_patch(patch.id, patch.to_h)
+        patch
+      end
+
+      command_for.send(
+        :recover_pending_fix_attempts!, state, fixer, capture
+      )
+
+      assert_equal [ finding.id ], recovered
+      effect = state.effect_state(intent)
+      assert_equal "failed", effect.fetch("state")
+      assert_equal patch.id, effect.fetch("outcome").fetch("patch_id")
+      assert_equal "interrupted_fix_attempt",
+                   state.patch_record(patch.id).fetch("validation").fetch("reason")
+      assert state.terminal_effects?(capture.occurrence_id)
+      assert_equal patch.id, state.patch_record(patch.id).fetch("id")
+    end
+  end
+
+  def test_interrupted_fix_attempt_reconciles_an_existing_patch
+    with_patrol_project do |repo|
+      entry = Hive::Config.find_project("demo")
+      state = Hive::Patrol::StateStore.new(repo)
+      finding = sample_finding
+      finding.fingerprint = "b" * 64
+      state.write_finding(finding)
+      capture = patrol_capture_for(entry)
+      state.reserve_occurrence!(capture)
+      intent = Hive::Modules::Migration::EffectIntent.build(
+        module_name: "patrol",
+        occurrence_id: capture.occurrence_id,
+        authority: capture.owner,
+        owner_epoch: capture.owner_epoch,
+        sink: "attempt",
+        target: "attempts/#{finding.fingerprint}",
+        idempotency_key: "#{capture.occurrence_id}:attempt:#{finding.fingerprint}",
+        capability: "repository_write",
+        created_at: capture.recorded_at
+      )
+      state.prepare_effect!(intent)
+      state.mark_dispatch_uncertain!(intent)
+      patch = failing_patch(finding)
+      state.write_patch(
+        patch.id,
+        patch.to_h.merge("patrol_occurrence_id" => capture.occurrence_id)
+      )
+      state.instance_variable_set(:@effect_capture, capture)
+      fixer = Object.new
+      fixer.define_singleton_method(:recover_interrupted_attempt) do |_finding|
+        raise "recovery fixer must not run after exact reconciliation"
+      end
+
+      command_for.send(
+        :recover_pending_fix_attempts!, state, fixer, capture
+      )
+
+      effect = state.effect_state(intent)
+      assert_equal "reconciled", effect.fetch("state")
+      assert_equal patch.id, effect.fetch("outcome").fetch("patch_id")
+      assert state.terminal_effects?(capture.occurrence_id)
+    end
+  end
+
+  def test_interrupted_fix_attempt_recovery_fails_closed_on_bad_reconciliation
+    unavailable = assert_raises(Hive::ConfigError) do
+      command_for.send(
+        :recover_pending_fix_attempts!,
+        recovery_state_double(
+          reconciliations: { "fp-1" => { "status" => "absent" } }
+        ),
+        recovery_fixer_double,
+        recovery_capture_double
+      )
+    end
+    assert_equal "patrol interrupted attempt finding is unavailable",
+                 unavailable.message
+
+    ambiguous = assert_raises(Hive::ConfigError) do
+      command_for.send(
+        :recover_pending_fix_attempts!,
+        recovery_state_double(
+          reconciliations: { "fp-1" => { "status" => "conflicted" } }
+        ),
+        recovery_fixer_double,
+        recovery_capture_double
+      )
+    end
+    assert_equal "patrol interrupted attempt recovery is ambiguous",
+                 ambiguous.message
+
+    malformed = assert_raises(Hive::ConfigError) do
+      command_for.send(
+        :recover_pending_fix_attempts!,
+        recovery_state_double(reconciliations: {}),
+        recovery_fixer_double,
+        recovery_capture_double
+      )
+    end
+    assert_equal "patrol interrupted attempt recovery is malformed",
+                 malformed.message
+  end
+
+  def recovery_capture_double
+    capture = Object.new
+    capture.define_singleton_method(:occurrence_id) { "occ-1" }
+    capture
+  end
+
+  def recovery_fixer_double
+    fixer = Object.new
+    fixer.define_singleton_method(:recover_interrupted_attempt) do |_finding|
+      raise "recovery fixer must not run for an unresolvable attempt"
+    end
+    fixer
+  end
+
+  def recovery_state_double(reconciliations:, findings: [])
+    state = Object.new
+    state.define_singleton_method(:pending_attempt_effects) do |_occurrence_id|
+      [ [ :intent, "fp-1" ] ]
+    end
+    state.define_singleton_method(:reconcile_attempts) do |_fingerprints|
+      reconciliations
+    end
+    state.define_singleton_method(:findings) { findings }
+    state.define_singleton_method(:settle_effect!) do |*_args, **_kwargs|
+      raise "unresolvable attempts must not settle their effect"
+    end
+    state
+  end
+
   def test_malformed_reconciled_patch_fails_closed
     error = assert_raises(Hive::ConfigError) do
       command_for.send(

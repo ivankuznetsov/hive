@@ -329,6 +329,17 @@ module Hive
           @effects.terminal_receipt_ids(occurrence_id)
         end
 
+        def terminal_effects?(occurrence_id)
+          record = fetch(occurrence_id)
+          malformed!("patrol occurrence is missing") unless record
+
+          record.fetch("effects").values.all? do |cell|
+            TERMINAL_STATES.include?(cell.fetch("state"))
+          end
+        rescue KeyError
+          malformed!("patrol occurrence is malformed")
+        end
+
         def pending_outbox(occurrence_id)
           record = fetch(occurrence_id)
           malformed!("patrol occurrence is missing") unless record

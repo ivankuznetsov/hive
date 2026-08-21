@@ -31,7 +31,7 @@ module Hive
         invalid_validation_key missing_regression regression_not_reproduced
         targeted_validation_failed fix_guardrail validation_mutated_worktree fix_error
         stale_evidence stale_target_sha validation_preflight_failed
-        validation_preflight_mutated_worktree
+        validation_preflight_mutated_worktree interrupted_fix_attempt
       ].freeze
       HARD_GUARDRAIL_PATTERNS = {
         hive_state_edit: {
@@ -94,7 +94,8 @@ module Hive
         @state = state || default_state_store
         @validator = validator || Validator.new(
           cfg.dig("patrol", "commands"),
-          timeout_sec: cfg.dig("timeout_sec", "patrol") || Validator::DEFAULT_TIMEOUT_SEC
+          timeout_sec: cfg.dig("timeout_sec", "patrol") || Validator::DEFAULT_TIMEOUT_SEC,
+          idle_timeout_sec: cfg.dig("timeout_sec", "patrol_idle")
         )
         @worktree_factory = worktree_factory || method(:build_worktree)
         @agent_runner = agent_runner || method(:run_agent)
@@ -187,7 +188,131 @@ module Hive
         patch
       end
 
+      # A killed Patrol process can leave its outer attempt effect uncertain
+      # before the fixer writes a patch receipt. Recovery may retire that
+      # checkout only when it is still an exact, clean ancestor of the current
+      # default branch. Dirty or uniquely committed work remains operator-owned.
+      def recover_interrupted_attempt(finding)
+        branch = branch_name(finding)
+        worktree = @worktree_factory.call(
+          finding: finding, branch: branch
+        )
+        # The proof returns the exact branch head it verified disposable, or
+        # nil when the attempt left no branch at all. Base and head are the
+        # same commit by construction — the proof *is* HEAD == branch head ==
+        # ancestor of default.
+        branch_head = interrupted_attempt_proof!(
+          finding, branch, worktree
+        )
+        retire_interrupted_attempt!(
+          branch, worktree, expected_head: branch_head
+        )
+        patch = PatchAttempt.new(
+          id: "patch-#{finding.fingerprint.to_s[0, 12]}-#{SecureRandom.hex(3)}",
+          finding: finding,
+          branch: branch,
+          worktree_path: worktree.path,
+          validation: {
+            "passed" => false,
+            "reason" => "interrupted_fix_attempt",
+            "error" =>
+              "the previous Patrol process ended before it recorded a patch"
+          },
+          passed: false,
+          diffstat: "",
+          base_sha: branch_head || finding_target_sha_or_nil(finding),
+          head_sha: nil
+        )
+        @state.write_patch(patch.id, patch.to_h)
+        patch
+      end
+
       private
+
+      def interrupted_attempt_proof!(finding, branch, worktree)
+        registered = worktree.list_worktree_paths.include?(worktree.path)
+        path_present = File.exist?(worktree.path) ||
+                       File.symlink?(worktree.path)
+        if path_present != registered
+          preserve_interrupted_worktree!(
+            "the checkout path and Git registration disagree"
+          )
+        end
+
+        branch_exists = Hive::Worktree.local_branch_ref_exists?(
+          @project_root, branch
+        )
+        if registered
+          checked_out = git_output!(
+            worktree.path, "branch", "--show-current"
+          ).strip
+          unless checked_out == branch
+            preserve_interrupted_worktree!(
+              "the checkout is on #{checked_out.inspect}, expected #{branch.inspect}"
+            )
+          end
+          unless git_output!(
+            worktree.path, "status", "--porcelain=v1",
+            "--untracked-files=all"
+          ).empty?
+            preserve_interrupted_worktree!("the checkout contains uncommitted work")
+          end
+        elsif !branch_exists
+          return nil
+        end
+
+        head = git_output!(
+          @project_root, "rev-parse", "--verify", "refs/heads/#{branch}^{commit}"
+        ).strip
+        if registered
+          worktree_head = git_output!(worktree.path, "rev-parse", "HEAD").strip
+          unless worktree_head == head
+            preserve_interrupted_worktree!(
+              "the checkout HEAD no longer matches its branch"
+            )
+          end
+        end
+        current_default = fresh_default_sha!
+        unless @git_ops.ancestor?(head, current_default)
+          preserve_interrupted_worktree!(
+            "the Patrol branch contains unique committed work"
+          )
+        end
+        head
+      rescue PublicationRecoveryError
+        raise
+      rescue StandardError => error
+        raise PublicationRecoveryError,
+              "patrol cannot prove the interrupted attempt is disposable " \
+              "(#{error.class}: #{error.message}); preserving the interrupted worktree"
+      end
+
+      def retire_interrupted_attempt!(branch, worktree, expected_head:)
+        if worktree.list_worktree_paths.include?(worktree.path)
+          worktree.remove!(path: worktree.path)
+        end
+        return unless expected_head
+
+        @git_ops.delete_branch_if_head!(branch, expected_head)
+      rescue PublicationRecoveryError
+        raise
+      rescue StandardError => error
+        raise PublicationRecoveryError,
+              "patrol cannot safely retire the interrupted attempt because " \
+              "the Patrol branch changed before retirement " \
+              "(#{error.class}: #{error.message}); preserving its work"
+      end
+
+      def finding_target_sha_or_nil(finding)
+        value = finding.target_sha.to_s
+        value.match?(REVISION) ? value.downcase : nil
+      end
+
+      def preserve_interrupted_worktree!(detail)
+        raise PublicationRecoveryError,
+              "patrol cannot retire an interrupted attempt because #{detail}; " \
+              "preserving the interrupted worktree"
+      end
 
       def revalidated_evidence(finding, worktree_path)
         evidence = finding.evidence

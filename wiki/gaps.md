@@ -1270,3 +1270,18 @@ retention policy. A sufficiently long-lived task will eventually reach the
 hard custody ceiling and fail closed before provider launch. Solve this with a
 durable receipt retention/compaction design that preserves authority evidence,
 not by adding another custody topology or raising the hard ceiling again.
+
+## Architecture patrol lacks interrupted-attempt recovery (2026-08-21)
+
+Ordinary patrol now settles a process-interrupted local fix attempt
+(adopt the exact patch receipt, or prove the deterministic checkout
+disposable before recording `interrupted_fix_attempt`).
+`RefactorPatrol::Fixer` has the same killed-process exposure — an
+interrupted architecture fix can leave its worktree and branch behind
+with no receipt — but has no symmetric recovery path. The asymmetry is
+deliberate for this change set: architecture patrol's job store owns a
+different custody model, and bolting the ordinary proof/retire protocol
+onto it without design review would risk discarding operator work. Keep
+this gap open until architecture patrol either adopts the same
+proof-before-retirement protocol or documents why its existing
+quarantine flow covers interrupted launches.

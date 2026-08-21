@@ -1,6 +1,7 @@
 require "open3"
 require "fileutils"
 require "hive/stages"
+require "hive/git_ref"
 
 module Hive
   class GitOps
@@ -70,6 +71,29 @@ module Hive
       return false if status.exitstatus == 1
 
       raise GitError, "git -C #{@project_root} merge-base --is-ancestor failed: #{err}"
+    end
+
+    # Delete a local branch only while it still names the exact commit the
+    # caller proved disposable. A concurrent commit turns this into a
+    # fail-closed lease error and preserves the ref.
+    def delete_branch_if_head!(name, expected_head)
+      branch = Hive::GitRef.validate_branch_name(name)
+      expected = expected_head.to_s
+      unless expected.match?(/\A[0-9a-f]{40,64}\z/i)
+        raise GitError, "invalid expected branch head #{expected_head.inspect}"
+      end
+
+      ref = "refs/heads/#{branch}"
+      out, err, status = run_git_quiet(
+        "-C", @project_root, "update-ref", "-d", ref, expected
+      )
+      return true if status.success? && !ref_exists?(ref)
+
+      detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
+      detail = "branch still exists" if detail.empty?
+      raise GitError, "git update-ref could not delete #{ref}: #{detail}"
+    rescue ArgumentError => error
+      raise GitError, error.message
     end
 
     def ref_exists?(ref)

@@ -1258,3 +1258,18 @@ One visual-custody contract defect was fixed, and a post-fix CLI inference rerun
 restored the omitted compatibility outcome and split one broad claim into three.
 Keep the gap open until at least one exact-range Web package and one CLI/TUI
 package are fully accepted without weakening the 4/4 false-completion result.
+
+## Architecture patrol lacks interrupted-attempt recovery (2026-08-21)
+
+Ordinary patrol now settles a process-interrupted local fix attempt
+(adopt the exact patch receipt, or prove the deterministic checkout
+disposable before recording `interrupted_fix_attempt`).
+`RefactorPatrol::Fixer` has the same killed-process exposure — an
+interrupted architecture fix can leave its worktree and branch behind
+with no receipt — but has no symmetric recovery path. The asymmetry is
+deliberate for this change set: architecture patrol's job store owns a
+different custody model, and bolting the ordinary proof/retire protocol
+onto it without design review would risk discarding operator work. Keep
+this gap open until architecture patrol either adopts the same
+proof-before-retirement protocol or documents why its existing
+quarantine flow covers interrupted launches.

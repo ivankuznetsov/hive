@@ -103,7 +103,7 @@
                   "fix_guardrail", "validation_mutated_worktree", "stale_evidence",
                   "stale_target_sha",
                   "validation_preflight_failed", "validation_preflight_mutated_worktree",
-                  "fix_error"
+                  "interrupted_fix_attempt", "fix_error"
                 ]
               },
               "detail": { "type": ["string", "null"] },

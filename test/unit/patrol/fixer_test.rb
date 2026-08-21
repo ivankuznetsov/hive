@@ -1007,6 +1007,266 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_interrupted_attempt_recovery_retires_only_an_untouched_patrol_worktree
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      state = Hive::Patrol::StateStore.new(repo)
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), state: state)
+      branch = fixer.send(:branch_name, finding)
+      worktree = fixer.send(
+        :build_worktree, finding: finding, branch: branch
+      )
+      base_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      worktree.create_exact!(branch, base_sha: base_sha)
+
+      patch = fixer.recover_interrupted_attempt(finding)
+
+      refute patch.passed
+      assert_equal "interrupted_fix_attempt",
+                   patch.validation.fetch("reason")
+      assert_equal base_sha, patch.base_sha
+      refute File.exist?(worktree.path)
+      refute Hive::Worktree.local_branch_ref_exists?(repo, branch)
+      assert_equal patch.id, state.patch_record(patch.id).fetch("id")
+    end
+  end
+
+  def test_interrupted_attempt_recovery_preserves_dirty_or_committed_work
+    %i[dirty committed].each do |residue|
+      with_tmp_git_repo do |repo|
+        File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+        run!("git", "-C", repo, "add", ".")
+        run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+        fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
+        branch = fixer.send(:branch_name, finding)
+        worktree = fixer.send(
+          :build_worktree, finding: finding, branch: branch
+        )
+        base_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+        worktree.create_exact!(branch, base_sha: base_sha)
+        File.write(File.join(worktree.path, "app.rb"), "puts 'changed'\n")
+        if residue == :committed
+          run!("git", "-C", worktree.path, "add", ".")
+          run!(
+            "git", "-C", worktree.path, "commit", "-m", "agent work",
+            "--quiet"
+          )
+        end
+
+        error = assert_raises(
+          Hive::Patrol::Fixer::PublicationRecoveryError
+        ) { fixer.recover_interrupted_attempt(finding) }
+
+        assert_match(/preserving the interrupted worktree/, error.message)
+        assert File.directory?(worktree.path)
+        assert Hive::Worktree.local_branch_ref_exists?(repo, branch)
+      end
+    end
+  end
+
+  def test_interrupted_attempt_recovery_preserves_a_broken_registration
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
+      branch = fixer.send(:branch_name, finding)
+      worktree = fixer.send(
+        :build_worktree, finding: finding, branch: branch
+      )
+      base_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      worktree.create_exact!(branch, base_sha: base_sha)
+      FileUtils.rm_rf(worktree.path)
+
+      error = assert_raises(
+        Hive::Patrol::Fixer::PublicationRecoveryError
+      ) { fixer.recover_interrupted_attempt(finding) }
+
+      assert_match(/Git registration disagree/, error.message)
+      assert Hive::Worktree.local_branch_ref_exists?(repo, branch)
+    end
+  end
+
+  def test_interrupted_attempt_retirement_leases_the_proven_branch_head
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
+      branch = fixer.send(:branch_name, finding)
+      worktree = fixer.send(
+        :build_worktree, finding: finding, branch: branch
+      )
+      base_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      worktree.create_exact!(branch, base_sha: base_sha)
+      expected_head = fixer.send(
+        :interrupted_attempt_proof!, finding, branch, worktree
+      )
+      File.write(File.join(worktree.path, "app.rb"), "puts 'late work'\n")
+      run!("git", "-C", worktree.path, "add", ".")
+      run!(
+        "git", "-C", worktree.path, "commit", "-m", "late agent work",
+        "--quiet"
+      )
+      late_head = run!("git", "-C", worktree.path, "rev-parse", "HEAD").strip
+
+      error = assert_raises(
+        Hive::Patrol::Fixer::PublicationRecoveryError
+      ) do
+        fixer.send(
+          :retire_interrupted_attempt!, branch, worktree,
+          expected_head: expected_head
+        )
+      end
+
+      assert_match(/branch changed before retirement/, error.message)
+      assert Hive::Worktree.local_branch_ref_exists?(repo, branch)
+      assert_equal late_head,
+                   run!("git", "-C", repo, "rev-parse", branch).strip
+    end
+  end
+
+  def test_interrupted_attempt_recovery_fails_an_attempt_that_left_no_trace
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      state = Hive::Patrol::StateStore.new(repo)
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), state: state)
+      branch = fixer.send(:branch_name, finding)
+      refute Hive::Worktree.local_branch_ref_exists?(repo, branch)
+
+      patch = fixer.recover_interrupted_attempt(finding)
+
+      refute patch.passed
+      assert_equal "interrupted_fix_attempt",
+                   patch.validation.fetch("reason")
+      assert_nil patch.head_sha
+      assert_nil patch.base_sha
+      assert_equal patch.id, state.patch_record(patch.id).fetch("id")
+    end
+  end
+
+  def test_interrupted_attempt_recovery_preserves_a_detached_checkout
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
+      branch = fixer.send(:branch_name, finding)
+      worktree = fixer.send(
+        :build_worktree, finding: finding, branch: branch
+      )
+      base_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      worktree.create_exact!(branch, base_sha: base_sha)
+      run!("git", "-C", worktree.path, "checkout", "--detach", "--quiet")
+
+      error = assert_raises(
+        Hive::Patrol::Fixer::PublicationRecoveryError
+      ) { fixer.recover_interrupted_attempt(finding) }
+
+      assert_match(/the checkout is on ""/, error.message)
+      assert File.directory?(worktree.path)
+      assert Hive::Worktree.local_branch_ref_exists?(repo, branch)
+    end
+  end
+
+  def test_interrupted_attempt_proof_preserves_a_checkout_that_left_its_branch
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
+      branch = fixer.send(:branch_name, finding)
+      run!("git", "-C", repo, "branch", branch)
+
+      with_tmp_dir do |elsewhere|
+        checkout = File.join(elsewhere, "checkout")
+        run!("git", "clone", "--quiet", repo, checkout)
+        run!("git", "-C", checkout, "config", "user.email", "test@example.com")
+        run!("git", "-C", checkout, "config", "user.name", "Test")
+        run!("git", "-C", checkout, "config", "commit.gpgsign", "false")
+        run!("git", "-C", checkout, "checkout", "--quiet", "-B", branch)
+        File.write(File.join(checkout, "app.rb"), "puts 'diverged'\n")
+        run!("git", "-C", checkout, "add", ".")
+        run!("git", "-C", checkout, "commit", "-m", "diverged", "--quiet")
+
+        error = assert_raises(
+          Hive::Patrol::Fixer::PublicationRecoveryError
+        ) do
+          fixer.send(
+            :interrupted_attempt_proof!, finding, branch,
+            recovery_worktree_double(checkout)
+          )
+        end
+
+        assert_match(/HEAD no longer matches its branch/, error.message)
+      end
+    end
+  end
+
+  def test_interrupted_attempt_proof_preserves_an_unreadable_checkout
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
+      branch = fixer.send(:branch_name, finding)
+      run!("git", "-C", repo, "branch", branch)
+
+      with_tmp_dir do |elsewhere|
+        plain = File.join(elsewhere, "not-a-checkout")
+        FileUtils.mkdir_p(plain)
+
+        error = assert_raises(
+          Hive::Patrol::Fixer::PublicationRecoveryError
+        ) do
+          fixer.send(
+            :interrupted_attempt_proof!, finding, branch,
+            recovery_worktree_double(plain)
+          )
+        end
+
+        assert_match(
+          /cannot prove the interrupted attempt is disposable/, error.message
+        )
+        assert_match(/preserving the interrupted worktree/, error.message)
+      end
+    end
+  end
+
+  def test_interrupted_attempt_retirement_never_rewraps_a_preservation_error
+    with_tmp_git_repo do |repo|
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
+      worktree = recovery_worktree_double(File.join(repo, "checkout"))
+      worktree.define_singleton_method(:remove!) do |**_kwargs|
+        raise Hive::Patrol::Fixer::PublicationRecoveryError,
+              "preserving the interrupted worktree"
+      end
+
+      error = assert_raises(
+        Hive::Patrol::Fixer::PublicationRecoveryError
+      ) do
+        fixer.send(
+          :retire_interrupted_attempt!, "patrol/recovery", worktree,
+          expected_head: nil
+        )
+      end
+
+      assert_equal "preserving the interrupted worktree", error.message
+      refute_match(/changed before retirement/, error.message)
+    end
+  end
+
+  def recovery_worktree_double(path)
+    double = Object.new
+    double.define_singleton_method(:path) { path }
+    double.define_singleton_method(:list_worktree_paths) { [ path ] }
+    double
+  end
+
   def test_uncertain_publication_reuses_the_complete_intent_seed
     with_tmp_git_repo do |repo|
       File.write(File.join(repo, "app.rb"), "if\n")

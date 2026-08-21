@@ -31,6 +31,8 @@ module Hive
       FINDING_QUERY_KEYS = %w[
         counts items schema schema_version total truncated
       ].freeze
+      PENDING_EFFECT_STATES = %w[prepared dispatch_uncertain].freeze
+      ATTEMPT_TARGET = %r{\Aattempts/([0-9a-f]{64})\z}
       FINDING_QUERY_ITEM_LIMITS = {
         "id" => 128,
         "feature_id" => 128,
@@ -316,6 +318,29 @@ module Hive
         @occurrence_store.effect_state(intent)
       end
 
+      def effect_intent(occurrence_id, intent_id)
+        @occurrence_store.effect_intent(occurrence_id, intent_id)
+      end
+
+      def pending_attempt_effects(occurrence_id)
+        occurrence(occurrence_id).fetch("effects").filter_map do |intent_id, cell|
+          next unless PENDING_EFFECT_STATES.include?(cell["state"])
+
+          semantic = cell["semantic"]
+          next unless semantic.is_a?(Hash) && semantic["sink"] == "attempt"
+
+          match = ATTEMPT_TARGET.match(semantic["target"].to_s)
+          unless match
+            raise Hive::ConfigError,
+                  "patrol interrupted attempt identity is malformed"
+          end
+          [ effect_intent(occurrence_id, intent_id), match[1] ]
+        end
+      rescue KeyError, TypeError
+        raise Hive::ConfigError,
+              "patrol interrupted attempt recovery is malformed"
+      end
+
       def with_effect_sender_lock(intent, &block)
         @occurrence_store.with_effect_sender_lock(intent, &block)
       end
@@ -371,6 +396,10 @@ module Hive
 
       def terminal_effect_receipt_ids(occurrence_id)
         @occurrence_store.effect_receipt_ids(occurrence_id)
+      end
+
+      def terminal_effects?(occurrence_id)
+        @occurrence_store.terminal_effects?(occurrence_id)
       end
 
       def recovery_backoff(now: Time.now.utc)
@@ -651,11 +680,10 @@ module Hive
         data = data.merge(
           "patrol_occurrence_id" => @effect_capture.occurrence_id
         ) if @effect_capture
-        effect_write(
-          sink: "state",
-          target: "patches/#{id}",
-          value: data
-        ) { write_json(File.join(root, "patches", "#{id}.json"), data) }
+        # The surrounding attempt effect owns this local result. Giving the
+        # patch its own state effect creates a nested crash window where the
+        # attempt can reconcile but the occurrence cannot become terminal.
+        write_json(File.join(root, "patches", "#{id}.json"), data)
       end
 
       def patch_record(id)
@@ -716,22 +744,35 @@ module Hive
       end
 
       def reconcile_attempt(fingerprint)
-        return { "status" => "absent", "outcome" => {} } unless @effect_capture
+        reconcile_attempts([ fingerprint ]).fetch(fingerprint.to_s)
+      end
 
-        matches = Dir.glob(File.join(root, "patches", "*.json")).filter_map do |path|
-          record = read_json(path)
-          next unless record["patrol_occurrence_id"] == @effect_capture.occurrence_id &&
-                      record["fingerprint"].to_s == fingerprint.to_s
+      def reconcile_attempts(fingerprints)
+        requested = fingerprints.map(&:to_s).uniq
+        matches = requested.to_h { |fingerprint| [ fingerprint, [] ] }
+        if @effect_capture
+          Dir.glob(File.join(root, "patches", "*.json")).each do |path|
+            record = read_json(path)
+            fingerprint = record["fingerprint"].to_s
+            next unless matches.key?(fingerprint) &&
+                        record["patrol_occurrence_id"] ==
+                          @effect_capture.occurrence_id
 
-          record
+            matches.fetch(fingerprint) << record
+          end
         end
-        return { "status" => "absent", "outcome" => {} } if matches.empty?
-        return { "status" => "ambiguous", "outcome" => {} } unless matches.one?
-
-        {
-          "status" => "matched",
-          "outcome" => { "patch_id" => matches.first.fetch("id") }
-        }
+        matches.transform_values do |records|
+          if records.empty?
+            { "status" => "absent", "outcome" => {} }
+          elsif records.one?
+            {
+              "status" => "matched",
+              "outcome" => { "patch_id" => records.first.fetch("id") }
+            }
+          else
+            { "status" => "ambiguous", "outcome" => {} }
+          end
+        end
       end
 
       # Publication recovery is an authoritative product mutation, so callers

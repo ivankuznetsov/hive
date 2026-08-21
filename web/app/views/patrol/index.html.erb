@@ -17,6 +17,39 @@
   <% end %>
 
   <div class="patrol-grid">
+    <% workflow = @overview.workflow %>
+    <% workflow_counts = workflow.fetch("counts", {}) %>
+    <% delivery = @overview.delivery %>
+    <% admission = @overview.admission %>
+    <section class="card patrol-section" aria-labelledby="patrol-fix-workflow-heading">
+      <div class="patrol-heading">
+        <div>
+          <h2 id="patrol-fix-workflow-heading">Patrol Fix workflow</h2>
+          <p class="muted">Accepted findings moving through inbox, fix, validation, review, and publication.</p>
+        </div>
+        <span class="tag"><%= @overview.migration.fetch("status", "unavailable") %> migration</span>
+      </div>
+      <div class="patrol-summary">
+        <span><strong><%= workflow_counts.fetch("active", 0) %></strong> active</span>
+        <span><strong><%= workflow_counts.fetch("parked", 0) %></strong> parked</span>
+        <span><strong><%= workflow.dig("stages", "6-done") || 0 %></strong> done</span>
+        <span><strong><%= admission.fetch("total_occurrences", 0) %></strong> accepted occurrences</span>
+        <span><strong><%= delivery.fetch("pr_created", 0) %></strong> PRs created</span>
+        <span><strong><%= delivery.fetch("pr_open", 0) %></strong> PRs open</span>
+      </div>
+      <div class="patrol-summary">
+        <% @overview.post_merge.each do |state, count| %>
+          <span><strong><%= count %></strong> post-merge <%= state.humanize.downcase %></span>
+        <% end %>
+        <% if @overview.tokens.fetch("available", false) %>
+          <span><strong><%= @overview.tokens.fetch("total") %></strong> observed tokens</span>
+        <% else %>
+          <span>token telemetry unavailable</span>
+        <% end %>
+      </div>
+      <p class="faint">Open the project task list for per-task source, stage, blocker, validation, review, successor, and PR evidence.</p>
+    </section>
+
     <% ordinary = @overview.ordinary %>
     <section class="card patrol-section" aria-labelledby="ordinary-patrol-heading">
       <div class="patrol-heading">
@@ -34,6 +67,8 @@
         <div class="patrol-summary">
           <span><strong><%= ordinary.counts.fetch("active", 0) %></strong> active</span>
           <span><strong><%= ordinary.total %></strong> total</span>
+          <span><strong><%= ordinary.allowance.fetch("used", "?") %>/<%= ordinary.allowance.fetch("limit", "?") %></strong> searches used</span>
+          <span><strong><%= ordinary.allowance.fetch("remaining", "?") %></strong> searches left</span>
           <% if ordinary.last_run_at %><span>updated <%= ordinary.last_run_at %></span><% end %>
         </div>
         <% if ordinary.items.empty? %>
@@ -73,6 +108,8 @@
         <div class="patrol-summary">
           <span><strong><%= architecture.counts.fetch("blocked", 0) %></strong> blocked on this page</span>
           <span><strong><%= architecture.total %></strong> jobs</span>
+          <span><strong><%= architecture.allowance.fetch("used", "?") %>/<%= architecture.allowance.fetch("limit", "?") %></strong> scheduled searches used</span>
+          <span><strong><%= architecture.allowance.fetch("remaining", "?") %></strong> scheduled searches left</span>
           <% if architecture.last_run_at %><span>updated <%= architecture.last_run_at %></span><% end %>
         </div>
         <% if architecture.items.empty? %>

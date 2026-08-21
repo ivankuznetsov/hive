@@ -15,6 +15,9 @@ class PatrolOverviewTest < ActiveSupport::TestCase
     assert_equal projection.dig("discovery", "architecture", "items"), overview.architecture.items
     assert_equal "attention", overview.ordinary.health
     assert_equal "running", overview.architecture.health
+    assert_equal projection.fetch("workflow"), overview.workflow
+    assert_equal projection.fetch("delivery"), overview.delivery
+    assert_equal 3, overview.ordinary.allowance.fetch("remaining")
   end
 
   test "missing or cross-project projection fails closed" do

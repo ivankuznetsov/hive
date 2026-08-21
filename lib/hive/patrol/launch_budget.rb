@@ -15,6 +15,8 @@ module Hive
     # is intentionally separate from UsageDb: token rows are telemetry and a
     # telemetry failure cannot create or remove discovery capacity.
     class LaunchBudget
+      class SeedUnavailable < Hive::Error; end
+
       SCHEMA = "hive-patrol-discovery-allowances".freeze
       SCHEMA_VERSION = 1
       ENGINES = %i[ordinary architecture].freeze
@@ -313,6 +315,8 @@ module Hive
         return project.fetch(engine.to_s) if project.key?(engine.to_s)
 
         seed = legacy_seed(date)
+        raise SeedUnavailable, "legacy discovery seed is unavailable" unless seed
+
         lane_seed = seed.fetch(engine)
         lane = {
           "seed_state" => lane_seed.fetch(:ambiguous).positive? ? "parked" : "complete",
@@ -336,22 +340,18 @@ module Hive
         result = @usage_db.patrol_discovery_seed(
           scope: { project_slug: @project_slug }, date: date
         )
-        return unavailable_seed unless result.is_a?(Hash) && result[:available] != false
+        return nil unless result.is_a?(Hash) && result[:available] != false
 
         ENGINES.to_h do |engine|
           value = result.fetch(engine, {})
           [ engine, { count: integer(value[:count]), ambiguous: integer(value[:ambiguous]) } ]
         end
       rescue StandardError
-        unavailable_seed
+        nil
       end
 
       def empty_seed
         ENGINES.to_h { |engine| [ engine, { count: 0, ambiguous: 0 } ] }
-      end
-
-      def unavailable_seed
-        ENGINES.to_h { |engine| [ engine, { count: 0, ambiguous: 1 } ] }
       end
 
       def reserve_telemetry!(profile:, stage:, started_at:)

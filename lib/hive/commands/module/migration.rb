@@ -84,10 +84,14 @@ module Hive
 
         def patrol_fix_apply
           require_confirmation!("apply the Patrol-fix authority cutover")
-          request = read_request!([ "manifest" ])
-          manifest = Hive::PatrolFix::Migration::DispositionManifest.new(
-            request.fetch("manifest")
-          )
+          request = read_request!([ "manifest" ], allow_empty: true)
+          manifest = if request
+            Hive::PatrolFix::Migration::DispositionManifest.new(
+              request.fetch("manifest")
+            )
+          else
+            patrol_fix_state.manifest
+          end
           manifest.verify!
           state = patrol_fix_cutover(manifest).call
           emit(state, "Patrol-fix migration: #{state.fetch('status')}")
@@ -143,7 +147,7 @@ module Hive
           emit(projection.to_h, "Patrol deterministic qualification admitted")
         end
 
-        def read_request!(expected_keys)
+        def read_request!(expected_keys, allow_empty: false)
           bytes = @stdin.read(MAX_REQUEST_BYTES + 1).to_s
           if bytes.bytesize > MAX_REQUEST_BYTES
             raise Hive::ConfigError,
@@ -153,6 +157,8 @@ module Hive
           unless text.valid_encoding?
             raise Hive::ConfigError, "module migration request must be valid UTF-8 JSON"
           end
+          return nil if allow_empty && text.strip.empty?
+
           request = JSON.parse(text)
           unless request.is_a?(Hash) && request.keys.sort == expected_keys
             raise Hive::ConfigError, "module migration request has unexpected keys"

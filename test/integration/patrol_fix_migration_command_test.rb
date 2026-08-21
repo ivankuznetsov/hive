@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/commands/init"
 require "hive/commands/module/migration"
 require "hive/daemon/patrol_fix_runtime"
+require "hive/modules/migration/patrol_fix_cutover"
 require "open3"
 
 class PatrolFixMigrationCommandTest < Minitest::Test
@@ -99,13 +100,64 @@ class PatrolFixMigrationCommandTest < Minitest::Test
     end
   end
 
+  def test_interrupted_forward_only_apply_resumes_from_the_durable_manifest
+    with_tmp_global_config do
+      with_tmp_git_repo do |project|
+        capture_io { Hive::Commands::Init.new(project, agent_skill_preflight: false).call }
+        store = Hive::Patrol::StateStore.new(project)
+        store.with_cycle_lock { nil }
+        store.write_finding(Hive::Patrol::Finding.new(
+          id: "finding-recovery", feature_id: "feature", category: "bug",
+          severity: "medium", confidence: "high", title: "Repair recovery",
+          description: "Recovery can leave state inconsistent.",
+          fingerprint: "recovery-root", target_sha: git_head(project),
+          lifecycle_state: "active",
+          lifecycle_updated_at: "2026-08-21T00:00:00Z"
+        ))
+        preflight = run_command(
+          "patrol-fix-preflight", project,
+          request: { "semantic_decisions" => [] }
+        )
+        manifest = Hive::PatrolFix::Migration::DispositionManifest.new(
+          preflight.fetch("manifest")
+        )
+        crash_after_effect_arm = Object.new
+        crash_after_effect_arm.define_singleton_method(:call) do |_group|
+          raise "simulated controller exit after effect arm"
+        end
+        interrupted = Hive::Modules::Migration::PatrolFixCutover.new(
+          project_root: project, hive_state_path: File.join(project, ".hive-state"),
+          manifest: manifest, group_materializer: crash_after_effect_arm
+        )
+
+        assert_raises(RuntimeError) { interrupted.call }
+        state = interrupted.state.read
+        assert_equal "applying", state.fetch("status")
+        assert state.fetch("new_authority_effect")
+        assert_raises(Hive::PatrolFix::Migration::CutoverState::ForwardOnly) do
+          interrupted.rollback!
+        end
+
+        resumed = run_command(
+          "patrol-fix-apply", project, request: nil, yes: true
+        )
+
+        assert_equal "committed", resumed.fetch("status")
+        assert_equal 1, resumed.fetch("groups").length
+        assert_equal 1, Dir.glob(
+          File.join(project, ".hive-state", "stages", "*", "*", "patrol-fix-manifest.json")
+        ).length
+      end
+    end
+  end
+
   private
 
   def run_command(action, project, request:, yes: false)
     output = StringIO.new
     Hive::Commands::Module::Migration.new(
       action, project_root: project, json: true, stdout: output,
-      stdin: StringIO.new(JSON.generate(request)), yes: yes
+      stdin: StringIO.new(request ? JSON.generate(request) : ""), yes: yes
     ).call
     JSON.parse(output.string)
   end

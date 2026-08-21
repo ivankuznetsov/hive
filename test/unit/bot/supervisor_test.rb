@@ -11,7 +11,8 @@ class HiveBotSupervisorTest < Minitest::Test
                    :marker, :attrs, :diagnostic,
                    :id, :display_name, :pr_url,
                    keyword_init: true)
-  StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, keyword_init: true)
+  StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :patrol_fix_projects,
+                            :error, :envelope, :warning, keyword_init: true)
 
   FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears,
                             :commands_registered, :raise_on_set_my_commands,
@@ -1715,6 +1716,30 @@ class HiveBotSupervisorTest < Minitest::Test
     refute_includes text, "COMPLETE"
     refute_includes text, "done"
     refute_includes text, "running"
+  end
+
+  def test_render_queue_surfaces_patrol_capacity_workflow_delivery_and_migration
+    projection = {
+      "discovery" => {
+        "ordinary" => { "allowance" => { "used" => 1, "limit" => 4, "remaining" => 3 } },
+        "architecture" => { "allowance" => { "used" => 2, "limit" => 4, "remaining" => 2 } }
+      },
+      "workflow" => {
+        "counts" => { "active" => 1, "parked" => 2 },
+        "stages" => { "6-done" => 3 }
+      },
+      "delivery" => { "pr_created" => 2, "pr_open" => 1 },
+      "migration" => { "status" => "committed" }
+    }
+
+    text = @supervisor.send(
+      :render_queue, [], patrol_fix_projects: { "demo" => projection }
+    )
+
+    assert_includes text, "Patrol demo: searches O 1/4 (3 left), A 2/4 (2 left)"
+    assert_includes text, "fixes 1 active, 2 parked, 3 done"
+    assert_includes text, "PRs 2 created/1 open; migration committed"
+    assert_includes text, "No active Hive tasks."
   end
 
   # The cap path is the fixture most likely to exceed Telegram's 4096-char

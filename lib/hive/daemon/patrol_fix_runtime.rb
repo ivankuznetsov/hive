@@ -62,17 +62,20 @@ module Hive
         @decision_runner_factory = decision_runner_factory || lambda do |**arguments|
           Hive::Daemon::PatrolFixSemanticDecisionRunner.new(**arguments)
         end
-        @entries = @registry.call.map { |raw| normalize_entry(raw) }.freeze
-        @sources = build_sources(@entries).freeze
       end
 
-      attr_reader :sources
+      # The project registry is mutable while the one production daemon stays
+      # alive. Rebuild the two lightweight source ports on each scheduler tick
+      # so a newly registered project does not need a daemon restart.
+      def sources
+        build_sources(entries).freeze
+      end
 
       # The daemon is the sole owner of source-store reads. All interfaces
       # receive these bounded project rows through OperationalSnapshot.
       def operational_projections(tasks:, now: Time.now.utc)
         task_rows = Array(tasks).group_by { |row| value(row, :project).to_s }
-        @entries.to_h do |entry|
+        entries.to_h do |entry|
           name = entry.fetch("name")
           normalized_tasks = Array(task_rows[name]).map { |row| operational_task(row) }
           projection = begin
@@ -116,7 +119,7 @@ module Hive
 
       def run_semantic_decision(project:, source_name:, occurrence_id:, reservation_id:,
                                 now: Time.now.utc)
-        source = @sources.find do |item|
+        source = sources.find do |item|
           item.project.to_s == project.to_s && item.source.to_s == source_name.to_s
         end
         raise Hive::ConfigError, "Patrol Fix semantic admission source is unavailable" unless source
@@ -143,6 +146,10 @@ module Hive
       end
 
       private
+
+      def entries
+        @registry.call.map { |raw| normalize_entry(raw) }.freeze
+      end
 
       def build_sources(entries)
         entries.flat_map do |entry|

@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "open3"
 require "hive/commands/init"
+require "hive/commands/approve"
 require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/daemon/patrol_fix_candidate_inventory"
 require "hive/patrol/fix_admission_outbox"
@@ -350,13 +351,9 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
   end
 
   def advance(task, destination)
+    capture_io { Hive::Commands::Approve.new(task.folder, quiet: true).call }
     target = File.join(task.hive_state_path, "stages", destination, task.slug)
-    Hive::PatrolFix::StageTransition.with_lock(task) do |transition|
-      transition.begin!(destination)
-      FileUtils.mkdir_p(File.dirname(target))
-      File.rename(task.folder, target)
-      transition.complete!(destination)
-    end
+    assert File.directory?(target), "production approval did not move #{task.slug} to #{destination}"
     Hive::Task.new(target)
   end
 

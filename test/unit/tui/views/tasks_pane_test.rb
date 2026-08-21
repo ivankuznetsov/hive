@@ -125,6 +125,61 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, "Tasks · myapp"
   end
 
+  def test_scoped_project_renders_patrol_capacity_workflow_and_delivery_summary
+    lane = lambda do |engine, used|
+      {
+        "enabled" => true, "health" => "healthy", "total" => 0,
+        "counts" => {}, "last_run_at" => nil, "truncated" => false,
+        "allowance" => {
+          "engine" => engine, "utc_date" => "2026-08-21", "used" => used,
+          "limit" => 4, "remaining" => 4 - used, "status" => "available",
+          "retry_at" => nil
+        }, "items" => []
+      }
+    end
+    workflow_tasks = [
+      [ "active", "2-fix", nil ],
+      [ "parked-1", "1-inbox", { "kind" => "blocked" } ],
+      [ "parked-2", "4-review", { "kind" => "rejected" } ],
+      [ "done-1", "6-done", nil ],
+      [ "done-2", "6-done", nil ],
+      [ "done-3", "6-done", nil ]
+    ].map do |slug, stage, outcome|
+      {
+        "slug" => slug,
+        "patrol_fix" => {
+          "stage" => stage, "outcome" => outcome, "successor" => nil,
+          "publication" => nil, "timing" => {}
+        }
+      }
+    end
+    patrol_fix = Hive::PatrolFix::OperationalProjection.new(
+      project: "hive", tasks: workflow_tasks, admissions: [],
+      discovery: {
+        "ordinary" => lane.call("ordinary", 1),
+        "architecture" => lane.call("architecture", 2),
+        "post_merge" => {}, "coverage" => {}
+      },
+      migration: {
+        "status" => "committed", "candidate_count" => 0, "group_count" => 0,
+        "disposition_count" => 0, "acknowledgement_count" => 0,
+        "manifest_digest" => "a" * 64
+      }, now: Time.utc(2026, 8, 21, 12)
+    ).to_h
+    snap = make_snapshot([
+      { "name" => "hive", "patrol_fix" => patrol_fix,
+        "tasks" => [ make_task(slug: "patrol-fix-task") ] }
+    ])
+
+    out = Hive::Tui::Views::TasksPane.render(
+      make_model(snapshot: snap, scope: 1), width: 120
+    )
+
+    assert_includes out, "Patrol searches: ordinary 1/4 used, 3 left; architecture 2/4 used, 2 left"
+    assert_includes out, "Fix workflow: 1 active, 2 parked, 3 done"
+    assert_includes out, "Delivery: 0 PRs created, 0 open; migration committed"
+  end
+
   def test_render_uses_producer_rows_and_shows_hidden_archive_summary
     recent = (Time.now - 86_400).utc.iso8601
     snap = make_snapshot([

@@ -24,7 +24,10 @@ Focused local migration proofs now cover read-only complete preflight,
 locked exact-byte epoch fencing, rollback before the first new-authority
 effect, source re-read and digest verification, task materialization before
 source acknowledgement, final authority verification, and reconstruction of
-both source adapters in one daemon after restart. This is not live dogfood.
+both source adapters in one daemon after restart. A filesystem-backed drill now
+interrupts after the first effect arm, proves rollback is refused, resumes from
+the durable manifest with no caller-retained envelope, and converges to one
+task. This is not live dogfood.
 U11 closes the four admission-runtime blockers without adding another
 coordinator: the daemon inventories only exact Patrol Fix task manifests,
 fails visibly on owned corruption while ignoring unrelated task bytes, binds

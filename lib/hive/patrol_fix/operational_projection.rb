@@ -312,7 +312,7 @@ module Hive
             retry_at = optional_time(task.dig("held", "retry_after"), "provider retry_after")
             current = latency.dig("current_provider", "next_retry_at")
             latency.fetch("current_provider")["next_retry_at"] = [ current, retry_at ].compact.min
-          elsif stage != "6-done"
+          elsif stage != "6-done" # not-a-stage-ref: Patrol Fix workflow stage
             counts["active"] += 1
           end
           counts["successors"] += 1 if projection["successor"]
@@ -332,7 +332,7 @@ module Hive
         totals["sample_count"] += 1
 
         projection = task.fetch("patrol_fix")
-        finish = if projection.fetch("stage") == "6-done"
+        finish = if projection.fetch("stage") == "6-done" # not-a-stage-ref: Patrol Fix workflow stage
           optional_time(projection.dig("publication", "observed_at"), "publication observed_at")
         end
         finish_time = finish ? Time.iso8601(finish) : @now

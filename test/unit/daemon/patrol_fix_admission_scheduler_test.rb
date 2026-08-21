@@ -21,6 +21,34 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
     end
   end
 
+  BrokenSource = Struct.new(:source) do
+    def enabled? = true
+    def pending(**) = raise(Hive::ConfigError, "corrupt source record")
+  end
+
+  HealthyEmptySource = Struct.new(:source, :pending_calls) do
+    def enabled? = true
+
+    def pending(**)
+      self.pending_calls += 1
+      []
+    end
+  end
+
+  def test_one_unavailable_source_does_not_stop_other_projects_from_draining
+    healthy = HealthyEmptySource.new("architecture_patrol", 0)
+    scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
+      sources: [ BrokenSource.new("ordinary_patrol"), healthy ], clock: -> { NOW }
+    )
+
+    events = scheduler.tick(now: NOW)
+
+    assert_equal 1, healthy.pending_calls
+    assert_equal [ :failed ], events.map(&:status)
+    assert_equal "ordinary_patrol", events.first.source
+    assert_match(/source_unavailable: Hive::ConfigError/, events.first.reason)
+  end
+
   def test_drains_accepted_source_while_discovery_is_exhausted_without_patrol_budget
     with_tmp_global_config do
       with_tmp_git_repo do |project_root|

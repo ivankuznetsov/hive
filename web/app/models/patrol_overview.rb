@@ -5,7 +5,7 @@ require "hive/patrol_fix/operational_projection"
 class PatrolOverview
   Section = Data.define(
     :enabled, :health, :total, :counts, :items, :last_run_at,
-    :truncated, :error
+    :truncated, :allowance, :error
   )
 
   attr_reader :project
@@ -22,6 +22,12 @@ class PatrolOverview
 
   def ordinary = section("ordinary")
   def architecture = section("architecture")
+  def admission = @projection&.fetch("admission", {}) || {}
+  def workflow = @projection&.fetch("workflow", {}) || {}
+  def migration = @projection&.fetch("migration", {}) || {}
+  def delivery = @projection&.fetch("delivery", {}) || {}
+  def tokens = @projection&.fetch("tokens", {}) || {}
+  def post_merge = @projection&.dig("discovery", "post_merge") || {}
 
   private
 
@@ -36,6 +42,7 @@ class PatrolOverview
       total: lane.fetch("total"), counts: lane.fetch("counts"),
       items: lane.fetch("items"), last_run_at: lane["last_run_at"],
       truncated: lane.fetch("truncated"),
+      allowance: lane.fetch("allowance"),
       error: lane.fetch("health") == "unavailable" ?
         "Patrol data is temporarily unavailable." : nil
     )
@@ -44,7 +51,7 @@ class PatrolOverview
   def unavailable_section
     Section.new(
       enabled: true, health: "unavailable", total: 0, counts: {}, items: [],
-      last_run_at: nil, truncated: false,
+      last_run_at: nil, truncated: false, allowance: {},
       error: "Patrol data is temporarily unavailable."
     )
   end

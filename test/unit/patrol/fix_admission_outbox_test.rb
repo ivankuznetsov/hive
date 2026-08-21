@@ -86,6 +86,22 @@ class PatrolFixAdmissionOutboxTest < Minitest::Test
     end
   end
 
+  def test_legacy_migration_snapshot_without_lifecycle_time_is_deterministic
+    Dir.mktmpdir do |dir|
+      legacy = finding
+      legacy.lifecycle_updated_at = nil
+      outbox = Hive::Patrol::FixAdmissionOutbox.new(root: dir)
+
+      first = outbox.migration_snapshot(legacy)
+      second = outbox.migration_snapshot(legacy)
+
+      assert_equal first.to_h, second.to_h
+      assert_equal first.digest, second.digest
+      assert_equal "1970-01-01T00:00:00Z", first.to_h.fetch("accepted_at")
+      assert_equal outbox.migration_occurrence_id(first), outbox.migration_occurrence_id(second)
+    end
+  end
+
   private
 
   def finding

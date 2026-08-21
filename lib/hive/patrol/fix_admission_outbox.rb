@@ -6,6 +6,8 @@ module Hive
     # Ordinary Patrol's source port. Finding JSON remains authoritative; this
     # sidecar contains only the immutable handoff and exact workflow back-link.
     class FixAdmissionOutbox
+      LEGACY_MIGRATION_ACCEPTED_AT = Time.at(0).utc.freeze
+
       attr_reader :store
 
       def self.for_project(project_root:, hive_state_path: nil)
@@ -49,11 +51,11 @@ module Hive
         )
       end
 
-      def migration_snapshot(finding, accepted_at: Time.now.utc)
+      def migration_snapshot(finding, accepted_at: LEGACY_MIGRATION_ACCEPTED_AT)
         source_snapshot(finding, accepted_at: accepted_at)
       end
 
-      def publish_migration_finding!(finding, accepted_at: Time.now.utc)
+      def publish_migration_finding!(finding, accepted_at: LEGACY_MIGRATION_ACCEPTED_AT)
         return nil unless enabled? && finding.lifecycle_state.to_s == "active"
 
         snapshot = migration_snapshot(finding, accepted_at: accepted_at)

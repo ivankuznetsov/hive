@@ -63,6 +63,28 @@ class HiveDaemonPatrolFixRuntimeTest < Minitest::Test
     end
   end
 
+  def test_registry_changes_are_visible_without_restarting_the_daemon
+    with_tmp_dir do |dir|
+      entries = [ {
+        "name" => "alpha", "path" => File.join(dir, "alpha"),
+        "hive_state_path" => File.join(dir, "alpha", ".hive-state")
+      } ]
+      runtime = Hive::Daemon::PatrolFixRuntime.new(
+        registry: -> { entries }, config_loader: ->(_path) { {} },
+        operational_projection: Projection.new
+      )
+
+      assert_equal [ "alpha" ], runtime.sources.map(&:project).uniq
+      entries << {
+        "name" => "beta", "path" => File.join(dir, "beta"),
+        "hive_state_path" => File.join(dir, "beta", ".hive-state")
+      }
+
+      assert_equal %w[alpha beta], runtime.sources.map(&:project).uniq
+      assert_equal %w[alpha beta], runtime.operational_projections(tasks: []).keys
+    end
+  end
+
   def test_provider_is_constructed_only_by_reserved_child_execution
     with_tmp_git_repo do |project_root|
       hive_state = File.join(project_root, ".hive-state")

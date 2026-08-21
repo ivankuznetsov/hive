@@ -248,7 +248,7 @@ module Hive
         )
         patrol_fix_runtime = Hive::Daemon::PatrolFixRuntime.new
         patrol_fix_admission_scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
-          sources: patrol_fix_runtime.sources,
+          sources: -> { patrol_fix_runtime.sources },
           admission_store_factory: patrol_fix_runtime.method(:admission_store),
           semantic_admission_factory: patrol_fix_runtime.method(:semantic_admission),
           task_materializer_factory: patrol_fix_runtime.method(:task_materializer),

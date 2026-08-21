@@ -10,7 +10,7 @@ module Hive
       SCHEMA = "hive-patrol-fix-projection".freeze
       SCHEMA_VERSION = 1
       MAX_DIAGNOSTIC_BYTES = 512
-      STAGE_DIRS = %w[1-inbox 2-fix 3-validate 4-review 5-publish 6-done].freeze
+      STAGE_DIRS = %w[1-inbox 2-fix 3-validate 4-review 5-publish 6-done].freeze # not-a-stage-ref: Patrol Fix workflow stages
       PARKED_ROUTES = %w[reject blocked escalate].freeze
 
       attr_reader :task_folder, :stage
@@ -47,7 +47,7 @@ module Hive
         fix = current.reverse.find { |receipt| receipt["kind"] == "fix" }
         publication = current.reverse.find { |receipt| receipt["kind"] == "publication" }
         outcome = parked_outcome(decision)
-        done = stage == "6-done"
+        done = stage == "6-done" # not-a-stage-ref: Patrol Fix workflow stage
         missing_publication = done && publication.nil?
         state = missing_publication ? "invalid" : "current"
         diagnostic = if missing_publication
@@ -161,9 +161,9 @@ module Hive
         boundary = case stage
         when "2-fix" then receipts.reverse.find { |receipt| receipt["kind"] == "decision" && receipt["stage"] == "inbox" }
         when "3-validate" then receipts.reverse.find { |receipt| receipt["kind"] == "fix" }
-        when "4-review" then receipts.reverse.find { |receipt| receipt["kind"] == "validation" }
+        when "4-review" then receipts.reverse.find { |receipt| receipt["kind"] == "validation" } # not-a-stage-ref: Patrol Fix workflow stage
         when "5-publish" then receipts.reverse.find { |receipt| receipt["kind"] == "decision" && receipt["stage"] == "review" }
-        when "6-done" then receipts.reverse.find { |receipt| receipt["kind"] == "publication" }
+        when "6-done" then receipts.reverse.find { |receipt| receipt["kind"] == "publication" } # not-a-stage-ref: Patrol Fix workflow stage
         end
         boundary&.fetch("recorded_at", nil)
       end
@@ -177,10 +177,10 @@ module Hive
         return action("done", runnable: false, reopen: false) if done
         return action("parked", runnable: false, reopen: true) if outcome
         ready = case stage
-        when "1-inbox" then decision&.dig("payload", "route") == "fix"
+        when "1-inbox" then decision&.dig("payload", "route") == "fix" # not-a-stage-ref: Patrol Fix workflow stage
         when "2-fix" then !fix.nil?
         when "3-validate" then !validation.nil?
-        when "4-review" then decision&.dig("payload", "route") == "publish"
+        when "4-review" then decision&.dig("payload", "route") == "publish" # not-a-stage-ref: Patrol Fix workflow stage
         when "5-publish" then !publication.nil?
         else false
         end

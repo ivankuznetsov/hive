@@ -44,9 +44,18 @@ module Hive
         remaining = @limit
         source_ports.each do |source|
           break if remaining.zero?
-          next unless source.enabled?
+          entries = begin
+            next unless source.enabled?
+            source.pending(limit: remaining, now: now)
+          rescue StandardError => error
+            events << event(
+              source, nil, :failed,
+              reason: "source_unavailable: #{error.class}: #{bounded_error(error)}"
+            )
+            next
+          end
 
-          source.pending(limit: remaining, now: now).each do |entry|
+          entries.each do |entry|
             break if remaining.zero?
             remaining -= 1
             result = process(source, entry, now: now)

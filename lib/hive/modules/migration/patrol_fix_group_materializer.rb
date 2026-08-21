@@ -187,9 +187,9 @@ module Hive
           task = Hive::Task.new(current)
           Hive::PatrolFix::StageTransition.with_lock(task) do
             source_stage = File.basename(File.dirname(current))
-            destination = File.join(@hive_state_path, "stages", "6-done", binding.fetch("slug"))
+            destination = File.join(@hive_state_path, "stages", "6-done", binding.fetch("slug")) # not-a-stage-ref: Patrol Fix workflow stage
             Hive::Lock.with_commit_lock(@hive_state_path) do
-              unless source_stage == "6-done"
+              unless source_stage == "6-done" # not-a-stage-ref: Patrol Fix workflow stage
                 unless current == folder
                   raise Error, "migration task moved before publication import"
                 end
@@ -213,7 +213,7 @@ module Hive
             File.join("stages", stage, slug)
           end
           @git_ops.hive_commit(
-            stage_name: "6-done", slug: slug,
+            stage_name: "6-done", slug: slug, # not-a-stage-ref: Patrol Fix workflow stage
             action: "existing publication imported", pathspecs: paths
           )
         end

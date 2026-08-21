@@ -104,6 +104,10 @@ it does not write source, task, branch, issue, or PR state. Pass that exact
 the first new-authority effect. Apply re-reads every source by immutable id,
 verifies its digest, materializes with the existing `TaskCapture` and
 `TaskMaterializer`, and records the source acknowledgement last.
+After the first new-authority effect, recovery is forward-only. Re-run
+`patrol-fix-apply --yes` with empty stdin to resume from the controller-owned
+durable manifest; the operator does not need to retain or reconstruct the
+original preflight envelope.
 
 The separately invoked reduced installed/live smoke has exactly five
 packaging owners: `Result` owns the canonical bounded schema and claim fences;

@@ -118,6 +118,11 @@ module Hive
           end
 
           visible = visible_snapshot(model)
+          patrol_lines = patrol_summary_lines(model, visible, inner_width)
+          unless patrol_lines.empty?
+            lines.concat(patrol_lines.map { |line| Styles::HINT.render(line) })
+            lines << ""
+          end
           hidden_count = model.snapshot.hidden_archived_task_count(scope: model.scope)
           if hidden_count.positive?
             lines << Styles::HINT.render(
@@ -175,6 +180,34 @@ module Hive
         def hidden_archived_summary(count)
           noun = count == 1 ? "task" : "tasks"
           "… and #{count} older archived #{noun} (hive archive to view)"
+        end
+
+        def patrol_summary_lines(model, snapshot, width)
+          return [] unless model.scope.to_i.positive?
+          project = snapshot&.projects&.first
+          projection = project&.patrol_fix
+          return [] unless projection.is_a?(Hash)
+
+          ordinary = projection.dig("discovery", "ordinary", "allowance") || {}
+          architecture = projection.dig("discovery", "architecture", "allowance") || {}
+          counts = projection.dig("workflow", "counts") || {}
+          stages = projection.dig("workflow", "stages") || {}
+          delivery = projection.fetch("delivery", {})
+          migration = projection.dig("migration", "status") || "unavailable"
+          [
+            "Patrol searches: ordinary #{allowance_label(ordinary)}; architecture #{allowance_label(architecture)}",
+            "Fix workflow: #{counts.fetch('active', 0)} active, #{counts.fetch('parked', 0)} parked, " \
+              "#{stages.fetch('6-done', 0)} done", # not-a-stage-ref: Patrol Fix workflow stage
+            "Delivery: #{delivery.fetch('pr_created', 0)} PRs created, " \
+              "#{delivery.fetch('pr_open', 0)} open; migration #{migration}"
+          ].map { |line| truncate(line, width) }
+        end
+
+        def allowance_label(value)
+          used = value.fetch("used", "?")
+          limit = value.fetch("limit", "?")
+          remaining = value.fetch("remaining", "?")
+          "#{used}/#{limit} used, #{remaining} left"
         end
 
         # Below `inner_width = ICON+ID+PR+STAGE+STATUS+AGE+SEPARATORS+NAME_MIN_WIDTH`

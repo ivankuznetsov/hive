@@ -97,6 +97,34 @@ class PatrolLaunchBudgetTest < Minitest::Test
     end
   end
 
+  def test_transient_upgrade_seed_failure_retries_without_parking_the_day
+    with_tmp_dir do |dir|
+      calls = 0
+      store = Object.new
+      store.define_singleton_method(:path) { File.join(dir, "usage.db") }
+      store.define_singleton_method(:patrol_discovery_seed) do |**|
+        calls += 1
+        if calls == 1
+          { available: false, ordinary: { count: 0, ambiguous: 0 },
+            architecture: { count: 0, ambiguous: 0 } }
+        else
+          { available: true, ordinary: { count: 0, ambiguous: 0 },
+            architecture: { count: 0, ambiguous: 0 } }
+        end
+      end
+      subject = budget(dir, engine: :ordinary, usage_db: store)
+
+      first = subject.allowance_snapshot
+      assert_equal "unavailable", first.fetch(:status)
+      assert_equal 0, first.fetch(:remaining)
+
+      recovered = subject.allowance_snapshot
+      assert_equal "available", recovered.fetch(:status)
+      assert_equal 4, recovered.fetch(:remaining)
+      assert_equal 2, calls
+    end
+  end
+
   def test_fix_review_and_action_telemetry_do_not_consume_discovery
     with_tmp_dir do |dir|
       Hive::UsageDb.path = File.join(dir, "usage.db")

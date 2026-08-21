@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-08-20
+updated: 2026-08-21
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage]
 ---
 
@@ -23,6 +23,10 @@ the task graph without making status itself perform daemon reconciliation. The
 same snapshot carries a bounded `patrol_fix_projects` map assembled once per
 project from the ordinary and Architecture source authorities; every status
 adapter validates and passes through those rows instead of rescanning stores.
+The Patrol Fix runtime re-reads the project registry when the admission
+scheduler asks for source ports, so projects registered after daemon start are
+admitted without a restart. One corrupt source outbox produces a bounded failed
+event for that source while the remaining project/source ports continue.
 
 `StatusConsumer` passes through the additive condition projection fields and
 the project-level `hidden_archived_task_count` from ordinary `hive status

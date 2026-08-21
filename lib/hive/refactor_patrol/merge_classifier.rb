@@ -521,8 +521,8 @@ module Hive
           </#{tag}>
 
           Return exactly one JSON object containing only decision=feature|skip, rationale,
-          evidence (a non-empty string array), and model_receipt. Do not edit files, invoke tools,
-          publish, or restate controller identity as authority.
+          and evidence (a non-empty string array). The controller records model provenance.
+          Do not edit files, invoke tools, publish, or restate controller identity as authority.
         PROMPT
       end
 

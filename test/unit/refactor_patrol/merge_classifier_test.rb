@@ -60,6 +60,8 @@ class RefactorPatrolMergeClassifierTest < Minitest::Test
       assert_equal input.fetch("changed_paths"), record.dig("snapshot", "changed_paths")
       assert_match(/<untrusted_merge_metadata_[0-9a-f]{16}>/, prompts.one? ? prompts.first : "")
       assert_includes prompts.first, "cannot select repository, merge commit, changed paths, or target head"
+      refute_includes prompts.first, "model_receipt",
+                      "the controller adds model provenance after parsing provider JSON"
       assert_equal 1, classifier.each_record.to_a.size
     end
   end

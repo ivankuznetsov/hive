@@ -32,6 +32,53 @@ class DaemonPatrolFixSemanticDecisionRunnerTest < Minitest::Test
     end
   end
 
+  def test_object_shaped_evidence_fails_closed_at_the_provider_boundary
+    with_tmp_dir do |dir|
+      error = assert_raises(Hive::Daemon::PatrolFixSemanticDecisionRunner::Error) do
+        invoke(dir, {
+          status: :ok,
+          final_message: JSON.generate(
+            "decision" => "distinct", "candidate_identity" => nil,
+            "rationale" => "The roots are independent.",
+            "evidence" => { "difference" => "The affected owners do not overlap." }
+          )
+        })
+      end
+
+      assert_match(/malformed JSON/, error.message)
+    end
+  end
+
+  def test_store_invalid_semantic_fields_fail_closed_at_the_provider_boundary
+    invalid_outputs = [
+      {
+        "decision" => "same_root", "candidate_identity" => "task:unknown",
+        "rationale" => "The roots match.", "evidence" => [ "Same owner." ]
+      },
+      {
+        "decision" => "distinct", "candidate_identity" => nil,
+        "rationale" => "", "evidence" => [ "Different owners." ]
+      },
+      {
+        "decision" => "distinct", "candidate_identity" => nil,
+        "rationale" => "The roots differ.", "evidence" => []
+      },
+      {
+        "decision" => "distinct", "candidate_identity" => nil,
+        "rationale" => "The roots differ.\nSecond line.", "evidence" => [ "Different owners." ]
+      }
+    ]
+
+    with_tmp_dir do |dir|
+      invalid_outputs.each do |output|
+        error = assert_raises(Hive::Daemon::PatrolFixSemanticDecisionRunner::Error) do
+          invoke(dir, { status: :ok, final_message: JSON.generate(output) })
+        end
+        assert_match(/malformed JSON/, error.message)
+      end
+    end
+  end
+
   def test_provider_retry_time_is_preserved
     with_tmp_dir do |dir|
       retry_at = Time.utc(2026, 8, 21, 18)

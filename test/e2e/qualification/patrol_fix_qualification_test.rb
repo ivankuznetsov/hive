@@ -1,13 +1,25 @@
+PATROL_FIX_QUALIFICATION_PATH_KEYS = %w[
+  HIVE_PATROL_FIX_QUALIFICATION_PROJECT
+  HIVE_PATROL_FIX_QUALIFICATION_EVIDENCE
+].freeze
+
+# This file is the explicit authenticated smoke boundary. Preserve the normal
+# test-suite HOME isolation unless both absolute opt-in paths were supplied
+# before test_helper selects the process environment.
+if PATROL_FIX_QUALIFICATION_PATH_KEYS.all? { |key| ENV[key].to_s.start_with?("/") }
+  ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] = "1"
+else
+  ENV.delete("HIVE_TEST_ALLOW_REAL_USER_ENV")
+end
+
 require_relative "../../test_helper"
 require_relative "../lib/patrol_qualification"
 
 class E2EPatrolFixLiveQualificationTest < Minitest::Test
   def test_configured_providers_clear_the_frozen_four_gate_corpus
-    required = %w[
-      HIVE_PATROL_FIX_QUALIFICATION_PROJECT
-      HIVE_PATROL_FIX_QUALIFICATION_EVIDENCE
-    ]
-    missing = required.reject { |key| ENV[key].to_s.start_with?("/") }
+    missing = PATROL_FIX_QUALIFICATION_PATH_KEYS.reject do |key|
+      ENV[key].to_s.start_with?("/")
+    end
     unless missing.empty?
       flunk "opt-in Patrol Fix qualification requires absolute paths in: #{missing.join(', ')}"
     end

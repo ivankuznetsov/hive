@@ -24,6 +24,17 @@ Behavior:
    bullets the user added) and integrate it. End with `<!-- COMPLETE -->`
    only when no follow-up questions remain; otherwise `<!-- WAITING -->`.
 
+Durable progress:
+
+- Before extensive research or drafting, create or update `plan.md` with a
+  non-terminal outline, then refine that file as you work. Do not hold the
+  complete plan only in one long model response before the first write.
+- Do not add `<!-- WAITING -->` or `<!-- COMPLETE -->` to an intermediate
+  checkpoint. Those markers are terminal and belong only on the final write.
+- On a retry, preserve and improve useful plan bytes already on disk; do not
+  restart from an empty document merely because the prior provider stream
+  ended before completion.
+
 Constraints:
 - Do not modify any file other than plan.md.
 - Do not run code in the project worktree — execution happens in the next stage.

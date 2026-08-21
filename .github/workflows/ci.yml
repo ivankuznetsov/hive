@@ -263,6 +263,15 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
           working-directory: web
+      - name: Cache Playwright browsers
+        if: ${{ matrix.suite != 'integration' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # Keyed on the pinned playwright version in web/package.json; a miss
+          # falls through to the full install step below, so caching can never
+          # skip or weaken the proof.
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('web/package-lock.json', 'web/package.json') }}
       - name: Install Playwright chromium for Capybara system tests
         if: ${{ matrix.suite != 'integration' }}
         run: |
@@ -274,6 +283,12 @@ jobs:
       - name: Rails system tests (Capybara + Playwright)
         if: ${{ matrix.suite == 'system' }}
         run: bin/rails test:system
+      - name: Cache the golden-path root gem bundle
+        if: ${{ matrix.suite == 'golden' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/vendor/root-bundle
+          key: root-bundle-${{ runner.os }}-${{ hashFiles('Gemfile.lock') }}
       - name: Install the gem bundle (the golden-path E2E spawns a real daemon)
         if: ${{ matrix.suite == 'golden' }}
         working-directory: .

@@ -33,6 +33,9 @@ Reviewer prompts now reserve finding-lifecycle transitions for Hive and require
 every newly emitted finding to start at `open`; this removes an ambiguity that
 caused a successful Ox review to be rejected after it described a finding as
 closed.
+Route-level capability diagnostics are now declared in both closed status
+schemas. This keeps the redacted diagnostic already emitted by plan-review
+status valid for CLI, operational-status, and real-scenario consumers.
 
 The in-repo agent-cli-runtime candidate is 0.2.3. This change prepares its
 version, changelog, lockfile, mirror, and package assertions; publication is a

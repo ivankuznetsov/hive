@@ -434,6 +434,7 @@
         "requested": { "$ref": "#/$defs/PlanReviewRouteIdentity" },
         "actual": { "$ref": "#/$defs/PlanReviewRouteIdentity" },
         "capability_result": { "type": ["string", "null"] },
+        "diagnostic": { "type": ["string", "null"] },
         "independence_verified": { "type": "boolean" },
         "independence_reason": { "type": ["string", "null"] },
         "attempt_id": { "type": ["string", "null"], "pattern": "^pra-[0-9a-f]{64}$" },

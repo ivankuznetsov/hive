@@ -467,6 +467,37 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "Task", "properties", "action", "enum").sort
   end
 
+  def test_plan_review_route_diagnostics_validate_in_status_contracts
+    route = {
+      "role" => "adversarial",
+      "requested" => {
+        "provider" => "codex", "model" => "gpt-5.6-sol",
+        "family" => "openai", "effort" => "xhigh", "route" => "native_codex"
+      },
+      "actual" => {
+        "provider" => "codex", "model" => "gpt-5.6-sol",
+        "family" => "openai", "effort" => "xhigh", "route" => "native_codex"
+      },
+      "capability_result" => "unsupported",
+      "diagnostic" => "provider executable is unavailable",
+      "independence_verified" => true
+    }
+
+    %w[hive-status hive-operational-status].each do |schema_name|
+      doc = JSON.parse(File.read(Hive::Schemas.schema_path(schema_name)))
+      schemer = JSONSchemer.schema({
+        "$schema" => doc.fetch("$schema"),
+        "$ref" => "#/$defs/PlanReviewRoute",
+        "$defs" => doc.fetch("$defs")
+      })
+      assert schemer.valid?(route),
+             "#{schema_name} must accept emitted route diagnostics " \
+             "(errors: #{schemer.validate(route).map { |error| error['error'] }.inspect})"
+      refute schemer.valid?(route.merge("diagnostic" => { "message" => "wrong shape" })),
+             "#{schema_name} route diagnostics must remain nullable strings"
+    end
+  end
+
   def test_archive_visibility_counts_are_additive_aggregate_schema_fields
     status = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
     project = status.dig("$defs", "Project")

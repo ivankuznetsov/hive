@@ -3,7 +3,6 @@ require "json"
 require "time"
 require "hive/managed_directory"
 require "hive/patrol_fix"
-require "hive/patrol_fix/cutover_gate"
 require "hive/patrol_fix/source_snapshot"
 require "hive/secret_patterns"
 
@@ -26,21 +25,16 @@ module Hive
 
       attr_reader :source
 
-      def initialize(root:, source:, gate: CutoverGate.new)
+      def initialize(root:, source:)
         @source = source.to_s
         raise ArgumentError, "source outbox identity is invalid" unless SourceSnapshot::ENGINES.include?(@source)
 
-        @gate = gate
         @directory = Hive::ManagedDirectory.new(
           root: File.expand_path(root), label: "#{@source} Patrol Fix outbox"
         )
       end
 
-      def enabled? = @gate.enabled?
-
       def publish!(occurrence_id:, snapshot:, now: Time.now.utc)
-        return nil unless enabled?
-
         source_snapshot = snapshot.is_a?(SourceSnapshot) ? snapshot : SourceSnapshot.new(snapshot)
         conflict!("snapshot source does not match outbox") unless source_snapshot.to_h.fetch("engine") == source
         id = text!(occurrence_id, "occurrence identity", max: 256)
@@ -48,7 +42,6 @@ module Hive
           "schema" => SCHEMA,
           "schema_version" => SCHEMA_VERSION,
           "source" => source,
-          "source_epoch" => @gate.epoch,
           "occurrence_id" => id,
           "snapshot" => source_snapshot.to_h,
           "snapshot_digest" => source_snapshot.digest,
@@ -60,7 +53,7 @@ module Hive
         }
         mutate(id, create: true) do |existing|
           if existing
-            immutable = %w[source source_epoch occurrence_id snapshot snapshot_digest]
+            immutable = %w[source occurrence_id snapshot snapshot_digest]
             conflict!("source outbox occurrence conflicts") unless
               existing.slice(*immutable) == candidate.slice(*immutable)
             next existing
@@ -78,7 +71,6 @@ module Hive
       end
 
       def pending(limit: 64, now: Time.now.utc)
-        return [].freeze unless enabled?
         maximum = Integer(limit)
         raise ArgumentError, "outbox limit must be between 1 and 64" unless (1..64).cover?(maximum)
 
@@ -91,7 +83,6 @@ module Hive
       end
 
       def park!(occurrence_id:, now: Time.now.utc)
-        return nil unless enabled?
         id = text!(occurrence_id, "occurrence identity", max: 256)
         mutate(id) do |record|
           conflict!("acknowledged source handoff cannot be parked") if
@@ -104,7 +95,6 @@ module Hive
       end
 
       def defer!(occurrence_id:, retry_at:, now: Time.now.utc)
-        return nil unless enabled?
         id = text!(occurrence_id, "occurrence identity", max: 256)
         eligible_at = retry_at.utc
         conflict!("source handoff retry must be scheduled in the future") unless
@@ -121,7 +111,6 @@ module Hive
       end
 
       def resume!(occurrence_id:, now: Time.now.utc)
-        return nil unless enabled?
         id = text!(occurrence_id, "occurrence identity", max: 256)
         mutate(id) do |record|
           conflict!("only a blocked source handoff may resume") unless
@@ -134,17 +123,15 @@ module Hive
       end
 
       def acknowledge!(occurrence_id:, admission_id:, task:, now: Time.now.utc)
-        return nil unless enabled?
         id = text!(occurrence_id, "occurrence identity", max: 256)
         binding = normalize_task(task)
         admission = text!(admission_id, "admission identity", max: 256)
-        receipt_id = "#{source}:#{Digest::SHA256.hexdigest([ id, admission, binding.fetch('slug'), binding.fetch('generation'), binding.fetch('evidence_digest'), @gate.epoch ].join(':'))}"
+        receipt_id = "#{source}:#{Digest::SHA256.hexdigest([ id, admission, binding.fetch('slug'), binding.fetch('generation'), binding.fetch('evidence_digest') ].join(':'))}"
         mutate(id) do |record|
           acknowledgement = {
             "receipt_id" => receipt_id,
             "admission_id" => admission,
             "task" => binding,
-            "source_epoch" => @gate.epoch,
             "acknowledged_at" => timestamp(now)
           }
           if record["acknowledgement"]
@@ -153,8 +140,6 @@ module Hive
             conflict!("source acknowledgement conflicts") unless exact
             next record
           end
-          conflict!("source epoch changed before acknowledgement") unless
-            record.fetch("source_epoch") == @gate.epoch
           record["acknowledgement"] = acknowledgement
           record["status"] = "acknowledged"
           record["retry_at"] = nil
@@ -165,7 +150,6 @@ module Hive
       end
 
       def settle!(occurrence_id:, now: Time.now.utc)
-        return nil unless enabled?
         id = text!(occurrence_id, "occurrence identity", max: 256)
         mutate(id) do |record|
           conflict!("source handoff settlement requires acknowledgement") unless
@@ -242,7 +226,7 @@ module Hive
       def validate_record!(record, expected_id: nil)
         keys = %w[
           acknowledgement created_at occurrence_id retry_at schema schema_version
-          snapshot snapshot_digest source source_epoch status updated_at
+          snapshot snapshot_digest source status updated_at
         ]
         corrupt!("source outbox record fields are invalid") unless
           record.is_a?(Hash) && record.keys.sort == keys.sort
@@ -257,7 +241,6 @@ module Hive
         corrupt!("source outbox snapshot digest is invalid") unless
           record["snapshot_digest"].is_a?(String) && record["snapshot_digest"].match?(DIGEST) &&
           record["snapshot_digest"] == snapshot.digest
-        text!(record.fetch("source_epoch"), "source epoch", max: 128)
         corrupt!("source outbox status is invalid") unless
           %w[pending blocked retry_wait acknowledged acknowledgement_retry_wait settled]
             .include?(record["status"])
@@ -276,13 +259,11 @@ module Hive
             record["acknowledgement"]
         if record["acknowledgement"]
           acknowledgement = record.fetch("acknowledgement")
-          corrupt!("source acknowledgement epoch conflicts with its handoff") unless
-            acknowledgement.fetch("source_epoch") == record.fetch("source_epoch")
           binding = normalize_task(acknowledgement.fetch("task"))
           expected_receipt = "#{source}:#{Digest::SHA256.hexdigest([
             record.fetch('occurrence_id'), acknowledgement.fetch('admission_id'),
             binding.fetch('slug'), binding.fetch('generation'),
-            binding.fetch('evidence_digest'), record.fetch('source_epoch')
+            binding.fetch('evidence_digest')
           ].join(':'))}"
           corrupt!("source acknowledgement receipt is inconsistent") unless
             acknowledgement.fetch("receipt_id") == expected_receipt
@@ -295,12 +276,11 @@ module Hive
       end
 
       def validate_acknowledgement!(value)
-        keys = %w[acknowledged_at admission_id receipt_id source_epoch task]
+        keys = %w[acknowledged_at admission_id receipt_id task]
         corrupt!("source acknowledgement fields are invalid") unless
           value.is_a?(Hash) && value.keys.sort == keys.sort
         text!(value.fetch("receipt_id"), "source receipt identity", max: 256)
         text!(value.fetch("admission_id"), "admission identity", max: 256)
-        text!(value.fetch("source_epoch"), "source epoch", max: 128)
         normalize_task(value.fetch("task"))
         timestamp_value!(value.fetch("acknowledged_at"), "acknowledged_at")
       end

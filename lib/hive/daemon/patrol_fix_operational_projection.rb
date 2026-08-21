@@ -2,7 +2,6 @@ require "hive/patrol/finding_query"
 require "hive/patrol/launch_budget"
 require "hive/patrol/state_store"
 require "hive/patrol_fix/admission_store"
-require "hive/patrol_fix/migration/cutover_state"
 require "hive/patrol_fix/operational_projection"
 require "hive/refactor_patrol/job_query"
 require "hive/refactor_patrol/job_store"
@@ -21,14 +20,13 @@ module Hive
 
       def initialize(ordinary_reader: nil, architecture_reader: nil,
                      allowance_reader: nil, admissions_reader: nil,
-                     migration_reader: nil, batches_reader: nil,
+                     batches_reader: nil,
                      scheduled_results_reader: nil, usage_reader: nil,
                      architecture_query_factory: nil)
         @ordinary_reader = ordinary_reader || method(:read_ordinary)
         @architecture_reader = architecture_reader || method(:read_architecture)
         @allowance_reader = allowance_reader || method(:read_allowance)
         @admissions_reader = admissions_reader || method(:read_admissions)
-        @migration_reader = migration_reader || method(:read_migration)
         @batches_reader = batches_reader || method(:read_batches)
         @scheduled_results_reader = scheduled_results_reader || method(:read_scheduled_results)
         @usage_reader = usage_reader || method(:read_usage)
@@ -47,9 +45,6 @@ module Hive
         end
         admissions = read_with_diagnostic("admission", diagnostics, []) do
           @admissions_reader.call(project: project, config: config, now: now)
-        end
-        migration = read_with_diagnostic("migration", diagnostics, nil) do
-          @migration_reader.call(project: project, config: config, now: now)
         end
         batches = read_with_diagnostic("post_merge_batches", diagnostics, []) do
           @batches_reader.call(project: project, config: config, now: now)
@@ -79,7 +74,7 @@ module Hive
               "architecture" => architecture_coverage(architecture_stats, scheduled_results)
             }
           },
-          migration: migration, tokens: tokens, diagnostics: diagnostics, now: now
+          tokens: tokens, diagnostics: diagnostics, now: now
         ).to_h
       end
 
@@ -371,28 +366,6 @@ module Hive
         Hive::PatrolFix::AdmissionStore.new(
           root: File.join(project.fetch("hive_state_path"), "patrol-fix", "admissions")
         ).operational_records
-      end
-
-      def read_migration(project:, **)
-        store = Hive::PatrolFix::Migration::CutoverState.new(
-          root: File.join(project.fetch("hive_state_path"), "patrol-fix", "migration")
-        )
-        state = store.read
-        return {
-          "status" => "not_started", "candidate_count" => 0, "group_count" => 0,
-          "disposition_count" => 0, "acknowledgement_count" => 0,
-          "manifest_digest" => nil
-        } unless state
-
-        manifest = store.manifest.to_h
-        {
-          "status" => state.fetch("status"),
-          "candidate_count" => manifest.dig("integrity", "inventory_count"),
-          "group_count" => manifest.fetch("semantic_groups").length,
-          "disposition_count" => manifest.dig("integrity", "disposition_count"),
-          "acknowledgement_count" => state.fetch("acknowledgement_count"),
-          "manifest_digest" => state.fetch("manifest_digest")
-        }
       end
 
       def read_batches(project:, **)

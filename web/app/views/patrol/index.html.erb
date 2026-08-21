@@ -27,7 +27,6 @@
           <h2 id="patrol-fix-workflow-heading">Patrol Fix workflow</h2>
           <p class="muted">Accepted findings moving through inbox, fix, validation, review, and publication.</p>
         </div>
-        <span class="tag"><%= @overview.migration.fetch("status", "unavailable") %> migration</span>
       </div>
       <div class="patrol-summary">
         <span><strong><%= workflow_counts.fetch("active", 0) %></strong> active</span>

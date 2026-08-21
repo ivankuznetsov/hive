@@ -53,31 +53,6 @@ class RefactorPatrolCanonicalActionCatalogTest < Minitest::Test
     end
   end
 
-  def test_migration_observations_are_timestamp_free_complete_and_read_only
-    with_tmp_dir do |root|
-      project = File.join(root, "project")
-      state_home = File.join(root, "migration-state")
-      FileUtils.mkdir_p(project)
-      terminal_store(project)
-      tick = T0
-      catalog = catalog_for(
-        state_home, [ entry("project", project) ],
-        clock: -> { tick += 1 }
-      )
-
-      first = catalog.patrol_fix_migration_observations
-      second = catalog.patrol_fix_migration_observations
-
-      assert_equal first, second
-      assert_equal %w[canonical_action coding_task pull_request],
-                   first.map { |item| item.fetch("kind") }.sort
-      assert_equal "legacy_link",
-                   first.find { |item| item.fetch("kind") == "pull_request" }
-                     .fetch("match")
-      refute File.exist?(state_home), "dry-run migration inventory must not create catalog state"
-    end
-  end
-
   def test_conflicting_terminal_proofs_fail_closed
     with_tmp_dir do |root|
       one = File.join(root, "one")

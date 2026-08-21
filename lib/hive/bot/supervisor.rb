@@ -1637,13 +1637,12 @@ module Hive
           workflow = row.dig("workflow", "counts") || {}
           stages = row.dig("workflow", "stages") || {}
           delivery = row.fetch("delivery", {})
-          migration = row.dig("migration", "status") || "unavailable"
           # not-a-stage-ref (block): Patrol Fix workflow metrics
           text = "Patrol #{project}: searches O #{allowance_compact(ordinary)}, " \
                  "A #{allowance_compact(architecture)}; fixes " \
                  "#{workflow.fetch('active', 0)} active, #{workflow.fetch('parked', 0)} parked, " \
                  "#{stages.fetch('6-done', 0)} done; PRs #{delivery.fetch('pr_created', 0)} " \
-                 "created/#{delivery.fetch('pr_open', 0)} open; migration #{migration}"
+                 "created/#{delivery.fetch('pr_open', 0)} open"
           Hive::Bot::Format.html_escape(text)
         end
       end

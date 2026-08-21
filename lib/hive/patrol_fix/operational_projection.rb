@@ -23,7 +23,7 @@ module Hive
       MAX_DOCUMENT_BYTES = 512 * 1024
       DOCUMENT_KEYS = %w[
         schema schema_version project generated_at completeness diagnostics
-        discovery admission workflow migration delivery tokens
+        discovery admission workflow delivery tokens
       ].sort.freeze
       STAGES = Projection::STAGE_DIRS
       ADMISSION_STATUSES = AdmissionStore::STATUSES
@@ -64,14 +64,13 @@ module Hive
             "architecture" => unavailable_lane.call("architecture"),
             "post_merge" => {}, "coverage" => {}
           },
-          migration: nil,
           tokens: nil,
           diagnostics: [ { "source" => source, "code" => code, "summary" => summary } ],
           now: now
         ).to_h
       end
 
-      def initialize(project:, tasks:, admissions:, discovery:, migration:, tokens: nil,
+      def initialize(project:, tasks:, admissions:, discovery:, tokens: nil,
                      diagnostics: [], now: Time.now.utc)
         @project = text(project, "project", max: 256)
         @tasks = Array(tasks)
@@ -80,7 +79,6 @@ module Hive
         raise ArgumentError, "Patrol-fix admission projection exceeds its bound" if
           @admissions.length > MAX_ADMISSIONS
         @discovery = discovery || {}
-        @migration = migration
         @tokens = tokens
         @diagnostics = Array(diagnostics)
         @now = normalize_time(now)
@@ -111,7 +109,6 @@ module Hive
           },
           "admission" => admission_projection(roots, unresolved),
           "workflow" => workflow,
-          "migration" => migration_projection,
           "delivery" => delivery_projection(roots, task_rows),
           "tokens" => token_projection
         }
@@ -352,26 +349,6 @@ module Hive
         bucket["parked_seconds"] += [ parked, stage_total ].min
       end
 
-      def migration_projection
-        return unavailable_migration unless @migration.is_a?(Hash)
-
-        {
-          "status" => text(@migration.fetch("status"), "migration status", max: 64),
-          "candidate_count" => optional_nonnegative_integer(@migration["candidate_count"], "migration candidates"),
-          "group_count" => optional_nonnegative_integer(@migration["group_count"], "migration groups"),
-          "disposition_count" => optional_nonnegative_integer(@migration["disposition_count"], "migration dispositions"),
-          "acknowledgement_count" => optional_nonnegative_integer(@migration["acknowledgement_count"], "migration acknowledgements"),
-          "manifest_digest" => optional_text(@migration["manifest_digest"], "migration digest", max: 64)
-        }
-      end
-
-      def unavailable_migration
-        {
-          "status" => "unavailable", "candidate_count" => nil, "group_count" => nil,
-          "disposition_count" => nil, "acknowledgement_count" => nil, "manifest_digest" => nil
-        }
-      end
-
       # Usage is observability only. It is deliberately projected alongside,
       # but never consulted by, discovery allowance or workflow admission.
       def token_projection
@@ -445,8 +422,6 @@ module Hive
         return "partial" if unresolved.positive? || diagnostics.any?
         return "partial" if workflow.dig("latency", "unavailable_count").positive?
         return "partial" if lanes.values.any? { |value| value["health"] == "unavailable" }
-        return "partial" if migration_projection["status"] == "unavailable"
-
         "complete"
       end
 

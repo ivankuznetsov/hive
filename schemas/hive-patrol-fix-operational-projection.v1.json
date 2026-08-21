@@ -4,7 +4,7 @@
   "title": "Hive Patrol Fix Operational Projection (v1)",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "schema_version", "project", "generated_at", "completeness", "diagnostics", "discovery", "admission", "workflow", "migration", "delivery", "tokens"],
+  "required": ["schema", "schema_version", "project", "generated_at", "completeness", "diagnostics", "discovery", "admission", "workflow", "delivery", "tokens"],
   "properties": {
     "schema": {"const": "hive-patrol-fix-operational-projection"},
     "schema_version": {"const": 1},
@@ -15,7 +15,6 @@
     "discovery": {"$ref": "#/$defs/discovery"},
     "admission": {"$ref": "#/$defs/admission"},
     "workflow": {"$ref": "#/$defs/workflow"},
-    "migration": {"$ref": "#/$defs/migration"},
     "delivery": {"$ref": "#/$defs/delivery"},
     "tokens": {"$ref": "#/$defs/tokens"}
   },
@@ -206,16 +205,6 @@
         "tasks": {"type": "integer", "minimum": 0}, "total_seconds": {"type": "integer", "minimum": 0},
         "active_seconds": {"type": "null"}, "parked_seconds": {"type": "integer", "minimum": 0},
         "provider_seconds": {"type": "null"}
-      }
-    },
-    "migration": {
-      "type": "object", "additionalProperties": false,
-      "required": ["status", "candidate_count", "group_count", "disposition_count", "acknowledgement_count", "manifest_digest"],
-      "properties": {
-        "status": {"type": "string", "minLength": 1, "maxLength": 64},
-        "candidate_count": {"$ref": "#/$defs/nullableCount"}, "group_count": {"$ref": "#/$defs/nullableCount"},
-        "disposition_count": {"$ref": "#/$defs/nullableCount"}, "acknowledgement_count": {"$ref": "#/$defs/nullableCount"},
-        "manifest_digest": {"type": ["string", "null"], "maxLength": 64}
       }
     },
     "delivery": {

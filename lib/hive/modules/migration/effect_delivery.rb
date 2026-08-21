@@ -67,7 +67,7 @@ module Hive
                        module_execution: nil, lifecycle_store_factory: nil,
                        diagnostic_transition: false, pass_intent: false,
                        not_delivered_error: nil, clock: -> { Time.now.utc },
-                       retry_safe_sinks: [], legacy_effect_allowed: ->(_intent) { true })
+                       retry_safe_sinks: [])
           @module_name = module_name.to_s.freeze
           @product_label = product_label.to_s.freeze
           @capture = validate_capture(capture)
@@ -90,8 +90,7 @@ module Hive
             claim_validator: claim_validator,
             module_execution: module_execution,
             lifecycle_store_factory: lifecycle_store_factory,
-            diagnostic_transition: diagnostic_transition,
-            legacy_effect_allowed: legacy_effect_allowed
+            diagnostic_transition: diagnostic_transition
           )
           delivery_store = RedactedDeliveryStore.new(delivery_store)
           @receipt_ledger = EffectReceiptLedger.new(

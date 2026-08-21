@@ -636,7 +636,7 @@ evidence generation. Worktree cleanup follows receipt durability; failure is a
 bounded diagnostic and cannot revoke completion. Publication performs no LLM,
 issue, edit, close, ready, or merge operation.
 
-Admission/migration may bypass remote reconciliation only by supplying this
+Admission may bypass remote reconciliation only by supplying this
 same full canonical publication payload, including host/repository/base,
 immutable creation base, exact head and digests, hosted state, and observation
 time. `PublicationReceipt.adopt` wraps those exact validated bytes without a
@@ -647,7 +647,7 @@ is rejected as Done authority.
 
 `hive-patrol-fix-operational-projection` v1 is the bounded common read model
 for one project's ordinary and Architecture discovery, admission decisions,
-workflow tasks, migration, successors, publication, post-merge activity, and
+workflow tasks, successors, publication, post-merge activity, and
 current-day usage telemetry. The daemon builds it once from the source
 authorities and stores it under `patrol_fix_projects` in the operational
 snapshot. Consumers validate the complete project document before adopting it;
@@ -667,46 +667,14 @@ its current interval, and a Done latency stops at the publication
 Token counts are nullable current-UTC-day telemetry read from the existing
 usage database; they are not an allowance, budget, or admission authority.
 
-## Patrol Fix migration cutover
+## Patrol Fix finding import
 
-The one-time ordinary/Architecture authority cutover persists canonical
-`state.json` and `manifest.json` under
-`.hive-state/patrol-fix/migration/`. Its state machine is
-`preflight` → `fenced` → `applying` → `committed`. It observes and advances the
-existing Patrol owner epochs under the shared migration lock; it does not mint
-a second epoch, outbox, JobStore field, or daemon coordinator. The durable
-checkpoint retains the exact pre-fence ownership/admission modes so a permitted
-rollback restores those modes rather than assuming both legacy lanes were
-open.
-
-Preflight is read-only. Its canonical manifest contains one disposition for
-every complete ordinary-current and Architecture-v4 source candidate, keeps v3
-Architecture records opaque with exact byte digests, and binds semantic groups
-to the frozen inventory bytes. Before the fence, the controller revalidates
-those exact bytes while holding the same exclusive lock used by legacy
-admission and refuses any live claim or unresolved legacy artifact route. The
-fence advances the existing owner epochs and keeps discovery closed through
-commit. Every legacy task, local branch/worktree, issue, PR, and terminal
-acknowledgement boundary rechecks the dynamic cutover gate and captured epoch.
-
-During apply, the controller re-reads each manifest member directly from its
-source-owned store by immutable id and recomputes its schema and digest before
-building the strict source snapshot. Each actionable semantic group is
-materialized exactly once through the existing `TaskCapture` and
-`TaskMaterializer`; all member aliases are attached before the source-owned
-handoff acknowledgement is written and settled. Blocked groups instead receive
-controller disposition receipts for every member. Those receipts prove the
-manifest disposition equation but are deliberately not represented as
-source-owned acknowledgements.
-
-Commit follows a complete authority reread proving the frozen inventory,
-every group checkpoint, task binding, and settled actionable source receipt.
-Only a committed state enables the one normal daemon's ordinary and
-Architecture source adapters. New findings accepted after commit publish into
-the existing source outboxes and consume normal `patrol-fix` workflow
-concurrency, independently of scheduled-discovery allowances. Recovery may
-roll back only before any new-authority effect or acknowledgement; afterward it
-is forward-only and replays the durable manifest.
+Patrol Fix has no runtime migration state, source epoch, cutover gate, or
+rollback path. New accepted findings publish directly into source-owned
+outboxes. Historical ordinary findings can be imported once with
+`script/migrate_patrol_findings.rb`; the script creates normal `patrol-fix`
+tasks through `TaskCapture`, preserves the source finding JSON, and is
+deterministically idempotent.
 
 ## Patrol occurrence, selection, and recovery state
 

@@ -18,21 +18,16 @@ module Hive
               project, hive_state_path: state
             ),
             "patrol-fix-outbox"
-          ),
-          gate: Hive::PatrolFix::CutoverGate.for_project(
-            project_root: project, hive_state_path: state,
-            source: "architecture_patrol"
           )
         )
       end
 
-      def initialize(root:, gate: Hive::PatrolFix::CutoverGate.new)
+      def initialize(root:)
         @store = Hive::PatrolFix::HandoffOutbox.new(
-          root: root, source: "architecture_patrol", gate: gate
+          root: root, source: "architecture_patrol"
         )
       end
 
-      def enabled? = store.enabled?
       def source = store.source
       def pending(limit: 64, now: Time.now.utc) = store.pending(limit: limit, now: now)
       def fetch(occurrence_id) = store.fetch(occurrence_id)
@@ -45,7 +40,6 @@ module Hive
       def acknowledge!(**attributes) = store.acknowledge!(**attributes)
 
       def publish_disposition!(aggregate, disposition, accepted_at: Time.now.utc)
-        return nil unless enabled?
         return nil unless actionable?(disposition)
 
         snapshot = source_snapshot(aggregate, disposition, accepted_at: accepted_at)
@@ -53,31 +47,6 @@ module Hive
           occurrence_id: occurrence_id(aggregate, disposition, snapshot),
           snapshot: snapshot, now: accepted_at
         )
-      end
-
-      def migration_snapshot(aggregate, disposition, accepted_at: Time.now.utc)
-        source_snapshot(aggregate, disposition, accepted_at: accepted_at)
-      end
-
-      def publish_migration_snapshot!(snapshot, accepted_at: Time.now.utc)
-        return nil unless enabled?
-
-        value = snapshot.is_a?(Hive::PatrolFix::SourceSnapshot) ?
-          snapshot : Hive::PatrolFix::SourceSnapshot.new(snapshot)
-        store.publish!(
-          occurrence_id: migration_occurrence_id(value), snapshot: value,
-          now: accepted_at
-        )
-      end
-
-      def migration_occurrence_id(snapshot)
-        value = snapshot.is_a?(Hive::PatrolFix::SourceSnapshot) ?
-          snapshot : Hive::PatrolFix::SourceSnapshot.new(snapshot)
-        "migration-architecture-#{Digest::SHA256.hexdigest(value.digest)[0, 32]}"
-      end
-
-      def legacy_downstream_allowed?(aggregate, disposition)
-        !enabled?
       end
 
       private

@@ -2,19 +2,13 @@ require "test_helper"
 require "tmpdir"
 require "hive/refactor_patrol/fix_admission_outbox"
 require "hive/refactor_patrol/job_store"
-require "hive/patrol_fix/cutover_gate"
 
 class RefactorPatrolFixAdmissionOutboxTest < Minitest::Test
   NOW = Time.utc(2026, 8, 20, 12)
 
   def test_actionable_disposition_is_a_bounded_architecture_snapshot
     Dir.mktmpdir do |dir|
-      outbox = Hive::RefactorPatrol::FixAdmissionOutbox.new(
-        root: dir,
-        gate: Hive::PatrolFix::CutoverGate.new(enabled: true, epoch: "epoch-test")
-      )
-      refute outbox.legacy_downstream_allowed?(aggregate, disposition),
-             "the fence must close legacy routing before handoff acknowledgement"
+      outbox = Hive::RefactorPatrol::FixAdmissionOutbox.new(root: dir)
       entry = outbox.publish_disposition!(aggregate, disposition, accepted_at: NOW)
 
       assert_equal "architecture_patrol", entry.dig("snapshot", "engine")
@@ -27,7 +21,6 @@ class RefactorPatrolFixAdmissionOutboxTest < Minitest::Test
         task: { "slug" => "repair-refresh-abc123", "generation" => 1,
                 "evidence_digest" => "a" * 64 }, now: NOW
       )
-      refute outbox.legacy_downstream_allowed?(aggregate, disposition)
     end
   end
 

@@ -45,7 +45,6 @@ module Hive
         source_ports.each do |source|
           break if remaining.zero?
           entries = begin
-            next unless source.enabled?
             source.pending(limit: remaining, now: now)
           rescue StandardError => error
             events << event(

@@ -8,7 +8,6 @@ require "hive/daemon/patrol_fix_candidate_inventory"
 require "hive/patrol/fix_admission_outbox"
 require "hive/refactor_patrol/fix_admission_outbox"
 require "hive/patrol_fix/admission_store"
-require "hive/patrol_fix/cutover_gate"
 require "hive/patrol_fix/semantic_admission"
 require "hive/patrol_fix/source_snapshot"
 require "hive/patrol_fix/stage_transition"
@@ -89,18 +88,19 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
         capture_io { Hive::Commands::Init.new(project, agent_skill_preflight: false).call }
         hive_state = File.join(project, ".hive-state")
         head = git(project, "rev-parse", "HEAD").strip
-        gate = Hive::PatrolFix::CutoverGate.new(enabled: true, epoch: "u11")
         ordinary = Hive::Patrol::FixAdmissionOutbox.new(
-          root: File.join(hive_state, "patrol", "patrol-fix-outbox"), gate: gate
+          root: File.join(hive_state, "patrol", "patrol-fix-outbox")
         )
         architecture = Hive::RefactorPatrol::FixAdmissionOutbox.new(
-          root: File.join(hive_state, "refactor-patrol", "patrol-fix-outbox"), gate: gate
+          root: File.join(hive_state, "refactor-patrol", "patrol-fix-outbox")
         )
-        ordinary_entry = ordinary.publish_migration_snapshot!(
-          snapshot("ordinary_patrol", "finding-1", head), accepted_at: NOW
+        ordinary_entry = ordinary.store.publish!(
+          occurrence_id: "ordinary:finding-1", snapshot: snapshot("ordinary_patrol", "finding-1", head),
+          now: NOW
         )
-        architecture_entry = architecture.publish_migration_snapshot!(
-          snapshot("architecture_patrol", "thesis-1", head), accepted_at: NOW
+        architecture_entry = architecture.store.publish!(
+          occurrence_id: "architecture:thesis-1", snapshot: snapshot("architecture_patrol", "thesis-1", head),
+          now: NOW
         )
         admission = Hive::PatrolFix::AdmissionStore.new(
           root: File.join(hive_state, "patrol-fix", "admissions")
@@ -164,11 +164,12 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
           task_folder: task.folder, stage: "6-done"
         ).to_h.dig("action", "kind")
 
-        escalation_entry = architecture.publish_migration_snapshot!(
-          snapshot(
+        escalation_entry = architecture.store.publish!(
+          occurrence_id: "architecture:thesis-escalate",
+          snapshot: snapshot(
             "architecture_patrol", "thesis-escalate", git(project, "rev-parse", "HEAD").strip,
             title: "Choose a public compatibility policy", lineage: "compatibility-policy"
-          ), accepted_at: NOW + 300
+          ), now: NOW + 300
         )
         drive_admission_with_restarts(
           project, [ architecture ], admission,

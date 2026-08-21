@@ -1,5 +1,4 @@
 require "json"
-require "base64"
 require "digest"
 require "time"
 require "uri"
@@ -124,16 +123,9 @@ module Hive
 
       DISCOVERY_ATTEMPT_KIND = "discovery_claim".freeze
       ACTIVE_CLAIM_STATES = %w[claimed running].freeze
-      MIGRATION_CURSOR_PREFIX = "patrol-fix-architecture-migration-v1".freeze
-      MIGRATION_CURSOR_KEYS = %w[after count snapshot_token through].freeze
-
       attr_reader :project_root, :root, :patrol_fix_admission_outbox
 
       class << self
-        def for_patrol_fix_migration(project_root, hive_state_path: nil)
-          new(project_root, hive_state_path: hive_state_path)
-        end
-
         def root_for(project_root, hive_state_path: nil)
           StatePaths.current_root(
             state_path_for(project_root, hive_state_path)
@@ -194,7 +186,6 @@ module Hive
       end
 
       def initialize(project_root, hive_state_path: nil,
-                     patrol_fix_cutover_gate: nil,
                      patrol_fix_admission_outbox: nil)
         @project_root = File.expand_path(project_root)
         hive_state_root = File.expand_path(hive_state_path || ".hive-state", @project_root)
@@ -226,14 +217,9 @@ module Hive
           corrupt_record: CorruptRecord,
           inconsistent_record: InconsistentRecord
         )
-        patrol_fix_cutover_gate ||= Hive::PatrolFix::CutoverGate.for_project(
-          project_root: @project_root, hive_state_path: hive_state_root,
-          source: "architecture_patrol"
-        )
         @patrol_fix_admission_outbox = patrol_fix_admission_outbox ||
           Hive::RefactorPatrol::FixAdmissionOutbox.new(
-            root: File.join(@root, "patrol-fix-outbox"),
-            gate: patrol_fix_cutover_gate
+            root: File.join(@root, "patrol-fix-outbox")
           )
         @occurrence_lifecycle = JobOccurrenceLifecycle.new(
           inconsistent_record: InconsistentRecord,
@@ -1032,13 +1018,6 @@ module Hive
 
           action = find_action!(aggregate, canonical_action_id, path)
           return nil if action.fetch("terminal")
-          unless legacy_action_allowed?(aggregate, action)
-            action["outcome"] = "patrol_fix_workflow_owned"
-            action["updated_at"] = now.utc.iso8601 if action.key?("updated_at")
-            aggregate["state"] = "blocked"
-            aggregate["updated_at"] = now.utc.iso8601
-            next [ aggregate, nil ]
-          end
           return nil if another_action_active?(aggregate, action)
           unless action.fetch("owner_job_id") == aggregate.fetch("job_id")
             raise InconsistentRecord.new("linked canonical action must be reconciled from its owner", path: path)
@@ -1155,12 +1134,7 @@ module Hive
       # performs no state mutation; holding the aggregate lock while checking
       # the active generation proves a superseded worker cannot proceed.
       def assert_action_claim!(token, now: Time.now)
-        mutate_action_claim(token, now: now) do |aggregate, action, _claim|
-          unless legacy_action_allowed?(aggregate, action)
-            raise InconsistentRecord, "Patrol Fix workflow acknowledgement fences the legacy action"
-          end
-          aggregate
-        end
+        mutate_action_claim(token, now: now) { |aggregate, _action, _claim| aggregate }
         true
       end
 
@@ -1175,9 +1149,6 @@ module Hive
         end
 
         mutate_action_claim(token, now: now) do |aggregate, action, claim|
-          unless legacy_action_allowed?(aggregate, action)
-            raise InconsistentRecord, "Patrol Fix workflow acknowledgement fences the legacy action"
-          end
           existing = action.fetch("receipts")["creation_intent"]
           if claim.fetch("authority") == "continuation_only"
             unless existing && existing["payload"] == payload
@@ -1598,69 +1569,6 @@ module Hive
         end
       end
 
-      # Complete, authoritative v4 migration page. Membership is frozen by a
-      # bounded filename snapshot rather than the rebuildable query index.
-      # Individual unreadable aggregates become blocking entries.
-      def patrol_fix_migration_page(limit:, cursor: nil)
-        page_limit = Integer(limit)
-        unless page_limit.between?(1, 512)
-          raise InconsistentRecord, "refactor patrol migration page limit is invalid"
-        end
-        state = cursor ? decode_migration_cursor(cursor) : nil
-        ids = @job_files.each_job_id.to_a
-        if state
-          frozen_ids = ids.select { |id| id <= state.fetch("through") }
-          unless frozen_ids.length == state.fetch("count") &&
-                 migration_snapshot_token(frozen_ids) == state.fetch("snapshot_token")
-            raise CorruptRecord, "refactor patrol migration snapshot changed"
-          end
-          after = state.fetch("after")
-          selected = frozen_ids.select { |id| id > after }.first(page_limit + 1)
-          snapshot_token = state.fetch("snapshot_token")
-          through = state.fetch("through")
-          count = state.fetch("count")
-        else
-          frozen_ids = ids.sort
-          snapshot_token = migration_snapshot_token(frozen_ids)
-          through = frozen_ids.last
-          count = frozen_ids.length
-          selected = frozen_ids.first(page_limit + 1)
-        end
-        has_more = selected.length > page_limit
-        page_ids = selected.first(page_limit)
-        next_cursor = if has_more
-          encode_migration_cursor(
-            "after" => page_ids.last,
-            "count" => count,
-            "snapshot_token" => snapshot_token,
-            "through" => through
-          )
-        end
-        {
-          "entries" => page_ids.map { |job_id| migration_job_entry(job_id) },
-          "next_cursor" => next_cursor,
-          "snapshot_token" => snapshot_token
-        }
-      rescue ArgumentError, TypeError
-        raise InconsistentRecord, "refactor patrol migration page limit is invalid"
-      end
-
-      def patrol_fix_migration_inventory(canonical_action_catalog: nil)
-        require "hive/refactor_patrol/migration_inventory"
-        Hive::RefactorPatrol::MigrationInventory.new(
-          self, canonical_action_catalog: canonical_action_catalog
-        )
-      end
-
-      def patrol_fix_migration_source(job_id)
-        entry = migration_job_entry(validate_id!(job_id.to_s))
-        if entry.fetch("error")
-          raise InconsistentRecord,
-                "Architecture Patrol migration source is unavailable or corrupt"
-        end
-        entry
-      end
-
       def rebuild_indexes!
         prepare_current_namespace!
         indexes = @job_indexes.project(each_job)
@@ -1685,86 +1593,6 @@ module Hive
       end
 
       private
-
-      def migration_job_entry(job_id)
-        bytes = @job_files.read_job(job_id)
-        repeated = @job_files.read_job(job_id)
-        raise CorruptRecord, "job changed while it was inventoried" unless bytes == repeated
-        aggregate = JSON.parse(bytes)
-        path = job_path(job_id)
-        raise CorruptRecord.new("refactor patrol job must contain a JSON object", path: path) unless
-          aggregate.is_a?(Hash)
-        version = aggregate["schema_version"]
-        unless version.is_a?(Integer)
-          raise CorruptRecord.new("refactor patrol job has no integer schema_version", path: path)
-        end
-        unless version == SCHEMA_VERSION
-          raise UnsupportedVersion.new(
-            "unsupported refactor patrol job schema_version #{version}", path: path
-          )
-        end
-        validate_job!(aggregate, path: path)
-        unless aggregate.fetch("job_id") == job_id
-          raise InconsistentRecord.new(
-            "refactor patrol job id does not match its migration filename", path: path
-          )
-        end
-        canonical = Hive::WorkflowPackage::CanonicalJSON.generate(aggregate)
-        {
-          "source_id" => job_id,
-          "source_schema" => "#{SCHEMA}/v#{SCHEMA_VERSION}",
-          "canonical_digest" => Digest::SHA256.hexdigest(canonical),
-          "record" => aggregate,
-          "error" => nil
-        }
-      rescue Error, JSON::ParserError, KeyError, ArgumentError,
-             Hive::ManagedDirectory::UnsafeError, SystemCallError, IOError => error
-        raw = begin
-          @job_files.read_job(job_id)
-        rescue StandardError
-          nil
-        end
-        descriptor = raw || Hive::WorkflowPackage::CanonicalJSON.generate(
-          "source_id" => job_id, "error" => error.class.name
-        )
-        {
-          "source_id" => job_id,
-          "source_schema" => "#{SCHEMA}/v#{SCHEMA_VERSION}",
-          "canonical_digest" => Digest::SHA256.hexdigest(descriptor),
-          "record" => nil,
-          "error" => "architecture job is unavailable or invalid"
-        }
-      end
-
-      def migration_snapshot_token(ids)
-        Digest::SHA256.hexdigest(
-          Hive::WorkflowPackage::CanonicalJSON.generate(ids)
-        )
-      end
-
-      def encode_migration_cursor(payload)
-        encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
-        "#{MIGRATION_CURSOR_PREFIX}.#{encoded}"
-      end
-
-      def decode_migration_cursor(cursor)
-        value = cursor.to_s
-        prefix, encoded = value.split(".", 2)
-        raise CorruptRecord, "refactor patrol migration cursor is invalid" unless
-          value.bytesize <= 4_096 && prefix == MIGRATION_CURSOR_PREFIX && encoded
-        payload = JSON.parse(Base64.urlsafe_decode64(encoded))
-        valid = payload.is_a?(Hash) && payload.keys.sort == MIGRATION_CURSOR_KEYS.sort &&
-          payload["after"].to_s.match?(ID_PATTERN) &&
-          payload["through"].to_s.match?(ID_PATTERN) &&
-          payload["after"] <= payload["through"] &&
-          payload["count"].is_a?(Integer) && payload["count"].positive? &&
-          payload["count"] <= JobStoreFiles::MAX_JOB_ENTRIES &&
-          payload["snapshot_token"].to_s.match?(/\A[0-9a-f]{64}\z/)
-        raise CorruptRecord, "refactor patrol migration cursor is invalid" unless valid
-        payload
-      rescue JSON::ParserError, ArgumentError
-        raise CorruptRecord, "refactor patrol migration cursor is invalid"
-      end
 
       def ordered_job_query_ids
         each_job.to_a.sort_by do |aggregate|
@@ -1801,7 +1629,7 @@ module Hive
             item.fetch("id") == thesis_id
           end
           validate_action_authority!(
-            aggregate, kind, disposition, thesis, disposition_item, path
+            aggregate, kind, disposition, thesis, path
           )
           family_id = specification["family_id"].to_s unless specification["family_id"].nil?
           identity = action_identity(kind, family_id, thesis, path)
@@ -1825,15 +1653,7 @@ module Hive
         end.sort_by { |item| item.fetch("canonical_action_id") }
       end
 
-      def validate_action_authority!(aggregate, kind, disposition, thesis,
-                                     disposition_item, path)
-        unless @patrol_fix_admission_outbox.legacy_downstream_allowed?(
-          aggregate, disposition_item
-        )
-          raise InconsistentRecord.new(
-            "Patrol Fix workflow acknowledgement fences legacy action planning", path: path
-          )
-        end
+      def validate_action_authority!(aggregate, kind, disposition, thesis, path)
         unless ACTION_KINDS.include?(kind)
           raise InconsistentRecord.new("action kind must be one of #{ACTION_KINDS.inspect}", path: path)
         end
@@ -2062,17 +1882,6 @@ module Hive
           attempt["kind"] == SOURCE_RETIREMENT_ATTEMPT_KIND &&
             attempt["reason"] == "source_no_longer_on_trunk"
         end
-      end
-
-      def legacy_action_allowed?(aggregate, action)
-        disposition = aggregate.fetch("dispositions").values.flatten.find do |item|
-          item.fetch("id") == action.fetch("thesis_id")
-        end
-        return false unless disposition
-
-        @patrol_fix_admission_outbox.legacy_downstream_allowed?(
-          aggregate, disposition
-        )
       end
 
       def obsolete_source_continuation?(aggregate, action)

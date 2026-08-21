@@ -37,7 +37,6 @@ class DaemonPatrolFixOperationalProjectionTest < Minitest::Test
       architecture_reader: ->(**) { architecture_payload },
       allowance_reader: ->(engine:, **) { allowance(engine) },
       admissions_reader: ->(**) { [] },
-      migration_reader: ->(**) { migration },
       batches_reader: ->(**) { [ { "status" => "claimed" }, { "status" => "finalized" } ] },
       scheduled_results_reader: ->(**) { [ { "created_at" => "2026-08-21T11:30:00Z" } ] },
       usage_reader: ->(**) { usage }
@@ -66,7 +65,7 @@ class DaemonPatrolFixOperationalProjectionTest < Minitest::Test
       ordinary_reader: ->(**) { raise Hive::ConfigError, "/secret/project corrupt" },
       architecture_reader: ->(**) { architecture_payload },
       allowance_reader: ->(engine:, **) { allowance(engine) },
-      admissions_reader: ->(**) { [] }, migration_reader: ->(**) { migration },
+      admissions_reader: ->(**) { [] },
       batches_reader: ->(**) { [] }, scheduled_results_reader: ->(**) { [] },
       usage_reader: ->(**) { { available: false } }
     )
@@ -86,12 +85,12 @@ class DaemonPatrolFixOperationalProjectionTest < Minitest::Test
     end
   end
 
-  def test_usage_failure_does_not_erase_discovery_or_migration
+  def test_usage_failure_does_not_erase_discovery
     reader = Hive::Daemon::PatrolFixOperationalProjection.new(
       ordinary_reader: ->(**) { ordinary_payload },
       architecture_reader: ->(**) { architecture_payload },
       allowance_reader: ->(engine:, **) { allowance(engine) },
-      admissions_reader: ->(**) { [] }, migration_reader: ->(**) { migration },
+      admissions_reader: ->(**) { [] },
       batches_reader: ->(**) { [] }, scheduled_results_reader: ->(**) { [] },
       usage_reader: ->(**) { raise IOError, "private database path" }
     )
@@ -99,7 +98,6 @@ class DaemonPatrolFixOperationalProjectionTest < Minitest::Test
     projection = reader.call(project: project, config: config, tasks: [], now: NOW)
 
     assert_equal 1, projection.dig("discovery", "ordinary", "total")
-    assert_equal "committed", projection.dig("migration", "status")
     assert_equal false, projection.dig("tokens", "available")
     assert_equal 1, projection.fetch("diagnostics").count do |entry|
       entry.fetch("source") == "token_telemetry"
@@ -128,7 +126,7 @@ class DaemonPatrolFixOperationalProjectionTest < Minitest::Test
         ordinary_reader: ->(**) { ordinary_payload },
         architecture_query_factory: ->(_store) { PagedArchitectureQuery.new(jobs) },
         allowance_reader: ->(engine:, **) { allowance(engine) },
-        admissions_reader: ->(**) { [] }, migration_reader: ->(**) { migration },
+        admissions_reader: ->(**) { [] },
         batches_reader: ->(**) { [] }, scheduled_results_reader: ->(**) { [] },
         usage_reader: ->(**) { usage }
       )
@@ -196,12 +194,6 @@ class DaemonPatrolFixOperationalProjectionTest < Minitest::Test
         } ]
       } ]
     }
-  end
-
-  def migration
-    { "status" => "committed", "candidate_count" => 2, "group_count" => 1,
-      "disposition_count" => 2, "acknowledgement_count" => 2,
-      "manifest_digest" => "c" * 64 }
   end
 
   def usage

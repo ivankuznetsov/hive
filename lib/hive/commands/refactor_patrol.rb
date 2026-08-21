@@ -35,7 +35,6 @@ require "hive/refactor_patrol/state_store"
 require "hive/refactor_patrol/thesis"
 require "hive/workflows"
 require "hive/worktree"
-require "hive/patrol_fix/cutover_gate"
 
 module Hive
   module Commands
@@ -801,19 +800,10 @@ module Hive
           project_root, "architecture-patrol",
           hive_state_path: hive_state_path
         )
-        allowed = ownership["admission"] == true &&
-          !patrol_fix_cutover_gate(project_root, hive_state_path).enabled?
-        return if allowed
+        return if ownership["admission"] == true
 
         raise Hive::ConfigError,
-              "Patrol Fix cutover fences Architecture Patrol v2 replay manifests"
-      end
-
-      def patrol_fix_cutover_gate(project_root, hive_state_path)
-        Hive::PatrolFix::CutoverGate.for_project(
-          project_root: project_root, hive_state_path: hive_state_path,
-          source: "architecture_patrol"
-        )
+              "Architecture Patrol does not own replay admission"
       end
 
       def checkpoint_manual_discovery!(payload)

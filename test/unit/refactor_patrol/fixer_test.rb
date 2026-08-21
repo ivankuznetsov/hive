@@ -48,7 +48,7 @@ class RefactorPatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_cutover_recheck_denies_before_local_worktree_creation
+  def test_effect_fence_denies_before_local_worktree_creation
     with_repo do |repo, analysis_sha|
       boundaries = []
       fence = lambda do |boundary|
@@ -56,7 +56,7 @@ class RefactorPatrolFixerTest < Minitest::Test
         boundary != :worktree_create
       end
 
-      error = assert_raises(Hive::RefactorPatrol::Fixer::CutoverDenied) do
+      error = assert_raises(Hive::RefactorPatrol::Fixer::EffectDenied) do
         fixer(repo, agent: ->(**) { flunk "fenced fixer must not launch an agent" })
           .attempt(
             thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha,

@@ -145,7 +145,7 @@ module Hive
         mutate_claim(claim_id, now: now) { |state, _claim| state["claim"] = nil }
       end
 
-      # Complete, bounded source inventory for U8 migration and operations.
+      # Complete, bounded source inventory for operational projections.
       def each_result
         return enum_for(__method__) unless block_given?
 

@@ -215,8 +215,6 @@ class PatrolFixOperationalProjectionTest < Minitest::Test
         "post_merge" => { "queued" => 0, "in_flight" => 0, "blocked" => 0, "batches" => 0 },
         "coverage" => { "ordinary" => nil, "architecture" => nil }
       },
-      migration: { "status" => "committed", "candidate_count" => 0, "group_count" => 0,
-                   "disposition_count" => 0, "acknowledgement_count" => 0, "manifest_digest" => "a" * 64 },
       tokens: tokens, now: NOW
     ).to_h
   end

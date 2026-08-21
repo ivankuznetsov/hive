@@ -10,12 +10,9 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ## Unified Patrol Fix live execution
 
 The current simplification keeps historical Architecture Patrol issue-action and
-policy fields readable for migration/replay compatibility. The retired issue
-effect is still parked fail-closed; removing the persisted vocabulary requires a
-separate schema/cutover decision and is not implied by deleting an unused writer
-constructor. The larger legacy publication-lane deletion and migration collapse
-also remain a distinct cutover-sized change until their restart and upgrade
-recovery contracts are specified.
+policy fields readable for replay compatibility. The retired issue effect is
+still parked fail-closed; removing that persisted vocabulary is separate from
+the completed Patrol Fix migration-subsystem deletion.
 
 The Inbox/Fix/Validate/Review/Publish path has focused local proof for exact worktree and
 receipt custody, failed-validation continuation, independent decision parsing,
@@ -28,14 +25,10 @@ publication against a disposable project. End-to-end dogfood belongs to the
 plan's final lifecycle verification; no current evidence claims live PR
 production.
 
-Focused local migration proofs now cover read-only complete preflight,
-locked exact-byte epoch fencing, rollback before the first new-authority
-effect, source re-read and digest verification, task materialization before
-source acknowledgement, final authority verification, and reconstruction of
-both source adapters in one daemon after restart. A filesystem-backed drill now
-interrupts after the first effect arm, proves rollback is refused, resumes from
-the durable manifest with no caller-retained envelope, and converges to one
-task. This is not live dogfood.
+The one-time importer has focused proof for active-finding selection,
+deterministic idempotency, dry-run behavior, and normal `TaskCapture` output.
+There is intentionally no migration preflight, cutover state, rollback, or
+runtime reconciliation path.
 U11 closes the four admission-runtime blockers without adding another
 coordinator: the daemon inventories only exact Patrol Fix task manifests,
 fails visibly on owned corruption while ignoring unrelated task bytes, binds

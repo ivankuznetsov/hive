@@ -5,7 +5,6 @@ require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/patrol/finding"
 require "hive/patrol/fix_admission_outbox"
 require "hive/patrol_fix/admission_store"
-require "hive/patrol_fix/cutover_gate"
 require "hive/patrol_fix/semantic_admission"
 require "hive/patrol_fix/task_materializer"
 require "hive/workflows/registry"
@@ -22,13 +21,10 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
   end
 
   BrokenSource = Struct.new(:source) do
-    def enabled? = true
     def pending(**) = raise(Hive::ConfigError, "corrupt source record")
   end
 
   HealthyEmptySource = Struct.new(:source, :pending_calls) do
-    def enabled? = true
-
     def pending(**)
       self.pending_calls += 1
       []
@@ -54,9 +50,8 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
       with_tmp_git_repo do |project_root|
         capture_io { Hive::Commands::Init.new(project_root, agent_skill_preflight: false).call }
         hive_state = File.join(project_root, ".hive-state")
-        gate = Hive::PatrolFix::CutoverGate.new(enabled: true, epoch: "epoch-test")
         source = Hive::Patrol::FixAdmissionOutbox.new(
-          root: File.join(hive_state, "patrol", "patrol-fix-outbox"), gate: gate
+          root: File.join(hive_state, "patrol", "patrol-fix-outbox")
         )
         source.publish_finding!(finding, accepted_at: NOW)
         admission = Hive::PatrolFix::AdmissionStore.new(
@@ -130,8 +125,7 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         capture_io { Hive::Commands::Init.new(project_root, agent_skill_preflight: false).call }
         hive_state = File.join(project_root, ".hive-state")
         source = Hive::Patrol::FixAdmissionOutbox.new(
-          root: File.join(hive_state, "patrol", "patrol-fix-outbox"),
-          gate: Hive::PatrolFix::CutoverGate.new(enabled: true, epoch: "epoch-test")
+          root: File.join(hive_state, "patrol", "patrol-fix-outbox")
         )
         entry = source.publish_finding!(finding, accepted_at: NOW)
         admission = Hive::PatrolFix::AdmissionStore.new(
@@ -187,8 +181,7 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         capture_io { Hive::Commands::Init.new(project_root, agent_skill_preflight: false).call }
         hive_state = File.join(project_root, ".hive-state")
         source = Hive::Patrol::FixAdmissionOutbox.new(
-          root: File.join(hive_state, "patrol", "patrol-fix-outbox"),
-          gate: Hive::PatrolFix::CutoverGate.new(enabled: true, epoch: "epoch-test")
+          root: File.join(hive_state, "patrol", "patrol-fix-outbox")
         )
         entry = source.publish_finding!(finding, accepted_at: NOW)
         admission = Hive::PatrolFix::AdmissionStore.new(
@@ -437,8 +430,7 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         capture_io { Hive::Commands::Init.new(project_root, agent_skill_preflight: false).call }
         hive_state = File.join(project_root, ".hive-state")
         source = Hive::Patrol::FixAdmissionOutbox.new(
-          root: File.join(hive_state, "patrol", "patrol-fix-outbox"),
-          gate: Hive::PatrolFix::CutoverGate.new(enabled: true, epoch: "epoch-test")
+          root: File.join(hive_state, "patrol", "patrol-fix-outbox")
         )
         entry = source.publish_finding!(finding, accepted_at: NOW)
         yield project_root, hive_state, source, entry

@@ -108,8 +108,8 @@ digest, releases its lock while a provider reasons, rejects stale decisions,
 records materialization intent before task capture, binds the task before
 acknowledging the source, and replays incomplete create/update boundaries. The
 daemon admission controller is a consumer outside the component and is
-independent of discovery scheduling and allowances. Its cutover gate remains
-disabled until the authority migration activates a persisted epoch.
+independent of discovery scheduling and allowances. Accepted source records
+enter the workflow directly; the core has no cutover gate or source epoch.
 
 The workflow-owned Publish stage is above this core. It composes the separate
 `Hive::GithubPublication` mechanism, which lives outside both `Hive::Stages`

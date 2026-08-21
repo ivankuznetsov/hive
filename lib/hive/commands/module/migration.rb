@@ -6,8 +6,6 @@ require "hive/modules/migration/patrols"
 require "hive/modules/migration/report"
 require "hive/modules/migration/shadow_comparator"
 require "hive/modules/migration/shadow_decision_migration"
-require "hive/patrol_fix/migration/cutover_state"
-require "hive/patrol_fix/migration/disposition_manifest"
 
 module Hive
   module Commands
@@ -15,13 +13,12 @@ module Hive
       class Migration
         ACTIONS = %w[
           status report cutover rollback deterministic-receipt
-          deterministic-qualification patrol-fix-status patrol-fix-apply
-          patrol-fix-preflight patrol-fix-rollback
+          deterministic-qualification
         ].freeze
         MAX_REQUEST_BYTES = 16 * 1024 * 1024
 
         def initialize(action, project_root:, json:, stdout:, stdin: $stdin, yes: false,
-                       reviewer: nil, patrol_fix_cutover_factory: nil, **)
+                       reviewer: nil, **)
           @action = action.to_s
           @project_root = File.expand_path(project_root)
           @json = json
@@ -29,16 +26,13 @@ module Hive
           @stdin = stdin
           @yes = yes
           @reviewer = reviewer
-          @patrol_fix_cutover_factory = patrol_fix_cutover_factory
         end
 
         def call
           unless ACTIONS.include?(@action)
             raise UsageError,
                   "module migration requires status, report, cutover, rollback, " \
-                  "deterministic-receipt, or deterministic-qualification; " \
-                  "Patrol-fix actions are patrol-fix-preflight, " \
-                  "patrol-fix-status, patrol-fix-apply, or patrol-fix-rollback"
+                  "deterministic-receipt, or deterministic-qualification"
           end
           case @action
           when "status" then emit_state(read_state)
@@ -47,81 +41,10 @@ module Hive
           when "rollback" then rollback
           when "deterministic-receipt" then deterministic_receipt
           when "deterministic-qualification" then deterministic_qualification
-          when "patrol-fix-status" then patrol_fix_status
-          when "patrol-fix-preflight" then patrol_fix_preflight
-          when "patrol-fix-apply" then patrol_fix_apply
-          when "patrol-fix-rollback" then patrol_fix_rollback
           end
         end
 
         private
-
-        def patrol_fix_preflight
-          request = read_request!([ "semantic_decisions" ])
-          require "hive/modules/migration/patrol_fix_preflight"
-          manifest = Hive::Modules::Migration::PatrolFixPreflight.new(
-            project_root: @project_root, hive_state_path: hive_state_path
-          ).call(
-            semantic_decisions: request.fetch("semantic_decisions")
-          )
-          emit(
-            { "manifest" => manifest.to_h },
-            "Patrol-fix migration preflight: " \
-            "#{manifest.to_h.dig('inventory', 'count')} sources"
-          )
-        rescue Hive::PatrolFix::Migration::Inventory::InvalidInventory,
-               Hive::PatrolFix::Migration::SemanticGroup::InvalidGroup,
-               Hive::PatrolFix::Migration::Reconciler::InvalidReconciliation,
-               Hive::PatrolFix::Migration::DispositionManifest::IntegrityError => error
-          raise Hive::ConfigError, error.message
-        end
-
-        def patrol_fix_status
-          state = patrol_fix_state.read ||
-            raise(Hive::ConfigError, "Patrol-fix migration has no preflight")
-          emit(state, "Patrol-fix migration: #{state.fetch('status')}")
-        end
-
-        def patrol_fix_apply
-          require_confirmation!("apply the Patrol-fix authority cutover")
-          request = read_request!([ "manifest" ], allow_empty: true)
-          manifest = if request
-            Hive::PatrolFix::Migration::DispositionManifest.new(
-              request.fetch("manifest")
-            )
-          else
-            patrol_fix_state.manifest
-          end
-          manifest.verify!
-          state = patrol_fix_cutover(manifest).call
-          emit(state, "Patrol-fix migration: #{state.fetch('status')}")
-        rescue Hive::PatrolFix::Migration::DispositionManifest::IntegrityError => error
-          raise Hive::ConfigError, error.message
-        end
-
-        def patrol_fix_rollback
-          require_confirmation!("roll back the Patrol-fix authority cutover")
-          manifest = patrol_fix_state.manifest
-          state = patrol_fix_cutover(manifest).rollback!
-          emit(state, "Patrol-fix migration: #{state.fetch('status')}")
-        end
-
-        def patrol_fix_state
-          Hive::PatrolFix::Migration::CutoverState.new(
-            root: File.join(hive_state_path, "patrol-fix", "migration")
-          )
-        end
-
-        def patrol_fix_cutover(manifest)
-          factory = @patrol_fix_cutover_factory || lambda do |**arguments|
-            require "hive/modules/migration/patrol_fix_cutover"
-            Hive::Modules::Migration::PatrolFixCutover.new(**arguments)
-          end
-          factory.call(
-            project_root: @project_root, hive_state_path: hive_state_path,
-            manifest: manifest
-          )
-        end
 
         def deterministic_receipt
           request = read_request!(%w[metadata selector])

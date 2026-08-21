@@ -159,11 +159,6 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
         "ordinary" => lane.call("ordinary", 1),
         "architecture" => lane.call("architecture", 2),
         "post_merge" => {}, "coverage" => {}
-      },
-      migration: {
-        "status" => "committed", "candidate_count" => 0, "group_count" => 0,
-        "disposition_count" => 0, "acknowledgement_count" => 0,
-        "manifest_digest" => "a" * 64
       }, now: Time.utc(2026, 8, 21, 12)
     ).to_h
     snap = make_snapshot([
@@ -177,7 +172,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
 
     assert_includes out, "Patrol searches: ordinary 1/4 used, 3 left; architecture 2/4 used, 2 left"
     assert_includes out, "Fix workflow: 1 active, 2 parked, 3 done"
-    assert_includes out, "Delivery: 0 PRs created, 0 open; migration committed"
+    assert_includes out, "Delivery: 0 PRs created, 0 open"
   end
 
   def test_render_uses_producer_rows_and_shows_hidden_archive_summary

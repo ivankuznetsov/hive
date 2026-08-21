@@ -17,7 +17,6 @@ module Hive
     autoload :AdmissionStore, "hive/patrol_fix/admission_store"
     autoload :SemanticAdmission, "hive/patrol_fix/semantic_admission"
     autoload :TaskMaterializer, "hive/patrol_fix/task_materializer"
-    autoload :CutoverGate, "hive/patrol_fix/cutover_gate"
     autoload :HandoffOutbox, "hive/patrol_fix/handoff_outbox"
     autoload :InboxReport, "hive/patrol_fix/inbox_report"
     autoload :FixReport, "hive/patrol_fix/fix_report"
@@ -28,17 +27,6 @@ module Hive
     autoload :Transition, "hive/patrol_fix/transition"
     autoload :SuccessorMaterializer, "hive/patrol_fix/successor_materializer"
     autoload :PublicationReceipt, "hive/patrol_fix/publication_receipt"
-
-    module Migration
-      autoload :Inventory, "hive/patrol_fix/migration/inventory"
-      autoload :SemanticGroup, "hive/patrol_fix/migration/semantic_group"
-      autoload :Reconciler, "hive/patrol_fix/migration/reconciler"
-      autoload :DispositionManifest,
-               "hive/patrol_fix/migration/disposition_manifest"
-      autoload :CutoverState, "hive/patrol_fix/migration/cutover_state"
-      autoload :Applier, "hive/patrol_fix/migration/applier"
-      autoload :ForwardRecovery, "hive/patrol_fix/migration/forward_recovery"
-    end
 
     module_function
 

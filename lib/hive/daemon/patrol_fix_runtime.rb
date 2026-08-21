@@ -8,7 +8,6 @@ require "hive/git_ops"
 require "hive/patrol/fix_admission_outbox"
 require "hive/patrol/state_store"
 require "hive/patrol_fix/admission_store"
-require "hive/patrol_fix/migration/cutover_state"
 require "hive/patrol_fix/semantic_admission"
 require "hive/patrol_fix/task_materializer"
 require "hive/refactor_patrol/fix_admission_outbox"
@@ -16,8 +15,8 @@ require "hive/workflows/registry"
 
 module Hive
   module Daemon
-    # Reconstructs committed project-local Patrol-fix outbox readers and their
-    # admission factories on daemon start. Discovery remains independently
+    # Reconstructs project-local Patrol-fix outbox readers and their admission
+    # factories on daemon start. Discovery remains independently
     # scheduled; these sources consume standard workflow capacity only.
     class PatrolFixRuntime
       class Source
@@ -29,11 +28,6 @@ module Hive
           @port = port
         end
 
-        def enabled?
-          state = cutover_state.read
-          state && state.fetch("status") == "committed" && port.enabled?
-        end
-
         def method_missing(name, *arguments, **keywords, &block)
           return super unless port.respond_to?(name)
           port.public_send(name, *arguments, **keywords, &block)
@@ -41,14 +35,6 @@ module Hive
 
         def respond_to_missing?(name, include_private = false)
           port.respond_to?(name, include_private) || super
-        end
-
-        private
-
-        def cutover_state
-          Hive::PatrolFix::Migration::CutoverState.new(
-            root: File.join(entry.fetch("hive_state_path"), "patrol-fix", "migration")
-          )
         end
       end
 

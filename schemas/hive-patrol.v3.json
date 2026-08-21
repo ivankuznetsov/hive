@@ -144,7 +144,8 @@
                   "active_feature",
                   "duplicate_in_run",
                   "feature_limit",
-                  "semantic_duplicate"
+                  "semantic_duplicate",
+                  "patrol_fix_workflow_owned"
                 ]
               },
               "canonical_finding_id": { "type": "string" }

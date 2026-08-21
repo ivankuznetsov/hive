@@ -1254,11 +1254,6 @@ class OperationalStatusTest < Minitest::Test
       discovery: {
         "ordinary" => lane.call("ordinary"), "architecture" => lane.call("architecture"),
         "post_merge" => {}, "coverage" => {}
-      },
-      migration: {
-        "status" => "committed", "candidate_count" => 0, "group_count" => 0,
-        "disposition_count" => 0, "acknowledgement_count" => 0,
-        "manifest_digest" => "a" * 64
       }, now: Time.utc(2026, 7, 20, 10)
     ).to_h
   end

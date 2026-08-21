@@ -15,7 +15,6 @@ require "hive/secret_patterns"
 require "hive/stages/base"
 require "hive/stages/review/fix_guardrail"
 require "hive/worktree"
-require "hive/patrol_fix/cutover_gate"
 
 module Hive
   module RefactorPatrol
@@ -46,7 +45,7 @@ module Hive
       end
 
       VALIDATION_NAMES = %w[docs format lint public_contract typecheck test].freeze
-      CutoverDenied = Class.new(Hive::ConfigError)
+      EffectDenied = Class.new(Hive::ConfigError)
 
       def initialize(project_root, cfg:, worktree_factory: nil, agent_runner: nil,
                      validator_factory: nil, public_contract_guard: Caps,
@@ -61,12 +60,7 @@ module Hive
         end
         @public_contract_guard = public_contract_guard
         @launch_budget = launch_budget || Hive::Patrol::LaunchBudget.new(@project_root, cfg: cfg)
-        gate = Hive::PatrolFix::CutoverGate.for_project(
-          project_root: @project_root,
-          hive_state_path: cfg["hive_state_path"] || ".hive-state",
-          source: "architecture_patrol"
-        )
-        @effect_fence = effect_fence || ->(_boundary) { !gate.enabled? }
+        @effect_fence = effect_fence || ->(_boundary) { true }
         @fix_identity = Hive::RefactorPatrol::AgentIdentity.new(
           cfg: cfg, project_root: @project_root
         ).fix unless agent_runner
@@ -172,7 +166,7 @@ module Hive
           validation: audit.fetch(:validation), changed_paths: audit.fetch(:paths),
           diff_lines: audit.fetch(:diff_lines), details: {}
         )
-      rescue CutoverDenied
+      rescue EffectDenied
         raise
       rescue Hive::ConfigError, ArgumentError => e
         # Configuration and identity errors are permanent for this action;
@@ -197,8 +191,7 @@ module Hive
       def authorize_effect!(fence, boundary)
         return if fence.call(boundary) == true
 
-        raise CutoverDenied,
-              "Patrol Fix cutover fenced legacy #{boundary} effect"
+        raise EffectDenied, "Architecture Patrol effect denied at #{boundary}"
       end
 
       def fix_routed?(thesis)

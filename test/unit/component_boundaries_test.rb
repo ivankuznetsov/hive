@@ -233,17 +233,9 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::PatrolFix", patrol_fix.dig("entrypoint", "constant")
     assert_equal %w[
       Hive::PatrolFix::AdmissionStore
-      Hive::PatrolFix::CutoverGate
       Hive::PatrolFix::FixReport
       Hive::PatrolFix::HandoffOutbox
       Hive::PatrolFix::InboxReport
-      Hive::PatrolFix::Migration::Applier
-      Hive::PatrolFix::Migration::CutoverState
-      Hive::PatrolFix::Migration::DispositionManifest
-      Hive::PatrolFix::Migration::ForwardRecovery
-      Hive::PatrolFix::Migration::Inventory
-      Hive::PatrolFix::Migration::Reconciler
-      Hive::PatrolFix::Migration::SemanticGroup
       Hive::PatrolFix::OperationalProjection
       Hive::PatrolFix::Projection
       Hive::PatrolFix::PublicationReceipt

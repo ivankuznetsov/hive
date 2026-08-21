@@ -2299,7 +2299,8 @@ class SchemaFilesTest < Minitest::Test
     document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
     allowed = document.dig("$defs", "SuccessPayload", "properties", "skipped_findings",
                            "items", "properties", "reason", "enum")
-    produced = Hive::Patrol::CandidateSelector::SKIP_REASONS
+    produced = Hive::Patrol::CandidateSelector::SKIP_REASONS +
+      [ Hive::Commands::Patrol::WORKFLOW_OWNED_REASON ]
 
     assert_equal produced.sort, allowed.sort
   end

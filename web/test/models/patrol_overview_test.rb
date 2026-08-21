@@ -49,11 +49,6 @@ class PatrolOverviewTest < ActiveSupport::TestCase
         "ordinary" => lane("ordinary", "attention", ordinary_item),
         "architecture" => lane("architecture", "running", architecture_item),
         "post_merge" => { "queued" => 1 }, "coverage" => {}
-      },
-      migration: {
-        "status" => "committed", "candidate_count" => 0, "group_count" => 0,
-        "disposition_count" => 0, "acknowledgement_count" => 0,
-        "manifest_digest" => "a" * 64
       }, now: Time.utc(2026, 8, 21, 12)
     ).to_h
   end

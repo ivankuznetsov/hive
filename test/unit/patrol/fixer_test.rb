@@ -159,7 +159,7 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_cutover_recheck_denies_before_local_worktree_creation
+  def test_effect_fence_denies_before_local_worktree_creation
     with_tmp_git_repo do |repo|
       File.write(File.join(repo, "app.rb"), "if\n")
       run!("git", "-C", repo, "add", ".")
@@ -174,7 +174,7 @@ class HivePatrolFixerTest < Minitest::Test
         agent_runner: ->(**) { flunk "fenced fixer must not launch an agent" }
       )
 
-      assert_raises(Hive::Patrol::Fixer::CutoverDenied) do
+      assert_raises(Hive::Patrol::Fixer::EffectDenied) do
         fixer.attempt(finding)
       end
 

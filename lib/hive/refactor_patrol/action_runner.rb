@@ -1010,25 +1010,8 @@ module Hive
         end
       end
 
-      def local_fix_effect_fence(token)
-        lambda do |_boundary|
-          capture = @effect_capture
-          next false unless capture
-          next false if @job_store.patrol_fix_admission_outbox.enabled?
-
-          ownership = Hive::Modules::Migration::Patrols.ownership_snapshot(
-            @project_root, "architecture-patrol",
-            hive_state_path: @hive_state_path
-          )
-          next false unless ownership["epoch"] == capture.owner_epoch &&
-                            ownership["owner"] == capture.owner &&
-                            ownership["admission"] == true
-
-          @job_store.assert_action_claim!(token, now: now)
-          true
-        rescue JobStore::StaleClaim
-          false
-        end
+      def local_fix_effect_fence(_token)
+        ->(_boundary) { false }
       end
 
       def continuation_fence(token, aggregate)

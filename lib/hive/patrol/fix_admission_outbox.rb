@@ -6,29 +6,20 @@ module Hive
     # Ordinary Patrol's source port. Finding JSON remains authoritative; this
     # sidecar contains only the immutable handoff and exact workflow back-link.
     class FixAdmissionOutbox
-      LEGACY_MIGRATION_ACCEPTED_AT = Time.at(0).utc.freeze
-
       attr_reader :store
 
       def self.for_project(project_root:, hive_state_path: nil)
         project = File.expand_path(project_root)
         state = File.expand_path(hive_state_path || ".hive-state", project)
-        new(
-          root: File.join(state, "patrol", "patrol-fix-outbox"),
-          gate: Hive::PatrolFix::CutoverGate.for_project(
-            project_root: project, hive_state_path: state,
-            source: "ordinary_patrol"
-          )
-        )
+        new(root: File.join(state, "patrol", "patrol-fix-outbox"))
       end
 
-      def initialize(root:, gate: Hive::PatrolFix::CutoverGate.new)
+      def initialize(root:)
         @store = Hive::PatrolFix::HandoffOutbox.new(
-          root: root, source: "ordinary_patrol", gate: gate
+          root: root, source: "ordinary_patrol"
         )
       end
 
-      def enabled? = store.enabled?
       def source = store.source
       def pending(limit: 64, now: Time.now.utc) = store.pending(limit: limit, now: now)
       def fetch(occurrence_id) = store.fetch(occurrence_id)
@@ -40,43 +31,13 @@ module Hive
       def settle!(**attributes) = store.settle!(**attributes)
 
       def publish_finding!(finding, accepted_at: Time.now.utc)
-        return nil unless enabled?
-        return nil unless finding.lifecycle_state.to_s == "active" &&
-                          %w[admitted recurrence_after_terminal].include?(finding.lifecycle_reason.to_s)
+        return nil unless admitted?(finding)
 
         snapshot = source_snapshot(finding, accepted_at: accepted_at)
         store.publish!(
           occurrence_id: occurrence_id(finding, snapshot), snapshot: snapshot,
           now: accepted_at
         )
-      end
-
-      def migration_snapshot(finding, accepted_at: LEGACY_MIGRATION_ACCEPTED_AT)
-        source_snapshot(finding, accepted_at: accepted_at)
-      end
-
-      def publish_migration_finding!(finding, accepted_at: LEGACY_MIGRATION_ACCEPTED_AT)
-        return nil unless enabled? && finding.lifecycle_state.to_s == "active"
-
-        snapshot = migration_snapshot(finding, accepted_at: accepted_at)
-        publish_migration_snapshot!(snapshot, accepted_at: accepted_at)
-      end
-
-      def publish_migration_snapshot!(snapshot, accepted_at: Time.now.utc)
-        return nil unless enabled?
-
-        value = snapshot.is_a?(Hive::PatrolFix::SourceSnapshot) ?
-          snapshot : Hive::PatrolFix::SourceSnapshot.new(snapshot)
-        store.publish!(
-          occurrence_id: migration_occurrence_id(value), snapshot: value,
-          now: accepted_at
-        )
-      end
-
-      def migration_occurrence_id(snapshot)
-        value = snapshot.is_a?(Hive::PatrolFix::SourceSnapshot) ?
-          snapshot : Hive::PatrolFix::SourceSnapshot.new(snapshot)
-        "migration-ordinary-#{Digest::SHA256.hexdigest(value.digest)[0, 32]}"
       end
 
       def acknowledge!(**attributes) = store.acknowledge!(**attributes)
@@ -90,11 +51,14 @@ module Hive
         published?(occurrence_id_for(finding))
       end
 
-      def legacy_downstream_allowed?(finding)
-        !enabled?
-      end
-
       private
+
+      def admitted?(finding)
+        finding.respond_to?(:lifecycle_state) &&
+          finding.lifecycle_state.to_s == "active" &&
+          finding.respond_to?(:lifecycle_reason) &&
+          %w[admitted recurrence_after_terminal].include?(finding.lifecycle_reason.to_s)
+      end
 
       def source_snapshot(finding, accepted_at:)
         data = finding.to_h

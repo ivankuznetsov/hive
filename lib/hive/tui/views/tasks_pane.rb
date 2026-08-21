@@ -193,13 +193,12 @@ module Hive
           counts = projection.dig("workflow", "counts") || {}
           stages = projection.dig("workflow", "stages") || {}
           delivery = projection.fetch("delivery", {})
-          migration = projection.dig("migration", "status") || "unavailable"
           [
             "Patrol searches: ordinary #{allowance_label(ordinary)}; architecture #{allowance_label(architecture)}",
             "Fix workflow: #{counts.fetch('active', 0)} active, #{counts.fetch('parked', 0)} parked, " \
               "#{stages.fetch('6-done', 0)} done", # not-a-stage-ref: Patrol Fix workflow stage
             "Delivery: #{delivery.fetch('pr_created', 0)} PRs created, " \
-              "#{delivery.fetch('pr_open', 0)} open; migration #{migration}"
+              "#{delivery.fetch('pr_open', 0)} open"
           ].map { |line| truncate(line, width) }
         end
 

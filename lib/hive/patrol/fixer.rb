@@ -15,7 +15,6 @@ require "hive/patrol/validator"
 require "hive/stages/base"
 require "hive/stages/review/fix_guardrail"
 require "hive/worktree"
-require "hive/patrol_fix/cutover_gate"
 
 module Hive
   module Patrol
@@ -27,7 +26,7 @@ module Hive
       REVISION = /\A[0-9a-f]{40,64}\z/i
       FixProofReadError = Class.new(StandardError)
       PublicationRecoveryError = Class.new(Hive::ConfigError)
-      CutoverDenied = Class.new(Hive::ConfigError)
+      EffectDenied = Class.new(Hive::ConfigError)
       FAILURE_REASONS = %w[
         fix_agent_failed fix_agent_rejected missing_fix_proof no_validation_commands
         invalid_validation_key missing_regression regression_not_reproduced
@@ -102,12 +101,7 @@ module Hive
         @agent_runner = agent_runner || method(:run_agent)
         @launch_budget = launch_budget || LaunchBudget.new(@project_root, cfg: cfg)
         @git_ops = git_ops || Hive::GitOps.new(@project_root)
-        gate = Hive::PatrolFix::CutoverGate.for_project(
-          project_root: @project_root,
-          hive_state_path: cfg["hive_state_path"] || ".hive-state",
-          source: "ordinary_patrol"
-        )
-        @effect_fence = effect_fence || ->(_boundary) { !gate.enabled? }
+        @effect_fence = effect_fence || ->(_boundary) { true }
         @validation_preflights = {}
       end
 
@@ -186,7 +180,7 @@ module Hive
         @state.write_patch(patch.id, patch.to_h)
         worktree.remove!(path: worktree.path, force: true) unless passed
         patch
-      rescue PublicationRecoveryError, CutoverDenied
+      rescue PublicationRecoveryError, EffectDenied
         # A durable publication binding or uncertain-effect seed owns this
         # exact validated worktree. Never turn missing/corrupt proof into an
         # ordinary failed patch: that path removes the checkout and permits a
@@ -208,8 +202,7 @@ module Hive
       def authorize_effect!(boundary)
         return if @effect_fence.call(boundary) == true
 
-        raise CutoverDenied,
-              "Patrol Fix cutover fenced legacy #{boundary} effect"
+        raise EffectDenied, "ordinary Patrol effect denied at #{boundary}"
       end
 
       def revalidated_evidence(finding, worktree_path)

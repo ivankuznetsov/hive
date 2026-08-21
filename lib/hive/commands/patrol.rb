@@ -30,6 +30,7 @@ module Hive
       FIX_RESULT_REASONS = (
         %w[validated validation_failed] + Hive::Patrol::Fixer::FAILURE_REASONS
       ).uniq.freeze
+      WORKFLOW_OWNED_REASON = "patrol_fix_workflow_owned".freeze
 
       def initialize(project, json: false, dry_run: false, list: false,
                      mapper_factory: nil, reviewer_factory: nil,
@@ -175,16 +176,16 @@ module Hive
         # admission, and portfolio scoring. The reviewer itself is a pure
         # producer and cannot accumulate untriaged duplicates.
         admission.persistable_findings.each { |finding| state.write_finding(finding) }
-        workflow_owned, candidates = candidates.partition do |finding|
-          !state.patrol_fix_legacy_downstream_allowed?(finding)
+        unless @fixer_factory || @pr_opener_factory
+          skipped.concat(candidates.map do |finding|
+            {
+              "finding_id" => finding.id,
+              "fingerprint" => finding.fingerprint,
+              "reason" => WORKFLOW_OWNED_REASON
+            }
+          end)
+          candidates = []
         end
-        skipped.concat(workflow_owned.map do |finding|
-          {
-            "finding_id" => finding.id,
-            "fingerprint" => finding.fingerprint,
-            "reason" => "patrol_fix_workflow_owned"
-          }
-        end)
         write_selection_audit(state, candidates, skipped)
 
         # `max_prs_per_cycle` caps PRs opened per scan, not fix candidates.
@@ -490,20 +491,8 @@ module Hive
         return @fixer_factory.call(root, cfg, state) if @fixer_factory
 
         options = { cfg: cfg, state: state, launch_budget: launch_budget }
-        options[:effect_fence] = patrol_fix_effect_fence(state, capture) if capture
+        options[:effect_fence] = ->(_boundary) { false } if capture
         Hive::Patrol::Fixer.new(root, **options)
-      end
-
-      def patrol_fix_effect_fence(state, capture)
-        lambda do |_boundary|
-          ownership = Hive::Modules::Migration::Patrols.ownership_snapshot(
-            state.project_root, "patrol", hive_state_path: state.hive_state_path
-          )
-          !state.patrol_fix_admission_outbox.enabled? &&
-            ownership["epoch"] == capture.owner_epoch &&
-            ownership["owner"] == capture.owner &&
-            ownership["admission"] == true
-        end
       end
 
       # The allowance counts discovery launches only. Remediation is owned by

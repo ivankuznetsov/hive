@@ -41,7 +41,7 @@
     "PatrolFixOperationalProjection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "project", "generated_at", "completeness", "diagnostics", "discovery", "admission", "workflow", "migration", "delivery", "tokens"],
+      "required": ["schema", "schema_version", "project", "generated_at", "completeness", "diagnostics", "discovery", "admission", "workflow", "delivery", "tokens"],
       "properties": {
         "schema": {"const": "hive-patrol-fix-operational-projection"},
         "schema_version": {"const": 1},
@@ -52,7 +52,6 @@
         "discovery": {"type": "object"},
         "admission": {"type": "object"},
         "workflow": {"type": "object"},
-        "migration": {"type": "object"},
         "delivery": {"type": "object"},
         "tokens": {"type": "object"}
       }

@@ -24,7 +24,6 @@ class PatrolOverview
   def architecture = section("architecture")
   def admission = @projection&.fetch("admission", {}) || {}
   def workflow = @projection&.fetch("workflow", {}) || {}
-  def migration = @projection&.fetch("migration", {}) || {}
   def delivery = @projection&.fetch("delivery", {}) || {}
   def tokens = @projection&.fetch("tokens", {}) || {}
   def post_merge = @projection&.dig("discovery", "post_merge") || {}

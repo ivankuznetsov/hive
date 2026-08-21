@@ -1,7 +1,6 @@
 require "hive/modules/migration/effect_delivery"
 require "hive/modules/migration/patrols"
 require "hive/refactor_patrol/effect_errors"
-require "hive/patrol_fix/cutover_gate"
 
 module Hive
   module RefactorPatrol
@@ -11,9 +10,6 @@ module Hive
     class EffectGateway
       Result = Hive::Modules::Migration::EffectDelivery::Result
       RETRY_SAFE_SINKS = %w[job discovery action].freeze
-      PATROL_FIX_FENCED_SINKS = %w[
-        action branch issue pull_request review_handoff
-      ].freeze
       NotDelivered = Class.new(StandardError)
       Denied = Hive::RefactorPatrol::EffectDenied
       ReconciliationRequired =
@@ -22,18 +18,9 @@ module Hive
       def initialize(project_root:, hive_state_path:, capture:, authority:,
                      evidence_store:, delivery_store:, claim_validator:,
                      migration_lock: nil, ownership_loader: nil,
-                     legacy_effect_allowed: nil,
                      **options)
         project_root = File.expand_path(project_root)
         hive_state_path = File.expand_path(hive_state_path)
-        cutover_gate = Hive::PatrolFix::CutoverGate.for_project(
-          project_root: project_root, hive_state_path: hive_state_path,
-          source: "architecture_patrol"
-        )
-        legacy_effect_allowed ||= lambda do |intent|
-          !PATROL_FIX_FENCED_SINKS.include?(intent.sink) ||
-            !cutover_gate.enabled?
-        end
         @delivery = Hive::Modules::Migration::EffectDelivery.new(
           module_name: "architecture-patrol",
           product_label: "architecture patrol",
@@ -65,7 +52,6 @@ module Hive
             )
           end,
           retry_safe_sinks: RETRY_SAFE_SINKS,
-          legacy_effect_allowed: legacy_effect_allowed,
           **options
         )
       end

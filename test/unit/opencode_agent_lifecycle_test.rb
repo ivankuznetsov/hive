@@ -388,6 +388,25 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       marker = Hive::Markers.current(task.state_file)
       assert_equal :error, marker.name
       assert_equal "configuration_failure", marker.attrs.fetch("reason")
+
+      timed_out = Hive::AgentRuntime::NormalizedOutcome.new(
+        provider: :opencode, launcher_identity: "opencode-cli/v1",
+        kind: :timed_out, termination: termination,
+        identity: Hive::AgentRuntime::RouteIdentity.new(
+          requested: route, actual: nil, resolution_status: :unobserved
+        ),
+        diagnostic: "UnknownError: Upstream idle timeout exceeded"
+      )
+      timeout_result = result.merge(normalized_outcome: timed_out)
+
+      agent.send(:handle_exit, timeout_result)
+
+      assert_equal :timeout, timeout_result.fetch(:status)
+      assert_equal "timeout", timeout_result.fetch(:error_reason)
+      timeout_marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, timeout_marker.name
+      assert_equal "timeout", timeout_marker.attrs.fetch("reason")
+      assert_equal "opencode", timeout_marker.attrs.fetch("provider")
     end
   end
 

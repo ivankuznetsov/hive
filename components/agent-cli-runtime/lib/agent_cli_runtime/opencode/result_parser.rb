@@ -22,8 +22,11 @@ module AgentCliRuntime
       AUTH_PATTERN = /auth|credential|api[ _-]?key|unauthorized|forbidden/i
       CONFIGURATION_PATTERN =
         /\b(?:Config(?:uration)?Error|UnknownProvider|UnknownModel|ModelNotFound|RouteUnavailable|VariantUnavailable)\b|\b(?:invalid|unknown|unsupported) (?:configuration|provider|model|route|variant)\b|\b(?:provider|model|route|variant)(?: [^\n]+)? (?:not found|unavailable)\b/i
+      UPSTREAM_TIMEOUT_PATTERN =
+        /\b(?:upstream\s+)?(?:idle\s+)?timeout\b|\btimed out\b|error_type['"\s:=>]+timeout\b|\bcode['"\s:=>]+504\b/i
       private_constant :KNOWN_EVENT_TYPES, :EVENT_PART_TYPES,
-                       :AUTH_PATTERN, :CONFIGURATION_PATTERN
+                       :AUTH_PATTERN, :CONFIGURATION_PATTERN,
+                       :UPSTREAM_TIMEOUT_PATTERN
 
       module_function
 
@@ -285,6 +288,8 @@ module AgentCliRuntime
             :authentication_failure
           elsif corpus.match?(CONFIGURATION_PATTERN)
             :configuration_failure
+          elsif corpus.match?(UPSTREAM_TIMEOUT_PATTERN)
+            :timed_out
           else
             :cli_failure
           end

@@ -1281,6 +1281,22 @@ module Hive
 
       normalized = result[:normalized_outcome]
       if normalized && !normalized.completed?
+        if normalized.kind == :timed_out
+          if effective_status_mode == :state_file_marker
+            Hive::Markers.set(
+              @task.state_file,
+              :error,
+              reason: "timeout",
+              provider: normalized.provider.to_s,
+              message: normalized.diagnostic.to_s.byteslice(0, 200)
+            )
+          end
+          result[:status] = :timeout
+          result[:error_reason] = "timeout"
+          result[:error_message] = normalized.diagnostic
+          return
+        end
+
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(
             @task.state_file,

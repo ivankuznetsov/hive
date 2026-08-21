@@ -3,7 +3,7 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-08-16
+updated: 2026-08-21
 tags: [agent, runtime, component, gem, cli]
 ---
 
@@ -89,6 +89,10 @@ assistant record, records requested and actual nested routes separately, and
 uses its token/cache/reasoning/cost fields without converting absence to zero.
 Timeout, cancellation, authentication failure, configuration failure, generic
 CLI failure, malformed output, and completion remain distinct outcomes.
+Nonzero OpenCode runs that carry an upstream idle-timeout/504 diagnostic are
+normalized as `timed_out` rather than generic `cli_failure`; Hive projects that
+use marker-owned stages record the ordinary transient `timeout` reason while
+preserving any partial artifact bytes for scheduler-owned retry.
 Unknown additive event payloads are discarded after binding any supplied
 session identity; only bounded, redacted type summaries survive. Exact
 truncation evidence is carried separately from final-message bytes. Legacy

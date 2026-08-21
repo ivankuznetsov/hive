@@ -18,6 +18,8 @@ class PatrolFixAdmissionOutboxTest < Minitest::Test
         root: dir,
         gate: Hive::PatrolFix::CutoverGate.new(enabled: true, epoch: "epoch-test")
       )
+      refute enabled.legacy_downstream_allowed?(finding),
+             "the fence must close legacy routing before handoff acknowledgement"
       entry = enabled.publish_finding!(finding, accepted_at: NOW)
       replay = enabled.publish_finding!(finding, accepted_at: NOW + 60)
 

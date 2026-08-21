@@ -143,9 +143,19 @@ module Hive
         record && %w[materializing bound acknowledged].include?(record.fetch("status"))
       end
 
-      def default_retry_at(record, _error, now)
+      def default_retry_at(record, error, now)
         attempts = record&.dig("retry", "attempts").to_i
-        now + RETRY_BACKOFF_SEC.fetch([ attempts, RETRY_BACKOFF_SEC.length - 1 ].min)
+        normal = now + RETRY_BACKOFF_SEC.fetch([ attempts, RETRY_BACKOFF_SEC.length - 1 ].min)
+        provider = provider_retry_at(error)
+        provider && provider > normal ? provider : normal
+      end
+
+      def provider_retry_at(error)
+        return unless error.respond_to?(:retry_at)
+        value = error.retry_at
+        value.is_a?(Time) ? value.utc : Time.iso8601(value.to_s).utc
+      rescue ArgumentError
+        nil
       end
 
       def defer_failure(source, store, occurrence_id, error, now:, reason:)

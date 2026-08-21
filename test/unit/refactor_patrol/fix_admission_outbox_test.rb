@@ -13,6 +13,8 @@ class RefactorPatrolFixAdmissionOutboxTest < Minitest::Test
         root: dir,
         gate: Hive::PatrolFix::CutoverGate.new(enabled: true, epoch: "epoch-test")
       )
+      refute outbox.legacy_downstream_allowed?(aggregate, disposition),
+             "the fence must close legacy routing before handoff acknowledgement"
       entry = outbox.publish_disposition!(aggregate, disposition, accepted_at: NOW)
 
       assert_equal "architecture_patrol", entry.dig("snapshot", "engine")

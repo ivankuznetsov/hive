@@ -19,6 +19,8 @@ require "hive/daemon/patrol_scheduler"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/logger"
 require "hive/daemon/dispatch_request_queue"
+require "hive/daemon/patrol_fix_admission_scheduler"
+require "hive/daemon/patrol_fix_runtime"
 require "hive/daemon/status_report"
 require "hive/invoked_binary"
 require "hive/update_check/state"
@@ -244,11 +246,12 @@ module Hive
           dry_run: @dry_run,
           event_publisher: module_event_publisher
         )
-        # U2 composes the admission lane inert. Its source ports remain empty
-        # until U9 installs the persisted cutover gate; keeping the scheduler
-        # present here prevents activation from being coupled to discovery.
+        patrol_fix_runtime = Hive::Daemon::PatrolFixRuntime.new
         patrol_fix_admission_scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
-          sources: [],
+          sources: patrol_fix_runtime.sources,
+          admission_store_factory: patrol_fix_runtime.method(:admission_store),
+          semantic_admission_factory: patrol_fix_runtime.method(:semantic_admission),
+          task_materializer_factory: patrol_fix_runtime.method(:task_materializer),
           capacity_available: lambda do |source:, now:, **|
             project = source.respond_to?(:project) ? source.project : nil
             project && controller.can_dispatch?(

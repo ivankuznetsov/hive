@@ -34,6 +34,9 @@ module Hive
       autoload :Reconciler, "hive/patrol_fix/migration/reconciler"
       autoload :DispositionManifest,
                "hive/patrol_fix/migration/disposition_manifest"
+      autoload :CutoverState, "hive/patrol_fix/migration/cutover_state"
+      autoload :Applier, "hive/patrol_fix/migration/applier"
+      autoload :ForwardRecovery, "hive/patrol_fix/migration/forward_recovery"
     end
 
     module_function

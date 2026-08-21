@@ -247,6 +247,9 @@ components:
         - Hive::PatrolFix::Migration::SemanticGroup
         - Hive::PatrolFix::Migration::Reconciler
         - Hive::PatrolFix::Migration::DispositionManifest
+        - Hive::PatrolFix::Migration::CutoverState
+        - Hive::PatrolFix::Migration::Applier
+        - Hive::PatrolFix::Migration::ForwardRecovery
         - Hive::PatrolFix::InboxReport
         - Hive::PatrolFix::FixReport
         - Hive::PatrolFix::WorktreeReceipt
@@ -272,6 +275,8 @@ components:
         - Hive::PatrolFix::Migration::SemanticGroup::InvalidGroup
         - Hive::PatrolFix::Migration::Reconciler::InvalidReconciliation
         - Hive::PatrolFix::Migration::DispositionManifest::IntegrityError
+        - Hive::PatrolFix::Migration::CutoverState::Error
+        - Hive::PatrolFix::Migration::Applier::Error
     owned_paths:
       - lib/hive/patrol_fix.rb
       - lib/hive/patrol_fix/task_manifest.rb
@@ -297,12 +302,16 @@ components:
       - lib/hive/patrol_fix/migration/semantic_group.rb
       - lib/hive/patrol_fix/migration/reconciler.rb
       - lib/hive/patrol_fix/migration/disposition_manifest.rb
+      - lib/hive/patrol_fix/migration/cutover_state.rb
+      - lib/hive/patrol_fix/migration/applier.rb
+      - lib/hive/patrol_fix/migration/forward_recovery.rb
       - schemas/hive-patrol-fix-decision.v1.json
       - schemas/hive-patrol-fix-task-manifest.v1.json
       - schemas/hive-patrol-fix-receipt.v1.json
       - schemas/hive-patrol-fix-projection.v1.json
       - schemas/hive-patrol-fix-migration-semantic-decision.v1.json
       - schemas/hive-patrol-fix-migration-disposition-manifest.v1.json
+      - schemas/hive-patrol-fix-migration-cutover-state.v1.json
     state_contracts:
       - "The strict task manifest binds every source revision and one canonical task generation while append-only receipts bind exact evidence generation"
       - "Equivalent evidence may add provenance within a generation; materially changed evidence advances exactly one generation and invalidates old receipts"
@@ -315,6 +324,8 @@ components:
       - "Rework and reopen advance generation under a stable replayable intent; rework invalidates validation while review reopen explicitly carries its unchanged receipt ids"
       - "Escalation creates exactly one linked coding task through TaskCapture and reciprocal controller-owned relation bytes without a GitHub issue effect"
       - "Migration inventories arrive through injected source-owned cursor ports; exact source digests, semantic member sets, artifact observations, and exactly-one dispositions reconstruct one deterministic read-only preflight"
+      - "The durable authority cutover binds one canonical manifest to preflight, fenced, applying, and committed checkpoints; rollback is allowed only before the first new-authority effect or acknowledgement"
+      - "Migration application re-reads each source by immutable identity, binds one task per semantic group, acknowledges every member last, and verifies the complete authorities before commit"
     schema_contracts:
       - "Manifest, decision, receipt, and projection contracts are versioned, bounded, and reject unknown fields"
       - "Source provenance includes source engine, identity, target revision, evidence, affected code, reproduction guidance, discovery run, and semantic lineage"
@@ -325,6 +336,7 @@ components:
       - "The common operational action acquires the stable slug lock then task lock, revalidates its observation token, and advances generation before a reopen receipt"
       - "Patrol-fix moves also hold a stable slug lock outside the moving task folder and journal intent before move plus committed reconciliation afterward"
       - "Admission records use per-occurrence locks; cross-occurrence task materialization is serialized without holding a source lock"
+      - "The injected existing Patrol epoch port revalidates exact frozen inventory bytes while holding the shared exclusive migration lock; the core owns no second epoch or distributed lock"
     component_dependencies:
       - safe-agent-git-gate
     allowed_hive_dependencies:

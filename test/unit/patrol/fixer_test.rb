@@ -159,6 +159,31 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_cutover_recheck_denies_before_local_worktree_creation
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "if\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      boundaries = []
+      fence = lambda do |boundary|
+        boundaries << boundary
+        boundary != :worktree_create
+      end
+      fixer = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo), effect_fence: fence,
+        agent_runner: ->(**) { flunk "fenced fixer must not launch an agent" }
+      )
+
+      assert_raises(Hive::Patrol::Fixer::CutoverDenied) do
+        fixer.attempt(finding)
+      end
+
+      assert_includes boundaries, :worktree_create
+      refute_includes run!("git", "-C", repo, "branch", "--format=%(refname:short)"),
+                      "hive-patrol/"
+    end
+  end
+
   def test_default_validator_uses_the_configured_patrol_timeout
     with_tmp_dir do |repo|
       configured = cfg(repo)

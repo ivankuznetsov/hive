@@ -71,7 +71,7 @@ module Hive
           raise UsageError, "module list does not accept a source or name"
         end
         if @subcommand == "migration"
-          raise UsageError, "module migration requires status, report, cutover, or rollback" if @subject.to_s.empty?
+          raise UsageError, "module migration requires an action" if @subject.to_s.empty?
           require "hive/commands/module/migration"
           return Migration.new(
             @subject, project_root: @project_root, json: @json, stdout: @stdout,

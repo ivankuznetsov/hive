@@ -606,7 +606,8 @@ module Hive
             thesis: thesis,
             job_id: aggregate.fetch("job_id"),
             canonical_action_id: action.fetch("canonical_action_id"),
-            analysis_sha: aggregate.fetch("analysis_sha")
+            analysis_sha: aggregate.fetch("analysis_sha"),
+            effect_fence: local_fix_effect_fence(token)
           )
           unless valid_fixer_result?(patch)
             release(token, "invalid_fixer_result")
@@ -1179,6 +1180,27 @@ module Hive
 
           @job_store.assert_action_claim!(token, now: now)
           true
+        end
+      end
+
+      def local_fix_effect_fence(token)
+        lambda do |_boundary|
+          capture = @effect_capture
+          next false unless capture
+          next false if @job_store.patrol_fix_admission_outbox.enabled?
+
+          ownership = Hive::Modules::Migration::Patrols.ownership_snapshot(
+            @project_root, "architecture-patrol",
+            hive_state_path: @hive_state_path
+          )
+          next false unless ownership["epoch"] == capture.owner_epoch &&
+                            ownership["owner"] == capture.owner &&
+                            ownership["admission"] == true
+
+          @job_store.assert_action_claim!(token, now: now)
+          true
+        rescue JobStore::StaleClaim
+          false
         end
       end
 

@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-20
+updated: 2026-08-21
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -19,6 +19,17 @@ Done move. The workflow has not yet run a real configured provider or GitHub
 publication against a disposable project. End-to-end dogfood belongs to the
 plan's final lifecycle verification; no current evidence claims live PR
 production.
+
+Focused local migration proofs now cover read-only complete preflight,
+locked exact-byte epoch fencing, rollback before the first new-authority
+effect, source re-read and digest verification, task materialization before
+source acknowledgement, final authority verification, and reconstruction of
+both source adapters in one daemon after restart. This is not live dogfood.
+The admission scheduler currently invokes the semantic provider synchronously
+inside its daemon tick after its workflow-capacity check. Final lifecycle
+dogfood must measure that behavior with a real configured provider and decide
+whether U11 should move that launch behind the existing child supervisor; the
+current local proof does not claim asynchronous provider custody.
 
 ## Patrol v4 needs installed fleet dogfood (2026-08-14)
 

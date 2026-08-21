@@ -55,7 +55,7 @@ module Hive
       attr_reader :patrol_fix_admission_outbox
 
       def initialize(project_root, hive_state_path: nil,
-                     patrol_fix_cutover_gate: Hive::PatrolFix::CutoverGate.new,
+                     patrol_fix_cutover_gate: nil,
                      patrol_fix_admission_outbox: nil)
         super(
           project_root,
@@ -71,6 +71,10 @@ module Hive
           label: "ordinary patrol cycle"
         )
         @cycle_lock_owner = nil
+        patrol_fix_cutover_gate ||= Hive::PatrolFix::CutoverGate.for_project(
+          project_root: project_root, hive_state_path: self.hive_state_path,
+          source: "ordinary_patrol"
+        )
         @patrol_fix_admission_outbox = patrol_fix_admission_outbox ||
           Hive::Patrol::FixAdmissionOutbox.new(
             root: File.join(root, "patrol-fix-outbox"),
@@ -602,6 +606,19 @@ module Hive
       def patrol_fix_migration_inventory
         require "hive/patrol/migration_inventory"
         Hive::Patrol::MigrationInventory.new(self)
+      end
+
+      def patrol_fix_migration_source(source_id)
+        identity = source_id.to_s
+        unless identity.match?(/\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\z/)
+          raise Hive::ConfigError, "patrol migration source identity is invalid"
+        end
+        migration_finding_entry("#{identity}.json").tap do |entry|
+          if entry.fetch("error")
+            raise Hive::ConfigError,
+                  "patrol migration source is unavailable or corrupt"
+          end
+        end
       end
 
       # Strict read-only support evidence for the source-owned migration

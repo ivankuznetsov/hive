@@ -15,6 +15,7 @@ require "hive/secret_patterns"
 require "hive/stages/base"
 require "hive/stages/review/fix_guardrail"
 require "hive/worktree"
+require "hive/patrol_fix/cutover_gate"
 
 module Hive
   module RefactorPatrol
@@ -45,10 +46,11 @@ module Hive
       end
 
       VALIDATION_NAMES = %w[docs format lint public_contract typecheck test].freeze
+      CutoverDenied = Class.new(Hive::ConfigError)
 
       def initialize(project_root, cfg:, worktree_factory: nil, agent_runner: nil,
                      validator_factory: nil, public_contract_guard: Caps,
-                     clock: nil, launch_budget: nil)
+                     clock: nil, launch_budget: nil, effect_fence: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @worktree_factory = worktree_factory || method(:build_worktree)
@@ -59,6 +61,12 @@ module Hive
         end
         @public_contract_guard = public_contract_guard
         @launch_budget = launch_budget || Hive::Patrol::LaunchBudget.new(@project_root, cfg: cfg)
+        gate = Hive::PatrolFix::CutoverGate.for_project(
+          project_root: @project_root,
+          hive_state_path: cfg["hive_state_path"] || ".hive-state",
+          source: "architecture_patrol"
+        )
+        @effect_fence = effect_fence || ->(_boundary) { !gate.enabled? }
         @fix_identity = Hive::RefactorPatrol::AgentIdentity.new(
           cfg: cfg, project_root: @project_root
         ).fix unless agent_runner
@@ -66,12 +74,14 @@ module Hive
 
       def attempt(thesis:, job_id:, analysis_sha:, canonical_action_id: nil,
                   reanalysis_depth: 0,
-                  report_analysis_sha: analysis_sha)
+                  report_analysis_sha: analysis_sha, effect_fence: @effect_fence)
         return blocked("not_fix_routed", thesis: thesis) unless fix_routed?(thesis)
 
         branch = branch_name(job_id, thesis.fingerprint, canonical_action_id)
         worktree = @worktree_factory.call(branch: branch)
+        authorize_effect!(effect_fence, :trunk_snapshot)
         default_branch_snapshot = default_branch_snapshot!(analysis_sha)
+        authorize_effect!(effect_fence, :worktree_create)
         materialized = worktree.create_exact!(branch, base_sha: analysis_sha)
         if materialized == :existing && !git_output!(worktree.path, "status", "--porcelain=v1", "-z").empty?
           return transient(
@@ -94,6 +104,7 @@ module Hive
           control_plane = control_plane_snapshot(
             worktree.path
           )
+          authorize_effect!(effect_fence, :agent_write)
           agent_result = @agent_runner.call(
             thesis: thesis, prompt: render_prompt(thesis, worktree.path), worktree_path: worktree.path,
             run_dir: run_dir(job_id, thesis.fingerprint)
@@ -113,12 +124,15 @@ module Hive
         audit = audit_and_validate(thesis, worktree.path, patch_base)
         return finish_audit_failure(audit, branch, worktree, analysis_sha) unless audit.fetch(:passed)
 
+        authorize_effect!(effect_fence, :commit)
         commit_audited_changes!(worktree.path, thesis, amend: recovering_commit)
+        authorize_effect!(effect_fence, :trunk_reconcile)
         publication_base = reconcile_trunk_drift(
           thesis, worktree, branch, analysis_sha, patch_base, default_branch_snapshot
         )
         if publication_base.is_a?(Result)
           if publication_base.outcome == "trunk_overlap_reanalysis_required" && reanalysis_depth.zero?
+            authorize_effect!(effect_fence, :branch_delete)
             git_output!(@project_root, "branch", "-D", branch)
             retried = attempt(
               thesis: thesis,
@@ -126,7 +140,8 @@ module Hive
               canonical_action_id: canonical_action_id,
               analysis_sha: publication_base.publication_base_sha,
               reanalysis_depth: reanalysis_depth + 1,
-              report_analysis_sha: report_analysis_sha
+              report_analysis_sha: report_analysis_sha,
+              effect_fence: effect_fence
             )
             retried.analysis_sha = report_analysis_sha
             retried.details = (retried.details || {}).merge(
@@ -144,6 +159,7 @@ module Hive
           audit = audit_and_validate(thesis, worktree.path, publication_base)
           return finish_audit_failure(audit, branch, worktree, analysis_sha) unless audit.fetch(:passed)
 
+          authorize_effect!(effect_fence, :commit)
           commit_audited_changes!(worktree.path, thesis, amend: true)
         end
         assert_clean_worktree!(worktree.path)
@@ -156,6 +172,8 @@ module Hive
           validation: audit.fetch(:validation), changed_paths: audit.fetch(:paths),
           diff_lines: audit.fetch(:diff_lines), details: {}
         )
+      rescue CutoverDenied
+        raise
       rescue Hive::ConfigError, ArgumentError => e
         # Configuration and identity errors are permanent for this action;
         # retrying can only reproduce them, so the result is terminal.
@@ -175,6 +193,13 @@ module Hive
       end
 
       private
+
+      def authorize_effect!(fence, boundary)
+        return if fence.call(boundary) == true
+
+        raise CutoverDenied,
+              "Patrol Fix cutover fenced legacy #{boundary} effect"
+      end
 
       def fix_routed?(thesis)
         thesis.effective_route(

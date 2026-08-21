@@ -1,5 +1,6 @@
 require "hive/modules/migration/effect_delivery"
 require "hive/modules/migration/patrols"
+require "hive/patrol_fix/cutover_gate"
 
 module Hive
   module Patrol
@@ -9,6 +10,9 @@ module Hive
     class EffectGateway
       Result = Hive::Modules::Migration::EffectDelivery::Result
       RETRY_SAFE_SINKS = %w[state finding review_handoff].freeze
+      PATROL_FIX_FENCED_SINKS = %w[
+        attempt branch pull_request review_handoff
+      ].freeze
 
       class Denied < StandardError
         attr_reader :reason, :receipt
@@ -35,9 +39,18 @@ module Hive
       def initialize(project_root:, hive_state_path:, capture:, authority:,
                      evidence_store:, delivery_store:,
                      migration_lock: nil, ownership_loader: nil,
+                     legacy_effect_allowed: nil,
                      **options)
         project_root = File.expand_path(project_root)
         hive_state_path = File.expand_path(hive_state_path)
+        cutover_gate = Hive::PatrolFix::CutoverGate.for_project(
+          project_root: project_root, hive_state_path: hive_state_path,
+          source: "ordinary_patrol"
+        )
+        legacy_effect_allowed ||= lambda do |intent|
+          !PATROL_FIX_FENCED_SINKS.include?(intent.sink) ||
+            !cutover_gate.enabled?
+        end
         @delivery = Hive::Modules::Migration::EffectDelivery.new(
           module_name: "patrol",
           product_label: "ordinary patrol",
@@ -66,6 +79,7 @@ module Hive
             )
           end,
           retry_safe_sinks: RETRY_SAFE_SINKS,
+          legacy_effect_allowed: legacy_effect_allowed,
           **options
         )
       end

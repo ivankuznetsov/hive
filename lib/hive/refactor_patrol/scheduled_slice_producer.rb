@@ -92,8 +92,9 @@ module Hive
           ),
           label: "scheduled Architecture Patrol cursor"
         )
-        @admission_outbox = admission_outbox || Hive::RefactorPatrol::FixAdmissionOutbox.new(
-          root: File.join(@directory.root, "patrol-fix-outbox")
+        @admission_outbox = admission_outbox || Hive::RefactorPatrol::FixAdmissionOutbox.for_project(
+          project_root: entry.fetch("path"),
+          hive_state_path: entry.fetch("hive_state_path")
         )
       end
 

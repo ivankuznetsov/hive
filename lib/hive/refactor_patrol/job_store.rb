@@ -130,6 +130,10 @@ module Hive
       attr_reader :project_root, :root, :patrol_fix_admission_outbox
 
       class << self
+        def for_patrol_fix_migration(project_root, hive_state_path: nil)
+          new(project_root, hive_state_path: hive_state_path)
+        end
+
         def root_for(project_root, hive_state_path: nil)
           StatePaths.current_root(
             state_path_for(project_root, hive_state_path)
@@ -190,7 +194,7 @@ module Hive
       end
 
       def initialize(project_root, hive_state_path: nil,
-                     patrol_fix_cutover_gate: Hive::PatrolFix::CutoverGate.new,
+                     patrol_fix_cutover_gate: nil,
                      patrol_fix_admission_outbox: nil)
         @project_root = File.expand_path(project_root)
         hive_state_root = File.expand_path(hive_state_path || ".hive-state", @project_root)
@@ -221,6 +225,10 @@ module Hive
           id_validator: method(:validate_id!),
           corrupt_record: CorruptRecord,
           inconsistent_record: InconsistentRecord
+        )
+        patrol_fix_cutover_gate ||= Hive::PatrolFix::CutoverGate.for_project(
+          project_root: @project_root, hive_state_path: hive_state_root,
+          source: "architecture_patrol"
         )
         @patrol_fix_admission_outbox = patrol_fix_admission_outbox ||
           Hive::RefactorPatrol::FixAdmissionOutbox.new(
@@ -1642,6 +1650,15 @@ module Hive
         Hive::RefactorPatrol::MigrationInventory.new(
           self, canonical_action_catalog: canonical_action_catalog
         )
+      end
+
+      def patrol_fix_migration_source(job_id)
+        entry = migration_job_entry(validate_id!(job_id.to_s))
+        if entry.fetch("error")
+          raise InconsistentRecord,
+                "Architecture Patrol migration source is unavailable or corrupt"
+        end
+        entry
       end
 
       def rebuild_indexes!

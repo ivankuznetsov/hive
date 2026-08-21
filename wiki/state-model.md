@@ -643,6 +643,47 @@ time. `PublicationReceipt.adopt` wraps those exact validated bytes without a
 GitHub call. The former five-field existing-PR summary is provenance only and
 is rejected as Done authority.
 
+## Patrol Fix migration cutover
+
+The one-time ordinary/Architecture authority cutover persists canonical
+`state.json` and `manifest.json` under
+`.hive-state/patrol-fix/migration/`. Its state machine is
+`preflight` → `fenced` → `applying` → `committed`. It observes and advances the
+existing Patrol owner epochs under the shared migration lock; it does not mint
+a second epoch, outbox, JobStore field, or daemon coordinator. The durable
+checkpoint retains the exact pre-fence ownership/admission modes so a permitted
+rollback restores those modes rather than assuming both legacy lanes were
+open.
+
+Preflight is read-only. Its canonical manifest contains one disposition for
+every complete ordinary-current and Architecture-v4 source candidate, keeps v3
+Architecture records opaque with exact byte digests, and binds semantic groups
+to the frozen inventory bytes. Before the fence, the controller revalidates
+those exact bytes while holding the same exclusive lock used by legacy
+admission and refuses any live claim or unresolved legacy artifact route. The
+fence advances the existing owner epochs and keeps discovery closed through
+commit. Every legacy task, local branch/worktree, issue, PR, and terminal
+acknowledgement boundary rechecks the dynamic cutover gate and captured epoch.
+
+During apply, the controller re-reads each manifest member directly from its
+source-owned store by immutable id and recomputes its schema and digest before
+building the strict source snapshot. Each actionable semantic group is
+materialized exactly once through the existing `TaskCapture` and
+`TaskMaterializer`; all member aliases are attached before the source-owned
+handoff acknowledgement is written and settled. Blocked groups instead receive
+controller disposition receipts for every member. Those receipts prove the
+manifest disposition equation but are deliberately not represented as
+source-owned acknowledgements.
+
+Commit follows a complete authority reread proving the frozen inventory,
+every group checkpoint, task binding, and settled actionable source receipt.
+Only a committed state enables the one normal daemon's ordinary and
+Architecture source adapters. New findings accepted after commit publish into
+the existing source outboxes and consume normal `patrol-fix` workflow
+concurrency, independently of scheduled-discovery allowances. Recovery may
+roll back only before any new-authority effect or acknowledgement; afterward it
+is forward-only and replays the durable manifest.
+
 ## Patrol occurrence, selection, and recovery state
 
 Ordinary Patrol and Architecture Patrol expose separate product stores over the

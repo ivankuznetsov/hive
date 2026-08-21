@@ -41,7 +41,7 @@ module Hive
         @clock = clock
       end
 
-      def call(occurrence_id)
+      def call(occurrence_id, acknowledge: true)
         created = false
         binding = nil
         task_folder = nil
@@ -62,6 +62,7 @@ module Hive
         if record.fetch("status") == "acknowledged"
           return result(task_folder, binding, created: false, acknowledged: true)
         end
+        return result(task_folder, binding, created: created, acknowledged: false) unless acknowledge
 
         receipt_id = @source_acknowledger.call(record, binding)
         @store.acknowledge!(occurrence_id, source_receipt_id: receipt_id, now: @clock.call)

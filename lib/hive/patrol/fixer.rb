@@ -15,6 +15,7 @@ require "hive/patrol/validator"
 require "hive/stages/base"
 require "hive/stages/review/fix_guardrail"
 require "hive/worktree"
+require "hive/patrol_fix/cutover_gate"
 
 module Hive
   module Patrol
@@ -26,6 +27,7 @@ module Hive
       REVISION = /\A[0-9a-f]{40,64}\z/i
       FixProofReadError = Class.new(StandardError)
       PublicationRecoveryError = Class.new(Hive::ConfigError)
+      CutoverDenied = Class.new(Hive::ConfigError)
       FAILURE_REASONS = %w[
         fix_agent_failed fix_agent_rejected missing_fix_proof no_validation_commands
         invalid_validation_key missing_regression regression_not_reproduced
@@ -88,7 +90,7 @@ module Hive
 
       def initialize(project_root, cfg:, state: nil,
                      validator: nil, worktree_factory: nil, agent_runner: nil,
-                     launch_budget: nil, git_ops: nil)
+                     launch_budget: nil, git_ops: nil, effect_fence: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state || default_state_store
@@ -100,17 +102,26 @@ module Hive
         @agent_runner = agent_runner || method(:run_agent)
         @launch_budget = launch_budget || LaunchBudget.new(@project_root, cfg: cfg)
         @git_ops = git_ops || Hive::GitOps.new(@project_root)
+        gate = Hive::PatrolFix::CutoverGate.for_project(
+          project_root: @project_root,
+          hive_state_path: cfg["hive_state_path"] || ".hive-state",
+          source: "ordinary_patrol"
+        )
+        @effect_fence = effect_fence || ->(_boundary) { !gate.enabled? }
         @validation_preflights = {}
       end
 
       def attempt(finding)
+        authorize_effect!(:attempt)
         branch = branch_name(finding)
         worktree = @worktree_factory.call(finding: finding, branch: branch)
         reusable = reusable_publication_patch(finding, branch, worktree)
         return reusable if reusable
 
         base_sha = fresh_default_sha!
+        authorize_effect!(:branch_prepare)
         prepare_branch_for_retry!(branch, worktree)
+        authorize_effect!(:worktree_create)
         worktree.create_exact!(branch, base_sha: base_sha)
         actual_base = git_output!(worktree.path, "rev-parse", "HEAD").strip
         unless actual_base == base_sha
@@ -139,6 +150,7 @@ module Hive
         end
         run_dir = @state.run_dir("fix")
         output_path = File.join(run_dir, "fix.json")
+        authorize_effect!(:agent_write)
         result = @agent_runner.call(finding: finding, prompt: render_prompt(finding, output_path),
                                     output_path: output_path, run_dir: run_dir,
                                     worktree_path: worktree.path)
@@ -164,13 +176,17 @@ module Hive
         end
 
         changed = diff_present?(worktree.path)
-        commit_changes(worktree.path, finding) if validation["passed"] && changed
+        if validation["passed"] && changed
+          authorize_effect!(:commit)
+          commit_changes(worktree.path, finding)
+        end
         passed = validation["passed"] && (changed || committed_since_base?(worktree.path, base_sha))
         patch = build_patch(finding, branch, worktree.path, validation, passed, base_sha)
+        authorize_effect!(:terminal_ack)
         @state.write_patch(patch.id, patch.to_h)
         worktree.remove!(path: worktree.path, force: true) unless passed
         patch
-      rescue PublicationRecoveryError
+      rescue PublicationRecoveryError, CutoverDenied
         # A durable publication binding or uncertain-effect seed owns this
         # exact validated worktree. Never turn missing/corrupt proof into an
         # ordinary failed patch: that path removes the checkout and permits a
@@ -188,6 +204,13 @@ module Hive
       end
 
       private
+
+      def authorize_effect!(boundary)
+        return if @effect_fence.call(boundary) == true
+
+        raise CutoverDenied,
+              "Patrol Fix cutover fenced legacy #{boundary} effect"
+      end
 
       def revalidated_evidence(finding, worktree_path)
         evidence = finding.evidence

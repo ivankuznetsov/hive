@@ -16,7 +16,8 @@ module Hive
                        migration_lock:, ownership_loader:, config_loader: nil,
                        capability_checker: nil, claim_validator: nil,
                        module_execution: nil, lifecycle_store_factory: nil,
-                       diagnostic_transition: false)
+                       diagnostic_transition: false,
+                       legacy_effect_allowed: ->(_intent) { true })
           @module_name = module_name
           @product_label = product_label
           @config_key = config_key
@@ -37,6 +38,7 @@ module Hive
             Hive::ModulePackage::ManagedStore.new(root)
           end
           @diagnostic_transition = diagnostic_transition == true
+          @legacy_effect_allowed = legacy_effect_allowed
         end
 
         def with_live_authorization(intent, on_denied:)
@@ -44,6 +46,8 @@ module Hive
             ownership = @ownership_loader.call
             config = load_live_config
             reason = ownership_denial(ownership)
+            reason ||= "patrol_fix_cutover" unless
+              @legacy_effect_allowed.call(intent)
             reason ||= configuration_denial(config) unless
               @diagnostic_transition
             return on_denied.call(reason) if reason

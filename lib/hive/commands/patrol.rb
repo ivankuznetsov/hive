@@ -198,7 +198,9 @@ module Hive
         pr_results = []
         fix_results = []
         unless @dry_run
-          fixer = build_fixer(project_root, cfg, state, launch_budget)
+          fixer = build_fixer(
+            project_root, cfg, state, launch_budget, capture
+          )
           pr_opener = if @pr_opener_factory
             @pr_opener_factory.call(project_root, cfg, state)
           else
@@ -484,10 +486,24 @@ module Hive
         Hive::Patrol::Reviewer.new(root, cfg: cfg, state: state, launch_budget: launch_budget)
       end
 
-      def build_fixer(root, cfg, state, launch_budget)
+      def build_fixer(root, cfg, state, launch_budget, capture = nil)
         return @fixer_factory.call(root, cfg, state) if @fixer_factory
 
-        Hive::Patrol::Fixer.new(root, cfg: cfg, state: state, launch_budget: launch_budget)
+        options = { cfg: cfg, state: state, launch_budget: launch_budget }
+        options[:effect_fence] = patrol_fix_effect_fence(state, capture) if capture
+        Hive::Patrol::Fixer.new(root, **options)
+      end
+
+      def patrol_fix_effect_fence(state, capture)
+        lambda do |_boundary|
+          ownership = Hive::Modules::Migration::Patrols.ownership_snapshot(
+            state.project_root, "patrol", hive_state_path: state.hive_state_path
+          )
+          !state.patrol_fix_admission_outbox.enabled? &&
+            ownership["epoch"] == capture.owner_epoch &&
+            ownership["owner"] == capture.owner &&
+            ownership["admission"] == true
+        end
       end
 
       # The allowance counts discovery launches only. Remediation is owned by

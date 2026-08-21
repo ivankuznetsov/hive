@@ -58,6 +58,25 @@ class PatrolEffectGatewayTest < Minitest::Test
     end
   end
 
+  def test_cutover_gate_is_revalidated_at_downstream_sink_boundary
+    with_tmp_dir do |root|
+      operations = []
+      store, evidence = delivery(root, operations)
+      gateway = gateway(
+        root, store: store, evidence: evidence, operations: operations,
+        legacy_effect_allowed: ->(_intent) { false }
+      )
+      calls = 0
+
+      error = assert_raises(Hive::Patrol::EffectGateway::Denied) do
+        perform(gateway) { calls += 1 }
+      end
+
+      assert_equal "patrol_fix_cutover", error.reason
+      assert_equal 0, calls
+    end
+  end
+
   def test_crashed_remote_dispatch_is_reconciliation_only
     with_tmp_dir do |root|
       operations = []
@@ -330,7 +349,8 @@ class PatrolEffectGatewayTest < Minitest::Test
   end
 
   def gateway(root, store:, evidence:, operations:, authority: "legacy",
-              capability_allowed: true, owner_epoch: 1, now: NOW)
+              capability_allowed: true, owner_epoch: 1, now: NOW,
+              legacy_effect_allowed: ->(_intent) { true })
     Hive::Patrol::EffectGateway.new(
       project_root: root,
       hive_state_path: File.join(root, ".hive-state"),
@@ -358,6 +378,7 @@ class PatrolEffectGatewayTest < Minitest::Test
         operations << :capability_check
         capability_allowed
       end,
+      legacy_effect_allowed: legacy_effect_allowed,
       clock: -> { now }
     )
   end

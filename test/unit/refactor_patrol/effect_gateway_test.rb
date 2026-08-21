@@ -64,6 +64,24 @@ class RefactorPatrolEffectGatewayTest < Minitest::Test
     end
   end
 
+  def test_cutover_gate_is_revalidated_at_downstream_sink_boundary
+    with_tmp_dir do |root|
+      store, evidence = delivery(root)
+      gateway = gateway(
+        root, store: store, evidence: evidence,
+        legacy_effect_allowed: ->(_intent) { false }
+      )
+      calls = 0
+
+      error = assert_raises(Hive::RefactorPatrol::EffectGateway::Denied) do
+        perform(gateway) { calls += 1 }
+      end
+
+      assert_equal "patrol_fix_cutover", error.reason
+      assert_equal 0, calls
+    end
+  end
+
   def test_remote_absence_does_not_authorize_a_retry
     with_tmp_dir do |root|
       store, evidence = delivery(root)
@@ -193,7 +211,8 @@ class RefactorPatrolEffectGatewayTest < Minitest::Test
     [ store, Evidence.new ]
   end
 
-  def gateway(root, store:, evidence:, claim_valid: true, now: NOW)
+  def gateway(root, store:, evidence:, claim_valid: true, now: NOW,
+              legacy_effect_allowed: ->(_intent) { true })
     Hive::RefactorPatrol::EffectGateway.new(
       project_root: root,
       hive_state_path: File.join(root, ".hive-state"),
@@ -210,6 +229,7 @@ class RefactorPatrolEffectGatewayTest < Minitest::Test
       },
       capability_checker: ->(**) { true },
       claim_validator: ->(**) { claim_valid },
+      legacy_effect_allowed: legacy_effect_allowed,
       clock: -> { now }
     )
   end

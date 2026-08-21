@@ -35,6 +35,7 @@ require "hive/refactor_patrol/state_store"
 require "hive/refactor_patrol/thesis"
 require "hive/workflows"
 require "hive/worktree"
+require "hive/patrol_fix/cutover_gate"
 
 module Hive
   module Commands
@@ -757,36 +758,62 @@ module Hive
 
       def publish_manual_replay_manifest!(project_root, original,
                                           hive_state_path: File.join(project_root, ".hive-state"))
-        root = File.join(
-          hive_state_path, "refactor_patrol", "v2", "manifests"
-        )
-        FileUtils.mkdir_p(root)
-        File.open(File.join(root, "manual-replays.lock"), File::RDWR | File::CREAT, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
-          base = original.fetch("job_id").to_s[0, 100]
-          sequence = Dir.glob(File.join(root, "#{base}-replay-*.json")).filter_map do |path|
-            File.basename(path, ".json")[/\A#{Regexp.escape(base)}-replay-(\d+)\z/, 1]&.to_i
-          end.max.to_i + 1
-          job_id = "#{base}-replay-#{sequence}"
-          payload = original.merge("job_id" => job_id).reject do |key, _value|
-            key == "manifest_checksum"
+        Hive::Modules::Migration::Patrols.with_migration_lock(
+          project_root, hive_state_path: hive_state_path, shared: true
+        ) do
+          assert_manual_replay_allowed!(project_root, hive_state_path)
+          root = File.join(
+            hive_state_path, "refactor_patrol", "v2", "manifests"
+          )
+          FileUtils.mkdir_p(root)
+          File.open(File.join(root, "manual-replays.lock"), File::RDWR | File::CREAT, 0o600) do |lock|
+            lock.flock(File::LOCK_EX)
+            base = original.fetch("job_id").to_s[0, 100]
+            sequence = Dir.glob(File.join(root, "#{base}-replay-*.json")).filter_map do |path|
+              File.basename(path, ".json")[/\A#{Regexp.escape(base)}-replay-(\d+)\z/, 1]&.to_i
+            end.max.to_i + 1
+            job_id = "#{base}-replay-#{sequence}"
+            payload = original.merge("job_id" => job_id).reject do |key, _value|
+              key == "manifest_checksum"
+            end
+            manifest = payload.merge(
+              "manifest_checksum" => Hive::RefactorPatrol::PrManifest.checksum(payload)
+            )
+            Hive::RefactorPatrol::PrManifest.validate!(
+              manifest,
+              expected_job_id: job_id,
+              registration: original.dig("source", "registration"),
+              default_branch: original.dig("source", "base_branch")
+            )
+            assert_manual_replay_allowed!(project_root, hive_state_path)
+            Hive::AtomicFile.write(
+              File.join(root, "#{job_id}.json"),
+              "#{JSON.pretty_generate(manifest)}\n", mode: 0o600
+            )
+            File.open(root, File::RDONLY) { |directory| directory.fsync }
+            manifest
           end
-          manifest = payload.merge(
-            "manifest_checksum" => Hive::RefactorPatrol::PrManifest.checksum(payload)
-          )
-          Hive::RefactorPatrol::PrManifest.validate!(
-            manifest,
-            expected_job_id: job_id,
-            registration: original.dig("source", "registration"),
-            default_branch: original.dig("source", "base_branch")
-          )
-          Hive::AtomicFile.write(
-            File.join(root, "#{job_id}.json"),
-            "#{JSON.pretty_generate(manifest)}\n", mode: 0o600
-          )
-          File.open(root, File::RDONLY) { |directory| directory.fsync }
-          manifest
         end
+      end
+
+      def assert_manual_replay_allowed!(project_root, hive_state_path)
+        ownership = Hive::Modules::Migration::Patrols.ownership_snapshot(
+          project_root, "architecture-patrol",
+          hive_state_path: hive_state_path
+        )
+        allowed = ownership["admission"] == true &&
+          !patrol_fix_cutover_gate(project_root, hive_state_path).enabled?
+        return if allowed
+
+        raise Hive::ConfigError,
+              "Patrol Fix cutover fences Architecture Patrol v2 replay manifests"
+      end
+
+      def patrol_fix_cutover_gate(project_root, hive_state_path)
+        Hive::PatrolFix::CutoverGate.for_project(
+          project_root: project_root, hive_state_path: hive_state_path,
+          source: "architecture_patrol"
+        )
       end
 
       def checkpoint_manual_discovery!(payload)

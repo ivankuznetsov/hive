@@ -1641,6 +1641,57 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_manual_replay_manifest_writer_is_fenced_after_patrol_fix_cutover
+    with_tmp_dir do |repo|
+      command = Hive::Commands::RefactorPatrol.new("demo")
+      command.define_singleton_method(:patrol_fix_cutover_gate) do |*, **|
+        Hive::PatrolFix::CutoverGate.new(enabled: true, epoch: "8")
+      end
+
+      error = assert_raises(Hive::ConfigError) do
+        command.send(:publish_manual_replay_manifest!, repo, {})
+      end
+
+      assert_match(/fences Architecture Patrol v2 replay manifests/, error.message)
+      refute_path_exists File.join(repo, ".hive-state", "refactor_patrol", "v2")
+    end
+  end
+
+  def test_manual_replay_final_recheck_and_write_share_patrol_epoch_lock
+    with_refactor_patrol_project do |repo|
+      original = with_manifest_checksum(pr_manifest)
+      command = Hive::Commands::RefactorPatrol.new("demo")
+      inside_epoch_lock = false
+      checks = []
+      writes = []
+      original_write = Hive::AtomicFile.method(:write)
+      command.define_singleton_method(:assert_manual_replay_allowed!) do |*, **|
+        checks << inside_epoch_lock
+      end
+
+      lock = lambda do |*, **, &block|
+        inside_epoch_lock = true
+        block.call
+      ensure
+        inside_epoch_lock = false
+      end
+      write = lambda do |*arguments, **keywords|
+        writes << inside_epoch_lock
+        original_write.call(*arguments, **keywords)
+      end
+      with_replaced_singleton_method(
+        Hive::Modules::Migration::Patrols, :with_migration_lock, lock
+      ) do
+        with_replaced_singleton_method(Hive::AtomicFile, :write, write) do
+          command.send(:publish_manual_replay_manifest!, repo, original)
+        end
+      end
+
+      assert_equal [ true, true ], checks
+      assert_equal [ true ], writes
+    end
+  end
+
   def test_claim_token_selection_heartbeats_and_release_failures_are_fail_closed
     command = Hive::Commands::RefactorPatrol.new("demo", pr: "7")
     tokens = [ { kind: :action }, { kind: :discovery, generation: 2 } ]

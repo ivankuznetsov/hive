@@ -13,6 +13,13 @@ require "hive/workflows/registry"
 class PatrolFixAdmissionSchedulerTest < Minitest::Test
   include HiveTestHelper
   NOW = Time.utc(2026, 8, 20, 12)
+  QuotaError = Class.new(StandardError) do
+    attr_reader :retry_at
+    def initialize(retry_at)
+      @retry_at = retry_at
+      super("provider quota exhausted")
+    end
+  end
 
   def test_drains_accepted_source_while_discovery_is_exhausted_without_patrol_budget
     with_tmp_global_config do
@@ -153,6 +160,36 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
         assert_equal [ entry.fetch("occurrence_id") ],
                      source.pending(now: NOW + 300).map { |record| record.fetch("occurrence_id") }
       end
+    end
+  end
+
+  def test_provider_retry_at_wins_over_short_default_backoff
+    with_initialized_scheduler_project do |_project_root, hive_state, source, entry|
+      admission = Hive::PatrolFix::AdmissionStore.new(
+        root: File.join(hive_state, "patrol-fix", "admissions")
+      )
+      retry_at = NOW + 7_200
+      scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
+        sources: [ source ], admission_store: admission,
+        semantic_admission_factory: lambda do |store:, **_args|
+          Hive::PatrolFix::SemanticAdmission.new(
+            store: store, candidate_provider: ->(_snapshot) { [] },
+            current_head: -> { "2" * 40 },
+            decision_provider: ->(_input) { raise QuotaError, retry_at.iso8601 },
+            clock: -> { NOW }
+          )
+        end,
+        task_materializer_factory: ->(**) { flunk "quota failure must not materialize" },
+        clock: -> { NOW }
+      )
+
+      event = scheduler.tick(now: NOW).fetch(0)
+
+      assert_equal :retry_wait, event.status
+      assert_equal retry_at.iso8601, event.retry_at
+      assert_empty source.pending(now: retry_at - 1)
+      assert_equal [ entry.fetch("occurrence_id") ],
+                   source.pending(now: retry_at).map { |record| record.fetch("occurrence_id") }
     end
   end
 

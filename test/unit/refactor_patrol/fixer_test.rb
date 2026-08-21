@@ -48,6 +48,29 @@ class RefactorPatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_cutover_recheck_denies_before_local_worktree_creation
+    with_repo do |repo, analysis_sha|
+      boundaries = []
+      fence = lambda do |boundary|
+        boundaries << boundary
+        boundary != :worktree_create
+      end
+
+      error = assert_raises(Hive::RefactorPatrol::Fixer::CutoverDenied) do
+        fixer(repo, agent: ->(**) { flunk "fenced fixer must not launch an agent" })
+          .attempt(
+            thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha,
+            effect_fence: fence
+          )
+      end
+
+      assert_match(/worktree_create/, error.message)
+      assert_includes boundaries, :worktree_create
+      refute_includes run!("git", "-C", repo, "branch", "--format=%(refname:short)"),
+                      "hive-refactor/"
+    end
+  end
+
   def test_retry_recovers_a_clean_committed_patch_without_rerunning_agent
     with_repo do |repo, analysis_sha|
       calls = 0

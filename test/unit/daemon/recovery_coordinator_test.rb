@@ -126,6 +126,88 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
                    request.recovery.fetch("failure_attempt_history")
       assert_equal "operator", request.recovery.fetch("owner")
       assert_equal "admitted", request.recovery.fetch("phase")
+
+      persisted_bytes = File.binread(request.path)
+      3.times do |tick|
+        replay = coordinator.resume(request:, row:, now: NOW + tick + 1)
+
+        assert_equal "blocked", replay.status
+        assert_equal "deterministic_failure", replay.reason
+        assert_equal "parked", replay.escalation_tier
+        assert_equal persisted_bytes, File.binread(request.path),
+                     "daemon replay must not mutate or unpark the request"
+        request = Q.fetch("deterministic", state_home: state_home)
+      end
+      assert_equal "error", Hive::Markers.current(row.state_file).name.to_s
+    end
+  end
+
+  def test_explicit_retry_unparks_and_changed_failure_reenters_with_a_fresh_count
+    attrs = {
+      "reason" => "implementer_failed", "marker_id" => "marker-3",
+      "provider" => "pi", "status" => "error", "message" => "same crash",
+      "attempt_id" => "attempt-3"
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - 3600) do |coordinator, row, state_home|
+      fingerprint = coordinator.send(:failure_fingerprint, row, attrs)
+      write_terminal_recovery_history(
+        row:, state_home:,
+        retry_count: Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.length,
+        failure_fingerprint: fingerprint, identical_failure_count: 2,
+        failure_attempt_history: %w[attempt-1 attempt-2]
+      )
+      coordinator.request(
+        row:, requestor: "healer", request_id: "deterministic", now: NOW
+      )
+
+      unparked = coordinator.request(
+        row:, requestor: "action",
+        observation_token: coordinator.observation_token_for(row),
+        now: NOW + 1
+      )
+
+      assert_equal "queued", unparked.status
+      assert_equal "admitted", unparked.phase
+      assert_nil unparked.reason
+      request = Q.fetch("deterministic", state_home: state_home)
+      assert_nil request.recovery.fetch("blocked_reason")
+      assert_equal "scheduler", request.recovery.fetch("owner")
+
+      resumed = coordinator.resume(request:, row:, now: NOW + 1)
+      assert_equal "queued", resumed.status
+      assert_equal "cleared", resumed.phase
+      request = Q.fetch("deterministic", state_home: state_home)
+      coordinator.mark_dispatched(request, attempt_id: "attempt-4", now: NOW + 1)
+      request = Q.fetch("deterministic", state_home: state_home)
+      coordinator.mark_dispatched(
+        request, attempt_id: "attempt-4", terminal: true,
+        outcome: "failed", now: NOW + 2
+      )
+
+      changed_attrs = attrs.merge(
+        "marker_id" => "marker-4", "attempt_id" => "attempt-4",
+        "message" => "different crash"
+      )
+      changed_at = NOW + 2
+      File.write(
+        row.state_file,
+        "# Task\n\n#{Hive::Markers.build_marker('ERROR', changed_attrs)}\n"
+      )
+      File.utime(changed_at, changed_at, row.state_file)
+      changed_row = row.with(
+        marker_attrs: changed_attrs, state_file_mtime: changed_at,
+        attempt_id: "attempt-4"
+      )
+
+      retried = coordinator.request(
+        row: changed_row, requestor: "healer", request_id: "changed-after-unpark",
+        now: changed_at + 3600
+      )
+
+      assert_equal "queued", retried.status
+      changed = Q.fetch("changed-after-unpark", state_home: state_home)
+      assert_equal 1, changed.recovery.fetch("identical_failure_count")
+      assert_equal [ "attempt-4" ], changed.recovery.fetch("failure_attempt_history")
     end
   end
 

@@ -287,6 +287,24 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_prefixed_unquoted_dotted_password_trips_the_secret_guardrail
+    variable = %w[DB PASSWORD].join("_")
+    dotted_literal = %w[s3cr3t pass42].join(".")
+    with_two_commits(
+      file: "config/runtime.env",
+      content: "export #{variable}=#{dotted_literal}\n"
+    ) do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir), base_sha: base, head_sha: head
+      )
+
+      assert_equal :tripped, result.status
+      assert(result.matches.any? do |match|
+        match.pattern_name == "secrets_pattern_match.password_assignment"
+      end)
+    end
+  end
+
   def test_test_password_literal_requires_an_exact_fingerprint_waiver
     with_two_commits(
       file: "test/integration/login_test.rb",

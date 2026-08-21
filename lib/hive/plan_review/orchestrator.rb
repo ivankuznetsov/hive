@@ -172,10 +172,19 @@ module Hive
         accepted = accepted_findings(record)
         candidate_bytes = candidate_bytes(record)
         unless accepted.empty?
+          # The follow-up limit must fence external re-entry as well as the
+          # automatic continuation below. A capped terminal record otherwise
+          # retained enough accepted evidence to launch revision N+1 on every
+          # later advance! call.
+          if record.state == "blocked" &&
+             verification_revision_rounds(record) >= MAX_VERIFICATION_REVISION_ROUNDS
+            return Projection.new(record)
+          end
+
           verification_route = latest_route(record, "verification")
           if candidate_bytes && verification_route &&
              TERMINAL_OUTCOMES.include?(verification_route["outcome"])
-            reset = recovery_reset_route(
+            reset = Hive::PlanReview.recovery_reset_route(
               verification_route,
               "verification_followup" => true,
               "diagnostic" => "candidate requires verification after another revision"
@@ -376,7 +385,7 @@ module Hive
         end
 
         reset = latest.map do |route|
-          recovery_reset_route(
+          Hive::PlanReview.recovery_reset_route(
             route,
             "capability_probe_fingerprint" => fingerprint,
             "capability_probe_count" => count
@@ -423,7 +432,7 @@ module Hive
 
       def reset_incomplete_verification(record, findings:, blockers:)
         route = latest_route(record, "verification")
-        reset = recovery_reset_route(
+        reset = Hive::PlanReview.recovery_reset_route(
           route,
           "incomplete_attestation_retry" => true,
           "diagnostic" => "verification omitted #{blockers.length} disposition attestation(s)"
@@ -443,16 +452,6 @@ module Hive
         record["routes"].count do |route|
           route["role"] == "verification" && route["incomplete_attestation_retry"] == true
         end
-      end
-
-      def recovery_reset_route(route, attributes = {})
-        route.slice(
-          "role", "requested", "actual", "capability_result",
-          "independence_verified", "independence_reason"
-        ).merge(
-          "outcome" => "retryable_failure", "retry_at" => nil,
-          "recovery_reset" => true
-        ).merge(attributes)
       end
 
       def ensure_leg(record, role, plan_bytes, requested: nil, merge_coverage: true,
@@ -830,7 +829,7 @@ module Hive
         return [ record, findings, nil ] if verification_revision_rounds(record) >=
                                                    MAX_VERIFICATION_REVISION_ROUNDS
 
-        reset = recovery_reset_route(
+        reset = Hive::PlanReview.recovery_reset_route(
           latest_route(record, "verification"),
           "verification_followup" => true,
           "diagnostic" => "verification found #{actionable.length} actionable residual(s)"

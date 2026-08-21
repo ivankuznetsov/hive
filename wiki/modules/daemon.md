@@ -47,7 +47,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Conditions::AttemptObserver` | `lib/hive/conditions/attempt_observer.rb` | Observes reconciled terminal/lost durable attempts. For coding execute attempts it idempotently journals the current `AgentHealthy` fact and rebuilds the projection: only a terminal `succeeded` receipt is satisfied; failed/cancelled/lost outcomes fail closed. Confirmed deliveries are memoized in-process before task lookup/journal parsing; restart rechecks the durable journal once. A deleted task folder is `not_applicable`, not perpetually pending. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
-| `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for marker-bound and explicit-route admission recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v5 request before clearing (or a markerless policy-bound request), and resumes `admitted → cleared → dispatched → terminal` after restart. Failure fingerprints are stage-scoped: varying failures retry freely, repeated failures surface degraded state, and three identical failures at the retry-ladder ceiling park as `deterministic_failure`. User-facing adapters only submit observations and render its receipt. |
+| `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for marker-bound and explicit-route admission recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v5 request before clearing (or a markerless policy-bound request), and resumes `admitted → cleared → dispatched → terminal` after restart. Failure fingerprints are stage-scoped: varying failures retry freely, repeated failures surface degraded state, and three identical failures at the retry-ladder ceiling park as `deterministic_failure`. A parked request survives scheduler ticks unchanged; after correcting the cause, a freshness-bound operator `workflow.retry` explicitly clears the park without changing request identity. User-facing adapters only submit observations and render its receipt. |
 | `Hive::Recovery::API` | `lib/hive/recovery/api.rb` | Neutral adapter for CLI/action, TUI, Rails, recorder, Telegram, and healer observations. It normalizes each surface's row shape and derives the freshness token; `RecoveryCoordinator` still owns every policy decision and mutation. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Turns an already-cleared coding `3-plan` pause into `hive develop ... --from 3-plan`. It validates command shape, prepares and re-verifies the exact `PlanReview::TransitionGuard` observation under the task lock, and only then flips `WAITING` to `COMPLETE`; uncleared review never mutates the marker. |
 | `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership and is the sole automatic scheduler that submits cooled `ERROR` / `REVIEW_ERROR` observations to `RecoveryCoordinator`. Lease-backed attempt loss is ledger-only and dispatches successors through `Attempts::Dispatcher` on the same retry ladder; it does not project or clear a compatibility marker. The obsolete attributed `execute_waiting reason=dirty_worktree` rewrite lives only in one-shot `hive migrate`, not the tick loop. |
@@ -448,6 +448,14 @@ advances a workflow stage directly:
    transition begins a new failure series at the five-second step. Historical
    plan-review recovery therefore cannot put a task's first execute failure at
    the one-hour ceiling.
+
+   A `deterministic_failure` park is also durable: ordinary scheduler resume
+   passes return the existing receipt without clearing its blocker, consuming
+   a dispatch slot, or launching another child. Once the failing input,
+   provider, or implementation changes, the existing freshness-bound
+   `workflow.retry` action is the explicit unpark verb. It keeps the same
+   recovery request and generation, returns it to scheduler ownership, and
+   starts the next observed failure series from fresh evidence.
 
    `StaleAgentHealer` is only the automatic scheduler for those durable errors.
    After the shared marker-age cooldown it submits the observed row to

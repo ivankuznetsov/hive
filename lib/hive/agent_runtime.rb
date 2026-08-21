@@ -262,8 +262,6 @@ module Hive
       return nil unless public_profile
 
       AgentCliRuntime.extract_provider_error(public_profile, event)
-    rescue StandardError
-      nil
     end
 
     def observe(profile, result)

@@ -24,14 +24,7 @@ Use the repository root for read-only code, wiki, history, and contract
 inspection. Do not edit the canonical plan, task metadata, markers, or project
 source; the disposable directory containing the plan copy and result is the
 only writable review workspace.
-<% if host_output_mode %>
-Return the review-result JSON as the complete string value at
-`files["<%= output_basename %>"]` in the required host-output wrapper. The
-outer response must be that wrapper, not the review-result object, and its file
-key must be the basename exactly, never the absolute path.
-<% else %>
 Write one JSON object to `<%= output_path %>` and no other authority artifact.
-<% end %>
 The object must use schema `hive-plan-review-adapter-result`, version 1, and
 include these exact observation bindings:
 
@@ -48,11 +41,6 @@ disposition.
 For each finding, set `anchor_digest` to the lowercase SHA-256 of the selected
 inclusive line range after removing each line terminator and joining the lines
 with a single `\n`; `path` must be exactly `plan.md`.
-<% if host_computed_anchors %>
-This confined route has no hashing tool. Set `anchor_digest` to 64 lowercase
-zeroes for each otherwise valid finding; Hive will replace it from the cited
-line range before validating the result.
-<% end %>
 
 Use exactly this JSON shape (JSON has no comments):
 

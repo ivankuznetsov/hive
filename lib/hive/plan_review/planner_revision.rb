@@ -1,10 +1,10 @@
 require "digest"
 require "erb"
-require "fileutils"
 require "json"
 require "securerandom"
 require "hive/artifact_firewall"
 require "hive/markers"
+require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/plan_signals"
 require "hive/plan_review/workspace_scope"
 require "hive/secret_patterns"
@@ -111,7 +111,10 @@ module Hive
       end
 
       def call(review_id:, plan_bytes:, findings:, planner_identity:, timeout_sec:)
-        Dir.mktmpdir("hive-plan-revision-") do |workspace|
+        DisposableWorktree.open(
+          project_root: @task.project_root,
+          prefix: "hive-plan-revision-worktree-"
+        ) do |workspace|
           input_path = File.join(workspace, "input-plan.md")
           output_path = File.join(workspace, "candidate-output.md")
           File.binwrite(input_path, Hive::SecretPatterns.redact(plan_bytes.to_s))

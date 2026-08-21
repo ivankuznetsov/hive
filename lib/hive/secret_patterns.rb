@@ -40,7 +40,9 @@ module Hive
       # `password=`, `passwd=`, `PASSWORD=` style assignments. Require
       # the assignment delimiter so prose such as "password resets" is
       # not mistaken for a credential.
-      password_assignment:   /\b(?:password|passwd|pwd)\b['"]?\s*[:=]\s*['"]?[^\s'"]{6,}['"]?(?=[\s,;}\]]|$)/i,
+      # Include conventional prefixes (`DB_PASSWORD`, `ADMIN_PASSWORD`) so a
+      # dotted unquoted credential cannot hide behind the variable name.
+      password_assignment:   /\b(?:[A-Za-z][A-Za-z0-9]*_)*(?:password|passwd|pwd)\b['"]?\s*[:=]\s*['"]?[^\s'"]{6,}['"]?(?=[\s,;}\]]|$)/i,
       password_sql:          /\bPASSWORD\s+['"][^\s'"]{6,}['"]/i,
       password_xml:          /<password>\s*[^<\s]{6,}\s*<\/password>/i,
       password_cli:          /--password\s+['"]?[^\s'"]{6,}['"]?(?=\s|$)/i,

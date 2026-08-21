@@ -505,9 +505,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
     ]
   end
 
-  def test_recovery_request_is_resumed_by_the_shared_coordinator_before_dispatch
+  def test_blocked_recovery_survives_repeated_dispatch_ticks_without_slots_or_spawns
     coordinator = FakeRecoveryCoordinator.new(status: "blocked")
-    dispatcher, supervisor, = make_dispatcher(
+    dispatcher, supervisor, controller = make_dispatcher(
       rows: [], recovery_coordinator: coordinator
     )
     recovery = {
@@ -542,11 +542,19 @@ class HiveDaemonDispatcherTest < Minitest::Test
       :find_project,
       ->(_name) { { "name" => "p1", "path" => "/tmp/p1" } }
     ) do
-      dispatcher.send(:process_dispatch_request_iteration, request, now: T0, rows: [ observed ])
+      3.times do |tick|
+        dispatcher.send(
+          :process_dispatch_request_iteration,
+          request,
+          now: T0 + tick,
+          rows: [ observed ]
+        )
+      end
     end
 
-    assert_equal 1, coordinator.resumes.size
+    assert_equal 3, coordinator.resumes.size
     assert_empty supervisor.spawned
+    assert_equal 0, controller.daily_count_for("p1", T0)
   end
 
   def test_recovery_request_waits_when_the_status_observation_is_missing

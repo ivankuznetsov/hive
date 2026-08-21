@@ -27,11 +27,6 @@ module Hive
 
       module_function
 
-      # Confinement no longer decides who may review, so no provider is
-      # refused for lacking it. Whether a provider can be launched at all is
-      # still the route resolver's capability probe to answer.
-      def supported?(_profile) = true
-
       def launch_kwargs(profile:, workspace:, role:, output_path: nil)
         return workspace_write_kwargs(profile) if profile.workspace_write_supported?
 

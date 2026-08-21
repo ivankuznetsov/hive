@@ -1,6 +1,5 @@
 require "open3"
 require "fileutils"
-require "digest"
 require "hive/config"
 require "hive/git_ops"
 require "hive/secret_patterns"
@@ -249,9 +248,8 @@ module Hive
 
           introduced = introduced_secret_names(
             worktree_path,
-            secret_match_fingerprints(blob[:stdout], path: entry[:path]),
-            head_object_ids[entry[:path]],
-            path: entry[:path]
+            Hive::SecretPatterns.scan(blob[:stdout]).map { |hit| [ hit[:name], hit[:sha256] ] },
+            head_object_ids[entry[:path]]
           )
           return introduced unless introduced[:success]
           names = introduced[:names]
@@ -265,36 +263,23 @@ module Hive
         { success: true, violations: violations.uniq }
       end
 
-      def introduced_secret_names(worktree_path, staged_hits, head_object_id, path: nil)
-        return { success: true, names: staged_hits.map { |hit| hit[:name] }.uniq } unless head_object_id
+      def introduced_secret_names(worktree_path, staged_hits, head_object_id)
+        return { success: true, names: staged_hits.map(&:first).uniq } unless head_object_id
 
         head_blob = bounded_blob(worktree_path, head_object_id)
         return head_blob unless head_blob[:success]
-        return { success: true, names: staged_hits.map { |hit| hit[:name] }.uniq } if head_blob[:oversized]
+        return { success: true, names: staged_hits.map(&:first).uniq } if head_blob[:oversized]
 
-        baseline = secret_match_fingerprints(head_blob[:stdout], path: path)
-                   .map { |hit| hit[:fingerprint] }.tally
+        baseline = Hive::SecretPatterns.scan(head_blob[:stdout])
+          .map { |hit| [ hit[:name], hit[:sha256] ] }.tally
         introduced = staged_hits.filter_map do |hit|
-          fingerprint = hit[:fingerprint]
-          if baseline.fetch(fingerprint, 0).positive?
-            baseline[fingerprint] -= 1
+          if baseline.fetch(hit, 0).positive?
+            baseline[hit] -= 1
             next
           end
-          hit[:name]
+          hit.first
         end
         { success: true, names: introduced.uniq }
-      end
-
-      def secret_match_fingerprints(content, path: nil)
-        text = content.to_s.dup.force_encoding(Encoding::UTF_8).scrub("?")
-        Hive::SecretPatterns::PATTERNS.flat_map do |name, pattern|
-          matches = []
-          text.scan(pattern) do
-            match = Regexp.last_match[0]
-            matches << { name: name, fingerprint: [ name, Digest::SHA256.hexdigest(match) ] }
-          end
-          matches
-        end
       end
 
       def bounded_blob(worktree_path, object_id)

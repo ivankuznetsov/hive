@@ -70,8 +70,6 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       runner = lambda do |output_path:, request:, **kwargs|
         prompt = kwargs.fetch(:prompt)
         payload = valid_result(request)
-        payload.fetch("findings").first.fetch("evidence")["anchor_digest"] = "0" * 64
-        payload["residual_evidence"] = [ { "unexpected" => "initial review residue" } ]
         File.write(output_path, JSON.generate(payload))
         { "status" => "ok", "actual_route" => request.reviewer }
       end
@@ -91,7 +89,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       refute_includes prompt, 'files["hive-plan-review-result.json"]'
       refute_includes prompt, "This confined route has no hashing tool"
       refute_includes prompt, "Invoke `"
-      assert_equal Digest::SHA256.hexdigest("# Plan"),
+      assert_equal valid_result(pi_request).dig("findings", 0, "evidence", "anchor_digest"),
                    result.findings.first["evidence"].fetch("anchor_digest")
       assert_empty result.residual_evidence
     end
@@ -481,7 +479,9 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       error = nil
       with_replaced_singleton_method(Open3, :capture3, capture) do
         error = assert_raises(Hive::PlanReview::InvalidRecord) do
-          adapter_for(->(**) { }).send(:prepare_disposable, request)
+          Hive::PlanReview::DisposableWorktree.new(
+            project_root: request.project_root
+          ).create
         end
       end
 
@@ -494,11 +494,17 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     Dir.mktmpdir("hive-plan-review-worktree-") do |parent|
       path = File.join(parent, "checkout")
       FileUtils.mkdir_p(path)
+      worktree = Hive::PlanReview::DisposableWorktree.new(
+        project_root: request_for_cleanup.project_root
+      )
+      worktree.instance_variable_set(:@temp_root, parent)
+      worktree.instance_variable_set(:@path, path)
+      worktree.instance_variable_set(:@added, true)
       _out, err = capture_io do
         with_replaced_singleton_method(
           Open3, :capture3, ->(*) { raise Errno::EIO, "cleanup" }
         ) do
-          adapter_for(->(**) { }).send(:cleanup_disposable, request_for_cleanup, path)
+          worktree.cleanup
         end
       end
 

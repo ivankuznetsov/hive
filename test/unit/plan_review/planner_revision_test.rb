@@ -4,11 +4,12 @@ require "hive/plan_review/planner_revision"
 class PlanReviewPlannerRevisionTest < Minitest::Test
   include HiveTestHelper
 
-  Task = Struct.new(:folder, keyword_init: true)
+  Task = Struct.new(:folder, :project_root, keyword_init: true)
   RunnerTask = Struct.new(:folder, :meta_yml_path, keyword_init: true)
 
   def test_accepts_one_complete_candidate_and_leaves_input_plan_untouched
     Dir.mktmpdir("hive-plan-revision") do |root|
+      initialize_repository(root)
       task_folder = File.join(root, ".hive-state", "stages", "3-plan", "demo")
       FileUtils.mkdir_p(task_folder)
       canonical = File.join(task_folder, "plan.md")
@@ -18,7 +19,7 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
         { "status" => "success", "actual_route" => planner_identity }
       end
       service = Hive::PlanReview::PlannerRevision.new(
-        task: Task.new(folder: task_folder), cfg: {}, runner:
+        task: Task.new(folder: task_folder, project_root: root), cfg: {}, runner:
       )
 
       result = service.call(
@@ -34,6 +35,7 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
 
   def test_rejects_waiting_candidate
     Dir.mktmpdir("hive-plan-revision") do |root|
+      initialize_repository(root)
       task_folder = File.join(root, ".hive-state", "stages", "3-plan", "demo")
       FileUtils.mkdir_p(task_folder)
       runner = lambda do |output_path:, **|
@@ -41,7 +43,7 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
         { "status" => "success" }
       end
       service = Hive::PlanReview::PlannerRevision.new(
-        task: Task.new(folder: task_folder), cfg: {}, runner:
+        task: Task.new(folder: task_folder, project_root: root), cfg: {}, runner:
       )
       result = service.call(
         review_id: "pr-#{'b' * 64}", plan_bytes: "# Plan\n", findings: [],
@@ -55,6 +57,7 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
 
   def test_rejects_candidate_before_allocating_more_than_the_byte_limit
     Dir.mktmpdir("hive-plan-revision") do |root|
+      initialize_repository(root)
       task_folder = File.join(root, ".hive-state", "stages", "3-plan", "demo")
       FileUtils.mkdir_p(task_folder)
       runner = lambda do |output_path:, **|
@@ -65,7 +68,7 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
         { "status" => "success" }
       end
       result = Hive::PlanReview::PlannerRevision.new(
-        task: Task.new(folder: task_folder), cfg: {}, runner:
+        task: Task.new(folder: task_folder, project_root: root), cfg: {}, runner:
       ).call(
         review_id: "pr-#{'c' * 64}", plan_bytes: "# Plan\n", findings: [],
         planner_identity:, timeout_sec: 60
@@ -299,7 +302,11 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
   end
 
   def test_revision_normalizes_failed_runner_object_findings_and_candidate_path_errors
-    task = Task.new(folder: Dir.mktmpdir("hive-plan-revision-branches"))
+    project = Dir.mktmpdir("hive-plan-revision-branches")
+    initialize_repository(project)
+    task_folder = File.join(project, ".hive-state", "stages", "3-plan", "demo")
+    FileUtils.mkdir_p(task_folder)
+    task = Task.new(folder: task_folder, project_root: project)
     failed = Hive::PlanReview::PlannerRevision.new(
       task:, cfg: {}, runner: ->(**) { { "status" => "timeout", "diagnostic" => "slow" } }
     ).call(
@@ -331,11 +338,57 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
     end
     assert_includes error.message, "did not publish"
   ensure
-    FileUtils.remove_entry(task.folder) if task&.folder && File.exist?(task.folder)
+    FileUtils.remove_entry(project) if project && File.exist?(project)
     FileUtils.remove_entry(workspace) if workspace && File.exist?(workspace)
   end
 
+  def test_codex_planner_revision_runs_inside_a_disposable_git_worktree
+    Dir.mktmpdir("hive-plan-revision-codex") do |root|
+      initialize_repository(root)
+      task_folder = File.join(root, ".hive-state", "stages", "3-plan", "demo")
+      FileUtils.mkdir_p(task_folder)
+      observed_workspace = nil
+      runner = lambda do |workspace:, output_path:, **|
+        observed_workspace = workspace
+        assert system(
+          "git", "-C", workspace, "rev-parse", "--is-inside-work-tree",
+          out: File::NULL, err: File::NULL
+        ), "Codex planner revision cwd must be a Git checkout"
+        refute_equal File.expand_path(root), File.expand_path(workspace)
+        File.write(output_path, "# Revised\n<!-- COMPLETE -->\n")
+        { "status" => "success" }
+      end
+      identity = planner_identity.merge("provider" => "codex")
+      service = Hive::PlanReview::PlannerRevision.new(
+        task: Task.new(folder: task_folder, project_root: root), cfg: {}, runner:
+      )
+
+      result = service.call(
+        review_id: "pr-#{'f' * 64}", plan_bytes: "# Plan\n", findings: [],
+        planner_identity: identity, timeout_sec: 60
+      )
+
+      assert result.success?
+      refute File.exist?(observed_workspace), "disposable planner worktree must be removed"
+    end
+  end
+
   private
+
+  def initialize_repository(root)
+    File.write(File.join(root, "README.md"), "fixture\n")
+    commands = [
+      %w[git init -q],
+      %w[git config user.email hive@example.test],
+      %w[git config user.name Hive],
+      %w[git add README.md],
+      %w[git commit -qm initial]
+    ]
+    commands.each do |command|
+      assert system(*command, chdir: root, out: File::NULL, err: File::NULL),
+             "fixture Git command failed: #{command.join(' ')}"
+    end
+  end
 
   def planner_identity
     {

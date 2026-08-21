@@ -191,8 +191,48 @@ class OperationalStatusTest < Minitest::Test
 
   def test_plan_review_state_owner_reason_and_projection_are_preserved
     review = {
+      "applicable" => true,
+      "review_id" => "pr-#{'a' * 64}",
+      "version" => 3,
+      "observation_digest" => "b" * 64,
+      "task_generation" => "generation-1",
+      "plan_digest" => "c" * 64,
+      "policy_fingerprint" => "d" * 64,
+      "computed_level" => "mandatory",
+      "effective_level" => "mandatory",
       "state" => "awaiting_decision", "required_action" => "answer manual finding",
-      "blocker_owner" => "operator", "blocker_reason" => "manual_answer_required"
+      "outcome" => nil,
+      "degraded" => false,
+      "degradation_reason" => nil,
+      "attempt_count" => 2,
+      "current_attempt_id" => "pra-#{'e' * 64}",
+      "coverage_counts" => {
+        "requested" => 2, "completed" => 1, "failed" => 0,
+        "unsupported" => 1, "waived" => 0
+      },
+      "finding_counts" => {
+        "open" => 1, "approved" => 0, "answered" => 0,
+        "incorporated" => 0, "verified" => 0, "resolved" => 0,
+        "waived" => 0, "total" => 1, "open_gated" => 1,
+        "open_manual" => 0, "fyi" => 0
+      },
+      "blockers" => [ {
+        "owner" => "operator", "reason" => "reviewer_unlaunchable",
+        "fingerprint" => "f" * 64, "diagnostic" => "review skill unavailable"
+      } ],
+      "blocker_owner" => "operator", "blocker_reason" => "manual_answer_required",
+      "retry_at" => nil,
+      "routes" => [ {
+        "role" => "verification", "requested" => {}, "actual" => {},
+        "capability_result" => "unsupported", "independence_verified" => true,
+        "outcome" => "retryable_failure", "recovery_reset" => true,
+        "capability_probe_fingerprint" => "0" * 64,
+        "capability_probe_count" => 3, "verification_followup" => true,
+        "incomplete_attestation_retry" => true
+      } ],
+      "artifacts" => {},
+      "freshness" => { "status" => "current", "reason" => nil },
+      "execution_allowed" => false
     }
     source = task(
       action: "plan_review_decision", slug: "review", stage: "3-plan",
@@ -205,6 +245,11 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", projected.fetch("blocker_owner")
     assert_equal "answer manual finding", projected.fetch("reason")
     assert_equal review, projected.fetch("plan_review")
+
+    schema = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
+    )
+    assert_empty schema.validate(project(status_payload(source))).to_a
   end
 
   def test_daemon_owned_error_retry_is_not_reported_as_operator_repair

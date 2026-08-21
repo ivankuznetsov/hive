@@ -54,18 +54,6 @@ class PlanReviewWorkspaceScopeTest < Minitest::Test
     end
   end
 
-  # The detached worktree supplies the common write-isolation boundary, while
-  # provider-specific tooling can still add its native sandbox. No provider is
-  # refused merely because it lacks an additional sandbox implementation.
-  def test_no_provider_is_refused_for_lacking_confinement
-    %i[opencode claude pi grok codex].each do |name|
-      profile = Hive::AgentProfiles.lookup(name)
-
-      assert Hive::PlanReview::WorkspaceScope.supported?(profile),
-             "#{name} must not be refused for confinement"
-    end
-  end
-
   # The reviewer must be able to read the code, search it, shell out (the
   # finding format needs SHA-256), and fetch referenced docs.
   def test_reviewers_get_the_tools_review_actually_requires
@@ -83,8 +71,6 @@ class PlanReviewWorkspaceScopeTest < Minitest::Test
 
     assert profile.workspace_write_supported?,
            "grok declares --sandbox flags, so workspace write must be supported"
-    assert Hive::PlanReview::WorkspaceScope.supported?(profile)
-
     kwargs = Hive::PlanReview::WorkspaceScope.launch_kwargs(
       profile:, workspace: "/tmp/review", role: "adversarial"
     )

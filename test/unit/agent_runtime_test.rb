@@ -86,12 +86,6 @@ class AgentRuntimeTest < Minitest::Test
     :name, :launcher_identity, :runtime_profile, keyword_init: true
   )
 
-  FailingErrorProfile = Struct.new(:name, :launcher_identity, keyword_init: true) do
-    def extract_error_event(_event)
-      raise "unreadable provider error payload"
-    end
-  end
-
   def test_existing_custom_profile_constructor_compiles_without_new_keywords
     profile = custom_profile
     request = Hive::AgentRuntime::Request.new(profile: profile, prompt: "work")
@@ -577,24 +571,6 @@ class AgentRuntimeTest < Minitest::Test
     assert_equal :pi, error[:provider]
     assert_equal 402, error[:status_code]
     assert_includes error[:message], "Prompt tokens limit exceeded"
-  end
-
-  # A profile that cannot read its own error shape must not take the run down
-  # with it: provider-error detection is an enrichment step, so a raising
-  # extractor degrades to "no provider error" and the normal exit-code path
-  # still classifies the run.
-  def test_provider_error_extraction_returns_nil_when_the_profile_raises
-    profile = RuntimeProfileAdapter.new(
-      name: :custom,
-      launcher_identity: "custom/v1",
-      runtime_profile: FailingErrorProfile.new(
-        name: :custom, launcher_identity: "custom/v1"
-      )
-    )
-
-    assert_nil Hive::AgentRuntime.extract_provider_error(
-      profile, { "type" => "error", "message" => "429 slow down" }
-    )
   end
 
   def test_completed_pi_turn_is_not_a_provider_error

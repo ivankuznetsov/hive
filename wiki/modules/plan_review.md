@@ -59,8 +59,9 @@ normalized policy settings, extracted evidence, and every level source.
 ## Reviewer and routing contract
 
 `Hive::PlanReview::Adapters::Base` owns a provider-neutral request/result
-contract. `CeDocReview` creates a detached disposable Git worktree, replaces
-its `plan.md` with the redacted immutable review input, and invokes the
+contract. The shared `DisposableWorktree` creates a detached Git checkout for
+both `CeDocReview` and original-planner revisions. `CeDocReview` replaces that
+checkout's `plan.md` with the redacted immutable review input and invokes the
 configured `ce-doc-review` capability for the primary
 whole-document/specialist leg. The adversarial leg uses a separate prompt and
 route. Neither reviewer can publish canonical `plan.md`; malformed or free-form
@@ -124,7 +125,9 @@ line-range SHA-256 against the immutable reviewed snapshot before the finding
 can affect revision or approval policy.
 
 Accepted findings are batched into a `PlannerRevision` call using the captured
-planner provider/model/family/effort. Each call writes one immutable,
+planner provider/model/family/effort. The planner runs in the same shared
+detached-worktree boundary as reviewers, including for Codex providers that
+refuse a non-Git temporary directory. Each call writes one immutable,
 digest-named `candidate-plan-<sha256>.md`. Its ArtifactFirewall custody is
 passed into the shared agent launcher, so the protected snapshot surrounds only the untrusted
 provider process. Hive's own durable session-start/session-finish writes to
@@ -140,8 +143,10 @@ lineage. Existing decisions remain bound to the same fingerprint, new gated
 findings consume any exact current approval policy immediately, and the daemon
 receives a runnable `revising` state. The next planner pass uses the latest
 candidate as its input rather than discarding earlier incorporated work. Hive
-permits at most three successful planner-revision rounds; a repeatedly
-unresolved defect then blocks instead of looping forever. A verified candidate
+permits at most three successful planner-revision rounds; the cap is enforced
+again at every orchestration entry, so an external `advance!` call cannot
+restart a capped verification loop. A repeatedly unresolved defect then blocks
+instead of looping forever. A verified candidate
 is atomically promoted to canonical `plan.md` under the task mutation lock
 immediately before its matching terminal resolution is published under that
 same lock.
@@ -264,6 +269,20 @@ attempt, coverage and finding counts, blockers/owner/reason, retry time, one
 required action, sanitized route receipts, artifact references, freshness, and
 `execution_allowed`. Daemon rows and `Hive::Tui::Snapshot::Row` copy that
 object; they do not derive a second policy result.
+
+The strict shared status definitions also admit the diagnostics Hive actually
+emits while recovering reviewer capability: blocker fingerprints and
+diagnostics, capability-probe fingerprint/count, verification-followup and
+incomplete-attestation retry flags. The plan-review progress token treats a
+missing projection distinctly, but hashes empty, non-object, invalid-identity,
+or oversized `current.json` bytes into one stable unreadable token instead of
+raising through attempt generation.
+
+Recovery-reset route construction is shared by orchestration and operator
+decisions. Reviewer prompts now have one output contract and require their own
+anchored evidence on every provider; the removed host-output and host-anchor
+branches had no runtime callers after disposable worktrees gave every reviewer
+the hashing and exact-file output capabilities the contract needs.
 
 Hive Web renders the same object on task detail, opens only current
 content-addressed safe artifacts, and posts the full observation identity to

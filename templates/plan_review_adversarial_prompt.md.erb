@@ -16,14 +16,7 @@ Focus on hidden contradictions, unsafe assumptions, rollback/recovery gaps,
 unmet acceptance criteria, and ways the plan could appear complete while
 failing in production. Use the repository root for read-only inspection. Do
 not edit the canonical plan or project source.
-<% if host_output_mode %>
-Return the review-result JSON as the complete string value at
-`files["<%= output_basename %>"]` in the required host-output wrapper. The
-outer response must be that wrapper, not the review-result object, and its file
-key must be the basename exactly, never the absolute path.
-<% else %>
 Write one JSON object to `<%= output_path %>`.
-<% end %>
 
 The review-result object must use schema `hive-plan-review-adapter-result`,
 version 1, bound to:
@@ -39,11 +32,6 @@ emit `closed` or another inferred disposition.
 For each finding, set `anchor_digest` to the lowercase SHA-256 of the selected
 inclusive line range after removing each line terminator and joining the lines
 with a single `\n`; `path` must be exactly `plan.md`.
-<% if host_computed_anchors %>
-This confined route has no hashing tool. Set `anchor_digest` to 64 lowercase
-zeroes for each otherwise valid finding; Hive will replace it from the cited
-line range before validating the result.
-<% end %>
 
 Use exactly this JSON shape (JSON has no comments):
 

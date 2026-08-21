@@ -375,13 +375,7 @@ module Hive
       end
 
       def append_recovery_reset(current, route)
-        reset = route.slice(
-          "role", "requested", "actual", "capability_result",
-          "independence_verified", "independence_reason"
-        ).merge(
-          "outcome" => "retryable_failure", "retry_at" => nil,
-          "recovery_reset" => true
-        )
+        reset = Hive::PlanReview.recovery_reset_route(route)
         current["routes"] + [ reset ]
       end
 

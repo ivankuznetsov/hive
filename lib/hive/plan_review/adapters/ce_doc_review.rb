@@ -2,16 +2,15 @@ require "digest"
 require "erb"
 require "fileutils"
 require "json"
-require "open3"
 require "securerandom"
 require "timeout"
-require "tmpdir"
 require "hive/agent_limit"
 require "hive/agent_profiles"
 require "hive/agent_skills"
 require "hive/artifact_firewall"
 require "hive/config"
 require "hive/plan_review/adapters/base"
+require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/result_parser"
 require "hive/plan_review/route_resolver"
 require "hive/plan_review/workspace_scope"
@@ -167,6 +166,7 @@ module Hive
         def call(request)
           runner_result = nil
           disposable = nil
+          disposable_worktree = nil
           validate_snapshot!(request)
           capability = capability_for(request)
           if capability.fetch("status") != "present"
@@ -178,7 +178,8 @@ module Hive
           end
 
           before_digest = request.plan_digest
-          disposable = prepare_disposable(request)
+          disposable_worktree = DisposableWorktree.new(project_root: request.project_root)
+          disposable = prepare_disposable(request, disposable_worktree)
           disposable_plan = File.join(disposable, "plan.md")
           snapshot_bytes = File.binread(disposable_plan)
           output_path = File.join(disposable, OUTPUT_BASENAME)
@@ -217,7 +218,6 @@ module Hive
           end
           validate_output!(output_path, disposable)
           bytes = File.binread(output_path, ResultParser::MAX_BYTES + 1)
-          bytes = normalize_pi_result(bytes, snapshot_bytes, request)
           parsed = ResultParser.parse(
             bytes,
             expected: {
@@ -256,7 +256,7 @@ module Hive
         rescue SystemCallError, IOError => e
           result("terminal_failure", diagnostic: "plan review adapter filesystem failure: #{e.message}")
         ensure
-          cleanup_disposable(request, disposable) if disposable
+          disposable_worktree&.cleanup
         end
 
         private
@@ -300,53 +300,19 @@ module Hive
           end
         end
 
-        def prepare_disposable(request)
+        def prepare_disposable(request, disposable_worktree)
           root = request.output_directory
           FileUtils.mkdir_p(root, mode: 0o700)
           status = File.lstat(root)
           raise InvalidRecord, "plan review output directory is a symlink" if status.symlink?
           raise InvalidRecord, "plan review output path is not a directory" unless status.directory?
 
-          temp_root = Dir.mktmpdir("hive-plan-review-worktree-")
-          path = File.join(temp_root, "checkout")
-          out, err, status = Open3.capture3(
-            "git", "-C", request.project_root, "worktree", "add",
-            "--detach", path, "HEAD"
-          )
-          unless status.success?
-            FileUtils.remove_entry_secure(temp_root) if File.directory?(temp_root)
-            raise InvalidRecord,
-                  "plan review could not create a disposable Git worktree: " \
-                  "#{Hive::SecretPatterns.redact([ out, err ].join(" ").strip)}"
-          end
+          path = disposable_worktree.create
           plan_copy = File.join(path, "plan.md")
           bytes = Hive::SecretPatterns.redact(File.binread(request.plan_path))
           File.binwrite(plan_copy, bytes)
           File.chmod(0o600, plan_copy)
           path
-        rescue StandardError
-          cleanup_disposable(request, path) if defined?(path) && path
-          raise
-        end
-
-        def cleanup_disposable(request, path)
-          expanded = File.expand_path(path)
-          parent = File.dirname(expanded)
-          return unless File.basename(parent).start_with?("hive-plan-review-worktree-")
-          return unless File.dirname(parent) == File.expand_path(Dir.tmpdir)
-
-          _out, err, status = Open3.capture3(
-            "git", "-C", request.project_root,
-            "worktree", "remove", "--force", expanded
-          )
-          warn "[hive.plan_review] disposable worktree cleanup failed: #{err.to_s.strip}" unless status.success?
-          FileUtils.remove_entry_secure(parent) if File.directory?(parent)
-          Open3.capture3(
-            "git", "-C", request.project_root,
-            "worktree", "prune", "--expire", "now"
-          ) unless status.success?
-        rescue SystemCallError => e
-          warn "[hive.plan_review] disposable worktree cleanup failed: #{e.class}: #{e.message}"
         end
 
         def render_prompt(request, disposable, output_path, capability)
@@ -367,39 +333,8 @@ module Hive
             attempt_id: request.attempt_id,
             plan_digest: request.plan_digest,
             policy_fingerprint: request.policy_fingerprint,
-            host_computed_anchors: false,
-            host_output_mode: false,
-            output_basename: OUTPUT_BASENAME,
             verification_findings_json: JSON.pretty_generate(request.verification_findings)
           )
-        end
-
-        def normalize_pi_result(bytes, snapshot_bytes, request)
-          return bytes unless request.reviewer.fetch("provider") == "pi"
-
-          data = JSON.parse(bytes)
-          data["residual_evidence"] = [] unless request.kind == "verification"
-          findings = data["findings"]
-          return bytes unless findings.is_a?(Array)
-
-          lines = snapshot_bytes.to_s.lines(chomp: true)
-          findings.each do |entry|
-            evidence = entry.is_a?(Hash) ? entry["evidence"] : nil
-            next unless evidence.is_a?(Hash) && evidence["path"] == "plan.md"
-
-            start_line = evidence["start_line"]
-            end_line = evidence["end_line"]
-            next unless start_line.is_a?(Integer) && end_line.is_a?(Integer) &&
-                        start_line.positive? && end_line >= start_line
-
-            anchored = lines[(start_line - 1)..(end_line - 1)]
-            next unless anchored&.length == end_line - start_line + 1
-
-            evidence["anchor_digest"] = Digest::SHA256.hexdigest(anchored.join("\n").b)
-          end
-          JSON.generate(data)
-        rescue JSON::ParserError
-          bytes
         end
 
         def validate_output!(path, disposable)

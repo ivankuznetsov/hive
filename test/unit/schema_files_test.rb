@@ -51,6 +51,35 @@ class SchemaFilesTest < Minitest::Test
                  document.dig("$defs", "Level", "enum").sort
   end
 
+  def test_status_schemas_accept_parked_review_diagnostics_and_recovery_routes
+    blocker = {
+      "owner" => "operator", "reason" => "reviewer_unlaunchable",
+      "fingerprint" => "a" * 64, "diagnostic" => "review skill unavailable"
+    }
+    route = {
+      "role" => "verification", "requested" => {}, "actual" => {},
+      "capability_result" => "unsupported", "independence_verified" => true,
+      "outcome" => "retryable_failure", "recovery_reset" => true,
+      "capability_probe_fingerprint" => "b" * 64,
+      "capability_probe_count" => 2,
+      "verification_followup" => true,
+      "incomplete_attestation_retry" => true
+    }
+
+    %w[hive-status.v7.json hive-operational-status.v4.json].each do |name|
+      document = JSON.parse(File.read(File.join(Hive::Schemas.schema_dir, name)))
+      %w[PlanReviewBlocker PlanReviewRoute].zip([ blocker, route ]).each do |definition, value|
+        schemer = JSONSchemer.schema({
+          "$schema" => document.fetch("$schema"),
+          "$ref" => "#/$defs/#{definition}",
+          "$defs" => document.fetch("$defs")
+        })
+        assert_empty schemer.validate(value).to_a,
+                     "#{name} #{definition} must accept emitted recovery diagnostics"
+      end
+    end
+  end
+
   def test_plan_review_action_schema_matches_success_payload_contract
     document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-plan-review-action")))
     success = document.dig("$defs", "SuccessPayload")

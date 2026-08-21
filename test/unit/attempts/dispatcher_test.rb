@@ -80,7 +80,11 @@ class AttemptsDispatcherTest < Minitest::Test
       review_dir = File.join(task.folder, "plan-review")
       FileUtils.mkdir_p(review_dir)
       current_path = File.join(review_dir, "current.json")
-      File.write(current_path, JSON.generate("state" => "verifying", "version" => 1))
+      review_id = "pr-#{'a' * 64}"
+      File.write(
+        current_path,
+        JSON.generate("review_id" => review_id, "state" => "verifying", "version" => 1)
+      )
       dispatcher.instance_variable_set(:@task_resolver, ->(_request) { task })
       dispatcher.define_singleton_method(:provider_for) { |_task| "pi" }
       request = lambda do |id|
@@ -96,7 +100,10 @@ class AttemptsDispatcherTest < Minitest::Test
         store, launcher, first, outcome: "succeeded", exit_status: 0, now: NOW + 3
       )
       replay = dispatcher.dispatch_request(request.call("review-two"), now: NOW + 4)
-      File.write(current_path, JSON.generate("state" => "verifying", "version" => 2))
+      File.write(
+        current_path,
+        JSON.generate("review_id" => review_id, "state" => "verifying", "version" => 2)
+      )
       retry_result = dispatcher.dispatch_request(request.call("review-three"), now: NOW + 5)
 
       assert_equal :terminal_replay, replay.status

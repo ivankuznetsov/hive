@@ -23,6 +23,16 @@ module Hive
           :pattern_name, :file, :line, :snippet, :severity, :match_sha256
         )
         WAIVER_SHA256 = /\A[0-9a-f]{64}\z/.freeze
+        PASSWORD_ASSIGNMENT_PREFIX = /\A.*?\b(?:[A-Za-z][A-Za-z0-9]*_)*(?:password|passwd|pwd)\b['"]?\s*[:=]\s*/i
+        DYNAMIC_PASSWORD_LOOKUP = /\A
+          (?=[^\r\n]*(?:\[|\())
+          [A-Za-z_$][A-Za-z0-9_$]*
+          (?:
+            \.[A-Za-z_$][A-Za-z0-9_$]*
+            | \[[^\]\r\n]+\]
+            | \([^\)\r\n]*\)
+          )+
+        \z/x
 
         module_function
 
@@ -263,14 +273,19 @@ module Hive
         def runtime_password_lookup?(added_line, hit)
           return false unless hit[:name] == :password_assignment
 
-          rhs = added_line.to_s.sub(
-            /\A.*?\b(?:password|passwd|pwd)\b['"]?\s*[:=]\s*/i,
-            ""
-          )
-          return false if rhs == added_line.to_s
-          return false if rhs.match?(/['"]/)
+          snippet = hit[:snippet].to_s
+          rhs = snippet.sub(PASSWORD_ASSIGNMENT_PREFIX, "")
+          terminated = rhs.end_with?(",", ";")
+          rhs = rhs[0...-1] if terminated
+          return false if rhs == snippet || !DYNAMIC_PASSWORD_LOOKUP.match?(rhs)
 
-          rhs.match?(/[\.\[\(]/)
+          return true if terminated
+
+          offset = added_line.to_s.index(snippet)
+          return false unless offset
+
+          tail = added_line.to_s[(offset + snippet.length)..].to_s.lstrip
+          tail.empty? || tail.start_with?(",", ")", "}", ";", "#")
         end
 
         def build_match(pattern_name:, file:, line:, snippet:, severity:,

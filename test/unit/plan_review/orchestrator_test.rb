@@ -395,6 +395,42 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_capped_verification_revision_is_a_noop_on_external_reentry
+    candidates = 4.times.map do |index|
+      standard_plan.sub("# Plan", "# Revision #{index + 1}")
+    end
+    with_task(standard_plan) do |task, cfg|
+      residual = finding("safe_auto", "Still needs revision")
+      adapter = FakeAdapter.new do |request|
+        successful_result(
+          request,
+          findings: request.kind == "primary" || request.kind == "verification" ?
+            [ residual ] : []
+        )
+      end
+      revision = SequencedRevision.new(*candidates)
+      runner = orchestrator(task, cfg, adapter:, planner_revision: revision)
+
+      2.times { assert_equal "revising", runner.advance!.record.state }
+      capped = runner.advance!.record
+
+      assert_equal "blocked", capped.state
+      assert_equal Hive::PlanReview::Orchestrator::MAX_VERIFICATION_REVISION_ROUNDS,
+                   revision.calls.length
+      verification_calls = adapter.calls.count { |request| request.kind == "verification" }
+      version = capped.version
+
+      replay = runner.advance!.record
+
+      assert_equal version, replay.version
+      assert_equal capped.to_h, replay.to_h
+      assert_equal Hive::PlanReview::Orchestrator::MAX_VERIFICATION_REVISION_ROUNDS,
+                   revision.calls.length
+      assert_equal verification_calls,
+                   adapter.calls.count { |request| request.kind == "verification" }
+    end
+  end
+
   def test_repeated_incorporated_finding_reopens_with_its_prior_decision
     existing = finding("gated_auto", "Still broken")
     accepted = Hive::PlanReview::Finding.new(

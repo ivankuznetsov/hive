@@ -36,7 +36,7 @@ record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes 
 | `github_fine_grained_pat` | `github_pat_[A-Za-z0-9_]{20,}` | Current fine-grained GitHub personal access tokens. |
 | `generic_api_key` | `\bapi[_-]?key\b[\s:=]{0,3}['"]?…20+ chars` | Quoted or unquoted assignments. |
 | `pem_private_key` | `-----BEGIN … PRIVATE KEY-----…-----END … PRIVATE KEY-----` (`/m`) | Block form — redacts the base64 body, not just the BEGIN header. PR #84 #3. |
-| `password_assignment` | `\b(password|passwd|pwd)\b[\s:=]{0,3}['"]?…6+ chars` | Catches shell / env / YAML assignment shapes. |
+| `password_assignment` | conventional names ending in `password`, `passwd`, or `pwd`, followed by `:` or `=` and 6+ chars | Catches shell / env / YAML assignment shapes such as `DB_PASSWORD=...` as well as bare `password: ...`. |
 | `bearer_token` | `\bauthorization\s*[:=]\s*['"]?(Bearer|Basic|Token)\s+…8+ chars` | HTTP `Authorization:` headers across curl / log / framework formats. |
 | `session_cookie` | `(Set-)?Cookie:\s*…(session(id)?|sid|auth)…=…8+` | Cookie / Set-Cookie values containing a session-like key. |
 | `openai_api_key` | `\bsk-[A-Za-z0-9]{20,}` | OpenAI API key prefix. |
@@ -51,13 +51,15 @@ record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes 
 - `Hive::Stages::Review::GithubPublisher` — skips PR comment mirroring when a reviewer file contains a secret pattern.
 - `Hive::Stages::Review::FixGuardrail` — the `secrets_pattern_match` default
   scans every added line. A password assignment is skipped only when its whole
-  right-hand side is unquoted and lookup-shaped (`.`, `[`, or `(`); mixed
+  right-hand side is unquoted and contains syntactic lookup structure
+  (`[...]` or a call); a dot inside a literal value is not a lookup. Mixed
   lookup-plus-literal lines remain findings. Exact findings may be waived by
   `[pattern_name, SHA256(full match)]`, so no path/value allowlist grows inside
   the scanner.
 - `Hive::Stages::AutoCommit` — scans exact staged blobs before an autonomous
-  residue/fix commit. Test fixtures and production files use the same
-  fail-closed secret rule.
+  residue/fix commit through `SecretPatterns.scan`, reusing its `(name,
+  sha256)` evidence to compare the staged blob with HEAD. Test fixtures and
+  production files use the same fail-closed secret rule.
 - `Hive::TaskAction#diagnostic` — calls `SecretPatterns.redact` on the bounded summary / detail before emission to JSON consumers (TUI, bot, daemon).
 - `Hive::DiagnosisAgent#artifact_body` — calls `SecretPatterns.redact` on the agent-produced body before writing `diagnostics/red-status.md`.
 - `Hive::Stages::DraftPrHandoff` — scans the exact new commit/object range, final changed files, repair report, and projected PR title/body before any publication; quarantined reports are redacted before Hive appends its marker.

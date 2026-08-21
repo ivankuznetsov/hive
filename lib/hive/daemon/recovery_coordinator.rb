@@ -314,6 +314,7 @@ module Hive
             state_home: @state_home
           )
           if existing
+            existing = unpark_deterministic_failure(existing, now:) if operator_request
             return receipt_for_request(
               existing,
               replay: existing.recovery&.fetch("phase", nil) == "terminal",
@@ -382,7 +383,7 @@ module Hive
             recovery.merge!(
               "blocked_reason" => "deterministic_failure",
               "blocked_remediation" =>
-                "change the failing input, provider, or implementation before retrying",
+                "change the failing input, provider, or implementation, then use the current workflow.retry action",
               "owner" => "operator"
             )
           end
@@ -619,6 +620,8 @@ module Hive
 
             recovery = current_request.recovery
             return receipt_for_request(current_request, now: now) if %w[dispatched terminal].include?(recovery["phase"])
+            return receipt_for_request(current_request, now: now) if
+              recovery["blocked_reason"] == "deterministic_failure"
 
             locked_task = resolve_task_for(row)
             unless same_task_identity?(task, locked_task) &&
@@ -1417,6 +1420,31 @@ module Hive
           },
           state_home: @state_home,
           request_locked: request_locked
+        )
+        refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)
+        return refreshed if transitioned && refreshed
+
+        request
+      end
+
+      # Evidence parking is inert under daemon replay. Only an explicit,
+      # freshness-bound operator retry releases the same guarded request back
+      # into its admitted -> cleared -> dispatched transition.
+      def unpark_deterministic_failure(request, now:)
+        recovery = request.recovery || {}
+        return request unless recovery["phase"] == "admitted"
+        return request unless recovery["blocked_reason"] == "deterministic_failure"
+
+        transitioned = @request_queue.update_recovery!(
+          request.request_id,
+          expected_phase: "admitted",
+          changes: {
+            "next_eligible_at" => now.utc.iso8601(6),
+            "blocked_reason" => nil,
+            "blocked_remediation" => nil,
+            "owner" => "scheduler"
+          },
+          state_home: @state_home
         )
         refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)
         return refreshed if transitioned && refreshed

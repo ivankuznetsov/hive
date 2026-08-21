@@ -248,6 +248,37 @@ class OperationalActionTest < Minitest::Test
     end
   end
 
+  def test_controller_observation_uses_markerless_folder_identity
+    with_tmp_dir do |root|
+      workflow = Struct.new(:id) { def controller? = true }.new(:"patrol-fix")
+      task = Struct.new(
+        :workflow, :folder, :project_root, :state_file, :meta_yml_path,
+        :slug, :stage_index, :stage_name, keyword_init: true
+      ).new(
+        workflow: workflow, folder: root, project_root: root,
+        state_file: File.join(root, "patrol-fix-manifest.json"),
+        meta_yml_path: File.join(root, "meta.yml"), slug: "repair",
+        stage_index: 1, stage_name: "inbox"
+      )
+      projection = Struct.new(:marker) do
+        def to_h = { "identity" => {} }
+      end.new
+      store = Object.new
+      store.define_singleton_method(:read) { |marker:| projection.marker = marker; projection }
+      action = Struct.new(:key).new("run")
+
+      with_replaced_singleton_method(Hive::TaskProjection::Store, :new, ->(**) { store }) do
+        with_replaced_singleton_method(Hive::Config, :load, ->(*) { {} }) do
+          with_replaced_singleton_method(Hive::TaskAction, :for, ->(*, **) { action }) do
+            row = Hive::OperationalAction.observed_row(task, project: "demo")
+            assert_equal "none", row.fetch("marker")
+            assert_equal root, Hive::OperationalAction.observation_mtime_source(task)
+          end
+        end
+      end
+    end
+  end
+
   def test_unknown_action_is_rejected_before_task_resolution
     executor = Hive::OperationalAction::Executor.new
 

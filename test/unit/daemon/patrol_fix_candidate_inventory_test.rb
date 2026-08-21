@@ -131,6 +131,54 @@ class HiveDaemonPatrolFixCandidateInventoryTest < Minitest::Test
     end
   end
 
+  def test_rejects_secret_like_owned_manifest_bytes
+    with_tmp_dir do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      write_manifest(
+        hive_state, slug: "repair-secret", path: "lib/secret.rb",
+        evidence: "token ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+      )
+
+      error = assert_raises(Hive::Daemon::PatrolFixCandidateInventory::InvalidInventory) do
+        Hive::Daemon::PatrolFixCandidateInventory.new(
+          hive_state_path: hive_state
+        ).call(source_snapshot)
+      end
+
+      assert_match(/secret-like material/, error.message)
+    end
+  end
+
+  def test_unreadable_owned_task_folder_fails_closed
+    inventory = Hive::Daemon::PatrolFixCandidateInventory.new(hive_state_path: Dir.pwd)
+    original = File.method(:directory?)
+    File.define_singleton_method(:directory?) { |*| raise Errno::EACCES, "blocked" }
+    begin
+      error = assert_raises(Hive::Daemon::PatrolFixCandidateInventory::InvalidInventory) do
+        inventory.send(:reject_unsafe_folder!, "/owned/task")
+      end
+      assert_match(/unreadable/, error.message)
+    ensure
+      File.define_singleton_method(:directory?, original)
+    end
+  end
+
+  def test_parent_and_child_paths_receive_partial_relevance
+    with_tmp_dir do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      write_manifest(
+        hive_state, slug: "repair-session", path: "lib/session",
+        evidence: "Independent evidence"
+      )
+
+      result = Hive::Daemon::PatrolFixCandidateInventory.new(
+        hive_state_path: hive_state
+      ).call(source_snapshot)
+
+      assert_equal "repair-session", result.fetch("candidates").fetch(0).fetch("identity")
+    end
+  end
+
   private
 
   def write_manifest(hive_state, slug:, path:, evidence:, remediation: "Apply a focused repair")

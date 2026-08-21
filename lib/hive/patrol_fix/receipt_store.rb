@@ -74,10 +74,7 @@ module Hive
             return match
           end
           terminal = existing.find { |candidate| terminal_key(candidate) == terminal_key(receipt) }
-          if terminal
-            invalid!("terminal receipt already exists with conflicting bytes") unless terminal == receipt
-            return terminal
-          end
+          invalid!("terminal receipt already exists with conflicting bytes") if terminal
           invalid!("receipt journal exceeds #{MAX_RECEIPTS} records") if existing.length >= MAX_RECEIPTS
           existing_bytes = File.exist?(path) ? File.size(path) : 0
           invalid!("receipt journal exceeds the size limit") if existing_bytes + line.bytesize > MAX_JOURNAL_BYTES
@@ -122,8 +119,6 @@ module Hive
         timestamp!(receipt.fetch("recorded_at"), "#{label}.recorded_at")
         validate_payload!(kind, stage, receipt.fetch("payload"), label)
         PatrolFix.deep_freeze(receipt)
-      rescue KeyError => e
-        invalid!("#{label} is missing #{e.key.inspect}")
       end
 
       def validate_task!(task, label)

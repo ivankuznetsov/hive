@@ -174,6 +174,91 @@ class RefactorPatrolPostMergeBatchStoreTest < Minitest::Test
     end
   end
 
+  def test_pending_materialization_and_finalization_contracts_are_idempotent
+    with_tmp_dir do |dir|
+      store = build_store(dir)
+      assert_raises(ArgumentError) { store.pending(limit: 0) }
+      record = classification("a", number: 10, paths: %w[lib/a.rb], merged_at: T0)
+      batch = claim(store, record, analysis_sha: "f" * 40)
+      assert_raises(Hive::RefactorPatrol::PostMergeBatchStore::Invalid) do
+        store.mark_materialized!(
+          batch.fetch("batch_id"), job_id: "wrong", manifest_checksum: "bad", now: T0
+        )
+      end
+      marked = store.mark_materialized!(
+        batch.fetch("batch_id"), job_id: batch.fetch("owner_job_id"),
+        manifest_checksum: "a" * 64, now: T0
+      )
+      assert_equal marked, store.mark_materialized!(
+        batch.fetch("batch_id"), job_id: batch.fetch("owner_job_id"),
+        manifest_checksum: "a" * 64, now: T0 + 1
+      )
+      assert_raises(Hive::RefactorPatrol::PostMergeBatchStore::Conflict) do
+        store.mark_materialized!(
+          batch.fetch("batch_id"), job_id: batch.fetch("owner_job_id"),
+          manifest_checksum: "b" * 64, now: T0 + 1
+        )
+      end
+      finalized = store.finalize!(
+        batch.fetch("batch_id"), job_id: batch.fetch("owner_job_id"),
+        manifest_checksum: "a" * 64
+      )
+      assert_equal finalized, store.finalize!(
+        batch.fetch("batch_id"), job_id: batch.fetch("owner_job_id"),
+        manifest_checksum: "a" * 64
+      )
+      assert_raises(Hive::RefactorPatrol::PostMergeBatchStore::Conflict) do
+        store.finalize!(
+          batch.fetch("batch_id"), job_id: batch.fetch("owner_job_id"),
+          manifest_checksum: "b" * 64
+        )
+      end
+    end
+  end
+
+  def test_classification_and_mapping_normalization_rejects_invalid_input
+    with_tmp_dir do |dir|
+      store = build_store(dir)
+      record = classification("a", number: 10, paths: %w[lib/a.rb], merged_at: T0)
+      invalid = [
+        [],
+        [ record, record ],
+        [ record.merge("status" => "pending") ],
+        [ record.reject { |key, _| key == "snapshot" } ]
+      ]
+      invalid.each do |records|
+        assert_raises(Hive::RefactorPatrol::PostMergeBatchStore::Invalid) do
+          store.send(:normalize_classifications, records)
+        end
+      end
+      assert_raises(Hive::RefactorPatrol::PostMergeBatchStore::Invalid) do
+        store.send(:normalize_mappings, [ record ], record.fetch("occurrence_id") => [])
+      end
+    end
+  end
+
+  def test_record_parser_distinguishes_shape_member_and_materialization_corruption
+    with_tmp_dir do |dir|
+      store = build_store(dir)
+      record = classification("a", number: 10, paths: %w[lib/a.rb], merged_at: T0)
+      batch = claim(store, record, analysis_sha: "f" * 40)
+      path = File.join(dir, "batches", "records", "#{batch.fetch('batch_id')}.json")
+      bytes = JSON.parse(File.read(path))
+      invalid = [
+        bytes.merge("status" => "bad"),
+        bytes.merge("members" => [ bytes.fetch("members").first.merge("number" => 0) ]),
+        bytes.merge("status" => "materialized"),
+        bytes.merge("manifest_checksum" => "a" * 64),
+        bytes.merge("created_at" => "bad")
+      ]
+      invalid.each do |document|
+        assert_raises(Hive::RefactorPatrol::PostMergeBatchStore::Invalid) do
+          store.send(:parse_record, Hive::PatrolFix.canonical_json(document))
+        end
+      end
+    end
+  end
+
   private
 
   def build_store(dir)

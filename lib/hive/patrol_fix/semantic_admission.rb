@@ -120,8 +120,6 @@ module Hive
           model_receipt: decision.fetch("model_receipt"),
           now: now
         )
-      rescue KeyError
-        raise InvalidDecision, "semantic admission provider returned incomplete output"
       end
 
       def revalidate!(occurrence_id, reservation_id, snapshot, prepared, now:)

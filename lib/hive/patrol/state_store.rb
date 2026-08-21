@@ -32,7 +32,7 @@ module Hive
         super(
           project_root,
           state_directory: "patrol",
-          collections: %w[features findings patches reports runs],
+          collections: %w[features findings runs],
           hive_state_path: hive_state_path
         )
         @cycle_directory = Hive::ManagedDirectory.new(
@@ -81,10 +81,6 @@ module Hive
           yield
         end
         [ acquired, value ]
-      end
-
-      def write_feature(feature)
-        write_record("features", feature)
       end
 
       def write_features(features)
@@ -278,52 +274,6 @@ module Hive
         Time.iso8601(finding.lifecycle_updated_at.to_s).to_f
       rescue ArgumentError
         0.0
-      end
-
-      public
-
-      def write_patch(id, data)
-        write_json(File.join(root, "patches", "#{id}.json"), data)
-      end
-
-      def patch_record(id)
-        identifier = id.to_s
-        raise Hive::ConfigError, "patrol patch identity is malformed" unless
-          identifier.match?(/\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\z/)
-
-        value = read_json(
-          File.join(root, "patches", "#{identifier}.json")
-        )
-        unless value["id"].to_s == identifier
-          raise Hive::ConfigError, "patrol patch record is unavailable"
-        end
-        value
-      end
-
-      def update_state(data)
-        raw_update_state(data)
-      end
-
-      def write_fingerprints(data)
-        raw_write_fingerprints(data)
-      end
-
-      def write_dismissed(data)
-        write_json(File.join(root, "dismissed.json"), data)
-      end
-
-      def write_run_log(id, data)
-        write_json(File.join(root, "runs", "#{id}.json"), data)
-      end
-
-      private
-
-      def raw_update_state(data)
-        write_json(File.join(root, "state.json"), state.merge(data))
-      end
-
-      def raw_write_fingerprints(data)
-        write_json(File.join(root, "fingerprints.json"), data)
       end
     end
   end

@@ -428,6 +428,180 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
     end
   end
 
+  def test_rejects_invalid_batch_limits
+    [ 0, 65 ].each do |limit|
+      assert_raises(ArgumentError) do
+        Hive::Daemon::PatrolFixAdmissionScheduler.new(limit: limit)
+      end
+    end
+  end
+
+  def test_capacity_denial_leaves_pending_admission_untouched
+    with_initialized_scheduler_project do |_project_root, hive_state, source, entry|
+      scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
+        sources: -> { [ source ] }, capacity_available: ->(**) { false }, clock: -> { NOW }
+      )
+
+      event = scheduler.tick.fetch(0)
+
+      assert_equal :capacity_blocked, event.status
+      assert_equal "workflow_capacity", event.reason
+      admission = Hive::PatrolFix::AdmissionStore.new(
+        root: File.join(hive_state, "patrol-fix", "admissions")
+      )
+      assert_equal "pending", admission.fetch(entry.fetch("occurrence_id")).fetch("status")
+    end
+  end
+
+  def test_missing_semantic_factory_enters_bounded_retry
+    with_initialized_scheduler_project do |_project_root, hive_state, source, entry|
+      scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
+        sources: [ source ], clock: -> { NOW }
+      )
+
+      event = scheduler.tick.fetch(0)
+
+      assert_equal :retry_wait, event.status
+      assert_equal (NOW + 60).iso8601, event.retry_at
+      admission = Hive::PatrolFix::AdmissionStore.new(
+        root: File.join(hive_state, "patrol-fix", "admissions")
+      )
+      assert_equal "retry_wait", admission.fetch(entry.fetch("occurrence_id")).fetch("status")
+    end
+  end
+
+  def test_semantic_staleness_is_reported_without_retry
+    with_initialized_scheduler_project do |_project_root, _hive_state, source, _entry|
+      semantic = Object.new
+      semantic.define_singleton_method(:prepare) do |**|
+        raise Hive::PatrolFix::AdmissionStore::StaleDecision, "changed"
+      end
+      scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
+        sources: [ source ], semantic_admission_factory: ->(**) { semantic }, clock: -> { NOW }
+      )
+
+      event = scheduler.tick.fetch(0)
+
+      assert_equal :stale, event.status
+      assert_equal "candidate_digest_changed", event.reason
+    end
+  end
+
+  def test_cancel_releases_unlaunched_reservation_and_fences_replay
+    with_initialized_scheduler_project do |project_root, hive_state, source, _entry|
+      admission = Hive::PatrolFix::AdmissionStore.new(
+        root: File.join(hive_state, "patrol-fix", "admissions")
+      )
+      scheduler, = scheduler_for(
+        project_root, source, admission,
+        decision_provider: ->(_input) { flunk "cancelled decision must not run" },
+        materializer_factory: ->(**) { flunk "cancelled decision must not materialize" }
+      )
+      dispatch = scheduler.tick.fetch(0)
+
+      assert_nil scheduler.cancel(dispatch_token: { kind: :other })
+      cancelled = scheduler.cancel(dispatch_token: dispatch.dispatch_token, now: NOW + 1)
+      stale = scheduler.cancel(dispatch_token: dispatch.dispatch_token, now: NOW + 2)
+
+      assert_equal :cancelled, cancelled.status
+      assert_equal :stale, stale.status
+      assert_equal "reservation_changed", stale.reason
+    end
+  end
+
+  def test_completion_handles_irrelevant_unknown_and_already_decided_tokens
+    with_initialized_scheduler_project do |project_root, hive_state, source, _entry|
+      source.define_singleton_method(:project) { project_root }
+      admission = Hive::PatrolFix::AdmissionStore.new(
+        root: File.join(hive_state, "patrol-fix", "admissions")
+      )
+      scheduler, services = scheduler_for(
+        project_root, source, admission,
+        decision_provider: lambda do |_input|
+          {
+            "decision" => "distinct", "candidate_identity" => nil,
+            "rationale" => "No shared root", "evidence" => [ "No candidate" ],
+            "model_receipt" => "fake-provider:distinct"
+          }
+        end,
+        materializer_factory: ->(**) { flunk "completion does not materialize" }
+      )
+      dispatch = scheduler.tick.fetch(0)
+
+      assert_nil scheduler.complete(
+        dispatch_token: { kind: :other }, exit_code: 0, envelope: {}, now: NOW
+      )
+      unknown = dispatch.dispatch_token.merge(project: "missing")
+      assert_equal :stale, scheduler.complete(
+        dispatch_token: unknown, exit_code: 1, envelope: {}, now: NOW
+      ).status
+      services.fetch(0).run_reserved(
+        occurrence_id: dispatch.occurrence_id,
+        reservation_id: dispatch.dispatch_token.fetch(:reservation_id), now: NOW + 1
+      )
+
+      completed = scheduler.complete(
+        dispatch_token: dispatch.dispatch_token, exit_code: 0, envelope: {}, now: NOW + 2
+      )
+      assert_equal :decision_completed, completed.status
+    end
+  end
+
+  def test_default_command_requires_project_and_shell_escapes_values
+    scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new
+    error = assert_raises(Hive::ConfigError) do
+      scheduler.send(
+        :semantic_command,
+        project: "", source: "ordinary_patrol", occurrence_id: "finding",
+        reservation_id: "a" * 64
+      )
+    end
+    assert_match(/project is unavailable/, error.message)
+
+    command = scheduler.send(
+      :semantic_command,
+      project: "demo project", source: "ordinary_patrol", occurrence_id: "finding one",
+      reservation_id: "a" * 64
+    )
+    assert_includes command, "demo\\ project"
+    assert_includes command, "finding\\ one"
+  end
+
+  def test_malformed_completion_token_returns_bounded_failure
+    scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
+      sources: [ ProjectSource.new("demo", HealthyEmptyStore.new(0)) ]
+    )
+
+    event = scheduler.complete(
+      dispatch_token: { kind: :patrol_fix_semantic_admission },
+      exit_code: 1, envelope: {}, now: NOW
+    )
+
+    assert_equal :failed, event.status
+    assert_match(/completion_failure: KeyError/, event.reason)
+  end
+
+  def test_default_clock_and_invalid_source_boundaries_fail_closed
+    scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(sources: [])
+    assert_empty scheduler.tick
+
+    assert_raises(Hive::ConfigError) do
+      scheduler.send(:store_for, Object.new)
+    end
+
+    source = ProjectSource.new("demo", Struct.new(:record) {
+      def fetch(*) = record
+    }.new(nil))
+    event = scheduler.send(
+      :process, source, { "occurrence_id" => "missing" }, now: NOW
+    )
+    assert_equal :failed, event.status
+    assert_match(/admission occurrence is missing/, event.reason)
+
+    malformed_retry = Struct.new(:retry_at).new("not-a-time")
+    assert_nil scheduler.send(:provider_retry_at, malformed_retry)
+  end
+
   private
 
   def with_initialized_scheduler_project

@@ -341,6 +341,30 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
+  def test_non_idempotent_authored_workflow_validation_rejects_drift
+    with_initialized_project do |project_root, project|
+      create_authored_workflow(project_root, "editorial")
+      command = Hive::Commands::New.new(
+        project, "same request", slug_override: "raced-authored",
+        workflow: "editorial", json: true
+      )
+      entry = Hive::Config.find_project(project)
+      workflow_info = command.send(:resolve_workflow, entry)
+      instruction = File.join(
+        project_root, ".hive-state", "workflows", "editorial", "work.md"
+      )
+      File.write(instruction, "Changed during task creation.\n")
+
+      error = assert_raises(Hive::ConcurrentRunError) do
+        command.send(
+          :validate_stable_authored_workflow!, workflow_info,
+          File.join(project_root, ".hive-state")
+        )
+      end
+      assert_match(/owner-authored workflow changed/, error.message)
+    end
+  end
+
   def test_unreadable_task_metadata_fails_idempotency_closed
     with_initialized_project do |project_root, project|
       capture_io do
@@ -377,7 +401,7 @@ class NewIdempotencyTest < Minitest::Test
         assert_raises(Errno::EEXIST) do
           Hive::Commands::New.new(
             project, "candidate", slug_override: "owned-candidate",
-            idempotency_key: "creator:owned-candidate", json: true
+            json: true
           ).call!
         end
       end

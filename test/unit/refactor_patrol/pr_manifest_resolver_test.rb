@@ -77,6 +77,42 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
     end
   end
 
+  def test_classification_interfaces_are_explicit_and_preview_adopts_existing_manifest
+    with_tmp_dir do |dir|
+      resolver = resolver_for(dir, FakeGh.new(details))
+
+      assert_raises(ArgumentError) { resolver.resolve_classified("7", classifier: Object.new) }
+      assert_raises(ArgumentError) { resolver.preview_classification("7", classifier: Object.new) }
+
+      manifest = resolver.resolve("7")
+      classifier = Object.new
+      classifier.define_singleton_method(:preview) { |_| flunk "existing manifest must be adopted" }
+      resolution = resolver.preview_classification("7", classifier: classifier)
+
+      assert_equal manifest, resolution.manifest
+      assert_equal "adopted", resolution.classification.fetch("status")
+    end
+  end
+
+  def test_preview_delegates_when_no_manifest_exists
+    with_tmp_dir do |dir|
+      classifier = Object.new
+      classifier.define_singleton_method(:preview) do |snapshot|
+        { "status" => "pending", "target_head" => snapshot.fetch("target_head") }
+      end
+
+      classified_details = details.merge(
+        "title" => "Add feature", "body" => "Adds behavior", "labels" => [],
+        "author" => "dev", "publication_provenance" => { "kind" => "none", "marker" => nil }
+      )
+      resolution = resolver_for(dir, FakeGh.new(classified_details), dry_run: true)
+        .preview_classification("7", classifier: classifier, target_head: "f" * 40)
+
+      assert_empty resolution.manifests
+      assert_equal "f" * 40, resolution.classification.fetch("target_head")
+    end
+  end
+
   def test_forwards_the_reconciler_deadline_slice_to_github_metadata_resolution
     with_tmp_dir do |dir|
       gh = FakeGh.new(details)
@@ -286,6 +322,49 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
     assert_same legacy, Hive::RefactorPatrol::PrManifest.validate!(legacy)
   end
 
+  def test_v3_manifest_rejects_each_bounded_classification_and_provenance_shape
+    valid = v3_manifest([ "lib/feature.rb" ])
+    invalid = [
+      valid.merge("lane" => "discovery"),
+      deep_copy(valid).tap { |row| row.dig("classification")["attempts"] = 11 },
+      deep_copy(valid).tap { |row| row.dig("classification", "prefilter")["decision"] = "skip" },
+      deep_copy(valid).tap { |row| row.dig("classification", "prefilter")["evidence"] = [ nil ] },
+      deep_copy(valid).tap { |row| row.dig("provenance")["merges"] = [] },
+      deep_copy(valid).tap { |row| row.dig("provenance", "merges", 0)["repository"] = "invalid" },
+      deep_copy(valid).tap do |row|
+        row.dig("provenance", "merges", 0)["classification_occurrence_id"] = "short"
+      end
+    ]
+
+    invalid.each do |manifest|
+      assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+        Hive::RefactorPatrol::PrManifest.validate!(manifest)
+      end
+    end
+
+    invalid_source = deep_copy(valid)
+    invalid_source.dig("source")["repository"] = "invalid"
+    assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+      Hive::RefactorPatrol::PrManifest.validate!(invalid_source)
+    end
+  end
+
+  def test_v3_manifest_enforces_aggregate_patch_and_mapping_bounds
+    oversized_patches = v3_manifest(
+      17.times.map { |index| "lib/patch-#{index}.rb" }, patch: "x" * (32 * 1024)
+    )
+    assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+      Hive::RefactorPatrol::PrManifest.validate!(oversized_patches)
+    end
+
+    oversized_mapping = v3_manifest(
+      513.times.map { |index| "lib/path-#{index}.rb" }
+    )
+    assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+      Hive::RefactorPatrol::PrManifest.validate!(oversized_mapping)
+    end
+  end
+
   def test_materializes_one_mapped_batch_owner_with_every_merge_path_provenance
     with_tmp_dir do |dir|
       classifier = Hive::RefactorPatrol::MergeClassifier.new(
@@ -326,6 +405,19 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
         now: Time.utc(2026, 8, 20, 12, 5, 0)
       )
 
+      wrong_members = deep_copy(batch).merge("members" => [])
+      assert_raises(Hive::RefactorPatrol::PrManifestResolver::Conflict) do
+        resolver_for(dir, FakeGh.new(details)).materialize_batch(
+          wrong_members, classifications: classifications
+        )
+      end
+      wrong_owner = deep_copy(batch).merge("owner_job_id" => "wrong")
+      assert_raises(Hive::RefactorPatrol::PrManifestResolver::Conflict) do
+        resolver_for(dir, FakeGh.new(details), dry_run: true).materialize_batch(
+          wrong_owner, classifications: classifications
+        )
+      end
+
       owner = resolver_for(dir, FakeGh.new(details)).materialize_batch(
         batch, classifications: classifications
       )
@@ -337,6 +429,36 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
       assert_equal mappings.values,
                    owner.dig("provenance", "merges").map { |merge| merge.fetch("path_mappings") }
       assert_same owner, Hive::RefactorPatrol::PrManifest.validate!(owner)
+    end
+  end
+
+  def test_existing_v3_manifest_conflicts_are_fail_closed
+    with_tmp_dir do |dir|
+      resolver = resolver_for(dir, FakeGh.new(details))
+      path = resolver.manifest_path(v3_manifest([ "lib/checkout.rb", "test/checkout_test.rb" ]).fetch("job_id"))
+      FileUtils.mkdir_p(File.dirname(path))
+      classifier = Object.new
+      classifier.define_singleton_method(:preview) { |_| flunk "conflict must precede preview" }
+
+      source_drift = v3_manifest([ "lib/checkout.rb", "test/checkout_test.rb" ])
+      source_drift.dig("source")["base_sha"] = "f" * 40
+      source_drift["manifest_checksum"] = Hive::RefactorPatrol::PrManifest.checksum(
+        source_drift.reject { |key, _| key == "manifest_checksum" }
+      )
+      File.write(path, JSON.generate(source_drift))
+      assert_raises(Hive::RefactorPatrol::PrManifestResolver::Conflict) do
+        resolver.preview_classification("7", classifier: classifier)
+      end
+
+      File.write(path, JSON.generate(v3_manifest([ "lib/checkout.rb", "test/checkout_test.rb" ])))
+      assert_raises(Hive::RefactorPatrol::PrManifestResolver::Conflict) do
+        resolver.preview_classification("7", classifier: classifier)
+      end
+
+      File.write(path, "{")
+      assert_raises(Hive::RefactorPatrol::PrManifestResolver::Conflict) do
+        resolver.preview_classification("7", classifier: classifier)
+      end
     end
   end
 
@@ -356,6 +478,35 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
   end
 
   private
+
+  def v3_manifest(paths, patch: "")
+    source = details.slice(
+      "url", "number", "repository", "base_branch", "base_sha", "merge_sha", "merged_at"
+    ).merge("registration" => "demo")
+    classification = {
+      "occurrence_id" => "c" * 64, "snapshot_digest" => "d" * 64,
+      "changed_paths_digest" => "e" * 64, "decision" => "feature",
+      "reason" => "llm", "rationale" => "New capability",
+      "evidence" => [ "Feature behavior" ], "model_receipt" => "fake:model",
+      "attempts" => 1, "classified_at" => "2026-08-20T12:00:00Z",
+      "prefilter" => { "decision" => "ambiguous", "reason" => "no_match", "evidence" => [] }
+    }
+    files = paths.map { |path| { "path" => path, "status" => "modified", "patch" => patch } }
+    provenance = {
+      "merges" => [ source.slice("repository", "number", "merge_sha", "merged_at").merge(
+        "classification_occurrence_id" => classification.fetch("occurrence_id"),
+        "path_mappings" => paths.map { |path| { "path" => path, "slice_ids" => [ "slice" ] } }
+      ) ]
+    }
+    Hive::RefactorPatrol::PrManifest.build(
+      source: source, files: files, lane: "post_merge",
+      classification: classification, provenance: provenance
+    )
+  end
+
+  def deep_copy(value)
+    Marshal.load(Marshal.dump(value))
+  end
 
   def resolver_for(dir, gh, dry_run: false)
     Hive::RefactorPatrol::PrManifestResolver.new(

@@ -458,4 +458,35 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       refute sched.pending?("p1")
     end
   end
+
+  def test_event_drain_reservation_failure_and_malformed_provider_retry_are_bounded
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      sched = Hive::Daemon::PatrolScheduler.new(
+        registry: -> { [] }, config_loader: ->(*) { enabled_cfg },
+        state_store_factory: ->(*) { raise "store unavailable" }
+      )
+      sched.instance_variable_get(:@events) << { status: :blocked }
+      assert_equal [ { status: :blocked } ], sched.drain_events
+      assert_empty sched.drain_events
+
+      candidate = { project: "p1", entry: entry, command: "hive patrol p1 --json" }
+      assert_raises(RuntimeError) { sched.reserve(candidate, now: T0) }
+      refute sched.pending?("p1")
+
+      parks = []
+      budget = Object.new
+      budget.define_singleton_method(:park!) { |**values| parks << values }
+      sched.define_singleton_method(:allowance_budget) { |*args, **kwargs| budget }
+      sched.instance_variable_set(:@pending, "p1" => { entry: entry, started_at: T0 })
+      sched.complete(
+        project: "p1", exit_code: 1, now: T0,
+        envelope: { "review_errors" => [ { "details" => { "resource_exhaustion" => {
+          "reason" => "provider_quota", "retry_after_sec" => "invalid"
+        } } } ] }
+      )
+      assert_equal T0 + 60, parks.fetch(0).fetch(:retry_at)
+      assert_nil sched.send(:parse_retry_time, "not-a-time")
+    end
+  end
 end

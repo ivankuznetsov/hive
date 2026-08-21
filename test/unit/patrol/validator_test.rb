@@ -71,6 +71,22 @@ class HivePatrolValidatorTest < Minitest::Test
     end
   end
 
+  def test_selected_commands_require_exact_controller_fields
+    validator = Hive::Patrol::Validator.new({})
+
+    assert_raises(ArgumentError) do
+      validator.validate_selected(
+        Dir.pwd, [ { "identity" => "test", "command" => "true" } ]
+      )
+    end
+    assert_raises(ArgumentError) do
+      validator.validate_selected(
+        Dir.pwd,
+        [ { "identity" => "", "command" => "true", "provenance" => "unknown" } ]
+      )
+    end
+  end
+
   def test_command_timeout_is_bounded_and_reported
     with_tmp_dir do |dir|
       validator = Hive::Patrol::Validator.new(

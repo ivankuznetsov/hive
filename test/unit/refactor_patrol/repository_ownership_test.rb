@@ -163,6 +163,96 @@ class RefactorPatrolRepositoryOwnershipTest < Minitest::Test
     end
   end
 
+  def test_source_identity_wraps_missing_or_malformed_urls
+    [ {}, { "url" => "[", "repository" => "acme/demo", "number" => 1 } ].each do |source|
+      error = assert_raises(Hive::GhError) do
+        Hive::RefactorPatrol::RepositoryOwnership.identity_from_source(source)
+      end
+      assert_match(/source repository URL is invalid/, error.message)
+    end
+  end
+
+  def test_invalid_repository_and_host_identities_fail_closed
+    with_tmp_dir do |dir|
+      target = entry("demo", dir)
+      [
+        identity("missing-owner", "github.com"),
+        identity("acme/demo", "https://github.com/path"),
+        identity("acme/demo", "[")
+      ].each do |invalid|
+        decision = guard_for([ target ], identities: { dir => invalid }).call(
+          entry: target, cfg: config(enabled: true)
+        )
+        assert_equal "repository_identity_unresolved", decision.reason
+      end
+    end
+  end
+
+  def test_snapshot_caches_configuration_failures
+    with_tmp_dir do |root|
+      target = entry("one", File.join(root, "one"))
+      broken = entry("two", File.join(root, "two"))
+      calls = 0
+      guard = Hive::RefactorPatrol::RepositoryOwnership.new(
+        registry: -> { [ target, broken ] },
+        config_loader: lambda do |_path|
+          calls += 1
+          raise "broken config"
+        end,
+        identity_resolver: ->(_entry, _cfg) { identity("acme/demo", "github.com") }
+      ).snapshot
+
+      2.times do
+        decision = guard.call(entry: target, cfg: config(enabled: true))
+        assert_equal "repository_identity_unresolved", decision.reason
+      end
+      assert_equal 1, calls
+    end
+  end
+
+  def test_registry_failure_is_reported_as_unresolved
+    with_tmp_dir do |dir|
+      target = entry("demo", dir)
+      guard = Hive::RefactorPatrol::RepositoryOwnership.new(
+        registry: -> { raise "registry unavailable" },
+        identity_resolver: ->(_entry, _cfg) { identity("acme/demo", "github.com") }
+      )
+
+      decision = guard.call(entry: target, cfg: config(enabled: true))
+
+      assert_equal "repository_identity_unresolved", decision.reason
+      assert_match(/registry unavailable/, decision.evidence.dig("unresolved_registrations", 0, "error"))
+    end
+  end
+
+  def test_default_resolvers_are_constructed
+    guard = Hive::RefactorPatrol::RepositoryOwnership.new
+
+    config_loader = guard.instance_variable_get(:@config_loader)
+    identity_resolver = guard.instance_variable_get(:@identity_resolver)
+    assert_respond_to config_loader, :call
+    assert_respond_to identity_resolver, :call
+    with_replaced_singleton_method(Hive::Config, :load, ->(path) { { "path" => path } }) do
+      assert_equal({ "path" => "/tmp/project" }, config_loader.call("/tmp/project"))
+    end
+    expected = identity("acme/demo", "github.com")
+    with_replaced_singleton_method(Hive::Gh, :repository_identity, ->(*, **) { expected }) do
+      assert_equal expected,
+                   identity_resolver.call(entry("demo", "/tmp/project"), config(enabled: true))
+    end
+  end
+
+  def test_unexpected_resolution_failure_is_returned_as_unresolved
+    target = entry("demo", "/tmp/project")
+    guard = guard_for([ target ], identities: { "/tmp/project" => identity("acme/demo", "github.com") })
+    guard.define_singleton_method(:enabled_registrations) { |*| raise "unexpected failure" }
+
+    decision = guard.call(entry: target, cfg: config(enabled: true))
+
+    assert_equal "repository_identity_unresolved", decision.reason
+    assert_match(/unexpected failure/, decision.evidence.dig("unresolved_registrations", 0, "error"))
+  end
+
   private
 
   def guard_for(entries, configs: {}, identities:)

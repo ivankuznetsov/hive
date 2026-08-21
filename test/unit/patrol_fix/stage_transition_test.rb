@@ -139,4 +139,95 @@ class PatrolFixStageTransitionTest < Minitest::Test
       refute File.exist?(task.folder)
     end
   end
+
+  def test_transition_journal_rejects_corrupt_and_unmatched_records
+    PatrolFixStageFixture.with_task(stage: "1-inbox") do |task, _root, _manifest|
+      transition = Hive::PatrolFix::StageTransition.new(task)
+      FileUtils.mkdir_p(transition.root)
+      journal = File.join(transition.root, "journal.jsonl")
+
+      File.write(journal, "{\n")
+      assert_raises(Hive::PatrolFix::StageTransition::InvalidTransition) do
+        transition.send(:records)
+      end
+
+      valid = {
+        "task" => task.slug, "generation" => 1, "evidence_digest" => "a" * 64,
+        "event" => "committed", "from" => "1-inbox", "to" => "2-fix",
+        "recorded_at" => Time.utc(2026, 8, 20, 12).iso8601
+      }
+      File.write(journal, Hive::PatrolFix.canonical_json(valid))
+      assert_raises(Hive::PatrolFix::StageTransition::InvalidTransition) do
+        transition.send(:pending_record)
+      end
+
+      File.write(journal, Hive::PatrolFix.canonical_json(valid.merge("event" => "unknown")))
+      assert_raises(Hive::PatrolFix::StageTransition::InvalidTransition) do
+        transition.send(:records)
+      end
+
+      File.write(journal, Hive::PatrolFix.canonical_json(valid.merge(
+        "event" => "intent", "recorded_at" => "not-a-time"
+      )))
+      assert_raises(Hive::PatrolFix::StageTransition::InvalidTransition) do
+        transition.send(:records)
+      end
+
+      assert_raises(Hive::PatrolFix::StageTransition::InvalidTransition) do
+        transition.send(:identity_for, File.join(task.hive_state_path, "missing"))
+      end
+    end
+  end
+
+  def test_pending_transition_rejects_a_task_in_an_unrelated_stage
+    PatrolFixStageFixture.with_task(stage: "1-inbox") do |task, _root, manifest|
+      transition = Hive::PatrolFix::StageTransition.new(task)
+      FileUtils.mkdir_p(transition.root)
+      row = {
+        "task" => task.slug, "generation" => manifest.dig("task", "generation"),
+        "evidence_digest" => manifest.dig("evidence_revision", "digest"),
+        "event" => "intent", "from" => "1-inbox", "to" => "2-fix",
+        "recorded_at" => Time.utc(2026, 8, 20, 12).iso8601
+      }
+      File.write(File.join(transition.root, "journal.jsonl"), Hive::PatrolFix.canonical_json(row))
+      destination = File.join(task.hive_state_path, "stages", "3-validate", task.slug)
+      FileUtils.mkdir_p(File.dirname(destination))
+      File.rename(task.folder, destination)
+
+      assert_raises(Hive::PatrolFix::StageTransition::InvalidTransition) do
+        Hive::PatrolFix::StageTransition.new(Hive::Task.new(destination)).send(:reconcile!)
+      end
+    end
+  end
+
+  def test_transition_store_and_parent_sync_translate_filesystem_failures
+    PatrolFixStageFixture.with_task(stage: "1-inbox") do |task, _root, _manifest|
+      unsafe_directory = Object.new
+      unsafe_directory.define_singleton_method(:with_lock) do |*|
+        raise Hive::ManagedDirectory::UnsafeError, "unsafe path"
+      end
+      fake = Object.new
+      fake.define_singleton_method(:directory) { unsafe_directory }
+      original_new = Hive::PatrolFix::StageTransition.method(:new)
+      Hive::PatrolFix::StageTransition.define_singleton_method(:new, ->(*) { fake })
+      begin
+        assert_raises(Hive::PatrolFix::StageTransition::InvalidTransition) do
+          Hive::PatrolFix::StageTransition.with_lock(task) { nil }
+        end
+      ensure
+        Hive::PatrolFix::StageTransition.define_singleton_method(:new, original_new)
+      end
+
+      transition = Hive::PatrolFix::StageTransition.new(task)
+      original_fsync = Hive::AtomicFile.method(:fsync_directory)
+      Hive::AtomicFile.define_singleton_method(:fsync_directory, ->(*) { raise IOError, "sync failed" })
+      begin
+        assert_raises(Hive::PatrolFix::StageTransition::InvalidTransition) do
+          transition.send(:sync_stage_parents!, "from" => "1-inbox", "to" => "2-fix")
+        end
+      ensure
+        Hive::AtomicFile.define_singleton_method(:fsync_directory, original_fsync)
+      end
+    end
+  end
 end

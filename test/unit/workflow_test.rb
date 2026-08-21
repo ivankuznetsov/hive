@@ -560,6 +560,16 @@ class WorkflowTest < Minitest::Test
     assert_match(/at least one stage/, error.message)
   end
 
+  def test_workflow_controller_must_be_a_symbol
+    stage = Hive::Workflow::Stage.new(
+      name: "done", index: 1, state_file: "done.md", kind: :inert
+    )
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(id: :invalid, stages: [ stage ], controller: "patrol_fix")
+    end
+    assert_match(/controller must be a Symbol/, error.message)
+  end
+
   def test_workflow_rejects_gapped_or_unordered_indices
     error = assert_raises(ArgumentError) do
       Hive::Workflow.new(

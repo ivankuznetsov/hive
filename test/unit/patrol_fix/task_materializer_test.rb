@@ -12,6 +12,21 @@ class PatrolFixTaskMaterializerTest < Minitest::Test
   include HiveTestHelper
   NOW = Time.utc(2026, 8, 20, 12)
 
+  def test_default_clock_is_utc
+    with_tmp_dir do |root|
+      materializer = Hive::PatrolFix::TaskMaterializer.new(
+        project_root: root, hive_state: File.join(root, ".hive-state"),
+        store: Object.new,
+        workflow_info: {
+          descriptor: Hive::Workflows::Registry.fetch(:"patrol-fix"),
+          pin: true, managed: nil, managed_cfg: {}, authored_digest: nil
+        }
+      )
+
+      assert materializer.instance_variable_get(:@clock).call.utc?
+    end
+  end
+
   def test_crash_after_task_creation_replays_one_task_and_acknowledges_admission_last
     with_initialized_project do |project_root|
       store = admission_store(project_root, klass: OneShotAcknowledgementFailureStore)
@@ -29,6 +44,10 @@ class PatrolFixTaskMaterializerTest < Minitest::Test
       assert_equal true, result.acknowledged
       assert_equal "acknowledged", store.fetch("ordinary-finding-1-v1").fetch("status")
       assert_equal 1, patrol_fix_tasks(project_root).length
+
+      replay = materializer(project_root, store).call("ordinary-finding-1-v1")
+      assert_equal false, replay.created
+      assert_equal true, replay.acknowledged
     end
   end
 
@@ -187,6 +206,128 @@ class PatrolFixTaskMaterializerTest < Minitest::Test
       assert_equal %w[architecture_patrol ordinary_patrol],
                    manifest.fetch("sources").map { |source| source.fetch("engine") }.sort
       assert_equal "acknowledged", store.fetch("architecture-update-retry-v1").fetch("status")
+    end
+  end
+
+  def test_rejects_pending_admission_and_missing_or_changed_canonical_intents
+    with_initialized_project do |project_root|
+      store = admission_store(project_root)
+      snapshot = source_snapshot
+      store.reserve!(occurrence_id: "pending-v1", snapshot: snapshot, now: NOW)
+      assert_raises(Hive::PatrolFix::TaskMaterializer::InvalidAdmission) do
+        materializer(project_root, store).call("pending-v1")
+      end
+
+      service = materializer(project_root, store)
+      record = {
+        "decision" => { "decision" => "same_root", "candidate_identity" => "canonical-task" },
+        "candidates" => [ { "kind" => "task", "identity" => "canonical-task" } ]
+      }
+      intent = { "slug" => "canonical-task" }
+      service.define_singleton_method(:locate_patrol_fix_task) { |_| nil }
+      assert_raises(Hive::PatrolFix::TaskMaterializer::MissingTask) do
+        service.send(:resume_intent!, "occurrence", record, snapshot, intent)
+      end
+
+      service.define_singleton_method(:locate_patrol_fix_task) { |_| File.join(project_root, "task") }
+      changed = Marshal.load(Marshal.dump(record))
+      changed.fetch("candidates").first["identity"] = "other-task"
+      changed.fetch("decision")["candidate_identity"] = "other-task"
+      assert_raises(Hive::PatrolFix::TaskMaterializer::InvalidAdmission) do
+        service.send(:resume_intent!, "occurrence", changed, snapshot, intent)
+      end
+    end
+  end
+
+  def test_replays_a_distinct_creation_intent_only_for_exact_task_bytes
+    with_initialized_project do |project_root|
+      store = admission_store(project_root)
+      service = materializer(project_root, store)
+      snapshot = source_snapshot
+      record = { "decision" => { "decision" => "distinct" }, "candidates" => [] }
+      folder = File.join(project_root, ".hive-state", "stages", "1-inbox", "repair-intent")
+      FileUtils.mkdir_p(folder)
+      manifest = service.send(:build_initial_manifest, "repair-intent", snapshot)
+      Hive::PatrolFix::TaskManifest.new(task_folder: folder).write!(manifest)
+      identity = service.send(:root_identity, record, snapshot, nil)
+      intent = service.send(:materialization_intent, manifest, identity)
+      service.define_singleton_method(:locate_patrol_fix_task) { |_| folder }
+
+      resumed = service.send(:resume_intent!, "occurrence", record, snapshot, intent)
+      assert_equal folder, resumed.fetch(0)
+      assert_equal false, resumed.fetch(2)
+
+      changed = Marshal.load(Marshal.dump(manifest))
+      changed.fetch("aliases") << { "kind" => "legacy_issue", "value" => "acme/demo#9" }
+      File.delete(File.join(folder, Hive::PatrolFix::TaskManifest::FILENAME))
+      Hive::PatrolFix::TaskManifest.new(task_folder: folder).write!(changed)
+      assert_raises(Hive::PatrolFix::TaskMaterializer::InvalidAdmission) do
+        service.send(:resume_intent!, "occurrence", record, snapshot, intent)
+      end
+
+      assert_raises(Hive::PatrolFix::TaskMaterializer::InvalidAdmission) do
+        service.send(:assert_matching_intent!, intent.merge("generation" => 99), manifest, identity)
+      end
+    end
+  end
+
+  def test_publication_linking_detects_generation_races_and_rolls_back_failed_commits
+    with_initialized_project do |project_root|
+      store = admission_store(project_root)
+      service = materializer(project_root, store)
+      publication = exact_publication(number: 7)
+      snapshot = source_snapshot(existing_pull_requests: [ publication ])
+      record = {
+        "decision" => {
+          "decision" => "same_root", "candidate_identity" => publication.fetch("id")
+        },
+        "candidates" => [ {
+          "kind" => "pull_request", "identity" => publication.fetch("id")
+        } ]
+      }
+      folder = File.join(project_root, ".hive-state", "stages", "1-inbox", "repair-publication")
+      FileUtils.mkdir_p(folder)
+      manifest = service.send(:build_initial_manifest, "repair-publication", snapshot)
+      Hive::PatrolFix::TaskManifest.new(task_folder: folder).write!(manifest)
+      service.define_singleton_method(:with_task_authority) { |_, op:, &block| block.call }
+
+      raced = Marshal.load(Marshal.dump(manifest))
+      raced.fetch("aliases") << { "kind" => "legacy_issue", "value" => "acme/demo#7" }
+      assert_raises(Hive::PatrolFix::TaskMaterializer::InvalidAdmission) do
+        service.send(:persist_publication_receipt!, folder, raced, record, snapshot)
+      end
+
+      restored = false
+      reset = false
+      service.define_singleton_method(:restore_originals!) { |_| restored = true }
+      service.define_singleton_method(:reset_task_index!) { |_| reset = true }
+      failing_git = Object.new
+      failing_git.define_singleton_method(:hive_commit) { |**| raise "commit failed" }
+      service.instance_variable_set(:@git_ops, failing_git)
+      assert_raises(RuntimeError) do
+        service.send(:persist_publication_receipt!, folder, manifest, record, snapshot)
+      end
+      assert restored
+      assert reset
+    end
+  end
+
+  def test_bound_task_must_still_match_its_admission_evidence
+    with_initialized_project do |project_root|
+      service = materializer(project_root, admission_store(project_root))
+      snapshot = source_snapshot
+      folder = File.join(project_root, ".hive-state", "stages", "1-inbox", "repair-bound")
+      FileUtils.mkdir_p(folder)
+      manifest = service.send(:build_initial_manifest, "repair-bound", snapshot)
+      Hive::PatrolFix::TaskManifest.new(task_folder: folder).write!(manifest)
+      service.define_singleton_method(:find_patrol_fix_task!) { |_| folder }
+
+      assert_raises(Hive::PatrolFix::TaskMaterializer::InvalidAdmission) do
+        service.send(:find_bound_task!, {
+          "slug" => "repair-bound", "generation" => 2,
+          "evidence_digest" => "b" * 64
+        })
+      end
     end
   end
 

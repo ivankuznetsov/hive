@@ -212,6 +212,82 @@ class PatrolFixReviewStageTest < Minitest::Test
     end
   end
 
+  def test_prompt_and_rework_configuration_fail_closed
+    task = Struct.new(:slug).new("repair-one")
+    assert_raises(ArgumentError) do
+      Hive::Stages::PatrolFix::Review.render_prompt(
+        task, {}, {}, {}, { "diff" => "" }, [ "publish" ], "/tmp/report",
+        boundary_token: "INVALID"
+      )
+    end
+    store = Struct.new(:rows) { def read_all = rows }.new([])
+    assert_raises(Hive::ConfigError) do
+      Hive::Stages::PatrolFix::Review.allowed_routes(store, -1)
+    end
+  end
+
+  def test_review_requires_exact_fix_and_validation_evidence
+    store = Struct.new(:rows) { def read_all = rows }.new([])
+    manifest = {
+      "task" => { "slug" => "repair-one", "generation" => 1 },
+      "evidence_revision" => { "generation" => 1, "digest" => "a" * 64 }
+    }
+
+    assert_raises(Hive::StageError) do
+      Hive::Stages::PatrolFix::Review.send(:review_evidence, store, manifest)
+    end
+  end
+
+  def test_review_recovers_carried_fix_and_validation_receipts
+    manifest = {
+      "task" => { "slug" => "repair-one", "generation" => 2 },
+      "evidence_revision" => { "generation" => 2, "digest" => "b" * 64 }
+    }
+    old_identity = {
+      "task" => { "slug" => "repair-one", "generation" => 1 },
+      "evidence_revision" => { "generation" => 1, "digest" => "a" * 64 }
+    }
+    fix = old_identity.merge("receipt_id" => "fix-old", "kind" => "fix")
+    validation = old_identity.merge(
+      "receipt_id" => "validation-old", "kind" => "validation"
+    )
+    reopen = {
+      "kind" => "reopen", "stage" => "review", "task" => manifest.fetch("task"),
+      "evidence_revision" => manifest.fetch("evidence_revision"),
+      "payload" => { "carried_receipts" => [ "fix-old", "validation-old" ] }
+    }
+    store = Struct.new(:rows) { def read_all = rows }.new([ fix, validation, reopen ])
+
+    assert_equal [ fix, validation ],
+                 Hive::Stages::PatrolFix::Review.send(:review_evidence, store, manifest)
+  end
+
+  def test_review_route_results_and_agent_failures_are_strict
+    transition = Object.new
+    task = Object.new
+    escalation = { "payload" => { "route" => "escalate" } }
+    assert_raises(ArgumentError) do
+      Hive::Stages::PatrolFix::Review.send(
+        :finish_route, task, escalation, transition, Object.new
+      )
+    end
+
+    blocked = Hive::Stages::PatrolFix::Review.send(
+      :finish_route, task, { "payload" => { "route" => "blocked" } }, transition, nil
+    )
+    assert_equal :parked, blocked.fetch(:status)
+
+    assert_raises(Hive::StageError) do
+      Hive::Stages::PatrolFix::Review.send(:validate_agent_run!, nil)
+    end
+    error = assert_raises(Hive::StageError) do
+      Hive::Stages::PatrolFix::Review.send(
+        :validate_agent_run!, status: :ok, custody: :tampered, diagnostic: "changed"
+      )
+    end
+    assert_match(/changed/, error.message)
+  end
+
   private
 
   def with_review_task

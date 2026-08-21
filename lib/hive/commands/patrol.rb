@@ -115,7 +115,9 @@ module Hive
         review = review_outcome(feature_batch, reviewer)
 
         registry = Hive::Patrol::FindingRegistry.new(state: state, target_sha: target_sha)
-        admission = registry.admit(findings, retry_active: !@dry_run)
+        admission = registry.admit(
+          findings, persist: !@dry_run, retry_active: !@dry_run
+        )
         findings = admission.findings
         candidates = findings
         skipped = admission.skipped

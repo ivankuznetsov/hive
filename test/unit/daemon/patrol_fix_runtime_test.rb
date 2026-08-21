@@ -82,4 +82,77 @@ class HiveDaemonPatrolFixRuntimeTest < Minitest::Test
       assert_equal 1, provider_calls
     end
   end
+
+  def test_missing_or_changed_semantic_source_fails_closed
+    with_tmp_dir do |dir|
+      entry = { "name" => "demo", "path" => dir, "hive_state_path" => ".state" }
+      runtime = Hive::Daemon::PatrolFixRuntime.new(
+        registry: -> { [ entry ] }, config_loader: ->(_path) { {} }
+      )
+
+      assert_raises(Hive::ConfigError) do
+        runtime.run_semantic_decision(
+          project: "missing", source_name: "ordinary_patrol",
+          occurrence_id: "finding-1", reservation_id: "a" * 64
+        )
+      end
+      assert_raises(Hive::ConfigError) do
+        runtime.run_semantic_decision(
+          project: "demo", source_name: "ordinary_patrol",
+          occurrence_id: "finding-1", reservation_id: "a" * 64
+        )
+      end
+    end
+  end
+
+  def test_builds_task_materializer_with_normalized_default_state_path
+    with_tmp_git_repo do |dir|
+      runtime = Hive::Daemon::PatrolFixRuntime.new(
+        registry: -> { [ { "name" => "demo", "path" => dir } ] },
+        config_loader: ->(_path) { { "default_branch" => "HEAD" } }
+      )
+      source = runtime.sources.fetch(0)
+
+      materializer = runtime.task_materializer(store: source.store, source: source)
+
+      assert_instance_of Hive::PatrolFix::TaskMaterializer, materializer
+      assert_equal File.join(dir, ".hive-state"), source.entry.fetch("hive_state_path")
+      assert_equal Hive::GitOps.new(dir).head_sha,
+                   materializer.instance_variable_get(:@current_head).call
+    end
+  end
+
+  def test_default_runtime_factories_use_project_configuration
+    with_tmp_global_config do
+      with_tmp_dir do |dir|
+        runtime = Hive::Daemon::PatrolFixRuntime.new(registry: -> { [] })
+        cfg = runtime.instance_variable_get(:@config_loader).call(dir)
+        state = Hive::Patrol::StateStore.new(dir)
+        budget = Object.new
+
+        identity = Struct.new(:review).new(Object.new)
+        runner = with_replaced_singleton_method(
+          Hive::RefactorPatrol::AgentIdentity, :new, ->(**) { identity }
+        ) do
+          runtime.instance_variable_get(:@decision_runner_factory).call(
+            project_root: dir, cfg: cfg, state: state, launch_budget: budget
+          )
+        end
+
+        assert_instance_of Hive::Daemon::PatrolFixSemanticDecisionRunner, runner
+      end
+    end
+  end
+
+  def test_current_head_failure_is_reported_as_git_error
+    with_tmp_dir do |dir|
+      runtime = Hive::Daemon::PatrolFixRuntime.new(
+        registry: -> { [ { "name" => "demo", "path" => dir } ] },
+        config_loader: ->(_path) { { "default_branch" => "missing" } }
+      )
+      source = runtime.sources.fetch(0)
+
+      assert_raises(Hive::GitError) { runtime.send(:current_head, source) }
+    end
+  end
 end

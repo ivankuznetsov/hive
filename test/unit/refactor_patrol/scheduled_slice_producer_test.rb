@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/refactor_patrol/discovery_capacity"
 require "hive/refactor_patrol/scheduled_slice_producer"
 
 class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
@@ -131,6 +132,25 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
       assert_equal "c", third.fetch("feature_id"), "removed ids are skipped without resetting"
       assert_equal 0, third.fetch("sweep_generation")
       assert_equal 3, snapshots.calls
+    end
+  end
+
+  def test_default_owner_pid_and_discovery_capacity_boundary
+    with_tmp_dir do |dir|
+      subject = Hive::RefactorPatrol::ScheduledSliceProducer.new(
+        entry: entry(dir), cfg: {}, snapshotter: Snapshots.new(snapshot(SHA1, %w[a])),
+        process_start_reader: ->(pid) { "start-#{pid}" },
+        admission_adapter: AdmissionAdapter.new
+      )
+
+      assert_equal Process.pid, subject.instance_variable_get(:@pid)
+      assert_match(/\A[0-9a-f-]{36}\z/, subject.claim(now: NOW).fetch("id"))
+      refute Hive::RefactorPatrol::DiscoveryCapacity.exhausted?(
+        effect_count: 0, effect_limit: 100
+      )
+      assert Hive::RefactorPatrol::DiscoveryCapacity.exhausted?(
+        effect_count: 86, effect_limit: 100
+      )
     end
   end
 
@@ -293,6 +313,116 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
         assert_equal SHA2, retained.fetch(0).fetch("analysis_sha")
         refute_nil retained.fetch(0).fetch("consumed_at")
       end
+    end
+  end
+
+  def test_default_snapshotter_projects_one_frozen_revision_map
+    feature = Struct.new(:id).new(:feature_b)
+    mapped = Struct.new(:analysis_sha, :features).new(SHA1, [ feature, feature ])
+    rig = Object.new
+    rig.define_singleton_method(:call) do |entry:, cfg:|
+      raise "entry missing" unless entry == { "project_id" => "project-1" }
+      raise "cfg missing" unless cfg == {}
+      mapped
+    end
+
+    value = Hive::RefactorPatrol::ScheduledSliceProducer::Snapshotter.new(rig: rig).call(
+      entry: { "project_id" => "project-1" }, cfg: {}
+    )
+
+    assert_equal SHA1, value.analysis_sha
+    assert_equal [ "feature_b" ], value.feature_ids
+  end
+
+  def test_result_builder_rejects_invalid_dispositions_features_and_missing_fields
+    with_tmp_dir do |dir|
+      subject, = producer(dir, snapshots: Snapshots.new(snapshot(SHA1, %w[a])))
+      claim = subject.claim(now: NOW)
+      invalid = [
+        result(claim).merge("fix" => [ { "route" => "fix", "feature_id" => "other" } ]),
+        result(claim).merge("feature_results" => []),
+        result(claim).reject { |key, _| key == "feature_results" }
+      ]
+      invalid.each do |report|
+        assert_raises(Hive::ConfigError) do
+          subject.send(:build_result_record, claim, report, NOW)
+        end
+      end
+    end
+  end
+
+  def test_persisted_results_replay_stable_content_and_reject_conflicts_or_corruption
+    with_tmp_dir do |dir|
+      subject, = producer(dir, snapshots: Snapshots.new(snapshot(SHA1, %w[a])))
+      claim = subject.claim(now: NOW)
+      record = subject.send(:build_result_record, claim, result(claim), NOW)
+      subject.send(:persist_result, record)
+      replay = subject.send(:persist_result, record.merge(
+        "created_at" => (NOW + 1).iso8601(6), "source" => record.fetch("source").merge(
+          "claimed_at" => (NOW + 1).iso8601(6)
+        )
+      ))
+      assert_equal record.fetch("occurrence_id"), replay.fetch("occurrence_id")
+
+      conflict = Hive::PatrolFix.deep_copy(record)
+      conflict.fetch("report")["features_mapped"] = 99
+      assert_raises(Hive::ConfigError) { subject.send(:persist_result, conflict) }
+
+      digest = record.fetch("occurrence_id").delete_prefix("architecture-scheduled:")
+      File.write(File.join(
+        dir, ".hive-state", "refactor_patrol", "scheduled-discovery", "results", "#{digest}.json"
+      ), "{")
+      assert_raises(Hive::ConfigError) { subject.send(:persist_result, record) }
+      assert_raises(Hive::ConfigError) { subject.each_result.to_a }
+    end
+  end
+
+  def test_unconsumed_result_capacity_fails_closed
+    with_max_results(1) do
+      with_tmp_dir do |dir|
+        subject, = producer(dir, snapshots: Snapshots.new(snapshot(SHA1, %w[a])))
+        first_claim = subject.claim(now: NOW)
+        first = subject.send(:build_result_record, first_claim, result(first_claim), NOW)
+        subject.send(:persist_result, first)
+
+        second_claim = first_claim.merge(
+          "feature_id" => "b", "sweep_generation" => 1,
+          "map_digest" => Digest::SHA256.hexdigest("b")
+        )
+        second = subject.send(:build_result_record, second_claim, result(second_claim), NOW + 1)
+        assert_raises(Hive::ConfigError) { subject.send(:persist_result, second) }
+      end
+    end
+  end
+
+  def test_snapshot_claim_result_and_cursor_validators_fail_closed
+    with_tmp_dir do |dir|
+      starts = ->(pid) { raise "process table unavailable" if pid == 999; "start-101" }
+      subject, = producer(
+        dir, snapshots: Snapshots.new(snapshot(SHA1, %w[a])), starts: starts
+      )
+      assert subject.send(:live_claim?, {
+        "owner_pid" => 999, "owner_process_start_time" => "unknown"
+      })
+      assert_raises(Hive::ConfigError) do
+        subject.send(:validate_snapshot!, snapshot("bad", %w[a]))
+      end
+      assert_raises(Hive::ConfigError) do
+        subject.send(:validate_state!, subject.send(:empty_state).merge("sweep_generation" => -1))
+      end
+      refute subject.send(:valid_time?, "not-a-time")
+
+      claim = subject.claim(now: NOW)
+      record = subject.send(:build_result_record, claim, result(claim), NOW)
+      assert_raises(Hive::ConfigError) do
+        subject.send(:validate_result_record!, record.merge("job_id" => "wrong"))
+      end
+
+      state_path = File.join(
+        dir, ".hive-state", "refactor_patrol", "scheduled-discovery", "state.json"
+      )
+      File.write(state_path, "{")
+      assert_raises(Hive::ConfigError) { subject.send(:load_state) }
     end
   end
 

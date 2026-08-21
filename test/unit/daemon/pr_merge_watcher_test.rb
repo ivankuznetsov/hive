@@ -315,6 +315,31 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     end
   end
 
+  def test_pending_classification_defers_merge_until_the_next_poll
+    with_merge_project(stages: [ "7-artifacts" ]) do |tasks, _home|
+      intake = FakeIntake.new
+      intake.outcomes = [ {
+        "classification" => {
+          "status" => "retry_wait", "occurrence_id" => "a" * 64,
+          "snapshot_digest" => "b" * 64
+        }
+      } ]
+      watcher, store = build_watcher(
+        gh: FakeGh.new(state: "MERGED"), task_closure: FakeClosure.new,
+        merge_intake: intake, poll_interval_sec: 60
+      )
+      watcher.observe([ row_for(tasks.first) ], now: T0)
+
+      result = watcher.tick(now: T0).first
+
+      assert_equal :deferred, result.fetch(:status)
+      candidate = store.load(identity_for(tasks.first.project_root))
+        .fetch("candidates").values.first
+      assert_equal "deferred", candidate.dig("architecture", "status")
+      assert_match(/retry_wait/, candidate.dig("architecture", "last_error"))
+    end
+  end
+
   def test_architecture_intake_failure_is_durable_and_retryable
     with_merge_project(stages: [ "7-artifacts" ]) do |tasks, _home|
       gh = FakeGh.new(state: "MERGED")

@@ -7,6 +7,18 @@ require "hive/patrol_fix/source_snapshot"
 class PatrolFixSemanticAdmissionTest < Minitest::Test
   NOW = Time.utc(2026, 8, 20, 12)
 
+  def test_default_clock_is_utc
+    Dir.mktmpdir do |dir|
+      service = Hive::PatrolFix::SemanticAdmission.new(
+        store: Hive::PatrolFix::AdmissionStore.new(root: dir),
+        candidate_provider: ->(*) { [] }, decision_provider: ->(*) { {} },
+        current_head: -> { "2" * 40 }
+      )
+
+      assert service.instance_variable_get(:@clock).call.utc?
+    end
+  end
+
   def test_rejects_a_stale_llm_decision_and_does_not_guess_ownership
     Dir.mktmpdir do |dir|
       candidates = [ candidate("task-a") ]
@@ -132,6 +144,63 @@ class PatrolFixSemanticAdmissionTest < Minitest::Test
         )
       end
       assert_equal "pending", service.store.fetch("ordinary-finding-1-v1").fetch("status")
+    end
+  end
+
+  def test_exact_identity_short_circuits_the_model_provider
+    Dir.mktmpdir do |dir|
+      model_calls = 0
+      exact = candidate("task-a")
+      service = Hive::PatrolFix::SemanticAdmission.new(
+        store: Hive::PatrolFix::AdmissionStore.new(root: dir),
+        candidate_provider: ->(*) { raise "candidate inventory should not run" },
+        decision_provider: ->(*) { model_calls += 1 },
+        exact_provider: ->(*) { exact }, current_head: -> { "2" * 40 }
+      )
+
+      settled = service.prepare(
+        occurrence_id: "ordinary-finding-1-v1", snapshot: source_snapshot,
+        reservation_id: "e" * 64, lease_expires_at: NOW + 60, now: NOW
+      )
+
+      assert_equal "decided", settled.fetch("status")
+      assert_equal "same_root", settled.dig("decision", "decision")
+      assert_equal "task-a", settled.dig("decision", "candidate_identity")
+      assert_equal 0, model_calls
+    end
+  end
+
+  def test_rejects_invalid_model_and_candidate_inventory_shapes
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      invalid_model = Hive::PatrolFix::SemanticAdmission.new(
+        store: store, candidate_provider: ->(*) { [ candidate("task-a") ] },
+        decision_provider: ->(*) { { "decision" => "distinct" } },
+        current_head: -> { "2" * 40 }, clock: -> { NOW }
+      )
+      prepared = invalid_model.prepare(
+        occurrence_id: "ordinary-finding-1-v1", snapshot: source_snapshot,
+        reservation_id: "f" * 64, lease_expires_at: NOW + 60, now: NOW
+      )
+      assert_equal "deciding", prepared.fetch("status")
+      assert_raises(Hive::PatrolFix::SemanticAdmission::InvalidDecision) do
+        invalid_model.run_reserved(
+          occurrence_id: "ordinary-finding-1-v1", reservation_id: "f" * 64, now: NOW
+        )
+      end
+
+      invalid_inventory = Hive::PatrolFix::SemanticAdmission.new(
+        store: Hive::PatrolFix::AdmissionStore.new(root: File.join(dir, "other")),
+        candidate_provider: ->(*) { { "candidates" => [] } },
+        decision_provider: ->(*) { raise "model should not run" },
+        current_head: -> { "2" * 40 }, clock: -> { NOW }
+      )
+      assert_raises(Hive::PatrolFix::SemanticAdmission::InvalidDecision) do
+        invalid_inventory.prepare(
+          occurrence_id: "ordinary-finding-2-v1", snapshot: source_snapshot,
+          reservation_id: "1" * 64, lease_expires_at: NOW + 60, now: NOW
+        )
+      end
     end
   end
 

@@ -622,6 +622,67 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal token, scheduler.cancelled.fetch(0).fetch(:dispatch_token)
   end
 
+  def test_patrol_fix_tick_failure_is_logged_and_keeps_daemon_alive
+    scheduler = FakePatrolFixAdmissionScheduler.new
+    scheduler.define_singleton_method(:tick) { |now:| raise "admission store failed at #{now}" }
+    dispatcher, = make_dispatcher(rows: [], patrol_fix_admission_scheduler: scheduler)
+    logger = dispatcher.instance_variable_get(:@logger)
+
+    dispatcher.tick(now: T0)
+
+    fatal = logger.events.find { |name, _| name == :fatal }
+    assert_match(/admission scheduler raised: RuntimeError/, fatal.last.fetch(:message))
+  end
+
+  def test_patrol_fix_reservation_is_cancelled_when_shutdown_starts_after_tick
+    token = {
+      kind: :patrol_fix_semantic_admission, project: "p1",
+      source: "ordinary_patrol", occurrence_id: "ordinary:finding-1:v1",
+      reservation_id: "a" * 64
+    }
+    event = Hive::Daemon::PatrolFixAdmissionScheduler::Event.new(
+      source: token.fetch(:source), occurrence_id: token.fetch(:occurrence_id),
+      status: :decision_dispatch, command: "hive semantic", dispatch_token: token
+    )
+    scheduler = FakePatrolFixAdmissionScheduler.new(results: [ event ])
+    dispatcher, supervisor = make_dispatcher(
+      rows: [], patrol_fix_admission_scheduler: scheduler
+    )
+    scheduler.define_singleton_method(:tick) do |now:|
+      dispatcher.request_shutdown!
+      [ event ]
+    end
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    assert_equal token, scheduler.cancelled.fetch(0).fetch(:dispatch_token)
+  end
+
+  def test_patrol_fix_dispatch_failure_is_settled_and_logged
+    token = {
+      kind: :patrol_fix_semantic_admission, project: "p1",
+      source: "ordinary_patrol", occurrence_id: "ordinary:finding-1:v1",
+      reservation_id: "a" * 64
+    }
+    event = Hive::Daemon::PatrolFixAdmissionScheduler::Event.new(
+      source: token.fetch(:source), occurrence_id: token.fetch(:occurrence_id),
+      status: :decision_dispatch, command: "hive semantic", dispatch_token: token
+    )
+    scheduler = FakePatrolFixAdmissionScheduler.new(results: [ event ])
+    dispatcher, = make_dispatcher(rows: [], patrol_fix_admission_scheduler: scheduler)
+    logger = dispatcher.instance_variable_get(:@logger)
+    dispatcher.define_singleton_method(:dispatch_command) { |*args, **kwargs| raise "spawn failed" }
+
+    dispatcher.tick(now: T0)
+
+    assert_equal token, scheduler.completed.fetch(0).fetch(:dispatch_token)
+    fatal = logger.events.find do |name, attrs|
+      name == :fatal && attrs[:message].to_s.include?("semantic dispatch failed")
+    end
+    assert_equal :decision_completed, fatal.last.fetch(:recovery_status)
+  end
+
   def test_blocked_recovery_survives_repeated_dispatch_ticks_without_slots_or_spawns
     coordinator = FakeRecoveryCoordinator.new(status: "blocked")
     dispatcher, supervisor, controller = make_dispatcher(

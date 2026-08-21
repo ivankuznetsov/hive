@@ -568,6 +568,7 @@ class UsageDbTest < Minitest::Test
         [ "refactor-patrol-review-unmetered", "patrol_discovery_launch" ],
         [ "patrol-fix", nil ],
         [ "refactor-patrol-review", "patrol_non_discovery_launch" ],
+        [ "refactor-patrol-unclassified", nil ],
         [ "patrol-unclassified", nil ]
       ]
       rows.each_with_index do |(stage, source), index|
@@ -583,11 +584,28 @@ class UsageDbTest < Minitest::Test
       )
       assert seed.fetch(:available)
       assert_equal({ count: 1, ambiguous: 1 }, seed.fetch(:ordinary))
-      assert_equal({ count: 1, ambiguous: 0 }, seed.fetch(:architecture))
+      assert_equal({ count: 1, ambiguous: 1 }, seed.fetch(:architecture))
       other = Hive::UsageDb.patrol_discovery_seed(
         scope: { project_slug: "beta" }, date: "2026-08-20"
       )
       assert_equal 0, other.dig(:ordinary, :count)
+    end
+  end
+
+  def test_patrol_discovery_seed_fails_closed_when_the_store_is_unavailable
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = dir
+
+      _out, err = capture_io do
+        seed = Hive::UsageDb.patrol_discovery_seed(
+          scope: {}, date: "2026-08-20"
+        )
+        refute seed.fetch(:available)
+        assert_equal({ count: 0, ambiguous: 0 }, seed.fetch(:ordinary))
+        assert_equal({ count: 0, ambiguous: 0 }, seed.fetch(:architecture))
+      end
+
+      assert_match(/patrol discovery seed failed/, err)
     end
   end
 

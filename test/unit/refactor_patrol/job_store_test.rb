@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/refactor_patrol/job_store"
+require "hive/refactor_patrol/reporter"
 
 class RefactorPatrolJobStoreTest < Minitest::Test
   include HiveTestHelper
@@ -2825,6 +2826,174 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_public_transition_rejection_and_claim_assertion_contracts
+    transition = {
+      "intent_id" => "intent-#{'9' * 64}",
+      "operation" => "reserve_effect",
+      "semantic_digest" => "8" * 64,
+      "error_code" => "stale_authority"
+    }
+    with_tmp_dir do |dir|
+      discovery = Hive::RefactorPatrol::JobStore.new(File.join(dir, "discovery"))
+      enqueue_manifest(discovery, manifest, policy: intake_policy, now: T0)
+      token = discovery.claim_discovery!(
+        "pr-7-stable", owner: "daemon", analysis_sha: "c" * 40, now: T0
+      )
+      assert discovery.assert_discovery_claim!(token, now: T0 + 1)
+      rejected = discovery.record_discovery_transition_rejection!(
+        token, transition: transition, now: T0 + 2
+      )
+      assert_equal "rejected", rejected.dig("attempts", -1, "transitions", -1, "outcome")
+
+      actions = initialized_store(File.join(dir, "actions"))
+      action_token = actions.claim_action!(
+        "job-1", fix_action_id(actions), owner: "runner", now: T0
+      )
+      assert actions.assert_action_claim!(action_token, now: T0 + 1)
+      action_rejected = actions.record_action_transition_rejection!(
+        action_token, transition: transition, now: T0 + 2
+      )
+      assert_equal "rejected",
+                   action_rejected.dig("actions", 0, "transitions", -1, "outcome")
+
+      jobs = Hive::RefactorPatrol::JobStore.new(File.join(dir, "jobs"))
+      jobs.write_job!(classified_job)
+      job_rejected = jobs.record_job_transition_rejection!(
+        "job-1", operation: "reserve_effect", generation: 1,
+        transition: transition, now: T0
+      )
+      assert_equal "rejected", job_rejected.dig("attempts", -1, "transitions", -1, "outcome")
+      assert_equal 1, jobs.next_diagnostic_episode("job-1", "action_block")
+    end
+  end
+
+  def test_idempotent_publication_attempt_can_record_transition_only
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      action_id = fix_action_id(store)
+      token = store.claim_action!("job-1", action_id, owner: "runner", now: T0)
+      patch = publication_patch(action_id, base: "c" * 40, commit: "d" * 40)
+      store.record_patch_publication_attempt!(token, receipt: patch, now: T0 + 1)
+      transition = {
+        "intent_id" => "intent-#{'7' * 64}",
+        "operation" => "record_publication",
+        "semantic_digest" => "6" * 64
+      }
+
+      repeated = store.record_patch_publication_attempt!(
+        token, receipt: patch, transition: transition, now: T0 + 2
+      )
+
+      assert_equal "record_publication",
+                   repeated.dig("actions", 0, "transitions", -1, "operation")
+    end
+  end
+
+  def test_action_block_snapshots_existing_claim_generations
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      action_id = fix_action_id(store)
+      store.claim_action!("job-1", action_id, owner: "runner", now: T0)
+
+      blocked = store.block_actions!("job-1", reason: "capacity", now: T0 + 1)
+
+      assert_equal 1, blocked.dig("attempts", -1, "action_claim_generations", action_id)
+    end
+  end
+
+  def test_incomplete_probe_advances_bounded_cursor
+    store = Hive::RefactorPatrol::JobStore.new("/tmp/refactor-patrol-cursor-test")
+    calls = 0
+    store.define_singleton_method(:job_query_page) do |limit:, cursor: nil|
+      calls += 1
+      if cursor
+        { "jobs" => [], "has_more" => false }
+      else
+        {
+          "jobs" => [ { "complete" => true } ], "has_more" => true,
+          "generation" => 2, "next_after_sequence" => 10, "through_sequence" => 20
+        }
+      end
+    end
+
+    refute store.incomplete_jobs?
+    assert_equal 2, calls
+  end
+
+  def test_current_manifest_validation_errors_are_wrapped_as_corrupt_records
+    store = Hive::RefactorPatrol::JobStore.new("/tmp/refactor-patrol-manifest-test")
+    invalid = manifest(
+      "schema_version" => Hive::RefactorPatrol::PrManifest::SCHEMA_VERSION,
+      "lane" => "post_merge"
+    )
+
+    assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+      store.send(:source_from_manifest, invalid)
+    end
+  end
+
+  def test_post_merge_source_validation_rejects_every_authority_shape
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      valid_source = post_merge_source(store)
+      valid = classified_job("source" => valid_source)
+      assert_equal valid, store.send(:validate_job!, valid, path: "/tmp/job.json")
+
+      mutations = [
+        ->(source) { source["changed_paths"] = [ "../escape" ] },
+        ->(source) { source.delete("provenance") },
+        ->(source) { source.dig("classification")["decision"] = "skip" },
+        ->(source) { source.dig("classification")["evidence"] = "bad" },
+        ->(source) { source.dig("classification", "prefilter")["decision"] = "skip" },
+        ->(source) { source.dig("classification", "prefilter")["evidence"] = "bad" },
+        ->(source) { source.dig("classification", "prefilter")["evidence"] = [ "" ] },
+        ->(source) { source.dig("provenance")["merges"] = [] },
+        ->(source) { source.dig("provenance", "merges", 0)["number"] = 0 },
+        lambda do |source|
+          mapping = source.dig("provenance", "merges", 0, "path_mappings", 0)
+          source.dig("provenance", "merges", 0)["path_mappings"] = [ mapping, mapping.dup ]
+        end,
+        ->(source) { source.dig("provenance", "merges", 0, "path_mappings", 0)["slice_ids"] = [] },
+        ->(source) { source.dig("provenance", "merges", 0, "path_mappings", 0)["path"] = "lib/other.rb" }
+      ]
+      mutations.each do |mutate|
+        candidate = JSON.parse(JSON.generate(valid))
+        mutate.call(candidate.fetch("source"))
+        assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+          store.send(:validate_job!, candidate, path: "/tmp/job.json")
+        end
+      end
+    end
+  end
+
+  def test_transition_and_publication_semantics_fail_closed
+    store = Hive::RefactorPatrol::JobStore.new("/tmp/refactor-patrol-semantic-test")
+    validator = store.instance_variable_get(:@record_validator)
+    semantic = Hive::RefactorPatrol::TransitionEvidence::SEMANTIC_KEYS.to_h do |key|
+      [ key, "#{key}-value" ]
+    end
+    record = {
+      "semantic_digest" => Hive::RefactorPatrol::TransitionEvidence.semantic_digest(semantic)
+    }
+    assert_same record, validator.validate_transition_semantic!(record, semantic: semantic)
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.validate_transition_semantic!(
+        {}, semantic: Object.new, path: "/tmp/job.json"
+      )
+    end
+
+    action_id = "fix-fp-accepted"
+    patch = publication_patch(action_id, base: "c" * 40, commit: "d" * 40)
+    payload = publication_pr_create_intent(action_id, patch).merge("operation" => "push_branch")
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(
+        :validate_publication_phase!, "pr_create_intent", payload,
+        descriptor: { "commit_sha" => patch.fetch("commit_sha") }, patch: patch,
+        action_id: action_id, repository: "acme/demo", path: "/tmp/job.json"
+      )
+    end
+  end
+
   private
 
   def with_constant(owner, name, replacement)
@@ -2844,6 +3013,35 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       "actions" => [],
       "attempts" => [ { "number" => 1, "outcome" => "classified" } ]
     ).merge(overrides)
+  end
+
+  def post_merge_source(store)
+    source = {
+      "url" => "https://github.com/acme/demo/pull/7", "number" => 7,
+      "repository" => "acme/demo", "registration" => "demo",
+      "base_branch" => "main", "base_sha" => "a" * 40,
+      "merge_sha" => "b" * 40, "merged_at" => T0.iso8601
+    }
+    classification = {
+      "occurrence_id" => "c" * 64, "snapshot_digest" => "d" * 64,
+      "changed_paths_digest" => "e" * 64, "decision" => "feature",
+      "reason" => "llm", "rationale" => "New capability",
+      "evidence" => [ "Feature behavior" ], "model_receipt" => "fake:model",
+      "attempts" => 1, "classified_at" => T0.iso8601,
+      "prefilter" => { "decision" => "ambiguous", "reason" => "no_match", "evidence" => [] }
+    }
+    files = [ { "path" => "lib/checkout.rb", "status" => "modified", "patch" => "patch" } ]
+    provenance = {
+      "merges" => [ source.slice("repository", "number", "merge_sha", "merged_at").merge(
+        "classification_occurrence_id" => classification.fetch("occurrence_id"),
+        "path_mappings" => [ { "path" => "lib/checkout.rb", "slice_ids" => [ "slice" ] } ]
+      ) ]
+    }
+    manifest = Hive::RefactorPatrol::PrManifest.build(
+      source: source, files: files, lane: "post_merge",
+      classification: classification, provenance: provenance
+    )
+    store.send(:source_from_manifest, manifest)
   end
 
   def initialized_store(dir)

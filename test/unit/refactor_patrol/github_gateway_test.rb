@@ -75,6 +75,54 @@ class RefactorPatrolGithubGatewayTest < Minitest::Test
     assert_equal "", details.fetch("author")
   end
 
+  def test_merged_pr_details_rejects_nested_inventory_gaps_and_detects_both_markers
+    invalid = [
+      [ pr_document.merge("labels" => nil), [ [] ] ],
+      [ pr_document.merge("labels" => [ "feature" ]), [ [] ] ],
+      [ pr_document.merge("changedFiles" => 0), [ [] ] ],
+      [ pr_document, [ [ { "filename" => "lib/only.rb", "status" => "modified", "patch" => "" } ] ] ]
+    ]
+    invalid.each do |document, pages|
+      gateway = Hive::RefactorPatrol::GithubGateway.new(
+        transport: FakeTransport.new(pr: document, pages: pages)
+      )
+      assert_raises(Hive::GhError) { gateway.merged_pr_details(17, worktree_path: "/repo") }
+    end
+
+    files = 17.times.map do |index|
+      { "filename" => "lib/#{index}.rb", "status" => "modified", "patch" => "x" * (32 * 1024) }
+    end
+    gateway = Hive::RefactorPatrol::GithubGateway.new(
+      transport: FakeTransport.new(pr: pr_document.merge("changedFiles" => 17), pages: [ files ])
+    )
+    assert_raises(Hive::GhError) { gateway.merged_pr_details(17, worktree_path: "/repo") }
+
+    markers = {
+      "patrol" => "<!-- hive-publication:v1 id=pub-#{'a' * 32} base=#{'b' * 40} -->",
+      "patrol_successor" => "<!-- hive-patrol-fix-successor:v1 digest=#{'c' * 64} -->"
+    }
+    markers.each do |kind, marker|
+      details = Hive::RefactorPatrol::GithubGateway.new(
+        transport: FakeTransport.new(
+          pr: pr_document.merge("body" => "body\n#{marker}"),
+          pages: [ [
+            { "filename" => "lib/a.rb", "status" => "modified", "patch" => "" },
+            { "filename" => "lib/b.rb", "status" => "modified", "patch" => "" }
+          ] ]
+        )
+      ).merged_pr_details(17, worktree_path: "/repo")
+      assert_equal kind, details.dig("publication_provenance", "kind")
+    end
+
+    gateway = Hive::RefactorPatrol::GithubGateway.new
+    assert_raises(Hive::GhError) do
+      gateway.send(
+        :validate_pr_repository_identity!, "https://%", "acme/demo", 17,
+        host: "github.com"
+      )
+    end
+  end
+
   private
 
   def pr_document

@@ -61,4 +61,14 @@ class RefactorPatrolPostMergeSliceMapperTest < Minitest::Test
       assert_equal [ [ :create, "a" * 40 ], [ :assert, "a" * 40 ], [ :discard, true ] ], worktree.calls
     end
   end
+
+  def test_rejects_invalid_revision_and_path_scope_before_mapping
+    mapper = Hive::RefactorPatrol::PostMergeSliceMapper.new(rig: ->(**) { flunk "must not map" })
+    assert_raises(Hive::ConfigError) do
+      mapper.call(entry: {}, cfg: {}, analysis_sha: "bad", paths: [ "lib/a.rb" ])
+    end
+    assert_raises(Hive::ConfigError) do
+      mapper.call(entry: {}, cfg: {}, analysis_sha: "a" * 40, paths: [ "../outside.rb" ])
+    end
+  end
 end

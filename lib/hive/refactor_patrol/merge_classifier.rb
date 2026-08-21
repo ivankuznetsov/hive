@@ -365,15 +365,6 @@ module Hive
           end
 
           attempt = record.fetch("attempts") + 1
-          if attempt > @max_attempts
-            record.merge!(
-              "status" => "blocked", "reason" => "attempts_exhausted",
-              "rationale" => "Merge classification exhausted #{@max_attempts} attempts.",
-              "retry_at" => nil, "updated_at" => timestamp(now)
-            )
-            persist(record)
-            return Hive::PatrolFix.deep_copy(record)
-          end
           record.merge!(
             "status" => "retry_wait", "attempts" => attempt,
             "reason" => "provider_pending", "retry_at" => timestamp(now + backoff(attempt)),

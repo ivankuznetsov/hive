@@ -61,6 +61,21 @@ class RefactorPatrolFixAdmissionAdapterTest < Minitest::Test
     end
   end
 
+  def test_invalid_source_time_and_non_json_evidence_fall_back_safely
+    Dir.mktmpdir do |dir|
+      adapter = Hive::RefactorPatrol::FixAdmissionAdapter.new(root: dir)
+      source = Marshal.load(Marshal.dump(aggregate))
+      source["source"]["merged_at"] = "not-a-time"
+      item = Marshal.load(Marshal.dump(disposition))
+      item.fetch("thesis")["evidence"] = [ Float::NAN ]
+
+      entry = adapter.publish_disposition!(source, item, accepted_at: NOW)
+
+      assert_equal NOW.iso8601, entry.dig("source", "accepted_at")
+      assert_equal [ "Recovery has two owners" ], entry.dig("source", "evidence")
+    end
+  end
+
   private
 
   def aggregate

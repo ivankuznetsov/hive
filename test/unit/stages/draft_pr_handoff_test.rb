@@ -480,6 +480,13 @@ class StagesDraftPrHandoffTest < Minitest::Test
 
     assert projected.body.end_with?(marker)
     assert_operator projected.body.bytesize, :<=, Hive::Stages::DraftPrHandoff::MAX_PR_BODY_CHARS
+
+    assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+      Hive::Stages::DraftPrHandoff.send(
+        :project_report, report,
+        publication_marker: "x" * (Hive::Stages::DraftPrHandoff::MAX_PR_BODY_CHARS + 1)
+      )
+    end
   end
 
   def test_blocked_and_unknown_agent_decisions_fail_closed
@@ -548,6 +555,14 @@ class StagesDraftPrHandoffTest < Minitest::Test
     end
     receipt["head_oid"] = state.head_oid
     receipt["report_sha256"] = "d" * 64
+    assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+      Hive::Stages::DraftPrHandoff.send(
+        :record_agent_validation!, task, receipt, VALID_REPORT, state, "/tmp"
+      )
+    end
+    receipt["report_sha256"] = Digest::SHA256.hexdigest(VALID_REPORT)
+    receipt["publication_marker"] =
+      "<!-- hive-patrol-fix-successor:v1 digest=#{'e' * 64} -->"
     assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
       Hive::Stages::DraftPrHandoff.send(
         :record_agent_validation!, task, receipt, VALID_REPORT, state, "/tmp"

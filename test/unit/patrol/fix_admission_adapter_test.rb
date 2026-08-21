@@ -48,6 +48,31 @@ class PatrolFixAdmissionAdapterTest < Minitest::Test
     assert_equal [ "lib/hive/patrol.rb" ], snapshot.to_h.fetch("affected_code")
   end
 
+  def test_occurrence_helpers_are_stable_and_report_publication
+    Dir.mktmpdir do |dir|
+      adapter = Hive::Patrol::FixAdmissionAdapter.new(root: dir)
+
+      occurrence_id = adapter.occurrence_id_for(finding)
+      refute adapter.published_for_finding?(finding)
+      entry = adapter.publish_finding!(finding, accepted_at: NOW)
+
+      assert_equal occurrence_id, entry.fetch("occurrence_id")
+      assert adapter.published_for_finding?(finding)
+    end
+  end
+
+  def test_invalid_lifecycle_time_falls_back_and_non_json_evidence_is_ignored
+    source = finding
+    source.lifecycle_updated_at = "not-a-time"
+    circular = []
+    circular << circular
+
+    snapshot = Hive::Patrol::FixAdmissionAdapter.snapshot_for(source, accepted_at: NOW)
+
+    assert_equal NOW.iso8601, snapshot.to_h.fetch("accepted_at")
+    assert_equal "", Hive::Patrol::FixAdmissionAdapter.send(:bounded_json_text, circular)
+  end
+
   private
 
   def finding

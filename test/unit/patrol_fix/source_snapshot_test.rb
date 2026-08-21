@@ -41,6 +41,46 @@ class PatrolFixSourceSnapshotTest < Minitest::Test
     assert_includes error.message, "exact canonical publication"
   end
 
+  def test_rejects_malformed_missing_alias_and_timestamp_input
+    assert_raises(Hive::PatrolFix::SourceSnapshot::InvalidSnapshot) do
+      Hive::PatrolFix::SourceSnapshot.parse("{")
+    end
+
+    base = build_snapshot.to_h
+    invalid_documents = [
+      base.reject { |key, _| key == "identity" },
+      base.merge("aliases" => [ "not-an-object" ]),
+      base.merge("aliases" => [ { "kind" => "unknown", "value" => "x" } ]),
+      base.merge("aliases" => [ { "kind" => "legacy_issue" } ]),
+      base.merge("accepted_at" => "not-a-time")
+    ]
+    invalid_documents.each do |document|
+      assert_raises(Hive::PatrolFix::SourceSnapshot::InvalidSnapshot) do
+        Hive::PatrolFix::SourceSnapshot.new(document)
+      end
+    end
+  end
+
+  def test_translates_json_serialization_failures
+    original = Hive::PatrolFix.method(:canonical_json)
+    Hive::PatrolFix.define_singleton_method(:canonical_json, ->(*) { raise JSON::GeneratorError, "bad value" })
+    begin
+      assert_raises(Hive::PatrolFix::SourceSnapshot::InvalidSnapshot) do
+        build_snapshot
+      end
+    ensure
+      Hive::PatrolFix.define_singleton_method(:canonical_json, original)
+    end
+  end
+
+  def test_accepts_a_strict_alias
+    snapshot = build_snapshot(
+      aliases: [ { "kind" => "legacy_issue", "value" => "acme/demo#7" } ]
+    )
+
+    assert_equal "acme/demo#7", snapshot.to_h.dig("aliases", 0, "value")
+  end
+
   private
 
   def build_snapshot(overrides = {})

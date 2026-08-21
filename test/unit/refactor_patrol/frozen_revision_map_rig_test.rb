@@ -71,6 +71,59 @@ class RefactorPatrolFrozenRevisionMapRigTest < Minitest::Test
     end
   end
 
+  def test_rejects_an_invalid_frozen_revision_and_still_discards_the_worktree
+    with_tmp_dir do |dir|
+      worktree = FakeWorktree.new(File.join(dir, "map"))
+      rig = build_rig(worktree) { flunk }
+
+      assert_raises(Hive::ConfigError) do
+        rig.call(entry: entry(dir), cfg: {}, analysis_sha: "not-an-oid")
+      end
+
+      assert_equal [ [ :discard, true ] ], worktree.calls
+    end
+  end
+
+  def test_default_builders_apply_the_isolated_root_and_architecture_mapper_config
+    with_tmp_dir do |dir|
+      captured = {}
+      worktree = FakeWorktree.new(File.join(dir, "mapped"))
+      worktree_new = lambda do |root, slug, worktree_root:|
+        captured[:worktree] = [ root, slug, worktree_root ]
+        worktree
+      end
+      state = Object.new
+      state_new = ->(*_args, **_kwargs) { state }
+      mapper = -> { [] }
+      mapper_new = lambda do |root, cfg:, state:, dry_run:, capabilities:|
+        captured[:mapper] = [ root, cfg, state, dry_run, capabilities ]
+        mapper
+      end
+      cfg = {
+        "worktree_root" => File.join(dir, "worktrees"),
+        "patrol" => { "include" => [ "old" ] },
+        "refactor_patrol" => {
+          "include" => [ "lib" ], "exclude" => [ "vendor" ], "review" => "high"
+        }
+      }
+      rig = Hive::RefactorPatrol::FrozenRevisionMapRig.new
+
+      with_replaced_singleton_method(Hive::Worktree, :new, worktree_new) do
+        with_replaced_singleton_method(Hive::RefactorPatrol::StateStore, :new, state_new) do
+          with_replaced_singleton_method(Hive::Patrol::Mapper, :new, mapper_new) do
+            assert_same worktree, rig.send(:build_worktree, entry(dir), cfg)
+            assert_same mapper, rig.send(:build_mapper, worktree.path, entry(dir), cfg)
+          end
+        end
+      end
+
+      assert_equal dir, captured.dig(:worktree, 0)
+      assert_match(%r{/\.refactor-patrol/frozen-revision-map\z}, captured.dig(:worktree, 2))
+      assert_equal [ "lib" ], captured.dig(:mapper, 1, "patrol", "include")
+      assert_equal %i[architecture documentation], captured.dig(:mapper, 4)
+    end
+  end
+
   private
 
   def entry(dir)

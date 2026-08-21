@@ -78,7 +78,7 @@ module Hive
         def bounded_json_text(value)
           raw = value.is_a?(String) ? value : JSON.generate(value)
           text(raw, fallback: "", max: 16 * 1024)
-        rescue JSON::GeneratorError, TypeError
+        rescue JSON::JSONError, TypeError
           ""
         end
 

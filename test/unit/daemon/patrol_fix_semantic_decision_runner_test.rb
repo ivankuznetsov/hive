@@ -24,6 +24,22 @@ class DaemonPatrolFixSemanticDecisionRunnerTest < Minitest::Test
     end
   end
 
+  def test_distinct_success_requires_a_nil_candidate_identity
+    with_tmp_dir do |dir|
+      result = invoke(dir, {
+        status: :ok,
+        final_message: JSON.generate(
+          "decision" => "distinct", "candidate_identity" => nil,
+          "rationale" => "The roots differ.",
+          "evidence" => [ "The affected owners do not overlap." ]
+        )
+      })
+
+      assert_equal "distinct", result.fetch("decision")
+      assert_nil result.fetch("candidate_identity")
+    end
+  end
+
   def test_malformed_provider_output_fails_closed
     with_tmp_dir do |dir|
       assert_raises(Hive::Daemon::PatrolFixSemanticDecisionRunner::Error) do
@@ -117,7 +133,87 @@ class DaemonPatrolFixSemanticDecisionRunnerTest < Minitest::Test
     assert_includes second, "<untrusted_patrol_semantic_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb>"
   end
 
+  def test_empty_inventory_is_decided_without_provider_launch
+    runner = Hive::Daemon::PatrolFixSemanticDecisionRunner.new(
+      project_root: Dir.pwd, cfg: {
+        "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" }
+      },
+      state: Object.new, launch_budget: Object.new
+    )
+
+    result = runner.call("candidates" => [])
+
+    assert_equal "distinct", result.fetch("decision")
+    assert_equal "deterministic:empty-candidate-set", result.fetch("model_receipt")
+  end
+
+  def test_exhausted_launch_budget_fails_before_agent_construction
+    budget = Object.new
+    budget.define_singleton_method(:acquire) { |**| false }
+    budget.define_singleton_method(:exhaustion_message) { "budget exhausted" }
+    runner = runner_with_budget(budget)
+
+    error = assert_raises(Hive::Daemon::PatrolFixSemanticDecisionRunner::Error) do
+      runner.call(valid_input)
+    end
+
+    assert_equal "budget exhausted", error.message
+  end
+
+  def test_invalid_boundary_token_fails_closed_and_records_launch
+    recorded = []
+    budget = Object.new
+    budget.define_singleton_method(:acquire) { |**| true }
+    budget.define_singleton_method(:record!) { |**arguments| recorded << arguments }
+    runner = runner_with_budget(budget, boundary_token_factory: -> { "INVALID" })
+
+    error = assert_raises(Hive::Daemon::PatrolFixSemanticDecisionRunner::Error) do
+      runner.call(valid_input)
+    end
+
+    assert_match(/boundary token is invalid/, error.message)
+    assert_nil recorded.fetch(0).fetch(:result)
+  end
+
+  def test_non_hash_provider_failure_has_no_retry_time
+    with_tmp_dir do |dir|
+      error = assert_raises(Hive::Daemon::PatrolFixSemanticDecisionRunner::Error) do
+        invoke(dir, nil)
+      end
+
+      assert_nil error.retry_at
+    end
+  end
+
+  def test_invalid_json_is_wrapped_as_semantic_error
+    with_tmp_dir do |dir|
+      error = assert_raises(Hive::Daemon::PatrolFixSemanticDecisionRunner::Error) do
+        invoke(dir, { status: :ok, final_message: "{" })
+      end
+
+      assert_match(/malformed JSON/, error.message)
+    end
+  end
+
   private
+
+  def runner_with_budget(budget, boundary_token_factory: -> { "a" * 32 })
+    Hive::Daemon::PatrolFixSemanticDecisionRunner.new(
+      project_root: Dir.pwd, cfg: {
+        "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" }
+      },
+      state: Hive::Patrol::StateStore.new(Dir.pwd), launch_budget: budget,
+      boundary_token_factory: boundary_token_factory
+    )
+  end
+
+  def valid_input
+    {
+      "candidate_set_digest" => "a" * 64, "current_head" => "b" * 40,
+      "source" => { "identity" => "finding-1" },
+      "candidates" => [ { "identity" => "task:repair-refresh" } ]
+    }
+  end
 
   def invoke(dir, agent_result)
     agent = Object.new

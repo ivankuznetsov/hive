@@ -318,4 +318,121 @@ class PatrolLaunchBudgetTest < Minitest::Test
       [ "token_limit" ], now: now, fallback: 60
     )
   end
+
+  def test_exhaustion_messages_and_idempotent_reservations_are_explicit
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = File.join(dir, "usage.db")
+      subject = budget(dir, engine: :ordinary, limit: 1)
+      assert_includes subject.exhaustion_message, "unknown"
+      assert acquire(subject, "patrol-review", id: "same-launch")
+      assert acquire(subject, "patrol-review", id: "same-launch")
+      refute acquire(subject, "patrol-review", id: "other-launch")
+      assert_includes subject.exhaustion_message, "daily discovery launch limit"
+
+      Hive::UsageDb.record!(
+        agent: "codex", model: nil, project_slug: "demo", task_slug: "patrol",
+        stage: "patrol-unknown", started_at: NOW, ended_at: NOW,
+        input: 0, output: 0, cached: 0
+      )
+      ambiguous = budget(dir, engine: :ordinary, project_id: "ambiguous")
+      refute acquire(ambiguous, "patrol-review", id: "blocked")
+      assert_includes ambiguous.exhaustion_message, "legacy launch attribution is ambiguous"
+    end
+  end
+
+  def test_provider_holds_and_corrupt_ledgers_block_reservations_not_only_snapshots
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = File.join(dir, "usage.db")
+      held = budget(dir, engine: :ordinary)
+      assert held.park!(retry_at: NOW + 60, reason: "provider")
+      refute acquire(held, "patrol-review", id: "held")
+
+      root = "#{Hive::UsageDb.path}.patrol-discovery-allowances"
+      day = File.join(root, "dates", "2026-08-20.json")
+      FileUtils.mkdir_p(File.dirname(day))
+      File.write(day, "{}")
+      corrupt = budget(dir, engine: :architecture)
+      refute acquire(corrupt, "refactor-patrol-review", id: "corrupt")
+      assert_equal "allowance_store_unavailable", corrupt.resource_exhaustion.fetch(:reason)
+    end
+  end
+
+  def test_ledger_and_telemetry_failures_are_contained
+    with_tmp_dir do |dir|
+      subject = budget(dir, engine: :ordinary)
+      unsafe = Object.new
+      unsafe.define_singleton_method(:prepare!) { raise "unavailable" }
+      subject.instance_variable_set(:@directory, unsafe)
+      refute subject.park!(retry_at: NOW + 60, reason: "provider")
+      refute subject.clear_park!
+
+      usage = Object.new
+      usage.define_singleton_method(:path) { File.join(dir, "usage.db") }
+      usage.define_singleton_method(:patrol_discovery_seed) { |**| raise "seed offline" }
+      usage.define_singleton_method(:record!) { |**| raise "telemetry offline" }
+      seeded = budget(dir, engine: :ordinary, usage_db: usage)
+      assert_equal "unavailable", seeded.allowance_snapshot.fetch(:status)
+      _out, err = capture_io { assert acquire(seeded, "patrol-fix") }
+      assert_includes err, "telemetry offline"
+
+      no_seed_api = Object.new
+      no_seed_api.define_singleton_method(:path) { File.join(dir, "other.db") }
+      no_seed_api.define_singleton_method(:record!) { |**| true }
+      assert_equal 4, budget(
+        dir, engine: :ordinary, usage_db: no_seed_api, project_id: "no-seed-api"
+      ).remaining_launches
+    end
+  end
+
+  def test_private_ledger_validators_reject_each_nested_contract_violation
+    with_tmp_dir do |dir|
+      subject = budget(dir, engine: :ordinary)
+      lane = {
+        "seed_state" => "complete", "seeded_launches" => 0,
+        "ambiguous_rows" => 0, "reservations" => []
+      }
+      day = {
+        "schema" => Hive::Patrol::LaunchBudget::SCHEMA,
+        "schema_version" => Hive::Patrol::LaunchBudget::SCHEMA_VERSION,
+        "date" => "2026-08-20", "projects" => { "project-1" => { "ordinary" => lane } }
+      }
+      holds = {
+        "schema" => Hive::Patrol::LaunchBudget::SCHEMA,
+        "schema_version" => Hive::Patrol::LaunchBudget::SCHEMA_VERSION,
+        "kind" => "provider_holds", "projects" => {}
+      }
+
+      invalid_days = [
+        day.merge("projects" => { "project-1" => {} }),
+        day.merge("projects" => { "" => { "ordinary" => lane } }),
+        day.merge("date" => "bad")
+      ]
+      invalid_days.each do |value|
+        assert_raises(StandardError) { subject.send(:validate_day!, value, value.fetch("date")) }
+      end
+
+      invalid_holds = [
+        holds.merge("projects" => { "project-1" => {} }),
+        holds.merge("projects" => { "project-1" => { "ordinary" => { "reason" => "" } } })
+      ]
+      invalid_holds.each do |value|
+        assert_raises(StandardError) { subject.send(:validate_holds!, value) }
+      end
+
+      assert_raises(StandardError) do
+        subject.send(:validate_lane!, "ordinary", lane.merge(
+          "seed_state" => "parked", "ambiguous_rows" => 0
+        ), "2026-08-20")
+      end
+      assert_raises(StandardError) do
+        subject.send(:validate_lane!, "ordinary", lane.merge(
+          "reservations" => [ { "id" => nil, "reserved_at" => NOW.iso8601 } ]
+        ), "2026-08-20")
+      end
+      assert_raises(StandardError) { subject.send(:validate_date!, "not-a-date") }
+      assert_raises(StandardError) { subject.send(:validate_project_identity!, "") }
+
+      assert_equal "codex", subject.send(:profile_name, Object.new, "refactor-patrol-fix")
+    end
+  end
 end

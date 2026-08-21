@@ -104,6 +104,51 @@ class PatrolFixTaskManifestTest < Minitest::Test
     end
   end
 
+  def test_rejects_missing_fields_generation_leaps_and_missing_files
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::TaskManifest.new(task_folder: dir)
+      error = assert_raises(Hive::PatrolFix::TaskManifest::InvalidManifest) { store.read }
+      assert_includes error.message, "missing"
+
+      assert_raises(Hive::PatrolFix::TaskManifest::InvalidManifest) do
+        store.write!(manifest.reject { |key, _| key == "relations" })
+      end
+
+      store.write!(manifest)
+      leap = Marshal.load(Marshal.dump(manifest))
+      leap.fetch("task")["generation"] = 3
+      leap.fetch("evidence_revision").merge!("generation" => 3, "digest" => "b" * 64)
+      assert_raises(Hive::PatrolFix::TaskManifest::InvalidManifest) { store.write!(leap) }
+    end
+  end
+
+  def test_translates_manifest_io_and_serialization_failures
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::TaskManifest.new(task_folder: dir)
+      File.write(store.path, Hive::PatrolFix.canonical_json(manifest))
+
+      [ Errno::ELOOP.new("loop"), IOError.new("closed") ].each do |failure|
+        original = File.method(:open)
+        File.define_singleton_method(:open, ->(*) { raise failure })
+        begin
+          assert_raises(Hive::PatrolFix::TaskManifest::InvalidManifest) { store.read }
+        ensure
+          File.define_singleton_method(:open, original)
+        end
+      end
+
+      original = Hive::PatrolFix.method(:canonical_json)
+      Hive::PatrolFix.define_singleton_method(:canonical_json, ->(*) { raise JSON::GeneratorError, "bad value" })
+      begin
+        assert_raises(Hive::PatrolFix::TaskManifest::InvalidManifest) do
+          store.write!(manifest)
+        end
+      ensure
+        Hive::PatrolFix.define_singleton_method(:canonical_json, original)
+      end
+    end
+  end
+
   private
 
   def manifest

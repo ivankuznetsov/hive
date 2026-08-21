@@ -68,6 +68,48 @@ class PatrolFixFixStageTest < Minitest::Test
     end
   end
 
+  def test_fix_requires_current_controller_authorization
+    store = Struct.new(:rows) { def read_all = rows }.new([])
+    manifest = {
+      "task" => { "slug" => "repair-one", "generation" => 1 },
+      "evidence_revision" => { "generation" => 1, "digest" => "a" * 64 }
+    }
+
+    error = assert_raises(Hive::StageError) do
+      Hive::Stages::PatrolFix::Fix.send(:fix_authorization, store, manifest)
+    end
+
+    assert_match(/requires a current inbox fix/, error.message)
+  end
+
+  def test_rework_rejects_custody_from_an_older_generation
+    with_fix_task do |task, worktree_root|
+      owner = Hive::PatrolFix::WorktreeReceipt.new(
+        task_folder: task.folder, project_root: task.project_root, slug: task.slug,
+        worktree_root: worktree_root
+      )
+      owner.prepare!(
+        generation: 1, evidence_digest: "a" * 64,
+        base_revision: git(task.project_root, "rev-parse", "HEAD").strip
+      )
+      manifest_store = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder)
+      manifest = JSON.parse(JSON.generate(manifest_store.read))
+      manifest.fetch("task")["generation"] = 2
+      manifest.fetch("evidence_revision")["generation"] = 2
+      manifest.fetch("evidence_revision")["digest"] = "b" * 64
+      manifest_store.write!(manifest)
+
+      with_replaced_singleton_method(
+        Hive::Stages::PatrolFix::Fix, :fix_authorization, ->(*) { [ Object.new, true ] }
+      ) do
+        error = assert_raises(Hive::StageError) do
+          Hive::Stages::PatrolFix::Fix.run!(task, {}, worktree_root: worktree_root)
+        end
+        assert_match(/does not bind the current generation/, error.message)
+      end
+    end
+  end
+
   private
 
   def with_fix_task

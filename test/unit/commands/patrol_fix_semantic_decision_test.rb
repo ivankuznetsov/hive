@@ -64,4 +64,47 @@ class HiveCommandsPatrolFixSemanticDecisionTest < Minitest::Test
     assert_equal retry_at.iso8601, payload.fetch("retry_at")
     assert_equal Retryable.name.to_s, payload.fetch("error_class")
   end
+
+  def test_constructor_rejects_invalid_controller_identities
+    assert_raises(Hive::ConfigError) do
+      Hive::Commands::PatrolFixSemanticDecision.new(
+        "", source: "ordinary_patrol", occurrence_id: "finding",
+        reservation_id: "a" * 64
+      )
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::Commands::PatrolFixSemanticDecision.new(
+        "demo", source: "unknown", occurrence_id: "finding",
+        reservation_id: "a" * 64
+      )
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::Commands::PatrolFixSemanticDecision.new(
+        "demo", source: "ordinary_patrol", occurrence_id: "finding",
+        reservation_id: "bad"
+      )
+    end
+  end
+
+  def test_invalid_provider_retry_time_is_omitted
+    runtime = Runtime.new(error: Retryable.new("never"))
+    command = Hive::Commands::PatrolFixSemanticDecision.new(
+      "demo", source: "ordinary_patrol", occurrence_id: "finding",
+      reservation_id: "a" * 64, runtime: runtime
+    )
+
+    out, = capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, command.call }
+
+    assert_nil JSON.parse(out).fetch("retry_at")
+  end
+
+  def test_default_runtime_is_constructed_lazily_for_a_valid_command
+    command = Hive::Commands::PatrolFixSemanticDecision.new(
+      "demo", source: "ordinary_patrol", occurrence_id: "finding",
+      reservation_id: "a" * 64
+    )
+
+    assert_instance_of Hive::Daemon::PatrolFixRuntime,
+                       command.instance_variable_get(:@runtime)
+  end
 end

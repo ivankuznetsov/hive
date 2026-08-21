@@ -83,9 +83,6 @@ module Hive
         reservation = record && record["decision_reservation"]
         return event_from_token(token, :stale, reason: "reservation_changed") unless
           reservation && reservation.fetch("reservation_id") == token.fetch(:reservation_id)
-        if exit_code.to_i.zero? && record.fetch("status") != "deciding"
-          return event_from_token(token, :decision_completed)
-        end
 
         error = CompletionFailure.new(envelope)
         retry_at = @retry_policy.call(record, error, now)
@@ -129,20 +126,7 @@ module Hive
         raise Hive::PatrolFix::AdmissionStore::Conflict, "admission occurrence is missing" unless record
         snapshot = Hive::PatrolFix::SourceSnapshot.new(record.fetch("source"))
         source_name = snapshot.to_h.fetch("engine")
-        if record&.fetch("status") == "blocked"
-          return event(
-            source, occurrence_id, :blocked, source_name: source_name,
-            reason: "insufficient_evidence"
-          )
-        end
         if record&.fetch("status") == "retry_wait"
-          retry_at = Time.iso8601(record.dig("retry", "retry_at"))
-          if retry_at > now
-            return event(
-              source, occurrence_id, :retry_wait,
-              source_name: source_name, retry_at: retry_at
-            )
-          end
           if record.dig("retry", "reason") == "materialization_failure"
             record = store.resume_materialization_retry!(occurrence_id, now: now)
           end
@@ -157,13 +141,6 @@ module Hive
         end
 
         if record&.fetch("status") == "deciding"
-          expires_at = Time.iso8601(record.dig("decision_reservation", "expires_at"))
-          if expires_at > now
-            return event(
-              source, occurrence_id, :decision_in_flight,
-              source_name: source_name, retry_at: expires_at
-            )
-          end
           record = store.expire_decision!(occurrence_id, now: now)
         end
 
@@ -200,13 +177,6 @@ module Hive
               command: @semantic_command_factory.call(token), dispatch_token: token
             )
           end
-        end
-
-        if record.fetch("status") == "blocked"
-          return event(
-            source, occurrence_id, :blocked, source_name: source_name,
-            reason: "insufficient_evidence"
-          )
         end
 
         begin

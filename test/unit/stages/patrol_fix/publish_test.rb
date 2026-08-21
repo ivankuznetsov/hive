@@ -4,6 +4,8 @@ require "hive/commands/approve"
 require "hive/stages/patrol_fix/publish"
 
 class PatrolFixPublishStageTest < Minitest::Test
+  include HiveTestHelper
+
   class LocalGit
     attr_reader :pushes
 
@@ -248,6 +250,43 @@ class PatrolFixPublishStageTest < Minitest::Test
     end
   end
 
+  def test_publication_receipt_must_be_current_before_cleanup
+    with_publish_task do |task, worktree_root, _manifest, _review, _remote|
+      cleanup_calls = 0
+      with_replaced_singleton_method(
+        Hive::Stages::PatrolFix::Publish, :current_publication, ->(*) { nil }
+      ) do
+        error = assert_raises(Hive::GithubPublication::Blocked) do
+          Hive::Stages::PatrolFix::Publish.run!(
+            task, config, git_gateway: LocalGit.new, github_gateway: FakeGithub.new,
+            worktree_root: worktree_root, cleanup: ->(*) { cleanup_calls += 1 }
+          )
+        end
+        assert_equal "stale_authority", error.code
+      end
+      assert_equal 0, cleanup_calls
+      assert publication_receipt(task)
+    end
+  end
+
+  def test_default_cleanup_removes_the_controller_owned_worktree
+    with_publish_task do |task, worktree_root, _manifest, _review, _remote|
+      owner = Hive::PatrolFix::WorktreeReceipt.new(
+        task_folder: task.folder, project_root: task.project_root,
+        slug: task.slug, worktree_root: worktree_root
+      ).read
+      destination = owner.fetch("worktree")
+
+      result = Hive::Stages::PatrolFix::Publish.run!(
+        task, config, git_gateway: LocalGit.new, github_gateway: FakeGithub.new,
+        worktree_root: worktree_root
+      )
+
+      assert_equal :complete, result.fetch(:status)
+      refute File.exist?(destination)
+    end
+  end
+
   def test_receipt_replay_never_cleans_tampered_worktree_custody
     with_publish_task do |task, worktree_root, _manifest, _review, _remote|
       Hive::Stages::PatrolFix::Publish.run!(
@@ -356,7 +395,126 @@ class PatrolFixPublishStageTest < Minitest::Test
     end
   end
 
+  def test_stage_final_authority_check_rejects_a_controller_that_skips_revalidation
+    with_publish_task do |task, worktree_root, _manifest, _review, _remote|
+      replace_review = lambda do
+        rewrite_receipts(task) do |rows|
+          rows.map do |row|
+            row["receipt_id"] == "review-one" ? row.merge("receipt_id" => "review-two") : row
+          end
+        end
+      end
+      controller = Object.new
+      controller.define_singleton_method(:publish!) do |request, **|
+        replace_review.call
+        {
+          "publication_id" => request.publication_id,
+          "number" => 42, "url" => "https://github.com/acme/demo/pull/42",
+          "state" => "draft", "head_oid" => request.head_oid,
+          "branch" => request.branch, "repository" => request.repository,
+          "host" => request.host, "base_branch" => request.base_branch,
+          "body_digest" => request.body_digest
+        }
+      end
+
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        Hive::Stages::PatrolFix::Publish.run!(
+          task, config, git_gateway: LocalGit.new, github_gateway: FakeGithub.new,
+          controller: controller, worktree_root: worktree_root, cleanup: ->(*) { true }
+        )
+      end
+
+      assert_equal "stale_authority", error.code
+    end
+  end
+
+  def test_publish_approval_requires_referenced_fix_and_validation
+    with_publish_task do |task, worktree_root, _manifest, _review, _remote|
+      rewrite_receipts(task) { |rows| rows.reject { |row| row["kind"] == "fix" } }
+
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::PatrolFix::Publish.publication_request(
+          task, config, git_gateway: LocalGit.new, worktree_root: worktree_root
+        )
+      end
+
+      assert_match(/references unavailable fix/, error.message)
+    end
+  end
+
+  def test_publish_approval_must_bind_the_exact_validated_patch
+    with_publish_task do |task, worktree_root, _manifest, _review, _remote|
+      rewrite_receipts(task) do |rows|
+        rows.map do |row|
+          next row unless row["kind"] == "fix"
+
+          row.merge("payload" => row.fetch("payload").merge("diff_digest" => "f" * 64))
+        end
+      end
+
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::PatrolFix::Publish.publication_request(
+          task, config, git_gateway: LocalGit.new, worktree_root: worktree_root
+        )
+      end
+
+      assert_match(/does not bind one exact validated patch/, error.message)
+    end
+  end
+
+  def test_repository_identity_and_request_identity_are_strict
+    with_publish_task do |task, worktree_root, _manifest, _review, _remote|
+      bad_git = LocalGit.new
+      bad_git.define_singleton_method(:repository_identity) { |**| { "repository" => "acme/demo" } }
+
+      assert_raises(Hive::StageError) do
+        Hive::Stages::PatrolFix::Publish.publication_request(
+          task, config, git_gateway: bad_git, worktree_root: worktree_root
+        )
+      end
+
+      snapshot = Hive::Stages::PatrolFix::Publish.send(
+        :exact_snapshot!, task, config, git_gateway: LocalGit.new,
+        worktree_root: worktree_root
+      )
+      snapshot["repository_identity"] = {
+        "host" => "github.com", "repository" => "invalid"
+      }
+      assert_raises(Hive::GithubPublication::Blocked) do
+        Hive::Stages::PatrolFix::Publish.send(
+          :request_from_snapshot, task, config, snapshot
+        )
+      end
+    end
+  end
+
+  def test_body_bounding_and_default_git_gateway
+    bounded = Hive::Stages::PatrolFix::Publish.send(:bounded_utf8, "é" * 20, 9)
+
+    assert bounded.valid_encoding?
+    assert_operator bounded.bytesize, :<=, 9
+    assert_instance_of Hive::GithubPublication::GitGateway,
+                       Hive::Stages::PatrolFix::Publish.send(:default_git_gateway, config)
+  end
+
+  def test_diagnostic_storage_failure_cannot_revoke_publication
+    task = Struct.new(:folder).new(Dir.pwd)
+    with_replaced_singleton_method(
+      Hive::AtomicFile, :write, ->(*) { raise IOError, "disk unavailable" }
+    ) do
+      assert_nil Hive::Stages::PatrolFix::Publish.send(
+        :cleanup_after_receipt, task, nil, nil, {}
+      )
+    end
+  end
+
   private
+
+  def rewrite_receipts(task)
+    path = File.join(task.folder, Hive::PatrolFix::ReceiptStore::FILENAME)
+    rows = File.readlines(path, chomp: true).map { |line| JSON.parse(line) }
+    File.write(path, yield(rows).map { |row| JSON.generate(row) }.join("\n") + "\n")
+  end
 
   def with_publish_task(review_rationale: "Independent review approved the exact patch.")
     PatrolFixStageFixture.with_task(stage: "5-publish") do |task, root, manifest|

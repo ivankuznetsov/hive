@@ -164,6 +164,162 @@ class PatrolCommandTest < Minitest::Test
     assert_includes err, "unknown project"
   end
 
+  def test_non_coding_default_workflow_is_rejected
+    with_patrol_project do |repo|
+      config_path = File.join(repo, ".hive-state", "config.yml")
+      config = YAML.safe_load_file(config_path, aliases: true)
+      config["default_workflow"] = "patrol-fix"
+      File.write(config_path, config.to_yaml)
+
+      out, _err, status = with_captured_exit { command_for.call }
+
+      assert_equal Hive::ExitCodes::CONFIG, status
+      assert_includes JSON.parse(out).fetch("message"), "non-coding default_workflow"
+    end
+  end
+
+  def test_internal_errors_are_wrapped_and_non_json_success_is_human_readable
+    with_patrol_project do
+      broken = Object.new
+      broken.define_singleton_method(:call) { raise "mapper exploded" }
+      out, _err, status = with_captured_exit do
+        command_for(mapper: broken).call
+      end
+      assert_equal Hive::ExitCodes::SOFTWARE, status
+      assert_equal "InternalError", JSON.parse(out).fetch("error_class")
+
+      command = Hive::Commands::Patrol.new(
+        "demo", mapper_factory: ->(*) { FakeMapper.new([]) },
+        reviewer_factory: ->(*) { FakeReviewer.new([]) }
+      )
+      human, = capture_io { command.call }
+      assert_match(/hive patrol: demo mapped=0/, human)
+    end
+  end
+
+  def test_unattributable_review_error_reports_zero_successes
+    batch = Struct.new(:features).new([ sample_feature ])
+    reviewer = FakeReviewer.new([], review_errors: [ { "error" => "unknown feature" } ])
+
+    result = command_for.send(:review_outcome, batch, reviewer)
+
+    assert_equal 0, result.fetch("features_reviewed")
+  end
+
+  def test_default_mapper_and_reviewer_are_constructed
+    with_patrol_project do |repo|
+      cfg = Hive::Config.load(repo)
+      state = patrol_store(repo)
+      command = Hive::Commands::Patrol.new("demo")
+      mapper = command.instance_variable_get(:@mapper_factory).call(repo, cfg, state)
+      budget = Hive::Patrol::LaunchBudget.new(repo, cfg: cfg, charge_discovery: false)
+
+      assert_instance_of Hive::Patrol::Mapper, mapper
+      assert_instance_of Hive::Patrol::Reviewer,
+                         command.send(:build_reviewer, repo, cfg, state, budget)
+    end
+  end
+
+  def test_active_materializable_snapshot_is_reused
+    with_patrol_project do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      state = patrol_store(repo)
+      state.update_state(
+        "feature_review_active" => true,
+        "feature_review_sha" => head,
+        "feature_review_cursor" => 1
+      )
+
+      assert_equal head, command_for.send(
+        :sweep_target_sha, repo, Hive::Config.load(repo), state
+      )
+      refute command_for.send(:materializable_commit?, repo, "invalid")
+    end
+  end
+
+  def test_scan_checkout_rejects_a_sha_other_than_the_requested_target
+    command = command_for(dry_run: true)
+    calls = []
+    command.define_singleton_method(:git_output!) do |root, *args|
+      calls << [ root, args ]
+      args == [ "rev-parse", "HEAD" ] ? "unexpected-sha\n" : ""
+    end
+
+    error = assert_raises(Hive::GitError) do
+      command.send(:with_scan_checkout, "/project", "expected-sha") { flunk "must not yield" }
+    end
+
+    assert_includes error.message, "unexpected-sha"
+    assert calls.any? { |_root, args| args.first(3) == [ "worktree", "remove", "--force" ] }
+  end
+
+  def test_scan_cleanup_failure_does_not_mask_result
+    command = command_for(dry_run: true)
+    command.define_singleton_method(:git_output!) do |_root, *args|
+      raise Hive::GitError, "removal blocked" if
+        args.first(3) == [ "worktree", "remove", "--force" ]
+      args == [ "rev-parse", "HEAD" ] ? "expected-sha\n" : ""
+    end
+
+    result = nil
+    _out, err = capture_io do
+      result = command.send(:with_scan_checkout, "/project", "expected-sha") { :scan_result }
+    end
+
+    assert_equal :scan_result, result
+    assert_match(/removal blocked/, err)
+  end
+
+  def test_git_output_and_fresh_scan_base_fail_closed
+    Dir.mktmpdir do |root|
+      error = assert_raises(Hive::GitError) do
+        command_for.send(:git_output!, root, "rev-parse", "HEAD")
+      end
+      assert_match(/not a git repository/i, error.message)
+    end
+
+    command = command_for
+    cfg = { "default_branch" => "master" }
+    status = Struct.new(:exitstatus) { def success? = exitstatus.zero? }
+    with_replaced_singleton_method(Hive::Worktree, :origin_configured?, ->(_root) { false }) do
+      with_replaced_singleton_method(
+        Open3, :capture3, ->(*) { [ "not-an-oid\n", "", status.new(0) ] }
+      ) do
+        error = assert_raises(Hive::GitError) do
+          command.send(:current_default_sha, "/project", cfg)
+        end
+        assert_match(/invalid SHA/, error.message)
+      end
+    end
+
+    with_replaced_singleton_method(Hive::Worktree, :origin_configured?, ->(_root) { true }) do
+      with_replaced_singleton_method(
+        Hive::Worktree, :fetch_origin_branch,
+        ->(_root, _branch) { [ "", "network unavailable", status.new(1) ] }
+      ) do
+        error = assert_raises(Hive::GitError) do
+          command.send(:current_default_sha, "/project", cfg)
+        end
+        assert_match(/cannot fetch fresh patrol scan base/, error.message)
+      end
+    end
+  end
+
+  def test_scan_checkout_rejects_committed_and_uncommitted_mutation
+    command = command_for
+    assert_raises(Hive::GitError) do
+      command.send(:assert_clean_scan_checkout!, Dir.pwd, "0" * 40)
+    end
+
+    head = run!("git", "rev-parse", "HEAD").strip
+    command.define_singleton_method(:git_output!) do |_root, *args|
+      args == [ "rev-parse", "HEAD" ] ? "#{head}\n" : " M changed.rb\n"
+    end
+    assert_raises(Hive::GitError) do
+      command.send(:assert_clean_scan_checkout!, Dir.pwd, head)
+    end
+  end
+
   private
 
   def with_patrol_project

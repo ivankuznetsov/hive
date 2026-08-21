@@ -98,6 +98,111 @@ class PatrolFixWorktreeReceiptTest < Minitest::Test
     end
   end
 
+  def test_read_translates_missing_malformed_and_io_failures
+    Dir.mktmpdir do |dir|
+      task = File.join(dir, "task")
+      FileUtils.mkdir_p(task)
+      store = Hive::PatrolFix::WorktreeReceipt.new(
+        task_folder: task, project_root: dir, slug: "repair-one"
+      )
+      assert_raises(Hive::PatrolFix::WorktreeReceipt::InvalidWorktree) { store.read }
+
+      path = File.join(task, Hive::PatrolFix::WorktreeReceipt::FILENAME)
+      File.write(path, "{")
+      assert_raises(Hive::PatrolFix::WorktreeReceipt::InvalidWorktree) { store.read }
+
+      original = File.method(:open)
+      File.define_singleton_method(:open, ->(*) { raise IOError, "closed" })
+      begin
+        assert_raises(Hive::PatrolFix::WorktreeReceipt::InvalidWorktree) { store.read }
+      ensure
+        File.define_singleton_method(:open, original)
+      end
+    end
+  end
+
+  def test_translates_hardened_git_failures_at_each_public_boundary
+    Dir.mktmpdir do |dir|
+      task = File.join(dir, "task")
+      FileUtils.mkdir_p(task)
+      base = "1" * 40
+      store = Hive::PatrolFix::WorktreeReceipt.new(
+        task_folder: task, project_root: dir, slug: "repair-one"
+      )
+      failed_worktree = Object.new
+      failed_worktree.define_singleton_method(:create_exact!) do |*|
+        raise Hive::AgentGitGate::Error, "hardened git failed"
+      end
+      store.define_singleton_method(:worktree) { |_| failed_worktree }
+      assert_raises(Hive::PatrolFix::WorktreeReceipt::InvalidWorktree) do
+        store.prepare!(generation: 1, evidence_digest: "a" * 64, base_revision: base)
+      end
+
+      store.define_singleton_method(:read) { raise Hive::AgentGitGate::Error, "hardened git failed" }
+      assert_raises(Hive::PatrolFix::WorktreeReceipt::InvalidWorktree) do
+        store.rotate!(generation: 2, evidence_digest: "b" * 64)
+      end
+      assert_raises(Hive::PatrolFix::WorktreeReceipt::InvalidWorktree) do
+        store.capture!(generation: 1, evidence_digest: "a" * 64)
+      end
+    end
+  end
+
+  def test_archive_helpers_are_idempotent_and_fail_closed
+    Dir.mktmpdir do |dir|
+      task = File.join(dir, "task")
+      FileUtils.mkdir_p(task)
+      store = Hive::PatrolFix::WorktreeReceipt.new(
+        task_folder: task, project_root: dir, slug: "repair-one"
+      )
+      archive_dir = File.join(task, "patrol-fix-worktrees")
+      File.write(archive_dir, "not a directory")
+      assert_raises(Hive::PatrolFix::WorktreeReceipt::InvalidWorktree) do
+        store.send(:ensure_archive_dir!, archive_dir)
+      end
+
+      original_lstat = File.method(:lstat)
+      File.define_singleton_method(:lstat, ->(*) { raise IOError, "unavailable" })
+      begin
+        assert_raises(Hive::PatrolFix::WorktreeReceipt::InvalidWorktree) do
+          store.send(:ensure_archive_dir!, File.join(task, "other"))
+        end
+      ensure
+        File.define_singleton_method(:lstat, original_lstat)
+      end
+
+      document = { "generation" => 1 }
+      retained = File.join(task, "retained.json")
+      File.write(retained, Hive::PatrolFix.canonical_json(document))
+      assert_nil store.send(:write_exact_or_match!, retained, document, "archive")
+
+      File.write(retained, "different")
+      assert_raises(Hive::PatrolFix::WorktreeReceipt::InvalidWorktree) do
+        store.send(:write_exact_or_match!, retained, document, "archive")
+      end
+
+      File.delete(retained)
+      target = File.join(task, "target")
+      File.write(target, "target")
+      File.symlink(target, retained)
+      assert_raises(Hive::PatrolFix::WorktreeReceipt::InvalidWorktree) do
+        store.send(:write_exact_or_match!, retained, document, "archive")
+      end
+      File.unlink(retained)
+      File.write(retained, "different")
+
+      original_binread = File.method(:binread)
+      File.define_singleton_method(:binread, ->(*) { raise IOError, "unavailable" })
+      begin
+        assert_raises(Hive::PatrolFix::WorktreeReceipt::InvalidWorktree) do
+          store.send(:write_exact_or_match!, retained, document, "archive")
+        end
+      ensure
+        File.define_singleton_method(:binread, original_binread)
+      end
+    end
+  end
+
   private
 
   def initialize_repo(path)

@@ -147,6 +147,32 @@ class PatrolFixProjectionTest < Minitest::Test
     end
   end
 
+  def test_invalid_publication_diagnostics_fail_the_projection_closed
+    with_task do |dir, _manifest, _receipts|
+      path = File.join(dir, "patrol-fix-publication-diagnostic.json")
+      File.write(path, JSON.generate("schema" => "unknown"))
+      invalid = Hive::PatrolFix::Projection.new(task_folder: dir, stage: "1-inbox").to_h
+      assert_equal "invalid", invalid.fetch("state")
+      assert_includes invalid.dig("diagnostic", "summary"), "diagnostic is invalid"
+
+      File.write(path, "{")
+      malformed = Hive::PatrolFix::Projection.new(task_folder: dir, stage: "1-inbox").to_h
+      assert_equal "invalid", malformed.fetch("state")
+      assert_includes malformed.dig("diagnostic", "summary"), "JSON::ParserError"
+    end
+  end
+
+  def test_action_defaults_to_not_ready_for_an_unrecognized_internal_stage
+    projection = Hive::PatrolFix::Projection.new(task_folder: ".", stage: "future")
+
+    action = projection.send(
+      :action_for, state: "current", done: false, outcome: nil,
+      decision: nil, fix: nil, validation: nil, publication: nil
+    )
+
+    assert_equal({ "kind" => "ready", "runnable" => true }, action)
+  end
+
   private
 
   def with_task(successor: nil)

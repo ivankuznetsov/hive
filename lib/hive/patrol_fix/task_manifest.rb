@@ -94,8 +94,6 @@ module Hive
           .each_with_index { |entry, index| validate_alias!(entry, index) }
         validate_relations!(document.fetch("relations"))
         PatrolFix.deep_freeze(document)
-      rescue KeyError => e
-        invalid!("manifest is missing #{e.key.inspect}")
       end
 
       def validate_task!(task)

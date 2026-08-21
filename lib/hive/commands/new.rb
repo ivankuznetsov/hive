@@ -617,27 +617,14 @@ module Hive
 
         assets_dir = File.join(task_dir, "assets")
         FileUtils.mkdir_p(assets_dir)
-        if @prepared_attachments
-          @prepared_attachments.each do |attachment|
-            destination = File.join(assets_dir, attachment.name)
-            FileUtils.cp(attachment.snapshot_path, destination)
-            next if ::Digest::SHA256.file(destination).hexdigest == attachment.sha256
-
-            raise InvalidAttachmentError.new(
-              "attachment snapshot changed while creating the task",
-              value: attachment.destination
-            )
-          end
-        else
-          @attachments.each do |src, dest_name|
-            name = attachment_name!(dest_name)
-            # `attachments:` is a programmatic contract used by the TUI and
-            # tests; callers may pass any absolute source path they captured.
-            # Keep the destination guard strict, but let FileUtils surface
-            # source readability/existence failures directly.
-            src_path = File.expand_path(src.to_s)
-            FileUtils.cp(src_path, File.join(assets_dir, name))
-          end
+        @attachments.each do |src, dest_name|
+          name = attachment_name!(dest_name)
+          # `attachments:` is a programmatic contract used by the TUI and
+          # tests; callers may pass any absolute source path they captured.
+          # Keep the destination guard strict, but let FileUtils surface
+          # source readability/existence failures directly.
+          src_path = File.expand_path(src.to_s)
+          FileUtils.cp(src_path, File.join(assets_dir, name))
         end
       end
 

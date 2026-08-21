@@ -146,6 +146,111 @@ class PatrolFixSuccessorMaterializerTest < Minitest::Test
     end
   end
 
+  def test_publication_marker_and_relation_validation_fail_closed
+    Dir.mktmpdir do |dir|
+      assert_nil Hive::PatrolFix::SuccessorMaterializer.publication_marker(dir, missing: true)
+      assert_raises(Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor) do
+        Hive::PatrolFix::SuccessorMaterializer.publication_marker(dir)
+      end
+
+      path = File.join(dir, Hive::PatrolFix::SuccessorMaterializer::ORIGIN_FILENAME)
+      FileUtils.mkdir_p(path)
+      assert_raises(Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor) do
+        Hive::PatrolFix::SuccessorMaterializer.publication_marker(dir)
+      end
+      FileUtils.rm_rf(path)
+      File.write(path, "{")
+      assert_raises(Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor) do
+        Hive::PatrolFix::SuccessorMaterializer.publication_marker(dir)
+      end
+
+      relation = {
+        "schema" => Hive::PatrolFix::SuccessorMaterializer::SCHEMA,
+        "schema_version" => Hive::PatrolFix::SuccessorMaterializer::SCHEMA_VERSION,
+        "origin" => { "project" => "demo", "slug" => "repair-one" },
+        "links" => [ {
+          "generation" => 1, "evidence_digest" => "a" * 64,
+          "decision_receipt_id" => "decision-1"
+        } ]
+      }
+      assert_raises(Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor) do
+        Hive::PatrolFix::SuccessorMaterializer.validate_relation_document!(
+          relation.merge("links" => [ relation.fetch("links").first.merge("generation" => 0) ])
+        )
+      end
+      assert_raises(Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor) do
+        Hive::PatrolFix::SuccessorMaterializer.validate_relation_document!(
+          relation.merge("links" => [ relation.fetch("links").first ] * 2)
+        )
+      end
+    end
+  end
+
+  def test_rejects_invalid_decisions_and_invalid_origin_manifests
+    with_origin do |task, decision|
+      materializer = Hive::PatrolFix::SuccessorMaterializer.new(task)
+      invalid = Marshal.load(Marshal.dump(decision))
+      invalid.fetch("payload")["route"] = "fix"
+      assert_raises(Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor) do
+        materializer.call(invalid)
+      end
+
+      File.write(
+        File.join(task.folder, Hive::PatrolFix::TaskManifest::FILENAME),
+        "not-json"
+      )
+      assert_raises(Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor) do
+        materializer.call(decision)
+      end
+    end
+  end
+
+  def test_reciprocal_and_origin_links_reject_foreign_ownership_and_io_failures
+    with_origin do |task, decision|
+      materializer = Hive::PatrolFix::SuccessorMaterializer.new(task)
+      result = materializer.call(decision)
+      path = File.join(result.fetch(:task_folder), Hive::PatrolFix::SuccessorMaterializer::ORIGIN_FILENAME)
+      relation = JSON.parse(File.read(path))
+      foreign = Marshal.load(Marshal.dump(relation))
+      foreign.fetch("origin")["slug"] = "other-origin"
+      File.write(path, Hive::PatrolFix.canonical_json(foreign))
+      assert_raises(Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor) do
+        materializer.send(:persist_reciprocal!, result.fetch(:task_folder), relation)
+      end
+
+      manifest_store = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder)
+      manifest = Marshal.load(Marshal.dump(manifest_store.read))
+      manifest.fetch("relations")["successor"] = {
+        "project" => task.project_name, "slug" => "foreign-coding-task"
+      }
+      manifest_store.write!(manifest)
+      assert_raises(Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor) do
+        materializer.send(:persist_origin_link!, result.fetch(:slug))
+      end
+
+      original_lstat = File.method(:lstat)
+      File.define_singleton_method(:lstat, ->(*) { raise IOError, "unavailable" })
+      begin
+        assert_raises(Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor) do
+          materializer.send(:persist_reciprocal!, result.fetch(:task_folder), relation)
+        end
+      ensure
+        File.define_singleton_method(:lstat, original_lstat)
+      end
+    end
+  end
+
+  def test_private_relation_reader_honors_missing_mode
+    with_origin do |task, decision|
+      materializer = Hive::PatrolFix::SuccessorMaterializer.new(task)
+      path = File.join(task.folder, "missing-origin.json")
+      assert_nil materializer.send(:read_relation, path, missing: true)
+      assert_raises(Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor) do
+        materializer.send(:read_relation, path)
+      end
+    end
+  end
+
   private
 
   def with_origin(stage: "inbox")

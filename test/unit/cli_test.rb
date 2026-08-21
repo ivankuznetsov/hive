@@ -1001,6 +1001,39 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_internal_patrol_commands_forward_fenced_identifiers
+    require "hive/commands/refactor_patrol_classify"
+    with_command_new_stub(Hive::Commands::RefactorPatrolClassify) do |calls|
+      Hive::CLI.start([
+        "refactor-patrol-classify", "proj", "--occurrence-id", "occurrence-1",
+        "--reservation-id", "#{'a' * 64}", "--result-file", "/tmp/result.json"
+      ])
+      assert_equal [ "proj" ], calls.first.fetch(:args)
+      assert_equal({
+        occurrence_id: "occurrence-1", reservation_id: "a" * 64,
+        result_file: "/tmp/result.json"
+      }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    require "hive/commands/patrol_fix_semantic_decision"
+    with_command_new_stub(Hive::Commands::PatrolFixSemanticDecision, return_value: 0) do |calls|
+      _out, _err, status = with_captured_exit do
+        Hive::CLI.start([
+          "__patrol-fix-semantic-decision", "proj", "--source", "ordinary_patrol",
+          "--occurrence-id", "occurrence-1", "--reservation-id", "#{'b' * 64}"
+        ])
+      end
+      assert_equal 0, status
+      assert_equal [ "proj" ], calls.first.fetch(:args)
+      assert_equal({
+        source: "ordinary_patrol", occurrence_id: "occurrence-1",
+        reservation_id: "b" * 64
+      }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+  end
+
 
   def test_bot_rejects_foreground_and_detach_together
     _out, err, status = with_captured_exit do

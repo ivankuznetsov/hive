@@ -226,6 +226,37 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_discard_unlinks_a_partial_symlink_without_touching_its_target
+    with_initialized_project do |dir, root|
+      wt = Hive::Worktree.new(dir, "discard-symlink", worktree_root: root)
+      target = File.join(root, "preserved")
+      FileUtils.mkdir_p(target)
+      File.symlink(target, wt.path)
+
+      assert_equal :removed, wt.discard!(force: true)
+      refute File.symlink?(wt.path)
+      assert Dir.exist?(target)
+    end
+  end
+
+  def test_discard_retries_registration_removal_after_cleaning_the_path
+    with_initialized_project do |dir, root|
+      wt = Hive::Worktree.new(dir, "discard-retry", worktree_root: root)
+      FileUtils.mkdir_p(wt.path)
+      calls = 0
+      wt.define_singleton_method(:registered?) { true }
+      wt.define_singleton_method(:remove!) do |**|
+        calls += 1
+        raise Hive::WorktreeError, "first removal failed" if calls == 1
+        :removed
+      end
+
+      assert_equal :removed, wt.discard!(force: true)
+      assert_equal 2, calls
+      refute File.exist?(wt.path)
+    end
+  end
+
   def test_create_exact_pins_the_requested_commit_without_moving_registered_head
     with_initialized_project do |dir, root|
       pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
@@ -345,6 +376,12 @@ class WorktreeTest < Minitest::Test
 
       assert_equal :created, wt.create_exact!(branch, base_sha: pinned)
       assert_equal descendant, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_equal :existing, wt.create_exact!(branch, base_sha: pinned)
+
+      error = assert_raises(Hive::WorktreeError) do
+        wt.create_exact!("hive-refactor/other", base_sha: pinned)
+      end
+      assert_match(/is not on branch/, error.message)
     end
   end
 

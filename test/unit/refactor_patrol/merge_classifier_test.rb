@@ -22,6 +22,7 @@ class RefactorPatrolMergeClassifierTest < Minitest::Test
           "patrol_successor", "<!-- hive-patrol-fix-successor:v1 digest=#{'c' * 64} -->"
         ),
         "docs_only" => snapshot(title: "docs: clarify setup", paths: [ "docs/setup.md" ]),
+        "non_production_only" => snapshot(title: "Improve test coverage", paths: [ "test/workflow_test.rb" ]),
         "dependency_only" => snapshot(
           title: "chore(deps): bump rack", author: "dependabot[bot]", paths: [ "Gemfile.lock" ]
         ),
@@ -106,6 +107,20 @@ class RefactorPatrolMergeClassifierTest < Minitest::Test
       assert_equal retry_at, error.retry_at
       assert_equal retry_at.iso8601(6), classifier.fetch(snapshot).fetch("retry_at")
       assert_empty classifier.eligible_records(now: T0 + 899, limit: 1)
+    end
+  end
+
+  def test_unexpected_settlement_failure_uses_the_same_bounded_retry_path
+    with_tmp_dir do |dir|
+      classifier = build_classifier(dir) { |_prompt| decision("feature") }
+      classifier.define_singleton_method(:settle_decision) { |*args, **kwargs| raise "disk failed" }
+
+      error = assert_raises(Hive::RefactorPatrol::MergeClassifier::Retryable) do
+        classifier.call(snapshot, now: T0)
+      end
+
+      assert_match(/disk failed/, error.message)
+      assert_equal "retry_wait", classifier.fetch(snapshot).fetch("status")
     end
   end
 
@@ -308,6 +323,169 @@ class RefactorPatrolMergeClassifierTest < Minitest::Test
         assert classifier.fetch_occurrence(active.fetch("occurrence_id"))
       end
     end
+  end
+
+  def test_constructor_and_public_mutations_reject_invalid_or_conflicting_input
+    with_tmp_dir do |dir|
+      root = File.join(dir, "classifications")
+      assert_raises(ArgumentError) do
+        Hive::RefactorPatrol::MergeClassifier.new(root: root, decision_provider: nil)
+      end
+      assert_raises(ArgumentError) do
+        Hive::RefactorPatrol::MergeClassifier.new(root: root, decision_provider: ->(*) { }, max_attempts: 0)
+      end
+      assert_raises(ArgumentError) do
+        Hive::RefactorPatrol::MergeClassifier.new(
+          root: root, decision_provider: ->(*) { }, retry_backoff_sec: [ 0 ]
+        )
+      end
+
+      classifier = build_classifier(dir) { |_prompt| decision("feature") }
+      assert_equal "skip", classifier.preview(
+        snapshot(title: "docs: update", paths: [ "docs/readme.md" ])
+      ).fetch("status")
+      assert_raises(ArgumentError) { classifier.eligible_records(now: T0, limit: 0) }
+      pending = classifier.hydrate(snapshot, now: T0)
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Invalid) do
+        classifier.claim!(pending.fetch("occurrence_id"), reservation_id: "bad", owner: "", now: T0)
+      end
+
+      classifier.claim!(
+        pending.fetch("occurrence_id"), reservation_id: "d" * 64,
+        owner: "daemon", now: T0, lease_sec: 60
+      )
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Conflict) do
+        classifier.release_claim!(
+          pending.fetch("occurrence_id"), reservation_id: "e" * 64, now: T0
+        )
+      end
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Conflict) do
+        classifier.call(snapshot, now: T0)
+      end
+    end
+  end
+
+  def test_materialization_binding_is_valid_idempotent_and_immutable
+    with_tmp_dir do |dir|
+      classifier = build_classifier(dir) { |_prompt| decision("feature") }
+      feature = classifier.call(snapshot, now: T0)
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Invalid) do
+        classifier.bind_materialization!(
+          feature.fetch("occurrence_id"), job_ids: [], manifest_checksums: [], now: T0
+        )
+      end
+      first = classifier.bind_materialization!(
+        feature.fetch("occurrence_id"), job_ids: [ "job-1" ],
+        manifest_checksums: [ "a" * 64 ], now: T0
+      )
+      assert_equal first, classifier.bind_materialization!(
+        feature.fetch("occurrence_id"), job_ids: [ "job-1" ],
+        manifest_checksums: [ "a" * 64 ], now: T0 + 1
+      )
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Conflict) do
+        classifier.bind_materialization!(
+          feature.fetch("occurrence_id"), job_ids: [ "job-2" ],
+          manifest_checksums: [ "b" * 64 ], now: T0 + 2
+        )
+      end
+    end
+  end
+
+  def test_retry_and_settlement_are_bound_to_the_exact_attempt
+    with_tmp_dir do |dir|
+      classifier = build_classifier(dir) { |_prompt| { "decision" => "feature" } }
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Retryable) do
+        classifier.call(snapshot, now: T0)
+      end
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Retryable) do
+        classifier.call(snapshot, now: T0 + 1)
+      end
+      record = classifier.fetch(snapshot)
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Conflict) do
+        classifier.send(
+          :settle_decision, record.fetch("occurrence_id"), record.fetch("snapshot_digest"), 99,
+          decision("feature"), now: T0, reservation_id: nil
+        )
+      end
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Conflict) do
+        classifier.send(
+          :fail_attempt, record.fetch("occurrence_id"), record.fetch("snapshot_digest"), 99,
+          RuntimeError.new("failed"), now: T0, reservation_id: nil
+        )
+      end
+    end
+  end
+
+  def test_snapshot_and_provider_contracts_reject_each_nested_invalid_shape
+    with_tmp_dir do |dir|
+      classifier = build_classifier(dir) { |_prompt| decision("feature") }
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Invalid) do
+        classifier.send(:normalize_decision, decision("feature").merge("evidence" => []))
+      end
+      invalid_snapshots = [
+        snapshot.reject { |key, _| key == "author" },
+        snapshot.merge("merge_sha" => "bad"),
+        snapshot.merge("labels" => [ "duplicate", "duplicate" ]),
+        snapshot.merge("changed_paths" => []),
+        snapshot.merge("files" => [ { "path" => "lib/hive/workflow.rb", "status" => "bad", "patch" => "" } ]),
+        snapshot.merge("files" => [ {
+          "path" => "lib/hive/workflow.rb", "status" => "renamed", "patch" => "",
+          "previous_path" => "../outside.rb"
+        } ]),
+        snapshot.merge("publication_provenance" => { "kind" => "unknown", "marker" => nil }),
+        snapshot.merge("merged_at" => "not-a-time"),
+        snapshot.merge("title" => "bad\0title")
+      ]
+      invalid_snapshots.each do |value|
+        assert_raises(Hive::RefactorPatrol::MergeClassifier::Invalid) do
+          classifier.send(:normalize_snapshot, value)
+        end
+      end
+    end
+  end
+
+  def test_record_claim_materialization_and_index_corruption_are_distinct
+    with_tmp_dir do |dir|
+      classifier = build_classifier(dir) { |_prompt| decision("feature") }
+      record = classifier.hydrate(snapshot, now: T0)
+      bytes = JSON.parse(File.read(File.join(
+        dir, "classifications", "records", "#{record.fetch('occurrence_id')}.json"
+      )))
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Invalid) do
+        classifier.send(:parse_record, Hive::PatrolFix.canonical_json(bytes.merge("status" => "bad")))
+      end
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Invalid) do
+        classifier.send(:parse_record, Hive::PatrolFix.canonical_json(bytes.merge("created_at" => "bad")))
+      end
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Invalid) do
+        classifier.send(:validate_claim!, {})
+      end
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Invalid) do
+        classifier.send(:validate_materialization!, {})
+      end
+
+      File.write(File.join(dir, "classifications", "eligible-index.json"), "{}")
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Invalid) do
+        classifier.eligible_records(now: T0, limit: 1)
+      end
+    end
+  end
+
+  def test_rebuild_refuses_more_pending_work_than_the_index_contract
+    original = Hive::RefactorPatrol::MergeClassifier::MAX_PENDING_RECORDS
+    with_tmp_dir do |dir|
+      classifier = build_classifier(dir) { |_prompt| decision("feature") }
+      classifier.hydrate(snapshot, now: T0)
+      File.delete(File.join(dir, "classifications", "eligible-index.json"))
+      Hive::RefactorPatrol::MergeClassifier.send(:remove_const, :MAX_PENDING_RECORDS)
+      Hive::RefactorPatrol::MergeClassifier.const_set(:MAX_PENDING_RECORDS, 0)
+      assert_raises(Hive::RefactorPatrol::MergeClassifier::Invalid) do
+        classifier.rebuild_eligible_index!
+      end
+    end
+  ensure
+    Hive::RefactorPatrol::MergeClassifier.send(:remove_const, :MAX_PENDING_RECORDS)
+    Hive::RefactorPatrol::MergeClassifier.const_set(:MAX_PENDING_RECORDS, original)
   end
 
   private

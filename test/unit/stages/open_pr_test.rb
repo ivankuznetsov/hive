@@ -263,4 +263,208 @@ class HiveStagesOpenPrTest < Minitest::Test
       refute_includes prompt, "gh pr create"
     end
   end
+
+  def test_authoring_agent_failures_are_durable_stage_errors
+    with_task do |task, repo, base_oid|
+      FileUtils.rm_f(File.join(task.folder, Hive::Stages::OpenPr::AUTHORING_FILE))
+      pointer = { "path" => repo, "branch" => task.slug, "base_oid" => base_oid }
+      profile = Struct.new(:name).new(:codex)
+      custody = Object.new
+      custody.define_singleton_method(:report) { nil }
+
+      with_replaced_singleton_method(Hive::ArtifactFirewall::AgentCustody, :new, ->(*) { custody }) do
+        with_replaced_singleton_method(
+          Hive::Stages::OpenPr, :spawn_open_pr_agent, ->(*) { { status: :ok } }
+        ) do
+          result = Hive::Stages::OpenPr.authoring_for(
+            task, cfg, pointer, nil, profile, {}
+          )
+          assert_equal({ commit: "open_pr_custody_missing", status: :error }, result)
+        end
+
+        with_replaced_singleton_method(
+          Hive::Stages::OpenPr, :spawn_open_pr_agent,
+          ->(*) { { status: :error, error_message: "provider failed" } }
+        ) do
+          result = Hive::Stages::OpenPr.authoring_for(
+            task, cfg, pointer, nil, profile, {}
+          )
+          assert_equal({ commit: "open_pr_authoring_failed", status: :error }, result)
+          assert_equal "provider failed", Hive::Markers.current(task.state_file).attrs.fetch("detail")
+        end
+      end
+    end
+  end
+
+  def test_tampered_authoring_custody_is_rejected
+    with_task do |task, repo, base_oid|
+      FileUtils.rm_f(File.join(task.folder, Hive::Stages::OpenPr::AUTHORING_FILE))
+      pointer = { "path" => repo, "branch" => task.slug, "base_oid" => base_oid }
+      profile = Struct.new(:name).new(:codex)
+      report = Object.new
+      report.define_singleton_method(:tampered?) { true }
+      report.define_singleton_method(:tampered_labels) { [ "task metadata" ] }
+      report.define_singleton_method(:restored?) { false }
+      report.define_singleton_method(:restore_diagnostic) { "restore failed" }
+      custody = Object.new
+      custody.define_singleton_method(:report) { report }
+
+      with_replaced_singleton_method(Hive::ArtifactFirewall::AgentCustody, :new, ->(*) { custody }) do
+        with_replaced_singleton_method(
+          Hive::Stages::OpenPr, :spawn_open_pr_agent, ->(*) { { status: :ok } }
+        ) do
+          result = Hive::Stages::OpenPr.authoring_for(
+            task, cfg, pointer, nil, profile, {}
+          )
+          assert_equal({ commit: "open_pr_tampered", status: :error }, result)
+        end
+      end
+    end
+  end
+
+  def test_publication_request_rejects_non_descendant_and_invalid_identity
+    task = Task.new(folder: Dir.pwd, state_file: "/tmp/pr.md", project_root: Dir.pwd,
+                    slug: "feature", id: 2)
+    pointer = { "path" => Dir.pwd, "branch" => "feature", "base_oid" => "a" * 40 }
+    authoring = Hive::Stages::OpenPr::Authoring.new(title: "Title", body: "Body")
+    result = Struct.new(:stdout, :stderr, :exitstatus, :overflow) do
+      def success? = exitstatus.zero?
+    end
+    reads = {
+      head_oid: result.new("#{'b' * 40}\n", "", 0, false),
+      current_branch: result.new("feature\n", "", 0, false),
+      status: result.new("", "", 0, false),
+      ancestor: result.new("", "", 1, false)
+    }
+    with_replaced_singleton_method(
+      Hive::Stages::OpenPr, :git_read!, ->(_path, operation, **) { reads.fetch(operation) }
+    ) do
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::OpenPr.publication_request(
+          task, cfg, pointer, authoring, git_gateway: FakeGitGateway.new
+        )
+      end
+      assert_match(/not descended/, error.message)
+    end
+
+    assert_raises(Hive::StageError) do
+      Hive::Stages::OpenPr.publication_request(
+        task, cfg, {}, authoring, git_gateway: FakeGitGateway.new
+      )
+    end
+  end
+
+  def test_git_read_failure_reports_bounded_reason
+    result = Struct.new(:stdout, :stderr, :exitstatus, :overflow) do
+      def success? = exitstatus.zero?
+    end
+    [
+      [ result.new("", "denied", 2, false), "denied" ],
+      [ result.new("", "", 2, false), "git exited 2" ],
+      [ result.new("", "", 2, true), "output exceeded its safe bound" ]
+    ].each do |failure, expected|
+      with_replaced_singleton_method(Hive::AgentGitGate, :read, ->(*) { failure }) do
+        error = assert_raises(Hive::StageError) do
+          Hive::Stages::OpenPr.git_read!(Dir.pwd, :status)
+        end
+        assert_includes error.message, expected
+      end
+    end
+  end
+
+  def test_authoring_file_missing_and_symlink_are_rejected
+    with_tmp_dir do |dir|
+      missing = File.join(dir, "missing.json")
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::OpenPr.read_authoring(missing)
+      end
+      assert_match(/is missing/, error.message)
+
+      target = File.join(dir, "target.json")
+      link = File.join(dir, "link.json")
+      File.write(target, JSON.generate("title" => "Title", "body" => "Body"))
+      File.symlink(target, link)
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::OpenPr.read_authoring(link)
+      end
+      assert_match(/not a symlink/, error.message)
+
+      with_replaced_singleton_method(File, :open, ->(*) { raise Errno::EACCES, "denied" }) do
+        error = assert_raises(Hive::StageError) do
+          Hive::Stages::OpenPr.read_authoring(target)
+        end
+        assert_match(/is unreadable: Errno::EACCES/, error.message)
+      end
+    end
+  end
+
+  def test_publication_agent_uses_the_bound_implementation_profile
+    identity = Struct.new(:provider).new(:codex)
+    profile = Object.new
+    expected_cfg = cfg
+    test_case = self
+    task = Task.new(folder: "/tmp/task", project_root: "/tmp/project", slug: "task")
+    with_replaced_singleton_method(
+      Hive::Stages::Base, :implementation_stage_identity, ->(*) { identity }
+    ) do
+      with_replaced_singleton_method(
+        Hive::AgentProfiles, :lookup,
+        lambda do |provider, cfg:|
+          test_case.assert_equal :codex, provider
+          test_case.assert_equal expected_cfg, cfg
+          profile
+        end
+      ) do
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :implementation_launch_arguments,
+          ->(seen_identity, seen_profile) { { identity: seen_identity, profile: seen_profile } }
+        ) do
+          assert_equal [ identity, profile, { identity: identity, profile: profile } ],
+                       Hive::Stages::OpenPr.publication_agent(task, cfg)
+        end
+      end
+    end
+  end
+
+  def test_pr_observation_records_attempt_bound_activity
+    task = Task.new(folder: "/tmp/task", project_root: "/tmp/project", slug: "task")
+    context = Struct.new(:attempt_id).new("attempt-1")
+    captured = nil
+    with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :record_task_activity,
+        lambda { |seen_task, **kwargs| captured = [ seen_task, kwargs ]; true }
+      ) do
+        assert Hive::Stages::OpenPr.record_pr_observation(
+          task,
+          { "number" => 42, "head_oid" => "a" * 40 },
+          "merged"
+        )
+      end
+    end
+
+    assert_same task, captured.first
+    assert_equal "merge_observed", captured.last.fetch(:kind)
+    assert_equal "publication:attempt-1:merged:42", captured.last.fetch(:operation_id)
+  end
+
+  def test_default_git_gateway_and_existing_dependency_branch
+    with_task do |task, _repo, _base_oid|
+      gateway = Hive::Stages::OpenPr.default_git_gateway(
+        cfg.merge("agent_git_gate" => { "allow_local_transport" => true })
+      )
+      assert_instance_of Hive::GithubPublication::GitGateway, gateway
+
+      with_replaced_singleton_method(
+        Hive::DependencySnapshot, :stacked_base, ->(*) { "dependency" }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Worktree, :origin_branch_exists?, ->(*) { true }
+        ) do
+          assert_equal "dependency",
+                       Hive::Stages::OpenPr.dependency_pr_base_branch(task, cfg)
+        end
+      end
+    end
+  end
 end

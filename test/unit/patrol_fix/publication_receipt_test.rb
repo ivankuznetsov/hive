@@ -46,6 +46,31 @@ class PatrolFixPublicationReceiptTest < Minitest::Test
     assert_equal built, adopted
   end
 
+  def test_rejects_malformed_observations_and_canonical_payload_fields
+    assert_raises(Hive::PatrolFix::PublicationReceipt::InvalidPublication) do
+      Hive::PatrolFix::PublicationReceipt.build(
+        task: {}, evidence_revision: {}, publication: nil
+      )
+    end
+
+    payload = Hive::PatrolFix::PublicationReceipt.build(
+      task: { "slug" => "repair-one", "generation" => 1 },
+      evidence_revision: { "generation" => 1, "digest" => "a" * 64 },
+      publication: publication
+    ).fetch("payload")
+    invalid_payloads = [
+      payload.merge("publication_id" => ""),
+      payload.merge("url" => "https://%"),
+      payload.merge("base_branch" => "..")
+    ]
+
+    invalid_payloads.each do |invalid|
+      assert_raises(Hive::PatrolFix::PublicationReceipt::InvalidPublication) do
+        Hive::PatrolFix::PublicationReceipt.validate_payload!(invalid)
+      end
+    end
+  end
+
   private
 
   def publication

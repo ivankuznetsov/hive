@@ -122,7 +122,11 @@ module Hive
           store = begin
             store_for(entry)
           rescue StandardError => error
-            recovery_state_unavailable(entry, error)
+            @events << {
+              status: :blocked, project: entry.fetch("name"),
+              reason: "recovery_state_unavailable",
+              error: "#{error.class}: #{error.message}"[0, 2_000]
+            }
             nil
           end
           next [ entry.fetch("name"), [] ] unless store

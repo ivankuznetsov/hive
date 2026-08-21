@@ -56,7 +56,86 @@ class TaskCaptureTest < Minitest::Test
     end
   end
 
+  def test_input_identity_and_attachment_validation_fail_closed
+    with_tmp_dir do |dir|
+      base = capture_options(dir)
+      [
+        [ { slug: "../unsafe" }, Hive::TaskCapture::SlugCollisionError ],
+        [ { idempotency_key: "" }, Hive::TaskCapture::IdempotencyConflict ],
+        [ { input_fingerprint: "BAD" }, Hive::TaskCapture::IdempotencyConflict ]
+      ].each do |overrides, error_class|
+        capture = Hive::TaskCapture.new(**base.merge(overrides))
+        assert_raises(error_class) { capture.send(:validate_inputs!) }
+      end
+
+      attachment = Hive::TaskCapture::Attachment.new(
+        snapshot_path: "/tmp/source", destination: "../bad", name: "../bad", sha256: "a" * 64
+      )
+      capture = Hive::TaskCapture.new(**base.merge(attachments: [ attachment ]))
+      assert_raises(Hive::TaskCapture::InvalidAttachmentError) do
+        capture.send(:validate_inputs!)
+      end
+
+      empty_workflow = Struct.new(:id, :stages).new(:empty, [])
+      capture = Hive::TaskCapture.new(
+        **base.merge(workflow_info: base.fetch(:workflow_info).merge(descriptor: empty_workflow))
+      )
+      assert_raises(Hive::ConfigError) { capture.send(:validate_inputs!) }
+    end
+  end
+
+  def test_initial_marker_is_written_during_capture
+    with_initialized_project do |project_root|
+      options = capture_options(project_root).merge(
+        hive_state: File.join(project_root, ".hive-state"),
+        initial_marker: { name: :waiting, attrs: { reason: "imported" } }
+      )
+
+      result = Hive::TaskCapture.new(**options).call
+
+      state_file = Hive::Workflows::Registry.default.stages.first.state_file
+      marker = Hive::Markers.current(File.join(result.folder, state_file))
+      assert_equal :waiting, marker.name
+      assert_equal "imported", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_managed_selection_drift_is_rejected
+    with_tmp_dir do |dir|
+      managed = {
+        "source_commit" => "a" * 40,
+        "manifest_digest" => "b" * 64,
+        "configuration_digest" => "c" * 64
+      }
+      options = capture_options(dir)
+      capture = Hive::TaskCapture.new(
+        **options.merge(
+          workflow_info: options.fetch(:workflow_info).merge(managed: managed)
+        )
+      )
+
+      assert_raises(Hive::ConcurrentRunError) do
+        capture.send(:validate_stable_selection!, managed.merge("source_commit" => "d" * 40))
+      end
+    end
+  end
+
   private
+
+  def capture_options(project_root)
+    {
+      project_root: project_root,
+      hive_state: File.join(project_root, ".hive-state"),
+      workflow_info: {
+        descriptor: Hive::Workflows::Registry.default,
+        pin: false, managed: nil, managed_cfg: {}, authored_digest: nil
+      },
+      slug: "patrol-fix-task",
+      state_bytes: "# Task\n",
+      idempotency_key: "patrol-fix:capture:one",
+      input_fingerprint: "a" * 64
+    }
+  end
 
   def with_initialized_project
     with_tmp_global_config do

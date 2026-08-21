@@ -1359,6 +1359,32 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_scheduled_slice_rejects_malformed_or_incomplete_identity
+    entry = { "project_id" => "project-1" }
+    valid = {
+      "project_id" => "project-1", "analysis_sha" => "a" * 40,
+      "feature_id" => "f"
+    }
+    [ nil, valid.merge("project_id" => "wrong") ].each do |slice|
+      command = Hive::Commands::RefactorPatrol.new(
+        "demo", project_entry: entry, scheduled_slice: slice
+      )
+      error = assert_raises(Hive::ConfigError) do
+        command.send(:prepare_scheduled_checkout!)
+      end
+      assert_equal "scheduled Architecture Patrol slice is invalid", error.message
+    end
+
+    command = Hive::Commands::RefactorPatrol.new(
+      "demo", project_entry: entry, scheduled_slice: valid
+    )
+    command.instance_variable_set(:@scheduled_slice, { "project_id" => "project-1" })
+    error = assert_raises(Hive::ConfigError) do
+      command.send(:prepare_scheduled_checkout!)
+    end
+    assert_equal "scheduled Architecture Patrol slice is invalid", error.message
+  end
+
   def test_default_manifest_resolver_receives_authoritative_project_context
     with_refactor_patrol_project do |repo|
       entry = Hive::Config.find_project("demo")
@@ -1805,6 +1831,14 @@ class RefactorPatrolCommandTest < Minitest::Test
       command.send(:validate_mode!)
     end
     assert_match(/--full cannot be combined with --limit/, error.message)
+
+    command = Hive::Commands::RefactorPatrol.new(
+      "demo", json: true, list: true, dry_run: true
+    )
+    error = assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
+      command.send(:validate_mode!)
+    end
+    assert_match(/cannot be combined with discovery options/, error.message)
   end
 
   def test_job_query_usage_is_validated_before_project_resolution

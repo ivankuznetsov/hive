@@ -117,6 +117,141 @@ class PatrolFixTransitionTest < Minitest::Test
     end
   end
 
+  def test_pending_intents_replay_idempotently_and_reject_competing_routes
+    PatrolFixStageFixture.with_task(stage: "4-review") do |task, _root, _manifest|
+      transition = Hive::PatrolFix::Transition.new(task, commit: ->(**) { })
+      intent = route_intent(task)
+      transition.define_singleton_method(:read_intent) { intent }
+      applied = nil
+      transition.define_singleton_method(:apply_intent) { |value| applied = value; :replayed }
+
+      assert_equal :replayed, transition.reconcile!
+      assert_equal intent, applied
+      assert_equal intent, transition.send(
+        :begin_intent, action_id: intent.fetch("action_id"), route: "rework",
+        stage: "review", destination: "2-fix", operator: "controller:review",
+        carried_receipts: []
+      )
+      assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        transition.send(
+          :begin_intent, action_id: "other-decision", route: "rework",
+          stage: "review", destination: "2-fix", operator: "controller:review",
+          carried_receipts: []
+        )
+      end
+    end
+  end
+
+  def test_generation_replay_rejects_changed_or_unrecoverable_evidence
+    PatrolFixStageFixture.with_task(stage: "4-review") do |task, _root, _manifest|
+      transition = Hive::PatrolFix::Transition.new(task, commit: ->(**) { })
+      changed = route_intent(task).merge("from_digest" => "b" * 64)
+      assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        transition.send(:apply_intent, changed)
+      end
+    end
+
+    PatrolFixStageFixture.with_task(stage: "4-review") do |task, _root, _manifest|
+      manifest_store = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder)
+      advanced = Marshal.load(Marshal.dump(manifest_store.read))
+      advanced.fetch("task")["generation"] = 2
+      advanced.fetch("evidence_revision").merge!("generation" => 2, "digest" => "b" * 64)
+      manifest_store.write!(advanced)
+      transition = Hive::PatrolFix::Transition.new(task, commit: ->(**) { })
+      assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        transition.send(:apply_intent, route_intent(task).merge("to_digest" => "c" * 64))
+      end
+
+      File.write(manifest_store.path, "not-json")
+      assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        transition.send(:apply_intent, route_intent(task))
+      end
+    end
+  end
+
+  def test_custody_and_task_move_must_match_the_intent_generation
+    with_review_task(route: "rework") do |task, worktree_root, _decision|
+      transition = Hive::PatrolFix::Transition.new(
+        task, worktree_root: worktree_root, commit: ->(**) { }
+      )
+      intent = route_intent(task).merge(
+        "from_generation" => 2, "to_generation" => 3,
+        "from_digest" => "b" * 64, "to_digest" => "c" * 64
+      )
+      assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        transition.send(:rotate_worktree!, task.folder, intent)
+      end
+
+      assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        transition.send(:move_if_needed!, task.folder, route_intent(task).merge("from" => "1-inbox"))
+      end
+
+      original_rename = File.method(:rename)
+      File.define_singleton_method(:rename, ->(*) { raise IOError, "move failed" })
+      begin
+        assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+          transition.send(:move_if_needed!, task.folder, route_intent(task))
+        end
+      ensure
+        File.define_singleton_method(:rename, original_rename)
+      end
+    end
+  end
+
+  def test_intent_store_and_decision_validation_fail_closed
+    PatrolFixStageFixture.with_task(stage: "4-review") do |task, _root, _manifest|
+      transition = Hive::PatrolFix::Transition.new(task, commit: ->(**) { })
+      assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        transition.send(:validate_decision!, {}, route: "rework")
+      end
+      assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        transition.send(:validate_intent, route_intent(task).merge("route" => "unknown"))
+      end
+      assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        transition.send(:validate_intent, route_intent(task).merge("recorded_at" => "bad"))
+      end
+
+      FileUtils.mkdir_p(transition.instance_variable_get(:@directory).root)
+      File.write(
+        File.join(transition.instance_variable_get(:@directory).root,
+                  Hive::PatrolFix::Transition::INTENT_FILENAME),
+        "{"
+      )
+      assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        transition.send(:read_intent)
+      end
+
+      unsafe = Object.new
+      unsafe.define_singleton_method(:read) { |*| raise Hive::ManagedDirectory::UnsafeError, "unsafe" }
+      transition.instance_variable_set(:@directory, unsafe)
+      assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        transition.send(:read_intent)
+      end
+      unsafe.define_singleton_method(:atomic_write) { |*| raise Hive::ManagedDirectory::UnsafeError, "unsafe" }
+      assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        transition.send(:write_intent, route_intent(task))
+      end
+    end
+  end
+
+  def test_default_commit_delegates_to_git_ops
+    PatrolFixStageFixture.with_task(stage: "4-review") do |task, _root, _manifest|
+      commits = []
+      fake_git = Object.new
+      fake_git.define_singleton_method(:hive_commit) { |**values| commits << values }
+      original_new = Hive::GitOps.method(:new)
+      Hive::GitOps.define_singleton_method(:new, ->(*) { fake_git })
+      begin
+        transition = Hive::PatrolFix::Transition.new(task)
+        transition.send(:commit_intent!, route_intent(task))
+      ensure
+        Hive::GitOps.define_singleton_method(:new, original_new)
+      end
+
+      assert_equal "review rework", commits.fetch(0).fetch(:action)
+    end
+  end
+
   private
 
   def with_review_task(route:)
@@ -164,6 +299,19 @@ class PatrolFixTransitionTest < Minitest::Test
       "task" => manifest.fetch("task"),
       "evidence_revision" => manifest.fetch("evidence_revision"),
       "recorded_at" => "2026-08-20T12:00:00Z", "payload" => payload
+    }
+  end
+
+  def route_intent(task)
+    {
+      "schema" => Hive::PatrolFix::Transition::SCHEMA,
+      "schema_version" => Hive::PatrolFix::Transition::SCHEMA_VERSION,
+      "status" => "pending", "task" => task.slug,
+      "action_id" => "review-rework-1", "route" => "rework", "stage" => "review",
+      "from" => "4-review", "to" => "2-fix", "from_generation" => 1,
+      "to_generation" => 2, "from_digest" => "a" * 64, "to_digest" => "b" * 64,
+      "operator" => "controller:review", "carried_receipts" => [],
+      "recorded_at" => "2026-08-20T12:00:00Z"
     }
   end
 end

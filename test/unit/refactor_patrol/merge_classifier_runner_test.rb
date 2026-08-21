@@ -86,4 +86,35 @@ class RefactorPatrolMergeClassifierRunnerTest < Minitest::Test
       assert_equal retry_at, error.retry_at
     end
   end
+
+  def test_rejects_budget_denial_and_malformed_provider_json
+    with_tmp_dir do |dir|
+      budget = Object.new
+      budget.define_singleton_method(:acquire) { |**| false }
+      budget.define_singleton_method(:exhaustion_message) { "daily limit" }
+      runner = Hive::RefactorPatrol::MergeClassifierRunner.new(
+        project_root: dir,
+        cfg: { "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" } },
+        launch_budget: budget
+      )
+      assert_raises(Hive::RefactorPatrol::MergeClassifierRunner::Error) do
+        runner.call("classify")
+      end
+
+      budget.define_singleton_method(:acquire) { |**| true }
+      budget.define_singleton_method(:record!) { |**| nil }
+      agent = Object.new
+      messages = [ JSON.generate("decision" => "unknown", "rationale" => "x", "evidence" => []), "{" ]
+      agent.define_singleton_method(:run!) do
+        { status: :ok, final_message: messages.shift, usage: {}, session_id: "session" }
+      end
+      2.times do
+        with_replaced_singleton_method(Hive::Agent, :new, ->(**) { agent }) do
+          assert_raises(Hive::RefactorPatrol::MergeClassifierRunner::Error) do
+            runner.call("classify")
+          end
+        end
+      end
+    end
+  end
 end

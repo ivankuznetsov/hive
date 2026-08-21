@@ -468,6 +468,232 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
+  def test_request_rejects_mismatched_bytes_non_boolean_draft_and_unbounded_text
+    with_local_remote do |repo, _remote, head|
+      valid = request_for(repo, head).to_h
+      invalid = [
+        valid.merge(diff_digest: "0" * 64),
+        valid.merge(draft: "yes"),
+        valid.merge(worktree_path: "bad\npath"),
+        valid.merge(title: "bad\ncontrol")
+      ]
+      invalid.each do |values|
+        assert_raises(ArgumentError) { Hive::GithubPublication::Request.new(**values) }
+      end
+    end
+  end
+
+  def test_github_gateway_rejects_incomplete_unparseable_and_invalid_inventory
+    responses = []
+    transport = Object.new
+    transport.define_singleton_method(:capture3) { |*, **| responses.shift }
+    gateway = Hive::GithubPublication::GithubGateway.new(transport: transport)
+    failure = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    success = Hive::Gh::CommandStatus.new(exitstatus: 0)
+
+    responses << [ "fallback error", "", failure ]
+    assert_raises(Hive::GhError) do
+      gateway.list_pull_requests(repository: "acme/demo", host: "github.com", branch: "topic")
+    end
+    responses << [ "{}", "", success ]
+    assert_raises(Hive::GhError) do
+      gateway.list_pull_requests(repository: "acme/demo", host: "github.com", branch: "topic")
+    end
+    responses << [ "{", "", success ]
+    assert_raises(Hive::GhError) do
+      gateway.list_pull_requests(repository: "acme/demo", host: "github.com", branch: "topic")
+    end
+
+    raw = raw_pull_request
+    invalid = [
+      nil,
+      raw.reject { |key, _| key == "head" },
+      raw.merge("state" => "unknown"),
+      raw.merge("html_url" => "https://github.com/other/demo/pull/42"),
+      raw.merge("html_url" => "https://%")
+    ]
+    invalid.each do |record|
+      assert_raises(Hive::GhError) do
+        gateway.send(:normalize_record, record, "acme/demo", "github.com")
+      end
+    end
+
+    responses << [ JSON.generate([ Array.new(Hive::GithubPublication::MAX_RECORDS + 1, raw) ]), "", success ]
+    assert_raises(Hive::GhError) do
+      gateway.list_pull_requests(repository: "acme/demo", host: "github.com", branch: "topic")
+    end
+
+    with_local_remote do |repo, _remote, head|
+      request = request_for(repo, head)
+      responses << [ "create rejected", "", failure ]
+      assert_raises(Hive::GhError) { gateway.create_pull_request(request: request) }
+    end
+  end
+
+  def test_controller_rejects_malformed_inventory_observations_and_state_relations
+    with_local_remote do |repo, remote, head|
+      request = request_for(repo, head)
+      controller = controller_for(repo, remote, FakeGithub.new)
+      base = prepared_state(controller, request)
+      push = push_observation(request)
+      pr = pr_observation(controller, request)
+
+      invalid_states = [
+        base.merge("phase" => "unknown"),
+        base.merge("updated_at" => "bad"),
+        base.merge("phase" => "branch_observed"),
+        base.merge("create_attempts" => 1),
+        base.merge("phase" => "pr_create_intent", "push_observation" => push, "pr" => {}),
+        base.merge("phase" => "pr_observed", "pr" => nil),
+        base.merge("push_attempted_at" => "2026-08-20T12:00:00Z"),
+        base.merge("phase" => "branch_observed", "push_observation" => push),
+        base.merge(
+          "phase" => "pr_observed", "pr" => pr, "create_attempts" => 1,
+          "create_attempted_at" => "2026-08-20T12:00:00Z"
+        )
+      ]
+      invalid_states.each do |state|
+        assert_raises(Hive::GithubPublication::Blocked) do
+          controller.send(:validate_state, state)
+        end
+      end
+
+      record = FakeGithub.new.owned_pr(request)
+      invalid_records = [
+        nil,
+        record.merge("head_branch" => nil),
+        record.merge("head_repository" => 7),
+        record.merge("head_oid" => "bad"),
+        record.merge("url" => "https://github.com/other/demo/pull/42"),
+        record.merge("url" => "https://%")
+      ]
+      invalid_records.each do |candidate|
+        assert_raises(Hive::GithubPublication::Blocked) do
+          controller.send(:validate_record!, candidate, request)
+        end
+      end
+
+      controller.instance_variable_set(:@git, Object.new.tap do |git|
+        git.define_singleton_method(:observe) { |**| {} }
+      end)
+      assert_raises(Hive::GithubPublication::Blocked) { controller.send(:observe, request) }
+      controller.instance_variable_set(:@git, Object.new.tap do |git|
+        git.define_singleton_method(:observe) { |**| raise "offline" }
+      end)
+      assert_raises(Hive::GithubPublication::Blocked) { controller.send(:observe, request) }
+
+      assert_raises(Hive::GithubPublication::Blocked) do
+        controller.send(:validate_push_receipt!, {}, base, request)
+      end
+      bad_pr = pr.merge("observed_at" => "bad")
+      refute controller.send(:valid_pr_observation?, bad_pr, base.merge("phase" => "pr_observed"))
+
+      FileUtils.mkdir_p(File.dirname(state_path(repo)))
+      File.write(state_path(repo), "{")
+      assert_raises(Hive::GithubPublication::Blocked) { controller.send(:read_state) }
+    end
+  end
+
+  def test_controller_covers_remote_reconciliation_failure_outcomes
+    with_local_remote do |repo, remote, head|
+      request = request_for(repo, head)
+      controller = controller_for(repo, remote, FakeGithub.new)
+      state = prepared_state(controller, request).merge(
+        "push_attempted_at" => "2026-08-20T12:00:00Z"
+      )
+      controller.instance_variable_set(:@git, sequence_git(
+        [ remote_observation(request.head_oid) ]
+      ))
+      observed = controller.send(:reconcile_push, request, state, ->(*) { true })
+      assert_equal "branch_observed", observed.fetch("phase")
+
+      retry_state = prepared_state(controller, request).merge(
+        "phase" => "push_intent", "push_attempted_at" => "2026-08-20T12:00:00Z"
+      )
+      controller.instance_variable_set(:@git, sequence_git(
+        [ remote_observation(nil), remote_observation(request.head_oid) ],
+        push: push_observation(request)
+      ))
+      assert_equal "branch_observed",
+                   controller.send(:reconcile_push, request, retry_state, ->(*) { true }).fetch("phase")
+
+      controller.instance_variable_set(:@git, sequence_git(
+        [ remote_observation(nil) ], push: {}
+      ))
+      assert_raises(Hive::GithubPublication::Blocked) do
+        controller.send(:reconcile_push, request, prepared_state(controller, request), ->(*) { true })
+      end
+
+      controller.instance_variable_set(:@git, sequence_git(
+        [ remote_observation(nil), remote_observation("f" * 40) ], push_error: true
+      ))
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller.send(:reconcile_push, request, prepared_state(controller, request), ->(*) { true })
+      end
+      assert_equal "push_outcome_unknown", error.code
+
+      controller.instance_variable_set(:@git, sequence_git(
+        [ remote_observation(nil), remote_observation(nil) ], push: push_observation(request)
+      ))
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller.send(:reconcile_push, request, prepared_state(controller, request), ->(*) { true })
+      end
+      assert_equal "push_not_observed", error.code
+
+      controller.instance_variable_set(:@git, sequence_git([ remote_observation("f" * 40) ]))
+      branch_state = prepared_state(controller, request).merge(
+        "phase" => "branch_observed", "push_attempted_at" => "2026-08-20T12:00:00Z",
+        "push_observation" => push_observation(request)
+      )
+      assert_raises(Hive::GithubPublication::Blocked) do
+        controller.send(:reconcile_create, request, branch_state, ->(*) { true })
+      end
+
+      github = FakeGithub.new
+      github.define_singleton_method(:create_pull_request) { |**| true }
+      controller.instance_variable_set(:@github, github)
+      controller.instance_variable_set(:@git, sequence_git([ remote_observation(request.head_oid) ]))
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller.send(:reconcile_create, request, branch_state, ->(*) { true })
+      end
+      assert_equal "create_not_observed", error.code
+    end
+  end
+
+  def test_controller_rejects_invalid_entrypoints_unsafe_state_and_unknown_phase
+    with_local_remote do |repo, remote, head|
+      request = request_for(repo, head)
+      controller = controller_for(repo, remote, FakeGithub.new)
+      assert_raises(ArgumentError) { controller.publish!(nil, revalidate: nil) }
+
+      unsafe = Object.new
+      unsafe.define_singleton_method(:with_lock) do |*|
+        raise Hive::ManagedDirectory::UnsafeError, "unsafe"
+      end
+      controller.instance_variable_set(:@directory, unsafe)
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller.publish!(request, revalidate: ->(*) { true })
+      end
+      assert_equal "unsafe_state", error.code
+
+      github = FakeGithub.new
+      github.define_singleton_method(:authenticate!) { |**| raise "no auth" }
+      controller = controller_for(repo, remote, github)
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller.publish!(request, revalidate: ->(*) { true })
+      end
+      assert_equal "authentication_unavailable", error.code
+
+      controller = controller_for(repo, remote, FakeGithub.new)
+      controller.define_singleton_method(:validate_request!) { |*| true }
+      controller.define_singleton_method(:reconcile_pull_requests) { |*| nil }
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller.send(:reconcile, request, { "phase" => "unknown" }, ->(*) { true })
+      end
+      assert_equal "invalid_phase", error.code
+    end
+  end
+
   private
 
   class CountingGit
@@ -514,6 +740,60 @@ class GithubPublicationTest < Minitest::Test
       diff_digest: Digest::SHA256.hexdigest(diff), title: "Fix the patrol finding",
       body: "## Fix\n\nValidated exact patch.\n", diff: diff, draft: true
     )
+  end
+
+  def raw_pull_request
+    {
+      "number" => 42, "html_url" => "https://github.com/acme/demo/pull/42",
+      "state" => "open", "merged_at" => nil, "draft" => false,
+      "title" => "Title", "body" => "Body",
+      "head" => {
+        "ref" => "topic", "sha" => "2" * 40,
+        "repo" => { "full_name" => "acme/demo" }
+      },
+      "base" => {
+        "ref" => "main", "repo" => { "full_name" => "acme/demo" }
+      }
+    }
+  end
+
+  def prepared_state(controller, request)
+    controller.send(:identity, request).merge(
+      "schema" => Hive::GithubPublication::SCHEMA,
+      "schema_version" => Hive::GithubPublication::SCHEMA_VERSION,
+      "phase" => "prepared", "expected_remote_oid" => nil,
+      "push_attempted_at" => nil, "push_observation" => nil,
+      "create_attempts" => 0, "create_attempted_at" => nil, "pr" => nil,
+      "updated_at" => "2026-08-20T12:00:00Z"
+    )
+  end
+
+  def remote_observation(oid)
+    { "oid" => oid, "remote_fingerprint" => "9" * 64 }
+  end
+
+  def push_observation(request)
+    {
+      "expected_oid" => nil, "before_oid" => nil,
+      "after_oid" => request.head_oid, "remote_fingerprint" => "9" * 64
+    }
+  end
+
+  def pr_observation(controller, request)
+    controller.send(:identity, request).except("draft").merge(
+      "number" => 42, "url" => "https://github.com/acme/demo/pull/42",
+      "hosted_state" => "open", "observed_at" => "2026-08-20T12:00:00Z"
+    )
+  end
+
+  def sequence_git(observations, push: nil, push_error: false)
+    Object.new.tap do |git|
+      git.define_singleton_method(:observe) { |**| observations.shift || raise("unexpected observation") }
+      git.define_singleton_method(:push_exact) do |**|
+        raise "push failed" if push_error
+        push
+      end
+    end
   end
 
   def with_local_remote

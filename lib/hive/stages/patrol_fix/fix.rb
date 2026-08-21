@@ -117,8 +117,6 @@ module Hive
           raise Hive::StageError, "fix requires a current inbox fix or controller rework authorization"
         end
         private_class_method :fix_authorization
-        def receipt!(store, manifest, kind, stage) = current(store, manifest, kind, stage) || raise(Hive::StageError, "missing current #{stage} #{kind} receipt")
-        private_class_method :receipt!
         def complete(receipt) = { status: :complete, commit: "patrol-fix fix complete", receipt: receipt }
         private_class_method :complete
         def validate_agent_run!(run)

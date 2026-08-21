@@ -136,8 +136,6 @@ module Hive
           invalid!("snapshot contains secret-like material")
         end
         PatrolFix.deep_freeze(document)
-      rescue KeyError => e
-        invalid!("snapshot is missing #{e.key.inspect}")
       end
 
       def validate_alias!(entry, index)

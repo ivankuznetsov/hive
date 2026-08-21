@@ -91,6 +91,69 @@ class PatrolFixInboxStageTest < Minitest::Test
     end
   end
 
+  def test_prompt_rejects_invalid_boundary_token
+    task = Struct.new(:slug).new("repair-one")
+    error = assert_raises(ArgumentError) do
+      Hive::Stages::PatrolFix::Inbox.render_prompt(
+        task, {}, "a" * 40, "/tmp/report", boundary_token: "INVALID"
+      )
+    end
+    assert_match(/boundary token is invalid/, error.message)
+  end
+
+  def test_escalation_requires_a_callable_successor
+    receipt = { "payload" => { "route" => "escalate" } }
+
+    assert_raises(ArgumentError) do
+      Hive::Stages::PatrolFix::Inbox.send(:finish_route, Object.new, receipt, Object.new)
+    end
+  end
+
+  def test_agent_failure_and_git_read_failure_are_stage_errors
+    error = assert_raises(Hive::StageError) do
+      Hive::Stages::PatrolFix::Inbox.send(:validate_agent_run!, nil)
+    end
+    assert_match(/successful structured result/, error.message)
+
+    failure = Struct.new(:stdout, :stderr) { def success? = false }.new("", "denied")
+    with_replaced_singleton_method(Hive::AgentGitGate, :read, ->(*) { failure }) do
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::PatrolFix::Inbox.send(:git_read!, Dir.pwd, :head_oid)
+      end
+      assert_match(/hardened Git head_oid failed: denied/, error.message)
+    end
+  end
+
+  def test_repository_change_during_inbox_review_is_rejected
+    with_task do |task, _manifest|
+      runner = lambda do |**values|
+        File.write(File.join(task.project_root, "changed.rb"), "changed\n")
+        File.write(values.fetch(:output_path), "{}")
+        { status: :ok, custody: :clean }
+      end
+
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::PatrolFix::Inbox.run!(task, {}, agent_runner: runner)
+      end
+
+      assert_match(/changed the controller-selected repository snapshot/, error.message)
+    end
+  end
+
+  def test_agent_git_gate_errors_are_translated_to_stage_errors
+    with_task do |task, _manifest|
+      with_replaced_singleton_method(
+        Hive::Stages::PatrolFix::Inbox, :git_read!,
+        ->(*) { raise Hive::AgentGitGate::Error, "bounded git failure" }
+      ) do
+        error = assert_raises(Hive::StageError) do
+          Hive::Stages::PatrolFix::Inbox.run!(task, {})
+        end
+        assert_equal "bounded git failure", error.message
+      end
+    end
+  end
+
   private
 
   def with_task

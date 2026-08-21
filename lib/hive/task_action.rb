@@ -14,6 +14,7 @@ require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
 require "hive/plan_review/transition_guard"
+require "hive/plan_review/approval_policy"
 
 module Hive
   # Classifier that turns a (Task, Marker) pair into a user-facing
@@ -672,7 +673,8 @@ module Hive
       when "degraded_cleared"
         ACTIONS.fetch(:plan_review_degraded)
       when "awaiting_decision"
-        ACTIONS.fetch(:plan_review_decision)
+        auto_plan_review_decision? ?
+          ACTIONS.fetch(:plan_reviewing) : ACTIONS.fetch(:plan_review_decision)
       when "retry_scheduled"
         retry_due?(plan_review["retry_at"]) ?
           ACTIONS.fetch(:plan_review_retry_due) : ACTIONS.fetch(:plan_review_retry_wait)
@@ -861,6 +863,32 @@ module Hive
     def retry_due?(value)
       value.nil? || Time.iso8601(value) <= @clock.call
     rescue ArgumentError, TypeError
+      false
+    end
+
+    # An awaiting-decision projection normally belongs to the operator. A
+    # gated finding already covered by an active approval policy is different:
+    # the orchestrator owns consuming that durable authority. Classify the row
+    # as runnable so the daemon can recover records written by an older build
+    # and so a crash between publishing the finding and consuming the policy
+    # cannot strand the task.
+    def auto_plan_review_decision?
+      return false unless task.folder && File.directory?(task.folder)
+
+      record = Hive::PlanReview::Store.new(task_folder: task.folder).current_validated
+      pending = record["findings"].map { |entry| Hive::PlanReview::Finding.new(entry) }
+        .select(&:blocking?)
+      return false if pending.empty?
+
+      pending.all? do |finding|
+        finding.classification == "gated_auto" &&
+          Hive::PlanReview::ApprovalPolicy.match(
+            finding:, policies: @config.dig("plan_review", "approval_policies"),
+            review_id: record.review_id, policy_fingerprint: record.policy_fingerprint,
+            now: @clock.call
+          )
+      end
+    rescue Hive::PlanReview::Error, Hive::ConfigError, SystemCallError, IOError
       false
     end
 

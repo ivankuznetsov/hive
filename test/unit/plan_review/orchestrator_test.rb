@@ -101,6 +101,25 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  class SequencedRevision
+    attr_reader :calls
+
+    def initialize(*candidates)
+      @candidates = candidates
+      @calls = []
+    end
+
+    def call(**arguments)
+      @calls << arguments
+      candidate = @candidates.fetch(@calls.length - 1)
+      Hive::PlanReview::PlannerRevision::Result.new(
+        outcome: "success", candidate_bytes: candidate,
+        candidate_digest: Digest::SHA256.hexdigest(candidate),
+        route_receipt: arguments.fetch(:planner_identity), diagnostic: nil
+      )
+    end
+  end
+
   def test_skip_records_clearance_without_any_reviewer_call
     with_task(skip_plan) do |task, cfg|
       adapter = FakeAdapter.new { flunk "skip must not invoke a reviewer" }
@@ -331,22 +350,66 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
-  def test_new_verification_finding_blocks_without_a_second_revision
-    revised = standard_plan.sub("# Plan", "# Revised plan")
+  def test_policy_approved_verification_finding_runs_a_second_revision
+    revised_once = standard_plan.sub("# Plan", "# Revised once")
+    revised_twice = standard_plan.sub("# Plan", "# Revised twice")
     with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["approval_policies"] = [
+        {
+          "id" => "verification_followup", "version" => 1,
+          "action" => "approve_finding", "risk" => "low",
+          "paths" => [ "plan.md" ],
+          "valid_from" => "2026-08-12T00:00:00Z",
+          "valid_until" => "2026-08-13T00:00:00Z", "revoked" => false
+        }
+      ]
       initial = finding("safe_auto", "Clarify tests")
-      regression = finding("safe_auto", "New regression", line: 2)
-      adapter = success_adapter(
-        primary_findings: [ initial ], verification_findings: [ regression ]
-      )
-      revision = FakeRevision.new(revised)
-      projection = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      regression = finding("gated_auto", "New regression", line: 2)
+      verification_calls = 0
+      adapter = FakeAdapter.new do |request|
+        findings = if request.kind == "primary"
+          [ initial ]
+        elsif request.kind == "verification" && (verification_calls += 1) == 1
+          [ regression ]
+        else
+          []
+        end
+        successful_result(request, findings:)
+      end
+      revision = SequencedRevision.new(revised_once, revised_twice)
+      runner = orchestrator(task, cfg, adapter:, planner_revision: revision)
 
-      assert_equal "blocked", projection.record.state
-      assert_equal 1, revision.calls.length
-      assert_equal 1, adapter.calls.count { |request| request.kind == "verification" }
-      assert_equal standard_plan, File.binread(File.join(task.folder, "plan.md"))
+      followup = runner.advance!
+
+      assert_equal "revising", followup.record.state
+      assert_equal "approved", followup.record["findings"].last.fetch("lifecycle")
+      assert_equal "policy", followup.record["decisions"].last.fetch("origin")
+
+      projection = runner.advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal 2, revision.calls.length
+      assert_equal revised_once, revision.calls.last.fetch(:plan_bytes)
+      assert_equal 2, adapter.calls.count { |request| request.kind == "verification" }
+      assert_equal revised_twice, File.binread(File.join(task.folder, "plan.md"))
     end
+  end
+
+  def test_repeated_incorporated_finding_reopens_with_its_prior_decision
+    existing = finding("gated_auto", "Still broken")
+    accepted = Hive::PlanReview::Finding.new(
+      existing.to_h.merge(
+        "lifecycle" => "incorporated", "decision_id" => "prd-#{'a' * 64}"
+      )
+    )
+    runner = Hive::PlanReview::Orchestrator.allocate
+
+    findings, = runner.send(
+      :apply_verification, [ accepted.to_h ], [ existing.to_h ], "success", []
+    )
+
+    assert_equal "approved", findings.first.fetch("lifecycle")
+    assert_equal "prd-#{'a' * 64}", findings.first.fetch("decision_id")
   end
 
   def test_transient_attempt_retries_within_bound_but_unsupported_does_not

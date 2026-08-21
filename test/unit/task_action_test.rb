@@ -136,6 +136,13 @@ class TaskActionTest < Minitest::Test
     assert_equal "plan_review_decision", decision.key
     assert_nil decision.command
 
+    policy_decision = Hive::TaskAction.for(
+      task, waiting, plan_review: { "state" => "awaiting_decision" }
+    )
+    policy_decision.define_singleton_method(:auto_plan_review_decision?) { true }
+    assert_equal "plan_reviewing", policy_decision.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", policy_decision.command
+
     unsupported = Hive::TaskAction.for(
       task, waiting,
       plan_review: {

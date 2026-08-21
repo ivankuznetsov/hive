@@ -25,6 +25,7 @@ module Hive
       TRANSIENT_OUTCOMES = Adapters::Base::TRANSIENT_OUTCOMES
       SUCCESS_OUTCOMES = Adapters::Base::SUCCESS_OUTCOMES
       TERMINAL_OUTCOMES = (Adapters::Base::OUTCOMES - TRANSIENT_OUTCOMES).freeze
+      MAX_VERIFICATION_REVISION_ROUNDS = 3
 
       class << self
         def run!(task:, cfg:, planner_identity:, **options)
@@ -170,7 +171,17 @@ module Hive
 
         accepted = accepted_findings(record)
         candidate_bytes = candidate_bytes(record)
-        if !accepted.empty? && candidate_bytes.nil?
+        unless accepted.empty?
+          verification_route = latest_route(record, "verification")
+          if candidate_bytes && verification_route &&
+             TERMINAL_OUTCOMES.include?(verification_route["outcome"])
+            reset = recovery_reset_route(
+              verification_route,
+              "verification_followup" => true,
+              "diagnostic" => "candidate requires verification after another revision"
+            )
+            record = publish(record, "routes" => record["routes"] + [ reset ])
+          end
           planner_route = latest_route(record, "planner_revision")
           unless record.state == "retry_scheduled" && planner_route &&
                  TRANSIENT_OUTCOMES.include?(planner_route["outcome"])
@@ -180,9 +191,8 @@ module Hive
               "execution_allowed" => false
             )
           end
-          record, revision, pending = ensure_planner_revision(
-            record, original_plan_bytes, accepted
-          )
+          revision_input = candidate_bytes || original_plan_bytes
+          record, revision, pending = ensure_planner_revision(record, revision_input, accepted)
           return Projection.new(record) if pending
           unless revision.success?
             return terminal(
@@ -191,12 +201,14 @@ module Hive
               required_action: "repair the planner route and start a linked plan generation"
             )
           end
+          candidate_bytes = revision.candidate_bytes
+          candidate_digest = Digest::SHA256.hexdigest(candidate_bytes.b)
           candidate_ref = @store.write_review_artifact!(
-            review_id: record.review_id, basename: "candidate-plan.md",
-            content: revision.candidate_bytes
+            review_id: record.review_id,
+            basename: "candidate-plan-#{candidate_digest}.md",
+            content: candidate_bytes
           )
           candidate_bytes = @store.read_reference(candidate_ref)
-          candidate_digest = Digest::SHA256.hexdigest(candidate_bytes.b)
           incorporated = incorporate_findings(record["findings"], accepted)
           record = publish(
             record,
@@ -239,6 +251,10 @@ module Hive
             record, findings:, blockers: verification_blockers
           )
         end
+        record, findings, followup = prepare_verification_followup(
+          record, findings, verification_findings, verification_outcome
+        )
+        return followup if followup
         if record["candidate_plan_digest"] && !SUCCESS_OUTCOMES.include?(verification_outcome)
           verification_blockers << {
             "owner" => "reviewer", "reason" => "candidate_verification_#{verification_outcome}"
@@ -739,6 +755,7 @@ module Hive
       def apply_verification(entries, observed, outcome, evidence)
         existing = entries.map { |entry| Finding.new(entry) }
         verification = Array(observed).map { |entry| entry.is_a?(Finding) ? entry : Finding.new(entry) }
+        verification_by_id = verification.to_h { |finding| [ finding.fingerprint, finding ] }
         observed_ids = verification.map(&:fingerprint)
         attestations = Array(evidence).filter_map do |entry|
           next unless entry.is_a?(Hash)
@@ -751,7 +768,11 @@ module Hive
           fingerprint.to_s
         end
         updated = existing.map do |finding|
-          if SUCCESS_OUTCOMES.include?(outcome) &&
+          observed_finding = verification_by_id[finding.fingerprint]
+          if SUCCESS_OUTCOMES.include?(outcome) && observed_finding &&
+             finding.classification != "fyi" && finding.lifecycle != "waived"
+            reopen_verification_finding(finding, observed_finding)
+          elsif SUCCESS_OUTCOMES.include?(outcome) &&
              %w[incorporated approved answered].include?(finding.lifecycle) &&
              !observed_ids.include?(finding.fingerprint) &&
              attestations.include?(finding.fingerprint)
@@ -783,6 +804,67 @@ module Hive
         else []
         end
         [ updated, blockers ]
+      end
+
+      # A successful verifier can discover either a new defect or that an
+      # accepted disposition is still present. Both are inputs to another
+      # planner pass, not terminal review evidence. Preserve the prior
+      # decision when the same fingerprint recurs, consume any matching
+      # approval policy immediately, and hand the daemon a runnable `revising`
+      # state instead of parking on an operator-owned `awaiting_decision` row.
+      def prepare_verification_followup(record, findings, observed, outcome)
+        actionable = Array(observed).map do |entry|
+          entry.is_a?(Finding) ? entry : Finding.new(entry)
+        end.reject { |finding| finding.classification == "fyi" || finding.resolved? }
+        return [ record, findings, nil ] unless SUCCESS_OUTCOMES.include?(outcome)
+        return [ record, findings, nil ] if actionable.empty?
+
+        record = publish(
+          record, "findings" => findings, "state" => "reviewing", "outcome" => nil,
+          "blockers" => [], "required_action" => nil, "execution_allowed" => false
+        )
+        record = consume_approval_policies(record)
+        findings = record["findings"]
+        return [ record, findings, nil ] unless pending_decision_findings(record).empty?
+        return [ record, findings, nil ] if accepted_findings(record).empty?
+        return [ record, findings, nil ] if verification_revision_rounds(record) >=
+                                                   MAX_VERIFICATION_REVISION_ROUNDS
+
+        reset = recovery_reset_route(
+          latest_route(record, "verification"),
+          "verification_followup" => true,
+          "diagnostic" => "verification found #{actionable.length} actionable residual(s)"
+        )
+        record = publish(
+          record,
+          "routes" => record["routes"] + [ reset ],
+          "state" => "revising", "outcome" => nil, "blockers" => [],
+          "required_action" => "revise plan with verification findings",
+          "execution_allowed" => false
+        )
+        [ record, record["findings"], Projection.new(record) ]
+      end
+
+      def reopen_verification_finding(existing, observed)
+        lifecycle = case existing.classification
+        when "safe_auto" then "open"
+        when "gated_auto" then existing["decision_id"] ? "approved" : "open"
+        when "manual" then existing["answer"] ? "answered" : "open"
+        else existing.lifecycle
+        end
+        existing.to_h.merge(
+          "title" => observed["title"],
+          "description" => observed["description"],
+          "evidence" => observed["evidence"],
+          "lifecycle" => lifecycle,
+          "verified_at" => nil
+        )
+      end
+
+      def verification_revision_rounds(record)
+        record["routes"].count do |route|
+          route["role"] == "planner_revision" && SUCCESS_OUTCOMES.include?(route["outcome"])
+        end
       end
 
       def merge_findings(existing, observed)

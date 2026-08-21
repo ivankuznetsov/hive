@@ -10,8 +10,8 @@ tags: [plan, review, policy, findings, coverage, execution, audit]
 **TLDR**: Every built-in coding task now has a policy-driven critique substate
 inside `3-plan`. A readable `plan.md` is classified as `skip`, `standard`, or
 `mandatory`; non-skipped plans receive whole-document and independent
-adversarial review, typed findings, at most one original-planner revision, and
-one verification pass. Only the freshness-bound `plan-review/current.json`
+adversarial review, typed findings, and a bounded original-planner
+revision/verification loop. Only the freshness-bound `plan-review/current.json`
 resolution can authorize `3-plan` to `4-execute`. Markers, generic approval,
 `--force`, daemon automation, Web forms, and direct execute entry cannot replace
 that authority.
@@ -123,24 +123,28 @@ prose. The adapter verifies each `plan.md` line range and its normalized
 line-range SHA-256 against the immutable reviewed snapshot before the finding
 can affect revision or approval policy.
 
-Accepted findings are batched into one `PlannerRevision` call using the
-captured planner provider/model/family/effort. That call writes only
-`candidate-plan.md`. Its ArtifactFirewall custody is passed into the shared
-agent launcher, so the protected snapshot surrounds only the untrusted
+Accepted findings are batched into a `PlannerRevision` call using the captured
+planner provider/model/family/effort. Each call writes one immutable,
+digest-named `candidate-plan-<sha256>.md`. Its ArtifactFirewall custody is
+passed into the shared agent launcher, so the protected snapshot surrounds only the untrusted
 provider process. Hive's own durable session-start/session-finish writes to
 `task-journal.jsonl` and `task-projection.json` occur outside that interval;
 they cannot be misclassified as planner tampering, while provider writes to
 the same anchors still fail closed and are restored. A launcher that returns
-success without invoking the supplied custody is rejected. Hive then runs one
-bounded disposition/regression verification leg. Each accepted finding
+success without invoking the supplied custody is rejected. Hive then runs a
+disposition/regression verification leg. Each accepted finding
 requires explicit fingerprint-bound verification evidence; absence from a
 generic critique does not verify it. A
-remaining or newly discovered blocker stops the lineage; it
-cannot trigger a recursive second revision. In particular, `request-review`
-cannot clear a verification-created finding without a new linked plan
-generation and planner incorporation. A verified candidate is atomically
-promoted to canonical `plan.md` under the task mutation lock immediately before
-its matching terminal resolution is published under that same lock.
+remaining or newly discovered actionable finding is reopened in the same
+lineage. Existing decisions remain bound to the same fingerprint, new gated
+findings consume any exact current approval policy immediately, and the daemon
+receives a runnable `revising` state. The next planner pass uses the latest
+candidate as its input rather than discarding earlier incorporated work. Hive
+permits at most three successful planner-revision rounds; a repeatedly
+unresolved defect then blocks instead of looping forever. A verified candidate
+is atomically promoted to canonical `plan.md` under the task mutation lock
+immediately before its matching terminal resolution is published under that
+same lock.
 
 A successful verifier result with no contrary finding but an incomplete set of
 fingerprint-bound evidence rows is treated as an incomplete transient attempt,
@@ -167,7 +171,7 @@ plan-review/
       coverage.json
       route-receipt.json
     decisions/<target>/<decision-id>.json
-    candidate-plan.md                # only when revision was required
+    candidate-plan-<sha256>.md       # one immutable artifact per revision round
     resolution-v<projection-version>.json
 ```
 
@@ -245,6 +249,11 @@ agent with unrestricted same-user shell access therefore has CLI authority.
 Project-local approval policies can consume a gated finding only when policy
 ID/version, validity/revocation, action, risk, paths/scope, review ID, and policy
 fingerprint match exactly. Consumption leaves a durable policy receipt.
+Verification-created findings are policy-matched before the runner returns, so
+they cannot be stranded in an operator-owned state. As a crash/upgrade recovery
+path, `TaskAction` also classifies a legacy `awaiting_decision` record as
+runnable when every blocking finding is gated and currently policy-matched;
+manual or unmatched decisions remain operator-owned.
 
 ## Shared status and Web projection
 

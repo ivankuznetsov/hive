@@ -513,6 +513,40 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_disposable_cleanup_warns_and_prunes_when_git_removal_fails
+    failed = Object.new
+    failed.define_singleton_method(:success?) { false }
+    succeeded = Object.new
+    succeeded.define_singleton_method(:success?) { true }
+    parent = Dir.mktmpdir("hive-plan-review-worktree-")
+    path = File.join(parent, "checkout")
+    FileUtils.mkdir_p(path)
+    worktree = Hive::PlanReview::DisposableWorktree.new(
+      project_root: request_for_cleanup.project_root
+    )
+    worktree.instance_variable_set(:@temp_root, parent)
+    worktree.instance_variable_set(:@path, path)
+    worktree.instance_variable_set(:@added, true)
+    calls = []
+    capture = lambda do |*argv|
+      calls << argv
+      argv.include?("remove") ? [ "", "cannot remove", failed ] : [ "", "", succeeded ]
+    end
+
+    _out, err = capture_io do
+      with_replaced_singleton_method(Open3, :capture3, capture) do
+        worktree.cleanup
+      end
+    end
+
+    assert_includes err, "disposable worktree cleanup failed: cannot remove"
+    assert calls.any? { |argv| argv.include?("remove") }
+    assert calls.any? { |argv| argv.include?("prune") }
+    refute_path_exists parent
+  ensure
+    FileUtils.rm_rf(parent) if parent
+  end
+
   def test_capability_probe_faults_degrade_to_unsupported_instead_of_raising
     with_request do |request, _plan_path|
       contract = Struct.new(:invocation).new("/ce-doc-review")

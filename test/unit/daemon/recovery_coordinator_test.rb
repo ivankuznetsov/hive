@@ -211,6 +211,42 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_explicit_retry_keeps_the_park_when_the_unpark_transition_is_lost
+    attrs = {
+      "reason" => "implementer_failed", "marker_id" => "marker-3",
+      "provider" => "pi", "status" => "error", "message" => "same crash",
+      "attempt_id" => "attempt-3"
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - 3600) do |coordinator, row, state_home|
+      fingerprint = coordinator.send(:failure_fingerprint, row, attrs)
+      write_terminal_recovery_history(
+        row:, state_home:,
+        retry_count: Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.length,
+        failure_fingerprint: fingerprint, identical_failure_count: 2,
+        failure_attempt_history: %w[attempt-1 attempt-2]
+      )
+      coordinator.request(
+        row:, requestor: "healer", request_id: "deterministic", now: NOW
+      )
+
+      result = with_replaced_singleton_method(
+        Q, :update_recovery!, ->(*) { false }
+      ) do
+        coordinator.request(
+          row:, requestor: "action",
+          observation_token: coordinator.observation_token_for(row),
+          now: NOW + 1
+        )
+      end
+
+      assert_equal "blocked", result.status
+      assert_equal "deterministic_failure", result.reason
+      request = Q.fetch("deterministic", state_home: state_home)
+      assert_equal "deterministic_failure", request.recovery.fetch("blocked_reason")
+      assert_equal "operator", request.recovery.fetch("owner")
+    end
+  end
+
   def test_changed_failure_fingerprint_retries_freely_at_the_ladder_ceiling
     with_fixture(marker_attrs: {
       "reason" => "implementer_failed", "marker_id" => "marker-new",

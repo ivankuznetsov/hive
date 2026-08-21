@@ -1555,7 +1555,9 @@ module Hive
               cwd: ctx.worktree_path,
               add_dirs: scope.fetch(:add_dirs),
               cli_flags: routing_arguments&.native_arguments,
-              **Hive::Stages::Base.tool_scope_kwargs(scope)
+              **Hive::Stages::Base.tool_scope_kwargs(scope).slice(
+                :permission_mode, :allowed_tools, :disallowed_tools, :runtime_policy
+              )
             ) do |handle|
               group.each do |spec|
                 result = run_reviewer_spec(
@@ -2250,8 +2252,7 @@ module Hive
           body << "#{section_labels[severity]}\n\n"
           entries.each do |m|
             body << "- [ ] #{m.pattern_name}: #{m.file}:#{m.line || '?'}: " \
-                    "#{m.snippet} (waiver pattern: #{m.pattern_name}; " \
-                    "sha256: #{m.match_sha256})\n"
+                    "#{m.snippet} (waiver sha256: #{m.match_sha256})\n"
           end
           body << "\n"
         end

@@ -563,6 +563,6 @@ class BrainstormAnsweringSkillContractTest < Minitest::Test
     )
     dispatcher = Hive::Daemon::Dispatcher.allocate
     dispatcher.instance_variable_set(:@brainstorm_parse_errors, {})
-    dispatcher.send(:brainstorm_answers_pending?, row)
+    dispatcher.send(:brainstorm_answer_state, row).fetch(:pending)
   end
 end

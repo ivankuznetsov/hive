@@ -3,7 +3,7 @@ title: Council Stage Runner
 type: stage
 source: lib/hive/stages/council.rb, lib/hive/stages/council/*.rb, templates/council_reviewer_prompt.md.erb, templates/council_revise_prompt.md.erb
 created: 2026-07-08
-updated: 2026-07-09
+updated: 2026-08-21
 tags: [stage, council, workflow, review]
 ---
 
@@ -50,7 +50,10 @@ aggregates a triage artifact, and marks the stage `COMPLETE` on quorum or
      `WAITING reason=needs_revision`;
    - `exit_rule: consensus` with a revise agent loops until quorum or
      `max_rounds`;
-   - exhausted consensus loops write `WAITING reason=max_rounds`.
+   - exhausted consensus loops write `WAITING reason=max_rounds`. One
+     loop-boundary check runs before either the next reviewer round or its
+     prerequisite revision, so resuming an exhausted marker cannot buy another
+     round.
 
 The runner intentionally does not reuse the coding `:review_council` body. That
 runner is worktree/diff/CI/PR coupled; the document council shares only artifact

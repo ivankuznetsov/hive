@@ -390,8 +390,8 @@ module Hive
       end
 
       # The three tool-scoping kwargs every spawn site forwards from a
-      # resolved-scope Hash to spawn_agent / spawn_claude! /
-      # with_shared_session. Splat this (`**Base.tool_scope_kwargs(scope)`)
+      # resolved-scope Hash to spawn_agent / spawn_claude!. Splat this
+      # (`**Base.tool_scope_kwargs(scope)`)
       # instead of restating the triplet at each call so the keys can't drift
       # across the spawn sites. `scope` is the Hash stage_permission_scope
       # returns, NOT the PermissionScope::Scope struct.

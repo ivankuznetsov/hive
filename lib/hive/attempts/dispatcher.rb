@@ -484,8 +484,7 @@ module Hive
       # meaning (capacity, successor_exists, invalid_predecessor).
       def superseding_loss?(result)
         result.status == :deferred &&
-          result.reason == "attempt_lost" &&
-          !result.attempt.nil?
+          result.reason == "attempt_lost"
       end
 
       def coding_brainstorm?(task)

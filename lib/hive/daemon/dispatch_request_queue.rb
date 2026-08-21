@@ -544,17 +544,14 @@ module Hive
       # first durable request instead of creating competing clear owners.
       def find_recovery(project:, slug:, observed_marker_generation:,
                         state_home: Hive::Paths.state_home)
-        request_files(directory(state_home: state_home)).filter_map do |path|
-          parsed = parse_file(path)
-          next if parsed.is_a?(Symbol) || !parsed.recovery.is_a?(Hash)
+        each_matching_request(state_home: state_home).filter_map do |parsed|
+          next unless parsed.recovery.is_a?(Hash)
           next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
           next unless parsed.recovery["observed_marker_generation"].to_s ==
                       observed_marker_generation.to_s
 
           parsed
         end.min_by { |request| [ request.created_at, request.request_id ] }
-      rescue Errno::ENOENT
-        nil
       end
 
       # Markerless admission failures are keyed by the immutable task
@@ -563,9 +560,8 @@ module Hive
       # invented merely to reuse the marker-bound lookup.
       def find_admission_recovery(project:, slug:, task_generation:, policy_digest:,
                                   state_home: Hive::Paths.state_home)
-        request_files(directory(state_home: state_home)).filter_map do |path|
-          parsed = parse_file(path)
-          next if parsed.is_a?(Symbol) || !parsed.recovery.is_a?(Hash)
+        each_matching_request(state_home: state_home).filter_map do |parsed|
+          next unless parsed.recovery.is_a?(Hash)
           next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
           next unless parsed.recovery["variant"] == "admission_failure"
           next unless parsed.task_generation.to_s == task_generation.to_s
@@ -573,8 +569,6 @@ module Hive
 
           parsed
         end.min_by { |request| [ request.created_at, request.request_id ] }
-      rescue Errno::ENOENT
-        nil
       end
 
       # Highest durable retry count already recorded for this task stage. A
@@ -583,17 +577,14 @@ module Hive
       # ceiling. Adapters still cannot supply or reset the ledger value.
       def recovery_retry_count(project:, slug:, expected_stage: nil,
                                state_home: Hive::Paths.state_home)
-        request_files(directory(state_home: state_home)).filter_map do |path|
-          parsed = parse_file(path)
-          next if parsed.is_a?(Symbol) || !parsed.recovery.is_a?(Hash)
+        each_matching_request(state_home: state_home).filter_map do |parsed|
+          next unless parsed.recovery.is_a?(Hash)
           next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
           next if expected_stage && parsed.expected_stage.to_s != expected_stage.to_s
 
           count = parsed.recovery["retry_count"]
           count if count.is_a?(Integer) && count >= 0
         end.max || 0
-      rescue Errno::ENOENT
-        0
       end
 
       # Latest terminal receipt for one task stage. Recovery uses this to
@@ -603,43 +594,33 @@ module Hive
       # repeated one.
       def latest_terminal_recovery(project:, slug:, expected_stage:,
                                    state_home: Hive::Paths.state_home)
-        request_files(directory(state_home: state_home)).filter_map do |path|
-          parsed = parse_file(path)
-          next if parsed.is_a?(Symbol) || parsed.recovery&.fetch("phase", nil) != "terminal"
+        each_matching_request(state_home: state_home).filter_map do |parsed|
+          next if parsed.recovery&.fetch("phase", nil) != "terminal"
           next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
           next unless parsed.expected_stage.to_s == expected_stage.to_s
 
           parsed
         end.max_by { |request| [ request.created_at, request.request_id ] }
-      rescue Errno::ENOENT
-        nil
       end
 
       def fetch(request_id, state_home: Hive::Paths.state_home)
-        request_files(directory(state_home: state_home)).each do |path|
-          parsed = parse_file(path)
-          next if parsed.is_a?(Symbol)
+        each_matching_request(state_home: state_home).each do |parsed|
           return parsed if parsed.request_id.to_s == request_id.to_s
         end
-        nil
-      rescue Errno::ENOENT
         nil
       end
 
       def remove_terminal_recoveries(project:, slug:, expected_stage:,
                                      except_request_id: nil,
                                      state_home: Hive::Paths.state_home)
-        request_files(directory(state_home: state_home)).filter_map do |path|
-          parsed = parse_file(path)
-          next if parsed.is_a?(Symbol) || parsed.recovery&.fetch("phase", nil) != "terminal"
+        each_matching_request(state_home: state_home).filter_map do |parsed|
+          next if parsed.recovery&.fetch("phase", nil) != "terminal"
           next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
           next unless parsed.expected_stage.to_s == expected_stage.to_s
           next if parsed.request_id.to_s == except_request_id.to_s
 
           parsed.request_id
         end.uniq.count { |request_id| remove(request_id, state_home: state_home) }
-      rescue Errno::ENOENT
-        0
       end
 
       # A task workflow migration changes both its canonical folder and task
@@ -647,34 +628,39 @@ module Hive
       # pre-migration stage. Terminal recovery documents are evidence receipts,
       # so retain them until the ordinary bounded-retention pass removes them.
       def remove_nonterminal_for_task(project:, slug:, state_home: Hive::Paths.state_home)
-        request_files(directory(state_home: state_home)).filter_map do |path|
-          parsed = parse_file(path)
-          next if parsed.is_a?(Symbol)
+        each_matching_request(state_home: state_home).filter_map do |parsed|
           next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
           next if parsed.recovery&.fetch("phase", nil) == "terminal"
 
           parsed.request_id
         end.uniq.count { |request_id| remove(request_id, state_home: state_home) }
-      rescue Errno::ENOENT
-        0
       end
 
       def prune_terminal_recoveries(now: Time.now,
                                     retention_sec: TERMINAL_RECOVERY_RETENTION_SEC,
                                     state_home: Hive::Paths.state_home)
         cutoff = now.utc - retention_sec
-        request_files(directory(state_home: state_home)).filter_map do |path|
-          parsed = parse_file(path)
-          next if parsed.is_a?(Symbol) || parsed.recovery&.fetch("phase", nil) != "terminal"
+        each_matching_request(state_home: state_home).filter_map do |parsed|
+          next if parsed.recovery&.fetch("phase", nil) != "terminal"
 
           terminal_at = Time.parse(parsed.recovery["terminal_at"].to_s)
           parsed.request_id if terminal_at < cutoff
         rescue ArgumentError, TypeError
           parsed.request_id if parsed.created_at < cutoff
         end.uniq.count { |request_id| remove(request_id, state_home: state_home) }
-      rescue Errno::ENOENT
-        0
       end
+
+      def each_matching_request(state_home: Hive::Paths.state_home)
+        return enum_for(__method__, state_home: state_home) unless block_given?
+
+        request_files(directory(state_home: state_home)).each do |path|
+          parsed = parse_file(path)
+          yield parsed unless parsed.is_a?(Symbol)
+        end
+      rescue Errno::ENOENT
+        nil
+      end
+      private_class_method :each_matching_request
 
       # Compare-and-swap the recovery transition without changing the queue
       # filename or claim state. A blocked transition records its reason while

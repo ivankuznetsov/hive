@@ -44,10 +44,8 @@ module Hive
       # validated read needed by the projection cache.
       def fetch_projection_binding(attempt_id)
         id = attempt_id_key(attempt_id)
-        binding_bytes = @storage.read(
-          PROJECTION_BINDING_KIND, key(id), max_bytes: MAX_PROJECTION_BINDING_BYTES
-        )
-        return parse_projection_binding_document(binding_bytes, expected_attempt_id: id) if binding_bytes
+        binding = read_projection_binding(id)
+        return binding if binding
 
         bytes = @storage.read(KIND, key(id), max_bytes: MAX_RECORD_BYTES)
         bytes && parse_projection_binding(bytes, expected_attempt_id: id)
@@ -101,10 +99,8 @@ module Hive
       # unchanged.
       def backfill_projection_binding(attempt_id)
         id = attempt_id_key(attempt_id)
-        current = @storage.read(
-          PROJECTION_BINDING_KIND, key(id), max_bytes: MAX_PROJECTION_BINDING_BYTES
-        )
-        return parse_projection_binding_document(current, expected_attempt_id: id) if current
+        current = read_projection_binding(id)
+        return current if current
 
         bytes = @storage.read(KIND, key(id), max_bytes: MAX_RECORD_BYTES)
         return nil unless bytes
@@ -119,6 +115,16 @@ module Hive
 
       def attempt_id_key(value)
         StorageKey.string(value)
+      end
+
+      def read_projection_binding(attempt_id)
+        bytes = @storage.read(
+          PROJECTION_BINDING_KIND, key(attempt_id),
+          max_bytes: MAX_PROJECTION_BINDING_BYTES
+        )
+        bytes && parse_projection_binding_document(
+          bytes, expected_attempt_id: attempt_id
+        )
       end
 
       def parse(bytes, expected_attempt_id:)

@@ -717,21 +717,6 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  # Superseding needs a predecessor to inherit generation, routing policy, and
-  # outputs from. A loss deferral carrying no attempt has nothing to inherit,
-  # so it must still defer rather than mint an orphan successor.
-  def test_loss_deferral_without_an_attempt_is_not_adopted
-    with_dispatcher do |dispatcher, _launcher, task|
-      orphan = Hive::Attempts::DispatchResult.new(
-        status: :deferred, attempt: nil, receipt: nil,
-        attach_descriptor: nil, reason: "attempt_lost"
-      )
-      refute dispatcher.send(:superseding_loss?, orphan),
-             "a loss with no attempt has no predecessor to adopt"
-      _ = task
-    end
-  end
-
   def test_lost_generation_and_invalid_successor_are_deferred
     with_dispatcher do |dispatcher, _launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")

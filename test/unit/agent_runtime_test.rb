@@ -617,16 +617,10 @@ class AgentRuntimeTest < Minitest::Test
   # A pi turn that OpenRouter refused for spend. pi leaves the envelope type
   # alone and reports the refusal through stopReason/errorMessage, then exits
   # zero — so this seam is the only place the failure is visible.
-  PI_REFUSED_TURN = {
-    "type" => "message_start",
-    "message" => {
-      "role" => "assistant",
-      "content" => [],
-      "provider" => "openrouter",
-      "model" => "deepseek/deepseek-v4-pro",
-      "stopReason" => "error",
-      "errorMessage" =>
-        "402: {\"message\":\"Prompt tokens limit exceeded: 25770 > 8471.\",\"code\":402}"
-    }
-  }.freeze
+  PI_REFUSED_TURN = JSON.parse(
+    File.read(File.expand_path(
+      "../../components/agent-cli-runtime/test/fixtures/pi_provider_limit.json",
+      __dir__
+    ))
+  ).freeze
 end

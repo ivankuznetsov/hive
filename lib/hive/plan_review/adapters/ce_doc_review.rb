@@ -147,11 +147,15 @@ module Hive
                 core["plan-review/#{relative}"] = path
               end
             end
+            writable_roots = [ workspace ]
+            required_outputs = { "review-result" => output_path }
+            manifest_entries = core.length + writable_roots.uniq.length +
+                               required_outputs.length
             Hive::ArtifactFirewall::Manifest.new(
               root: @task.folder, protected_anchors: core,
-              permitted_writable_roots: [ workspace ],
-              required_outputs: { "review-result" => output_path },
-              max_entries: [ core.length, Hive::ArtifactFirewall::MAX_ENTRIES ].max
+              permitted_writable_roots: writable_roots,
+              required_outputs: required_outputs,
+              max_entries: [ manifest_entries, Hive::ArtifactFirewall::MAX_ENTRIES ].max
             )
           end
         end

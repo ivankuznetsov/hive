@@ -237,21 +237,9 @@ module Hive
                             profile: nil, allowed_tools: DEFAULT_ALLOWED_TOOLS,
                             disallowed_tools: nil,
                             permission_mode: nil, mcp_config_path: nil,
-                            strict_mcp_config: false, cli_flags: nil, runtime_policy: nil,
-                            additional_read_roots: [], additional_write_roots: [],
-                            opencode_edit_patterns: [])
+                            strict_mcp_config: false, cli_flags: nil, runtime_policy: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
-      # Base.tool_scope_kwargs has one stable shape for every launcher. These
-      # three fields are OpenCode-only, but shared sessions are Claude-only;
-      # accept their empty defaults so a normal Claude reviewer group does not
-      # crash at the launcher boundary, and fail closed if a future caller
-      # accidentally tries to apply an OpenCode filesystem policy here.
-      unless additional_read_roots.empty? && additional_write_roots.empty? &&
-             opencode_edit_patterns.empty?
-        raise Hive::ConfigError,
-              "shared Claude sessions cannot apply OpenCode filesystem scope"
-      end
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
 
       runner = build_runner(

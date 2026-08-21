@@ -1,5 +1,6 @@
 require "open3"
 require "digest"
+require "set"
 require "hive/secret_patterns"
 require "hive/stages/review/fix_guardrail/patterns"
 
@@ -134,7 +135,7 @@ module Hive
         # exemption forever.
         def resolve_waivers(cfg)
           values = Array(cfg.dig("review", "fix", "guardrail", "waivers"))
-          values.each_with_object({}) do |value, result|
+          values.each_with_object(Set.new) do |value, result|
             unless value.is_a?(Hash)
               raise Hive::ConfigError,
                     "review.fix.guardrail.waivers entries must contain pattern and sha256"
@@ -146,7 +147,7 @@ module Hive
                     "review.fix.guardrail.waivers entries must contain pattern and SHA-256"
             end
 
-            result[[ pattern, sha256 ]] = true
+            result.add([ pattern, sha256 ])
           end.freeze
         end
 

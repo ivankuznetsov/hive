@@ -297,11 +297,13 @@ module Hive
       # owns every anchor; the hard limit remains a fail-closed retention cap.
       def execute_custody_manifest(task, worktree_path)
         paths = execute_protected_files(task)
+        writable_roots = [ task.folder, worktree_path ].uniq
+        manifest_entries = paths.length + writable_roots.length
         Hive::ArtifactFirewall::Manifest.new(
           root: task.folder,
           protected_anchors: paths,
-          permitted_writable_roots: [ task.folder, worktree_path ],
-          max_entries: [ paths.length, Hive::ArtifactFirewall::MAX_ENTRIES ].max
+          permitted_writable_roots: writable_roots,
+          max_entries: [ manifest_entries, Hive::ArtifactFirewall::MAX_ENTRIES ].max
         )
       end
 

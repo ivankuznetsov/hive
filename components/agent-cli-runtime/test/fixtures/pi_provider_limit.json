@@ -1,0 +1,17 @@
+{
+  "type": "message_start",
+  "message": {
+    "role": "assistant",
+    "content": [],
+    "api": "openai-completions",
+    "provider": "openrouter",
+    "model": "deepseek/deepseek-v4-pro",
+    "usage": {
+      "input": 0,
+      "output": 0,
+      "totalTokens": 0
+    },
+    "stopReason": "error",
+    "errorMessage": "402: {\"message\":\"Prompt tokens limit exceeded: 25770 > 8471.\",\"code\":402,\"metadata\":{\"limit_source\":\"openrouter_credits\"}}"
+  }
+}

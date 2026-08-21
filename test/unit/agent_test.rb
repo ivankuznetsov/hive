@@ -2592,48 +2592,34 @@ class AgentTest < Minitest::Test
     end
   end
 
-  def test_completed_state_marker_beats_an_earlier_provider_error
-    with_tmp_dir do |dir|
-      task = make_task(dir)
-      File.write(task.state_file, "<!-- COMPLETE -->\n")
-      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
-      result = {
-        timed_out: false, exit_code: 0, final_message: "done",
-        provider_error: {
-          kind: :provider_error, provider: :pi, status_code: 502,
-          message: "transient upstream error"
+  def test_completed_evidence_beats_an_earlier_provider_error
+    [ :state_file_marker, :output_file_exists ].each do |mode|
+      with_tmp_dir do |dir|
+        task = make_task(dir)
+        kwargs = {}
+        if mode == :state_file_marker
+          File.write(task.state_file, "<!-- COMPLETE -->\n")
+        else
+          output = File.join(task.folder, "review.json")
+          File.write(output, "{}\n")
+          kwargs = { status_mode: mode, expected_output: output }
+        end
+        agent = Hive::Agent.new(
+          task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5, **kwargs
+        )
+        result = {
+          timed_out: false, exit_code: 0, final_message: "done",
+          provider_error: {
+            kind: :provider_error, provider: :pi, status_code: 502,
+            message: "transient upstream error"
+          }
         }
-      }
 
-      agent.handle_exit(result)
+        agent.handle_exit(result)
 
-      assert_equal :complete, result[:status]
-      assert_equal :complete, Hive::Markers.current(task.state_file).name
-      refute result.key?(:error_reason)
-    end
-  end
-
-  def test_completed_output_file_beats_an_earlier_provider_error
-    with_tmp_dir do |dir|
-      task = make_task(dir)
-      output = File.join(task.folder, "review.json")
-      File.write(output, "{}\n")
-      agent = Hive::Agent.new(
-        task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5,
-        status_mode: :output_file_exists, expected_output: output
-      )
-      result = {
-        timed_out: false, exit_code: 0,
-        provider_error: {
-          kind: :provider_error, provider: :pi, status_code: 502,
-          message: "transient upstream error"
-        }
-      }
-
-      agent.handle_exit(result)
-
-      assert_equal :ok, result[:status]
-      refute result.key?(:error_reason)
+        assert_equal(mode == :state_file_marker ? :complete : :ok, result[:status])
+        refute result.key?(:error_reason)
+      end
     end
   end
 

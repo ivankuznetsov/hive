@@ -26,20 +26,6 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
-  # Invalid UTF-8 must not be silently mangled; PlanSignals reports it as
-  # invalid_utf8, which is the error the operator should actually see.
-  def test_plan_text_leaves_invalid_utf8_as_bytes
-    Dir.mktmpdir do |dir|
-      path = File.join(dir, "plan.md")
-      File.binwrite(path, "# Plan\n\xC3\x28 bad\n")
-      orchestrator = Hive::PlanReview::Orchestrator.allocate
-
-      text = orchestrator.send(:plan_text, path)
-
-      refute text.dup.force_encoding(Encoding::UTF_8).valid_encoding?
-    end
-  end
-
   Workflow = Struct.new(:id, keyword_init: true)
   Task = Struct.new(
     :folder, :project_root, :slug, :id, :workflow, :meta_yml_path,

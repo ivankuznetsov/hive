@@ -4,21 +4,9 @@ class AgentCliRuntimeErrorExtractorsTest < Minitest::Test
   # Verbatim envelope from a pi run whose OpenRouter key hit its ceiling: the
   # type stays "message_start", content is empty, and the refusal lives in
   # stopReason/errorMessage while the process still exits zero.
-  PI_REFUSAL = {
-    "type" => "message_start",
-    "message" => {
-      "role" => "assistant",
-      "content" => [],
-      "api" => "openai-completions",
-      "provider" => "openrouter",
-      "model" => "deepseek/deepseek-v4-pro",
-      "usage" => { "input" => 0, "output" => 0, "totalTokens" => 0 },
-      "stopReason" => "error",
-      "errorMessage" =>
-        "402: {\"message\":\"Prompt tokens limit exceeded: 25770 > 8471.\"," \
-        "\"code\":402,\"metadata\":{\"limit_source\":\"openrouter_credits\"}}"
-    }
-  }.freeze
+  PI_REFUSAL = JSON.parse(
+    File.read(File.join(__dir__, "fixtures", "pi_provider_limit.json"))
+  ).freeze
 
   PI_SUCCESS = {
     "type" => "message_end",

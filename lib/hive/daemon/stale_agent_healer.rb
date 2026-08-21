@@ -301,11 +301,7 @@ module Hive
         return false unless limited_at
 
         retry_count = attempt["retry_charge"].to_i
-        delay = if @recovery_coordinator
-          @recovery_coordinator.retry_delay_sec(retry_count)
-        else
-          Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.first
-        end
+        delay = @recovery_coordinator.retry_delay_sec(retry_count)
         now.utc >= limited_at + delay
       end
 

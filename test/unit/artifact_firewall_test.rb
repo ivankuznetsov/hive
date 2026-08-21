@@ -468,7 +468,7 @@ class ArtifactFirewallTest < Minitest::Test
       error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
         build_manifest(dir, roots: roots)
       end
-      assert_includes error.message, "permitted_writable_roots exceeds"
+      assert_includes error.message, "manifest exceeds max_entries"
 
       long_path = "a" * (Hive::ArtifactFirewall::MAX_PATH_BYTES + 1)
       error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
@@ -794,6 +794,23 @@ class ArtifactFirewallTest < Minitest::Test
       end
 
       assert_includes error.message, Hive::ArtifactFirewall::HARD_MAX_ENTRIES.to_s
+    end
+  end
+
+  def test_manifest_entry_limit_applies_to_the_aggregate_inventory
+    with_tmp_dir do |dir|
+      error = assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        build_manifest(
+          dir,
+          protected: { "anchor-a" => "a", "anchor-b" => "b" },
+          outputs: { "output-a" => "c", "output-b" => "d" },
+          roots: %w[root-a root-b],
+          max_entries: 5
+        )
+      end
+
+      assert_includes error.message, "manifest exceeds max_entries"
+      assert_includes error.message, "6 > 5"
     end
   end
 

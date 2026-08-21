@@ -65,7 +65,7 @@ module Hive
         # PlanFrontmatter already parsed and validated this into a Reference;
         # a malformed one never reaches here as :ok.
         reference = declared.to_s
-        return if reference.empty? || reference == task.slug
+        return if reference == task.slug
 
         Hive::TaskMeta.rewrite(task.folder, depends_on: reference)
       rescue StandardError

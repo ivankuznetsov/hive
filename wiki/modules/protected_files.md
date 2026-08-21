@@ -3,7 +3,7 @@ title: Hive::ArtifactFirewall
 type: module
 source: lib/hive/artifact_firewall.rb, lib/hive/protected_files.rb
 created: 2026-04-26
-updated: 2026-07-26
+updated: 2026-08-21
 tags: [security, artifacts, custody, integrity, orchestrator]
 ---
 
@@ -59,11 +59,12 @@ The public errors are `Error`, `InvalidManifest`, `CaptureError`, and
 `InvalidSnapshot`. Manifest/snapshot binding prevents validating one manifest
 and then restoring through a different policy observation.
 
-`Manifest.new(..., max_entries:)` defaults to 128 entries and rejects any
-consumer request above the hard 4096-entry ceiling. Consumers with a known,
-exact authority inventory may widen the per-instance admission bound; capture,
-validation, restoration, and reporting still run through one code path and one
-snapshot. There is no multi-manifest custody wrapper.
+`Manifest.new(..., max_entries:)` defaults to 128 total entries across
+protected anchors, required outputs, and permitted writable roots, and rejects
+any consumer request above the hard 4096-entry ceiling. Consumers with a known,
+exact authority inventory may widen the per-instance aggregate admission
+bound; capture, validation, restoration, and reporting still run through one
+code path and one snapshot. There is no multi-manifest custody wrapper.
 
 `validate_required_outputs(manifest)` is the read-only polling seam used by
 headless `Hive::Agent` and `Hive::ClaudeLauncher`. It replaces the former

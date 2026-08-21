@@ -1126,10 +1126,10 @@ module Hive
 
       def value(row, key)
         return row.public_send(key) if row.respond_to?(key)
-        return row[key.to_s] if row.respond_to?(:[])
+        return row[key] if row.respond_to?(:key?) && row.key?(key)
+        return row[key.to_s] if row.respond_to?(:key?) && row.key?(key.to_s)
+        return row[key.to_s] if row.respond_to?(:[]) && !row.respond_to?(:members)
 
-        nil
-      rescue KeyError, IndexError, NameError, TypeError
         nil
       end
 

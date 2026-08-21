@@ -57,7 +57,7 @@ module Hive
       TERMINAL_RECOVERY_PRUNE_INTERVAL_SEC = 60 * 60
 
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file the
-      # daemon gates auto-resume on (see `brainstorm_answers_pending?`).
+      # daemon gates auto-resume on (see `brainstorm_answer_state`).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: answer-pending daemon gate only parses coding brainstorm.md
       EMPTY_BRAINSTORM_ANSWER_STATE = { pending: false, complete: false }.freeze
 
@@ -220,7 +220,7 @@ module Hive
         @dispatch_result_state_home = dispatch_result_state_home
         # `[project, slug] → last-logged error signature` for the
         # brainstorm-gate parse-error log dedup (see
-        # `brainstorm_answers_pending?`).
+        # `brainstorm_answer_state`).
         @brainstorm_parse_errors = {}
         # `op-label → last-logged error signature` for the global-digest
         # scheduler tick/complete :fatal dedup, mirroring the brainstorm-gate
@@ -1386,14 +1386,6 @@ module Hive
         )
       end
 
-      # True when `row` is a brainstorm `needs_input` row whose
-      # `brainstorm.md` still has UNANSWERED questions. Only brainstorm
-      # rows carry Q&A markers, so every other edit-resume row (execute /
-      # review WAITING) returns false and behaves exactly as before.
-      def brainstorm_answers_pending?(row)
-        brainstorm_answer_state(row).fetch(:pending)
-      end
-
       # Return the two structural Q&A signals used by the policy: pending when
       # any answer slot is empty, and complete only for a non-empty document
       # whose answer slots are all filled. Missing, empty, and unparseable
@@ -1434,7 +1426,7 @@ module Hive
 
         @brainstorm_parse_errors[key] = signature
         @logger.event(:fatal,
-                      message: "brainstorm_answers_pending? raised: #{signature}",
+                      message: "brainstorm_answer_state raised: #{signature}",
                       project: row.project, slug: row.slug, keeping_previous: true)
       end
 

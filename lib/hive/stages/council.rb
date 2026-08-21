@@ -41,17 +41,35 @@ module Hive
           else
             next_round(task.folder, stage)
           end
+        pending_revision = if
+          preflight.name == :waiting && preflight.attrs["reason"] == "max_rounds" ||
+            round > stage.council.max_rounds
+          preflight.attrs["triage"] || latest_triage_path(task.folder, stage)
+        end
         loop do
-          # Enforce the budget BEFORE spawning reviewers. The check below runs
-          # after a full round, which bounds one invocation but not a re-run:
-          # `round` is re-derived from the triage files already on disk, so a
-          # stage resumed past its budget paid for another complete reviewer
-          # round before noticing. One council reached round 11 against
-          # max_rounds 3 that way — eight rounds of reviewers bought nothing,
-          # and the operator never saw the waiting marker that should have
-          # asked them nine rounds earlier.
-          if round > stage.council.max_rounds
-            return max_rounds_result(output_path, task, stage, round)
+          # A completed non-consensus round becomes a pending revision. Check
+          # the budget at that single loop boundary, before either the next
+          # reviewer round or its prerequisite revision can spend anything.
+          # This also catches a resumed max-round marker and historical triage
+          # files already beyond the configured budget.
+          if pending_revision && round >= stage.council.max_rounds
+            return max_rounds_result(
+              output_path, task, stage, round, triage_path: pending_revision
+            )
+          end
+
+          if pending_revision
+            Hive::Stages::Council::Revise.run!(
+              task: task,
+              cfg: cfg,
+              stage: stage,
+              revise: stage.council.revise,
+              round: round,
+              target_path: target_path,
+              triage_path: pending_revision
+            )
+            round += 1
+            pending_revision = nil
           end
 
           # Include pid/started for parity with the agent runner's working
@@ -90,22 +108,7 @@ module Hive
             return { commit: action_for(marker.name), status: marker.name }
           end
 
-          if round >= stage.council.max_rounds
-            return max_rounds_result(
-              output_path, task, stage, round, triage_path: triage.path
-            )
-          end
-
-          Hive::Stages::Council::Revise.run!(
-            task: task,
-            cfg: cfg,
-            stage: stage,
-            revise: revise,
-            round: round,
-            target_path: target_path,
-            triage_path: triage.path
-          )
-          round += 1
+          pending_revision = triage.path
         end
       rescue Hive::StageError => e
         Hive::Markers.set(output_path || task.state_file, :error, reason: "council_failed", message: e.message.to_s[0, 200])

@@ -140,16 +140,19 @@ module Hive
         entry_limit = self.class.send(:normalize_entry_limit, max_entries)
         normalized_root = self.class.send(:normalize_root, root)
         anchors = self.class.send(
-          :normalize_labeled_paths, protected_anchors, normalized_root, "protected_anchors",
-          entry_limit
+          :normalize_labeled_paths, protected_anchors, normalized_root, "protected_anchors"
         )
         outputs = self.class.send(
-          :normalize_labeled_paths, required_outputs, normalized_root, "required_outputs",
-          entry_limit
+          :normalize_labeled_paths, required_outputs, normalized_root, "required_outputs"
         )
         roots = self.class.send(
-          :normalize_roots, permitted_writable_roots, normalized_root, entry_limit
+          :normalize_roots, permitted_writable_roots, normalized_root
         )
+        entry_count = anchors.length + outputs.length + roots.length
+        if entry_count > entry_limit
+          raise InvalidManifest,
+                "manifest exceeds max_entries: #{entry_count} > #{entry_limit}"
+        end
         self.class.send(:validate_path_ownership!, anchors, outputs)
         unless redactor.respond_to?(:call)
           raise InvalidManifest, "redactor must respond to #call"
@@ -187,7 +190,7 @@ module Hive
       end
       private_class_method :normalize_root
 
-      def self.normalize_labeled_paths(entries, root, field, max_entries)
+      def self.normalize_labeled_paths(entries, root, field)
         pairs =
           if entries.is_a?(Array) && entries.all? { |entry| entry.is_a?(String) }
             entries.to_h { |entry| [ entry, entry ] }
@@ -196,10 +199,6 @@ module Hive
           else
             raise InvalidManifest, "#{field} must be relative names or a label-to-path mapping"
           end
-        if pairs.length > max_entries
-          raise InvalidManifest, "#{field} exceeds #{max_entries} entries"
-        end
-
         normalized = pairs.each_with_object({}) do |(label, path), result|
           safe_label = label.to_s
           raise InvalidManifest, "#{field} labels must not be empty" if safe_label.empty?
@@ -218,13 +217,8 @@ module Hive
       end
       private_class_method :normalize_labeled_paths
 
-      def self.normalize_roots(entries, root, max_entries)
-        roots = Array(entries)
-        if roots.length > max_entries
-          raise InvalidManifest, "permitted_writable_roots exceeds #{max_entries} entries"
-        end
-
-        roots.map do |path|
+      def self.normalize_roots(entries, root)
+        Array(entries).map do |path|
           normalize_path(
             expand_path(path, root, "permitted_writable_roots"),
             "permitted_writable_roots"

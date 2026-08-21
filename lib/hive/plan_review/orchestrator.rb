@@ -116,12 +116,7 @@ module Hive
       # UTF-8 and BINARY`. PlanSignals.analyze already reads the same file
       # the right way; this matches it so both agree on what plan.md says.
       def plan_text(path)
-        bytes = File.binread(path)
-        text = bytes.dup.force_encoding(Encoding::UTF_8)
-        # A plan that is not valid UTF-8 is left as bytes rather than
-        # silently mangled: PlanSignals independently rejects it as
-        # `invalid_utf8`, which is the error the operator should see.
-        text.valid_encoding? ? text : bytes
+        File.binread(path).force_encoding(Encoding::UTF_8)
       end
 
       def resume_review(record, original_plan_bytes)
@@ -154,10 +149,9 @@ module Hive
           action = pending.first.classification == "manual" ?
             "answer manual plan finding #{pending.first.fingerprint}" :
             "approve gated plan finding #{pending.first.fingerprint}"
-          return Projection.new(publish(
-            record, "state" => "awaiting_decision", "outcome" => nil,
-            "blockers" => blockers, "required_action" => action,
-            "execution_allowed" => false
+          return Projection.new(publish_transition(
+            record, state: "awaiting_decision", required_action: action,
+            blockers: blockers
           ))
         end
         if record.effective_level == "standard" && initial_coverage.degraded? &&
@@ -194,10 +188,9 @@ module Hive
           planner_route = latest_route(record, "planner_revision")
           unless record.state == "retry_scheduled" && planner_route &&
                  TRANSIENT_OUTCOMES.include?(planner_route["outcome"])
-            record = publish(
-              record, "state" => "revising", "outcome" => nil, "blockers" => [],
-              "required_action" => "revise plan with accepted findings",
-              "execution_allowed" => false
+            record = publish_transition(
+              record, state: "revising",
+              required_action: "revise plan with accepted findings"
             )
           end
           revision_input = candidate_bytes || original_plan_bytes
@@ -219,20 +212,19 @@ module Hive
           )
           candidate_bytes = @store.read_reference(candidate_ref)
           incorporated = incorporate_findings(record["findings"], accepted)
-          record = publish(
-            record,
-            "candidate_plan_digest" => candidate_digest,
-            "findings" => incorporated,
-            "artifacts" => record["artifacts"].merge("candidate_plan" => candidate_ref),
-            "state" => "verifying", "required_action" => "run disposition verification",
-            "blockers" => [], "execution_allowed" => false
+          record = publish_transition(
+            record, state: "verifying",
+            required_action: "run disposition verification",
+            candidate_plan_digest: candidate_digest,
+            findings: incorporated,
+            artifacts: record["artifacts"].merge("candidate_plan" => candidate_ref)
           )
         end
 
         candidate_bytes ||= original_plan_bytes
-        record = publish(
-          record, "state" => "verifying", "outcome" => nil, "blockers" => [],
-          "required_action" => "run disposition verification", "execution_allowed" => false
+        record = publish_transition(
+          record, state: "verifying",
+          required_action: "run disposition verification"
         ) unless record.state == "verifying"
 
         verification_targets = verification_targets(record)
@@ -391,15 +383,11 @@ module Hive
             "capability_probe_count" => count
           )
         end
-        Projection.new(
-          publish(
-            record,
-            "routes" => routes + reset,
-            "state" => "reviewing", "outcome" => nil, "blockers" => [],
-            "required_action" => "restore reviewer capability; the review retries on its own",
-            "execution_allowed" => false
-          )
-        )
+        Projection.new(publish_transition(
+          record, state: "reviewing",
+          required_action: "restore reviewer capability; the review retries on its own",
+          routes: routes + reset
+        ))
       end
 
       def capability_probe_fingerprint(routes)
@@ -437,15 +425,11 @@ module Hive
           "incomplete_attestation_retry" => true,
           "diagnostic" => "verification omitted #{blockers.length} disposition attestation(s)"
         )
-        Projection.new(
-          publish(
-            record,
-            "findings" => findings, "routes" => record["routes"] + [ reset ],
-            "state" => "verifying", "outcome" => nil, "blockers" => [],
-            "required_action" => "retry incomplete disposition verification automatically",
-            "execution_allowed" => false
-          )
-        )
+        Projection.new(publish_transition(
+          record, state: "verifying",
+          required_action: "retry incomplete disposition verification automatically",
+          findings: findings, routes: record["routes"] + [ reset ]
+        ))
       end
 
       def incomplete_attestation_retries(record)
@@ -646,6 +630,16 @@ module Hive
         @store.publish_current!(Record.new(data), expected_version: record.version)
       end
 
+      def publish_transition(record, state:, required_action:, **attributes)
+        publish(
+          record,
+          {
+            "state" => state, "outcome" => nil, "blockers" => [],
+            "required_action" => required_action, "execution_allowed" => false
+          }.merge(stringify(attributes))
+        )
+      end
+
       def requested_coverage(review_id, policy_fingerprint)
         required = Array(@cfg.dig("plan_review", "coverage", "required"))
         optional = Array(@cfg.dig("plan_review", "coverage", "optional"))
@@ -723,10 +717,9 @@ module Hive
         end
         return record unless changed
 
-        publish(
-          record, "findings" => findings.map(&:to_h), "decisions" => decisions,
-          "artifacts" => artifacts, "state" => "reviewing", "outcome" => nil,
-          "blockers" => [], "required_action" => nil, "execution_allowed" => false
+        publish_transition(
+          record, state: "reviewing", required_action: nil,
+          findings: findings.map(&:to_h), decisions: decisions, artifacts: artifacts
         )
       end
 
@@ -818,9 +811,8 @@ module Hive
         return [ record, findings, nil ] unless SUCCESS_OUTCOMES.include?(outcome)
         return [ record, findings, nil ] if actionable.empty?
 
-        record = publish(
-          record, "findings" => findings, "state" => "reviewing", "outcome" => nil,
-          "blockers" => [], "required_action" => nil, "execution_allowed" => false
+        record = publish_transition(
+          record, state: "reviewing", required_action: nil, findings: findings
         )
         record = consume_approval_policies(record)
         findings = record["findings"]
@@ -834,12 +826,10 @@ module Hive
           "verification_followup" => true,
           "diagnostic" => "verification found #{actionable.length} actionable residual(s)"
         )
-        record = publish(
-          record,
-          "routes" => record["routes"] + [ reset ],
-          "state" => "revising", "outcome" => nil, "blockers" => [],
-          "required_action" => "revise plan with verification findings",
-          "execution_allowed" => false
+        record = publish_transition(
+          record, state: "revising",
+          required_action: "revise plan with verification findings",
+          routes: record["routes"] + [ reset ]
         )
         [ record, record["findings"], Projection.new(record) ]
       end

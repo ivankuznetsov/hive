@@ -58,6 +58,13 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
+  class FakeRecoveryCoordinator
+    def retry_delay_sec(retry_count)
+      ladder = Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC
+      ladder.fetch([ retry_count.to_i, ladder.length - 1 ].min)
+    end
+  end
+
   def test_repeated_ticks_and_healer_restart_dispatch_exactly_one_budgeted_successor
     with_task do |task|
       with_tmp_dir do |root|
@@ -429,6 +436,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
       lost_outcome_store: outcomes,
       lost_outcome_processor: processor,
       project_daemon_enabled: project_daemon_enabled,
+      recovery_coordinator: FakeRecoveryCoordinator.new,
       admission_open: admission_open
     )
   end

@@ -7104,7 +7104,7 @@ end
     end
   end
 
-  def test_brainstorm_answers_pending_predicate_branches
+  def test_brainstorm_answer_state_branches
     dispatcher, = make_dispatcher
     folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
     pending = File.join(folder, "brainstorm.md")
@@ -7114,12 +7114,10 @@ end
     empty = File.join(folder, "empty.md")
     File.write(empty, "# Brainstorm\n\nNo questions yet.\n")
 
-    assert dispatcher.send(:brainstorm_answers_pending?,
-                           row(action: "needs_input", stage: "2-brainstorm",
-                               state_file: pending, folder: folder))
-    refute dispatcher.send(:brainstorm_answers_pending?,
-                           row(action: "needs_input", stage: "2-brainstorm",
-                               state_file: done, folder: folder))
+    assert_equal({ pending: true, complete: false },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "needs_input", stage: "2-brainstorm",
+                                     state_file: pending, folder: folder)))
     assert_equal({ pending: false, complete: true },
                  dispatcher.send(:brainstorm_answer_state,
                                  row(action: "needs_input", stage: "2-brainstorm",
@@ -7130,27 +7128,31 @@ end
                                      state_file: empty, folder: folder)),
                  "zero parseable questions must not bypass the first-sight baseline")
     # Not a brainstorm stage → no Q&A, never pending.
-    refute dispatcher.send(:brainstorm_answers_pending?,
-                           row(action: "needs_input", stage: "6-review",
-                               state_file: pending, folder: folder))
+    assert_equal({ pending: false, complete: false },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "needs_input", stage: "6-review",
+                                     state_file: pending, folder: folder)))
     # A NON-coding workflow that reuses the 2-brainstorm dir has no coding
     # Q&A answer flow → never pending (it must take the generic path, not be
     # held as answers_pending).
-    refute dispatcher.send(:brainstorm_answers_pending?,
-                           row(action: "needs_input", stage: "2-brainstorm",
-                               workflow: "research",
-                               state_file: pending, folder: folder))
+    assert_equal({ pending: false, complete: false },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "needs_input", stage: "2-brainstorm",
+                                     workflow: "research",
+                                     state_file: pending, folder: folder)))
     # Not a needs_input row.
-    refute dispatcher.send(:brainstorm_answers_pending?,
-                           row(action: "ready_to_brainstorm", stage: "2-brainstorm",
-                               state_file: pending, folder: folder))
+    assert_equal({ pending: false, complete: false },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "ready_to_brainstorm", stage: "2-brainstorm",
+                                     state_file: pending, folder: folder)))
     # Missing file → not pending.
-    refute dispatcher.send(:brainstorm_answers_pending?,
-                           row(action: "needs_input", stage: "2-brainstorm",
-                               state_file: "/no/such/brainstorm.md", folder: folder))
+    assert_equal({ pending: false, complete: false },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "needs_input", stage: "2-brainstorm",
+                                     state_file: "/no/such/brainstorm.md", folder: folder)))
   end
 
-  def test_brainstorm_answers_pending_fails_open_on_parse_error
+  def test_brainstorm_answer_state_fails_open_on_parse_error
     dispatcher, _supervisor, _controller, logger = make_dispatcher
     folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
     bpath = File.join(folder, "brainstorm.md")
@@ -7158,10 +7160,11 @@ end
     r = row(action: "needs_input", stage: "2-brainstorm", state_file: bpath, folder: folder)
 
     with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise "boom" }) do
-      refute dispatcher.send(:brainstorm_answers_pending?, r),
-             "a parse error must fail OPEN (false) so a malformed file can't strand the task"
+      assert_equal({ pending: false, complete: false },
+                   dispatcher.send(:brainstorm_answer_state, r),
+                   "a parse error must fail OPEN so a malformed file can't strand the task")
     end
-    assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("brainstorm_answers_pending") })
+    assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("brainstorm_answer_state") })
   end
 
   # #5: end-to-end — on a parse error the daemon must actually RESUME
@@ -7194,46 +7197,46 @@ end
     r = row(action: "needs_input", stage: "2-brainstorm", state_file: bpath, folder: folder)
 
     with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise "boom" }) do
-      3.times { dispatcher.send(:brainstorm_answers_pending?, r) }
+      3.times { dispatcher.send(:brainstorm_answer_state, r) }
     end
     fatals = logger.events.count { |(n, a)| n == :fatal && a[:slug] == "s1" }
     assert_equal 1, fatals, "three failing ticks must log :fatal once, not three times"
 
     # A successful parse clears the flag so a later recurrence logs again.
-    dispatcher.send(:brainstorm_answers_pending?, r)
+    dispatcher.send(:brainstorm_answer_state, r)
     with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise "boom" }) do
-      dispatcher.send(:brainstorm_answers_pending?, r)
+      dispatcher.send(:brainstorm_answer_state, r)
     end
     assert_equal 2, logger.events.count { |(n, a)| n == :fatal && a[:slug] == "s1" },
                  "the dedup re-arms after a successful parse"
   end
 
-  def test_brainstorm_answers_pending_multi_round_and_edge_files
+  def test_brainstorm_answer_state_multi_round_and_edge_files
     dispatcher, = make_dispatcher
     folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
 
     # Round 1 fully answered, Round 2 still open → pending.
     multi = File.join(folder, "multi.md")
     File.write(multi, "## Round 1\n### Q1.\nA?\n### A1.\nyes\n## Round 2\n### Q2.\nB?\n### A2.\n\n")
-    assert dispatcher.send(:brainstorm_answers_pending?,
+    assert dispatcher.send(:brainstorm_answer_state,
                            row(action: "needs_input", stage: "2-brainstorm",
-                               state_file: multi, folder: folder))
+                               state_file: multi, folder: folder)).fetch(:pending)
 
     # A `### Q` with NO `### A` slot at all → still unanswered → held
     # (documents the no-fillable-slot case; recovery is operator/bot side).
     noslot = File.join(folder, "noslot.md")
     File.write(noslot, "## Round 1\n### Q1.\nA?\n")
-    assert dispatcher.send(:brainstorm_answers_pending?,
+    assert dispatcher.send(:brainstorm_answer_state,
                            row(action: "needs_input", stage: "2-brainstorm",
-                               state_file: noslot, folder: folder))
+                               state_file: noslot, folder: folder)).fetch(:pending)
 
     # Zero parseable questions (empty / header drift) → fail OPEN (resume
     # to re-run the agent); the bot can't answer it either.
     zeroq = File.join(folder, "zeroq.md")
     File.write(zeroq, "## Round 1\nno questions here\n")
-    refute dispatcher.send(:brainstorm_answers_pending?,
+    refute dispatcher.send(:brainstorm_answer_state,
                            row(action: "needs_input", stage: "2-brainstorm",
-                               state_file: zeroq, folder: folder))
+                               state_file: zeroq, folder: folder)).fetch(:pending)
   end
 
   # ── R-02: child-timeout enforcement + logging ─────────────────────────

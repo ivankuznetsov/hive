@@ -19,6 +19,7 @@ module Hive
       RECOVERABLE_TERMINAL_OUTCOMES = (
         Adapters::Base::OUTCOMES - Adapters::Base::SUCCESS_OUTCOMES - TRANSIENT_OUTCOMES
       ).freeze
+      RECOVERABLE_ROLES = %w[primary adversarial verification planner_revision].freeze
 
       Result = Data.define(:applied, :decision, :projection) do
         def noop? = !applied
@@ -355,7 +356,7 @@ module Hive
 
       def latest_review_route(current)
         current["routes"].reverse.find do |entry|
-          %w[primary adversarial verification].include?(entry["role"]) &&
+          RECOVERABLE_ROLES.include?(entry["role"]) &&
             entry["attempt_id"]
         end
       end
@@ -385,7 +386,7 @@ module Hive
       end
 
       def recoverable_terminal_routes(current)
-        %w[primary adversarial verification].filter_map do |role|
+        RECOVERABLE_ROLES.filter_map do |role|
           current["routes"].reverse.find { |entry| entry["role"] == role }
         end.select do |entry|
           RECOVERABLE_TERMINAL_OUTCOMES.include?(entry["outcome"])

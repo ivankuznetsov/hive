@@ -231,12 +231,12 @@ rejected. Both CLI and Web recheck the canonical plan, task generation, policy
 configuration, and run-level receipt inside the mutation lock before writing a
 decision. Waivers and downgrades require a human-readable reason. The JSON
 result is `hive-plan-review-action.v1`. `request-review` appends recovery resets
-for every role whose current effective route is `unsupported` or
-`terminal_failure`; a later optional terminal route can therefore no longer
-hide an earlier failed required route from the sanctioned recovery action. Its
-semantic target binds the current terminal attempt IDs, so a later failed
-attempt can receive a new recovery decision while an exact replay remains a
-no-op.
+for every primary, adversarial, verification, or planner-revision role whose
+current effective route is `unsupported` or `terminal_failure`; a later
+optional terminal route can therefore no longer hide an earlier failed
+required route from the sanctioned recovery action. Its semantic target binds
+the current terminal attempt IDs, so a later failed attempt can receive a new
+recovery decision while an exact replay remains a no-op.
 
 Under ADR-008's local same-user trust model, direct CLI invocation is the
 operator boundary; Web actions use the authenticated access predicate. An

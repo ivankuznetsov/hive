@@ -14,6 +14,11 @@ finish bookkeeping. The full protected-anchor set remains covered during the
 untrusted interval, candidate output remains required and shape-checked, and a
 successful launcher that never invokes custody fails closed.
 
+The same recovery path now includes `planner_revision` alongside primary,
+adversarial, and verification routes. A terminal planner-revision failure can
+therefore receive the documented observation-bound `request-review` reset
+instead of leaving a mandatory review permanently parked with no valid action.
+
 Focused tests reproduce controller journal/projection writes on both sides of
 the provider interval, retain provider-tamper detection and restoration, cover
 missing custody, and preserve complete-candidate timeout salvage.

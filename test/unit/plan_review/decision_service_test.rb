@@ -168,15 +168,19 @@ class PlanReviewDecisionServiceTest < Minitest::Test
     adversarial = route("unsupported").merge(
       "role" => "adversarial", "attempt_id" => "pra-#{'f' * 64}"
     )
-    with_service(routes: [ primary, adversarial ]) do |service, store, record|
+    planner_revision = route("terminal_failure").merge(
+      "role" => "planner_revision", "attempt_id" => "pra-#{'e' * 64}"
+    )
+    with_service(routes: [ primary, adversarial, planner_revision ]) do |service, store, record|
       result = service.apply(**decision_arguments(
         record, action: "request_review", authorized: false
       ))
 
       assert result.applied
       assert_match(/\Areview-[0-9a-f]{64}\z/, result.decision.target_fingerprint)
-      resets = store.current["routes"].last(2)
-      assert_equal %w[primary adversarial], resets.map { |entry| entry.fetch("role") }
+      resets = store.current["routes"].last(3)
+      assert_equal %w[primary adversarial planner_revision],
+                   resets.map { |entry| entry.fetch("role") }
       assert resets.all? { |entry| entry.fetch("recovery_reset") }
       assert resets.all? { |entry| entry.fetch("outcome") == "retryable_failure" }
       assert resets.none? { |entry| entry.key?("attempt_id") }

@@ -80,6 +80,11 @@ OpenCode 1.18.18 emits the entire export through one unawaited stdout write;
 under a pipe, large live exports could exit zero after writing only a valid
 prefix. A regular file makes the write synchronous, after which Hive reads at
 most the parser's four-MiB limit and deletes the data when inspection returns.
+The local probe still checks OpenCode's exact model inventory first. When a
+dynamic route is absent there but the selected, non-secret overlay config
+explicitly declares that exact provider/model and its variants, that declaration
+is sufficient route evidence. The requested variant must still be present; an
+undeclared route or variant remains a fail-closed preflight error.
 
 Cleanup runs from the process owner's `ensure` path after preparation, spawn,
 inspection, or normalization failures. Only the prepared invocation's owned

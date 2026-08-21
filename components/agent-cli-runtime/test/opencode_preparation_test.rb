@@ -106,6 +106,76 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
     end
   end
 
+  def test_explicit_model_definition_survives_absent_dynamic_inventory_route
+    with_fixture_cli(mode: :wrong_route) do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        root = File.join(dir, "invocation")
+        FileUtils.mkdir_p(work)
+        config = {
+          "provider" => {
+            "anthropic" => {
+              "models" => {
+                "claude-sonnet-4-5" => {
+                  "variants" => { "high" => { "reasoning" => true } }
+                }
+              }
+            }
+          }
+        }
+
+        prepared = AgentCliRuntime.prepare!(
+          preparation_request(
+            work:, root:, source: nil, configuration: config
+          ),
+          env: fixture.fetch(:env)
+        )
+
+        assert prepared.probe_result.ready
+        assert_equal [ "high" ], prepared.probe_result.available_variants
+        configured = prepared.probe_result.capability_evidence.find do |item|
+          item.capability == :configured_model_route
+        end
+        assert_equal [ "anthropic/claude-sonnet-4-5" ], configured.arguments
+      ensure
+        prepared&.cleanup!
+      end
+    end
+  end
+
+  def test_explicit_model_definition_still_requires_the_requested_variant
+    with_fixture_cli(mode: :wrong_route) do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        root = File.join(dir, "invocation")
+        FileUtils.mkdir_p(work)
+        config = {
+          "provider" => {
+            "anthropic" => {
+              "models" => {
+                "claude-sonnet-4-5" => {
+                  "variants" => { "low" => {} }
+                }
+              }
+            }
+          }
+        }
+
+        error = assert_raises(AgentCliRuntime::RouteUnavailable) do
+          AgentCliRuntime.prepare!(
+            preparation_request(
+              work:, root:, source: nil, configuration: config
+            ),
+            env: fixture.fetch(:env)
+          )
+        end
+
+        assert_match(/variant is unavailable/, error.message)
+        refute File.exist?(root)
+      end
+    end
+  end
+
   def test_workspace_write_policy_allows_edits_only_in_declared_roots
     with_fixture_cli do |fixture|
       Dir.mktmpdir do |dir|

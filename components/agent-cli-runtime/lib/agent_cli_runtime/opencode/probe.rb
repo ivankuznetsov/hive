@@ -109,7 +109,8 @@ module AgentCliRuntime
         models_output = capture!(
           profile, child_env, "models", request.route.provider, "--verbose"
         )
-        variants = variants_for(models_output, request.route.to_s)
+        inventory_variants = variants_for(models_output, request.route.to_s)
+        variants = inventory_variants || request.configured_variants
         if variants.nil?
           raise RouteUnavailable,
                 "requested OpenCode route is unavailable in the local model inventory"
@@ -119,6 +120,11 @@ module AgentCliRuntime
                 "requested OpenCode variant is unavailable for the exact route"
         end
         evidence << evidence(profile, :model_route, [ request.route.to_s ])
+        if inventory_variants.nil?
+          evidence << evidence(
+            profile, :configured_model_route, [ request.route.to_s ]
+          )
+        end
         evidence << evidence(profile, :model_variant, [ request.variant ]) if
           request.variant
 

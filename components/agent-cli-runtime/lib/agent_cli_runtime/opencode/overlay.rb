@@ -103,7 +103,9 @@ module AgentCliRuntime
             credential_file_staged:
               staged_credential && credential_file_supports_provider?(
                 staged_credential.last, requested_route.provider
-              )
+              ),
+            configured_variants:
+              configured_route_variants(source_config, requested_route)
           )
           probe_result = OpenCode::Probe.call!(probe_request, env: probe_env)
           invocation = compile_invocation(
@@ -174,6 +176,18 @@ module AgentCliRuntime
         end
       end
       private_class_method :validate_provider!
+
+      def configured_route_variants(config, route)
+        models = config.dig("provider", route.provider, "models")
+        return nil unless models.is_a?(Hash)
+
+        definition = models[route.model]
+        return nil unless definition.is_a?(Hash)
+
+        variants = definition["variants"]
+        variants.is_a?(Hash) ? variants.keys.sort.freeze : [].freeze
+      end
+      private_class_method :configured_route_variants
 
       def validate_nonsecret!(value, key = nil)
         case value

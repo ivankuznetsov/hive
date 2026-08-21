@@ -167,6 +167,21 @@ class TaskActionTest < Minitest::Test
     )
     assert_equal "plan_review_blocked", blocked.key
     assert_nil blocked.command
+
+    stale_revision = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: {
+        "state" => "blocked", "required_action" => "repair the planner route",
+        "routes" => [
+          {
+            "role" => "planner_revision", "outcome" => "retryable_failure",
+            "planner_revision_contract_version" => 1
+          }
+        ]
+      }
+    )
+    assert_equal "plan_reviewing", stale_revision.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", stale_revision.command
   end
 
   def test_policy_eligible_awaiting_decision_is_runnable

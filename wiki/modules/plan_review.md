@@ -153,6 +153,9 @@ Planner-revision attempt receipts carry the result-adjudication contract
 version. When an exhausted transient series predates the running contract,
 Hive opens one new bounded attempt series automatically; a fixed harness can
 therefore recover without an operator manufacturing a linked plan generation.
+The task-action classifier exposes only this stale-contract blocked state as
+`plan_reviewing`, allowing the daemon to enter the recovery path while current
+blocked verdicts remain terminal and operator-owned.
 Each accepted finding
 requires explicit fingerprint-bound verification evidence; absence from a
 generic critique does not verify it. A

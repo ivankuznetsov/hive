@@ -18,3 +18,11 @@ configured identities remain conflicts.
 **Coverage:** The inspector regression uses the real pinned Compound
 Engineering package identity with no materialized install root and requires a
 healthy result while preserving the requested synthetic resolution evidence.
+
+The same dogfood run exposed a separate cold-start failure in the component
+route probe: `opencode models <provider> --verbose` can exceed the generic
+10-second local-inspection deadline while emitting a large hermetic model
+catalog. Agent CLI Runtime now grants only that inventory command 30 seconds;
+version, help, export, and auth probes retain the original 10-second bound. The
+component regression records the deadline selected for every probe leg without
+sleeping or invoking a model.

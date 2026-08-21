@@ -234,8 +234,12 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   `provider/model` route; supported effort values render as `--variant` only
   after route-aware capability validation. Hive prepares private XDG/config
   homes, forwards only configured credential names, and maps read-only/scoped
-  stage permissions to deny-first OpenCode rules. A successful run is complete
-  only after its terminal message correlates with sanitized session export.
+  stage permissions to deny-first OpenCode rules. Local capability inspection
+  remains bounded at 10 seconds per command except for the verbose model
+  inventory, which gets 30 seconds because a cold hermetic provider catalog can
+  be hundreds of kilobytes before any model invocation starts. A successful run
+  is complete only after its terminal message correlates with sanitized session
+  export.
   `Hive::SkillCheck::OpenCode` resolves project/user skills and explicitly
   configured plugin roots. Setup can atomically add the pinned Compound
   Engineering `3.21.4` plugin entry. Skill-bearing roles verify the selected

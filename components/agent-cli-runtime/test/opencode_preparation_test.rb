@@ -21,6 +21,63 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
     assert_match(/explicit OpenCode permission policy/, error.message)
   end
 
+  def test_route_probe_gives_only_the_large_model_inventory_a_longer_deadline
+    calls = []
+    success = Object.new
+    success.define_singleton_method(:success?) { true }
+    profile = Object.new
+    profile.define_singleton_method(:name) { :opencode }
+    profile.define_singleton_method(:binary_installed?) { |env:| !env.nil? }
+    profile.define_singleton_method(:bin) { |env:| env && "opencode" }
+    profile.define_singleton_method(:check_version!) { |env:| env && "1.18.18" }
+    profile.define_singleton_method(:min_version) { "1.18.16" }
+    profile.define_singleton_method(:launcher_identity) { "opencode-cli/v1" }
+    profile.define_singleton_method(:env_bin_override_keys) { [] }
+    profile.define_singleton_method(:capture_local) do |*arguments, env:, timeout_sec: 10|
+      calls << [ arguments, timeout_sec, env ]
+      output = case arguments
+      when [ "run", "--help" ]
+        "--model --variant --format --dir --pure --auto"
+      when [ "export", "--help" ]
+        "--sanitize"
+      when [ "auth", "list" ]
+        "openrouter\n"
+      when [ "models", "openrouter", "--verbose" ]
+        "openrouter/stealth/ox-alpha\n{\"variants\":{\"high\":{}}}\n"
+      else
+        raise "unexpected inspection call: #{arguments.inspect}"
+      end
+      [ output, "", success ]
+    end
+    request = AgentCliRuntime::ProbeRequest.new(
+      profile: :opencode,
+      route: "openrouter/stealth/ox-alpha",
+      variant: "high",
+      environment: {},
+      credential_environment_keys: [ "OPENROUTER_API_KEY" ]
+    )
+
+    profiles = AgentCliRuntime::Profiles
+    singleton = profiles.singleton_class
+    original_resolve = profiles.method(:resolve)
+    singleton.define_method(:resolve) { |_value| profile }
+    result = begin
+      AgentCliRuntime::OpenCode::Probe.call!(
+        request, env: { "OPENROUTER_API_KEY" => "selected" }
+      )
+    ensure
+      singleton.define_method(:resolve, original_resolve)
+    end
+
+    assert result.ready
+    inventory = calls.find do |arguments, _timeout, _env|
+      arguments == [ "models", "openrouter", "--verbose" ]
+    end
+    assert_equal 30, inventory.fetch(1)
+    assert_equal [ 10 ], calls.reject { |entry| entry == inventory }
+                             .map { |entry| entry.fetch(1) }.uniq
+  end
+
   def test_prepare_builds_a_private_hermetic_invocation_without_spawning_run
     with_fixture_cli do |fixture|
       Dir.mktmpdir do |dir|

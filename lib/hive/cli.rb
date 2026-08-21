@@ -1129,7 +1129,8 @@ module Hive
       ).call
     end
 
-    desc "refactor-patrol-classify PROJECT", "Run one queued merge classifier (daemon/internal)"
+    desc "refactor-patrol-classify PROJECT",
+         "Run one queued merge classifier (daemon/internal)", hide: true
     option :occurrence_id, type: :string, required: true
     option :reservation_id, type: :string, required: true
     option :result_file, type: :string, required: true

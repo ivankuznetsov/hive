@@ -32,7 +32,8 @@ hive refactor-patrol my-project --pr https://github.com/acme/app/pull/123 --json
 hive refactor-patrol my-project --job-manifest PATH --json
 hive refactor-patrol my-project --job-manifest PATH --actions --json
 # The daemon also supplies an internal --result-file under v2/results/.
-# Ambiguous classification uses a supervised internal Patrol-scan child:
+# Ambiguous classification uses this hidden supervised Patrol-scan child; it
+# is a daemon protocol and is intentionally omitted from `hive help`:
 hive refactor-patrol-classify my-project --occurrence-id DIGEST \
   --reservation-id DIGEST --result-file PATH --json
 

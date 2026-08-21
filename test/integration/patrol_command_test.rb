@@ -869,7 +869,7 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_review_batch_reserves_daily_launch_capacity_for_fixes
+  def test_review_batch_uses_medium_discovery_allowance
     with_patrol_project do |repo|
       cfg_path = File.join(repo, ".hive-state", "config.yml")
       cfg = YAML.safe_load_file(cfg_path, aliases: true)
@@ -889,15 +889,15 @@ class PatrolCommandTest < Minitest::Test
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, status
-      assert_equal 5, reviewer.features.size
-      assert_equal 5, JSON.parse(out).fetch("features_review_attempted")
+      assert_equal 4, reviewer.features.size
+      assert_equal 4, JSON.parse(out).fetch("features_review_attempted")
     end
   end
 
-  def test_review_batch_respects_shared_daily_launch_usage
+  def test_review_batch_seeds_discovery_allowance_from_usage
     with_patrol_project do |repo|
       now = Time.now.utc
-      6.times do
+      3.times do
         Hive::UsageDb.record!(
           agent: "codex", model: nil, project_slug: "demo",
           task_slug: "patrol-review", stage: "patrol-review",
@@ -969,12 +969,12 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_review_batch_reserves_daily_launches_for_fixes
+  def test_review_batch_uses_all_remaining_discovery_launches
     cfg = { "patrol" => { "max_fix_attempts_per_cycle" => 6 } }
     budget = Object.new
     budget.define_singleton_method(:remaining_launches) { 8 }
 
-    assert_equal 2, Hive::Commands::Patrol.new("demo").send(
+    assert_equal 8, Hive::Commands::Patrol.new("demo").send(
       :review_launch_limit, cfg, budget
     )
     assert_equal 8, Hive::Commands::Patrol.new("demo", dry_run: true).send(

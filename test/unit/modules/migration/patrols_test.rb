@@ -578,7 +578,10 @@ class ModulesMigrationPatrolsTest < Minitest::Test
   end
 
   def test_reservation_rechecks_ownership_after_candidate_enumeration
-    entry = { "name" => "demo", "path" => "/project", "hive_state_path" => "/state" }
+    entry = {
+      "name" => "demo", "project_id" => "project-1",
+      "path" => "/project", "hive_state_path" => "/state"
+    }
     checks = 0
     ownership = lambda do |_entry, _module_name, _authority|
       checks += 1
@@ -612,6 +615,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
 
     candidate = scheduler.candidates(now: NOW).fetch(0)
     assert_nil scheduler.reserve(candidate, now: NOW)
+    assert_equal 2, checks
     refute scheduler.pending?("demo")
   end
 

@@ -111,7 +111,6 @@ class PatrolCapabilityCommandTest < Minitest::Test
         [ :require_repository_write! ],
         [ :require_filesystem_write!, ".hive-state/refactor_patrol/**" ],
         [ :require_filesystem_write!, ".hive-state/stages/**" ],
-        [ :require_github_mutation!, "issues" ],
         [ :require_github_mutation!, "pull_requests" ],
         [ :require_external_command!, "gh" ],
         [ :require_network_host!, "api.github.com" ]

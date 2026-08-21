@@ -17,3 +17,5 @@ tags: [patrol, architecture-patrol, patrol-fix, daemon, migration, observability
   test-owned filesystem move.
 - Rendered the common Patrol capacity, workflow, migration, and delivery state
   in scoped TUI, Telegram status, and the web Patrol overview.
+- Hid the daemon-only merge-classifier verb from the public command index so
+  normal `hive help` keeps user-facing command summaries visible at 80 columns.

@@ -1344,7 +1344,7 @@ def test_merged_pr_details_fetches_complete_paginated_file_metadata
     "number" => 7, "url" => "https://github.com/acme/demo/pull/7", "state" => "MERGED",
     "baseRefName" => "main", "baseRefOid" => "a" * 40,
     "mergeCommit" => { "oid" => "b" * 40 }, "mergedAt" => "2026-07-10T10:00:00Z",
-    "changedFiles" => 2
+    "changedFiles" => 2, "labels" => []
   }
   pages = [
     [ { "filename" => "lib/a.rb", "status" => "modified" } ],
@@ -1382,7 +1382,7 @@ def test_refactor_patrol_gateway_shares_one_monotonic_deadline_across_metadata_c
     "number" => 7, "url" => "https://github.com/acme/demo/pull/7", "state" => "MERGED",
     "baseRefName" => "main", "baseRefOid" => "a" * 40,
     "mergeCommit" => { "oid" => "b" * 40 }, "mergedAt" => "2026-07-10T10:00:00Z",
-    "changedFiles" => 1
+    "changedFiles" => 1, "labels" => []
   }
   transport = Object.new
   timeouts = []
@@ -1421,7 +1421,7 @@ def test_merged_pr_details_rejects_url_from_another_repository_before_file_fetch
     "number" => 7, "url" => "https://github.com/other/repo/pull/7", "state" => "MERGED",
     "baseRefName" => "main", "baseRefOid" => "a" * 40,
     "mergeCommit" => { "oid" => "b" * 40 }, "mergedAt" => "2026-07-10T10:00:00Z",
-    "changedFiles" => 1
+    "changedFiles" => 1, "labels" => []
   }
   calls = []
 
@@ -1452,7 +1452,7 @@ def test_merged_pr_details_rejects_non_object_file_rows
       "number" => 7, "url" => "https://github.com/acme/demo/pull/7",
       "state" => "MERGED", "baseRefName" => "main", "baseRefOid" => "a" * 40,
       "mergeCommit" => { "oid" => "b" * 40 }, "mergedAt" => "2026-07-10T10:00:00Z",
-      "changedFiles" => 1
+      "changedFiles" => 1, "labels" => []
     ), "", status ],
     [ JSON.generate([ [ nil ] ]), "", status ]
   ]
@@ -1730,7 +1730,7 @@ def test_merged_pr_details_wraps_view_file_transport_shape_and_parse_failures
     "number" => 7, "url" => "https://github.com/acme/demo/pull/7",
     "state" => "MERGED", "baseRefName" => "main", "baseRefOid" => "a" * 40,
     "mergeCommit" => { "oid" => "b" * 40 }, "mergedAt" => "2026-07-10T10:00:00Z",
-    "changedFiles" => 1
+    "changedFiles" => 1, "labels" => []
   }
   response_sets = [
     [ [ "view unavailable", "", failed ] ],

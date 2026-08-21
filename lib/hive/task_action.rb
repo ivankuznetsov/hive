@@ -660,6 +660,7 @@ module Hive
     end
 
     def plan_review_action
+      return nil if @config.dig("plan_review", "enabled") == false
       return nil unless plan_review
 
       freshness = plan_review.dig("freshness", "status")

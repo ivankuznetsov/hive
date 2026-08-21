@@ -280,17 +280,20 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       )
       joins = []
       killed = false
+      capture = { data: +"", truncated: false }
       thread = Object.new
       thread.define_singleton_method(:join) { |seconds| joins << seconds }
       thread.define_singleton_method(:alive?) { true }
       thread.define_singleton_method(:kill) { killed = true }
       io = StringIO.new
 
-      agent.send(:finish_capture_thread, thread, io)
+      agent.send(:finish_capture_thread, thread, io, capture: capture)
 
-      assert_equal [ 2, 0.2 ], joins
+      assert_equal [ Hive::Agent::OPENCODE_CAPTURE_DRAIN_SECONDS, 0.2 ], joins
       assert_predicate io, :closed?
       assert killed
+      assert capture.fetch(:truncated),
+             "a forced reader shutdown must invalidate the partial capture"
 
       rescue_killed = false
       failing_thread = Object.new

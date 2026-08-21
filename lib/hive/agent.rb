@@ -22,6 +22,7 @@ module Hive
     TERMINATION_GRACE_SECONDS = 3
     COMPLETION_EVENT_GRACE_SECONDS = 3
     OPENCODE_INSPECTION_TIMEOUT_SECONDS = 10
+    OPENCODE_CAPTURE_DRAIN_SECONDS = 30
     OPENCODE_CAPTURE_BYTES =
       AgentCliRuntime::OpenCode::ResultParser::MAX_RUN_BYTES + 1
     TOKEN_LIMIT_REASON = "token_limit".freeze
@@ -648,8 +649,8 @@ module Hive
         trap("INT", old_int || "DEFAULT")
         trap("TERM", old_term || "DEFAULT")
       end
-      finish_capture_thread(stdout_thread, stdout_reader)
-      finish_capture_thread(stderr_thread, stderr_reader)
+      finish_capture_thread(stdout_thread, stdout_reader, capture: stdout_capture)
+      finish_capture_thread(stderr_thread, stderr_reader, capture: stderr_capture)
       write_opencode_capture_log(
         log_file, stdout_capture.fetch(:data), stderr_capture.fetch(:data)
       )
@@ -873,12 +874,20 @@ module Hive
       end
     end
 
-    def finish_capture_thread(thread, io)
+    def finish_capture_thread(thread, io, capture: nil)
       return unless thread
 
-      thread.join(2)
+      # The child has exited and the parent's writer is already closed, so the
+      # reader normally reaches EOF. Large OpenCode runs and sanitized exports
+      # can still need several seconds to drain on a loaded host. The former
+      # two-second cutoff silently killed that reader and handed the strict JSON
+      # parser a successful-process prefix, producing misleading malformed JSON
+      # and empty-terminal-message errors. Keep a finite bound for descendants
+      # that inherited the pipe, but invalidate any capture we must cut short.
+      thread.join(OPENCODE_CAPTURE_DRAIN_SECONDS)
       return unless thread.alive?
 
+      capture[:truncated] = true if capture
       io.close unless io.closed?
       thread.join(0.2)
       thread.kill if thread.alive?
@@ -964,8 +973,8 @@ module Hive
         end
         sleep 0.05
       end
-      finish_capture_thread(stdout_thread, stdout_reader)
-      finish_capture_thread(stderr_thread, stderr_reader)
+      finish_capture_thread(stdout_thread, stdout_reader, capture: stdout_capture)
+      finish_capture_thread(stderr_thread, stderr_reader, capture: stderr_capture)
       success = status&.success? == true && !stdout_capture.fetch(:truncated)
       diagnostic = unless success
         AgentCliRuntime::Redactor.diagnostic(

@@ -61,11 +61,20 @@ commits also bumped RuboCop to 1.88.2, Brakeman from
 bundle still resolves its own Brakeman 8.0.4 and `concurrent-ruby` 1.3.6 locks
 as of this refresh.
 
+Because `web/Gemfile` resolves both `hive-cli` (at `..`) and `agent-cli-runtime`
+(at `../components/agent-cli-runtime`) as path gems, bumping either component
+version must be relocked in `web/Gemfile.lock` as well as the root — even when
+the constraint itself does not move, since the lockfile records the resolved
+version. The web jobs run `bundle install` in frozen mode, which refuses to
+update the lockfile and fails setup with "the gemspecs for path gems changed"
+before a single test runs, so a missed web relock shows up as every web job
+dying in seconds rather than as a test failure.
+
 ## Runtime gems
 
 | Gem | Version | Purpose |
 |-----|---------|---------|
-| `agent-cli-runtime` | `~> 0.2.0` (locked 0.2.0) | Published compatibility layer for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. Hive source resolves the component path, while installed Hive requires the independently published OpenCode-capable 0.2.x line. |
+| `agent-cli-runtime` | `~> 0.2.0` (locked 0.2.3) | Published compatibility layer for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. Hive source resolves the component path, while installed Hive requires the independently published OpenCode-capable 0.2.x line. Provider-error extraction shipped as 0.2.1, Grok's sandbox flags as 0.2.2, and typed provider-failure classification as 0.2.3; all are compatible patches on the same line. |
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
 | `base64` | `>= 0.2` | Explicit runtime dependency for framed durable-attempt output and other binary-safe payloads; Ruby is unbundling it from the default gems. |
 | `bundler` | `= 2.7.2` | Exact installer for the authenticated managed web lock. Hive package managers vendor it into Hive's isolated `GEM_HOME`, and `AppBundle` invokes its absolute executable through the current Ruby without consulting `PATH`. |

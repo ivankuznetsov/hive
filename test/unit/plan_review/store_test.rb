@@ -195,6 +195,19 @@ class PlanReviewStoreTest < Minitest::Test
     end
   end
 
+  def test_progress_token_degrades_empty_nonobject_and_oversized_current_to_unreadable
+    with_store do |store|
+      FileUtils.mkdir_p(store.root)
+      tokens = [ "", "null", "[]", "x" * (Hive::PlanReview::Store::MAX_JSON_BYTES + 1) ].map do |bytes|
+        File.binwrite(store.current_path, bytes)
+        store.progress_token
+      end
+
+      assert_equal 1, tokens.uniq.length
+      assert_match(/\A[0-9a-f]{64}\z/, tokens.first)
+    end
+  end
+
   def test_oversized_json_artifacts_and_unwritable_paths_fail_closed
     with_store do |store|
       manifest = manifest_record

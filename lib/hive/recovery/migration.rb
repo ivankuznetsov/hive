@@ -561,9 +561,23 @@ module Hive
             raise Error, "daily accounting attempt #{attempt_id} has no matching durable record"
           end
 
-          refunded = record.receipt &&
+          # Two ways an attempt provably did no work, and so may hold no daily
+          # charge: a TEMPFAIL receipt (lock contention), and a loss that never
+          # reached `running` (no agent, no tokens).
+          #
+          # The check is that every refund is *justified*, not that it is
+          # predictable: unstarted losses recorded before refunding them was
+          # introduced are legitimately still charged, and re-deriving the flag
+          # would reject that history. A TEMPFAIL left unrefunded is still an
+          # error, since that refund has always been mandatory.
+          tempfail = record.receipt &&
             record.receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
-          unless acceptance.fetch("refunded") == !!refunded
+          unstarted_loss = record.state == "lost" && record["started_at"].nil?
+          refunded = acceptance.fetch("refunded")
+          if refunded && !(tempfail || unstarted_loss)
+            raise Error, "daily accounting refund disagrees with durable attempt #{attempt_id}"
+          end
+          if !refunded && tempfail
             raise Error, "daily accounting refund disagrees with durable attempt #{attempt_id}"
           end
           counts[[ record["project"], date ]] += 1 unless refunded

@@ -57,15 +57,18 @@ class PlanReviewLifecycleIntegrationTest < Minitest::Test
       unavailable = FakeAdapter.new("unsupported")
       blocked = orchestrator(task, unavailable).advance!
 
+      # A mandatory review that could launch no reviewer resets and retries
+      # rather than caching a verdict — but it still refuses to let execution
+      # proceed, which is what this test is really about.
       assert_equal "mandatory", blocked.record.effective_level
-      assert_equal "blocked", blocked.record.state
+      assert_equal "reviewing", blocked.record.state
       refute blocked.record.execution_allowed?
 
       _out, error, status = with_captured_exit do
         Hive::Commands::StageAction.new("develop", task.slug).call
       end
       assert_equal Hive::ExitCodes::WRONG_STAGE, status
-      assert_includes error, "waive named coverage or restore required reviewer capability"
+      assert_includes error, "restore reviewer capability"
       assert File.directory?(task.folder), "denied transition must leave the task at plan"
 
       current = Hive::PlanReview::Store.new(task_folder: task.folder).current_validated

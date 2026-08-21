@@ -230,8 +230,8 @@ class AgentRuntimeTest < Minitest::Test
     assert_equal "do work", codex_call.stdin_data
 
     pi_call = compile(pi, add_dirs: [ "/workspace/extra" ], max_budget_usd: 2)
-    assert_equal [ pi.bin, "-p", *pi.output_format_flags, "do work" ], pi_call.argv
-    assert_nil pi_call.stdin_data
+    assert_equal [ pi.bin, "-p", *pi.output_format_flags ], pi_call.argv
+    assert_equal "do work", pi_call.stdin_data
     directory_evidence = pi_call.capability_evidence.find { |item| item.capability == :add_directory }
     assert_equal false, directory_evidence.supported
 
@@ -459,7 +459,7 @@ class AgentRuntimeTest < Minitest::Test
         input: 0, output: 9, cached: 2, cache_read: nil,
         cache_write: nil, reasoning: nil, input_includes_cache_read: nil,
         input_includes_cache_write: nil, output_includes_reasoning: nil,
-        model: "small"
+        model: "small", provider_reported_cost: nil
       },
       observation.usage
     )
@@ -488,7 +488,7 @@ class AgentRuntimeTest < Minitest::Test
         input: 0, output: 2, cached: 3, cache_read: nil,
         cache_write: nil, reasoning: nil, input_includes_cache_read: nil,
         input_includes_cache_write: nil, output_includes_reasoning: nil,
-        model: "legacy"
+        model: "legacy", provider_reported_cost: nil
       },
       observation.usage
     )
@@ -508,7 +508,7 @@ class AgentRuntimeTest < Minitest::Test
         input: 4, output: 5, cached: 0, cache_read: nil,
         cache_write: nil, reasoning: nil, input_includes_cache_read: nil,
         input_includes_cache_write: nil, output_includes_reasoning: nil,
-        model: "provider/model"
+        model: "provider/model", provider_reported_cost: nil
       },
       Hive::AgentRuntime.extract_usage(profile, { "type" => "usage" })
     )
@@ -529,6 +529,59 @@ class AgentRuntimeTest < Minitest::Test
     )
 
     assert_nil Hive::AgentRuntime.extract_usage(profile, { "type" => "usage" })
+  end
+
+  def test_legacy_usage_extraction_keeps_a_fraction_of_a_cent_charge
+    profile = LegacyUsageProfile.new(
+      name: :legacy, launcher_identity: "legacy/v1",
+      usage: { "provider_reported_cost" => 0.0004 }
+    )
+
+    assert_equal(
+      0.0004,
+      Hive::AgentRuntime.extract_usage(
+        profile, { "type" => "usage" }
+      )[:provider_reported_cost]
+    )
+  end
+
+  def test_legacy_usage_extraction_drops_an_unusable_reported_cost
+    [ -1, Float::INFINITY, Float::NAN, "0.5" ].each do |cost|
+      profile = LegacyUsageProfile.new(
+        name: :legacy, launcher_identity: "legacy/v1",
+        usage: { provider_reported_cost: cost }
+      )
+
+      assert_nil(
+        Hive::AgentRuntime.extract_usage(
+          profile, { "type" => "usage" }
+        )[:provider_reported_cost],
+        "expected #{cost.inspect} to be rejected as a charge"
+      )
+    end
+  end
+
+  def test_extracts_a_refused_pi_turn_as_a_provider_error
+    error = Hive::AgentRuntime.extract_provider_error(
+      Hive::AgentProfiles.lookup(:pi), PI_REFUSED_TURN
+    )
+
+    refute_nil error, "a refused pi turn must reach Hive as a provider error"
+    assert_equal :provider_limit, error[:kind]
+    assert_equal :pi, error[:provider]
+    assert_equal 402, error[:status_code]
+    assert_includes error[:message], "Prompt tokens limit exceeded"
+  end
+
+  def test_completed_pi_turn_is_not_a_provider_error
+    event = {
+      "type" => "message_end",
+      "message" => { "stopReason" => "stop", "provider" => "openrouter" }
+    }
+
+    assert_nil Hive::AgentRuntime.extract_provider_error(
+      Hive::AgentProfiles.lookup(:pi), event
+    )
   end
 
   private
@@ -560,4 +613,14 @@ class AgentRuntimeTest < Minitest::Test
     assert_equal false, error.evidence.supported
     assert_equal :custom, error.evidence.provider if error.evidence.provider == :custom
   end
+
+  # A pi turn that OpenRouter refused for spend. pi leaves the envelope type
+  # alone and reports the refusal through stopReason/errorMessage, then exits
+  # zero — so this seam is the only place the failure is visible.
+  PI_REFUSED_TURN = JSON.parse(
+    File.read(File.expand_path(
+      "../../components/agent-cli-runtime/test/fixtures/pi_provider_limit.json",
+      __dir__
+    ))
+  ).freeze
 end

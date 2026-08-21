@@ -688,6 +688,7 @@ module Hive
             base_sha: before_fix_head,
             head_sha: after_fix_head
           )
+          emit_guardrail_waivers(task, pass, guardrail.waived_matches)
           if guardrail.status == :tripped
             write_fix_guardrail_findings(ctx_pass, guardrail.matches)
             # Record the guarded HEAD SHA on the marker so the
@@ -1554,7 +1555,9 @@ module Hive
               cwd: ctx.worktree_path,
               add_dirs: scope.fetch(:add_dirs),
               cli_flags: routing_arguments&.native_arguments,
-              **Hive::Stages::Base.tool_scope_kwargs(scope)
+              **Hive::Stages::Base.tool_scope_kwargs(scope).slice(
+                :permission_mode, :allowed_tools, :disallowed_tools, :runtime_policy
+              )
             ) do |handle|
               group.each do |spec|
                 result = run_reviewer_spec(
@@ -2248,11 +2251,29 @@ module Hive
 
           body << "#{section_labels[severity]}\n\n"
           entries.each do |m|
-            body << "- [ ] #{m.pattern_name}: #{m.file}:#{m.line || '?'}: #{m.snippet}\n"
+            body << "- [ ] #{m.pattern_name}: #{m.file}:#{m.line || '?'}: " \
+                    "#{m.snippet} (waiver sha256: #{m.match_sha256})\n"
           end
           body << "\n"
         end
         File.write(path, body)
+      end
+
+      def emit_guardrail_waivers(task, pass, matches)
+        return if matches.empty?
+
+        Hive::Events.emit(
+          task_folder: task.folder, slug: task.slug,
+          stage: "6-review", # coding-scoped: coding review event
+          event_type: :round_complete,
+          message: "fix guardrail released #{matches.length} exact fingerprint waiver(s)",
+          data: {
+            pass: pass,
+            guardrail_waivers: matches.map do |match|
+              { pattern: match.pattern_name, sha256: match.match_sha256 }
+            end
+          }
+        )
       end
 
       # U5 — check whether reviews/fix-guardrail-NN.md has been

@@ -16,6 +16,10 @@ module Hive
   module PlanReview
     class DecisionService
       TRANSIENT_OUTCOMES = Adapters::Base::TRANSIENT_OUTCOMES
+      RECOVERABLE_TERMINAL_OUTCOMES = (
+        Adapters::Base::OUTCOMES - Adapters::Base::SUCCESS_OUTCOMES - TRANSIENT_OUTCOMES
+      ).freeze
+      RECOVERABLE_ROLES = %w[primary adversarial verification planner_revision].freeze
 
       Result = Data.define(:applied, :decision, :projection) do
         def noop? = !applied
@@ -204,7 +208,16 @@ module Hive
           raise InvalidAction, "retry requires a current transient attempt" unless attempt_id
 
           attempt_id
-        when "request_review" then "review-#{review_id}"
+        when "request_review"
+          if current["blockers"].any? { |entry| entry["reason"] == "verification_finding" }
+            return "review-#{review_id}"
+          end
+          routes = recoverable_terminal_routes(current)
+          raise InvalidAction, "request_review requires a terminal reviewer route" if routes.empty?
+
+          Identity.stable_id(
+            "review", review_id:, attempts: routes.map { |route| route["attempt_id"] }
+          )
         else
           raise InvalidAction, "#{action} requires an exact target fingerprint"
         end
@@ -343,7 +356,7 @@ module Hive
 
       def latest_review_route(current)
         current["routes"].reverse.find do |entry|
-          %w[primary adversarial verification].include?(entry["role"]) &&
+          RECOVERABLE_ROLES.include?(entry["role"]) &&
             entry["attempt_id"]
         end
       end
@@ -353,24 +366,25 @@ module Hive
           raise InvalidAction,
                 "request_review cannot clear a verification finding; create a linked plan generation"
         end
-        route = current["routes"].reverse.find do |entry|
-          %w[primary adversarial verification].include?(entry["role"]) &&
-            !TRANSIENT_OUTCOMES.include?(entry["outcome"])
-        end
-        raise InvalidAction, "request_review requires a terminal reviewer route" unless route
+        routes = recoverable_terminal_routes(current)
+        raise InvalidAction, "request_review requires a terminal reviewer route" if routes.empty?
 
-        append_recovery_reset(current, route)
+        routes.reduce(current["routes"]) do |rows, route|
+          append_recovery_reset(current.to_h.merge("routes" => rows), route)
+        end
       end
 
       def append_recovery_reset(current, route)
-        reset = route.slice(
-          "role", "requested", "actual", "capability_result",
-          "independence_verified", "independence_reason"
-        ).merge(
-          "outcome" => "retryable_failure", "retry_at" => nil,
-          "recovery_reset" => true
-        )
+        reset = Hive::PlanReview.recovery_reset_route(route)
         current["routes"] + [ reset ]
+      end
+
+      def recoverable_terminal_routes(current)
+        RECOVERABLE_ROLES.filter_map do |role|
+          current["routes"].reverse.find { |entry| entry["role"] == role }
+        end.select do |entry|
+          RECOVERABLE_TERMINAL_OUTCOMES.include?(entry["outcome"])
+        end
       end
 
       def validate_current_freshness!(current)

@@ -287,6 +287,10 @@ module Hive
           end
         else
           index.record_unresolved_loss(record)
+          # A loss that never started spent nothing, so it must not spend a
+          # daily slot either — otherwise failed launches exhaust the budget
+          # that real runs need.
+          index.refund_unstarted(record) if record["started_at"].nil?
           successor = resolved_loss_successor(record)
           index.record_successor(successor)
         end

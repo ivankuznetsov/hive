@@ -175,9 +175,11 @@ class HiveCommandsDaemonTest < Minitest::Test
     )
     captured = nil
     test_case = self
+    clock_reading = nil
     dispatcher = FakeDispatcher.new([])
     dispatcher.define_singleton_method(:run_forever) do
       calls << :run_forever
+      clock_reading = captured.fetch(:clock).call
       captured.fetch(:runtime_ready_callback).call
     end
 
@@ -203,6 +205,11 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_equal %i[acquire release], activation_lock.events
     assert_equal 2, activation_lock.release_attempts,
                  "outer cleanup may retry the idempotent release"
+    # Every durable daemon timestamp is derived from this injected clock, so a
+    # local-zone reading would write ambiguous times into recovery receipts.
+    assert_kind_of Time, clock_reading
+    assert_predicate clock_reading, :utc?,
+                     "the daemon clock must hand the dispatcher UTC"
   end
 
   def test_manual_daemon_start_pins_children_to_the_invoked_hive_binary

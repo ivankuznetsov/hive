@@ -1,6 +1,9 @@
 require "hive/stages/base"
 require "hive/claude_launcher"
 require "hive/plan_review/orchestrator"
+require "hive/plan_frontmatter"
+require "hive/dependencies"
+require "hive/task_meta"
 
 module Hive
   module Stages
@@ -28,11 +31,48 @@ module Hive
         # prompt-injected brainstorm.md cannot reach the project source.
         result = spawn_plan_agent(task, cfg, prompt, profile)
         marker = Hive::Markers.current(task.state_file)
+        adopt_plan_dependency!(task, marker)
         review = start_plan_review(task, cfg, profile, result, marker)
         {
           commit: action_for(marker.name), status: marker.name,
           plan_review: review&.summary
         }
+      end
+
+      # A plan that declares `depends_on` in its frontmatter is stating a real
+      # scheduling constraint, but only meta.yml gates dispatch. Leaving the two
+      # out of step parked the task on an admission error whose only remedy was
+      # an operator copying one string between two files — toil that reviews
+      # nothing, since nobody re-derives whether the dependency is right before
+      # pasting it.
+      #
+      # So absence is adopted and conflict still blocks: when meta.yml has no
+      # dependency we persist the plan's, and when it has a different one the
+      # `plan_dependency_mismatch` gate still stops everything for a human. A
+      # dependency adopted here is not trusted blindly either — admission still
+      # resolves the target and still reports `dependency_cycle` with the
+      # offending path, which is a far better error than a copy instruction.
+      def adopt_plan_dependency!(task, marker)
+        return unless marker.name == :complete
+
+        plan = Hive::PlanFrontmatter.read(File.join(task.folder, "plan.md"))
+        return unless plan.valid?
+
+        declared = plan.depends_on
+        return if declared.nil? || declared.to_s.strip.empty?
+        return unless Hive::TaskMeta.read(task.folder)[:depends_on].nil?
+
+        # PlanFrontmatter already parsed and validated this into a Reference;
+        # a malformed one never reaches here as :ok.
+        reference = declared.to_s
+        return if reference == task.slug
+
+        Hive::TaskMeta.rewrite(task.folder, depends_on: reference)
+      rescue StandardError
+        # Adoption is a convenience over an existing admission check. If it
+        # fails we must not fail the plan stage: admission still catches the
+        # mismatch and tells the operator exactly what to do.
+        nil
       end
 
       def spawn_plan_agent(task, cfg, prompt, profile)

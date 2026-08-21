@@ -1,3 +1,5 @@
+require "digest"
+
 module Hive
   # Shared regex set for credential/secret detection. Used by both:
   # - PR-body/comment secret scans in OpenPr, Finalize, and GithubPublisher
@@ -38,7 +40,9 @@ module Hive
       # `password=`, `passwd=`, `PASSWORD=` style assignments. Require
       # the assignment delimiter so prose such as "password resets" is
       # not mistaken for a credential.
-      password_assignment:   /\b(?:password|passwd|pwd)\b['"]?\s*[:=]\s*['"]?[^\s'"]{6,}['"]?(?=[\s,;}\]]|$)/i,
+      # Include conventional prefixes (`DB_PASSWORD`, `ADMIN_PASSWORD`) so a
+      # dotted unquoted credential cannot hide behind the variable name.
+      password_assignment:   /\b(?:[A-Za-z][A-Za-z0-9]*_)*(?:password|passwd|pwd)\b['"]?\s*[:=]\s*['"]?[^\s'"]{6,}['"]?(?=[\s,;}\]]|$)/i,
       password_sql:          /\bPASSWORD\s+['"][^\s'"]{6,}['"]/i,
       password_xml:          /<password>\s*[^<\s]{6,}\s*<\/password>/i,
       password_cli:          /--password\s+['"]?[^\s'"]{6,}['"]?(?=\s|$)/i,
@@ -74,7 +78,11 @@ module Hive
       PATTERNS.each do |name, regex|
         text.scan(regex) do |_capture|
           full = Regexp.last_match[0]
-          matches << { name: name, snippet: full.length > 80 ? "#{full[0, 80]}…" : full }
+          matches << {
+            name: name,
+            snippet: full.length > 80 ? "#{full[0, 80]}…" : full,
+            sha256: Digest::SHA256.hexdigest(full)
+          }
         end
       end
       matches

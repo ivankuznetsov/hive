@@ -192,6 +192,26 @@ class AgentObservationTest < Minitest::Test
     refute_includes payload.to_s, "provider failed"
   end
 
+  def test_model_output_limit_remains_distinct_in_terminal_resource_evidence
+    activity = Activity.new
+    observation = Hive::AgentObservation.new(
+      task: task, context: context, session_id: "session-output-limit", role: "reviewer",
+      provider: "pi", timeout_sec: 30, guards: guards,
+      activity: activity, clock: -> { NOW }
+    )
+    observation.start!
+    observation.finish!(
+      status: :error,
+      resource_exhaustion: { reason: "model_output_limit", observed: 8_192 }
+    )
+
+    resource = activity.records.last.dig(:payload, "resource_observation")
+    assert_equal "model_output_limit", resource.fetch("kind")
+    assert_equal "tokens", resource.fetch("unit")
+    assert_nil resource.fetch("configured")
+    assert_equal 8_192, resource.fetch("observed")
+  end
+
   def test_missing_durable_attempt_context_is_explicitly_unavailable
     activity = Activity.new
     observation = Hive::AgentObservation.new(

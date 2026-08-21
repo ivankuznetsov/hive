@@ -46,12 +46,23 @@ module AgentCliRuntime
       end
       argv.concat(request.trusted_cli_arguments)
       argv.concat(profile.output_format_flags) if request.include_output_format
-      argv << (prompt_style == :stdin ? "-" : request.prompt) unless
-        prompt_style == :headless_flag_value
+      stdin_data =
+        case prompt_style
+        when :positional
+          argv << request.prompt
+          nil
+        when :headless_flag_value
+          nil
+        when :stdin
+          argv << "-"
+          request.prompt
+        when :piped_stdin
+          request.prompt
+        end
 
       CompiledInvocation.new(
         argv: request.command_prefix + argv,
-        stdin_data: prompt_style == :stdin ? request.prompt : nil,
+        stdin_data:,
         provider: profile.name,
         launcher_identity: profile.launcher_identity,
         capability_evidence: evidence
@@ -106,6 +117,51 @@ module AgentCliRuntime
         nil
       end
     end
+
+    # A provider failure seen mid-stream, normalized to
+    # {kind:, provider:, status_code:, message:}, or nil when the event is
+    # clean. Callers use this to tell a provider-side stop (quota, credit
+    # ceiling, rate limit, model output truncation) apart from an agent that
+    # genuinely produced nothing: several CLIs report the former on the stream
+    # and still exit zero.
+    def extract_provider_error(profile, event)
+      resolved = Profiles.resolve(profile)
+      extracted = resolved.extract_error_event(event)
+      return nil if extracted.nil?
+
+      kind, text = normalize_extracted_error(extracted)
+      return nil if text.nil? || text.strip.empty?
+
+      {
+        kind: kind,
+        provider: resolved.name,
+        status_code: status_code_from(text),
+        message: Redactor.diagnostic(text)
+      }.freeze
+    end
+
+    def normalize_extracted_error(extracted)
+      return [ extracted.kind, extracted.message ] if extracted.is_a?(ExtractedFailure)
+      return [ failure_kind_from(extracted), extracted ] if extracted.is_a?(String)
+
+      [ nil, nil ]
+    end
+    private_class_method :normalize_extracted_error
+
+    def failure_kind_from(text)
+      status = status_code_from(text)
+      return :provider_limit if status == 402
+      return :rate_limited if status == 429
+
+      normalized = text.to_s.downcase
+      return :rate_limited if normalized.match?(/\brate[\s_-]*limit(?:ed|s)?\b/)
+      return :provider_limit if normalized.match?(
+        /\b(?:quota|billing|credits?|tokens?[\s_-]*limit|usage[\s_-]*limit)\b/
+      )
+
+      :provider_error
+    end
+    private_class_method :failure_kind_from
 
     def observe(profile, result)
       resolved = Profiles.resolve(profile)
@@ -267,6 +323,16 @@ module AgentCliRuntime
     end
     private_class_method :tool_csv
 
+    # Providers prefix the status onto the text ("402: {...}") or carry it in
+    # the embedded payload. Either is enough to classify without matching on
+    # human-readable wording, which differs per provider and changes freely.
+    def status_code_from(text)
+      value = text[/\A\s*(\d{3})\s*:/, 1] || text[/"code"\s*:\s*(\d{3})\b/, 1]
+      code = value.to_i
+      code.between?(100, 599) ? code : nil
+    end
+    private_class_method :status_code_from
+
     def normalize_usage(usage)
       return nil unless usage.is_a?(Hash)
 
@@ -281,10 +347,21 @@ module AgentCliRuntime
         input_includes_cache_read: normalized_boolean(value.call(:input_includes_cache_read)),
         input_includes_cache_write: normalized_boolean(value.call(:input_includes_cache_write)),
         output_includes_reasoning: normalized_boolean(value.call(:output_includes_reasoning)),
-        model: value.call(:model)&.to_s&.dup&.freeze
+        model: value.call(:model)&.to_s&.dup&.freeze,
+        # Carried as a float: this is money, and normalized_count would round
+        # a fraction-of-a-cent charge to zero.
+        provider_reported_cost: normalized_cost(value.call(:provider_reported_cost))
       }.freeze
     end
     private_class_method :normalize_usage
+
+    def normalized_cost(value)
+      return nil unless value.is_a?(Numeric)
+
+      cost = value.to_f
+      cost if cost >= 0 && cost.finite?
+    end
+    private_class_method :normalized_cost
 
     def normalized_count(value)
       value.nil? ? nil : [ value.to_i, 0 ].max

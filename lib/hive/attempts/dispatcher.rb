@@ -3,17 +3,18 @@ require "hive/attempts/contracts"
 require "hive/attempts/capability"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/generation"
+require "hive/attempts/command_progress"
 require "hive/provider_health"
 require "hive/provider_routing"
 require "hive/task_resolver"
 require "hive/workflows"
 require "hive/context_provenance"
+require "hive/plan_review/store"
 
 module Hive
   module Attempts
     class Dispatcher
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: coding brainstorm artifact repair
-
       DEFAULT_LIMITS = { max_global: 3, max_per_project: 3, max_daily: 50 }.freeze
 
       def initialize(store:, launcher:, limits: DEFAULT_LIMITS, clock: -> { Time.now.utc },
@@ -46,15 +47,32 @@ module Hive
                    admission_view: nil, routing_policy: nil)
         @launcher.preflight!
         generation = normalize_generation(
-          generation, task: task, project: project, intended_stage: intended_stage
+          generation, task: task, project: project, intended_stage: intended_stage,
+          argv: argv
         )
-        admit(
+        policy = routing_policy || resolve_routing_policy(task, intended_stage)
+        result = admit(
           task: task, generation: generation, argv: argv, request_id: request_id,
           provider: provider, interactive: interactive,
           predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
           successor_of: nil, now: now, admission_view: admission_view,
-          routing_policy: routing_policy || resolve_routing_policy(task, intended_stage)
+          routing_policy: policy
+        )
+        return result unless superseding_loss?(result)
+
+        # A lost attempt blocks admission until an explicit successor exists,
+        # but nothing mints that successor on its own: the daemon's recovery
+        # request carries no predecessor, and an operator's `hive run` carries
+        # none either. Left alone the task re-blocks every tick, forever. Adopt
+        # the loss as the predecessor so lineage, generation, frozen routing
+        # policy, and inherited outputs are all preserved. Racing successors
+        # are not a concern — admission is serialized, and a second one is
+        # refused by the `successor_exists` gate inside `admit`.
+        dispatch_successor(
+          predecessor: result.attempt, task: task, project: project, argv: argv,
+          request_id: request_id, provider: provider, interactive: interactive,
+          now: now, admission_view: admission_view, routing_policy: policy
         )
       end
 
@@ -117,6 +135,7 @@ module Hive
         intended_stage = intended_stage_for(request.argv, task)
         generation = Generation.resolve(
           task: task, project: request.project, intended_stage: intended_stage,
+          progress_token: command_progress_token(request.argv, task),
           task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil,
           attempt_store: @store
         )
@@ -158,7 +177,14 @@ module Hive
             records = view.refresh_for_admission
             semantic_owner = find_semantic_owner(records, generation)
             if semantic_owner&.live?
-              result = live_result(semantic_owner, interactive: interactive)
+              result = if semantic_owner.task_generation == generation.task_generation
+                live_result(semantic_owner, interactive: interactive)
+              else
+                DispatchResult.new(
+                  status: :deferred, attempt: semantic_owner, receipt: nil,
+                  attach_descriptor: nil, reason: "in_flight"
+                )
+              end
               next
             end
 
@@ -454,6 +480,13 @@ module Hive
         Hive::Stages::Brainstorm.artifact_valid?(task.state_file)
       end
 
+      # Only an unresolved loss is adoptable; every other deferral keeps its
+      # meaning (capacity, successor_exists, invalid_predecessor).
+      def superseding_loss?(result)
+        result.status == :deferred &&
+          result.reason == "attempt_lost"
+      end
+
       def coding_brainstorm?(task)
         Hive::Workflows.coding_id?(task.respond_to?(:workflow) ? task.workflow : nil)
       end
@@ -580,13 +613,19 @@ module Hive
         { "attempt_id" => record.attempt_id }
       end
 
-      def normalize_generation(generation, task:, project:, intended_stage:)
+      def normalize_generation(generation, task:, project:, intended_stage:, argv:)
         return generation if generation.is_a?(Generation)
 
         Generation.resolve(
           task: task, project: project, intended_stage: intended_stage,
+          progress_token: command_progress_token(argv, task),
           task_generation: generation, attempt_store: @store
         )
+      end
+
+      def command_progress_token(argv, task)
+        base = Generation.artifact_token(task)
+        Hive::Attempts::CommandProgress.token_for(argv:, task:, fallback: base)
       end
 
       def starting_revision(task)

@@ -1259,6 +1259,18 @@ restored the omitted compatibility outcome and split one broad claim into three.
 Keep the gap open until at least one exact-range Web package and one CLI/TUI
 package are fully accepted without weakening the 4/4 false-completion result.
 
+## Controller receipt retention remains unbounded (2026-08-21)
+
+Artifact custody now uses one manifest with a 128-entry default and a hard
+4096-entry ceiling; execute and plan review may widen that manifest only to
+their exact current protected inventory. This deletes multi-manifest batching
+but makes the actual deferred wall explicit: context receipts, activity
+operations, and plan-review attempt records currently have no compaction or
+retention policy. A sufficiently long-lived task will eventually reach the
+hard custody ceiling and fail closed before provider launch. Solve this with a
+durable receipt retention/compaction design that preserves authority evidence,
+not by adding another custody topology or raising the hard ceiling again.
+
 ## Architecture patrol lacks interrupted-attempt recovery (2026-08-21)
 
 Ordinary patrol now settles a process-interrupted local fix attempt

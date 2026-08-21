@@ -81,6 +81,12 @@ module AgentCliRuntime
     end
   end
 
+  ExtractedFailure = Data.define(:kind, :message) do
+    def initialize(kind:, message:)
+      super(kind: kind.to_sym, message: Immutable.string(message))
+    end
+  end
+
   Request = Data.define(
     :profile, :prompt, :permission_mode, :permission_arguments,
     :add_dirs, :require_add_dirs,

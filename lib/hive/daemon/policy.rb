@@ -139,10 +139,15 @@ module Hive
       #   resume CANNOT tell "answered 1 of 3, still going" from "done"
       #   (each Telegram answer bumps the file mtime), so a would-be
       #   `:dispatch` on an edit-resume row is held as `:wait_for_answers`
-      #   while answers are pending. The first-sight `:record_baseline`
-      #   and the `:skip`/`:wait_for_debounce` outcomes are unaffected, so
-      #   the editor-bulk-save path still resumes once it is complete. The
-      #   dispatcher computes this by parsing the brainstorm file.
+      #   while answers are pending. `:skip` and `:wait_for_debounce` remain
+      #   unaffected; first sight records a baseline unless the separate
+      #   `answers_complete` signal proves the whole Q&A was already filled.
+      #   The dispatcher computes both signals from the brainstorm file.
+      # @param answers_complete [Boolean] true only when a brainstorm contains
+      #   at least one question and every answer slot is filled. This lets a
+      #   first-sight row distinguish completed Q&A from the agent's freshly
+      #   written unanswered WAITING document without weakening the generic
+      #   edit-resume baseline brake.
       # @param blocked [Boolean] the status JSON's verbatim dependency-gate
       #   flag. When true, a would-be `:dispatch` is gated to
       #   `:blocked_on_dependency`, taking precedence over `answers_pending`
@@ -159,8 +164,8 @@ module Hive
       # ConcurrencyController#observe_state_file_mtime so the next tick
       # has a baseline to compare against.
       def decide(action:, stage: nil, workflow: nil, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
-                 now:, edit_debounce_sec: 30, answers_pending: false, blocked: false,
-                 admission_error: false)
+                 now:, edit_debounce_sec: 30, answers_pending: false,
+                 answers_complete: false, blocked: false, admission_error: false)
         return :admission_error if admission_error || action == "admission_error"
         return :skip if action.nil?
         # Advance, cleared-plan approval, review automation, and edit-resume
@@ -204,7 +209,8 @@ module Hive
           outcome = decide_edit(state_file_mtime: state_file_mtime,
                                 last_dispatched: last_dispatched_state_file_mtime,
                                 now: now,
-                                debounce_sec: edit_debounce_sec)
+                                debounce_sec: edit_debounce_sec,
+                                answers_complete: answers_complete)
           # Gate a would-be edit-resume `:dispatch` on two holds, in
           # precedence order: an unmet task dependency wins
           # (→ :blocked_on_dependency), then unanswered brainstorm Q&A
@@ -277,7 +283,8 @@ module Hive
         :dispatch
       end
 
-      def decide_edit(state_file_mtime:, last_dispatched:, now:, debounce_sec:)
+      def decide_edit(state_file_mtime:, last_dispatched:, now:, debounce_sec:,
+                      answers_complete: false)
         return :skip if state_file_mtime.nil?
 
         if last_dispatched.nil?
@@ -287,7 +294,16 @@ module Hive
           # and skip. The dispatcher must observe this signal to seed
           # the controller; the next genuine user edit (mtime > baseline)
           # then triggers a dispatch on a subsequent tick.
-          return :record_baseline
+          return :record_baseline unless answers_complete
+
+          # A non-empty, fully answered brainstorm is structurally distinct
+          # from the agent's normal first-pass WAITING output. Preserve the
+          # edit debounce, but do not consume the completed answers as the
+          # first-sight baseline: doing so would require another operator edit
+          # before the daemon could ever resume the task.
+          return :wait_for_debounce if (now - state_file_mtime) < debounce_sec
+
+          return :dispatch
         end
 
         # Subsequent visits: only re-fire if the user has actually edited

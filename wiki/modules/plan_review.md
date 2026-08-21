@@ -3,15 +3,15 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-08-13
+updated: 2026-08-21
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
 **TLDR**: Every built-in coding task now has a policy-driven critique substate
 inside `3-plan`. A readable `plan.md` is classified as `skip`, `standard`, or
 `mandatory`; non-skipped plans receive whole-document and independent
-adversarial review, typed findings, at most one original-planner revision, and
-one verification pass. Only the freshness-bound `plan-review/current.json`
+adversarial review, typed findings, and a bounded original-planner
+revision/verification loop. Only the freshness-bound `plan-review/current.json`
 resolution can authorize `3-plan` to `4-execute`. Markers, generic approval,
 `--force`, daemon automation, Web forms, and direct execute entry cannot replace
 that authority.
@@ -59,17 +59,24 @@ normalized policy settings, extracted evidence, and every level source.
 ## Reviewer and routing contract
 
 `Hive::PlanReview::Adapters::Base` owns a provider-neutral request/result
-contract. `CeDocReview` passes a redacted immutable snapshot into a disposable
-directory and invokes the configured `ce-doc-review` capability for the primary
+contract. The shared `DisposableWorktree` creates a detached Git checkout for
+both `CeDocReview` and original-planner revisions. `CeDocReview` replaces that
+checkout's `plan.md` with the redacted immutable review input and invokes the
+configured `ce-doc-review` capability for the primary
 whole-document/specialist leg. The adversarial leg uses a separate prompt and
 route. Neither reviewer can publish canonical `plan.md`; malformed or free-form
 output has no clearance authority.
 
-Reviewer and original-planner revision launches are confined to disposable
-workspaces with provider-enforced workspace-write or exact Claude file-tool
-scope. A provider that cannot enforce either boundary is unavailable rather
-than inheriting a bypass-permissions default. The reviewed input is itself a
-protected anchor, so findings cannot be minted against a reviewer-mutated copy.
+Reviewers run from that disposable checkout with search, shell, and network access so
+they can verify a plan against code, wiki context, history, and referenced
+contracts instead of checking only the document against itself. Codex and Grok
+retain their native workspace-write sandboxes; Claude receives exact file-tool
+scope; Pi may run directly because every provider is structurally separated
+from the live checkout. The adapter result is copied back only through Hive's
+validated output path, and the live plan-review records remain under
+ArtifactFirewall detection and restore. One manifest captures the entire
+authority history; its default bound is 128 and this explicit consumer widens
+it only to the exact inventory, subject to the hard 4096-entry ceiling.
 
 The default adversarial request is native Grok Build, model `grok-4.6`, effort
 `high`. Every route records requested and actual provider, model, model family,
@@ -91,6 +98,13 @@ adversarial, verification, and original-planner revision legs. Provider-route
 exceptions are normalized into those durable attempt outcomes rather than
 escaping before retry evidence is written. Missing retry hints receive bounded
 exponential delay with deterministic jitter rather than a hot retry loop.
+An unsupported mandatory route is probed cheaply before another expensive
+review. An unchanged failed capability probe is recorded as operational
+evidence; after three identical observations the review parks as
+`reviewer_unlaunchable` instead of spawning forever. A changed probe resets the
+series and permits a new reviewer launch. Review identity includes adapter,
+reviewer, and route configuration, while attempt timeout and retry tuning are
+operational and do not invalidate an otherwise identical verdict.
 
 ## Findings, revision, and verification
 
@@ -110,17 +124,40 @@ prose. The adapter verifies each `plan.md` line range and its normalized
 line-range SHA-256 against the immutable reviewed snapshot before the finding
 can affect revision or approval policy.
 
-Accepted findings are batched into one `PlannerRevision` call using the
-captured planner provider/model/family/effort. That call writes only
-`candidate-plan.md`. Hive then runs one bounded disposition/regression
-verification leg. Each accepted finding requires explicit fingerprint-bound
-verification evidence; absence from a generic critique does not verify it. A
-remaining or newly discovered blocker stops the lineage; it
-cannot trigger a recursive second revision. In particular, `request-review`
-cannot clear a verification-created finding without a new linked plan
-generation and planner incorporation. A verified candidate is atomically
-promoted to canonical `plan.md` under the task mutation lock immediately before
-its matching terminal resolution is published under that same lock.
+Accepted findings are batched into a `PlannerRevision` call using the captured
+planner provider/model/family/effort. The planner runs in the same shared
+detached-worktree boundary as reviewers, including for Codex providers that
+refuse a non-Git temporary directory. Each call writes one immutable,
+digest-named `candidate-plan-<sha256>.md`. Its ArtifactFirewall custody is
+passed into the shared agent launcher, so the protected snapshot surrounds only the untrusted
+provider process. Hive's own durable session-start/session-finish writes to
+`task-journal.jsonl` and `task-projection.json` occur outside that interval;
+they cannot be misclassified as planner tampering, while provider writes to
+the same anchors still fail closed and are restored. A launcher that returns
+success without invoking the supplied custody is rejected. Hive then runs a
+disposition/regression verification leg. Each accepted finding
+requires explicit fingerprint-bound verification evidence; absence from a
+generic critique does not verify it. A
+remaining or newly discovered actionable finding is reopened in the same
+lineage. Existing decisions remain bound to the same fingerprint, new gated
+findings consume any exact current approval policy immediately, and the daemon
+receives a runnable `revising` state. The next planner pass uses the latest
+candidate as its input rather than discarding earlier incorporated work. Hive
+permits at most three successful planner-revision rounds; the cap is enforced
+again at every orchestration entry, so an external `advance!` call cannot
+restart a capped verification loop. A repeatedly unresolved defect then blocks
+instead of looping forever. A verified candidate
+is atomically promoted to canonical `plan.md` under the task mutation lock
+immediately before its matching terminal resolution is published under that
+same lock.
+
+A successful verifier result with no contrary finding but an incomplete set of
+fingerprint-bound evidence rows is treated as an incomplete transient attempt,
+not immediately cached as a terminal plan verdict. Hive preserves the evidence
+already returned, resets only the verification route, and asks the next attempt
+only about dispositions still lacking attestations. This recovery is bounded by
+`plan_review.attempts.max_transient`; exhaustion still blocks. A verifier that
+returns an actual finding never enters this retry path and remains blocking.
 
 ## Durable identity and artifacts
 
@@ -139,7 +176,7 @@ plan-review/
       coverage.json
       route-receipt.json
     decisions/<target>/<decision-id>.json
-    candidate-plan.md                # only when revision was required
+    candidate-plan-<sha256>.md       # one immutable artifact per revision round
     resolution-v<projection-version>.json
 ```
 
@@ -202,7 +239,13 @@ observation exits temporary-failure, and a conflicting target decision is
 rejected. Both CLI and Web recheck the canonical plan, task generation, policy
 configuration, and run-level receipt inside the mutation lock before writing a
 decision. Waivers and downgrades require a human-readable reason. The JSON
-result is `hive-plan-review-action.v1`.
+result is `hive-plan-review-action.v1`. `request-review` appends recovery resets
+for every primary, adversarial, verification, or planner-revision role whose
+current effective route is `unsupported` or `terminal_failure`; a later
+optional terminal route can therefore no longer hide an earlier failed
+required route from the sanctioned recovery action. Its semantic target binds
+the current terminal attempt IDs, so a later failed attempt can receive a new
+recovery decision while an exact replay remains a no-op.
 
 Under ADR-008's local same-user trust model, direct CLI invocation is the
 operator boundary; Web actions use the authenticated access predicate. An
@@ -211,6 +254,11 @@ agent with unrestricted same-user shell access therefore has CLI authority.
 Project-local approval policies can consume a gated finding only when policy
 ID/version, validity/revocation, action, risk, paths/scope, review ID, and policy
 fingerprint match exactly. Consumption leaves a durable policy receipt.
+Verification-created findings are policy-matched before the runner returns, so
+they cannot be stranded in an operator-owned state. As a crash/upgrade recovery
+path, `TaskAction` also classifies a legacy `awaiting_decision` record as
+runnable when every blocking finding is gated and currently policy-matched;
+manual or unmatched decisions remain operator-owned.
 
 ## Shared status and Web projection
 
@@ -221,6 +269,20 @@ attempt, coverage and finding counts, blockers/owner/reason, retry time, one
 required action, sanitized route receipts, artifact references, freshness, and
 `execution_allowed`. Daemon rows and `Hive::Tui::Snapshot::Row` copy that
 object; they do not derive a second policy result.
+
+The strict shared status definitions also admit the diagnostics Hive actually
+emits while recovering reviewer capability: blocker fingerprints and
+diagnostics, capability-probe fingerprint/count, verification-followup and
+incomplete-attestation retry flags. The plan-review progress token treats a
+missing projection distinctly, but hashes empty, non-object, invalid-identity,
+or oversized `current.json` bytes into one stable unreadable token instead of
+raising through attempt generation.
+
+Recovery-reset route construction is shared by orchestration and operator
+decisions. Reviewer prompts now have one output contract and require their own
+anchored evidence on every provider; the removed host-output and host-anchor
+branches had no runtime callers after disposable worktrees gave every reviewer
+the hashing and exact-file output capabilities the contract needs.
 
 Hive Web renders the same object on task detail, opens only current
 content-addressed safe artifacts, and posts the full observation identity to

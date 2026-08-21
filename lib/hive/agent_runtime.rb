@@ -254,6 +254,16 @@ module Hive
       nil
     end
 
+    # nil unless the profile recognizes a provider refusal in this event. The
+    # profile owns its CLI's shape, so Hive never has to know which key a given
+    # provider hides a failed turn behind.
+    def extract_provider_error(profile, event)
+      public_profile = runtime_profile(profile)
+      return nil unless public_profile
+
+      AgentCliRuntime.extract_provider_error(public_profile, event)
+    end
+
     def observe(profile, result)
       if result.is_a?(Hash) &&
          result[:normalized_outcome].is_a?(NormalizedOutcome)
@@ -486,10 +496,22 @@ module Hive
         input_includes_cache_read: normalized_boolean(value.call(:input_includes_cache_read)),
         input_includes_cache_write: normalized_boolean(value.call(:input_includes_cache_write)),
         output_includes_reasoning: normalized_boolean(value.call(:output_includes_reasoning)),
-        model: value.call(:model)&.to_s&.dup&.freeze
+        model: value.call(:model)&.to_s&.dup&.freeze,
+        # Money, so it stays a float — normalized_count would round a
+        # fraction-of-a-cent charge to zero. Keeps this legacy path's shape
+        # identical to the packaged runtime's.
+        provider_reported_cost: normalized_cost(value.call(:provider_reported_cost))
       }.freeze
     end
     private_class_method :normalize_usage
+
+    def normalized_cost(value)
+      return nil unless value.is_a?(Numeric)
+
+      cost = value.to_f
+      cost if cost >= 0 && cost.finite?
+    end
+    private_class_method :normalized_cost
 
     def normalized_count(value)
       value.nil? ? nil : [ value.to_i, 0 ].max

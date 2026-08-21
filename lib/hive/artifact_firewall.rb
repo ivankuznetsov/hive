@@ -13,6 +13,7 @@ module Hive
   module ArtifactFirewall
     DIAGNOSTIC_BYTES = 512
     MAX_ENTRIES = 128
+    HARD_MAX_ENTRIES = 4_096
     MAX_PATH_BYTES = 4_096
     REQUIRED_OUTPUT_INSPECTION_ID = "required-output-inspection"
     ORCHESTRATOR_OWNED = Hive::ProtectedFiles::ORCHESTRATOR_OWNED
@@ -130,10 +131,13 @@ module Hive
     end
 
     Manifest = Data.define(
-      :root, :protected_anchors, :permitted_writable_roots, :required_outputs, :redactor
+      :root, :protected_anchors, :permitted_writable_roots, :required_outputs,
+      :redactor, :max_entries
     ) do
       def initialize(root:, protected_anchors:, permitted_writable_roots: [],
-                     required_outputs: {}, redactor: Hive::SecretPatterns.method(:redact))
+                     required_outputs: {}, redactor: Hive::SecretPatterns.method(:redact),
+                     max_entries: MAX_ENTRIES)
+        entry_limit = self.class.send(:normalize_entry_limit, max_entries)
         normalized_root = self.class.send(:normalize_root, root)
         anchors = self.class.send(
           :normalize_labeled_paths, protected_anchors, normalized_root, "protected_anchors"
@@ -144,6 +148,11 @@ module Hive
         roots = self.class.send(
           :normalize_roots, permitted_writable_roots, normalized_root
         )
+        entry_count = anchors.length + outputs.length + roots.length
+        if entry_count > entry_limit
+          raise InvalidManifest,
+                "manifest exceeds max_entries: #{entry_count} > #{entry_limit}"
+        end
         self.class.send(:validate_path_ownership!, anchors, outputs)
         unless redactor.respond_to?(:call)
           raise InvalidManifest, "redactor must respond to #call"
@@ -155,9 +164,23 @@ module Hive
           protected_anchors: anchors,
           permitted_writable_roots: roots,
           required_outputs: outputs,
-          redactor: ->(text) { redactor_callable.call(text) }.freeze
+          redactor: ->(text) { redactor_callable.call(text) }.freeze,
+          max_entries: entry_limit
         )
       end
+
+      def self.normalize_entry_limit(value)
+        limit = Integer(value)
+        unless limit.positive? && limit <= HARD_MAX_ENTRIES
+          raise InvalidManifest,
+                "max_entries must be between 1 and #{HARD_MAX_ENTRIES}"
+        end
+
+        limit
+      rescue ArgumentError, TypeError
+        raise InvalidManifest, "max_entries must be an integer"
+      end
+      private_class_method :normalize_entry_limit
 
       def self.normalize_root(root)
         value = root.to_s
@@ -176,10 +199,6 @@ module Hive
           else
             raise InvalidManifest, "#{field} must be relative names or a label-to-path mapping"
           end
-        if pairs.length > MAX_ENTRIES
-          raise InvalidManifest, "#{field} exceeds #{MAX_ENTRIES} entries"
-        end
-
         normalized = pairs.each_with_object({}) do |(label, path), result|
           safe_label = label.to_s
           raise InvalidManifest, "#{field} labels must not be empty" if safe_label.empty?
@@ -199,12 +218,7 @@ module Hive
       private_class_method :normalize_labeled_paths
 
       def self.normalize_roots(entries, root)
-        roots = Array(entries)
-        if roots.length > MAX_ENTRIES
-          raise InvalidManifest, "permitted_writable_roots exceeds #{MAX_ENTRIES} entries"
-        end
-
-        roots.map do |path|
+        Array(entries).map do |path|
           normalize_path(
             expand_path(path, root, "permitted_writable_roots"),
             "permitted_writable_roots"

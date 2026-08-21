@@ -52,6 +52,32 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
+  def test_valid_snapshot_uses_narrow_attempt_binding_read_when_available
+    with_tmp_dir do |dir|
+      attempt = durable_attempt
+      reads = []
+      attempt_store = Object.new
+      attempt_store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
+        reads << attempt_id
+        attempt.to_h if attempt_id == "attempt-1"
+      end
+      attempt_store.define_singleton_method(:fetch) do |attempt_id|
+        raise "full attempt read must not run for projection replay: #{attempt_id}"
+      end
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      write_journal(dir, [ condition_event("event-1") ])
+      store.rebuild!
+      reads.clear
+
+      projection = store.read
+
+      assert_equal "satisfied", projection.current_condition("AgentHealthy").fetch("state")
+      assert_equal [ "attempt-1" ], reads
+    end
+  end
+
   def test_journal_validation_fetches_each_immutable_attempt_once
     with_tmp_dir do |dir|
       write_journal(dir, [ condition_event("event-1"), condition_event("event-2") ])

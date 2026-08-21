@@ -3,6 +3,7 @@ require "json"
 require "pathname"
 require "securerandom"
 require "hive/claude_launcher"
+require "hive/agent_limit"
 require "hive/artifact_firewall"
 require "hive/artifacts/capture_policy"
 require "hive/artifacts/capture_toolkit"
@@ -25,6 +26,16 @@ module Hive
       MAX_INFERENCE_ATTEMPTS = 2
       MAX_REVIEWER_ATTEMPTS = 2
       class RoleOutputError < Hive::Artifacts::OutcomeEvidence::StoreError; end
+      class RoleAgentError < StandardError
+        attr_reader :role, :profile, :result
+
+        def initialize(role:, profile:, result:)
+          @role = role.to_s
+          @profile = profile
+          @result = result
+          super("#{@role} agent did not return a successful durable output")
+        end
+      end
       DEFAULT_REVIEW_CAPABILITIES = {
         "proof_kinds" => Hive::Artifacts::OutcomeEvidence::Proof::KINDS,
         "temporal_video" => true
@@ -33,6 +44,8 @@ module Hive
       def run!(task, cfg)
         FileUtils.touch(task.state_file) unless File.exist?(task.state_file)
         run_outcome_evidence!(task, cfg || {})
+      rescue RoleAgentError => e
+        publish_role_agent_error!(task, e)
       rescue Hive::Artifacts::OutcomeEvidence::Error, Hive::ArtifactFirewall::Error,
              Hive::Artifacts::BrowserGateway::GatewayError,
              Hive::Artifacts::CaptureMailbox::MailboxError,
@@ -43,6 +56,48 @@ module Hive
           diagnostic: e.message.to_s.byteslice(0, 200).to_s.scrub
         )
         { commit: "error", status: :error }
+      end
+
+      # Agent#run already classified provider stream failures. Preserve that
+      # trusted envelope at the stage boundary instead of collapsing every
+      # failed role into outcome_evidence_invalid. In particular, a 402/429
+      # must publish limits_reached so the daemon applies the provider cooldown
+      # rather than immediately spending another large prompt on the same wall.
+      def publish_role_agent_error!(task, error)
+        result = error.result || {}
+        provider_error = result[:provider_error] || {}
+        provider = provider_error[:provider] || error.profile&.name
+        message = result[:error_message].to_s
+        message = error.message if message.empty?
+
+        if role_agent_limit?(result)
+          limit_text = result[:limit_text].to_s
+          limit_text = message if limit_text.empty?
+          Hive::Markers.set(
+            task.state_file, :error,
+            reason: "limits_reached",
+            provider: provider,
+            message: message.byteslice(0, 200).to_s.scrub,
+            retry_after: result[:retry_at] || Hive::AgentLimit.retry_after(text: limit_text)
+          )
+          return { commit: "limits_reached", status: :error }
+        end
+
+        Hive::Markers.set(
+          task.state_file, :error,
+          {
+            reason: result[:error_reason] || "outcome_evidence_agent_failed",
+            provider: provider,
+            status: result[:status],
+            status_code: provider_error[:status_code],
+            message: message.byteslice(0, 200).to_s.scrub
+          }.compact
+        )
+        { commit: "error", status: :error }
+      end
+
+      def role_agent_limit?(result)
+        result[:error_reason].to_s == "limits_reached"
       end
 
       def run_outcome_evidence!(task, cfg, identity_resolver: nil, store: nil,
@@ -305,6 +360,16 @@ module Hive
             unless reviewer.fetch(:output).keys == [ "verdicts" ]
               raise RoleOutputError, "reviewer output must contain only verdicts"
             end
+            # Check the verdict contract here as well as during the append.
+            # append_attempt! runs after this loop returns, so a violation it
+            # raises escapes the repair channel entirely and ends the stage —
+            # yet an over-long or vague reason is exactly what one more
+            # reviewer turn fixes. Validation only; nothing is persisted.
+            begin
+              Hive::Artifacts::OutcomeEvidence::Contract.verdicts!(reviewer.fetch(:output))
+            rescue Hive::Artifacts::OutcomeEvidence::StoreError => e
+              raise RoleOutputError, e.message
+            end
 
             return reviewer
           rescue RoleOutputError => e
@@ -396,8 +461,7 @@ module Hive
                 "#{role} modified protected task state: #{report.diagnostic}"
         end
         unless result && result[:status] == :ok
-          raise Hive::Artifacts::OutcomeEvidence::StoreError,
-                "#{role} agent did not return a successful durable output"
+          raise RoleAgentError.new(role: role, profile: profile, result: result)
         end
         if result[:final_message_truncated] == true
           raise Hive::Artifacts::OutcomeEvidence::StoreError,

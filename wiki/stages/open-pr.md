@@ -3,7 +3,7 @@ title: 5-open-pr stage
 type: stage
 source: lib/hive/stages/open_pr.rb, templates/open_pr_prompt.md.erb
 created: 2026-05-13
-updated: 2026-07-31
+updated: 2026-08-21
 tags: [stage, pr, github]
 ---
 
@@ -37,8 +37,17 @@ The first two checks are the shared `Hive::Stages::Base.worktree_pointer_or_exit
 6. Render `templates/open_pr_prompt.md.erb` with the plan and execute output wrapped in a per-spawn `<user_supplied>` nonce.
 7. Spawn the open-pr agent in the worktree. Controller-owned task files are
    captured before spawn and restored atomically on a mismatch; the resulting
-   error carries `reason=open_pr_tampered` and `restored=true|false`. The prompt
-   invokes `/ce-commit-push-pr`, requires `gh pr create --draft`, forbids
+   error carries `reason=open_pr_tampered` and `restored=true|false`. The full
+   controller-owned anchor set remains protected, including the authoritative
+   task journal and projection. A late terminal observation for the preceding
+   execute attempt must acquire the same ordinary task ownership lock as stage
+   execution; while open PR owns that lock, the daemon returns `:pending`
+   immediately and retries the observation after the stage releases. The
+   provider therefore retains ordinary repository, shell, and network access,
+   controller bookkeeping stays outside its custody window, and direct
+   provider edits still produce `open_pr_tampered` and are restored.
+   The prompt invokes `/ce-commit-push-pr`, requires
+   `gh pr create --draft`, forbids
    another push, requires `pr.md` frontmatter with `pr_url`, `pr_number`, and
    full `head_oid`, and
    ends with a required completion section that makes the

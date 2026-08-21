@@ -62,9 +62,11 @@ module Hive
     AppendResult = Data.define(:cursor, :event_id, :journal_hash, :records)
 
     class Validator
-      def initialize(attempt_store: nil, require_attempt_store: false)
+      def initialize(attempt_store: nil, require_attempt_store: false,
+                     projection_bindings: false)
         @attempt_store = attempt_store
         @require_attempt_store = require_attempt_store
+        @projection_bindings = projection_bindings
         @attempt_cache = {}
         @lineage_cache = {}
       end
@@ -167,7 +169,7 @@ module Hive
         attempt = if @attempt_cache.key?(attempt_id)
           @attempt_cache[attempt_id]
         else
-          @attempt_cache[attempt_id] = @attempt_store.fetch(attempt_id)
+          @attempt_cache[attempt_id] = fetch_attempt(attempt_id)
         end
         raise AttemptMismatch, "unknown durable attempt #{record['attempt_id']}" unless attempt
 
@@ -176,8 +178,10 @@ module Hive
         mismatches << "task" unless attempt["task_slug"] == task["slug"] &&
                                     (task["id"].nil? || attempt["task_id"].to_s == task["id"].to_s)
         mismatches << "stage" unless attempt["intended_stage"] == record["stage"]
-        mismatches << "task_generation" unless attempt.task_input_epoch == record["task_generation"]
-        if record["ownership_generation"] && attempt.ownership_generation != record["ownership_generation"]
+        mismatches << "task_generation" unless
+          attempt_value(attempt, :task_input_epoch) == record["task_generation"]
+        if record["ownership_generation"] &&
+           attempt_value(attempt, :ownership_generation) != record["ownership_generation"]
           mismatches << "ownership_generation"
         end
         unless mismatches.empty?
@@ -194,13 +198,13 @@ module Hive
           "task_slug" => attempt["task_slug"],
           "task_id" => attempt["task_id"].to_s,
           "intended_stage" => attempt["intended_stage"],
-          "task_input_epoch" => attempt.task_input_epoch
+          "task_input_epoch" => attempt_value(attempt, :task_input_epoch)
         }
         lineage = []
         seen = {}
         current = attempt
         loop do
-          id = current.attempt_id
+          id = attempt_value(current, :attempt_id)
           raise AttemptMismatch, "durable attempt lineage cycle at #{id}" if seen[id]
 
           seen[id] = true
@@ -211,7 +215,7 @@ module Hive
           predecessor = if @attempt_cache.key?(predecessor_id)
             @attempt_cache[predecessor_id]
           else
-            @attempt_cache[predecessor_id] = @attempt_store.fetch(predecessor_id)
+            @attempt_cache[predecessor_id] = fetch_attempt(predecessor_id)
           end
           unless predecessor
             raise AttemptMismatch, "durable attempt lineage is missing predecessor #{predecessor_id}"
@@ -219,12 +223,24 @@ module Hive
           unless predecessor["task_slug"] == expected.fetch("task_slug") &&
                  predecessor["task_id"].to_s == expected.fetch("task_id") &&
                  predecessor["intended_stage"] == expected.fetch("intended_stage") &&
-                 predecessor.task_input_epoch == expected.fetch("task_input_epoch")
+                 attempt_value(predecessor, :task_input_epoch) == expected.fetch("task_input_epoch")
             raise AttemptMismatch, "durable attempt lineage predecessor #{predecessor_id} has incompatible identity"
           end
           current = predecessor
         end
         lineage.freeze
+      end
+
+      def fetch_attempt(attempt_id)
+        if @projection_bindings && @attempt_store.respond_to?(:fetch_projection_binding)
+          @attempt_store.fetch_projection_binding(attempt_id)
+        else
+          @attempt_store.fetch(attempt_id)
+        end
+      end
+
+      def attempt_value(attempt, name)
+        attempt.respond_to?(name) ? attempt.public_send(name) : attempt[name.to_s]
       end
 
       def require_non_empty!(record, keys)

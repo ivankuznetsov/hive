@@ -5,12 +5,27 @@ require "hive/stages/base"
 class PlanReviewCeDocReviewAdapterTest < Minitest::Test
   include HiveTestHelper
 
+  # Hive journals the review attempt while the reviewer runs, so anchoring its
+  # own bookkeeping made every review fail with "reviewer modified protected
+  # artifacts" for writes the reviewer never made.
+  def test_custody_manifest_does_not_anchor_hive_written_journals
+    anchored = Hive::ArtifactFirewall::ORCHESTRATOR_OWNED -
+      Hive::PlanReview::Adapters::CeDocReview::HiveRunner::ORCHESTRATOR_JOURNALS
+
+    refute_includes anchored, "task-journal.jsonl"
+    refute_includes anchored, "task-projection.json"
+    # The reviewer's actual input must still be protected.
+    assert_includes anchored, "plan.md"
+  end
+
   def test_success_uses_disposable_plan_and_validates_machine_output
     with_request do |request, plan_path|
       original = File.binread(plan_path)
       runner = lambda do |prompt:, cwd:, output_path:, request:, **|
         refute_equal File.dirname(plan_path), cwd
+        assert File.directory?(File.join(cwd, ".git")) || File.file?(File.join(cwd, ".git"))
         assert_includes prompt, "ce-doc-review"
+        assert_includes prompt, "Repository root: `#{cwd}`"
         File.write(File.join(cwd, "review-notes.md"), "reviewer scratch work")
         File.write(output_path, JSON.generate(valid_result(request)))
         { "status" => "ok", "actual_route" => request.reviewer }
@@ -55,8 +70,6 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       runner = lambda do |output_path:, request:, **kwargs|
         prompt = kwargs.fetch(:prompt)
         payload = valid_result(request)
-        payload.fetch("findings").first.fetch("evidence")["anchor_digest"] = "0" * 64
-        payload["residual_evidence"] = [ { "unexpected" => "initial review residue" } ]
         File.write(output_path, JSON.generate(payload))
         { "status" => "ok", "actual_route" => request.reviewer }
       end
@@ -71,11 +84,12 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       assert_equal "success", result.outcome
       assert_includes prompt, "Review the immutable executable-plan copy"
       assert_includes prompt, "do not require an external skill or subagent"
-      assert_includes prompt, "Hive will replace it from the cited"
-      assert_includes prompt, 'files["hive-plan-review-result.json"]'
-      assert_includes prompt, "never the absolute path"
+      assert_match(/Repository root: `.*hive-plan-review-worktree-.*\/checkout`/, prompt)
+      assert_includes prompt, "Write one JSON object to `"
+      refute_includes prompt, 'files["hive-plan-review-result.json"]'
+      refute_includes prompt, "This confined route has no hashing tool"
       refute_includes prompt, "Invoke `"
-      assert_equal Digest::SHA256.hexdigest("# Plan"),
+      assert_equal valid_result(pi_request).dig("findings", 0, "evidence", "anchor_digest"),
                    result.findings.first["evidence"].fetch("anchor_digest")
       assert_empty result.residual_evidence
     end
@@ -261,6 +275,39 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_production_runner_batches_large_review_history_without_dropping_custody
+    with_runner do |runner, request, output_path|
+      review_root = File.join(request.project_root, "plan-review", "reviews", "historical")
+      FileUtils.mkdir_p(review_root)
+      paths = (Hive::ArtifactFirewall::MAX_ENTRIES + 5).times.map do |index|
+        path = File.join(review_root, format("record-%03d.json", index))
+        File.write(path, "original #{index}\n")
+        path
+      end
+      target = paths.last
+      launched = false
+      payload = valid_result(request)
+      replacement = lambda do |_task, expected_output:, **|
+        launched = true
+        File.write(target, "forged\n")
+        File.write(expected_output, JSON.generate(payload))
+        { status: :ok, usage: { model: request.reviewer.fetch("model") } }
+      end
+
+      observed = nil
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
+        observed = runner.call(
+          prompt: "review", cwd: request.output_directory, output_path:, request:
+        )
+      end
+
+      assert launched, "large histories must reach the reviewer instead of failing manifest admission"
+      assert_equal "terminal_failure", observed.fetch("status")
+      assert_includes observed.fetch("diagnostic"), "record-132.json"
+      assert_equal "original 132\n", File.read(target)
+    end
+  end
+
   def test_production_runner_maps_agent_results_onto_transport_status
     cases = {
       "ok" => { status: :ok, usage: { model: "gpt-5.6-sol" } },
@@ -415,6 +462,91 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_disposable_worktree_creation_failure_is_cleaned_and_reported
+    failed = Object.new
+    failed.define_singleton_method(:success?) { false }
+    succeeded = Object.new
+    succeeded.define_singleton_method(:success?) { true }
+
+    with_request do |request, _plan_path|
+      capture = lambda do |*argv|
+        if argv.include?("add")
+          [ "", "cannot add", failed ]
+        else
+          [ "", "", succeeded ]
+        end
+      end
+      error = nil
+      with_replaced_singleton_method(Open3, :capture3, capture) do
+        error = assert_raises(Hive::PlanReview::InvalidRecord) do
+          Hive::PlanReview::DisposableWorktree.new(
+            project_root: request.project_root
+          ).create
+        end
+      end
+
+      assert_includes error.message, "could not create a disposable Git worktree"
+      assert_includes error.message, "cannot add"
+    end
+  end
+
+  def test_disposable_cleanup_reports_filesystem_failures
+    Dir.mktmpdir("hive-plan-review-worktree-") do |parent|
+      path = File.join(parent, "checkout")
+      FileUtils.mkdir_p(path)
+      worktree = Hive::PlanReview::DisposableWorktree.new(
+        project_root: request_for_cleanup.project_root
+      )
+      worktree.instance_variable_set(:@temp_root, parent)
+      worktree.instance_variable_set(:@path, path)
+      worktree.instance_variable_set(:@added, true)
+      _out, err = capture_io do
+        with_replaced_singleton_method(
+          Open3, :capture3, ->(*) { raise Errno::EIO, "cleanup" }
+        ) do
+          worktree.cleanup
+        end
+      end
+
+      assert_includes err, "disposable worktree cleanup failed"
+      assert_includes err, "EIO"
+    end
+  end
+
+  def test_disposable_cleanup_warns_and_prunes_when_git_removal_fails
+    failed = Object.new
+    failed.define_singleton_method(:success?) { false }
+    succeeded = Object.new
+    succeeded.define_singleton_method(:success?) { true }
+    parent = Dir.mktmpdir("hive-plan-review-worktree-")
+    path = File.join(parent, "checkout")
+    FileUtils.mkdir_p(path)
+    worktree = Hive::PlanReview::DisposableWorktree.new(
+      project_root: request_for_cleanup.project_root
+    )
+    worktree.instance_variable_set(:@temp_root, parent)
+    worktree.instance_variable_set(:@path, path)
+    worktree.instance_variable_set(:@added, true)
+    calls = []
+    capture = lambda do |*argv|
+      calls << argv
+      argv.include?("remove") ? [ "", "cannot remove", failed ] : [ "", "", succeeded ]
+    end
+
+    _out, err = capture_io do
+      with_replaced_singleton_method(Open3, :capture3, capture) do
+        worktree.cleanup
+      end
+    end
+
+    assert_includes err, "disposable worktree cleanup failed: cannot remove"
+    assert calls.any? { |argv| argv.include?("remove") }
+    assert calls.any? { |argv| argv.include?("prune") }
+    refute_path_exists parent
+  ensure
+    FileUtils.rm_rf(parent) if parent
+  end
+
   def test_capability_probe_faults_degrade_to_unsupported_instead_of_raising
     with_request do |request, _plan_path|
       contract = Struct.new(:invocation).new("/ce-doc-review")
@@ -465,6 +597,10 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
 
         assert_equal "success", adapter_for(runner).call(scoped).outcome
         assert_includes observed, heading
+        assert_match(
+          /Every newly emitted finding must use\s+`"lifecycle": "open"`/,
+          observed
+        )
       end
     end
   end
@@ -513,6 +649,10 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
 
   private
 
+  def request_for_cleanup
+    Struct.new(:project_root).new(Dir.tmpdir)
+  end
+
   def with_runner
     with_request do |request, _plan_path|
       meta_path = File.join(request.project_root, "meta.yml")
@@ -540,6 +680,11 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       File.write(plan_path, "# Plan\n")
       output = File.join(root, "output")
       FileUtils.mkdir_p(output)
+      run!("git", "-C", root, "init", "--quiet")
+      run!("git", "-C", root, "config", "user.name", "Hive Test")
+      run!("git", "-C", root, "config", "user.email", "hive@example.test")
+      run!("git", "-C", root, "add", "input-plan.md")
+      run!("git", "-C", root, "commit", "-m", "plan review fixture", "--quiet")
       request = Hive::PlanReview::Adapters::Base::Request.new(
         plan_path:, plan_digest: Digest::SHA256.file(plan_path).hexdigest,
         document_type: "executable_plan", level: "standard",

@@ -1,4 +1,5 @@
 require "hive/config"
+require "hive/lock"
 require "hive/markers"
 require "hive/task"
 require "hive/task_journal"
@@ -43,24 +44,39 @@ module Hive
           return :not_applicable
         end
 
-        writer = Hive::TaskJournal::Writer.new(
-          task_folder: task.folder, attempt_store: @store, clock: -> { now }
-        )
-        records = Hive::TaskProjection.read_journal(
-          writer.path, attempt_store: @store
-        )
-        if observed?(records, attempt)
-          @delivered.add(key)
-          return :acknowledged
-        end
+        # A terminal execute observation may arrive just after the daemon has
+        # advanced the task into open-pr. Open-pr's provider custody protects
+        # the same journal and projection this observer updates, so writing
+        # through its live stage lock creates an indistinguishable
+        # open_pr_tampered false positive. Acquire the ordinary task ownership
+        # lock non-blockingly instead: contention is expected and returns
+        # :pending, letting the daemon retry after the active stage releases.
+        Hive::Lock.with_task_lock(
+          task.folder, op: "attempt_observation", create: false
+        ) do
+          writer = Hive::TaskJournal::Writer.new(
+            task_folder: task.folder, attempt_store: @store, clock: -> { now }
+          )
+          records = Hive::TaskProjection.read_journal(
+            writer.path, attempt_store: @store
+          )
+          if observed?(records, attempt)
+            @delivered.add(key)
+            next :acknowledged
+          end
 
-        writer.append(observation(task, attempt, status, records))
-        marker = Hive::Markers.current(task.state_file)
-        Hive::TaskProjection::Store.new(
-          task_folder: task.folder, attempt_store: @store
-        ).rebuild!(marker: marker)
-        @delivered.add(key)
-        :delivered
+          writer.append(observation(task, attempt, status, records))
+          marker = Hive::Markers.current(task.state_file)
+          Hive::TaskProjection::Store.new(
+            task_folder: task.folder, attempt_store: @store
+          ).rebuild!(marker: marker)
+          @delivered.add(key)
+          :delivered
+        end
+      rescue Hive::ConcurrentRunError
+        :pending
+      rescue Errno::ENOENT
+        :not_applicable
       rescue Hive::Error, SystemCallError, IOError => e
         report_error(status&.attempt, e)
         :pending

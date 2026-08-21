@@ -58,6 +58,13 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
+  class FakeRecoveryCoordinator
+    def retry_delay_sec(retry_count)
+      ladder = Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC
+      ladder.fetch([ retry_count.to_i, ladder.length - 1 ].min)
+    end
+  end
+
   def test_repeated_ticks_and_healer_restart_dispatch_exactly_one_budgeted_successor
     with_task do |task|
       with_tmp_dir do |root|
@@ -162,7 +169,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
-  def test_deferred_successor_dispatch_retries_on_persisted_shared_cooldown
+  def test_deferred_successor_dispatch_retries_on_persisted_shared_ladder_step
     with_task do |task|
       with_tmp_dir do |root|
         store = Hive::Attempts::Store.new(root: root)
@@ -180,21 +187,21 @@ class DaemonAttemptLossHealerTest < Minitest::Test
           store, outcomes, FakeProcessor.new(outcomes, task.folder),
           dispatcher, FakeLogger.new
         )
+        retry_delay = Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.first
+        scheduled_at = NOW + 1 + retry_delay
 
-        service.heal_attempt_losses([ lost ], now: RETRY_AT - 3)
+        service.heal_attempt_losses([ lost ], now: scheduled_at - 1)
         assert_empty dispatcher.calls
 
-        service.heal_attempt_losses([ lost ], now: RETRY_AT)
+        service.heal_attempt_losses([ lost ], now: scheduled_at)
         assert_equal 1, dispatcher.calls.size
         first_retry_at = outcomes.fetch(lost.attempt_id).fetch("last_retry_at")
 
-        service.heal_attempt_losses([ lost ], now: RETRY_AT + 30)
+        service.heal_attempt_losses([ lost ], now: scheduled_at + retry_delay - 1)
         assert_equal 1, dispatcher.calls.size
         assert_equal first_retry_at, outcomes.fetch(lost.attempt_id).fetch("last_retry_at")
 
-        service.heal_attempt_losses(
-          [ lost ], now: RETRY_AT + Hive::AgentLimit.retry_cooldown_sec
-        )
+        service.heal_attempt_losses([ lost ], now: scheduled_at + retry_delay)
         assert_equal 2, dispatcher.calls.size
       end
     end
@@ -330,7 +337,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
-  def test_global_auto_retry_gate_holds_attempt_loss
+  def test_attempt_loss_is_healed_with_no_global_gate_to_hold_it
     with_task do |task|
       with_tmp_dir do |root|
         store = Hive::Attempts::Store.new(root: root)
@@ -340,12 +347,13 @@ class DaemonAttemptLossHealerTest < Minitest::Test
 
         healer(
           store, outcomes, FakeProcessor.new(outcomes, task.folder),
-          dispatcher, FakeLogger.new, auto_retry_enabled: false
+          dispatcher, FakeLogger.new
         ).heal_attempt_losses([ lost ], now: RETRY_AT)
 
-        assert_empty dispatcher.calls
-        assert_nil outcomes.fetch(lost.attempt_id),
-                   "a disabled global retry policy must not even advance the loss sidecar"
+        # There is no switch to hold this any more: a lost attempt is healed
+        # like every other failure.
+        refute_empty dispatcher.calls,
+                     "a lost attempt must be healed, not held by a global gate"
       end
     end
   end
@@ -361,7 +369,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         healer(
           store, outcomes, FakeProcessor.new(outcomes, task.folder),
           dispatcher, FakeLogger.new,
-          project_auto_retry_enabled: ->(project) { project != "demo" }
+          project_daemon_enabled: ->(project) { project != "demo" }
         ).heal_attempt_losses([ lost ], now: RETRY_AT)
 
         assert_empty dispatcher.calls
@@ -418,8 +426,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
   private
 
   def healer(store, outcomes, processor, dispatcher, logger,
-             auto_retry_enabled: true,
-             project_auto_retry_enabled: ->(_project) { true },
+             project_daemon_enabled: ->(_project) { true },
              admission_open: -> { true })
     Hive::Daemon::StaleAgentHealer.new(
       controller: FakeController.new,
@@ -428,8 +435,8 @@ class DaemonAttemptLossHealerTest < Minitest::Test
       attempt_dispatcher: dispatcher,
       lost_outcome_store: outcomes,
       lost_outcome_processor: processor,
-      auto_retry_enabled: auto_retry_enabled,
-      project_auto_retry_enabled: project_auto_retry_enabled,
+      project_daemon_enabled: project_daemon_enabled,
+      recovery_coordinator: FakeRecoveryCoordinator.new,
       admission_open: admission_open
     )
   end

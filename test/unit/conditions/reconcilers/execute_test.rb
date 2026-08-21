@@ -91,7 +91,8 @@ class ConditionsReconcilersExecuteTest < Minitest::Test
       File.write(File.join(task.worktree_path, "dirty.txt"), "dirty\n")
       dirty = build_reconciler(task, store, attempt).reconcile(baseline_head: baseline)
       assert_equal "satisfied", dirty.projection.current_condition("ChangesPresent").fetch("state")
-      assert_equal "dirty_worktree", dirty.projection.current_condition("AwaitingHuman").fetch("reason")
+      assert_equal "unsatisfied", dirty.projection.current_condition("AwaitingHuman").fetch("state")
+      assert_equal "not_waiting", dirty.projection.current_condition("AwaitingHuman").fetch("reason")
     end
 
     with_fixture do |task, store, attempt, baseline|

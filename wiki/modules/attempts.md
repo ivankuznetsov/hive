@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-08-12
+updated: 2026-08-20
 tags: [attempts, ownership, leases, daemon, recovery, bounded-storage]
 ---
 
@@ -52,6 +52,19 @@ This boundary does not split Attempts into another repository, process, or gem.
 It creates an in-monorepo seam that Hive can exercise first; a separately
 published package remains a later response to demonstrated non-Hive demand,
 not a requirement of the module design.
+
+Task-projection cache validation and journal replay use
+`Store#fetch_projection_binding`. Hot records still receive full schema
+validation because their lifecycle fields can
+change. Immutable permanent proofs take a narrower validated read of the exact
+identity, generation, state, outcome, lease, and lineage fields consumed by the
+projection. New permanent proofs publish that subset as a separate immutable
+point-addressed sidecar; older proofs fall back to the full document and can be
+backfilled without changing it. Full `Store#fetch` continues to validate
+receipts, diagnostics, and every output reference for consumers that use those
+domains. This prevents a status scan from repeatedly reading or walking
+cumulative inherited-output arrays while preserving fail-closed binding
+validation.
 
 The component catalog keeps this admission slice as a guarded reference
 `candidate`. Its facade, result contracts, focused clean-process load, and
@@ -222,7 +235,12 @@ deterministic dependency-admission verdict. Replaying the same request returns
 that request's original terminal receipt, including a failure. A different
 request against an unchanged generation may start a fresh attempt after a
 failed/cancelled receipt; only a successful terminal receipt remains the
-semantic owner for later requests. A dependency wait that later becomes clear
+semantic owner for later requests. A live owner is attachable only when its
+task generation matches the new request. When the same task and stage are live
+under a different generation, admission returns `deferred(in_flight)` instead:
+the request stays queued until the old owner exits, then runs its distinct
+command. This prevents a queued plan rerun from being silently attached to an
+older `plan-review-run` merely because both operate at `3-plan`. A dependency wait that later becomes clear
 advances generation instead of replaying the stale exit-75 receipt. A lost
 attempt blocks admission only until its explicit successor exists, so a
 terminally failed successor cannot leave the generation trapped behind a
@@ -231,6 +249,14 @@ generation, predecessor, outputs, worktree/branch, and an incremented retry
 charge. An omitted or empty successor-output override inherits the
 predecessor's complete output set; only a non-empty explicit override replaces
 it.
+
+`plan-review-run` also binds the byte-exact `plan-review/current.json`
+projection into its progress token. Plan review is a multi-step state machine:
+it can move from revision to verification or install a bounded recovery reset
+without changing `plan.md` or its completion marker. An unchanged projection
+still replays the successful orchestration attempt, while a changed projection
+advances generation so the daemon can run the next review step instead of
+replaying the earlier success forever.
 
 A terminal explicit attempt with a trusted provider-evidence receipt is also a
 valid, narrowly scoped successor predecessor. `RecoveryCoordinator` alone puts

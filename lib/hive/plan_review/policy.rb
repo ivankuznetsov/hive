@@ -93,8 +93,21 @@ module Hive
         raise Hive::ConfigError, "plan_review.classifier_version must be an Integer"
       end
 
+      # `routes` belongs here: a review is a verdict from particular reviewers,
+      # so changing who reviews makes the old verdict stale in exactly the way
+      # this fingerprint exists to express.
+      #
+      # Leaving it out had a sharp edge. A review blocked because no reviewer
+      # could be launched — `unsupported`, a statement about our tooling and
+      # not about the plan — was keyed on inputs that excluded the reviewer.
+      # Installing the skill, correcting the route or shipping the gem could
+      # not invalidate it, so the stale block replayed forever while telling
+      # the operator to "restore required reviewer capability".
       def policy_affecting_config(settings)
-        %w[classifier_version minimum_level coding skip protected_paths attempts coverage].to_h do |key|
+        %w[
+          classifier_version minimum_level coding skip protected_paths
+          coverage adapter reviewers routes
+        ].to_h do |key|
           [ key, settings[key] ]
         end
       end

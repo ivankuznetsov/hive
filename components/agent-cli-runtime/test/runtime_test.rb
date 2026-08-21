@@ -105,9 +105,11 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
     ], codex.argv
     assert_equal "hello", codex.stdin_data
 
+    pi = compile(:pi)
     assert_equal [
-      "pi", "-p", "--mode", "json", "--no-session", "hello"
-    ], compile(:pi).argv
+      "pi", "-p", "--mode", "json", "--no-session"
+    ], pi.argv
+    assert_equal "hello", pi.stdin_data
 
     assert_equal [
       "grok", "-p", "hello", "--always-approve",
@@ -188,7 +190,7 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
         input_includes_cache_read: false,
         input_includes_cache_write: nil,
         output_includes_reasoning: nil,
-        model: "claude-sonnet"
+        model: "claude-sonnet", provider_reported_cost: nil
       },
       claude
     )
@@ -199,7 +201,7 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
         input_includes_cache_read: nil,
         input_includes_cache_write: nil,
         output_includes_reasoning: nil,
-        model: nil
+        model: nil, provider_reported_cost: nil
       },
       codex
     )
@@ -210,7 +212,7 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
         input_includes_cache_read: nil,
         input_includes_cache_write: nil,
         output_includes_reasoning: nil,
-        model: nil
+        model: nil, provider_reported_cost: nil
       },
       pi
     )

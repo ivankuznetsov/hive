@@ -63,6 +63,35 @@ class HivePatrolReviewerTest < Minitest::Test
     db&.close
   end
 
+  # The daemon SIGTERMs patrol and SIGKILLs it after the grace window. Stopping
+  # between features keeps the findings already produced and leaves the rest
+  # for the next cycle, instead of the scan being killed mid-agent.
+  def test_a_requested_shutdown_stops_the_scan_between_features
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, "app.rb"), "user.name\n")
+      reviewed = []
+      runner = lambda do |feature:, output_path:, **|
+        reviewed << feature.id
+        Hive::Patrol::Shutdown.request!
+        File.write(output_path, JSON.generate(
+          "findings" => [ qualified_finding(file: "app.rb") ]
+        ))
+      end
+
+      second = feature.dup.tap { |value| value.id = "route-orders" }
+      findings = Hive::Patrol::Reviewer.new(
+        dir, cfg: cfg, agent_runner: runner
+      ).call([ feature, second ])
+
+      assert_equal [ "route-users" ], reviewed,
+                   "the second feature must not launch an agent after shutdown is requested"
+      assert_equal 1, findings.size, "findings already produced are kept"
+    ensure
+      Hive::Patrol::Shutdown.reset!
+    end
+  end
+
   def test_returns_schema_valid_findings_without_persisting_before_selection
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

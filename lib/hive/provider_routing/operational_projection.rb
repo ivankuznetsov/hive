@@ -109,8 +109,10 @@ module Hive
         route_ids = @accounts.values.flat_map do |account|
           account.models.map { |model| "#{account.id}/#{model}" }
         end
-        entries = attempt_store.decision_index.routing_decisions(limit: DECISION_LIMIT)
-        entries.select! do |entry|
+        # DecisionIndex returns an immutable snapshot. Filtering belongs to
+        # this read-only projection, so never mutate the durable reader's
+        # array in place.
+        entries = attempt_store.decision_index.routing_decisions(limit: DECISION_LIMIT).select do |entry|
           decision = entry.fetch("decision")
           selected = decision["selected_route"]
           selected_id = selected.is_a?(Hash) ? selected["route_id"] : selected

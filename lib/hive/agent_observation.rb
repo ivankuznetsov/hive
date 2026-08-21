@@ -9,7 +9,7 @@ module Hive
   class AgentObservation
     RESOURCE_KINDS = %w[
       monetary_api_cap budget_equivalent_guard token_limit launch_quota timeout
-      account_quota provider_rate_limit turn_limit
+      account_quota provider_rate_limit turn_limit model_output_limit
     ].freeze
     UNITS = %w[usd tokens launches seconds turns requests].freeze
     ENFORCEMENTS = %w[controller provider_cli provider_account advisory unenforced].freeze
@@ -196,10 +196,15 @@ module Hive
       detail = result[:resource_exhaustion]
       if detail.is_a?(Hash)
         reason = detail[:reason] || detail["reason"]
-        kind = reason.to_s == "turn_limit" ? "turn_limit" : "token_limit"
+        kind, unit = case reason.to_s
+        when "token_limit" then [ "token_limit", "tokens" ]
+        when "turn_limit" then [ "turn_limit", "turns" ]
+        when "model_output_limit" then [ "model_output_limit", "tokens" ]
+        else return nil
+        end
         return {
           "kind" => kind,
-          "unit" => kind == "turn_limit" ? "turns" : "tokens",
+          "unit" => unit,
           "configured" => detail[:limit] || detail["limit"],
           "observed" => detail[:observed] || detail["observed"],
           "retry_at" => nil

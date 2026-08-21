@@ -38,7 +38,7 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     script = <<~'RUBY'
       require "agent_cli_runtime"
       abort "loaded Hive unexpectedly" if defined?(Hive)
-      abort "wrong version" unless AgentCliRuntime::VERSION == "0.2.0"
+      abort "wrong version" unless AgentCliRuntime::VERSION == "0.2.3"
       puts AgentCliRuntime::Profiles.names.join(",")
     RUBY
     out, err, status = Bundler.with_unbundled_env do
@@ -381,5 +381,24 @@ class AgentCliRuntimeComponentTest < Minitest::Test
       :opencode, captured, requested_route: "anthropic/claude-sonnet-4-5"
     )
     assert_equal public_outcome.to_h, hive_outcome.to_h
+  end
+
+  def test_every_lockfile_pins_the_released_component_version
+    repository_root = File.expand_path("../..", __dir__)
+    source = File.read(
+      File.join(COMPONENT_ROOT, "lib", "agent_cli_runtime", "version.rb")
+    )
+    released = source[/VERSION\s*=\s*"([^"]+)"/, 1]
+
+    refute_nil released, "component version.rb declares no VERSION"
+    %w[Gemfile.lock web/Gemfile.lock].each do |relative_path|
+      lockfile = File.read(File.join(repository_root, relative_path))
+      pinned = lockfile[/^\s+agent-cli-runtime \((\d+\.\d+\.\d+)\)$/, 1]
+
+      refute_nil pinned, "#{relative_path} does not pin agent-cli-runtime"
+      assert_equal released, pinned,
+                   "#{relative_path} is stale: releasing the component " \
+                   "must re-resolve this lockfile too"
+    end
   end
 end

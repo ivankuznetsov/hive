@@ -41,7 +41,37 @@ module Hive
           else
             next_round(task.folder, stage)
           end
+        pending_revision = if
+          preflight.name == :waiting && preflight.attrs["reason"] == "max_rounds" ||
+            round > stage.council.max_rounds
+          preflight.attrs["triage"] || latest_triage_path(task.folder, stage)
+        end
         loop do
+          # A completed non-consensus round becomes a pending revision. Check
+          # the budget at that single loop boundary, before either the next
+          # reviewer round or its prerequisite revision can spend anything.
+          # This also catches a resumed max-round marker and historical triage
+          # files already beyond the configured budget.
+          if pending_revision && round >= stage.council.max_rounds
+            return max_rounds_result(
+              output_path, task, stage, round, triage_path: pending_revision
+            )
+          end
+
+          if pending_revision
+            Hive::Stages::Council::Revise.run!(
+              task: task,
+              cfg: cfg,
+              stage: stage,
+              revise: stage.council.revise,
+              round: round,
+              target_path: target_path,
+              triage_path: pending_revision
+            )
+            round += 1
+            pending_revision = nil
+          end
+
           # Include pid/started for parity with the agent runner's working
           # marker (Hive::Agent#run!), so `hive status` can show which runner
           # owns an in-flight council rather than just the phase/round.
@@ -78,23 +108,7 @@ module Hive
             return { commit: action_for(marker.name), status: marker.name }
           end
 
-          if round >= stage.council.max_rounds
-            terminal = stage.council.on_max_rounds == :complete ? :complete : :waiting
-            Hive::Markers.set(output_path, terminal, reason: "max_rounds", round: round, triage: triage.path)
-            marker = Hive::Markers.current(output_path)
-            return { commit: action_for(marker.name), status: marker.name }
-          end
-
-          Hive::Stages::Council::Revise.run!(
-            task: task,
-            cfg: cfg,
-            stage: stage,
-            revise: revise,
-            round: round,
-            target_path: target_path,
-            triage_path: triage.path
-          )
-          round += 1
+          pending_revision = triage.path
         end
       rescue Hive::StageError => e
         Hive::Markers.set(output_path || task.state_file, :error, reason: "council_failed", message: e.message.to_s[0, 200])
@@ -142,6 +156,27 @@ module Hive
           File.basename(path, ".md")[/-(\d+)\z/, 1]&.to_i
         end
         rounds.max.to_i + 1
+      end
+
+      # The highest-numbered triage already on disk, so a council stopped at
+      # its budget still points the operator at the most recent verdict rather
+      # than at nothing.
+      def latest_triage_path(task_folder, stage)
+        triage_output = stage.council.triage_output || Hive::Workflow::DEFAULT_TRIAGE_OUTPUT
+        dir = File.dirname(triage_output)
+        pattern = File.join(task_folder, dir, "#{triage_basename(stage)}-*.md")
+        Dir.glob(pattern).max_by { |path| File.basename(path, ".md")[/-(\d+)\z/, 1].to_i }
+      end
+
+      def max_rounds_result(output_path, task, stage, round, triage_path: nil)
+        terminal = stage.council.on_max_rounds == :complete ? :complete : :waiting
+        terminal_round = [ round, stage.council.max_rounds ].min
+        attrs = { reason: "max_rounds", round: terminal_round }
+        attrs[:triage] = triage_path || latest_triage_path(task.folder, stage)
+        attrs.compact!
+        Hive::Markers.set(output_path, terminal, **attrs)
+        marker = Hive::Markers.current(output_path)
+        { commit: action_for(marker.name), status: marker.name }
       end
 
       def triage_basename(stage)

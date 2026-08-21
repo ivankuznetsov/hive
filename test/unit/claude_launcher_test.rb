@@ -187,7 +187,7 @@ class ClaudeLauncherTest < Minitest::Test
                               cfg: cfg,
                               session_name: "hive-test-session",
                               cwd: task.folder,
-                              add_dirs: []
+                              add_dirs: [],
                             ) { |_handle| }
                           end
                         end

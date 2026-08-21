@@ -203,6 +203,18 @@ module Hive
         end
         private_class_method :actor!
 
+        # Validate reviewer verdicts without persisting anything. A controller
+        # can then surface a contract violation to the reviewer as a repair
+        # round, rather than discovering it during the append that ends the
+        # stage — an over-long or vague reason is precisely what one more
+        # reviewer turn fixes.
+        def verdicts!(value, label = "review output")
+          output = object!(value, label)
+          Array(output.fetch("verdicts")).map { |item| verdict!(item) }
+        rescue KeyError => e
+          raise StoreError, "#{label} is missing #{e.key}"
+        end
+
         def verdict!(value)
           verdict = object!(value, "review verdict")
           reject_unknown!(verdict, %w[target_id verdict reason], "review verdict")

@@ -213,6 +213,13 @@ module Hive
         permanent_proofs.fetch(attempt_id)
       end
 
+      def fetch_projection_binding(attempt_id)
+        hot = fetch_hot(attempt_id)
+        return hot if hot
+
+        permanent_proofs.fetch_projection_binding(attempt_id)
+      end
+
       def fetch_hot(attempt_id)
         path = record_path(attempt_id)
         validate_regular_file!(path, label: "attempt record")

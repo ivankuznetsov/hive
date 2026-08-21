@@ -62,6 +62,15 @@
         "reason": { "type": ["string", "null"] },
         "remediation": { "type": ["string", "null"] },
         "retry_count": { "type": ["integer", "null"], "minimum": 0 },
+        "failure_fingerprint": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "identical_failure_count": { "type": ["integer", "null"], "minimum": 0 },
+        "escalation_tier": {
+          "type": ["string", "null"],
+          "enum": ["silent_retry", "degraded", "parked", null]
+        },
         "terminal_outcome": { "type": ["string", "null"] },
         "terminal_at": { "type": ["string", "null"], "format": "date-time" },
         "provider_hint": {

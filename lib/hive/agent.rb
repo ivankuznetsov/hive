@@ -24,6 +24,9 @@ module Hive
     OPENCODE_INSPECTION_TIMEOUT_SECONDS = 10
     OPENCODE_CAPTURE_BYTES =
       AgentCliRuntime::OpenCode::ResultParser::MAX_RUN_BYTES + 1
+    TOKEN_LIMIT_REASON = "token_limit".freeze
+    TURN_LIMIT_REASON = "turn_limit".freeze
+    MODEL_OUTPUT_LIMIT_REASON = "model_output_limit".freeze
 
     # Converts provider JSONL usage events into one monotonic in-flight count.
     # Claude reports input/cache at message_start and cumulative output for the
@@ -327,6 +330,7 @@ module Hive
       token_meter = StreamTokenMeter.new(@profile.name)
       resource_exhaustion = nil
       provider_signal = nil
+      provider_error = nil
       termination_deadline = nil
       completion_event_deadline = nil
       completed_turns = 0
@@ -362,8 +366,8 @@ module Hive
         "claude_pid_start_time" => Hive::Lock.process_start_time(pid)
       )
 
-      old_int = trap("INT") { kill_group(pgid) }
-      old_term = trap("TERM") { kill_group(pgid) }
+      old_int = install_chained_signal_trap("INT") { kill_group(pgid) }
+      old_term = install_chained_signal_trap("TERM") { kill_group(pgid) }
 
       reader = Thread.new do
         open_private_log(log_file) do |log|
@@ -406,10 +410,22 @@ module Hive
             # MessageExtractor does not surface as a final message — so without
             # scanning the raw line the limit text never reaches handle_exit and
             # the run is misreported as a generic failure (exit_code=1).
-            if limit_text.nil? && !sensitive_payload && provider_limit_candidate?(json) &&
-               Hive::AgentLimit.limit_reached?(line)
-              detail = json && (json["message"] || (json["error"].is_a?(Hash) ? json["error"]["message"] : nil))
-              limit_text = (detail || line).to_s.strip
+            # Ask the profile first: it owns its CLI's shape. pi keeps the
+            # envelope type ("message_start") and moves a refused turn into
+            # stopReason/errorMessage, so the type-based scan below never sees
+            # it — the run then reads as a clean exit 0 that produced nothing,
+            # and a quota wall gets misreported as invalid agent output.
+            event_provider_error = if provider_error.nil? && !sensitive_payload
+              Hive::AgentRuntime.extract_provider_error(@profile, json)
+            end
+            provider_error ||= event_provider_error
+            if limit_text.nil? && !sensitive_payload
+              if event_provider_error && provider_limit_status?(event_provider_error)
+                limit_text = event_provider_error[:message].to_s.strip
+              elsif provider_limit_candidate?(json) && Hive::AgentLimit.limit_reached?(line)
+                detail = json && (json["message"] || (json["error"].is_a?(Hash) ? json["error"]["message"] : nil))
+                limit_text = (detail || line).to_s.strip
+              end
             end
             turn_started = claude_turn_started?(json)
             if turn_started
@@ -428,11 +444,17 @@ module Hive
               observed_tokens = token_meter.observe(json, usage)
               if @max_tokens && observed_tokens >= @max_tokens && resource_exhaustion.nil?
                 resource_exhaustion = {
-                  reason: "token_limit",
+                  reason: TOKEN_LIMIT_REASON,
                   limit: @max_tokens,
                   observed: observed_tokens
                 }
               end
+            end
+            if event_provider_error&.dig(:kind) == :model_output_limit && resource_exhaustion.nil?
+              resource_exhaustion = {
+                reason: MODEL_OUTPUT_LIMIT_REASON,
+                observed: usage&.dig(:output)
+              }.compact
             end
             turn_completed = claude_turn_completed?(json)
             if turn_completed
@@ -440,7 +462,7 @@ module Hive
               write_turn_completed = true if write_tool_in_current_turn
               if @max_turns && completed_turns >= @max_turns && resource_exhaustion.nil?
                 resource_exhaustion = {
-                  reason: "turn_limit",
+                  reason: TURN_LIMIT_REASON,
                   limit: @max_turns,
                   observed: completed_turns
                 }
@@ -564,6 +586,7 @@ module Hive
         resource_exhaustion: resource_exhaustion,
         output_completed: output_completed,
         provider_signal: provider_signal,
+        provider_error: provider_error,
         status: nil
       }
       if structured_failure
@@ -617,8 +640,8 @@ module Hive
 
       cancellation = { cancelled: false }
       cancellation_handler = ->(*) { cancel_opencode!(cancellation, pgid) }
-      old_int = trap("INT", &cancellation_handler)
-      old_term = trap("TERM", &cancellation_handler)
+      old_int = install_chained_signal_trap("INT", &cancellation_handler)
+      old_term = install_chained_signal_trap("TERM", &cancellation_handler)
       begin
         timed_out, status = wait_for_opencode_process(pid, pgid)
       ensure
@@ -1180,6 +1203,18 @@ module Hive
         return
       end
 
+      # A provider CLI may emit a transient failed-turn event, retry it
+      # internally, and still finish successfully. Current controller-owned
+      # completion evidence wins over that earlier stream diagnostic.
+      if recovered_provider_error?(result)
+        result[:status] = if effective_status_mode == :state_file_marker
+          Hive::Markers.current(@task.state_file).name
+        else
+          :ok
+        end
+        return
+      end
+
       if result[:output_completed] && completed_output_file?
         result[:status] = :ok
         return
@@ -1221,6 +1256,11 @@ module Hive
         end
         result[:status] = :error
         result[:error_message] = limit_message
+        return
+      end
+
+      if result[:provider_error]
+        handle_provider_error(result)
         return
       end
 
@@ -1328,13 +1368,25 @@ module Hive
         return
       end
 
-      resource = detail.fetch(:reason) == "turn_limit" ? "turn" : "token"
-      message = "agent reached in-flight #{resource} limit " \
-                "(observed #{detail.fetch(:observed)}, limit #{detail.fetch(:limit)})"
+      reason = detail.fetch(:reason)
+      case reason
+      when MODEL_OUTPUT_LIMIT_REASON
+        observed = detail[:observed]
+        count = observed ? " after #{observed} output tokens" : ""
+        message = "agent response reached the model's maximum output tokens#{count}; " \
+                  "raise the model maxTokens setting or lower reasoning effort"
+      when TOKEN_LIMIT_REASON, TURN_LIMIT_REASON
+        resource = reason == TURN_LIMIT_REASON ? "turn" : "token"
+        message = "agent reached in-flight #{resource} limit " \
+                  "(observed #{detail.fetch(:observed)}, limit #{detail.fetch(:limit)})"
+      else
+        raise Hive::AgentError, "unknown resource exhaustion reason #{reason.inspect}"
+      end
       if effective_status_mode == :state_file_marker
         Hive::Markers.set(@task.state_file, :error, **resource_exhaustion_marker_attrs(detail))
       end
       result[:status] = :error
+      result[:error_reason] = reason
       result[:error_message] = message
     end
 
@@ -1368,18 +1420,28 @@ module Hive
     end
 
     def resource_exhaustion_marker_attrs(detail)
-      if detail.fetch(:reason) == "token_limit"
+      case detail.fetch(:reason)
+      when TOKEN_LIMIT_REASON
         {
-          reason: "token_limit",
+          reason: TOKEN_LIMIT_REASON,
           observed_tokens: detail.fetch(:observed),
           max_tokens: detail.fetch(:limit)
         }
-      else
+      when TURN_LIMIT_REASON
         {
-          reason: "turn_limit",
+          reason: TURN_LIMIT_REASON,
           observed_turns: detail.fetch(:observed),
           max_turns: detail.fetch(:limit)
         }
+      when MODEL_OUTPUT_LIMIT_REASON
+        {
+          reason: MODEL_OUTPUT_LIMIT_REASON,
+          observed_output_tokens: detail[:observed],
+          remedy: "raise_model_max_tokens_or_lower_reasoning_effort"
+        }.compact
+      else
+        raise Hive::AgentError,
+              "unknown resource exhaustion reason #{detail.fetch(:reason).inspect}"
       end
     end
 
@@ -1399,6 +1461,11 @@ module Hive
     end
 
     def detected_limit_text(result)
+      provider_error = result[:provider_error]
+      if provider_error && provider_limit_kind?(provider_error[:kind])
+        return provider_error[:message].to_s
+      end
+
       return nil if result[:exit_code] == 0 && !result[:timed_out]
 
       # Prefer the limit text captured directly from the raw stream
@@ -1410,6 +1477,42 @@ module Hive
       return nil unless Hive::AgentLimit.limit_reached?(limit)
 
       limit
+    end
+
+    def recovered_provider_error?(result)
+      return false unless result[:provider_error] && result[:exit_code] == 0
+
+      case effective_status_mode
+      when :state_file_marker then completed_state_file_artifact?
+      when :output_file_exists then completed_output_file?
+      else false
+      end
+    end
+
+    # Some CLIs report a failed provider turn in their structured event stream
+    # but still exit zero. The profile extractor is the typed boundary that
+    # distinguishes that failure from innocent model text. Keep trusted route
+    # health separate: this fails only the current agent result and lets the
+    # owning stage decide its ordinary retry policy.
+    def handle_provider_error(result)
+      error = result.fetch(:provider_error)
+      message = error[:message].to_s
+      message = "provider reported a failed turn" if message.empty?
+      if effective_status_mode == :state_file_marker
+        Hive::Markers.set(
+          @task.state_file,
+          :error,
+          {
+            reason: "provider_error",
+            provider: error[:provider],
+            status_code: error[:status_code],
+            message: message
+          }.compact
+        )
+      end
+      result[:status] = :error
+      result[:error_reason] = "provider_error"
+      result[:error_message] = message
     end
 
     def handle_exit_state_file_marker(result)
@@ -1508,6 +1611,27 @@ module Hive
     def parse_json_line(line)
       Hive::Agent::MessageExtractor.parse_json_line(line)
     end
+
+    def install_chained_signal_trap(signal, &handler)
+      previous = nil
+      previous = trap(signal) do |number|
+        handler.call(number)
+        call_previous_signal_handler(previous, number)
+      end
+      previous
+    end
+
+    def call_previous_signal_handler(handler, signal)
+      return unless handler.respond_to?(:call)
+
+      handler.arity.zero? ? handler.call : handler.call(signal)
+    end
+
+    def provider_limit_status?(provider_error)
+      provider_limit_kind?(provider_error[:kind])
+    end
+
+    def provider_limit_kind?(kind) = %i[provider_limit rate_limited].include?(kind&.to_sym)
 
     def provider_limit_candidate?(event)
       return true unless event.is_a?(Hash)

@@ -686,6 +686,31 @@ class RecoveryMigrationTest < Minitest::Test
     assert_includes error.message, "daily accounting refund disagrees with durable attempt"
   end
 
+  # The TEMPFAIL refund has always been mandatory, so an unrefunded one means
+  # the counter and the durable record disagree about work that never happened.
+  def test_daily_parity_rejects_a_tempfail_that_was_never_refunded
+    terminal = terminal_attempt(
+      current_attempt(attempt_id: "tempfail-unrefunded"),
+      outcome: "failed", exit_status: Hive::ExitCodes::TEMPFAIL
+    )
+    record = Hive::Attempts::Record.new(
+      Hive::Attempts::RecordMigration.convert_v3(legacy_v3(terminal))
+    )
+    acceptance = {
+      "accepted_at" => record["accepted_at"], "project" => record["project"],
+      "refunded" => false
+    }
+    store = daily_parity_store(
+      acceptances: { record.attempt_id => acceptance }, records: { record.attempt_id => record }
+    )
+
+    error = assert_raises(Hive::Recovery::Migration::Error) do
+      migration.send(:durable_daily_counts, store, date: NOW.to_date)
+    end
+
+    assert_includes error.message, "daily accounting refund disagrees with durable attempt"
+  end
+
   def test_daily_parity_rejects_an_unreadable_index
     store = daily_parity_store(
       error: Hive::Attempts::StoreError.new("injected daily index failure")

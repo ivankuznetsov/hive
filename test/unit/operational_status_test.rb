@@ -191,8 +191,48 @@ class OperationalStatusTest < Minitest::Test
 
   def test_plan_review_state_owner_reason_and_projection_are_preserved
     review = {
+      "applicable" => true,
+      "review_id" => "pr-#{'a' * 64}",
+      "version" => 3,
+      "observation_digest" => "b" * 64,
+      "task_generation" => "generation-1",
+      "plan_digest" => "c" * 64,
+      "policy_fingerprint" => "d" * 64,
+      "computed_level" => "mandatory",
+      "effective_level" => "mandatory",
       "state" => "awaiting_decision", "required_action" => "answer manual finding",
-      "blocker_owner" => "operator", "blocker_reason" => "manual_answer_required"
+      "outcome" => nil,
+      "degraded" => false,
+      "degradation_reason" => nil,
+      "attempt_count" => 2,
+      "current_attempt_id" => "pra-#{'e' * 64}",
+      "coverage_counts" => {
+        "requested" => 2, "completed" => 1, "failed" => 0,
+        "unsupported" => 1, "waived" => 0
+      },
+      "finding_counts" => {
+        "open" => 1, "approved" => 0, "answered" => 0,
+        "incorporated" => 0, "verified" => 0, "resolved" => 0,
+        "waived" => 0, "total" => 1, "open_gated" => 1,
+        "open_manual" => 0, "fyi" => 0
+      },
+      "blockers" => [ {
+        "owner" => "operator", "reason" => "reviewer_unlaunchable",
+        "fingerprint" => "f" * 64, "diagnostic" => "review skill unavailable"
+      } ],
+      "blocker_owner" => "operator", "blocker_reason" => "manual_answer_required",
+      "retry_at" => nil,
+      "routes" => [ {
+        "role" => "verification", "requested" => {}, "actual" => {},
+        "capability_result" => "unsupported", "independence_verified" => true,
+        "outcome" => "retryable_failure", "recovery_reset" => true,
+        "capability_probe_fingerprint" => "0" * 64,
+        "capability_probe_count" => 3, "verification_followup" => true,
+        "incomplete_attestation_retry" => true
+      } ],
+      "artifacts" => {},
+      "freshness" => { "status" => "current", "reason" => nil },
+      "execution_allowed" => false
     }
     source = task(
       action: "plan_review_decision", slug: "review", stage: "3-plan",
@@ -205,6 +245,11 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", projected.fetch("blocker_owner")
     assert_equal "answer manual finding", projected.fetch("reason")
     assert_equal review, projected.fetch("plan_review")
+
+    schema = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
+    )
+    assert_empty schema.validate(project(status_payload(source))).to_a
   end
 
   def test_daemon_owned_error_retry_is_not_reported_as_operator_repair
@@ -219,13 +264,13 @@ class OperationalStatusTest < Minitest::Test
     automated = project(
       status_payload(error),
       project_context: {
-        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+        "demo" => { "daemon_enabled" => true }
       }
     ).fetch("tasks").first
     disabled = project(
       status_payload(error),
       project_context: {
-        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => false }
+        "demo" => { "daemon_enabled" => false }
       }
     ).fetch("tasks").first
 
@@ -236,7 +281,7 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", disabled.fetch("blocker_owner")
   end
 
-  def test_terminal_outcome_errors_remain_operator_owned_when_auto_retry_is_enabled
+  def test_terminal_outcome_errors_are_retried_like_any_other_error
     %w[
       terminal_outcome_blocked terminal_outcome_invalid
       outcome_evidence_capability_blocked outcome_evidence_review_blocked
@@ -253,13 +298,13 @@ class OperationalStatusTest < Minitest::Test
       projected = project(
         status_payload(semantic_error),
         project_context: {
-          "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+          "demo" => { "daemon_enabled" => true }
         }
       ).fetch("tasks").first
 
-      assert_equal "needs_repair", projected.fetch("state"), reason
-      assert_equal "operator", projected.fetch("blocker_owner"), reason
-      assert_equal "task_repair", projected.dig("reasons", 0, "code"), reason
+      # No reason is exempt from automatic retry, so none of these are
+      # reported as work waiting on a human.
+      refute_equal "operator", projected.fetch("blocker_owner"), reason
     end
   end
 
@@ -592,7 +637,7 @@ class OperationalStatusTest < Minitest::Test
     projected = project(
       status_payload(source_task),
       project_context: {
-        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+        "demo" => { "daemon_enabled" => true }
       },
       scheduler_snapshot: snapshot
     ).fetch("tasks").first
@@ -639,6 +684,9 @@ class OperationalStatusTest < Minitest::Test
         "reason" => nil,
         "remediation" => nil,
         "retry_count" => 1,
+        "failure_fingerprint" => "f" * 64,
+        "identical_failure_count" => 2,
+        "escalation_tier" => "degraded",
         "provider_hint" => nil,
         "terminal_outcome" => nil,
         "terminal_at" => nil
@@ -647,7 +695,7 @@ class OperationalStatusTest < Minitest::Test
       projected = project(
         status_payload(source_task),
         project_context: {
-          "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+          "demo" => { "daemon_enabled" => true }
         },
         scheduler_snapshot: snapshot
       ).fetch("tasks").first
@@ -655,6 +703,8 @@ class OperationalStatusTest < Minitest::Test
       assert_equal status, projected.dig("recovery", "status"), status
       assert_equal "request-1", projected.dig("recovery", "request_id"), status
       assert_equal phase, projected.dig("recovery", "phase"), status
+      assert_equal "degraded", projected.dig("recovery", "escalation_tier"), status
+      assert_equal 2, projected.dig("recovery", "identical_failure_count"), status
     end
   end
 
@@ -706,7 +756,7 @@ class OperationalStatusTest < Minitest::Test
     projected = project(
       status_payload(source_task),
       project_context: {
-        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+        "demo" => { "daemon_enabled" => true }
       },
       scheduler_snapshot: snapshot
     ).fetch("tasks").first
@@ -734,7 +784,7 @@ class OperationalStatusTest < Minitest::Test
     projected = project(
       status_payload(source_task),
       project_context: {
-        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+        "demo" => { "daemon_enabled" => true }
       },
       scheduler_snapshot: snapshot
     ).fetch("tasks").first
@@ -776,7 +826,7 @@ class OperationalStatusTest < Minitest::Test
     status = Hive::OperationalStatus.new(
       status_payload: status_payload(*(ordinary + [ failure ])),
       project_context: {
-        "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+        "demo" => { "daemon_enabled" => true }
       },
       scheduler_snapshot: snapshot
     )

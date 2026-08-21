@@ -40,6 +40,9 @@ module AgentCliRuntime
         event["token_usage"],
         event.dig("event", "usage"),
         event.dig("event", "message", "usage"),
+        # pi reports usage on the assistant message itself, not under an
+        # "event" envelope. Without this every pi run is unmetered.
+        event.dig("message", "usage"),
         event.dig("info", "usage"),
         event.dig("info", "total_token_usage"),
         event.dig("response", "usage"),
@@ -60,12 +63,15 @@ module AgentCliRuntime
         "reasoning_tokens", "reasoningTokens"
       )
       {
+        # The bare "input"/"output" spellings are pi's and are matched last,
+        # so a provider using an explicit *_tokens key keeps its own reading.
         input: optional_token_count(
-          usage, "input_tokens", "inputTokens", "prompt_tokens", "promptTokens"
+          usage, "input_tokens", "inputTokens", "prompt_tokens", "promptTokens",
+          "input"
         ),
         output: optional_token_count(
           usage, "output_tokens", "outputTokens", "completion_tokens",
-          "completionTokens"
+          "completionTokens", "output"
         ),
         cached: aggregate_cached || complete_cached(cache_read, cache_write),
         cache_read: cache_read,
@@ -86,8 +92,27 @@ module AgentCliRuntime
             usage, "output_includes_reasoning",
             inferred_reasoning_inclusion(provider, reasoning)
           ),
-        model: model || model_from_usage(usage) || model_from(event)
+        model: model || model_from_usage(usage) || model_from(event),
+        provider_reported_cost: reported_cost(usage)
       }
+    end
+
+    # A charge the provider itself reported for this turn, in USD. This is an
+    # observed amount, not an estimate from the pricing catalog, and it is the
+    # only cost available for a model the catalog does not carry — an
+    # OpenRouter-routed model, for one. OpenRouter sends a per-category
+    # breakdown carrying a total; other providers may send a scalar.
+    def reported_cost(usage)
+      value = usage["cost"] || usage["total_cost"] || usage["totalCost"]
+      value = value["total"] || value["total_cost"] if value.is_a?(Hash)
+      return nil unless value.is_a?(Numeric) || value.is_a?(String)
+
+      cost = begin
+        Float(value)
+      rescue ArgumentError, TypeError
+        nil
+      end
+      cost if cost && cost >= 0 && cost.finite?
     end
 
     def aggregate_cached_tokens(usage)
@@ -104,13 +129,13 @@ module AgentCliRuntime
         nested_hash(usage, "prompt_tokens_details"), "cached_tokens", "cachedTokens"
       ) || optional_token_count(
         nested_hash(usage, "input_tokens_details"), "cached_tokens", "cachedTokens"
-      )
+      ) || optional_token_count(usage, "cacheRead")
     end
 
     def cache_write_tokens(usage)
       optional_token_count(
         usage, "cache_creation_input_tokens", "cacheCreationInputTokens",
-        "cache_write_input_tokens", "cacheWriteInputTokens"
+        "cache_write_input_tokens", "cacheWriteInputTokens", "cacheWrite"
       )
     end
 

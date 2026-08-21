@@ -686,6 +686,73 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_overlong_verdict_reason_gets_one_repair_round_before_the_append
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      prompts = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        # 1920 bytes, over the contract's 1024-byte statement cap. Without
+        # in-loop validation this only fails inside append_attempt!, which
+        # runs after run_reviewer! returns — so the reviewer never gets told.
+        reason = if prompts.length == 1
+          "The retained document proves the requested flow. " * 40
+        else
+          "The retained document proves the requested flow."
+        end
+
+        {
+          actor: { "context_id" => "reviewer-#{prompts.length}", "agent" => "pi" },
+          output: {
+            "verdicts" => [
+              { "target_id" => "claim-flow", "verdict" => "accepted", "reason" => reason }
+            ]
+          }
+        }
+      end
+
+      reviewer = Hive::Stages::Artifacts.run_reviewer!(
+        task: task, cfg: {}, identity: outcome_identity,
+        requirement: { "claims" => [], "exclusions" => [] }, evidence: [],
+        review_context: {}
+      )
+
+      assert_equal "reviewer-2", reviewer.dig(:actor, "context_id")
+      assert_equal 2, prompts.length
+      assert_includes prompts.last,
+                      "review verdict reason must be a meaningful bounded explanation"
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
+  def test_reviewer_custody_violation_is_terminal_without_a_repair_round
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      calls = 0
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |**|
+        calls += 1
+        raise Hive::Artifacts::OutcomeEvidence::StoreError,
+              "reviewer modified protected task state: task.md changed"
+      end
+
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Hive::Stages::Artifacts.run_reviewer!(
+          task: task, cfg: {}, identity: outcome_identity,
+          requirement: { "claims" => [], "exclusions" => [] }, evidence: [],
+          review_context: {}
+        )
+      end
+
+      assert_equal 1, calls
+      assert_includes error.message, "modified protected task state"
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
   def test_retained_pending_candidate_skips_producer_and_resumes_review
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
@@ -1294,6 +1361,71 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_run_preserves_role_provider_limits_as_a_cooldown_marker
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      retry_at = "2026-08-21T10:15:00Z"
+      failure = Hive::Stages::Artifacts::RoleAgentError.new(
+        role: "inference",
+        profile: Struct.new(:name).new(:pi),
+        result: {
+          status: :error,
+          error_reason: "limits_reached",
+          error_message:
+            '402: {"message":"Prompt tokens limit exceeded: 25770 > 8471","code":402}',
+          limit_text: "Prompt tokens limit exceeded: 25770 > 8471",
+          retry_at: retry_at,
+          provider_error: { provider: :pi, status_code: 402 }
+        }
+      )
+      replacement = ->(_task, _cfg) { raise failure }
+
+      result = with_replaced_singleton_method(
+        Hive::Stages::Artifacts, :run_outcome_evidence!, replacement
+      ) do
+        Hive::Stages::Artifacts.run!(task, {})
+      end
+
+      assert_equal({ commit: "limits_reached", status: :error }, result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "limits_reached", marker.attrs.fetch("reason")
+      assert_equal "pi", marker.attrs.fetch("provider")
+      assert_equal retry_at, marker.attrs.fetch("retry_after")
+      assert_includes marker.attrs.fetch("message"), "25770 > 8471"
+    end
+  end
+
+  def test_run_preserves_non_limit_role_provider_errors
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      failure = Hive::Stages::Artifacts::RoleAgentError.new(
+        role: "reviewer",
+        profile: Struct.new(:name).new(:pi),
+        result: {
+          status: :error,
+          error_reason: "provider_error",
+          error_message: "upstream refused the request",
+          provider_error: { provider: :pi, status_code: 503 }
+        }
+      )
+      replacement = ->(_task, _cfg) { raise failure }
+
+      result = with_replaced_singleton_method(
+        Hive::Stages::Artifacts, :run_outcome_evidence!, replacement
+      ) do
+        Hive::Stages::Artifacts.run!(task, {})
+      end
+
+      assert_equal({ commit: "error", status: :error }, result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal "provider_error", marker.attrs.fetch("reason")
+      assert_equal "pi", marker.attrs.fetch("provider")
+      assert_equal "503", marker.attrs.fetch("status_code")
+      assert_equal "upstream refused the request", marker.attrs.fetch("message")
+    end
+  end
+
   def test_controller_replays_accepted_blocked_capability_and_attempt_terminal_states
     scenarios = %i[accepted_identity blocked_identity accepted_generation accepted_attempt capability]
     scenarios.each do |scenario|
@@ -1692,18 +1824,21 @@ class StagesArtifactsTest < Minitest::Test
         end
 
         [
-          { status: :error, final_message: "{}" },
-          {
-            status: :ok, final_message: '{"claims":[],"exclusions":[]}',
-            final_message_truncated: true
-          }
-        ].each do |result|
+          [ { status: :error, final_message: "{}" }, Hive::Stages::Artifacts::RoleAgentError ],
+          [
+            {
+              status: :ok, final_message: '{"claims":[],"exclusions":[]}',
+              final_message_truncated: true
+            },
+            Hive::Artifacts::OutcomeEvidence::StoreError
+          ]
+        ].each do |result, error_class|
           with_replaced_singleton_method(
             Hive::Stages::Base, :spawn_agent, lambda { |_task, agent_custody:, **|
               agent_custody.call { result }
             }
           ) do
-            assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+            assert_raises(error_class) do
               Hive::Stages::Artifacts.run_role!(
                 role: "inference", task: task, cfg: {}, prompt: "infer", identity: identity
               )

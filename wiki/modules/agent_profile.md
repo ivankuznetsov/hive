@@ -3,7 +3,7 @@ title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-08-12
+updated: 2026-08-20
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -100,7 +100,7 @@ constructs a package profile from them. Every profile freezes after init.
 | `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`, `"opencode"`). |
 | `env_bin_override_key:` | Env var name (`"HIVE_CLAUDE_BIN"` etc.) that overrides `bin_default` when set non-empty. |
 | `headless_flag:` | The `-p` / `--prompt` style flag. |
-| `prompt_style:` | `:positional`, `:headless_flag_value`, or `:stdin`; controls where the rendered prompt is delivered. Defaults to `:stdin` for a profile named `codex` (backward compatibility), otherwise `:positional`. |
+| `prompt_style:` | `:positional`, `:headless_flag_value`, `:stdin`, or `:piped_stdin`; controls where the rendered prompt is delivered. `:stdin` includes a `-` argv marker, while `:piped_stdin` does not. Defaults to `:stdin` for a profile named `codex` (backward compatibility), otherwise `:positional`. Built-in Pi uses `:piped_stdin`. |
 | `permission_skip_flag:` | The CLI's "no-prompt" flag (e.g. `--dangerously-skip-permissions` for claude). |
 | `add_dir_flag:` | Optional flag to grant FS access outside cwd; `nil` means the profile cannot extend the sandbox (triggers `warn_isolation_reduced`). |
 | `budget_flag:` | Optional `--budget USD` style flag. A profile-native flag supplies the run cap; provider protocol parsing determines whether the run ended because that cap was exhausted. |
@@ -143,7 +143,7 @@ constructs a package profile from them. Every profile freezes after init.
 | `read_only_supported?` | True only when the profile declares non-empty read-only argv. Architecture discovery uses this for non-Claude profiles. |
 | `require_cli_capability!(name)` | Version-checks the resolved binary, then delegates the bounded `<bin> <capability-argv> --help` check and option verification to the package. Missing declarations, flags, binaries, failed help, and timeouts raise `Hive::AgentError`. |
 | `concrete_default_model(cfg:, project_root:)` | Resolves and validates a provider-native model without copying credentials or arbitrary CLI configuration into Hive state. Codex discovery reads the top-level TOML `model` assignment and accepts ordinary inline comments. |
-| `identity_arguments(model:, effort:, pin_model:)` | Returns normalized model/effort observability plus discrete native argv, including requested/effective effort and support. |
+| `identity_arguments(model:, effort:, pin_model:)` | Returns normalized model/effort observability plus discrete native argv, including requested/effective effort and support. The `default` and `inherit` effort sentinels remain visible as requested identity but omit a native effort flag, matching routed launches and preventing provider CLIs from receiving a sentinel they do not accept. |
 | `validate_routed_control!(control, source:)` | Validates one exact/coarse `ModelRouting::EffectiveControl` against this profile's native model/effort capabilities and vocabulary. |
 | `routing_arguments(resolution, source:)` | Atomically validates an active `ModelRouting::Resolution`, renders both routed and inherited effective fields with profile-native sentinel behavior, and returns typed global/subcommand argv. Inactive or unscoped resolutions return nil. |
 | `raw_cli_arguments_supported?` | True only for a profile that explicitly accepts the legacy raw argv escape hatch. |

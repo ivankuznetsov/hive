@@ -51,6 +51,35 @@ class SchemaFilesTest < Minitest::Test
                  document.dig("$defs", "Level", "enum").sort
   end
 
+  def test_status_schemas_accept_parked_review_diagnostics_and_recovery_routes
+    blocker = {
+      "owner" => "operator", "reason" => "reviewer_unlaunchable",
+      "fingerprint" => "a" * 64, "diagnostic" => "review skill unavailable"
+    }
+    route = {
+      "role" => "verification", "requested" => {}, "actual" => {},
+      "capability_result" => "unsupported", "independence_verified" => true,
+      "outcome" => "retryable_failure", "recovery_reset" => true,
+      "capability_probe_fingerprint" => "b" * 64,
+      "capability_probe_count" => 2,
+      "verification_followup" => true,
+      "incomplete_attestation_retry" => true
+    }
+
+    %w[hive-status.v7.json hive-operational-status.v4.json].each do |name|
+      document = JSON.parse(File.read(File.join(Hive::Schemas.schema_dir, name)))
+      %w[PlanReviewBlocker PlanReviewRoute].zip([ blocker, route ]).each do |definition, value|
+        schemer = JSONSchemer.schema({
+          "$schema" => document.fetch("$schema"),
+          "$ref" => "#/$defs/#{definition}",
+          "$defs" => document.fetch("$defs")
+        })
+        assert_empty schemer.validate(value).to_a,
+                     "#{name} #{definition} must accept emitted recovery diagnostics"
+      end
+    end
+  end
+
   def test_plan_review_action_schema_matches_success_payload_contract
     document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-plan-review-action")))
     success = document.dig("$defs", "SuccessPayload")
@@ -465,6 +494,37 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "Task", "properties", "marker", "enum").sort
     assert_equal Hive::Schemas::TaskActionKind::ALL.sort,
                  doc.dig("$defs", "Task", "properties", "action", "enum").sort
+  end
+
+  def test_plan_review_route_diagnostics_validate_in_status_contracts
+    route = {
+      "role" => "adversarial",
+      "requested" => {
+        "provider" => "codex", "model" => "gpt-5.6-sol",
+        "family" => "openai", "effort" => "xhigh", "route" => "native_codex"
+      },
+      "actual" => {
+        "provider" => "codex", "model" => "gpt-5.6-sol",
+        "family" => "openai", "effort" => "xhigh", "route" => "native_codex"
+      },
+      "capability_result" => "unsupported",
+      "diagnostic" => "provider executable is unavailable",
+      "independence_verified" => true
+    }
+
+    %w[hive-status hive-operational-status].each do |schema_name|
+      doc = JSON.parse(File.read(Hive::Schemas.schema_path(schema_name)))
+      schemer = JSONSchemer.schema({
+        "$schema" => doc.fetch("$schema"),
+        "$ref" => "#/$defs/PlanReviewRoute",
+        "$defs" => doc.fetch("$defs")
+      })
+      assert schemer.valid?(route),
+             "#{schema_name} must accept emitted route diagnostics " \
+             "(errors: #{schemer.validate(route).map { |error| error['error'] }.inspect})"
+      refute schemer.valid?(route.merge("diagnostic" => { "message" => "wrong shape" })),
+             "#{schema_name} route diagnostics must remain nullable strings"
+    end
   end
 
   def test_archive_visibility_counts_are_additive_aggregate_schema_fields

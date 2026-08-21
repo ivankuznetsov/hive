@@ -163,6 +163,55 @@ class PlanReviewDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_request_review_resets_each_current_terminal_reviewer_route
+    primary = route("terminal_failure")
+    adversarial = route("unsupported").merge(
+      "role" => "adversarial", "attempt_id" => "pra-#{'f' * 64}"
+    )
+    planner_revision = route("terminal_failure").merge(
+      "role" => "planner_revision", "attempt_id" => "pra-#{'e' * 64}"
+    )
+    with_service(routes: [ primary, adversarial, planner_revision ]) do |service, store, record|
+      result = service.apply(**decision_arguments(
+        record, action: "request_review", authorized: false
+      ))
+
+      assert result.applied
+      assert_match(/\Areview-[0-9a-f]{64}\z/, result.decision.target_fingerprint)
+      resets = store.current["routes"].last(3)
+      assert_equal %w[primary adversarial planner_revision],
+                   resets.map { |entry| entry.fetch("role") }
+      assert resets.all? { |entry| entry.fetch("recovery_reset") }
+      assert resets.all? { |entry| entry.fetch("outcome") == "retryable_failure" }
+      assert resets.none? { |entry| entry.key?("attempt_id") }
+    end
+  end
+
+  def test_request_review_identity_changes_for_a_new_terminal_attempt
+    with_service(routes: [ route("terminal_failure") ]) do |service, store, record|
+      first = service.apply(**decision_arguments(
+        record, action: "request_review", authorized: false
+      ))
+      current = store.current
+      next_route = route("terminal_failure").merge("attempt_id" => "pra-#{'f' * 64}")
+      retried = Hive::PlanReview::Record.new(current.to_h.merge(
+        "version" => current.version + 1,
+        "routes" => current["routes"] + [ next_route ],
+        "attempt_ids" => current["attempt_ids"] + [ next_route.fetch("attempt_id") ],
+        "current_attempt_id" => next_route.fetch("attempt_id")
+      ))
+      store.publish_current!(retried, expected_version: current.version)
+
+      second = service.apply(**decision_arguments(
+        store.current, action: "request_review", authorized: false
+      ))
+
+      assert second.applied
+      refute_equal first.decision.target_fingerprint, second.decision.target_fingerprint
+      refute_equal first.decision.decision_id, second.decision.decision_id
+    end
+  end
+
   def test_action_value_normalization_is_shared_by_cli_and_web_callers
     assert_equal({ "answer" => "yes" }, Hive::PlanReview::DecisionService.action_value(
       "answer-finding", answer: "yes"

@@ -328,8 +328,9 @@ class AgentProfileModesTest < Minitest::Test
       assert_includes cmd, "--mode"
       assert_includes cmd, "json"
       assert_includes cmd, "--no-session"
-      # prompt last
-      assert_equal "do work", cmd.last
+      # Pi receives the prompt through piped stdin without Codex's argv marker.
+      refute_includes cmd, "do work"
+      refute_includes cmd, "-"
     end
   end
 

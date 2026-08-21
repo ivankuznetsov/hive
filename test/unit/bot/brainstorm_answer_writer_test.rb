@@ -728,10 +728,47 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
-  def with_short_deadline
+  def test_holder_propagates_when_deadline_expires_before_the_first_retry
+    # Timing-free companion to the test above. That one leans on a 0.1s
+    # deadline outlasting one try_append, which is not a guarantee on a
+    # loaded runner: when try_append itself takes longer than the budget the
+    # loop breaks on its first pass. A zero deadline pins that exact pass
+    # deterministically, so the holder-capture ordering is covered without a
+    # race against the clock.
+    with_brainstorm(sample) do |path|
+      task_folder = File.dirname(path)
+      held_holder = { "pid" => Process.pid, "op" => "approve", "slug" => "slug-260514-abcd" }
+      File.write(File.join(task_folder, ".lock"), held_holder.to_yaml)
+
+      logger = StubLogger.new
+      with_deadline(0) do
+        assert_equal :lock_busy, Hive::Bot::BrainstormAnswerWriter.append!(
+          brainstorm_path: path,
+          question_n: 1,
+          answer_text: "Reply blocked by the live lock holder",
+          logger: logger
+        )
+      end
+
+      payload = logger.events.find { |name, _| name == :answer_lock_contention }&.last
+      refute_nil payload, "writer must emit :answer_lock_contention when the deadline expires"
+      refute_nil payload[:holder],
+                 "holder observed on the deadline-crossing pass must still reach the event"
+      assert_equal Process.pid, payload[:holder]["pid"]
+      assert_equal "approve", payload[:holder]["op"]
+    ensure
+      File.delete(File.join(task_folder, ".lock")) if task_folder && File.exist?(File.join(task_folder, ".lock"))
+    end
+  end
+
+  def with_short_deadline(&block)
+    with_deadline(0.1, &block)
+  end
+
+  def with_deadline(seconds)
     original = Hive::Bot::BrainstormAnswerWriter::LOCK_RETRY_DEADLINE_SEC
     Hive::Bot::BrainstormAnswerWriter.send(:remove_const, :LOCK_RETRY_DEADLINE_SEC)
-    Hive::Bot::BrainstormAnswerWriter.const_set(:LOCK_RETRY_DEADLINE_SEC, 0.1)
+    Hive::Bot::BrainstormAnswerWriter.const_set(:LOCK_RETRY_DEADLINE_SEC, seconds)
     yield
   ensure
     Hive::Bot::BrainstormAnswerWriter.send(:remove_const, :LOCK_RETRY_DEADLINE_SEC)

@@ -306,8 +306,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   class FakeRecoveryCoordinator
     attr_reader :resumes, :deferred, :marked, :admission_failures,
-                :admission_observations
-    attr_accessor :defer_error
+                :admission_observations, :terminal_repairs
+    attr_accessor :defer_error, :terminal_repair_result
 
     def initialize(status: "blocked")
       @status = status
@@ -316,7 +316,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @marked = []
       @admission_failures = []
       @admission_observations = []
+      @terminal_repairs = []
       @defer_error = nil
+      @terminal_repair_result = false
     end
 
     def assessment(row, now:)
@@ -366,6 +368,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     def mark_dispatched(request, **attributes)
       @marked << { request: request, **attributes }
+    end
+
+    def repair_failed_terminal_marker(request, refresh: true)
+      @terminal_repairs << { request_id: request.request_id, refresh: refresh }
+      @terminal_repair_result
     end
 
     def request_admission_failure(request:, decision:, now:)
@@ -425,7 +432,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       module_migration_coordinator: nil,
                       recovery_coordinator: nil,
                       plan_approval: Hive::Daemon::PlanApproval,
-                      runtime_ready_callback: nil)
+                      runtime_ready_callback: nil, clock: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -479,7 +486,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       module_migration_coordinator: module_migration_coordinator,
       recovery_coordinator: recovery_coordinator,
       plan_approval: plan_approval,
-      runtime_ready_callback: runtime_ready_callback
+      runtime_ready_callback: runtime_ready_callback,
+      clock: clock
     )
     # Generic dispatcher tests exercise routing, not the detached production
     # name generator. Rows intentionally omit display names in many fixtures;
@@ -497,9 +505,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
     ]
   end
 
-  def test_recovery_request_is_resumed_by_the_shared_coordinator_before_dispatch
+  def test_blocked_recovery_survives_repeated_dispatch_ticks_without_slots_or_spawns
     coordinator = FakeRecoveryCoordinator.new(status: "blocked")
-    dispatcher, supervisor, = make_dispatcher(
+    dispatcher, supervisor, controller = make_dispatcher(
       rows: [], recovery_coordinator: coordinator
     )
     recovery = {
@@ -534,11 +542,19 @@ class HiveDaemonDispatcherTest < Minitest::Test
       :find_project,
       ->(_name) { { "name" => "p1", "path" => "/tmp/p1" } }
     ) do
-      dispatcher.send(:process_dispatch_request_iteration, request, now: T0, rows: [ observed ])
+      3.times do |tick|
+        dispatcher.send(
+          :process_dispatch_request_iteration,
+          request,
+          now: T0 + tick,
+          rows: [ observed ]
+        )
+      end
     end
 
-    assert_equal 1, coordinator.resumes.size
+    assert_equal 3, coordinator.resumes.size
     assert_empty supervisor.spawned
+    assert_equal 0, controller.daily_count_for("p1", T0)
   end
 
   def test_recovery_request_waits_when_the_status_observation_is_missing
@@ -1200,6 +1216,38 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  def test_durable_dispatch_refreshes_admission_time_after_a_long_tick
+    admitted_at = nil
+    request_created_at = nil
+    attempt = Struct.new(:attempt_id, :task_generation, :state)
+                    .new("attempt-1", "generation-1", "running")
+    result = Hive::Attempts::DispatchResult.new(
+      status: :accepted, attempt: attempt, receipt: nil,
+      attach_descriptor: nil, reason: nil
+    )
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **options|
+      admitted_at = options.fetch(:now)
+      request_created_at = request.created_at
+      result
+    end
+    launch_time = T0 + 120
+    dispatcher, = make_dispatcher(
+      rows: [], attempt_dispatcher: attempt_dispatcher,
+      clock: -> { launch_time }
+    )
+    observed = row(
+      stage: "3-plan", action: "plan_reviewing",
+      command: "hive plan-review-run s1 --project demo --json"
+    )
+
+    outcome = dispatcher.send(:dispatch_or_block, observed, now: T0)
+
+    assert_equal :dispatched, outcome
+    assert_equal launch_time, admitted_at
+    assert_equal launch_time, request_created_at
+  end
+
   def test_durable_dispatch_publishes_the_exact_provider_routing_decision
     route = Hive::ProviderRouting::Route.new(
       id: "account-a/model-a", account: "account-a", adapter: "codex",
@@ -1323,10 +1371,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "operator", disposition.fetch(:owner)
   end
 
+  # Retry pacing is a backoff ladder now, so a failure has to be inside the
+  # current step to be in cooldown. A ten-minute-old marker error is due —
+  # it used to wait the provider-sized hour for a local fault.
   def test_error_retry_publishes_scheduler_owned_cooldown_disposition
     snapshot = FakeOperationalSnapshot.new
     dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
-    observed = row(marker: "review_error", action: "recover_review")
+    first_step = Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.first
+    observed = row(marker: "review_error", action: "recover_review", mtime: T0 - 1)
 
     dispatcher.send(:handle_row, observed, now: T0)
 
@@ -1334,7 +1386,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     disposition = snapshot.calls.last.last
     assert_equal :retry_cooldown, disposition.fetch(:decision)
     assert_equal "scheduler", disposition.fetch(:owner)
-    assert_equal (T0 - 600 + Hive::AgentLimit.retry_cooldown_sec).iso8601(6),
+    assert_equal (T0 - 1 + first_step).iso8601(6),
                  disposition.fetch(:retry_at)
     assert_equal false, disposition.fetch(:retry_due)
     assert_equal true, disposition.fetch(:retry_safe)
@@ -1359,13 +1411,19 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal true, disposition.fetch(:retry_safe)
   end
 
-  def test_terminal_outcome_errors_bypass_automatic_retry_assessment
+  # Exempting a class of error from automatic retry does not make it safe, it
+  # makes it stuck: the exempt reason still needs the same retry, performed by
+  # hand at whatever delay a human happens to notice it. Every error marker is
+  # assessed now, and the assessment decides — not the reason string.
+  def test_terminal_outcome_errors_are_assessed_for_automatic_retry
     %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
       snapshot = FakeOperationalSnapshot.new
-      dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
+      dispatcher, _supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
       healer = dispatcher.instance_variable_get(:@stale_agent_healer)
-      healer.define_singleton_method(:retry_assessment) do |*_args, **_kwargs|
-        raise "semantic terminal errors must not be assessed automatically"
+      assessed = []
+      healer.define_singleton_method(:retry_assessment) do |assessed_row, **_kwargs|
+        assessed << assessed_row.marker_attrs["reason"]
+        { due: false, retry_at: nil, safe: true, safety_reason: nil }
       end
       observed = row(
         marker: "error",
@@ -1376,10 +1434,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
       dispatcher.send(:handle_row, observed, now: T0)
 
-      assert_empty supervisor.spawned
-      disposition = snapshot.calls.last.last
-      assert_equal :semantic_terminal_error, disposition.fetch(:decision)
-      assert_equal "operator", disposition.fetch(:owner)
+      assert_equal [ reason ], assessed,
+                   "#{reason} must be assessed for retry, not parked for an operator"
+      refute_equal :semantic_terminal_error,
+                   snapshot.calls.last.last.fetch(:decision)
     end
   end
 
@@ -3536,7 +3594,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def test_boot_healer_uses_the_live_per_project_retry_gate
     dispatcher, = make_dispatcher(project_enabled: false)
     healer = dispatcher.instance_variable_get(:@stale_agent_healer)
-    gate = healer.instance_variable_get(:@project_auto_retry_enabled)
+    gate = healer.instance_variable_get(:@project_daemon_enabled)
 
     assert_equal false, gate.call("disabled-project")
   end
@@ -3566,7 +3624,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                 "reload_config! must rebuild the healer so new daemon.agent_marker_grace_sec binds"
     assert_equal 60, rebuilt.instance_variable_get(:@grace_sec),
                  "rebuilt healer must carry the reloaded grace value"
-    gate = rebuilt.instance_variable_get(:@project_auto_retry_enabled)
+    gate = rebuilt.instance_variable_get(:@project_daemon_enabled)
     assert_equal true, gate.call("enabled-project"),
                  "the rebuilt healer must retain the live per-project gate"
     healer_admission = rebuilt.instance_variable_get(:@admission_open)
@@ -3583,14 +3641,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
            "the reloaded name backfiller must share the daemon's live shutdown gate"
   end
 
-  def test_reload_config_applies_auto_retry_kill_switch_to_universal_healer
+  def test_reload_config_rebuilds_the_universal_healer
     dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
     original_healer = dispatcher.instance_variable_get(:@stale_agent_healer)
 
     new_cfg = {
       "agent_marker_grace_sec" => 60,
-      "edit_debounce_sec" => 30,
-      "auto_retry" => { "enabled" => false }
+      "edit_debounce_sec" => 30
     }
     original = Hive::Config.method(:load_global_daemon)
     Hive::Config.define_singleton_method(:load_global_daemon) { new_cfg }
@@ -3603,7 +3660,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
     rebuilt = dispatcher.instance_variable_get(:@stale_agent_healer)
     refute_same original_healer, rebuilt,
                 "reload_config! must rebuild the universal healer"
-    assert_equal false, rebuilt.auto_retry_enabled?
   end
 
 def test_run_forever_reloads_ticks_and_shuts_down_cleanly
@@ -4468,26 +4524,19 @@ def test_reload_config_error_logs_and_keeps_previous_config
          "an invalid reload must not emit a success event"
 end
 
-def test_late_reload_loader_failure_never_splits_auto_retry_policy
-  [ false, true ].each do |previously_enabled|
+def test_late_reload_loader_failure_never_splits_daemon_config
+  [ 30, 60 ].each do |previous_debounce|
     dispatcher, _sup, controller, logger, _mw = make_dispatcher
-    previous_daemon = {
-      "edit_debounce_sec" => 30,
-      "auto_retry" => { "enabled" => previously_enabled }
-    }
+    previous_daemon = { "edit_debounce_sec" => previous_debounce }
     previous_config = dispatcher.instance_variable_get(:@config)
     previous_config["daemon"] = previous_daemon
     dispatcher.instance_variable_set(:@daemon_cfg, previous_daemon)
     previous_healer = Hive::Daemon::StaleAgentHealer.new(
       controller: controller,
-      logger: logger,
-      auto_retry_enabled: previously_enabled
+      logger: logger
     )
     dispatcher.instance_variable_set(:@stale_agent_healer, previous_healer)
-    requested_daemon = {
-      "edit_debounce_sec" => 45,
-      "auto_retry" => { "enabled" => !previously_enabled }
-    }
+    requested_daemon = { "edit_debounce_sec" => previous_debounce + 15 }
 
     with_replaced_singleton_method(
       Hive::Config, :load_global_daemon, -> { requested_daemon }
@@ -4507,9 +4556,9 @@ def test_late_reload_loader_failure_never_splits_auto_retry_policy
     assert_same previous_daemon, dispatcher.instance_variable_get(:@daemon_cfg)
     assert_same previous_config, dispatcher.instance_variable_get(:@config)
     assert_same previous_healer, dispatcher.instance_variable_get(:@stale_agent_healer)
-    assert_equal previously_enabled,
-                 previous_healer.auto_retry_enabled?,
-                 "failed #{previously_enabled ? 'disable' : 'enable'} reload must retain one coherent policy"
+    assert_equal previous_debounce,
+                 dispatcher.instance_variable_get(:@daemon_cfg)["edit_debounce_sec"],
+                 "a failed reload must retain one coherent config, not a half-applied one"
     refute logger.events.any? { |name, _attrs| name == :config_reloaded }
     assert logger.events.any? { |name, attrs|
       name == :fatal && attrs[:message].include?("answer digest is invalid")
@@ -5066,6 +5115,40 @@ end
     end
   end
 
+  def test_queue_delivery_refreshes_admission_time_after_a_long_tick
+    Dir.mktmpdir("hive-dispatch-queue-fresh-time") do |state_home|
+      admitted_at = nil
+      attempt = Struct.new(:attempt_id, :task_generation, :state)
+                      .new("attempt-1", "generation-1", "launching")
+      result = Hive::Attempts::DispatchResult.new(
+        status: :accepted, attempt: attempt, receipt: nil,
+        attach_descriptor: nil, reason: nil
+      )
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) do |_request, **options|
+        admitted_at = options.fetch(:now)
+        result
+      end
+      launch_time = T0 + 120
+      dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        attempt_dispatcher: attempt_dispatcher,
+        clock: -> { launch_time }
+      )
+      Q.write_request!(
+        project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+        request_id: "request-fresh-time", state_home: state_home, now: T0
+      )
+      request = Q.pending(state_home: state_home).first
+
+      dispatcher.send(:dispatch_request!, request, now: T0)
+
+      assert_equal launch_time, admitted_at
+      claim_path = Dir.glob(File.join(state_home, "dispatch_requests", "*.claim")).first
+      assert_equal launch_time.iso8601(6), JSON.parse(File.read(claim_path)).fetch("claimed_at")
+    end
+  end
+
   def test_durable_request_releases_preclaim_when_shutdown_arrives_before_dispatch
     Dir.mktmpdir("hive-dispatch-shutdown") do |state_home|
       calls = []
@@ -5607,6 +5690,75 @@ end
     end
     assert_equal [ "request-failed" ], discarded
     assert_equal [ "request-failed" ], removed
+  end
+
+  def test_terminal_recovery_reconciles_markerless_failed_attempt_before_acknowledging
+    request = Q::Request.new(
+      request_id: "recovery-markerless", created_at: T0,
+      project: "p1", slug: "demo-task",
+      argv: %w[hive run demo-task], requestor: "healer", chat_id: nil,
+      expected_stage: "4-execute",
+      recovery: dispatcher_recovery(phase: "terminal").merge(
+        "attempt_id" => "attempt-failed",
+        "terminal_outcome" => "failed",
+        "terminal_at" => T0.iso8601(6)
+      )
+    )
+    delivery = Q::ClaimedDelivery.new(
+      request: request, claim: { "attempt_id" => "attempt-failed" }, path: "/claim"
+    )
+    coordinator = FakeRecoveryCoordinator.new
+    dispatcher, = make_dispatcher(
+      rows: [], attempt_reconciler: Object.new,
+      recovery_coordinator: coordinator
+    )
+
+    with_replaced_singleton_method(Q, :claimed, ->(**_kwargs) { [ delivery ] }) do
+      dispatcher.send(:reconcile_attempt_deliveries, now: T0)
+    end
+
+    assert_equal [ { request_id: "recovery-markerless", refresh: false } ],
+                 coordinator.terminal_repairs
+  end
+
+  # Healing a markerless failed recovery is the only signal an operator gets
+  # that the attempt died without writing its own marker. Silence here reads
+  # as "nothing happened" while the task quietly moves back to retry.
+  def test_repaired_terminal_recovery_marker_is_logged_as_healed
+    request = Q::Request.new(
+      request_id: "recovery-healed", created_at: T0,
+      project: "p1", slug: "demo-task",
+      argv: %w[hive run demo-task], requestor: "healer", chat_id: nil,
+      expected_stage: "4-execute",
+      recovery: dispatcher_recovery(phase: "terminal").merge(
+        "attempt_id" => "attempt-failed",
+        "terminal_outcome" => "failed",
+        "terminal_at" => T0.iso8601(6)
+      )
+    )
+    delivery = Q::ClaimedDelivery.new(
+      request: request, claim: { "attempt_id" => "attempt-failed" }, path: "/claim"
+    )
+    coordinator = FakeRecoveryCoordinator.new
+    coordinator.terminal_repair_result = true
+    dispatcher, _sup, _ctrl, logger = make_dispatcher(
+      rows: [], attempt_reconciler: Object.new,
+      recovery_coordinator: coordinator
+    )
+
+    with_replaced_singleton_method(Q, :claimed, ->(**_kwargs) { [ delivery ] }) do
+      dispatcher.send(:reconcile_attempt_deliveries, now: T0)
+    end
+
+    assert events_include?(logger, :marker_healed),
+           "a repaired terminal marker must be observable; events=#{logger.events.inspect}"
+    attrs = logger.events.find { |(name, _)| name == :marker_healed }[1]
+    assert_equal "recovery_attempt_failed", attrs[:reason]
+    assert_equal "attempt-failed", attrs[:attempt_id]
+    assert_equal "recovery-healed", attrs[:request_id]
+    assert_equal "4-execute", attrs[:stage]
+    assert_equal "p1", attrs[:project]
+    assert_equal "demo-task", attrs[:slug]
   end
 
   def test_terminal_attempt_reconciliation_closes_the_durable_recovery_receipt
@@ -6884,42 +7036,123 @@ end
                  "resumes once every question is answered"
   end
 
-  def test_brainstorm_answers_pending_predicate_branches
+  def test_handle_row_resumes_first_sight_brainstorm_when_all_answers_are_complete
+    dispatcher, supervisor, controller, logger = make_dispatcher
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+    bpath = File.join(folder, "brainstorm.md")
+    File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\nbecause\n### Q2.\nWhy?\n### A2.\nyes\n")
+    r = row(action: "needs_input", stage: "2-brainstorm",
+            command: "hive brainstorm s1 --from 2-brainstorm",
+            state_file: bpath, mtime: T0 - 60, folder: folder)
+
+    dispatcher.send(:handle_row, r, now: T0)
+
+    assert_equal 1, supervisor.spawned.size,
+                 "complete brainstorm answers must resume even before a baseline exists"
+    assert_equal T0 - 60,
+                 controller.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1"),
+                 "the successful dispatch, not first-sight observation, records the mtime"
+    refute(logger.events.any? { |(name, attrs)|
+      name == :skipped && attrs[:reason] == "baseline_recorded"
+    })
+  end
+
+  def test_handle_row_resumes_complete_brainstorm_from_a_restored_baseline_once
+    Dir.mktmpdir("restored-brainstorm-baseline") do |dir|
+      path = File.join(dir, "baselines.json")
+      baseline = T0 - 60
+      Hive::Daemon::DispatchBaselines.new(path: path).write({ [ "p1", "s1" ] => baseline })
+      dispatcher, supervisor, controller, = make_dispatcher(
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+      )
+      folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+      bpath = File.join(folder, "brainstorm.md")
+      File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\nanswered\n")
+      r = row(action: "needs_input", stage: "2-brainstorm",
+              command: "hive brainstorm s1 --from 2-brainstorm",
+              state_file: bpath, mtime: baseline, folder: folder)
+
+      dispatcher.send(:handle_row, r, now: T0)
+
+      assert_equal 1, supervisor.spawned.size,
+                   "a completed Q&A stranded behind a restored baseline must resume"
+      refute controller.restored_dispatch_baseline_for?(project: "p1", slug: "s1"),
+             "a real dispatch must consume the one-shot restart recovery"
+    end
+  end
+
+  def test_handle_row_keeps_restored_baseline_when_brainstorm_answers_are_pending
+    Dir.mktmpdir("restored-pending-brainstorm-baseline") do |dir|
+      path = File.join(dir, "baselines.json")
+      baseline = T0 - 60
+      Hive::Daemon::DispatchBaselines.new(path: path).write({ [ "p1", "s1" ] => baseline })
+      dispatcher, supervisor, controller, = make_dispatcher(
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+      )
+      folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+      bpath = File.join(folder, "brainstorm.md")
+      File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
+      r = row(action: "needs_input", stage: "2-brainstorm",
+              command: "hive brainstorm s1 --from 2-brainstorm",
+              state_file: bpath, mtime: baseline, folder: folder)
+
+      dispatcher.send(:handle_row, r, now: T0)
+
+      assert_empty supervisor.spawned
+      assert controller.restored_dispatch_baseline_for?(project: "p1", slug: "s1"),
+             "pending Q&A must retain both the baseline and its restored provenance"
+    end
+  end
+
+  def test_brainstorm_answer_state_branches
     dispatcher, = make_dispatcher
     folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
     pending = File.join(folder, "brainstorm.md")
     File.write(pending, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
     done = File.join(folder, "done.md")
     File.write(done, "## Round 1\n### Q1.\nWhat?\n### A1.\nanswered\n")
+    empty = File.join(folder, "empty.md")
+    File.write(empty, "# Brainstorm\n\nNo questions yet.\n")
 
-    assert dispatcher.send(:brainstorm_answers_pending?,
-                           row(action: "needs_input", stage: "2-brainstorm",
-                               state_file: pending, folder: folder))
-    refute dispatcher.send(:brainstorm_answers_pending?,
-                           row(action: "needs_input", stage: "2-brainstorm",
-                               state_file: done, folder: folder))
+    assert_equal({ pending: true, complete: false },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "needs_input", stage: "2-brainstorm",
+                                     state_file: pending, folder: folder)))
+    assert_equal({ pending: false, complete: true },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "needs_input", stage: "2-brainstorm",
+                                     state_file: done, folder: folder)))
+    assert_equal({ pending: false, complete: false },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "needs_input", stage: "2-brainstorm",
+                                     state_file: empty, folder: folder)),
+                 "zero parseable questions must not bypass the first-sight baseline")
     # Not a brainstorm stage → no Q&A, never pending.
-    refute dispatcher.send(:brainstorm_answers_pending?,
-                           row(action: "needs_input", stage: "6-review",
-                               state_file: pending, folder: folder))
+    assert_equal({ pending: false, complete: false },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "needs_input", stage: "6-review",
+                                     state_file: pending, folder: folder)))
     # A NON-coding workflow that reuses the 2-brainstorm dir has no coding
     # Q&A answer flow → never pending (it must take the generic path, not be
     # held as answers_pending).
-    refute dispatcher.send(:brainstorm_answers_pending?,
-                           row(action: "needs_input", stage: "2-brainstorm",
-                               workflow: "research",
-                               state_file: pending, folder: folder))
+    assert_equal({ pending: false, complete: false },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "needs_input", stage: "2-brainstorm",
+                                     workflow: "research",
+                                     state_file: pending, folder: folder)))
     # Not a needs_input row.
-    refute dispatcher.send(:brainstorm_answers_pending?,
-                           row(action: "ready_to_brainstorm", stage: "2-brainstorm",
-                               state_file: pending, folder: folder))
+    assert_equal({ pending: false, complete: false },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "ready_to_brainstorm", stage: "2-brainstorm",
+                                     state_file: pending, folder: folder)))
     # Missing file → not pending.
-    refute dispatcher.send(:brainstorm_answers_pending?,
-                           row(action: "needs_input", stage: "2-brainstorm",
-                               state_file: "/no/such/brainstorm.md", folder: folder))
+    assert_equal({ pending: false, complete: false },
+                 dispatcher.send(:brainstorm_answer_state,
+                                 row(action: "needs_input", stage: "2-brainstorm",
+                                     state_file: "/no/such/brainstorm.md", folder: folder)))
   end
 
-  def test_brainstorm_answers_pending_fails_open_on_parse_error
+  def test_brainstorm_answer_state_fails_open_on_parse_error
     dispatcher, _supervisor, _controller, logger = make_dispatcher
     folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
     bpath = File.join(folder, "brainstorm.md")
@@ -6927,10 +7160,11 @@ end
     r = row(action: "needs_input", stage: "2-brainstorm", state_file: bpath, folder: folder)
 
     with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise "boom" }) do
-      refute dispatcher.send(:brainstorm_answers_pending?, r),
-             "a parse error must fail OPEN (false) so a malformed file can't strand the task"
+      assert_equal({ pending: false, complete: false },
+                   dispatcher.send(:brainstorm_answer_state, r),
+                   "a parse error must fail OPEN so a malformed file can't strand the task")
     end
-    assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("brainstorm_answers_pending") })
+    assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("brainstorm_answer_state") })
   end
 
   # #5: end-to-end — on a parse error the daemon must actually RESUME
@@ -6963,46 +7197,46 @@ end
     r = row(action: "needs_input", stage: "2-brainstorm", state_file: bpath, folder: folder)
 
     with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise "boom" }) do
-      3.times { dispatcher.send(:brainstorm_answers_pending?, r) }
+      3.times { dispatcher.send(:brainstorm_answer_state, r) }
     end
     fatals = logger.events.count { |(n, a)| n == :fatal && a[:slug] == "s1" }
     assert_equal 1, fatals, "three failing ticks must log :fatal once, not three times"
 
     # A successful parse clears the flag so a later recurrence logs again.
-    dispatcher.send(:brainstorm_answers_pending?, r)
+    dispatcher.send(:brainstorm_answer_state, r)
     with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise "boom" }) do
-      dispatcher.send(:brainstorm_answers_pending?, r)
+      dispatcher.send(:brainstorm_answer_state, r)
     end
     assert_equal 2, logger.events.count { |(n, a)| n == :fatal && a[:slug] == "s1" },
                  "the dedup re-arms after a successful parse"
   end
 
-  def test_brainstorm_answers_pending_multi_round_and_edge_files
+  def test_brainstorm_answer_state_multi_round_and_edge_files
     dispatcher, = make_dispatcher
     folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
 
     # Round 1 fully answered, Round 2 still open → pending.
     multi = File.join(folder, "multi.md")
     File.write(multi, "## Round 1\n### Q1.\nA?\n### A1.\nyes\n## Round 2\n### Q2.\nB?\n### A2.\n\n")
-    assert dispatcher.send(:brainstorm_answers_pending?,
+    assert dispatcher.send(:brainstorm_answer_state,
                            row(action: "needs_input", stage: "2-brainstorm",
-                               state_file: multi, folder: folder))
+                               state_file: multi, folder: folder)).fetch(:pending)
 
     # A `### Q` with NO `### A` slot at all → still unanswered → held
     # (documents the no-fillable-slot case; recovery is operator/bot side).
     noslot = File.join(folder, "noslot.md")
     File.write(noslot, "## Round 1\n### Q1.\nA?\n")
-    assert dispatcher.send(:brainstorm_answers_pending?,
+    assert dispatcher.send(:brainstorm_answer_state,
                            row(action: "needs_input", stage: "2-brainstorm",
-                               state_file: noslot, folder: folder))
+                               state_file: noslot, folder: folder)).fetch(:pending)
 
     # Zero parseable questions (empty / header drift) → fail OPEN (resume
     # to re-run the agent); the bot can't answer it either.
     zeroq = File.join(folder, "zeroq.md")
     File.write(zeroq, "## Round 1\nno questions here\n")
-    refute dispatcher.send(:brainstorm_answers_pending?,
+    refute dispatcher.send(:brainstorm_answer_state,
                            row(action: "needs_input", stage: "2-brainstorm",
-                               state_file: zeroq, folder: folder))
+                               state_file: zeroq, folder: folder)).fetch(:pending)
   end
 
   # ── R-02: child-timeout enforcement + logging ─────────────────────────

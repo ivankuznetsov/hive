@@ -9,7 +9,9 @@ module Hive
       # transitions or authorization policy.
       class EffectReceiptLedger
         Result = Data.define(:status, :outcome, :receipt)
-        TERMINAL_STATES = OccurrenceContract::TERMINAL_STATES
+        # `abandoned` is terminal journal history, not a delivered effect and
+        # intentionally has no external receipt to replay.
+        TERMINAL_STATES = (OccurrenceContract::TERMINAL_STATES - [ "abandoned" ]).freeze
 
         def initialize(delivery_store:, evidence_store:, denied_error:,
                        clock:)

@@ -153,26 +153,22 @@ module Hive
         baseline_head = execute_baseline_head(task, worktree_git)
         return worktree_git_failed(task, cfg, worktree_path) unless baseline_head
 
-        custody_manifest = Hive::ArtifactFirewall::Manifest.new(
-          root: task.folder,
-          protected_anchors: execute_protected_files(task),
-          permitted_writable_roots: [ task.folder, worktree_path ]
+        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(
+          execute_custody_manifest(task, worktree_path)
         )
-        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
         begin
           impl_result = spawn_implementation(
             task, cfg, worktree_path, identity: identity,
             agent_custody: agent_custody
           )
         rescue Hive::ProviderRouteFailed
-          if agent_custody.report&.tampered?
-            record_tamper(
-              task, agent_custody.report.tampered_labels, who: "implementer",
-              restored: agent_custody.report.restored?,
-              restore_error: agent_custody.report.restore_diagnostic
-            )
-          else
+          record_implementation_exception(task, agent_custody) do
             mark_provider_route_failure(task)
+          end
+          raise
+        rescue StandardError => e
+          record_implementation_exception(task, agent_custody) do
+            mark_implementer_exception(task, cfg, e)
           end
           raise
         end
@@ -240,9 +236,8 @@ module Hive
         if dirty_worktree
           return apply_execute_outcome(
             task, cfg, worktree_path, baseline_head,
-            marker_name: :execute_waiting, attrs: { reason: "dirty_worktree" },
-            commit: "execute_waiting_dirty_worktree", status: :execute_waiting,
-            waiting_reason: "dirty_worktree"
+            marker_name: :error, attrs: { reason: "dirty_worktree" },
+            commit: "execute_dirty_worktree", status: :error
           )
         end
 
@@ -295,6 +290,21 @@ module Hive
           paths << Hive::ContextProvenance.promoted_reference(context.attempt_id)
         end
         paths.uniq.freeze
+      end
+
+      # Durable context and activity receipts grow with every retry. Admit the
+      # exact inventory through one manifest so one validation/restore pass
+      # owns every anchor; the hard limit remains a fail-closed retention cap.
+      def execute_custody_manifest(task, worktree_path)
+        paths = execute_protected_files(task)
+        writable_roots = [ task.folder, worktree_path ].uniq
+        manifest_entries = paths.length + writable_roots.length
+        Hive::ArtifactFirewall::Manifest.new(
+          root: task.folder,
+          protected_anchors: paths,
+          permitted_writable_roots: writable_roots,
+          max_entries: [ manifest_entries, Hive::ArtifactFirewall::MAX_ENTRIES ].max
+        )
       end
 
       def apply_execute_outcome(task, cfg, worktree_path, baseline_head,
@@ -367,8 +377,39 @@ module Hive
         Hive::Markers.set(task.state_file, :error, attrs)
       end
 
+      # Process-spawn and stream failures can raise before Agent returns its
+      # ordinary typed result. Leaving the task markerless makes the durable
+      # failed attempt visible but gives StaleAgentHealer nothing to retry.
+      # Preserve the exception for the attempt receipt while also publishing
+      # the same recoverable marker used by ordinary implementation failures.
+      def mark_implementer_exception(task, cfg, error)
+        Hive::Markers.set(
+          task.state_file, :error,
+          reason: "implementer_failed",
+          provider: execute_agent_name(cfg),
+          status: "exception",
+          exception_class: error.class.name,
+          message: AgentCliRuntime::Redactor.diagnostic(error)
+        )
+      end
+
+      def record_implementation_exception(task, custody)
+        report = custody.report
+        if report&.tampered?
+          record_tamper(
+            task, report.tampered_labels, who: "implementer",
+            restored: report.restored?, restore_error: report.restore_diagnostic
+          )
+        elsif custody.safe_after?
+          yield
+        end
+      end
+
       def implementer_hit_limit?(impl_result)
         return false unless impl_result
+
+        typed_reason = impl_result[:error_reason].to_s
+        return typed_reason == "limits_reached" unless typed_reason.empty?
 
         Hive::AgentLimit.limit_reached?(impl_result[:limit_text].to_s) ||
           Hive::AgentLimit.limit_reached?(impl_result[:error_message].to_s)

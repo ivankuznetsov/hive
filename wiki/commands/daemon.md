@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-08-14
+updated: 2026-08-21
 tags: [command, daemon, automation, plan-review, json]
 ---
 
@@ -60,11 +60,18 @@ step and submits eligible `ERROR` / `REVIEW_ERROR` observations to
 marker-age cooldown, rejects live ownership or unsafe current-work evidence,
 persists the canonical task/marker/generation identity, and owns the guarded
 clear plus restart replay. Set
-`daemon.auto_retry.enabled: false` to disable automatic coordinator submissions;
+`daemon.auto_retry.enabled` is accepted but inert — automatic retry is unconditional;
 explicit operator recovery through the shared API remains available.
 The deterministic v5 request does not expire behind admission gates; a crash
 before or after clear resumes its persisted phase, while stale identity is
 blocked instead of crossing into a replacement task generation.
+Each terminal marker is fingerprinted from its reason, provider, status code,
+and normalized diagnostic. A changed fingerprint keeps autonomous retries
+unbounded. Repetition is exposed as `escalation_tier=degraded`; after three
+identical failures at the ladder ceiling the request parks once with
+`reason=deterministic_failure`, its fingerprint, and bounded attempt history,
+so it stops consuming dispatch slots while other tasks continue. Terminal
+recovery cleanup is stage-scoped and cannot erase a prior stage's ladder.
 Independently,
 `Hive::Daemon::DisplayNameBackfiller`
 runs each tick and re-spawns `hive generate-name <folder>` (fire-and-forget,
@@ -90,7 +97,7 @@ stage.
 | future `plan_review_retry` | Hold until the projection's `retry_at`; provider/transient evidence remains attached to the same attempt lineage. |
 | `plan_review_decision`, `plan_review_unsupported`, or `plan_review_blocked` | Skip. The row names the operator/configuration action; daemon enrollment creates no authority. |
 | `ready_to_develop` or `plan_review_degraded` at coding `3-plan` | `PlanApproval.prepare` rewrites to `hive develop ...`, revalidates the exact current plan-review observation under the task lock, and only then flips `:waiting` to `:complete`. A missing/stale/blocked review leaves the marker and folder untouched. |
-| `needs_input` (any other stage) | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. Brainstorm/execute/review WAITING represent actual user-authored answers; auto-dispatch without an edit would either spam the agent or skip real user input. The `[project, slug] → mtime` baseline this compares against is **persisted** (`daemon_dispatch_baselines.json` under the state home, beside `.daemon.pid`), so a daemon restart no longer re-strands a task answered while it was down — see [[modules/daemon]] "Persisted dispatch baselines". **Brainstorm Q&A gate:** mtime-debounce alone can't tell "answered 1 of 3, still going" from "done" — each Telegram answer bumps the file mtime — so a `2-brainstorm` `needs_input` row whose `brainstorm.md` still has unanswered `### Q{n}.` slots is **held** (`Policy :wait_for_answers`, logged `:skipped reason=answers_pending`) until every question is answered, whether they arrive one-at-a-time via the bot or in one editor save. See [[modules/daemon]] "Brainstorm answers-pending gate". |
+| `needs_input` (any other stage) | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. Brainstorm/execute/review WAITING represent actual user-authored answers; auto-dispatch without an edit would either spam the agent or skip real user input. The `[project, slug] → mtime` baseline this compares against is **persisted** (`daemon_dispatch_baselines.json` under the state home, beside `.daemon.pid`), so a daemon restart no longer re-strands a task answered while it was down — see [[modules/daemon]] "Persisted dispatch baselines". **Brainstorm Q&A gate:** mtime-debounce alone can't tell "answered 1 of 3, still going" from "done" — each Telegram answer bumps the file mtime — so a `2-brainstorm` `needs_input` row whose `brainstorm.md` still has unanswered `### Q{n}.` slots is **held** (`Policy :wait_for_answers`, logged `:skipped reason=answers_pending`) until every question is answered. A non-empty, fully answered brainstorm observed before any baseline dispatches after the same debounce instead of consuming the answers as its baseline, so answers written while the daemon was down resume automatically. See [[modules/daemon]] "Brainstorm answers-pending gate". |
 | `recover_execute` | Skip — `EXECUTE_STALE` / waiting findings are explicit human-input gates. |
 | `recover_review` | Policy skips the row. `REVIEW_ERROR` is handled earlier by the universal recovery scheduler; `REVIEW_STALE` / `REVIEW_CI_STALE` remain explicit operator submissions after inspection or edits. |
 | `agent_running`       | Skip — task is in flight; per-task `.lock` would block double-spawn anyway. |
@@ -165,7 +172,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 |-----|---------|---------|
 | `poll_interval_sec` | 30 | Backstop cadence for full status scans. Min 5. |
 | `fast_poll_sec` | 1 | Cheap wake cadence for child reaps and state-file/stage-dir mtime probes between full scans. Min 1. |
-| `auto_retry.enabled` | `true` | Global kill switch for automatic `ERROR` / `REVIEW_ERROR` retries. `false` leaves those markers parked for operator recovery while stale in-flight ownership reconciliation remains active. |
+| `auto_retry.enabled` | — | **Inert.** Retired as a kill switch: `ERROR` / `REVIEW_ERROR` retries are unconditional and follow one backoff ladder. The key is still shape-validated so a typo fails loudly, but setting it changes nothing. Pause a project with `daemon.enabled: false` instead. |
 | `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |
 | `pr_merge_poll_interval_sec` | 300 | Durable per-candidate merge reconciliation cadence. Min 60 to respect GitHub rate limits; failure counts remain uncapped and backoff is persisted. |
 | `max_concurrent_runs` | 3 | Global cap. Raise carefully — multiplies cost ceiling. |

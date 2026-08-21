@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-08-20
+updated: 2026-08-21
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage]
 ---
 
@@ -36,21 +36,21 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 
 | Module | File | Purpose |
 |--------|------|---------|
-| `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over action, admission/dependency state, stage/workflow context, mtime debounce, and `answers_pending`. Structured admission errors return `:admission_error` before every stage branch; ordinary blocked rows cannot dispatch or poll for merge. |
-| `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate plus per-project patrol scans), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. `Dispatcher#reload_config!` applies reloaded limits through `update_limits` on this same object so SIGHUP changes admission immediately without discarding runtime state. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); everything else is intentionally in-memory. |
+| `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over action, admission/dependency state, stage/workflow context, mtime debounce, and the brainstorm `answers_pending` / `answers_complete` signals. Structured admission errors return `:admission_error` before every stage branch; ordinary blocked rows cannot dispatch or poll for merge. |
+| `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate plus per-project patrol scans), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. `Dispatcher#reload_config!` applies reloaded limits through `update_limits` on this same object so SIGHUP changes admission immediately without discarding runtime state. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); restored keys retain one-process provenance until a real observation or dispatch consumes them. Everything else is intentionally in-memory. |
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
 | `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed visible rows including `workflow`, canonical `pr_url`, structured `admission_error`, project information, and the summed `hidden_archived_task_count`. Missing or malformed admission state is converted to `dependency_validation_failed`, `blocked: true`, action `admission_error`, and no command. Envelope shape and hidden-count types are hard-validated while forward schema versions remain best-effort. |
 | `Hive::Daemon::OperationalSnapshot` | `lib/hive/daemon/operational_snapshot.rb` | Private daemon-to-status observation channel. `Assembler` first publishes a generation-bound `runtime_ready` acknowledgement after signal installation and inherited-claim recovery, then retains that flag on `started`, `failed`, revalidated `complete`, and shutdown records. Tick completion includes the final aggregate hidden-archive count; SIGHUP recalculates validity from the reloaded poll interval, and recovery receipts are overlaid only when task, stage, marker identity, and lifecycle still match. `Store` atomically persists records under owner-private path/inode checks; the ordinary `Reader` accepts only live-generation complete observations and degrades every other condition to explicit unavailable/stale/invalid evidence. |
 | `Hive::Daemon::ActivationLock` | `lib/hive/daemon/activation_lock.rb` | Stable, owner-bound, never-unlinked profile flock held by daemon startup through generation-bound runtime readiness. Unsafe paths, replacement inodes, and bounded contention fail closed. |
 | `Hive::Daemon::StatusReport` | `lib/hive/daemon/status_report.rb` | Shared read-only `hive-daemon-status` producer for `hive daemon status --json` and hivebox. Builds the PID/service/binary/update-nudge envelope as a plain hash, exposes `running_state`, `payload`, and web-safe `safe_payload`, suppresses update-state orphan cleanup, bounds `installed_binary --version` probes to 10s, treats a stable service symlink and its current deployment target as the same binary by filesystem identity, and owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE` so the CLI producer and web repair affordance read the same enum source. |
 | `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Owns non-task ancillary children such as digest and patrol jobs. Task-stage agents use [[modules/attempts]] and are never adopted with `wait2` or terminated on daemon shutdown. Ancillary exits reaped during graceful shutdown are returned to the dispatcher and use the same scheduler-completion path as ordinary tick reaps. |
-| `Hive::Conditions::AttemptObserver` | `lib/hive/conditions/attempt_observer.rb` | Observes reconciled terminal/lost durable attempts. For coding execute attempts it idempotently journals the current `AgentHealthy` fact and rebuilds the projection: only a terminal `succeeded` receipt is satisfied; failed/cancelled/lost outcomes fail closed. Confirmed deliveries are memoized in-process before task lookup/journal parsing; restart rechecks the durable journal once. |
+| `Hive::Conditions::AttemptObserver` | `lib/hive/conditions/attempt_observer.rb` | Observes reconciled terminal/lost durable attempts. For coding execute attempts it idempotently journals the current `AgentHealthy` fact and rebuilds the projection: only a terminal `succeeded` receipt is satisfied; failed/cancelled/lost outcomes fail closed. Confirmed deliveries are memoized in-process before task lookup/journal parsing; restart rechecks the durable journal once. A deleted task folder is `not_applicable`, not perpetually pending. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
-| `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for marker-bound and explicit-route admission recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v5 request before clearing (or a markerless policy-bound request), and resumes `admitted → cleared → dispatched → terminal` after restart. User-facing adapters only submit observations and render its receipt. |
+| `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for marker-bound and explicit-route admission recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v5 request before clearing (or a markerless policy-bound request), and resumes `admitted → cleared → dispatched → terminal` after restart. Failure fingerprints are stage-scoped: varying failures retry freely, repeated failures surface degraded state, and three identical failures at the retry-ladder ceiling park as `deterministic_failure`. A parked request survives scheduler ticks unchanged; after correcting the cause, a freshness-bound operator `workflow.retry` explicitly clears the park without changing request identity. User-facing adapters only submit observations and render its receipt. |
 | `Hive::Recovery::API` | `lib/hive/recovery/api.rb` | Neutral adapter for CLI/action, TUI, Rails, recorder, Telegram, and healer observations. It normalizes each surface's row shape and derives the freshness token; `RecoveryCoordinator` still owns every policy decision and mutation. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Turns an already-cleared coding `3-plan` pause into `hive develop ... --from 3-plan`. It validates command shape, prepares and re-verifies the exact `PlanReview::TransitionGuard` observation under the task lock, and only then flips `WAITING` to `COMPLETE`; uncleared review never mutates the marker. |
-| `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership and is the sole automatic scheduler that submits cooled `ERROR` / `REVIEW_ERROR` observations to `RecoveryCoordinator`. Lease-backed attempt loss is ledger-only and dispatches successors through `Attempts::Dispatcher`; it does not project or clear a compatibility marker. |
+| `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership and is the sole automatic scheduler that submits cooled `ERROR` / `REVIEW_ERROR` observations to `RecoveryCoordinator`. Lease-backed attempt loss is ledger-only and dispatches successors through `Attempts::Dispatcher` on the same retry ladder; it does not project or clear a compatibility marker. The obsolete attributed `execute_waiting reason=dirty_worktree` rewrite lives only in one-shot `hive migrate`, not the tick loop. |
 | `Hive::Modules::DaemonRuntime` | `lib/hive/modules/daemon_runtime.rb` | Sole autonomous module hook/schedule drain. It receives the dispatcher's process-lifetime shutdown predicate and rechecks it between projects, retries, setup outboxes, schedules, events, selections, and hooks. An event cursor advances only after every eligible hook finished while admission stayed open; a shutdown-interrupted event therefore replays, and the decision journal suppresses a second Attempt for hooks already admitted. |
 | `Hive::Daemon::DisplayNameBackfiller` | `lib/hive/daemon/display_name_backfiller.rb` | Tick-time self-heal for tasks whose one-shot name generation at `hive new` never landed (agent/codex outage). It skips admission-error rows and uses `TaskMeta.read_for_admission`, so corrupt metadata is never treated as a blank name. For a healthy row whose `display_name` is nil/blank, it re-spawns fire-and-forget `hive generate-name <folder>`, mirroring `Hive::Commands::New#spawn_name_generator` (detached, pgroup, logged to `<state_home>/logs/display-name.log`, fully rescued). Anti-churn: an `@inflight` map stores `{pid, at}` per folder, uses the shared `Hive::ProcessKill.pid_alive?` `kill(0)` probe plus `MAX_INFLIGHT_AGE_SEC = 120` to avoid both double-spawns and reused-pid/EPERM pinning, `max_per_tick` (default 2) bounds spawns, and a set name is a natural fixed point. Unexpected row/reap/spawn errors degrade through `:fatal` logging while preserving the no-raise tick contract. Purely additive — never touches markers or dispatch. Logs `display_name_backfill`. |
 | `Hive::Daemon::TaskIdBackfiller` | `lib/hive/daemon/task_id_backfiller.rb` | Tick-time self-heal for tasks created outside `hive new` (hand-made folder, one `mv`-ed in) whose `meta.yml` has no `id` — `hive new` allocates ids from `Hive::TaskCounter`, so a task that skipped it shows a blank id in TUI, status, and dependency refs. It skips admission-error rows and corrupt strict metadata reads, so allocating an id cannot replace damaged dependency evidence. For a healthy row whose `Hive::TaskMeta` `id` is nil it allocates `TaskCounter.next!`, writes it via `TaskMeta.update_id` (every other meta field preserved), and commits the meta on `hive/state` under the per-project commit lock (`Hive::Lock.with_commit_lock`, as every durable committer does) with the per-task `hive_commit(stage_name:, slug:, action: "id-assigned")` call. The `task_id_backfill` event carries `committed:` so a swallowed commit (lock timeout / git error) is visible rather than masquerading as fully durable. Synchronous (no spawn/inflight — assignment is instant), `max_per_tick` (default 5) bounds the per-tick commits, and an assigned id is a natural fixed point. Guards `File.directory?(folder)` first so a row that outlived its folder (e.g. `hive drop` between snapshot and tick) is NOT resurrected by `TaskMeta.write`'s `mkdir_p`. Row/commit errors degrade through `:fatal` / `task_id_backfill_commit_skipped` logging while preserving the no-raise tick contract. Purely additive — never touches markers or dispatch. Logs `task_id_backfill`. |
@@ -146,6 +146,14 @@ Dispatch requests come BEFORE the row-scan so a slug whose request just
 dispatched this tick is already in-flight in the controller and the row
 scan's per-slug in-flight gate (`controller.running_task?`) keeps the same
 tick from double-spawning.
+
+The timestamp captured at tick start is an observation timestamp, not a
+durable-attempt launch timestamp. A full tick can exceed
+`attempt_launch_timeout_sec` while draining recovery work. Immediately before
+durable admission, the production dispatcher reads a fresh wall clock for the
+request creation time and attempt claim deadline; otherwise later rows could
+be born with already-expired claim windows and fail every detached handoff as
+`launch_handoff_failed`.
 
 Scheduler decisions are captured in memory as each row is evaluated. At the
 end of the tick the dispatcher fetches status a second time and publishes a
@@ -425,7 +433,29 @@ advances a workflow stage directly:
    configuration, credentials, provider state, or the configured agent binary
    changed, so the rerun itself is the universal health probe. A repeated
    failure writes a fresh marker and restarts the cooldown; no error retry
-   budget can exhaust.
+   budget can exhaust. Terminal-recovery reconciliation enforces that
+   invariant when a stage crashes before it can write the marker: if and only
+   if the failed/cancelled/lost receipt still names the exact unchanged
+   markerless post-clear generation, the coordinator writes
+   `ERROR reason=recovery_attempt_failed`. A meaningful marker, changed task
+   generation, moved task, or newer attempt is never overwritten. During
+   daemon reconciliation the coordinator consumes the already parsed claimed
+   request instead of rescanning the full dispatch queue for every terminal
+   recovery.
+
+   The retry ladder is durable per project, task, and workflow stage. Repeated
+   failures within one stage climb the shared backoff, but a successful stage
+   transition begins a new failure series at the five-second step. Historical
+   plan-review recovery therefore cannot put a task's first execute failure at
+   the one-hour ceiling.
+
+   A `deterministic_failure` park is also durable: ordinary scheduler resume
+   passes return the existing receipt without clearing its blocker, consuming
+   a dispatch slot, or launching another child. Once the failing input,
+   provider, or implementation changes, the existing freshness-bound
+   `workflow.retry` action is the explicit unpark verb. It keeps the same
+   recovery request and generation, returns it to scheduler ownership, and
+   starts the next observed failure series from fresh evidence.
 
    `StaleAgentHealer` is only the automatic scheduler for those durable errors.
    After the shared marker-age cooldown it submits the observed row to
@@ -539,29 +569,28 @@ answer with "Try again — another run holds the lock").
 
 The fix gates the resume on whether any questions are still unanswered:
 
-- `Dispatcher#brainstorm_answers_pending?(row)` parses the brainstorm
+- `Dispatcher#brainstorm_answer_state(row)` parses the brainstorm
   file (via the shared `Hive::BrainstormParser`, relocated out of
   `Hive::Bot::` for exactly this reason) for a `2-brainstorm`
-  `needs_input` row and returns true while any `### Q{n}.` lacks an
-  answer. It returns false for every non-brainstorm edit-resume row
-  (execute/review carry no Q&A markers). **Fails open** (resume) on a
-  file that parses to ZERO questions or on an unexpected error — and
-  this is self-healing, not a gap: the Telegram bot locates questions
-  with the *same* parser, so a file with no parseable `### Q{n}.` (empty,
-  agent crashed mid-write, header drift) is one the operator can't answer
-  via the bot either; the recovery is to re-run the brainstorm agent,
-  which regenerates a clean file, and holding would strand it instead.
+  `needs_input` row and returns two signals: `pending` while any
+  `### Q{n}.` lacks an answer, and `complete` only when the document has
+  at least one parsed question and every answer is filled. Non-brainstorm,
+  missing, zero-question, and unparseable files return neither signal and
+  retain the generic mtime-baseline path. The Telegram bot locates questions
+  with the *same* parser, so malformed files can still self-heal after a real
+  edit instead of being held forever as unanswered.
   `parse` is hardened (encoding-scrub + IO-resilient) so a torn
   concurrent read — the bot appends an answer while the daemon parses —
   degrades rather than raises; the residual `:fatal` rescue is deduped
   per `[project, slug]` so a persistently unreadable file can't spam the
   log every tick.
-- `Policy.decide` takes `answers_pending:` and downgrades a would-be
+- `Policy.decide` takes both signals. `answers_pending:` downgrades a would-be
   `:dispatch` to `:wait_for_answers` — but **only** the terminal
-  dispatch. The first-sight `:record_baseline`, `:skip`, and
-  `:wait_for_debounce` outcomes pass through unchanged, so the mtime
-  baseline is still seeded and the **editor-bulk-save** path (all answers
-  in one save → no unanswered slots) resumes normally.
+  dispatch. `answers_complete:` is the narrow first-sight exception: once
+  the final write is older than `edit_debounce_sec`, a non-empty fully
+  answered Q&A dispatches instead of consuming those answers as its initial
+  baseline. A fresh complete write still debounces, and incomplete or
+  structurally unknown rows still seed the normal baseline.
 - The dispatcher logs the hold as `:skipped reason=answers_pending`, and
   `hive status --json` carries an `unanswered_questions` count for the
   row (issue #270) so the hold is observable without tailing the log —
@@ -637,11 +666,19 @@ appear in `daemon.log` so a silent re-strand cannot happen unobserved.
 fails loud at the call site rather than silently re-stranding answered
 tasks across per-project status errors.
 
-**Accepted limitation:** if the daemon is down for the *entire* window
-between a bot-dispatched brainstorm's `WAITING` write and the user's
-answer, no baseline was ever recorded, so the answer becomes the baseline
-on first start and the task waits for the next edit. The daemon is
-normally up, so the window is tiny; the operator can re-save / `touch`.
+When a completed brainstorm is the daemon's first observation — including when
+all answers landed while the daemon was down — the non-empty structural
+`answers_complete` signal prevents the current answered mtime from becoming a
+first-sight baseline. After the normal debounce it resumes without a synthetic
+`touch`, another answer, or an operator-owned retry marker.
+
+Upgrade recovery covers baselines already written by an older daemon. The
+controller marks keys loaded from `daemon_dispatch_baselines.json` as restored
+until this process observes or dispatches them. For a fully answered brainstorm
+only, the dispatcher treats that uncorroborated restored value as first sight
+once. A real dispatch consumes the flag and restores ordinary duplicate-run
+protection; incomplete brainstorms and every non-brainstorm row continue using
+the persisted baseline unchanged.
 
 ## Single-dispatcher: producers write requests, daemon dispatches
 
@@ -679,7 +716,7 @@ unlinks the claim and logs completion.
 Current request schema is v5. It carries generation intent, predecessor
 attempt, inherited output references, and a restartable recovery object with
 canonical task, stage, marker ID, expected attrs, dispatch generation,
-owner/remediation, phase, retry count, terminal outcome/time, bounded routing
+owner/remediation, phase, stage-scoped retry count, terminal outcome/time, bounded routing
 admission observation, and immutable source terminal-receipt identity. Its
 closed recovery union distinguishes ordinary marker recovery from markerless
 initial route exhaustion keyed by task generation and frozen policy digest.
@@ -751,7 +788,10 @@ capacity saturation creates no recovery request or deadline.
 
 Lease reconciliation refreshes capacity and completion before another
 admission. A different request ID for the same live task generation resolves
-to the existing owner rather than another spawn.
+to the existing owner rather than another spawn. A request whose semantic
+progress produces a different task generation remains queued as `in_flight`
+until that owner exits; it is never attached to a different command simply
+because both commands target the same task stage.
 
 An internal worker or ancillary child that returns an `admission_error` JSON
 envelope with CONFIG exit 78 represents task-local validation state; delivery

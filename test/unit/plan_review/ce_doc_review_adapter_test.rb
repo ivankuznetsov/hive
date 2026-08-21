@@ -203,7 +203,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
 
       result = adapter_for(runner).call(request)
 
-      assert_equal "terminal_failure", result.outcome
+      assert_equal "retryable_failure", result.outcome
       assert_equal request.reviewer, result.route_receipt.fetch("actual")
       assert_equal "different_model_family", result.route_receipt.fetch("independence_reason")
       assert_equal "parser", result.route_receipt.fetch("diagnostic_source")
@@ -270,7 +270,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
 
       result = adapter.call(pi_request)
 
-      assert_equal "terminal_failure", result.outcome
+      assert_equal "retryable_failure", result.outcome
       assert_includes result.diagnostic, "not valid JSON"
     end
   end
@@ -357,7 +357,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
-  def test_output_is_read_with_the_parser_byte_bound
+  def test_oversized_output_is_retryable_with_the_parser_byte_bound
     with_request do |request, _plan_path|
       runner = lambda do |output_path:, **|
         File.binwrite(output_path, "x" * (Hive::PlanReview::ResultParser::MAX_BYTES + 1))
@@ -366,7 +366,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
 
       result = adapter_for(runner).call(request)
 
-      assert_equal "terminal_failure", result.outcome
+      assert_equal "retryable_failure", result.outcome
       assert_includes result.diagnostic, "size limit"
     end
   end
@@ -780,6 +780,8 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
           observed
         )
         unless kind == "verification"
+          assert_includes observed, "[a-z][a-z0-9_]{0,63}"
+          assert_match(/Set\s+`residual_evidence` to `\[\]`/, observed)
           rubric_patterns = [
             /`safe_auto`: one concrete, low-risk, reversible technical correction follows\s+from the plan, product contract, or established repository patterns/,
             /`gated_auto`: the preferred technical correction is clear, but applying it\s+materially changes architecture, external behavior, compatibility/,
@@ -787,15 +789,9 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
             /`fyi`: useful information that requires no plan change/
           ]
           rubric_patterns.each { |pattern| assert_match pattern, observed }
-          assert_match(
-            /For the final JSON written to Hive, this rubric is authoritative and overrides\s+any classification, autofix, or routing rubric from an invoked skill/,
-            observed
-          )
+          assert_match(/For the final JSON written to Hive, this rubric is authoritative and overrides\s+any classification, autofix, or routing rubric from an invoked skill/, observed)
           assert_includes observed, "Classification is about decision authority, not severity."
-          assert_match(
-            /Do not use `manual`\s+merely because the plan must choose/,
-            observed
-          )
+          assert_match(/Do not use `manual`\s+merely because the plan must choose/, observed)
         end
       end
     end

@@ -84,6 +84,15 @@ ambient OpenCode configuration does not contain the plugin. Provider selection
 therefore cannot pass configuration and runtime probing only to fail later
 because the review skill contract omitted or ignored that supported host.
 
+Primary and adversarial result prompts spell out the machine-only fields that
+are easy for a natural-language reviewer to misread: `selected_lenses` uses
+snake_case identifiers and `residual_evidence` stays empty until disposition
+verification. A malformed reviewer result is retryable within the existing
+bounded attempt budget; plan or snapshot mutation remains terminal. The
+adapter-contract version participates in the policy fingerprint, so shipping a
+corrected prompt/parser contract gives an unchanged plan a fresh review instead
+of replaying a verdict Hive never successfully parsed.
+
 Reviewers run from that disposable checkout with search, shell, and network access so
 they can verify a plan against code, wiki context, history, and referenced
 contracts instead of checking only the document against itself. Codex and Grok

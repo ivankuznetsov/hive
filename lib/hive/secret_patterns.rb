@@ -1,3 +1,5 @@
+require "digest"
+
 module Hive
   # Shared regex set for credential/secret detection. Used by both:
   # - PR-body/comment secret scans in OpenPr, Finalize, and GithubPublisher
@@ -6,18 +8,6 @@ module Hive
   # New patterns must come with at least one test in
   # test/unit/secret_patterns_test.rb (or the consumer's tests).
   module SecretPatterns
-    TEST_FIXTURE_PATH = %r{\A(?:test|spec)/}.freeze
-    OBVIOUS_TEST_PASSWORD_VALUES = %w[
-      password
-      test-password
-      example-password
-      fake-password
-      dummy-password
-      correct
-      system-password
-    ].freeze
-    PASSWORD_ASSIGNMENT_VALUE = /\A.*?\b(?:password|passwd|pwd)\b['"]?\s*[:=]\s*(['"]?)([^\s'"]{6,})\1\z/i
-
     PATTERNS = {
       # AWS access key id (AKIA = long-term, ASIA = temporary session token)
       # and secret access key.
@@ -86,7 +76,11 @@ module Hive
       PATTERNS.each do |name, regex|
         text.scan(regex) do |_capture|
           full = Regexp.last_match[0]
-          matches << { name: name, snippet: full.length > 80 ? "#{full[0, 80]}…" : full }
+          matches << {
+            name: name,
+            snippet: full.length > 80 ? "#{full[0, 80]}…" : full,
+            sha256: Digest::SHA256.hexdigest(full)
+          }
         end
       end
       matches
@@ -96,20 +90,6 @@ module Hive
       return false if text.nil? || text.empty?
 
       PATTERNS.each_value.any? { |regex| regex.match?(text) }
-    end
-
-    # Auto-commit and post-fix review scans inspect source files rather than
-    # untrusted logs. Permit only unmistakable placeholder credentials in
-    # conventional test trees, where fixtures such as
-    # `operator.password = "password"` are executable test setup rather than
-    # deployed secrets. The shared scan/redact API remains conservative, and
-    # arbitrary literals (even under test/) still fail closed.
-    def obvious_test_password_fixture?(path:, hit:)
-      return false unless TEST_FIXTURE_PATH.match?(path.to_s)
-      return false unless hit[:name] == :password_assignment
-
-      match = PASSWORD_ASSIGNMENT_VALUE.match(hit[:snippet].to_s)
-      match && OBVIOUS_TEST_PASSWORD_VALUES.include?(match[2].downcase)
     end
 
     # Replace every PATTERNS match in `text` with a `[REDACTED:<name>]`

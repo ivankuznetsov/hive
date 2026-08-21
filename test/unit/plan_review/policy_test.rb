@@ -108,6 +108,43 @@ class PlanReviewPolicyTest < Minitest::Test
     assert_equal first.policy_fingerprint, second.policy_fingerprint
   end
 
+  def test_operational_attempt_tuning_does_not_rekey_a_review
+    first = Hive::PlanReview::Policy.evaluate(
+      workflow_id: "coding", signals: signals(skip: false),
+      config: config.merge("attempts" => { "timeout_sec" => 900, "max_transient" => 1 })
+    )
+    second = Hive::PlanReview::Policy.evaluate(
+      workflow_id: "coding", signals: signals(skip: false),
+      config: config.merge("attempts" => { "timeout_sec" => 1800, "max_transient" => 4 })
+    )
+
+    assert_equal first.policy_fingerprint, second.policy_fingerprint
+  end
+
+  def test_reviewer_or_adapter_change_rekeys_a_review
+    base = config.merge(
+      "adapter" => "ce_doc_review",
+      "reviewers" => { "primary" => { "agent" => "pi" } }
+    )
+    reviewer_changed = base.merge(
+      "reviewers" => { "primary" => { "agent" => "codex" } }
+    )
+    adapter_changed = base.merge("adapter" => "codex_review")
+
+    first = Hive::PlanReview::Policy.evaluate(
+      workflow_id: "coding", signals: signals(skip: false), config: base
+    )
+    second = Hive::PlanReview::Policy.evaluate(
+      workflow_id: "coding", signals: signals(skip: false), config: reviewer_changed
+    )
+    third = Hive::PlanReview::Policy.evaluate(
+      workflow_id: "coding", signals: signals(skip: false), config: adapter_changed
+    )
+
+    refute_equal first.policy_fingerprint, second.policy_fingerprint
+    refute_equal first.policy_fingerprint, third.policy_fingerprint
+  end
+
   def test_non_integer_classifier_version_is_a_config_error
     error = assert_raises(Hive::ConfigError) do
       Hive::PlanReview::Policy.evaluate(

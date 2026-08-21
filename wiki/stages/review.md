@@ -165,7 +165,7 @@ After the fix agent returns, `Hive::Stages::Review::FixGuardrail.run!` (ADR-020 
 
 - `shell_pipe_to_interpreter` — curl/wget pipe into sh/bash/python/ruby/node
 - `ci_workflow_edit` — `.github/workflows/`, gitlab-ci, circleci, Jenkinsfile, bitbucket-pipelines, azure-pipelines, travis
-- `secrets_pattern_match` — dispatches to `Hive::SecretPatterns.scan` (AWS, GitHub, OpenAI, Anthropic, Stripe, Slack, JWT, PEM, generic api_key). General password detection requires an actual `:` or `=` assignment delimiter, so prose such as “password resets” is not treated as a credential; explicit SQL, XML, and `--password VALUE` forms remain protected. Added source under conventional `test/` or `spec/` trees may use a closed list of unmistakable placeholder passwords (`password`, `test-password`, `example-password`, `fake-password`, `dummy-password`, `correct`, `system-password`) without tripping the post-fix guardrail; the shared log/PR-body scanner remains conservative and production paths never receive this exemption.
+- `secrets_pattern_match` — dispatches to `Hive::SecretPatterns.scan` (AWS, GitHub, OpenAI, Anthropic, Stripe, Slack, JWT, PEM, generic api_key). General password detection requires an actual `:` or `=` assignment delimiter. An unquoted right-hand side is skipped only when the whole value is lookup-shaped (`.`, `[`, or `(`); any string literal on the same line keeps the finding. Test and production paths share this rule.
 - `dotenv_edit` — `.env`, `.env.<environment>` (e.g., `.env.local`, `.env.production`, `.env.test`, `.env.staging`), `secrets.yml`, `credentials.yml(.enc)`, `.npmrc`, `.pypirc`. Template suffixes are deliberately **excluded** so committed templates do not trip the guardrail: `.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.tmpl`, `.env.default`, `.env.defaults`. Projects that genuinely keep secrets in `.env.example` can re-add strict matching via `review.fix.guardrail.patterns_override` (custom `dotenv_template_edit` pattern).
 - `dependency_lockfile_change` — Gemfile.lock, package-lock.json, pnpm-lock, yarn.lock, Cargo.lock, go.sum, poetry.lock, Pipfile.lock, composer.lock, uv.lock
 - `permission_change` — `new mode 100755` raw-diff-header
@@ -181,7 +181,13 @@ Per-project override via `review.fix.guardrail.patterns_override`: `false` to di
 
 When all four hold, Phase 2/3/4 are skipped for that pass — the prior pass's commits stand, `fix-success-NN.md` is written, marker resets, and the loop advances. **Special-case** for `pass == max_passes`: the approval breaks directly to Phase 5 (browser test) instead of incrementing into `REVIEW_STALE`. Approval is single-shot per pass: a future pass that re-trips the guardrail writes a fresh `fix-guardrail-(NN+1).md` with `[ ]` lines; pass-N approval does not transfer. The `fix-guardrail-NN.md` file is included in `protected_set` during every Phase 4 spawn (alongside `reviews/escalations-NN.md`, `reviews/errors-NN.md`, and the `fix-success-NN.md` sentinel) so a compromised fix agent cannot pre-write all-`[x]` lines to stage an approval token for the next resume.
 
-An explicit `review.fix.guardrail.bypass: true` applies consistently to both new scans and an already-persisted `REVIEW_WAITING reason=fix_guardrail` pause. Status classifies that paused row as `ready_for_review`, allowing the daemon to resume it without a checkbox edit. Resume still validates the positive match count, guarded HEAD, and clean worktree before clearing the pause; bypass waives the finding class, not tree integrity.
+Project config may waive one exact finding with
+`review.fix.guardrail.waivers: [{pattern: NAME, sha256: DIGEST}]`, where the
+digest is SHA-256 of the detector's full match. Applied waivers are recorded in
+the guardrail report and emit a task event with the exact fingerprints. The old
+global `bypass` key has no release authority, and an already parked
+`REVIEW_WAITING reason=fix_guardrail` still requires checked findings plus the
+existing count, HEAD, and clean-tree validations.
 
 If `marker.attrs["matches"]` is missing or malformed (not a positive Integer string) on a `fix_guardrail` marker, the runner refuses approval with `REVIEW_ERROR phase=resume reason=malformed_marker_matches` — disables a silent count-blind bypass.
 

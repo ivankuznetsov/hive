@@ -1,4 +1,5 @@
 require "open3"
+require "digest"
 require "hive/secret_patterns"
 require "hive/stages/review/fix_guardrail/patterns"
 
@@ -17,54 +18,34 @@ module Hive
       # Pattern set lives in lib/hive/stages/review/fix_guardrail/patterns.rb.
       # Per-project override via review.fix.guardrail.patterns_override.
       module FixGuardrail
-        Result = Data.define(:status, :matches)
-        Match = Data.define(:pattern_name, :file, :line, :snippet, :severity)
-
-        # SecretPatterns deliberately remains conservative because it also
-        # redacts logs and diagnostics. In an added source-code line, however,
-        # a password keyword whose value is an obvious runtime lookup is not
-        # secret material. Treating `password: params[:password]` as though it
-        # were `password: "literal"` parked an otherwise autonomous review on
-        # an operator-only guardrail.
-        DYNAMIC_PASSWORD_REFERENCES = /\A(?:
-          params(?:\[|\.)
-          | request\.params(?:\[|\.)
-          | ENV(?:\[|\.)
-          | env(?:\[|\.)
-          | process\.env(?:\[|\.)
-          | Rails\.application\.credentials(?:\[|\.)
-          | credentials(?:\[|\.)
-          | config(?:\[|\.)
-          | settings?(?:\[|\.)
-          | options?(?:\[|\.)
-          | kwargs(?:\[|\.)
-          | payload(?:\[|\.)
-          | input(?:\[|\.)
-          | attributes?(?:\[|\.)
-        )/ix
+        Result = Data.define(:status, :matches, :waived_matches)
+        Match = Data.define(
+          :pattern_name, :file, :line, :snippet, :severity, :match_sha256
+        )
+        WAIVER_SHA256 = /\A[0-9a-f]{64}\z/.freeze
 
         module_function
 
         def run!(cfg:, ctx:, base_sha:, head_sha:)
           enabled = cfg.dig("review", "fix", "guardrail", "enabled")
-          return Result.new(status: :skipped, matches: []) if enabled == false
+          return Result.new(status: :skipped, matches: [], waived_matches: []) if enabled == false
 
-          bypass = cfg.dig("review", "fix", "guardrail", "bypass")
-          return Result.new(status: :skipped, matches: []) if bypass
-
-          return Result.new(status: :clean, matches: []) if base_sha.nil? || head_sha.nil?
-          return Result.new(status: :clean, matches: []) if base_sha == head_sha
+          return Result.new(status: :clean, matches: [], waived_matches: []) if base_sha.nil? || head_sha.nil?
+          return Result.new(status: :clean, matches: [], waived_matches: []) if base_sha == head_sha
 
           diff = capture_diff(ctx.worktree_path, base_sha, head_sha)
-          return Result.new(status: :clean, matches: []) if diff.empty?
+          return Result.new(status: :clean, matches: [], waived_matches: []) if diff.empty?
 
           patterns = resolve_patterns(cfg)
-          matches = scan_diff(diff, patterns)
+          waivers = resolve_waivers(cfg)
+          matches, waived = scan_diff(diff, patterns).partition do |match|
+            !waivers.include?([ match.pattern_name, match.match_sha256 ])
+          end
 
           if matches.empty?
-            Result.new(status: :clean, matches: [])
+            Result.new(status: :clean, matches: [], waived_matches: waived)
           else
-            Result.new(status: :tripped, matches: matches)
+            Result.new(status: :tripped, matches: matches, waived_matches: waived)
           end
         end
 
@@ -137,6 +118,28 @@ module Hive
           }
         end
 
+        # Waivers are exact finding fingerprints, not detector/value/path
+        # allowlists. A changed pattern, path, or matched snippet therefore
+        # requires a fresh auditable decision instead of inheriting a broad
+        # exemption forever.
+        def resolve_waivers(cfg)
+          values = Array(cfg.dig("review", "fix", "guardrail", "waivers"))
+          values.each_with_object({}) do |value, result|
+            unless value.is_a?(Hash)
+              raise Hive::ConfigError,
+                    "review.fix.guardrail.waivers entries must contain pattern and sha256"
+            end
+            pattern = (value["pattern"] || value[:pattern]).to_s
+            sha256 = (value["sha256"] || value[:sha256]).to_s.downcase
+            if pattern.empty? || !WAIVER_SHA256.match?(sha256)
+              raise Hive::ConfigError,
+                    "review.fix.guardrail.waivers entries must contain pattern and SHA-256"
+            end
+
+            result[[ pattern, sha256 ]] = true
+          end.freeze
+        end
+
         # Walk the unified diff once, dispatching each line to whichever
         # pattern targets apply. Returns Match objects ordered by
         # appearance in the diff.
@@ -177,7 +180,7 @@ module Hive
                 next unless spec[:targets] == :file_path
                 next unless spec[:regex] =~ path
 
-                matches << Match.new(
+                matches << build_match(
                   pattern_name: name.to_s,
                   file: path,
                   line: nil,
@@ -207,7 +210,7 @@ module Hive
               next unless spec[:targets] == :raw_diff_header
               next unless spec[:regex] =~ chomped
 
-              matches << Match.new(
+              matches << build_match(
                 pattern_name: name.to_s,
                 file: current_file,
                 line: nil,
@@ -227,27 +230,26 @@ module Hive
 
               if name == :secrets_pattern_match
                 Hive::SecretPatterns.scan(added).each do |hit|
-                  next if dynamic_password_reference?(hit)
-                  next if Hive::SecretPatterns.obvious_test_password_fixture?(
-                    path: current_file, hit: hit
-                  )
+                  next if runtime_password_lookup?(added, hit)
 
-                  matches << Match.new(
+                  matches << build_match(
                     pattern_name: "secrets_pattern_match.#{hit[:name]}",
                     file: current_file,
                     line: current_line,
                     snippet: hit[:snippet],
-                    severity: spec[:severity]
+                    severity: spec[:severity],
+                    match_sha256: hit.fetch(:sha256)
                   )
                 end
               elsif spec[:regex] && spec[:regex] =~ added
-                snippet = Regexp.last_match[0]
-                matches << Match.new(
+                matched = Regexp.last_match[0]
+                matches << build_match(
                   pattern_name: name.to_s,
                   file: current_file,
                   line: current_line,
-                  snippet: snippet.length > 100 ? "#{snippet[0, 100]}…" : snippet,
-                  severity: spec[:severity]
+                  snippet: matched.length > 100 ? "#{matched[0, 100]}…" : matched,
+                  severity: spec[:severity],
+                  match_sha256: Digest::SHA256.hexdigest(matched)
                 )
               end
             end
@@ -258,18 +260,24 @@ module Hive
           matches
         end
 
-        def dynamic_password_reference?(hit)
+        def runtime_password_lookup?(added_line, hit)
           return false unless hit[:name] == :password_assignment
 
-          rhs = hit[:snippet].to_s.sub(
+          rhs = added_line.to_s.sub(
             /\A.*?\b(?:password|passwd|pwd)\b['"]?\s*[:=]\s*/i,
             ""
           )
-          return false if rhs.start_with?("'", '"')
+          return false if rhs == added_line.to_s
+          return false if rhs.match?(/['"]/)
 
-          DYNAMIC_PASSWORD_REFERENCES.match?(rhs)
+          rhs.match?(/[\.\[\(]/)
         end
-        private_class_method :dynamic_password_reference?
+
+        def build_match(pattern_name:, file:, line:, snippet:, severity:,
+                        match_sha256: Digest::SHA256.hexdigest(snippet.to_s))
+          Match.new(pattern_name:, file:, line:, snippet:, severity:, match_sha256:)
+        end
+        private_class_method :runtime_password_lookup?, :build_match
       end
     end
   end

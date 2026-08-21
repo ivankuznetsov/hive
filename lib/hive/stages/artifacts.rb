@@ -97,10 +97,7 @@ module Hive
       end
 
       def role_agent_limit?(result)
-        result[:error_reason].to_s == "limits_reached" ||
-          Hive::AgentLimit.limit_reached?(result[:limit_text].to_s) ||
-          Hive::AgentLimit.from_limit?(result[:error_message].to_s) ||
-          Hive::AgentLimit.limit_reached?(result[:error_message].to_s)
+        result[:error_reason].to_s == "limits_reached"
       end
 
       def run_outcome_evidence!(task, cfg, identity_resolver: nil, store: nil,
@@ -368,10 +365,14 @@ module Hive
             # raises escapes the repair channel entirely and ends the stage —
             # yet an over-long or vague reason is exactly what one more
             # reviewer turn fixes. Validation only; nothing is persisted.
-            Hive::Artifacts::OutcomeEvidence::Contract.verdicts!(reviewer.fetch(:output))
+            begin
+              Hive::Artifacts::OutcomeEvidence::Contract.verdicts!(reviewer.fetch(:output))
+            rescue Hive::Artifacts::OutcomeEvidence::StoreError => e
+              raise RoleOutputError, e.message
+            end
 
             return reviewer
-          rescue Hive::Artifacts::OutcomeEvidence::StoreError => e
+          rescue RoleOutputError => e
             raise if index + 1 >= MAX_REVIEWER_ATTEMPTS
 
             repair = {

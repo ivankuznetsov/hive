@@ -306,27 +306,28 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
-  # A mandatory review that could not launch any reviewer has learned nothing
-  # about the plan, so it must not cache a verdict. Reviewer routes are not
-  # part of the review identity, so a terminal `blocked` here would replay
-  # forever even after the reviewer was fixed. Instead the legs are reset and
-  # the review retries itself once capability returns.
-  def test_mandatory_total_unavailability_resets_instead_of_caching_a_verdict
+  # Mandatory capability failures get cheap re-probes, but an unchanged probe
+  # eventually parks instead of growing current.json forever.
+  def test_mandatory_total_unavailability_parks_after_three_stable_probes
     with_task(mandatory_plan) do |task, cfg|
       adapter = FakeAdapter.new do |_request|
         Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported")
       end
-      projection = orchestrator(task, cfg, adapter:).advance!
-      record = projection.record
+      first = orchestrator(task, cfg, adapter:).advance!.record
+      second = orchestrator(task, cfg, adapter:).advance!.record
+      record = orchestrator(task, cfg, adapter:).advance!.record
 
-      refute_equal "blocked", record.state
-      assert_equal "reviewing", record.state
+      assert_equal "reviewing", first.state
+      assert_equal "reviewing", second.state
+      assert_equal "blocked", record.state
       refute record.execution_allowed?
-      assert_empty record["blockers"]
+      assert_equal "reviewer_unlaunchable", record["blockers"].first.fetch("reason")
       assert_includes record["required_action"], "restore reviewer capability"
-      assert record["routes"].any? { |route| route["recovery_reset"] == true },
-             "the failed legs must be reset so the next run probes capability again"
-      assert_equal %w[primary adversarial], adapter.calls.map(&:kind)
+      assert_equal 6, adapter.calls.length
+      counts = record["routes"].filter_map do |route|
+        route["capability_probe_count"] if route["role"] == "primary"
+      end
+      assert_equal [ 1, 2 ], counts
     end
   end
 

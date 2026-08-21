@@ -173,41 +173,14 @@ class SecretPatternsTest < Minitest::Test
     refute_match_any("Rate limits apply to password resets, confirmations, and sign-ins.")
   end
 
-  def test_obvious_test_password_fixture_is_identified_without_weakening_scan
-    hits = Hive::SecretPatterns.scan('operator.password = "password"')
-    assert_equal 1, hits.length
-    hit = hits.fetch(0)
-
-    assert Hive::SecretPatterns.obvious_test_password_fixture?(
-      path: "test/integration/login_test.rb", hit: hit
-    )
+  def test_test_password_literal_remains_a_detected_assignment
     assert_match_name('operator.password = "password"', :password_assignment)
   end
 
-  def test_runtime_test_password_placeholders_are_identified
+  def test_runtime_test_password_literals_remain_detected
     [ "correct", "system-password" ].each do |value|
-      hit = Hive::SecretPatterns.scan(%(password: "#{value}")).fetch(0)
-
-      assert Hive::SecretPatterns.obvious_test_password_fixture?(
-        path: "test/controllers/sessions_controller_test.rb", hit: hit
-      ), value
+      assert_match_name(%(password: "#{value}"), :password_assignment)
     end
-  end
-
-  def test_test_password_fixture_requires_an_obvious_value_and_test_path
-    realistic_hits = Hive::SecretPatterns.scan('operator.password = "project-secret-42"')
-    placeholder_hits = Hive::SecretPatterns.scan('operator.password = "password"')
-    assert_equal 1, realistic_hits.length
-    assert_equal 1, placeholder_hits.length
-    realistic = realistic_hits.fetch(0)
-    placeholder = placeholder_hits.fetch(0)
-
-    refute Hive::SecretPatterns.obvious_test_password_fixture?(
-      path: "test/integration/login_test.rb", hit: realistic
-    )
-    refute Hive::SecretPatterns.obvious_test_password_fixture?(
-      path: "app/services/operator.rb", hit: placeholder
-    )
   end
 
   def test_high_signal_password_forms_remain_protected

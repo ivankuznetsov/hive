@@ -341,6 +341,16 @@
         "blocked_reason": { "type": ["string", "null"] },
         "blocked_remediation": { "type": ["string", "null"] },
         "retry_count": { "type": "integer", "minimum": 0 },
+        "failure_fingerprint": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "identical_failure_count": { "type": "integer", "minimum": 0 },
+        "failure_attempt_history": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+        },
         "provider_hint": {
           "type": ["object", "null"],
           "additionalProperties": false,

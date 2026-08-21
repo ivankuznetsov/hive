@@ -573,6 +573,7 @@ class AgentRuntimeTest < Minitest::Test
     )
 
     refute_nil error, "a refused pi turn must reach Hive as a provider error"
+    assert_equal :provider_limit, error[:kind]
     assert_equal :pi, error[:provider]
     assert_equal 402, error[:status_code]
     assert_includes error[:message], "Prompt tokens limit exceeded"

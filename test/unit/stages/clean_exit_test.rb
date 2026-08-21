@@ -255,7 +255,7 @@ class HiveStagesCleanExitTest < Minitest::Test
     end
   end
 
-  def test_obvious_password_fixture_in_test_tree_is_auto_committed
+  def test_test_password_literal_returns_safety_violation
     with_tmp_dir do |worktree|
       init_git(worktree)
       FileUtils.mkdir_p(File.join(worktree, "test", "integration"))
@@ -269,8 +269,9 @@ class HiveStagesCleanExitTest < Minitest::Test
         task: fake_task, cfg: @default_cfg
       )
 
-      assert_equal :auto_committed, result[:status]
-      assert_empty `git -C #{worktree} status --porcelain`
+      assert_equal :safety_violation, result[:status]
+      assert_match(/password_assignment/, result[:message])
+      refute_empty `git -C #{worktree} status --porcelain`
     end
   end
 

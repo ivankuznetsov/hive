@@ -46,4 +46,43 @@ class PatrolShutdownTest < Minitest::Test
 
     refute_predicate Hive::Patrol::Shutdown, :requested?
   end
+
+  def test_agent_child_handler_preserves_the_patrol_shutdown_request
+    previous = Signal.trap("TERM", "DEFAULT")
+    Hive::Patrol::Shutdown.install_trap!(signals: %w[TERM])
+    agent = Hive::Agent.allocate
+    child_cancelled = false
+    agent.send(:install_chained_signal_trap, "TERM") { child_cancelled = true }
+
+    Process.kill("TERM", Process.pid)
+    20.times do
+      break if child_cancelled && Hive::Patrol::Shutdown.requested?
+
+      sleep 0.01
+    end
+
+    assert child_cancelled
+    assert_predicate Hive::Patrol::Shutdown, :requested?
+  ensure
+    Signal.trap("TERM", previous || "DEFAULT")
+  end
+
+  def test_install_trap_chains_an_existing_callable_handler
+    previous = Signal.trap("TERM", "DEFAULT")
+    chained = false
+    Signal.trap("TERM") { chained = true }
+    Hive::Patrol::Shutdown.install_trap!(signals: %w[TERM])
+
+    Process.kill("TERM", Process.pid)
+    20.times do
+      break if chained && Hive::Patrol::Shutdown.requested?
+
+      sleep 0.01
+    end
+
+    assert chained
+    assert_predicate Hive::Patrol::Shutdown, :requested?
+  ensure
+    Signal.trap("TERM", previous || "DEFAULT")
+  end
 end

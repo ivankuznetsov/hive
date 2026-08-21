@@ -81,7 +81,9 @@ module AgentCliRuntime
     end
   end
 
-  EXTRACTED_FAILURE_KINDS = %i[model_output_limit].freeze
+  EXTRACTED_FAILURE_KINDS = %i[
+    provider_limit rate_limited model_output_limit provider_error
+  ].freeze
 
   ExtractedFailure = Data.define(:kind, :message) do
     def initialize(kind:, message:)

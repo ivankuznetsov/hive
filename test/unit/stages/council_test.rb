@@ -443,6 +443,7 @@ class StagesCouncilTest < Minitest::Test
         marker = Hive::Markers.current(task.state_file)
         assert_equal({ commit: "round_waiting", status: :waiting }, result)
         assert_equal "max_rounds", marker.attrs.fetch("reason")
+        assert_equal "1", marker.attrs.fetch("round")
         assert_equal 2, captured.length, "revise must not run after max_rounds is reached"
       end
     end
@@ -470,6 +471,7 @@ class StagesCouncilTest < Minitest::Test
         marker = Hive::Markers.current(task.state_file)
         assert_equal({ commit: "round_waiting", status: :waiting }, result)
         assert_equal "max_rounds", marker.attrs.fetch("reason")
+        assert_equal "2", marker.attrs.fetch("round")
         assert_empty captured, "a council already past its budget must not spawn a reviewer"
         assert_equal File.join(reviews, "triage-05.md"), marker.attrs.fetch("triage"),
                      "the operator must be pointed at the most recent verdict"

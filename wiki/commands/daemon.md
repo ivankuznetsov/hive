@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-08-14
+updated: 2026-08-21
 tags: [command, daemon, automation, plan-review, json]
 ---
 
@@ -65,6 +65,13 @@ explicit operator recovery through the shared API remains available.
 The deterministic v5 request does not expire behind admission gates; a crash
 before or after clear resumes its persisted phase, while stale identity is
 blocked instead of crossing into a replacement task generation.
+Each terminal marker is fingerprinted from its reason, provider, status code,
+and normalized diagnostic. A changed fingerprint keeps autonomous retries
+unbounded. Repetition is exposed as `escalation_tier=degraded`; after three
+identical failures at the ladder ceiling the request parks once with
+`reason=deterministic_failure`, its fingerprint, and bounded attempt history,
+so it stops consuming dispatch slots while other tasks continue. Terminal
+recovery cleanup is stage-scoped and cannot erase a prior stage's ladder.
 Independently,
 `Hive::Daemon::DisplayNameBackfiller`
 runs each tick and re-spawns `hive generate-name <folder>` (fire-and-forget,

@@ -37,6 +37,9 @@ regression, emit a `residual_evidence` row with its exact fingerprint, status
 missing or regresses behavior, emit the original finding fingerprint (or a new
 typed finding for a new regression) in `findings`; never infer verification
 merely from a finding's absence.
+Every newly emitted finding must use `"lifecycle": "open"`; Hive alone owns
+later lifecycle transitions, so never emit `closed` or another inferred
+disposition.
 For every new typed finding, set `anchor_digest` to the lowercase SHA-256 of
 the selected inclusive line range after removing each line terminator and
 joining the lines with a single `\n`; `path` must be exactly `plan.md`.

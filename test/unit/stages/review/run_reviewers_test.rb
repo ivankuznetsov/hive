@@ -2017,6 +2017,30 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_exact_guardrail_waiver_emits_a_visible_fingerprint_event
+    Dir.mktmpdir("hive-review-waiver-event") do |dir|
+      task = Struct.new(:folder, :slug).new(dir, "review-task")
+      match = Hive::Stages::Review::FixGuardrail::Match.new(
+        pattern_name: "secrets_pattern_match.password_assignment",
+        file: "config/example.rb", line: 1, snippet: "[REDACTED]",
+        severity: :high, match_sha256: "a" * 64
+      )
+
+      Hive::Stages::Review.emit_guardrail_waivers(task, 2, [ match ])
+
+      event = JSON.parse(File.readlines(File.join(dir, "events.jsonl")).last)
+      assert_equal "round_complete", event.fetch("event_type")
+      assert_equal 2, event.dig("data", "pass")
+      assert_equal(
+        {
+          "pattern" => "secrets_pattern_match.password_assignment",
+          "sha256" => "a" * 64
+        },
+        event.dig("data", "guardrail_waivers", 0)
+      )
+    end
+  end
+
   def test_fix_guardrail_approved_false_when_any_unchecked_remains
     with_tmp_dir do |dir|
       write_guardrail_file(dir, pass: 4, body: <<~MD)

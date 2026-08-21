@@ -13,16 +13,15 @@ class PlanReviewWorkspaceScopeTest < Minitest::Test
                  scope.fetch(:permission_mode)
     assert_nil scope.fetch(:allowed_tools)
     assert_nil scope.fetch(:disallowed_tools)
-    assert_equal [
-      "--sandbox", "workspace-write", "-c", 'approval_policy="never"',
-      "--ephemeral", "--ignore-user-config", "--ignore-rules",
-      "--skip-git-repo-check"
-    ], scope.fetch(:permission_arguments)
+    refute scope.key?(:permission_arguments)
+    refute_includes Hive::AgentProfiles.lookup(:codex).permission_flags(
+      scope.fetch(:permission_mode)
+    ), "--skip-git-repo-check"
   end
 
-  # Reads and search are no longer clipped to the temp dir — a reviewer has to
-  # reach the repository — but edits still point only at the disposable
-  # workspace, and the ArtifactFirewall still guards the protected artifacts.
+  # The disposable workspace is a complete checkout: read/search/shell can
+  # inspect it, while edits remain scoped to that checkout and the
+  # ArtifactFirewall retains custody of controller-owned task artifacts.
   def test_claude_can_reach_the_repo_while_edits_stay_in_the_workspace
     workspace = File.expand_path("/tmp/review")
     scope = Hive::PlanReview::WorkspaceScope.launch_kwargs(
@@ -55,9 +54,9 @@ class PlanReviewWorkspaceScopeTest < Minitest::Test
     end
   end
 
-  # Confinement no longer decides who may review: a reviewer needs the repo,
-  # and the ArtifactFirewall — not an empty temp dir — is what guards the
-  # protected artifacts. No provider is refused for lacking a sandbox.
+  # The detached worktree supplies the common write-isolation boundary, while
+  # provider-specific tooling can still add its native sandbox. No provider is
+  # refused merely because it lacks an additional sandbox implementation.
   def test_no_provider_is_refused_for_lacking_confinement
     %i[opencode claude pi grok codex].each do |name|
       profile = Hive::AgentProfiles.lookup(name)

@@ -162,7 +162,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
-  def test_deferred_successor_dispatch_retries_on_persisted_shared_cooldown
+  def test_deferred_successor_dispatch_retries_on_persisted_shared_ladder_step
     with_task do |task|
       with_tmp_dir do |root|
         store = Hive::Attempts::Store.new(root: root)
@@ -180,21 +180,21 @@ class DaemonAttemptLossHealerTest < Minitest::Test
           store, outcomes, FakeProcessor.new(outcomes, task.folder),
           dispatcher, FakeLogger.new
         )
+        retry_delay = Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.first
+        scheduled_at = NOW + 1 + retry_delay
 
-        service.heal_attempt_losses([ lost ], now: RETRY_AT - 3)
+        service.heal_attempt_losses([ lost ], now: scheduled_at - 1)
         assert_empty dispatcher.calls
 
-        service.heal_attempt_losses([ lost ], now: RETRY_AT)
+        service.heal_attempt_losses([ lost ], now: scheduled_at)
         assert_equal 1, dispatcher.calls.size
         first_retry_at = outcomes.fetch(lost.attempt_id).fetch("last_retry_at")
 
-        service.heal_attempt_losses([ lost ], now: RETRY_AT + 30)
+        service.heal_attempt_losses([ lost ], now: scheduled_at + retry_delay - 1)
         assert_equal 1, dispatcher.calls.size
         assert_equal first_retry_at, outcomes.fetch(lost.attempt_id).fetch("last_retry_at")
 
-        service.heal_attempt_losses(
-          [ lost ], now: RETRY_AT + Hive::AgentLimit.retry_cooldown_sec
-        )
+        service.heal_attempt_losses([ lost ], now: scheduled_at + retry_delay)
         assert_equal 2, dispatcher.calls.size
       end
     end

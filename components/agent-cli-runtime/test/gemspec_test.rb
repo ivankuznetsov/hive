@@ -8,7 +8,7 @@ class AgentCliRuntimeGemspecTest < Minitest::Test
     spec = Gem::Specification.load(GEMSPEC)
 
     assert_equal "agent-cli-runtime", spec.name
-    assert_equal Gem::Version.new("0.2.2"), spec.version
+    assert_equal Gem::Version.new("0.2.3"), spec.version
     assert_equal Gem::Requirement.new(">= 3.4.0"), spec.required_ruby_version
     assert_equal [ "agent-runtime" ], spec.executables
     assert_equal "MIT", spec.license
@@ -37,7 +37,7 @@ class AgentCliRuntimeGemspecTest < Minitest::Test
     assert_includes readme, "PreparedInvocation#cleanup!"
     refute_match(/~> 0\.1\./, readme)
     assert_match(
-      /\A# Changelog\n\n## Unreleased\n\n## 0\.2\.2 - 2026-08-18\n/,
+      /\A# Changelog\n\n## Unreleased\n\n## 0\.2\.3 - 2026-08-21\n/,
       changelog
     )
   end

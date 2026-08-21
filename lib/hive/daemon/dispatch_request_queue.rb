@@ -55,7 +55,8 @@ module Hive
         dispatch_generation failure_origin next_eligible_at owner
         blocked_reason blocked_remediation provider_hint attempt_id
         terminal_outcome terminal_at retry_count policy_digest source_receipt
-        admission_observation
+        admission_observation failure_fingerprint identical_failure_count
+        failure_attempt_history
       ].freeze
       SOURCE_RECEIPT_KEYS = %w[
         attempt_id receipt_version terminal_lease_version
@@ -595,6 +596,25 @@ module Hive
         0
       end
 
+      # Latest terminal receipt for one task stage. Recovery uses this to
+      # compare the failure it is about to retry with the failure produced by
+      # the preceding attempt. Keeping the lookup stage-scoped prevents a
+      # plan failure from teaching execute that its first failure is already a
+      # repeated one.
+      def latest_terminal_recovery(project:, slug:, expected_stage:,
+                                   state_home: Hive::Paths.state_home)
+        request_files(directory(state_home: state_home)).filter_map do |path|
+          parsed = parse_file(path)
+          next if parsed.is_a?(Symbol) || parsed.recovery&.fetch("phase", nil) != "terminal"
+          next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
+          next unless parsed.expected_stage.to_s == expected_stage.to_s
+
+          parsed
+        end.max_by { |request| [ request.created_at, request.request_id ] }
+      rescue Errno::ENOENT
+        nil
+      end
+
       def fetch(request_id, state_home: Hive::Paths.state_home)
         request_files(directory(state_home: state_home)).each do |path|
           parsed = parse_file(path)
@@ -606,12 +626,14 @@ module Hive
         nil
       end
 
-      def remove_terminal_recoveries(project:, slug:, except_request_id: nil,
+      def remove_terminal_recoveries(project:, slug:, expected_stage:,
+                                     except_request_id: nil,
                                      state_home: Hive::Paths.state_home)
         request_files(directory(state_home: state_home)).filter_map do |path|
           parsed = parse_file(path)
           next if parsed.is_a?(Symbol) || parsed.recovery&.fetch("phase", nil) != "terminal"
           next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
+          next unless parsed.expected_stage.to_s == expected_stage.to_s
           next if parsed.request_id.to_s == except_request_id.to_s
 
           parsed.request_id
@@ -1013,6 +1035,26 @@ module Hive
           if recovery.key?("retry_count") &&
              (!recovery["retry_count"].is_a?(Integer) || recovery["retry_count"].negative?)
             raise ArgumentError, "retry_count must be a non-negative integer"
+          end
+          if recovery.key?("identical_failure_count") &&
+             (!recovery["identical_failure_count"].is_a?(Integer) ||
+               recovery["identical_failure_count"].negative?)
+            raise ArgumentError, "identical_failure_count must be a non-negative integer"
+          end
+          if recovery.key?("failure_fingerprint") &&
+             !recovery["failure_fingerprint"].nil? &&
+             !Hive::Attempts::OutputReference::SHA256_PATTERN.match?(
+               recovery["failure_fingerprint"].to_s
+             )
+            raise ArgumentError, "failure_fingerprint must be a sha256 or null"
+          end
+          if recovery.key?("failure_attempt_history") &&
+             (!recovery["failure_attempt_history"].is_a?(Array) ||
+               recovery["failure_attempt_history"].length > 64 ||
+               !recovery["failure_attempt_history"].all? { |entry|
+                 entry.is_a?(String) && !entry.empty? && entry.bytesize <= 128
+               })
+            raise ArgumentError, "failure_attempt_history must contain at most 64 attempt ids"
           end
           validate_nullable_time!(recovery["terminal_at"], "terminal_at")
           validate_provider_hint!(recovery["provider_hint"]) if recovery.key?("provider_hint")

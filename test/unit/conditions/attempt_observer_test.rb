@@ -125,7 +125,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
     end
   end
 
-  def test_task_move_during_lock_claim_is_a_quiet_pending_delivery
+  def test_deleted_task_during_lock_claim_is_quietly_not_applicable
     with_tmp_dir do |dir|
       task = build_task(dir)
       store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
@@ -144,7 +144,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
       with_replaced_singleton_method(
         Hive::Lock, :with_task_lock, ->(*, **) { raise Errno::ENOENT, task.folder }
       ) do
-        assert_equal :pending, observer.observe(status, now: NOW + 3)
+        assert_equal :not_applicable, observer.observe(status, now: NOW + 3)
       end
       assert_empty events
     end

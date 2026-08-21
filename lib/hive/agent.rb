@@ -366,8 +366,8 @@ module Hive
         "claude_pid_start_time" => Hive::Lock.process_start_time(pid)
       )
 
-      old_int = trap("INT") { kill_group(pgid) }
-      old_term = trap("TERM") { kill_group(pgid) }
+      old_int = install_chained_signal_trap("INT") { kill_group(pgid) }
+      old_term = install_chained_signal_trap("TERM") { kill_group(pgid) }
 
       reader = Thread.new do
         open_private_log(log_file) do |log|
@@ -640,8 +640,8 @@ module Hive
 
       cancellation = { cancelled: false }
       cancellation_handler = ->(*) { cancel_opencode!(cancellation, pgid) }
-      old_int = trap("INT", &cancellation_handler)
-      old_term = trap("TERM", &cancellation_handler)
+      old_int = install_chained_signal_trap("INT", &cancellation_handler)
+      old_term = install_chained_signal_trap("TERM", &cancellation_handler)
       begin
         timed_out, status = wait_for_opencode_process(pid, pgid)
       ensure
@@ -1203,6 +1203,18 @@ module Hive
         return
       end
 
+      # A provider CLI may emit a transient failed-turn event, retry it
+      # internally, and still finish successfully. Current controller-owned
+      # completion evidence wins over that earlier stream diagnostic.
+      if recovered_provider_error?(result)
+        result[:status] = if effective_status_mode == :state_file_marker
+          Hive::Markers.current(@task.state_file).name
+        else
+          :ok
+        end
+        return
+      end
+
       if result[:output_completed] && completed_output_file?
         result[:status] = :ok
         return
@@ -1449,9 +1461,12 @@ module Hive
     end
 
     def detected_limit_text(result)
-      typed_provider_limit = result[:provider_error] &&
-                             provider_limit_status?(result[:provider_error])
-      return nil if result[:exit_code] == 0 && !result[:timed_out] && !typed_provider_limit
+      provider_error = result[:provider_error]
+      if provider_error && provider_limit_kind?(provider_error[:kind])
+        return provider_error[:message].to_s
+      end
+
+      return nil if result[:exit_code] == 0 && !result[:timed_out]
 
       # Prefer the limit text captured directly from the raw stream
       # (result[:limit_text]); it catches CLIs like codex that emit the
@@ -1462,6 +1477,16 @@ module Hive
       return nil unless Hive::AgentLimit.limit_reached?(limit)
 
       limit
+    end
+
+    def recovered_provider_error?(result)
+      return false unless result[:provider_error] && result[:exit_code] == 0
+
+      case effective_status_mode
+      when :state_file_marker then completed_state_file_artifact?
+      when :output_file_exists then completed_output_file?
+      else false
+      end
     end
 
     # Some CLIs report a failed provider turn in their structured event stream
@@ -1587,16 +1612,26 @@ module Hive
       Hive::Agent::MessageExtractor.parse_json_line(line)
     end
 
-    # A refusal the provider itself attributed to spend or pacing. The status
-    # code is authoritative and provider-independent; the wording check keeps
-    # providers that describe a limit without setting a status.
-    PROVIDER_LIMIT_STATUS_CODES = [ 402, 429 ].freeze
+    def install_chained_signal_trap(signal, &handler)
+      previous = nil
+      previous = trap(signal) do |number|
+        handler.call(number)
+        call_previous_signal_handler(previous, number)
+      end
+      previous
+    end
+
+    def call_previous_signal_handler(handler, signal)
+      return unless handler.respond_to?(:call)
+
+      handler.arity.zero? ? handler.call : handler.call(signal)
+    end
 
     def provider_limit_status?(provider_error)
-      return true if PROVIDER_LIMIT_STATUS_CODES.include?(provider_error[:status_code])
-
-      Hive::AgentLimit.limit_reached?(provider_error[:message].to_s)
+      provider_limit_kind?(provider_error[:kind])
     end
+
+    def provider_limit_kind?(kind) = %i[provider_limit rate_limited].include?(kind&.to_sym)
 
     def provider_limit_candidate?(event)
       return true unless event.is_a?(Hash)

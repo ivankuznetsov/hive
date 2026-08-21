@@ -142,11 +142,26 @@ module AgentCliRuntime
 
     def normalize_extracted_error(extracted)
       return [ extracted.kind, extracted.message ] if extracted.is_a?(ExtractedFailure)
-      return [ :provider_error, extracted ] if extracted.is_a?(String)
+      return [ failure_kind_from(extracted), extracted ] if extracted.is_a?(String)
 
       [ nil, nil ]
     end
     private_class_method :normalize_extracted_error
+
+    def failure_kind_from(text)
+      status = status_code_from(text)
+      return :provider_limit if status == 402
+      return :rate_limited if status == 429
+
+      normalized = text.to_s.downcase
+      return :rate_limited if normalized.match?(/\brate[\s_-]*limit(?:ed|s)?\b/)
+      return :provider_limit if normalized.match?(
+        /\b(?:quota|billing|credits?|tokens?[\s_-]*limit|usage[\s_-]*limit)\b/
+      )
+
+      :provider_error
+    end
+    private_class_method :failure_kind_from
 
     def observe(profile, result)
       resolved = Profiles.resolve(profile)

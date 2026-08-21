@@ -59,15 +59,11 @@ The public errors are `Error`, `InvalidManifest`, `CaptureError`, and
 `InvalidSnapshot`. Manifest/snapshot binding prevents validating one manifest
 and then restoring through a different policy observation.
 
-`ProtectedAnchorCustodySet` encloses one untrusted call with multiple bounded manifests.
-It nests ordinary single-use custody guards, so every manifest is captured
-before the provider runs and every manifest validates in reverse order after
-the provider returns or raises. Its combined report exposes the same tamper,
-restoration, and safe-after decisions used by stage adapters. This keeps
-growing controller history under exact per-file custody without weakening the
-`MAX_ENTRIES` limit on any individual manifest. The set accepts protected
-anchors only and fails closed above 16 manifests, so batching cannot turn the
-per-manifest bound into an unbounded snapshot stack.
+`Manifest.new(..., max_entries:)` defaults to 128 entries and rejects any
+consumer request above the hard 4096-entry ceiling. Consumers with a known,
+exact authority inventory may widen the per-instance admission bound; capture,
+validation, restoration, and reporting still run through one code path and one
+snapshot. There is no multi-manifest custody wrapper.
 
 `validate_required_outputs(manifest)` is the read-only polling seam used by
 headless `Hive::Agent` and `Hive::ClaudeLauncher`. It replaces the former
@@ -169,9 +165,9 @@ Artifact Firewall, and Safe Agent Git Gate remain three separate guarantees.
 Hive keeps stage semantics above the facade:
 
 - `Stages::Execute` supplies its implementation-owned writable worktree and
-  task-control anchors; growing context and activity receipt history is
-  partitioned across a `ProtectedAnchorCustodySet`, and tampering in any batch
-  retains `implementer_tampered`.
+  task-control anchors in one exact-inventory manifest; tampering retains
+  `implementer_tampered`, while the hard manifest ceiling exposes unbounded
+  receipt growth instead of hiding it behind batches.
 - `Stages::OpenPr` and `Stages::Finalize` protect controller task state around
   body-authoring spawns and retain their current error markers. Open PR keeps
   the complete controller-owned anchor set, including `task-journal.jsonl` and

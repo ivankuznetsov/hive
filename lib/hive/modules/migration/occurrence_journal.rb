@@ -311,7 +311,7 @@ module Hive
               next record
             end
 
-            abandon_regenerable_effects!(record)
+            abandon_regenerable_effects!(record, now: now)
             assert_terminal_effects!(record, capture)
             record["phase"] = "finalized"
             record["final_capture"] = capture.to_h
@@ -662,11 +662,15 @@ module Hive
         # covered that sink), so the occurrence could not finalize, so it
         # could not retire, so patrol re-ran it every cycle forever and held
         # a dispatch slot the whole time.
-        def abandon_regenerable_effects!(record)
-          record.fetch("effects").delete_if do |_intent_id, cell|
-            next false if TERMINAL_STATES.include?(cell.fetch("state"))
+        def abandon_regenerable_effects!(record, now: Time.now.utc)
+          record.fetch("effects").each_value do |cell|
+            next if TERMINAL_STATES.include?(cell.fetch("state"))
+            next unless REGENERABLE_SINKS.include?(cell.dig("semantic", "sink").to_s)
 
-            REGENERABLE_SINKS.include?(cell.dig("semantic", "sink").to_s)
+            cell["state"] = "abandoned"
+            cell["outcome"] = { "reason" => "regenerable_effect_abandoned" }
+            cell["terminal_receipt_id"] = nil if cell.key?("terminal_receipt_id")
+            cell["updated_at"] = @validator.timestamp(now) if cell.key?("updated_at")
           end
         end
 
@@ -679,8 +683,8 @@ module Hive
               "patrol occurrence has nonterminal effects"
             )
           end
-          expected = cells.map do |cell|
-            cell.fetch("terminal_receipt_id")
+          expected = cells.filter_map do |cell|
+            cell.fetch("terminal_receipt_id", nil)
           end.sort
           unless expected == capture.effect_ids.sort
             malformed!(

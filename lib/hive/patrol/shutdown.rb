@@ -19,7 +19,11 @@ module Hive
 
       def install_trap!(signals: SIGNALS)
         signals.each do |signal|
-          Signal.trap(signal) { @requested = true }
+          previous = nil
+          previous = Signal.trap(signal) do |number|
+            @requested = true
+            call_previous_handler(previous, number)
+          end
         rescue ArgumentError
           # A platform without this signal simply keeps the default handler.
           nil
@@ -37,6 +41,13 @@ module Hive
       def reset!
         @requested = false
       end
+
+      def call_previous_handler(handler, signal)
+        return unless handler.respond_to?(:call)
+
+        handler.arity.zero? ? handler.call : handler.call(signal)
+      end
+      private_class_method :call_previous_handler
     end
   end
 end

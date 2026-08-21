@@ -46,7 +46,7 @@ class AgentCliRuntimeErrorExtractorsTest < Minitest::Test
     error = AgentCliRuntime.extract_provider_error(:pi, PI_REFUSAL)
 
     refute_nil error, "a stopReason=error turn must surface as a provider error"
-    assert_equal :provider_error, error[:kind]
+    assert_equal :provider_limit, error[:kind]
     assert_equal :pi, error[:provider]
     assert_equal 402, error[:status_code]
     assert_includes error[:message], "Prompt tokens limit exceeded"
@@ -74,6 +74,7 @@ class AgentCliRuntimeErrorExtractorsTest < Minitest::Test
     }
     error = AgentCliRuntime.extract_provider_error(:pi, event)
 
+    assert_equal :provider_error, error[:kind]
     assert_equal "upstream refused", error[:message]
     assert_nil error[:status_code]
   end
@@ -83,7 +84,7 @@ class AgentCliRuntimeErrorExtractorsTest < Minitest::Test
       :codex, { "type" => "error", "message" => "429: rate limit reached" }
     )
 
-    assert_equal :provider_error, error[:kind]
+    assert_equal :rate_limited, error[:kind]
     assert_equal 429, error[:status_code]
     assert_equal :codex, error[:provider]
   end
@@ -94,6 +95,7 @@ class AgentCliRuntimeErrorExtractorsTest < Minitest::Test
       { "type" => "result", "is_error" => true, "error" => { "message" => "quota exhausted" } }
     )
 
+    assert_equal :provider_limit, error[:kind]
     assert_equal "quota exhausted", error[:message]
   end
 

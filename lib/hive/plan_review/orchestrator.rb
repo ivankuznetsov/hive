@@ -138,7 +138,7 @@ module Hive
           adapter_outcomes: outcomes
         )
         if record.effective_level == "mandatory" && initial_coverage.blocked?
-          return reset_for_capability(record) if capability_only_block?(outcomes)
+          return handle_capability_block(record) if capability_only_block?(outcomes)
 
           return terminal(
             record, state: "blocked", outcome: "blocked",
@@ -324,24 +324,48 @@ module Hive
       # about our configuration rather than the plan, and both fixed by
       # changing routes. Caching either as "blocked" is caching an answer we
       # never got.
-      VERDICT_OUTCOMES = (
-        Adapters::Base::SUCCESS_OUTCOMES + %w[terminal_failure]
-      ).freeze
+      CAPABILITY_STABLE_PROBE_LIMIT = 3
 
       def capability_only_block?(outcomes)
         observed = Array(outcomes).map(&:to_s)
-        observed.any? && observed.none? { |outcome| VERDICT_OUTCOMES.include?(outcome) }
+        observed.any? && observed.all? { |outcome| outcome == "unsupported" }
       end
 
-      # Reuse the same recovery_reset an operator's `request-review` appends:
-      # it starts a fresh attempt series for the role, so the next run probes
-      # capability again instead of replaying the old refusal. Doing it here
-      # means restoring the reviewer is enough — no operator action required
-      # to un-park a review that was never about the plan.
-      def reset_for_capability(record)
+      # Capability retries are cheap probes, not repeated reviewer launches.
+      # Retry while the observation changes; after three identical failed
+      # probes, park once with a durable diagnosis instead of appending route
+      # rows forever. Timeout/transport exhaustion is deliberately excluded:
+      # those are expensive attempts and must not masquerade as capability.
+      def handle_capability_block(record)
         routes = record["routes"]
         latest = %w[primary adversarial].filter_map { |role| latest_route(record, role) }
-        reset = latest.map { |route| recovery_reset_route(route) }
+        fingerprint = capability_probe_fingerprint(latest)
+        previous = routes.reverse.find { |route| route["capability_probe_fingerprint"] }
+        count = if previous && previous["capability_probe_fingerprint"] == fingerprint
+          Integer(previous["capability_probe_count"]) + 1
+        else
+          1
+        end
+        if count >= CAPABILITY_STABLE_PROBE_LIMIT
+          diagnostics = latest.filter_map { |route| route["diagnostic"] }.uniq
+          return terminal(
+            record, state: "blocked", outcome: "blocked",
+            blockers: [ {
+              "owner" => "operator", "reason" => "reviewer_unlaunchable",
+              "fingerprint" => fingerprint,
+              "diagnostic" => diagnostics.join("; ")
+            } ],
+            required_action: "restore reviewer capability, then request a fresh review"
+          )
+        end
+
+        reset = latest.map do |route|
+          recovery_reset_route(
+            route,
+            "capability_probe_fingerprint" => fingerprint,
+            "capability_probe_count" => count
+          )
+        end
         Projection.new(
           publish(
             record,
@@ -351,6 +375,16 @@ module Hive
             "execution_allowed" => false
           )
         )
+      end
+
+      def capability_probe_fingerprint(routes)
+        rows = routes.map do |route|
+          route.slice(
+            "role", "requested", "actual", "capability_result", "outcome",
+            "independence_reason", "diagnostic", "attempts"
+          )
+        end
+        Digest::SHA256.hexdigest(JSON.generate(rows))
       end
 
       # A verifier can return a valid success result with no contrary finding
@@ -471,7 +505,7 @@ module Hive
         route = merge_route_receipts(
           resolution.receipt, adapter_result.route_receipt,
           role:, attempt_id:, outcome: adapter_result.outcome,
-          retry_at:
+          retry_at:, diagnostic: adapter_result.diagnostic
         )
         coverage = reject_unverified_adversarial_coverage(coverage, role:, route:)
         refs = @store.write_attempt!(
@@ -805,7 +839,8 @@ module Hive
         record["routes"].reverse.find { |entry| entry["role"] == role }
       end
 
-      def merge_route_receipts(base, adapter, role:, attempt_id:, outcome:, retry_at:)
+      def merge_route_receipts(base, adapter, role:, attempt_id:, outcome:, retry_at:,
+                               diagnostic: nil)
         base = stringify(base)
         adapter = stringify(adapter)
         {
@@ -818,7 +853,8 @@ module Hive
           ),
           "independence_reason" => adapter["independence_reason"] || base["independence_reason"],
           "attempt_id" => attempt_id, "outcome" => outcome, "retry_at" => retry_at,
-          "attempts" => base["attempts"] || adapter["attempts"]
+          "attempts" => base["attempts"] || adapter["attempts"],
+          "diagnostic" => diagnostic
         }.compact
       end
 

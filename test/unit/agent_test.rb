@@ -2564,6 +2564,79 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_pi_zero_exit_402_is_a_limit_even_when_wording_does_not_match_legacy_patterns
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      event = {
+        "type" => "message_end",
+        "message" => {
+          "stopReason" => "error",
+          "errorMessage" =>
+            "402: {\"message\":\"Prompt tokens limit exceeded: 25770 > 8471\",\"code\":402}"
+        }
+      }
+
+      with_env(
+        "HIVE_PI_BIN" => FAKE_BIN,
+        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event)
+      ) do
+        result = Hive::Agent.new(
+          task: task, prompt: "implement", max_budget_usd: nil, timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:pi), status_mode: :exit_code_only
+        ).run!
+
+        assert_equal :provider_limit, result.dig(:provider_error, :kind)
+        assert_equal "limits_reached", result[:error_reason]
+        assert result[:retry_at]
+      end
+    end
+  end
+
+  def test_completed_state_marker_beats_an_earlier_provider_error
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- COMPLETE -->\n")
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = {
+        timed_out: false, exit_code: 0, final_message: "done",
+        provider_error: {
+          kind: :provider_error, provider: :pi, status_code: 502,
+          message: "transient upstream error"
+        }
+      }
+
+      agent.handle_exit(result)
+
+      assert_equal :complete, result[:status]
+      assert_equal :complete, Hive::Markers.current(task.state_file).name
+      refute result.key?(:error_reason)
+    end
+  end
+
+  def test_completed_output_file_beats_an_earlier_provider_error
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      output = File.join(task.folder, "review.json")
+      File.write(output, "{}\n")
+      agent = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5,
+        status_mode: :output_file_exists, expected_output: output
+      )
+      result = {
+        timed_out: false, exit_code: 0,
+        provider_error: {
+          kind: :provider_error, provider: :pi, status_code: 502,
+          message: "transient upstream error"
+        }
+      }
+
+      agent.handle_exit(result)
+
+      assert_equal :ok, result[:status]
+      refute result.key?(:error_reason)
+    end
+  end
+
   def test_claude_write_tool_event_recognizes_completed_assistant_tool_use
     with_tmp_dir do |dir|
       agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)

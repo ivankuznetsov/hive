@@ -235,7 +235,7 @@ class RunReviewTest < Minitest::Test
     end
   end
 
-  def test_resume_fix_guardrail_bypass_advances_without_checkbox_edits
+  def test_legacy_guardrail_bypass_does_not_release_unchecked_pause
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = setup_review_task(
@@ -262,8 +262,8 @@ class RunReviewTest < Minitest::Test
         capture_io { Hive::Commands::Run.new(folder).call }
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
-        assert_equal :review_complete, marker.name
-        assert File.exist?(File.join(reviews_dir, "fix-success-01.md"))
+        assert_equal :review_waiting, marker.name
+        refute File.exist?(File.join(reviews_dir, "fix-success-01.md"))
       end
     end
   end

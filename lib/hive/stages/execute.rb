@@ -153,8 +153,8 @@ module Hive
         baseline_head = execute_baseline_head(task, worktree_git)
         return worktree_git_failed(task, cfg, worktree_path) unless baseline_head
 
-        agent_custody = Hive::ArtifactFirewall::ProtectedAnchorCustodySet.new(
-          execute_custody_manifests(task, worktree_path)
+        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(
+          execute_custody_manifest(task, worktree_path)
         )
         begin
           impl_result = spawn_implementation(
@@ -292,17 +292,17 @@ module Hive
         paths.uniq.freeze
       end
 
-      # Durable context and activity receipts grow with every retry. Keep all
-      # of them under exact per-file custody without asking one firewall
-      # manifest to exceed its deliberate admission bound.
-      def execute_custody_manifests(task, worktree_path)
-        execute_protected_files(task).each_slice(Hive::ArtifactFirewall::MAX_ENTRIES).map do |paths|
-          Hive::ArtifactFirewall::Manifest.new(
-            root: task.folder,
-            protected_anchors: paths,
-            permitted_writable_roots: [ task.folder, worktree_path ]
-          )
-        end.freeze
+      # Durable context and activity receipts grow with every retry. Admit the
+      # exact inventory through one manifest so one validation/restore pass
+      # owns every anchor; the hard limit remains a fail-closed retention cap.
+      def execute_custody_manifest(task, worktree_path)
+        paths = execute_protected_files(task)
+        Hive::ArtifactFirewall::Manifest.new(
+          root: task.folder,
+          protected_anchors: paths,
+          permitted_writable_roots: [ task.folder, worktree_path ],
+          max_entries: [ paths.length, Hive::ArtifactFirewall::MAX_ENTRIES ].max
+        )
       end
 
       def apply_execute_outcome(task, cfg, worktree_path, baseline_head,
@@ -405,6 +405,9 @@ module Hive
 
       def implementer_hit_limit?(impl_result)
         return false unless impl_result
+
+        typed_reason = impl_result[:error_reason].to_s
+        return typed_reason == "limits_reached" unless typed_reason.empty?
 
         Hive::AgentLimit.limit_reached?(impl_result[:limit_text].to_s) ||
           Hive::AgentLimit.limit_reached?(impl_result[:error_message].to_s)

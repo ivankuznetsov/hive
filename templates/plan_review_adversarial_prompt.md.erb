@@ -33,7 +33,9 @@ version 1, bound to:
 - `policy_fingerprint`: `<%= policy_fingerprint %>`
 
 Use only typed findings and named coverage. Free-form stdout is diagnostic,
-not clearance authority.
+not clearance authority. Every newly emitted finding must use
+`"lifecycle": "open"`; Hive alone owns later lifecycle transitions, so never
+emit `closed` or another inferred disposition.
 For each finding, set `anchor_digest` to the lowercase SHA-256 of the selected
 inclusive line range after removing each line terminator and joining the lines
 with a single `\n`; `path` must be exactly `plan.md`.

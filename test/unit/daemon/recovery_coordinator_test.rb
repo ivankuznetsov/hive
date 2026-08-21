@@ -99,6 +99,59 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_identical_failures_at_the_ladder_ceiling_park_without_dispatch
+    attrs = {
+      "reason" => "implementer_failed", "marker_id" => "marker-3",
+      "provider" => "pi", "status" => "error", "message" => "same crash",
+      "attempt_id" => "attempt-3"
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - 3600) do |coordinator, row, state_home|
+      fingerprint = coordinator.send(:failure_fingerprint, row, attrs)
+      write_terminal_recovery_history(
+        row: row, state_home: state_home,
+        retry_count: Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.length,
+        failure_fingerprint: fingerprint, identical_failure_count: 2,
+        failure_attempt_history: %w[attempt-1 attempt-2]
+      )
+
+      receipt = coordinator.request(
+        row: row, requestor: "healer", request_id: "deterministic", now: NOW
+      )
+
+      assert_equal "blocked", receipt.status
+      assert_equal "deterministic_failure", receipt.reason
+      request = Q.fetch("deterministic", state_home: state_home)
+      assert_equal 3, request.recovery.fetch("identical_failure_count")
+      assert_equal %w[attempt-1 attempt-2 attempt-3],
+                   request.recovery.fetch("failure_attempt_history")
+      assert_equal "operator", request.recovery.fetch("owner")
+      assert_equal "admitted", request.recovery.fetch("phase")
+    end
+  end
+
+  def test_changed_failure_fingerprint_retries_freely_at_the_ladder_ceiling
+    with_fixture(marker_attrs: {
+      "reason" => "implementer_failed", "marker_id" => "marker-new",
+      "provider" => "pi", "message" => "a different crash"
+    }, mtime: NOW - 3600) do |coordinator, row, state_home|
+      write_terminal_recovery_history(
+        row: row, state_home: state_home,
+        retry_count: Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.length,
+        failure_fingerprint: "f" * 64, identical_failure_count: 50,
+        failure_attempt_history: %w[attempt-old]
+      )
+
+      receipt = coordinator.request(
+        row: row, requestor: "healer", request_id: "changed", now: NOW
+      )
+
+      assert_equal "queued", receipt.status
+      request = Q.fetch("changed", state_home: state_home)
+      assert_equal 1, request.recovery.fetch("identical_failure_count")
+      refute_equal "f" * 64, request.recovery.fetch("failure_fingerprint")
+    end
+  end
+
   # The cooldown paces Hive's own retry sweep. First failure waits the first
   # backoff step, not the provider-sized hour.
   def test_request_before_cooldown_returns_cooldown_without_writing
@@ -1567,7 +1620,10 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     )
   end
 
-  def write_terminal_recovery_history(row:, state_home:, retry_count:)
+  def write_terminal_recovery_history(row:, state_home:, retry_count:,
+                                      failure_fingerprint: nil,
+                                      identical_failure_count: nil,
+                                      failure_attempt_history: nil)
     Q.write_request!(
       project: row.project,
       slug: row.slug,
@@ -1599,7 +1655,11 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         "attempt_id" => "attempt-previous",
         "terminal_outcome" => "failed",
         "terminal_at" => (NOW - 60).iso8601(6)
-      },
+      }.merge({
+        "failure_fingerprint" => failure_fingerprint,
+        "identical_failure_count" => identical_failure_count,
+        "failure_attempt_history" => failure_attempt_history
+      }.compact),
       state_home: state_home,
       now: NOW - 60
     )

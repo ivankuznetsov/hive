@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.2.3 - 2026-08-21
+
+- Classify extracted provider failures once at the runtime boundary as
+  `provider_limit`, `rate_limited`, `model_output_limit`, or `provider_error`.
+  HTTP 402/429 payloads are authoritative even when their provider-specific
+  wording does not match an orchestrator's legacy quota phrases.
+
 ## 0.2.2 - 2026-08-18
 
 - Deliver built-in Pi prompts through its native non-TTY stdin reader instead

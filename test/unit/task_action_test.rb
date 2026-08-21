@@ -385,7 +385,7 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive review demo-260426-aaaa --from 6-review", action.command
   end
 
-  def test_bypassed_fix_guardrail_is_ready_for_automatic_review_resume
+  def test_legacy_bypass_does_not_auto_release_a_fix_guardrail_pause
     task = fake_task(stage_name: "review", stage_index: 6)
     config = {
       "review" => { "fix" => { "guardrail" => { "bypass" => true } } }
@@ -396,7 +396,7 @@ class TaskActionTest < Minitest::Test
       config: config
     )
 
-    assert_equal "ready_for_review", action.key
+    assert_equal "needs_input", action.key
     assert_equal "hive review demo-260426-aaaa --from 6-review", action.command
   end
 

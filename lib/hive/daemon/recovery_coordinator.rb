@@ -29,10 +29,18 @@ module Hive
       Receipt = Data.define(
         :status, :request_id, :attempt_id, :phase, :failure_origin,
         :next_eligible_at, :owner, :reason, :remediation, :retry_count,
-        :provider_hint, :terminal_outcome, :terminal_at
+        :provider_hint, :terminal_outcome, :terminal_at,
+        :failure_fingerprint, :identical_failure_count, :escalation_tier
       ) do
-        def initialize(terminal_outcome: nil, terminal_at: nil, **rest)
-          super(terminal_outcome: terminal_outcome, terminal_at: terminal_at, **rest)
+        def initialize(terminal_outcome: nil, terminal_at: nil,
+                       failure_fingerprint: nil, identical_failure_count: nil,
+                       escalation_tier: nil, **rest)
+          super(
+            terminal_outcome: terminal_outcome, terminal_at: terminal_at,
+            failure_fingerprint: failure_fingerprint,
+            identical_failure_count: identical_failure_count,
+            escalation_tier: escalation_tier, **rest
+          )
         end
 
         def to_h
@@ -146,6 +154,8 @@ module Hive
       # and a separate marker window that happened to disagree. Steps climb
       # and then hold; the last step is the ceiling.
       RETRY_BACKOFF_SEC = [ 5, 10, 60, 300, 900, 3600 ].freeze
+      DETERMINISTIC_FAILURE_THRESHOLD = 3
+      FAILURE_HISTORY_LIMIT = 64
 
       # A deliberate human retry is not the automatic sweep. The cooldown
       # paces Hive's own retries; gating an operator on it leaves a task idle
@@ -166,7 +176,8 @@ module Hive
         retry_delay_sec(recovery.is_a?(Hash) ? recovery["retry_count"].to_i : 0)
       end
 
-      def assessment(row, now: Time.now.utc, retry_count: 0)
+      def assessment(row, now: Time.now.utc, retry_count: nil)
+        retry_count = durable_retry_count(row) if retry_count.nil?
         observed_at = value(row, :state_file_mtime)
         eligible_at = observed_at && observed_at + retry_delay_sec(retry_count)
         safe, safety_reason = @safety.call(row)
@@ -342,6 +353,9 @@ module Hive
           attrs = Hive::Recovery.canonical_marker_attrs(current.attrs)
           marker_id = marker_identity(current)
           next_eligible_at = assessment[:retry_at].utc.iso8601(6)
+          failure_evidence = failure_evidence_for(
+            row, retry_count: retry_count, marker_attrs: attrs
+          )
           recovery = {
             "variant" => "marker",
             "phase" => "admitted",
@@ -356,11 +370,22 @@ module Hive
             "blocked_reason" => nil,
             "blocked_remediation" => nil,
             "retry_count" => retry_count + 1,
+            "failure_fingerprint" => failure_evidence.fetch("fingerprint"),
+            "identical_failure_count" => failure_evidence.fetch("count"),
+            "failure_attempt_history" => failure_evidence.fetch("attempts"),
             "provider_hint" => provider_hint(row),
             "policy_digest" => nil,
             "source_receipt" => source_receipt,
             "admission_observation" => nil
           }
+          if failure_evidence.fetch("deterministic")
+            recovery.merge!(
+              "blocked_reason" => "deterministic_failure",
+              "blocked_remediation" =>
+                "change the failing input, provider, or implementation before retrying",
+              "owner" => "operator"
+            )
+          end
           @request_queue.write_request!(
             project: value(row, :project),
             slug: value(row, :slug),
@@ -383,9 +408,14 @@ module Hive
           @request_queue.remove_terminal_recoveries(
             project: value(row, :project),
             slug: value(row, :slug),
+            expected_stage: value(row, :stage),
             except_request_id: canonical_request_id,
             state_home: @state_home
           )
+          if failure_evidence.fetch("deterministic")
+            persisted = @request_queue.fetch(canonical_request_id, state_home: @state_home)
+            return receipt_for_request(persisted, now: now)
+          end
           receipt(
             "queued", request_id: canonical_request_id, phase: "admitted",
             failure_origin: recovery.fetch("failure_origin"),
@@ -511,6 +541,7 @@ module Hive
           )
           @request_queue.remove_terminal_recoveries(
             project: project, slug: slug, except_request_id: request_id,
+            expected_stage: task_stage(locked_task),
             state_home: @state_home
           )
           persisted = @request_queue.fetch(request_id, state_home: @state_home)
@@ -883,8 +914,19 @@ module Hive
           retry_count: recovery["retry_count"],
           provider_hint: recovery["provider_hint"],
           terminal_outcome: recovery["terminal_outcome"],
-          terminal_at: recovery["terminal_at"]
+          terminal_at: recovery["terminal_at"],
+          failure_fingerprint: recovery["failure_fingerprint"],
+          identical_failure_count: recovery["identical_failure_count"],
+          escalation_tier: escalation_tier_for(recovery)
         )
+      end
+
+      def escalation_tier_for(recovery)
+        return "parked" if recovery["blocked_reason"] == "deterministic_failure"
+        return "degraded" if recovery["identical_failure_count"].to_i > 1
+        return "silent_retry" if recovery["failure_fingerprint"]
+
+        nil
       end
 
       def observation_token_for(row)
@@ -905,6 +947,42 @@ module Hive
           project: project, slug: slug, expected_stage: expected_stage,
           state_home: @state_home
         )
+      end
+
+      def failure_evidence_for(row, retry_count:, marker_attrs:)
+        fingerprint = failure_fingerprint(row, marker_attrs)
+        previous = @request_queue.latest_terminal_recovery(
+          project: value(row, :project), slug: value(row, :slug),
+          expected_stage: value(row, :stage), state_home: @state_home
+        )
+        previous_recovery = previous&.recovery || {}
+        repeated = previous_recovery["failure_fingerprint"].to_s == fingerprint
+        count = repeated ? previous_recovery["identical_failure_count"].to_i + 1 : 1
+        attempts = repeated ? Array(previous_recovery["failure_attempt_history"]).dup : []
+        attempt_id = marker_attrs["attempt_id"].to_s
+        attempt_id = value(row, :attempt_id).to_s if attempt_id.empty?
+        attempts << attempt_id unless attempt_id.empty? || attempts.include?(attempt_id)
+        attempts = attempts.last(FAILURE_HISTORY_LIMIT)
+        at_ceiling = retry_count.to_i >= RETRY_BACKOFF_SEC.length - 1
+
+        {
+          "fingerprint" => fingerprint,
+          "count" => count,
+          "attempts" => attempts,
+          "deterministic" => at_ceiling && count >= DETERMINISTIC_FAILURE_THRESHOLD
+        }
+      end
+
+      def failure_fingerprint(row, attrs)
+        message = attrs["message"] || attrs["diagnostic"] || attrs["exception_class"]
+        normalized_message = message.to_s.scrub.downcase.gsub(/\s+/, " ").strip
+        Digest::SHA256.hexdigest(JSON.generate(
+          "reason" => attrs["reason"].to_s,
+          "provider" => (attrs["provider"] || attrs["provider_account_id"] ||
+            value(row, :provider)).to_s,
+          "status_code" => (attrs["status_code"] || attrs["status"]).to_s,
+          "message_digest" => Digest::SHA256.hexdigest(normalized_message)
+        ))
       end
 
       def source_receipt_for(marker:, task:, project:)
@@ -1026,7 +1104,9 @@ module Hive
       def receipt(status, request_id: nil, attempt_id: nil, phase: nil,
                   failure_origin: nil, next_eligible_at: nil, owner: nil,
                   reason: nil, remediation: nil, retry_count: nil,
-                  provider_hint: nil, terminal_outcome: nil, terminal_at: nil)
+                  provider_hint: nil, terminal_outcome: nil, terminal_at: nil,
+                  failure_fingerprint: nil, identical_failure_count: nil,
+                  escalation_tier: nil)
         raise ArgumentError, "unknown recovery lifecycle #{status}" unless LIFECYCLE_STATES.include?(status)
 
         Receipt.new(
@@ -1035,7 +1115,9 @@ module Hive
           next_eligible_at: next_eligible_at, owner: owner, reason: reason,
           remediation: remediation, retry_count: retry_count,
           provider_hint: provider_hint, terminal_outcome: terminal_outcome,
-          terminal_at: terminal_at
+          terminal_at: terminal_at, failure_fingerprint: failure_fingerprint,
+          identical_failure_count: identical_failure_count,
+          escalation_tier: escalation_tier
         )
       end
 
@@ -1043,6 +1125,8 @@ module Hive
         return row.public_send(key) if row.respond_to?(key)
         return row[key.to_s] if row.respond_to?(:[])
 
+        nil
+      rescue KeyError, IndexError, NameError, TypeError
         nil
       end
 

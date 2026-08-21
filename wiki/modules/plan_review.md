@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-08-20
+updated: 2026-08-21
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -59,32 +59,23 @@ normalized policy settings, extracted evidence, and every level source.
 ## Reviewer and routing contract
 
 `Hive::PlanReview::Adapters::Base` owns a provider-neutral request/result
-contract. `CeDocReview` passes a redacted immutable snapshot into a disposable
-directory and invokes the configured `ce-doc-review` capability for the primary
+contract. `CeDocReview` creates a detached disposable Git worktree, replaces
+its `plan.md` with the redacted immutable review input, and invokes the
+configured `ce-doc-review` capability for the primary
 whole-document/specialist leg. The adversarial leg uses a separate prompt and
 route. Neither reviewer can publish canonical `plan.md`; malformed or free-form
 output has no clearance authority.
 
-Reviewers receive the repository root plus search, shell, and network access so
+Reviewers run from that disposable checkout with search, shell, and network access so
 they can verify a plan against code, wiki context, history, and referenced
-contracts instead of checking only the document against itself. The disposable
-directory remains the declared review-output workspace. Codex and Grok retain
-their native workspace-write sandboxes; Codex also receives
-`--skip-git-repo-check` because the disposable workspace is intentionally not
-a checkout. That flag bypasses only Codex's repository-shape preflight; its
-workspace-write sandbox and Hive's artifact custody remain active. Claude
-receives exact file-tool scope.
-Pi cannot combine its managed read-only wrapper with the required shell and
-network access, so plan review launches Pi directly under the same
-ArtifactFirewall detection-and-restore boundary used by Hive's other native
-stages. The reviewed input and authority records are protected anchors, so
-findings cannot be minted against a reviewer-mutated copy. Pi writes the normal
-adapter JSON file directly; the managed host-output wrapper is not used for
-this full-access review route. Review history is partitioned across bounded
-firewall manifests once it exceeds the firewall's per-manifest 128-anchor
-limit. Every historical authority file remains captured and restorable; a
-long-lived task therefore does not lose custody or fail before reviewer launch
-merely because it accumulated many attempts.
+contracts instead of checking only the document against itself. Codex and Grok
+retain their native workspace-write sandboxes; Claude receives exact file-tool
+scope; Pi may run directly because every provider is structurally separated
+from the live checkout. The adapter result is copied back only through Hive's
+validated output path, and the live plan-review records remain under
+ArtifactFirewall detection and restore. One manifest captures the entire
+authority history; its default bound is 128 and this explicit consumer widens
+it only to the exact inventory, subject to the hard 4096-entry ceiling.
 
 The default adversarial request is native Grok Build, model `grok-4.6`, effort
 `high`. Every route records requested and actual provider, model, model family,
@@ -106,6 +97,13 @@ adversarial, verification, and original-planner revision legs. Provider-route
 exceptions are normalized into those durable attempt outcomes rather than
 escaping before retry evidence is written. Missing retry hints receive bounded
 exponential delay with deterministic jitter rather than a hot retry loop.
+An unsupported mandatory route is probed cheaply before another expensive
+review. An unchanged failed capability probe is recorded as operational
+evidence; after three identical observations the review parks as
+`reviewer_unlaunchable` instead of spawning forever. A changed probe resets the
+series and permits a new reviewer launch. Review identity includes adapter,
+reviewer, and route configuration, while attempt timeout and retry tuning are
+operational and do not invalidate an otherwise identical verdict.
 
 ## Findings, revision, and verification
 

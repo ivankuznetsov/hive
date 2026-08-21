@@ -106,7 +106,7 @@ module Hive
       def policy_affecting_config(settings)
         %w[
           classifier_version minimum_level coding skip protected_paths
-          attempts coverage routes
+          coverage adapter reviewers routes
         ].to_h do |key|
           [ key, settings[key] ]
         end

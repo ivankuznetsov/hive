@@ -291,9 +291,6 @@ module Hive
           matches = []
           text.scan(pattern) do
             match = Regexp.last_match[0]
-            hit = { name: name, snippet: match }
-            next if Hive::SecretPatterns.obvious_test_password_fixture?(path: path, hit: hit)
-
             matches << { name: name, fingerprint: [ name, Digest::SHA256.hexdigest(match) ] }
           end
           matches

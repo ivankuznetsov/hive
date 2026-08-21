@@ -289,6 +289,37 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_preserves_typed_zero_exit_402_limit_classification
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(
+        task, "path" => File.join(dir, "worktree"), "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = {
+        status: :error,
+        exit_code: 0,
+        error_reason: "limits_reached",
+        limit_text: "Prompt tokens limit exceeded: 25770 > 8471",
+        error_message:
+          '402: {"message":"Prompt tokens limit exceeded: 25770 > 8471","code":402}',
+        provider_error: { kind: :provider_limit, provider: :pi, status_code: 402 }
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("pi"), File.join(dir, "worktree"))
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "limits_reached", status: :error }, run_result)
+      assert_equal "limits_reached", marker.attrs.fetch("reason")
+      assert_equal "pi", marker.attrs.fetch("provider")
+      assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+    end
+  end
+
   def test_run_pass_preserves_non_limit_implementation_failure_marker
     with_tmp_dir do |dir|
       task = build_task(dir)

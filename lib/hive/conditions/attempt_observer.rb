@@ -73,8 +73,10 @@ module Hive
           @delivered.add(key)
           :delivered
         end
-      rescue Hive::ConcurrentRunError, Errno::ENOENT
+      rescue Hive::ConcurrentRunError
         :pending
+      rescue Errno::ENOENT
+        :not_applicable
       rescue Hive::Error, SystemCallError, IOError => e
         report_error(status&.attempt, e)
         :pending

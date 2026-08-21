@@ -23,7 +23,9 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       original = File.binread(plan_path)
       runner = lambda do |prompt:, cwd:, output_path:, request:, **|
         refute_equal File.dirname(plan_path), cwd
+        assert File.directory?(File.join(cwd, ".git")) || File.file?(File.join(cwd, ".git"))
         assert_includes prompt, "ce-doc-review"
+        assert_includes prompt, "Repository root: `#{cwd}`"
         File.write(File.join(cwd, "review-notes.md"), "reviewer scratch work")
         File.write(output_path, JSON.generate(valid_result(request)))
         { "status" => "ok", "actual_route" => request.reviewer }
@@ -84,7 +86,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       assert_equal "success", result.outcome
       assert_includes prompt, "Review the immutable executable-plan copy"
       assert_includes prompt, "do not require an external skill or subagent"
-      assert_includes prompt, "Repository root: `#{request.project_root}`"
+      assert_match(/Repository root: `.*hive-plan-review-worktree-.*\/checkout`/, prompt)
       assert_includes prompt, "Write one JSON object to `"
       refute_includes prompt, 'files["hive-plan-review-result.json"]'
       refute_includes prompt, "This confined route has no hashing tool"
@@ -512,6 +514,10 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
 
         assert_equal "success", adapter_for(runner).call(scoped).outcome
         assert_includes observed, heading
+        assert_match(
+          /Every newly emitted finding must use\s+`"lifecycle": "open"`/,
+          observed
+        )
       end
     end
   end
@@ -587,6 +593,11 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       File.write(plan_path, "# Plan\n")
       output = File.join(root, "output")
       FileUtils.mkdir_p(output)
+      run!("git", "-C", root, "init", "--quiet")
+      run!("git", "-C", root, "config", "user.name", "Hive Test")
+      run!("git", "-C", root, "config", "user.email", "hive@example.test")
+      run!("git", "-C", root, "add", "input-plan.md")
+      run!("git", "-C", root, "commit", "-m", "plan review fixture", "--quiet")
       request = Hive::PlanReview::Adapters::Base::Request.new(
         plan_path:, plan_digest: Digest::SHA256.file(plan_path).hexdigest,
         document_type: "executable_plan", level: "standard",

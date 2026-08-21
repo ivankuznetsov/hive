@@ -51,13 +51,7 @@ module Hive
           # and the operator never saw the waiting marker that should have
           # asked them nine rounds earlier.
           if round > stage.council.max_rounds
-            terminal = stage.council.on_max_rounds == :complete ? :complete : :waiting
-            attrs = { reason: "max_rounds", round: round }
-            latest = latest_triage_path(task.folder, stage)
-            attrs[:triage] = latest if latest
-            Hive::Markers.set(output_path, terminal, **attrs)
-            marker = Hive::Markers.current(output_path)
-            return { commit: action_for(marker.name), status: marker.name }
+            return max_rounds_result(output_path, task, stage, round)
           end
 
           # Include pid/started for parity with the agent runner's working
@@ -97,10 +91,9 @@ module Hive
           end
 
           if round >= stage.council.max_rounds
-            terminal = stage.council.on_max_rounds == :complete ? :complete : :waiting
-            Hive::Markers.set(output_path, terminal, reason: "max_rounds", round: round, triage: triage.path)
-            marker = Hive::Markers.current(output_path)
-            return { commit: action_for(marker.name), status: marker.name }
+            return max_rounds_result(
+              output_path, task, stage, round, triage_path: triage.path
+            )
           end
 
           Hive::Stages::Council::Revise.run!(
@@ -170,6 +163,17 @@ module Hive
         dir = File.dirname(triage_output)
         pattern = File.join(task_folder, dir, "#{triage_basename(stage)}-*.md")
         Dir.glob(pattern).max_by { |path| File.basename(path, ".md")[/-(\d+)\z/, 1].to_i }
+      end
+
+      def max_rounds_result(output_path, task, stage, round, triage_path: nil)
+        terminal = stage.council.on_max_rounds == :complete ? :complete : :waiting
+        terminal_round = [ round, stage.council.max_rounds ].min
+        attrs = { reason: "max_rounds", round: terminal_round }
+        attrs[:triage] = triage_path || latest_triage_path(task.folder, stage)
+        attrs.compact!
+        Hive::Markers.set(output_path, terminal, **attrs)
+        marker = Hive::Markers.current(output_path)
+        { commit: action_for(marker.name), status: marker.name }
       end
 
       def triage_basename(stage)

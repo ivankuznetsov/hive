@@ -15,16 +15,11 @@ module Hive
     #   findings could be emitted because this execution environment has no
     #   way to compute SHA-256.
     #
-    # Prevention bought little here. The reviewer's input is plan.md, written
-    # by our own plan stage — not the untrusted task text that justifies
-    # narrowing brainstorm/plan add-dirs against prompt injection. Meanwhile
-    # the ArtifactFirewall already snapshots plan.md, meta.yml and every
-    # plan-review record around the run, detecting and restoring tampering.
-    # That is the same trust model execute, open_pr and artifacts run under.
-    #
-    # So reviewers now get what reviewing actually requires — the repository,
-    # search, shell, network — while writes stay pointed at the disposable
-    # workspace and the firewall remains the guard.
+    # Reviewers now run from a disposable detached Git worktree. They get what
+    # reviewing actually requires — repository context, search, shell and
+    # network — without exposing the live checkout to their writes. The
+    # ArtifactFirewall independently retains custody of controller-owned task
+    # state and the required verdict output.
     module WorkspaceScope
       # What a reviewer needs to check a plan against the codebase it
       # describes, rather than against itself.
@@ -44,9 +39,9 @@ module Hive
         # expose Bash or network access. Those are both required here: the
         # reviewer must inspect the repository and referenced documentation,
         # and its finding format requires SHA-256. Plan review uses the same
-        # ArtifactFirewall detection-and-restore boundary as the other native
-        # stages, so launch Pi directly instead of pretending its managed
-        # output wrapper can enforce this broader review contract.
+        # disposable-worktree and ArtifactFirewall boundaries, so launch Pi
+        # directly instead of pretending its managed output wrapper can
+        # enforce this broader review contract.
         return unrestricted_kwargs if profile.name == :pi
 
         tools = REVIEW_TOOLS + write_tools(workspace)
@@ -63,25 +58,16 @@ module Hive
         }
       end
 
-      # codex and grok carry a real filesystem sandbox, which already confines
-      # writes to the working directory while leaving reads, shell and network
-      # intact. Codex additionally refuses to start from the disposable review
-      # directory because it is intentionally not a git checkout. The plan
-      # copy and result have their own ArtifactFirewall custody, so bypass only
-      # that repository-shape preflight while keeping workspace-write active.
-      def workspace_write_kwargs(profile)
-        kwargs = {
+      # Codex and Grok carry a real filesystem sandbox, which confines writes
+      # to the disposable Git worktree while leaving reads, shell and network
+      # intact. The cwd is now a real checkout, so Codex needs no repository-
+      # shape bypass.
+      def workspace_write_kwargs(_profile)
+        {
           permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE,
           allowed_tools: nil,
           disallowed_tools: nil
         }
-        return kwargs unless profile.name == :codex
-
-        kwargs.merge(
-          permission_arguments: profile.permission_flags(
-            Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE
-          ) + [ "--skip-git-repo-check" ]
-        )
       end
 
       def unrestricted_kwargs

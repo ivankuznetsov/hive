@@ -763,7 +763,10 @@ module Hive
         "retry_count" => recovery["retry_count"],
         "provider_hint" => recovery["provider_hint"] || provider_hint(row),
         "terminal_outcome" => recovery["terminal_outcome"],
-        "terminal_at" => recovery["terminal_at"]
+        "terminal_at" => recovery["terminal_at"],
+        "failure_fingerprint" => recovery["failure_fingerprint"],
+        "identical_failure_count" => recovery["identical_failure_count"],
+        "escalation_tier" => recovery["escalation_tier"]
       }
     end
 

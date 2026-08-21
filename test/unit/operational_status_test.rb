@@ -639,6 +639,9 @@ class OperationalStatusTest < Minitest::Test
         "reason" => nil,
         "remediation" => nil,
         "retry_count" => 1,
+        "failure_fingerprint" => "f" * 64,
+        "identical_failure_count" => 2,
+        "escalation_tier" => "degraded",
         "provider_hint" => nil,
         "terminal_outcome" => nil,
         "terminal_at" => nil
@@ -655,6 +658,8 @@ class OperationalStatusTest < Minitest::Test
       assert_equal status, projected.dig("recovery", "status"), status
       assert_equal "request-1", projected.dig("recovery", "request_id"), status
       assert_equal phase, projected.dig("recovery", "phase"), status
+      assert_equal "degraded", projected.dig("recovery", "escalation_tier"), status
+      assert_equal 2, projected.dig("recovery", "identical_failure_count"), status
     end
   end
 

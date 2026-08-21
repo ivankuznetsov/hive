@@ -2543,8 +2543,14 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
 
       journal.send(:abandon_regenerable_effects!, record)
 
-      assert_equal [ "intent-committed" ], record.fetch("effects").keys,
-                   "regenerable sinks must be abandoned rather than block the occurrence"
+      assert_equal %w[
+        intent-committed intent-stranded-patch intent-stranded-finding
+      ], record.fetch("effects").keys
+      %w[intent-stranded-patch intent-stranded-finding].each do |intent_id|
+        cell = record.dig("effects", intent_id)
+        assert_equal "abandoned", cell.fetch("state")
+        assert_equal "regenerable_effect_abandoned", cell.dig("outcome", "reason")
+      end
     end
   end
 

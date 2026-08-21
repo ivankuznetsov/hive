@@ -56,14 +56,14 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
-  def test_skipped_when_bypass
-    with_two_commits(file: "innocent.rb", content: "class A\nend\n") do |dir, base, head|
+  def test_legacy_bypass_does_not_disable_the_guardrail
+    with_two_commits(file: ".env", content: "TOKEN=secret\n") do |dir, base, head|
       result = Hive::Stages::Review::FixGuardrail.run!(
         cfg: cfg("review" => { "fix" => { "guardrail" => { "bypass" => true } } }),
         ctx: make_ctx(dir),
         base_sha: base, head_sha: head
       )
-      assert_equal :skipped, result.status
+      assert_equal :tripped, result.status
     end
   end
 
@@ -255,6 +255,21 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_dynamic_password_with_a_literal_fallback_trips_the_secret_guardrail
+    with_two_commits(
+      file: "app/controllers/setup/operators_controller.rb",
+      content: "password: params[:x] || \"realsecret99\"\n"
+    ) do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir), base_sha: base, head_sha: head
+      )
+
+      assert_equal :tripped, result.status
+      assert_equal "secrets_pattern_match.password_assignment",
+                   result.matches.first.pattern_name
+    end
+  end
+
   def test_literal_password_assignment_still_trips_the_secret_guardrail
     with_two_commits(
       file: "config/database.yml",
@@ -272,22 +287,39 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
-  def test_obvious_password_fixture_in_test_tree_does_not_trip_the_secret_guardrail
+  def test_test_password_literal_requires_an_exact_fingerprint_waiver
     with_two_commits(
       file: "test/integration/login_test.rb",
       content: "@operator.password = \"password\"\n"
     ) do |dir, base, head|
-      result = Hive::Stages::Review::FixGuardrail.run!(
+      unwaived = Hive::Stages::Review::FixGuardrail.run!(
         cfg: cfg, ctx: make_ctx(dir),
         base_sha: base, head_sha: head
       )
+      finding = unwaived.matches.fetch(0)
+      waived_cfg = cfg(
+        "review" => {
+          "fix" => {
+            "guardrail" => {
+              "waivers" => [
+                { "pattern" => finding.pattern_name, "sha256" => finding.match_sha256 }
+              ]
+            }
+          }
+        }
+      )
+      waived = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: waived_cfg, ctx: make_ctx(dir), base_sha: base, head_sha: head
+      )
 
-      assert_equal :clean, result.status
-      assert_empty result.matches
+      assert_equal :tripped, unwaived.status
+      assert_match(/\A[0-9a-f]{64}\z/, finding.match_sha256)
+      assert_equal :clean, waived.status
+      assert_empty waived.matches
     end
   end
 
-  def test_runtime_password_placeholders_in_test_tree_do_not_trip_the_secret_guardrail
+  def test_runtime_password_placeholders_in_test_tree_trip_without_waivers
     with_two_commits(
       file: "test/controllers/sessions_controller_test.rb",
       content: "password: \"correct\"\npassword = \"system-password\"\n"
@@ -297,8 +329,23 @@ class FixGuardrailTest < Minitest::Test
         base_sha: base, head_sha: head
       )
 
-      assert_equal :clean, result.status
-      assert_empty result.matches
+      assert_equal :tripped, result.status
+      assert_equal 2, result.matches.count do |match|
+        match.pattern_name == "secrets_pattern_match.password_assignment"
+      end
+    end
+  end
+
+  def test_invalid_waiver_fingerprint_fails_closed
+    with_two_commits(file: ".env", content: "TOKEN=secret\n") do |dir, base, head|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Review::FixGuardrail.run!(
+          cfg: cfg("review" => { "fix" => { "guardrail" => { "waivers" => [ "all" ] } } }),
+          ctx: make_ctx(dir), base_sha: base, head_sha: head
+        )
+      end
+
+      assert_includes error.message, "pattern and sha256"
     end
   end
 

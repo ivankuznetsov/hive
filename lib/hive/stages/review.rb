@@ -323,15 +323,7 @@ module Hive
                        status: :review_error }
             end
 
-            # An explicit project-level bypass suppresses new guardrail scans;
-            # it must also release a pause written before the policy changed.
-            # Keep all surrounding integrity checks (well-formed match count,
-            # guarded HEAD, and clean worktree) so bypass means "waive this
-            # class of finding", not "advance a different or dirty tree".
-            guardrail_bypassed =
-              cfg.dig("review", "fix", "guardrail", "bypass") == true
-            if guardrail_bypassed ||
-               fix_guardrail_approved?(ctx_pass, expected_matches: expected_matches)
+            if fix_guardrail_approved?(ctx_pass, expected_matches: expected_matches)
               if worktree_dirty?(worktree_path)
                 Hive::Markers.set(task.state_file, :review_error,
                                   phase: :resume, reason: "approval_dirty_worktree", pass: pass)
@@ -696,6 +688,7 @@ module Hive
             base_sha: before_fix_head,
             head_sha: after_fix_head
           )
+          emit_guardrail_waivers(task, pass, guardrail.waived_matches)
           if guardrail.status == :tripped
             write_fix_guardrail_findings(ctx_pass, guardrail.matches)
             # Record the guarded HEAD SHA on the marker so the
@@ -2256,11 +2249,30 @@ module Hive
 
           body << "#{section_labels[severity]}\n\n"
           entries.each do |m|
-            body << "- [ ] #{m.pattern_name}: #{m.file}:#{m.line || '?'}: #{m.snippet}\n"
+            body << "- [ ] #{m.pattern_name}: #{m.file}:#{m.line || '?'}: " \
+                    "#{m.snippet} (waiver pattern: #{m.pattern_name}; " \
+                    "sha256: #{m.match_sha256})\n"
           end
           body << "\n"
         end
         File.write(path, body)
+      end
+
+      def emit_guardrail_waivers(task, pass, matches)
+        return if matches.empty?
+
+        Hive::Events.emit(
+          task_folder: task.folder, slug: task.slug,
+          stage: "6-review", # coding-scoped: coding review event
+          event_type: :round_complete,
+          message: "fix guardrail released #{matches.length} exact fingerprint waiver(s)",
+          data: {
+            pass: pass,
+            guardrail_waivers: matches.map do |match|
+              { pattern: match.pattern_name, sha256: match.match_sha256 }
+            end
+          }
+        )
       end
 
       # U5 — check whether reviews/fix-guardrail-NN.md has been

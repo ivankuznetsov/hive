@@ -13,7 +13,7 @@ module Hive
   module ArtifactFirewall
     DIAGNOSTIC_BYTES = 512
     MAX_ENTRIES = 128
-    MAX_CUSTODY_MANIFESTS = 16
+    HARD_MAX_ENTRIES = 4_096
     MAX_PATH_BYTES = 4_096
     REQUIRED_OUTPUT_INSPECTION_ID = "required-output-inspection"
     ORCHESTRATOR_OWNED = Hive::ProtectedFiles::ORCHESTRATOR_OWNED
@@ -131,19 +131,24 @@ module Hive
     end
 
     Manifest = Data.define(
-      :root, :protected_anchors, :permitted_writable_roots, :required_outputs, :redactor
+      :root, :protected_anchors, :permitted_writable_roots, :required_outputs,
+      :redactor, :max_entries
     ) do
       def initialize(root:, protected_anchors:, permitted_writable_roots: [],
-                     required_outputs: {}, redactor: Hive::SecretPatterns.method(:redact))
+                     required_outputs: {}, redactor: Hive::SecretPatterns.method(:redact),
+                     max_entries: MAX_ENTRIES)
+        entry_limit = self.class.send(:normalize_entry_limit, max_entries)
         normalized_root = self.class.send(:normalize_root, root)
         anchors = self.class.send(
-          :normalize_labeled_paths, protected_anchors, normalized_root, "protected_anchors"
+          :normalize_labeled_paths, protected_anchors, normalized_root, "protected_anchors",
+          entry_limit
         )
         outputs = self.class.send(
-          :normalize_labeled_paths, required_outputs, normalized_root, "required_outputs"
+          :normalize_labeled_paths, required_outputs, normalized_root, "required_outputs",
+          entry_limit
         )
         roots = self.class.send(
-          :normalize_roots, permitted_writable_roots, normalized_root
+          :normalize_roots, permitted_writable_roots, normalized_root, entry_limit
         )
         self.class.send(:validate_path_ownership!, anchors, outputs)
         unless redactor.respond_to?(:call)
@@ -156,9 +161,23 @@ module Hive
           protected_anchors: anchors,
           permitted_writable_roots: roots,
           required_outputs: outputs,
-          redactor: ->(text) { redactor_callable.call(text) }.freeze
+          redactor: ->(text) { redactor_callable.call(text) }.freeze,
+          max_entries: entry_limit
         )
       end
+
+      def self.normalize_entry_limit(value)
+        limit = Integer(value)
+        unless limit.positive? && limit <= HARD_MAX_ENTRIES
+          raise InvalidManifest,
+                "max_entries must be between 1 and #{HARD_MAX_ENTRIES}"
+        end
+
+        limit
+      rescue ArgumentError, TypeError
+        raise InvalidManifest, "max_entries must be an integer"
+      end
+      private_class_method :normalize_entry_limit
 
       def self.normalize_root(root)
         value = root.to_s
@@ -168,7 +187,7 @@ module Hive
       end
       private_class_method :normalize_root
 
-      def self.normalize_labeled_paths(entries, root, field)
+      def self.normalize_labeled_paths(entries, root, field, max_entries)
         pairs =
           if entries.is_a?(Array) && entries.all? { |entry| entry.is_a?(String) }
             entries.to_h { |entry| [ entry, entry ] }
@@ -177,8 +196,8 @@ module Hive
           else
             raise InvalidManifest, "#{field} must be relative names or a label-to-path mapping"
           end
-        if pairs.length > MAX_ENTRIES
-          raise InvalidManifest, "#{field} exceeds #{MAX_ENTRIES} entries"
+        if pairs.length > max_entries
+          raise InvalidManifest, "#{field} exceeds #{max_entries} entries"
         end
 
         normalized = pairs.each_with_object({}) do |(label, path), result|
@@ -199,10 +218,10 @@ module Hive
       end
       private_class_method :normalize_labeled_paths
 
-      def self.normalize_roots(entries, root)
+      def self.normalize_roots(entries, root, max_entries)
         roots = Array(entries)
-        if roots.length > MAX_ENTRIES
-          raise InvalidManifest, "permitted_writable_roots exceeds #{MAX_ENTRIES} entries"
+        if roots.length > max_entries
+          raise InvalidManifest, "permitted_writable_roots exceeds #{max_entries} entries"
         end
 
         roots.map do |path|
@@ -331,90 +350,6 @@ module Hive
         return true unless called?
 
         report && (!report.tampered? || report.restored?)
-      end
-    end
-
-    # A single untrusted call can own more protected anchors than one bounded
-    # manifest accepts. This group nests ordinary single-use custody guards so
-    # every manifest is captured before the call and every guard validates in
-    # reverse order afterward, including when an inner validation raises.
-    class ProtectedAnchorCustodySet
-      class CombinedReport
-        attr_reader :reports
-
-        def initialize(reports)
-          @reports = reports.dup.freeze
-        end
-
-        def tampered?
-          reports.any?(&:tampered?)
-        end
-
-        def tampered_labels
-          reports.flat_map(&:tampered_labels).uniq.freeze
-        end
-
-        def restored?
-          affected = reports.select(&:tampered?)
-          return nil if affected.empty?
-
-          affected.all? { |report| report.restored? == true }
-        end
-
-        def restore_diagnostic
-          diagnostics = reports.filter_map(&:restore_diagnostic)
-          return nil if diagnostics.empty?
-
-          diagnostics.join("; ").byteslice(0, DIAGNOSTIC_BYTES).scrub
-        end
-      end
-
-      attr_reader :report
-
-      def initialize(manifests)
-        entries = Array(manifests)
-        raise InvalidManifest, "agent custody set requires at least one manifest" if entries.empty?
-        if entries.length > MAX_CUSTODY_MANIFESTS
-          raise InvalidManifest,
-                "agent custody set exceeds #{MAX_CUSTODY_MANIFESTS} manifests"
-        end
-        unless entries.all? { |manifest| manifest.is_a?(Manifest) }
-          raise InvalidManifest, "agent custody set entries must be manifests"
-        end
-        if entries.any? { |manifest| !manifest.required_outputs.empty? }
-          raise InvalidManifest, "protected-anchor custody set does not accept required outputs"
-        end
-
-        @custodies = entries.map { |manifest| AgentCustody.new(manifest) }.freeze
-        @called = false
-        @report = nil
-      end
-
-      def call(&block)
-        raise Error, "agent custody requires a block" unless block
-        raise Error, "agent custody is single-use" if @called
-
-        @called = true
-        invoke(0, &block)
-      ensure
-        reports = @custodies&.map(&:report)
-        @report = CombinedReport.new(reports) if reports&.all?
-      end
-
-      def called? = @called
-
-      def safe_after?
-        return true unless called?
-
-        @custodies.all?(&:safe_after?)
-      end
-
-      private
-
-      def invoke(index, &block)
-        return block.call if index == @custodies.length
-
-        @custodies.fetch(index).call { invoke(index + 1, &block) }
       end
     end
 

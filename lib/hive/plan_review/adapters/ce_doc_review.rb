@@ -2,8 +2,10 @@ require "digest"
 require "erb"
 require "fileutils"
 require "json"
+require "open3"
 require "securerandom"
 require "timeout"
+require "tmpdir"
 require "hive/agent_limit"
 require "hive/agent_profiles"
 require "hive/agent_skills"
@@ -35,18 +37,16 @@ module Hive
             scope = Hive::PlanReview::WorkspaceScope.launch_kwargs(
               profile:, workspace: cwd, role: request.kind, output_path:
             )
-            manifests = custody_manifests(cwd, output_path)
-            snapshots = manifests.map { |manifest| Hive::ArtifactFirewall.capture(manifest) }
-            result = nil
-            reports = []
-            begin
-              result = Hive::Stages::Base.spawn_agent(
+            custody = Hive::ArtifactFirewall::AgentCustody.new(
+              custody_manifest(cwd, output_path)
+            )
+            result = custody.call do
+              Hive::Stages::Base.spawn_agent(
                 @task,
                 prompt:,
-                # The repository too, not just the disposable workspace: a
-                # reviewer that cannot read the code, wiki, or contracts the
-                # plan refers to can only check the document against itself.
-                add_dirs: [ cwd, request.project_root ].compact.uniq,
+                # cwd is a disposable detached checkout, so one directory
+                # supplies both repository context and the write boundary.
+                add_dirs: [ cwd ],
                 cwd:,
                 max_budget_usd: @cfg.dig("budget_usd", "plan"),
                 timeout_sec: request.timeout_sec,
@@ -59,12 +59,8 @@ module Hive
                 effort: request.reviewer["effort"],
                 **scope
               )
-            ensure
-              reports = manifests.zip(snapshots).reverse_each.map do |manifest, snapshot|
-                Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
-              end
             end
-            tampered = reports.flat_map(&:tampered_labels).uniq
+            tampered = custody.report&.tampered_labels.to_a
             unless tampered.empty?
               return {
                 "status" => "terminal_failure",
@@ -132,43 +128,32 @@ module Hive
           # anchored below.
           ORCHESTRATOR_JOURNALS = %w[task-journal.jsonl task-projection.json].freeze
 
-          # Review history is append-only and can outgrow the firewall's
-          # deliberately small per-manifest admission bound. Keeping every
-          # record in one manifest made the 129th protected path fail before
-          # the reviewer launched (`protected_anchors exceeds 128 entries`).
-          # Partitioning preserves exact per-file capture and restoration
-          # without weakening the global firewall limit or dropping old
-          # review authority from custody.
-          def custody_manifests(workspace, output_path)
+          # Review history is append-only. Keep every record in one custody
+          # transaction so validation failure cannot skip restoration of a
+          # later batch. Manifest admission remains hard-bounded.
+          def custody_manifest(workspace, output_path)
             anchored = Hive::ArtifactFirewall::ORCHESTRATOR_OWNED - ORCHESTRATOR_JOURNALS
             core = anchored.to_h do |name|
               [ name, File.join(@task.folder, name) ]
             end
             core["meta.yml"] = @task.meta_yml_path
             core["review-input"] = File.join(workspace, "plan.md")
-            manifests = [ Hive::ArtifactFirewall::Manifest.new(
-              root: @task.folder, protected_anchors: core,
-              permitted_writable_roots: [ workspace ],
-              required_outputs: { "review-result" => output_path }
-            ) ]
-
             review_root = File.join(@task.folder, "plan-review")
             if File.directory?(review_root) && !File.symlink?(review_root)
-              history = Dir.glob(File.join(review_root, "**", "*"), File::FNM_DOTMATCH).sort.filter_map do |path|
+              Dir.glob(File.join(review_root, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
                 next if %w[. ..].include?(File.basename(path))
                 next unless File.file?(path) || File.symlink?(path)
 
                 relative = path.delete_prefix("#{review_root}/")
-                [ "plan-review/#{relative}", path ]
-              end
-              history.each_slice(Hive::ArtifactFirewall::MAX_ENTRIES) do |entries|
-                manifests << Hive::ArtifactFirewall::Manifest.new(
-                  root: @task.folder, protected_anchors: entries.to_h,
-                  permitted_writable_roots: [ workspace ]
-                )
+                core["plan-review/#{relative}"] = path
               end
             end
-            manifests.freeze
+            Hive::ArtifactFirewall::Manifest.new(
+              root: @task.folder, protected_anchors: core,
+              permitted_writable_roots: [ workspace ],
+              required_outputs: { "review-result" => output_path },
+              max_entries: [ core.length, Hive::ArtifactFirewall::MAX_ENTRIES ].max
+            )
           end
         end
 
@@ -181,6 +166,7 @@ module Hive
 
         def call(request)
           runner_result = nil
+          disposable = nil
           validate_snapshot!(request)
           capability = capability_for(request)
           if capability.fetch("status") != "present"
@@ -269,6 +255,8 @@ module Hive
           )
         rescue SystemCallError, IOError => e
           result("terminal_failure", diagnostic: "plan review adapter filesystem failure: #{e.message}")
+        ensure
+          cleanup_disposable(request, disposable) if disposable
         end
 
         private
@@ -319,13 +307,46 @@ module Hive
           raise InvalidRecord, "plan review output directory is a symlink" if status.symlink?
           raise InvalidRecord, "plan review output path is not a directory" unless status.directory?
 
-          path = File.join(root, "disposable-#{request.attempt_id}")
-          FileUtils.mkdir_p(path, mode: 0o700)
+          temp_root = Dir.mktmpdir("hive-plan-review-worktree-")
+          path = File.join(temp_root, "checkout")
+          out, err, status = Open3.capture3(
+            "git", "-C", request.project_root, "worktree", "add",
+            "--detach", path, "HEAD"
+          )
+          unless status.success?
+            FileUtils.remove_entry_secure(temp_root) if File.directory?(temp_root)
+            raise InvalidRecord,
+                  "plan review could not create a disposable Git worktree: " \
+                  "#{Hive::SecretPatterns.redact([ out, err ].join(" ").strip)}"
+          end
           plan_copy = File.join(path, "plan.md")
           bytes = Hive::SecretPatterns.redact(File.binread(request.plan_path))
           File.binwrite(plan_copy, bytes)
           File.chmod(0o600, plan_copy)
           path
+        rescue StandardError
+          cleanup_disposable(request, path) if defined?(path) && path
+          raise
+        end
+
+        def cleanup_disposable(request, path)
+          expanded = File.expand_path(path)
+          parent = File.dirname(expanded)
+          return unless File.basename(parent).start_with?("hive-plan-review-worktree-")
+          return unless File.dirname(parent) == File.expand_path(Dir.tmpdir)
+
+          _out, err, status = Open3.capture3(
+            "git", "-C", request.project_root,
+            "worktree", "remove", "--force", expanded
+          )
+          warn "[hive.plan_review] disposable worktree cleanup failed: #{err.to_s.strip}" unless status.success?
+          FileUtils.remove_entry_secure(parent) if File.directory?(parent)
+          Open3.capture3(
+            "git", "-C", request.project_root,
+            "worktree", "prune", "--expire", "now"
+          ) unless status.success?
+        rescue SystemCallError => e
+          warn "[hive.plan_review] disposable worktree cleanup failed: #{e.class}: #{e.message}"
         end
 
         def render_prompt(request, disposable, output_path, capability)
@@ -339,7 +360,7 @@ module Hive
             skill_invocation: request.kind == "adversarial" ? nil : capability.fetch("invocation"),
             nonce: SecureRandom.hex(24),
             plan_path: File.join(disposable, "plan.md"),
-            project_root: request.project_root,
+            project_root: disposable,
             output_path:,
             level: request.level,
             required_coverage_json: JSON.generate(request.required_coverage),

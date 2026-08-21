@@ -1290,8 +1290,10 @@ quarantine flow covers interrupted launches.
 
 The local benchmark runtime can now grant an explicit process-local exception
 for projects that serialize `plan_review.enabled: false`; ordinary Hive loads
-still reject that configuration. Unit coverage proves the grant is required,
-but a complete Pi/OpenCode comparison has not yet proven that the benchmark
-runner forwards it through every container and that no plan-review artifacts or
-reviewer calls appear. Keep this boundary local until that fresh campaign proof
-exists.
+still reject that configuration. The first live Pi cell proved the runner
+forwarded the grant and skipped reviewer dispatch, but exposed a second gate:
+the plan-to-execute transition still required a resolution. Focused coverage
+now proves disabled review bypasses prepare, locked verification, and execute
+entry as well as policy dispatch. A complete Pi/OpenCode comparison has not yet
+proven that replacement path live. Keep this boundary local until a fresh cell
+reaches execute without reviewer calls.

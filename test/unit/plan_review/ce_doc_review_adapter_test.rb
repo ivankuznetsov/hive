@@ -18,6 +18,24 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     assert_includes anchored, "plan.md"
   end
 
+  def test_hive_runner_capability_probe_uses_the_project_prepared_opencode_plugin
+    plugin = "compound-engineering@git+https://github.com/EveryInc/" \
+      "compound-engineering-plugin.git#compound-engineering-v3.21.4"
+    runner = Hive::PlanReview::Adapters::CeDocReview::HiveRunner.new(
+      task: nil,
+      cfg: { "agents" => { "opencode" => { "plugins" => [ plugin ] } } }
+    )
+
+    result = runner.capability_probe(
+      agent: "opencode", invocation: "/ce-doc-review", project_root: Dir.pwd
+    )
+    adapter = Hive::PlanReview::Adapters::CeDocReview.new(runner:)
+
+    assert_equal "present", result.fetch("status")
+    assert_includes result.fetch("diagnostic"), "prepared pinned plugin"
+    assert_equal runner, adapter.instance_variable_get(:@capability_probe).receiver
+  end
+
   def test_success_uses_disposable_plan_and_validates_machine_output
     with_request do |request, plan_path|
       original = File.binread(plan_path)

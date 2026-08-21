@@ -69,9 +69,11 @@ output has no clearance authority.
 
 The committed capability manifest exposes `ce-doc-review` through every
 Compound Engineering host Hive can route here, including OpenCode's prepared
-plugin overlay. Provider selection therefore cannot pass configuration and
-runtime probing only to fail later because the review skill contract omitted
-that otherwise-supported host.
+plugin overlay. Capability probing uses the same project-prepared profile as
+the reviewer launch, so `agents.opencode.plugins` is visible even when the
+ambient OpenCode configuration does not contain the plugin. Provider selection
+therefore cannot pass configuration and runtime probing only to fail later
+because the review skill contract omitted or ignored that supported host.
 
 Reviewers run from that disposable checkout with search, shell, and network access so
 they can verify a plan against code, wiki context, history, and referenced

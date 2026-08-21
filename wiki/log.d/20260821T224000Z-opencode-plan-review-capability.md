@@ -19,3 +19,10 @@ but only the raw route row was fingerprinted. Correcting the adversarial model
 therefore replayed the old blocked record. The policy and configuration
 fingerprints now include only the three plan-review routing keys; unrelated
 execute and workflow model choices do not rekey a review.
+
+The fresh review then proved that the adapter's default skill probe looked up
+the stock ambient OpenCode profile while the actual launch used the
+project-prepared profile. It consequently instructed the operator to install a
+plugin already present in `agents.opencode.plugins`. `HiveRunner` now exposes a
+capability probe backed by its project config, and `CeDocReview` selects it by
+default; custom test/embedding probes remain injectable.

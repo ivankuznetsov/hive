@@ -136,6 +136,31 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_clean_partial_feature_batch_persists_the_next_cursor
+    with_patrol_project do |repo|
+      config_path = File.join(repo, ".hive-state", "config.yml")
+      config = YAML.safe_load_file(config_path, aliases: true)
+      config["patrol"]["max_features_per_cycle"] = 1
+      File.write(config_path, config.to_yaml)
+      second = sample_feature
+      second.id = "search"
+
+      out, _err, status = with_captured_exit do
+        command_for(
+          mapper: FakeMapper.new([ sample_feature, second ]),
+          reviewer: FakeReviewer.new([])
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      refute JSON.parse(out).fetch("review_complete")
+      state = patrol_store(repo).state
+      assert_equal "", state.fetch("last_scanned_sha", "")
+      assert_equal true, state.fetch("feature_review_active")
+      assert_equal 1, state.fetch("feature_review_cursor")
+    end
+  end
+
   def test_dry_run_never_materializes_a_workflow_admission
     with_patrol_project do |repo|
       out, _err, status = with_captured_exit do
@@ -301,6 +326,30 @@ class PatrolCommandTest < Minitest::Test
           command.send(:current_default_sha, "/project", cfg)
         end
         assert_match(/cannot fetch fresh patrol scan base/, error.message)
+      end
+    end
+
+    with_replaced_singleton_method(Hive::Worktree, :origin_configured?, ->(_root) { true }) do
+      with_replaced_singleton_method(
+        Hive::Worktree, :fetch_origin_branch,
+        ->(_root, _branch) { [ "", "", status.new(0) ] }
+      ) do
+        with_replaced_singleton_method(
+          Open3, :capture3, ->(*) { [ "#{'a' * 40}\n", "", status.new(0) ] }
+        ) do
+          assert_equal "a" * 40, command.send(:current_default_sha, "/project", cfg)
+        end
+      end
+    end
+
+    with_replaced_singleton_method(Hive::Worktree, :origin_configured?, ->(_root) { false }) do
+      with_replaced_singleton_method(
+        Open3, :capture3, ->(*) { [ "", "missing ref", status.new(1) ] }
+      ) do
+        error = assert_raises(Hive::GitError) do
+          command.send(:current_default_sha, "/project", cfg)
+        end
+        assert_match(/git rev-parse master failed: missing ref/, error.message)
       end
     end
   end

@@ -171,7 +171,7 @@ module Hive
     def create_candidate!(task_dir, stable_selection:)
       created = false
       FileUtils.mkdir_p(File.dirname(task_dir))
-      Dir.mkdir(task_dir)
+      create_task_directory!(task_dir)
       created = true
       state_path = File.join(task_dir, @workflow.stages.first.state_file)
       File.binwrite(state_path, @state_bytes)
@@ -186,18 +186,18 @@ module Hive
       @candidate_writer&.call(task_dir)
       validate_stable_authored_workflow!
       write_task_meta!(task_dir, stable_selection: stable_selection)
+    rescue StandardError, Interrupt
+      FileUtils.rm_rf(task_dir) if created
+      raise
+    end
+
+    def create_task_directory!(task_dir)
+      Dir.mkdir(task_dir)
     rescue Errno::EEXIST
-      if created
-        FileUtils.rm_rf(task_dir)
-        raise
-      end
       raise SlugCollisionError.new(
         "slug collision at #{task_dir} (rare; retry the command)",
         value: @slug
       )
-    rescue StandardError, Interrupt
-      FileUtils.rm_rf(task_dir) if created
-      raise
     end
 
     def copy_attachments!(task_dir)

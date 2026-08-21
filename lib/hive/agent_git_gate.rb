@@ -40,7 +40,18 @@ module Hive
           raise InvalidRequest, "read result overflow state is invalid"
         end
 
-        status = Integer(exitstatus)
+        # A bounded capture kills an overflowing child, so the process may
+        # die by signal and report no exit status at all. That is expected
+        # exactly when overflow was proven; otherwise a missing status stays
+        # invalid.
+        status =
+          begin
+            Integer(exitstatus)
+          rescue ArgumentError, TypeError
+            raise InvalidRequest, "read result exit status is invalid" unless overflow == true
+
+            0
+          end
         raise InvalidRequest, "read result exit status is invalid" if status.negative?
 
         super(
@@ -50,12 +61,10 @@ module Hive
           exitstatus: status,
           overflow: overflow
         )
-      rescue ArgumentError, TypeError
-        raise InvalidRequest, "read result exit status is invalid"
       end
 
       def success?
-        exitstatus.zero? && !overflow
+        exitstatus.to_i.zero? && !overflow
       end
     end
 

@@ -270,15 +270,26 @@ module Hive
           end
           validate_output!(output_path, disposable)
           bytes = File.binread(output_path, ResultParser::MAX_BYTES + 1)
-          parsed = ResultParser.parse(
-            bytes,
-            expected: {
-              "attempt_id" => request.attempt_id,
-              "plan_digest" => request.plan_digest,
-              "policy_fingerprint" => request.policy_fingerprint
-            },
-            snapshot_bytes:
-          )
+          begin
+            parsed = ResultParser.parse(
+              bytes,
+              expected: {
+                "attempt_id" => request.attempt_id,
+                "plan_digest" => request.plan_digest,
+                "policy_fingerprint" => request.policy_fingerprint
+              },
+              snapshot_bytes:
+            )
+          rescue InvalidRecord => e
+            # A well-confined reviewer that emitted malformed JSON or one bad
+            # diagnostic field did not judge the plan. Treat the producer's
+            # output failure like other retryable provider output, while the
+            # orchestrator's max_transient bound prevents a retry loop.
+            return result(
+              "retryable_failure", diagnostic: e.message,
+              route_receipt: route_receipt(request, actual: runner_result["actual_route"])
+            )
+          end
           result(
             parsed.outcome,
             findings: parsed.findings,

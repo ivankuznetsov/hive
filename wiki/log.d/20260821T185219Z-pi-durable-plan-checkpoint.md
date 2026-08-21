@@ -18,3 +18,12 @@ that first-write dependency even when the model later succeeds.
 The checkpoint is provider-neutral and keeps the recovery boundary simple: Hive
 continues to own retries, the terminal marker continues to own stage completion,
 and a retried planner improves the useful partial document already on disk.
+
+The same dogfood run exposed a second Pi boundary: Ox Alpha returned three
+valid anchored findings, but used natural lowercase phrases in
+`selected_lenses` and prose strings in `residual_evidence`. The old prompt did
+not document either machine-only constraint, then the parser terminalized the
+whole useful review. Primary/adversarial prompts now require snake_case lens
+identifiers and an empty residual array, malformed producer output consumes a
+bounded transient retry, and adapter-contract version 2 rekeys unchanged plans
+so the fixed contract is exercised without operator intervention.

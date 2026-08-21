@@ -20,6 +20,29 @@ module Hive
         Result = Data.define(:status, :matches)
         Match = Data.define(:pattern_name, :file, :line, :snippet, :severity)
 
+        # SecretPatterns deliberately remains conservative because it also
+        # redacts logs and diagnostics. In an added source-code line, however,
+        # a password keyword whose value is an obvious runtime lookup is not
+        # secret material. Treating `password: params[:password]` as though it
+        # were `password: "literal"` parked an otherwise autonomous review on
+        # an operator-only guardrail.
+        DYNAMIC_PASSWORD_REFERENCES = /\A(?:
+          params(?:\[|\.)
+          | request\.params(?:\[|\.)
+          | ENV(?:\[|\.)
+          | env(?:\[|\.)
+          | process\.env(?:\[|\.)
+          | Rails\.application\.credentials(?:\[|\.)
+          | credentials(?:\[|\.)
+          | config(?:\[|\.)
+          | settings?(?:\[|\.)
+          | options?(?:\[|\.)
+          | kwargs(?:\[|\.)
+          | payload(?:\[|\.)
+          | input(?:\[|\.)
+          | attributes?(?:\[|\.)
+        )/ix
+
         module_function
 
         def run!(cfg:, ctx:, base_sha:, head_sha:)
@@ -204,6 +227,8 @@ module Hive
 
               if name == :secrets_pattern_match
                 Hive::SecretPatterns.scan(added).each do |hit|
+                  next if dynamic_password_reference?(hit)
+
                   matches << Match.new(
                     pattern_name: "secrets_pattern_match.#{hit[:name]}",
                     file: current_file,
@@ -229,6 +254,19 @@ module Hive
 
           matches
         end
+
+        def dynamic_password_reference?(hit)
+          return false unless hit[:name] == :password_assignment
+
+          rhs = hit[:snippet].to_s.sub(
+            /\A.*?\b(?:password|passwd|pwd)\b['"]?\s*[:=]\s*/i,
+            ""
+          )
+          return false if rhs.start_with?("'", '"')
+
+          DYNAMIC_PASSWORD_REFERENCES.match?(rhs)
+        end
+        private_class_method :dynamic_password_reference?
       end
     end
   end

@@ -225,6 +225,53 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_dynamic_password_parameter_does_not_trip_the_secret_guardrail
+    with_two_commits(
+      file: "app/controllers/setup/operators_controller.rb",
+      content: "Setup::CompleteOperator.call(password: params[:password], token: params[:token])\n"
+    ) do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+
+      assert_equal :clean, result.status
+      assert_empty result.matches
+    end
+  end
+
+  def test_dynamic_environment_password_does_not_trip_the_secret_guardrail
+    with_two_commits(
+      file: "config/database.rb",
+      content: "connect(password: ENV.fetch(\"DATABASE_PASSWORD\"))\n"
+    ) do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+
+      assert_equal :clean, result.status
+      assert_empty result.matches
+    end
+  end
+
+  def test_literal_password_assignment_still_trips_the_secret_guardrail
+    with_two_commits(
+      file: "config/database.yml",
+      content: "password: s3cretpassphrase42\n"
+    ) do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+
+      assert_equal :tripped, result.status
+      assert(result.matches.any? do |match|
+        match.pattern_name == "secrets_pattern_match.password_assignment"
+      end)
+    end
+  end
+
   # --- dotenv_edit -----------------------------------------------------
 
   def test_trips_on_dotenv_edit

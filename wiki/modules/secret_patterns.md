@@ -3,7 +3,7 @@ title: Hive::SecretPatterns
 type: module
 source: lib/hive/secret_patterns.rb
 created: 2026-04-26
-updated: 2026-07-26
+updated: 2026-08-21
 tags: [security, secrets, regex, secret-scan, redact]
 ---
 
@@ -49,7 +49,13 @@ record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes 
 
 - `Hive::Stages::OpenPr` / `Hive::Stages::Finalize` — refuse PR body/state content containing any match (ADR-008).
 - `Hive::Stages::Review::GithubPublisher` — skips PR comment mirroring when a reviewer file contains a secret pattern.
-- `Hive::Stages::Review::FixGuardrail` — the `secrets_pattern_match` default pattern dispatches to `SecretPatterns.scan` for added lines in the post-fix diff.
+- `Hive::Stages::Review::FixGuardrail` — the `secrets_pattern_match` default
+  pattern dispatches to `SecretPatterns.scan` for added lines in the post-fix
+  diff. Its source-code context suppresses only obvious dynamic password
+  references such as `password: params[:password]` and
+  `password: ENV.fetch(...)`; literal password assignments still trip, and the
+  lower-level scanner continues to redact dynamic references conservatively in
+  logs and diagnostics.
 - `Hive::TaskAction#diagnostic` — calls `SecretPatterns.redact` on the bounded summary / detail before emission to JSON consumers (TUI, bot, daemon).
 - `Hive::DiagnosisAgent#artifact_body` — calls `SecretPatterns.redact` on the agent-produced body before writing `diagnostics/red-status.md`.
 - `Hive::Stages::DraftPrHandoff` — scans the exact new commit/object range, final changed files, repair report, and projected PR title/body before any publication; quarantined reports are redacted before Hive appends its marker.

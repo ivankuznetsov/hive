@@ -324,11 +324,13 @@ module AgentCliRuntime
 
   ProbeRequest = Data.define(
     :profile, :route, :variant, :environment,
-    :credential_environment_keys, :credential_file_staged
+    :credential_environment_keys, :credential_file_staged,
+    :configured_variants
   ) do
     def initialize(profile:, route:, variant: nil, environment: {},
                    credential_environment_keys: [],
-                   credential_file_staged: false)
+                   credential_file_staged: false,
+                   configured_variants: nil)
       parsed_route = route.is_a?(Route) ? route : Route.parse(route)
       super(
         profile: profile,
@@ -337,7 +339,9 @@ module AgentCliRuntime
         environment: Immutable.hash(environment),
         credential_environment_keys:
           Immutable.strings(credential_environment_keys),
-        credential_file_staged: credential_file_staged == true
+        credential_file_staged: credential_file_staged == true,
+        configured_variants:
+          configured_variants.nil? ? nil : Immutable.strings(configured_variants)
       )
     end
   end

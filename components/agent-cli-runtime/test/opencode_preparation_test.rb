@@ -163,6 +163,58 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
     end
   end
 
+  def test_selected_custom_model_survives_a_stale_local_inventory
+    with_fixture_cli(mode: :wrong_route) do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        root = File.join(dir, "invocation")
+        FileUtils.mkdir_p(work)
+        config = {
+          "provider" => {
+            "anthropic" => {
+              "models" => {
+                "claude-sonnet-4-5" => {
+                  "variants" => { "high" => {} }
+                }
+              }
+            }
+          }
+        }
+
+        prepared = AgentCliRuntime.prepare!(
+          preparation_request(
+            work:, root:, source: nil, configuration: config,
+            credential_environment_keys: [ "ANTHROPIC_API_KEY" ]
+          ),
+          env: fixture.fetch(:env)
+        )
+
+        assert prepared.probe_result.ready
+        assert_equal [ "high" ], prepared.probe_result.available_variants
+        prepared.cleanup!
+      end
+    end
+  end
+
+  def test_stale_inventory_still_fails_without_a_selected_model_declaration
+    with_fixture_cli(mode: :wrong_route) do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        FileUtils.mkdir_p(work)
+
+        assert_raises(AgentCliRuntime::RouteUnavailable) do
+          AgentCliRuntime.prepare!(
+            preparation_request(
+              work:, root: File.join(dir, "invocation"),
+              source: selected_config(dir)
+            ),
+            env: fixture.fetch(:env)
+          )
+        end
+      end
+    end
+  end
+
   def test_workspace_write_policy_allows_edits_only_in_declared_roots
     with_fixture_cli do |fixture|
       Dir.mktmpdir do |dir|

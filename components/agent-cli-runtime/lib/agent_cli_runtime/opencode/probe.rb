@@ -111,11 +111,13 @@ module AgentCliRuntime
           profile, child_env, "models", request.route.provider, "--verbose",
           timeout_sec: MODEL_INVENTORY_TIMEOUT_SECONDS
         )
-        variants = variants_for(models_output, request.route.to_s)
-        if variants.nil?
+        inventory_variants = variants_for(models_output, request.route.to_s)
+        configured_variants = request.configured_variants
+        if inventory_variants.nil? && configured_variants.nil?
           raise RouteUnavailable,
                 "requested OpenCode route is unavailable in the local model inventory"
         end
+        variants = [ *inventory_variants, *configured_variants ].uniq.sort.freeze
         if request.variant && !variants.include?(request.variant)
           raise RouteUnavailable,
                 "requested OpenCode variant is unavailable for the exact route"

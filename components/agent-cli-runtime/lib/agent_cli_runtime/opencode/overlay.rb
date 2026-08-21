@@ -103,7 +103,9 @@ module AgentCliRuntime
             credential_file_staged:
               staged_credential && credential_file_supports_provider?(
                 staged_credential.last, requested_route.provider
-              )
+              ),
+            configured_variants:
+              configured_variants(source_config, requested_route)
           )
           probe_result = OpenCode::Probe.call!(probe_request, env: probe_env)
           invocation = compile_invocation(
@@ -174,6 +176,21 @@ module AgentCliRuntime
         end
       end
       private_class_method :validate_provider!
+
+      # A selected OpenCode configuration may declare a custom model that is
+      # newer than the CLI's bundled provider catalog. With model fetching
+      # disabled for hermetic launches, that declaration is durable route
+      # evidence; the large `models --verbose` inventory is complementary,
+      # not its replacement.
+      def configured_variants(config, route)
+        models = config.dig("provider", route.provider, "models")
+        return nil unless models.is_a?(Hash) && models.key?(route.model)
+
+        definition = models.fetch(route.model)
+        variants = definition.is_a?(Hash) ? definition["variants"] : nil
+        variants.is_a?(Hash) ? variants.keys.sort.freeze : [].freeze
+      end
+      private_class_method :configured_variants
 
       def validate_nonsecret!(value, key = nil)
         case value

@@ -26,3 +26,11 @@ catalog. Agent CLI Runtime now grants only that inventory command 30 seconds;
 version, help, export, and auth probes retain the original 10-second bound. The
 component regression records the deadline selected for every probe leg without
 sleeping or invoking a model.
+
+A later retry exposed the other half of cold hermetic route readiness: the
+fetch-disabled CLI inventory can omit a newly configured custom model even
+though the exact selected configuration declares that model and its variant.
+Preparation now combines those operator-owned declarations with the CLI
+inventory. An exact configured route therefore survives a stale bundled
+catalog, while an undeclared route absent from the inventory still fails
+closed. Regressions pin both sides of that boundary.

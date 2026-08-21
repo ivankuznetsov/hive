@@ -237,8 +237,12 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   stage permissions to deny-first OpenCode rules. Local capability inspection
   remains bounded at 10 seconds per command except for the verbose model
   inventory, which gets 30 seconds because a cold hermetic provider catalog can
-  be hundreds of kilobytes before any model invocation starts. A successful run
-  is complete only after its terminal message correlates with sanitized session
+  be hundreds of kilobytes before any model invocation starts. Exact custom
+  models and variants declared in the selected provider configuration are
+  combined with that inventory: this keeps a new operator-pinned route usable
+  when the fetch-disabled bundled catalog is stale, while an undeclared route
+  missing from the CLI inventory still fails closed. A successful run is
+  complete only after its terminal message correlates with sanitized session
   export.
   `Hive::SkillCheck::OpenCode` resolves project/user skills and explicitly
   configured plugin roots. Setup can atomically add the pinned Compound

@@ -17,6 +17,7 @@ jobs:
   coverage-shards:
     name: coverage shard ${{ matrix.label }}/6
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -67,7 +68,17 @@ jobs:
     if: ${{ always() }}
     needs: coverage-shards
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
+      - name: Aggregation-only notice (no tests run in this job)
+        shell: bash
+        run: |
+          {
+            echo "### Coverage aggregation only"
+            echo ""
+            echo "This job runs **no tests**. It merges shard resultsets and enforces the exact coverage contract."
+            echo "- A red result here means a coverage shard failed or uncovered executable lines exist — check the \`coverage shard N/6\` jobs and the exported evidence."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Require every coverage collector
         shell: bash
         env:
@@ -96,6 +107,7 @@ jobs:
   expensive-test-gates:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -127,7 +139,16 @@ jobs:
       - expensive-test-gates
       - e2e
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
+      - name: Aggregation-only notice (no tests run in this job)
+        shell: bash
+        run: |
+          {
+            echo "### Required-gate aggregation only — this job runs no tests"
+            echo ""
+            echo "A red result here means one of its children failed: \`coverage (Ruby 3.4)\`, an \`expensive-test-gates\` entry, or \`real CLI scenario harness\`. Check those jobs, not this one."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Require coverage, functional e2e, and expensive proof gates
         shell: bash
         env:
@@ -142,6 +163,7 @@ jobs:
   e2e:
     name: real CLI scenario harness
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
@@ -177,6 +199,7 @@ jobs:
     needs: e2e
     continue-on-error: true
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
@@ -195,6 +218,7 @@ jobs:
   web-tests:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -249,7 +273,16 @@ jobs:
     if: ${{ always() }}
     needs: web-tests
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
+      - name: Aggregation-only notice (no tests run in this job)
+        shell: bash
+        run: |
+          {
+            echo "### Web-gate aggregation only — this job runs no tests"
+            echo ""
+            echo "A red result here means a \`web-tests\` matrix child failed (integration, system, or golden-path E2E). Check those jobs, not this one."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Require Rails integration, system, and golden-path gates
         shell: bash
         env:
@@ -263,6 +296,7 @@ jobs:
   hivebox-installer-windows:
     name: hivebox installer (Windows PowerShell)
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Syntax-check both installers
@@ -278,6 +312,7 @@ jobs:
   rubocop:
     name: rubocop (37signals omakase)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
@@ -289,6 +324,7 @@ jobs:
   brakeman:
     name: brakeman
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
@@ -300,6 +336,7 @@ jobs:
   bundler-audit:
     name: bundler-audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
@@ -320,6 +357,7 @@ jobs:
   launchd-macos:
     name: launchd service install (macOS)
     runs-on: macos-15
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1

@@ -321,6 +321,7 @@ class UsageDbTest < Minitest::Test
 
   def test_legacy_schema_migrates_transactionally_and_rows_remain_unattributed
     with_usage_db do
+      require "sqlite3"
       db = SQLite3::Database.new(Hive::UsageDb.path)
       db.execute_batch(Hive::UsageDb::LEGACY_SCHEMA_SQL)
       db.execute(

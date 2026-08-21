@@ -270,6 +270,52 @@ module Hive
         )
       end
 
+      # Complete a previously dirty implementation after the guarded worktree
+      # recovery command has committed its residue. This is the same clean,
+      # expected-branch, descendant-commit boundary enforced after a normal
+      # implementation spawn, but deliberately does not buy a second model
+      # turn merely to observe that the recovered commit already satisfies it.
+      def recover_committed_residue!(task, cfg, worktree_path)
+        unless task.stage_index == 4 && task.stage_name == "execute"
+          raise Hive::WorktreeError, "committed execute recovery requires a 4-execute task"
+        end
+
+        worktree_git = Hive::GitOps.new(worktree_path)
+        baseline_head = execute_baseline_head(task, worktree_git)
+        raise Hive::WorktreeError, "execute recovery is missing execute_base_head" unless baseline_head
+
+        state = inspect_worktree_state(task, worktree_git)
+        raise Hive::WorktreeError, "execute recovery could not inspect the worktree" unless state
+        raise Hive::WorktreeError, "execute recovery worktree is still dirty" if state.fetch(:dirty)
+
+        head = state.fetch(:head)
+        branch = state.fetch(:branch)
+        expected_branch = expected_worktree_branch(task)
+        unless branch == expected_branch
+          raise Hive::WorktreeError,
+                "execute recovery worktree is on branch #{branch.inspect}, expected #{expected_branch.inspect}"
+        end
+        if head == baseline_head
+          raise Hive::WorktreeError, "execute recovery has no commit beyond execute_base_head"
+        end
+        unless worktree_git.ancestor?(baseline_head, head)
+          raise Hive::WorktreeError, "execute recovery head does not descend from execute_base_head"
+        end
+
+        result = apply_execute_outcome(
+          task, cfg, worktree_path, baseline_head,
+          marker_name: :execute_complete, attrs: {},
+          commit: "execute_complete", status: :execute_complete
+        )
+        unless result[:status] == :execute_complete
+          raise Hive::WorktreeError,
+                "execute recovery did not satisfy the execute completion boundary"
+        end
+        result
+      rescue Hive::GitError => e
+        raise Hive::WorktreeError, "execute recovery git validation failed: #{e.message}"
+      end
+
       def execute_protected_files(task)
         paths = PROTECTED_FILES.dup
         CONTROLLER_RECEIPT_DIRECTORIES.each do |directory|

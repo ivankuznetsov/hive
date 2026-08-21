@@ -747,6 +747,8 @@ module Hive
                    desc: "repository-relative residue paths to discard (space-separated)"
     option :message, type: :string,
                      desc: "one-line commit subject for commit-residue"
+    option :complete_execute, type: :boolean, default: false,
+                              desc: "complete a validated 4-execute dirty-residue recovery"
     option :strategy, type: :string, enum: %w[commit discard],
                       desc: "for repair: commit or discard"
     def worktree(subcommand = nil, target = nil)
@@ -759,6 +761,7 @@ module Hive
         json: options[:json],
         paths: options[:paths],
         message: options[:message],
+        complete_execute: options[:complete_execute],
         strategy: options[:strategy]
       ).call
     end

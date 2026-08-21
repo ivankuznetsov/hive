@@ -16,6 +16,12 @@ project root to `Worktree.canonical_root`. Passing the configured worktree
 directory there caused a second config lookup and bogus roots such as
 `.worktrees.worktrees`, preventing safe recovery even for valid owned pointers.
 
+**Action:** Added `hive worktree commit-residue --complete-execute`. After the
+existing guarded commit, this mode requires a clean owned 4-execute worktree on
+the expected branch with a new descendant commit beyond `execute_base_head`,
+then applies Execute's normal completion boundary without spawning the model a
+second time. Ordinary residue commands retain their marker-preserving behavior.
+
 **Evidence:** `test/unit/agent_profile_test.rb` retains the bounded timeout and
 process cleanup coverage. `test/unit/commands/worktree_test.rb` now pins guarded
 commit recovery from the current execute marker without clearing its marker ID.

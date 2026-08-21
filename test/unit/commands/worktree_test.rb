@@ -154,6 +154,32 @@ class HiveCommandsWorktreeTest < Minitest::Test
     assert_equal "execute-dirty-1", marker.attrs.fetch("marker_id")
   end
 
+  def test_commit_residue_can_complete_validated_execute_recovery
+    Hive::Markers.set(
+      @task.state_file, :error,
+      reason: "dirty_worktree", marker_id: "execute-dirty-2", attempt_id: "attempt-2"
+    )
+    FileUtils.mkdir_p(File.join(@worktree, "wiki"))
+    File.write(File.join(@worktree, "wiki", "residue.md"), "residue\n")
+    recovered = nil
+    recovery = lambda do |task, cfg, worktree_path|
+      recovered = [ task, cfg, worktree_path ]
+      Hive::Markers.set(task.state_file, :execute_complete)
+      { commit: "execute_complete", status: :execute_complete }
+    end
+
+    payload = with_replaced_singleton_method(
+      Hive::Stages::Execute, :recover_committed_residue!, recovery
+    ) do
+      run_command("commit-residue", complete_execute: true)
+    end
+
+    assert_equal [ @task, Hive::Config::DEFAULTS, @worktree ], recovered
+    assert payload.fetch("execute_completed")
+    assert payload.fetch("clean")
+    assert_equal :execute_complete, Hive::Markers.current(@task.state_file).name
+  end
+
   def test_commit_residue_rejects_secret_content_without_committing_or_leaking_it
     FileUtils.mkdir_p(File.join(@worktree, "wiki"))
     secret = "AKIAABCDEFGHIJKLMNOP"
@@ -311,6 +337,7 @@ class HiveCommandsWorktreeTest < Minitest::Test
       [ "status", { paths: [ "wiki/a.md" ] }, /status does not accept/ ],
       [ "commit-residue", { strategy: "commit" }, /strategy applies only/ ],
       [ "commit-residue", { paths: [ "wiki/a.md" ] }, /paths applies only/ ],
+      [ "discard-residue", { complete_execute: true }, /complete-execute applies only/ ],
       [ "discard-residue", { message: "commit this" }, /message applies only/ ]
     ]
 

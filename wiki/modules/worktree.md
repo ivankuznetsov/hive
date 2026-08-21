@@ -215,6 +215,7 @@ reason=dirty_worktree`, and they run under the task lock:
 
 ```text
 hive worktree commit-residue <slug> [--message "one line"] [--json]
+hive worktree commit-residue <slug> --complete-execute [--json]
 hive worktree discard-residue <slug> [--paths path [path ...]] [--json]
 hive worktree repair <slug> --strategy commit|discard [--json]
 ```
@@ -226,9 +227,18 @@ directory back into the project-root configuration resolver. Discard recovery
 accepts only normalized paths that are
 currently dirty; without `--paths` it uses the marker's losslessly encoded,
 bounded residue-path array (with legacy comma-delimited fallback). It restores
-tracked paths from `HEAD` and cleans only the named untracked paths. Neither mutation clears the marker: the returned
-`next_action` requires a fresh `hive status --json`, followed by that
-snapshot's generation-guarded `workflow.retry` action.
+tracked paths from `HEAD` and cleans only the named untracked paths. Ordinary
+commit/discard mutation does not clear the marker: the returned `next_action`
+requires a fresh `hive status --json`, followed by that snapshot's
+generation-guarded `workflow.retry` action.
+
+`--complete-execute` is narrower than ordinary residue commit: it requires the
+current `4-execute` `ERROR reason=dirty_worktree`, a now-clean task-owned
+worktree on its expected branch, and a new `HEAD` descending from the saved
+`execute_base_head`. It then applies Execute's normal completion boundary and
+writes `EXECUTE_COMPLETE` without launching the implementation model again.
+This preserves the already-produced candidate and avoids a recovery loop where
+a shell-less model makes another edit solely because it was relaunched.
 
 ## Path-prefix validation
 

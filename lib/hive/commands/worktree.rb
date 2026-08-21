@@ -8,6 +8,7 @@ require "hive/lock"
 require "hive/markers"
 require "hive/stages/auto_commit"
 require "hive/stages/clean_exit"
+require "hive/stages/execute"
 require "hive/task_resolver"
 require "hive/worktree"
 
@@ -24,7 +25,8 @@ module Hive
       REPAIR_STRATEGIES = %w[commit discard].freeze
 
       def initialize(subcommand, target, project: nil, stage: nil, json: false,
-                     paths: nil, message: nil, strategy: nil, pointer_resolver: nil)
+                     paths: nil, message: nil, strategy: nil, complete_execute: false,
+                     pointer_resolver: nil)
         @subcommand = subcommand.to_s
         @target = target
         @project_filter = project
@@ -33,6 +35,7 @@ module Hive
         @paths = paths
         @message = message
         @strategy = strategy
+        @complete_execute = complete_execute == true
         @pointer_resolver = pointer_resolver
       end
 
@@ -99,6 +102,9 @@ module Hive
         end
         if effective_action == "discard-residue" && !@message.to_s.empty?
           raise Hive::UsageError, "--message applies only to commit-residue recovery"
+        end
+        if @complete_execute && effective_action != "commit-residue"
+          raise Hive::UsageError, "--complete-execute applies only to commit-residue recovery"
         end
         validate_subject! unless @message.to_s.empty?
       end
@@ -168,10 +174,22 @@ module Hive
           raise Hive::WorktreeError, display_message(result[:message])
         end
 
+        execute_completed = false
+        if @complete_execute
+          marker = Hive::Markers.current(task.state_file)
+          unless marker.name == :error && marker.attrs["reason"].to_s == "dirty_worktree"
+            raise Hive::WorktreeError,
+                  "--complete-execute requires ERROR reason=dirty_worktree"
+          end
+          Hive::Stages::Execute.recover_committed_residue!(task, cfg, worktree_path)
+          execute_completed = true
+        end
+
         status_payload(task, worktree_path, action: "commit-residue").merge(
           "commit" => result[:head],
           "committed_paths" => display_paths(result[:paths]),
-          "commit_subject" => result[:commit_subject]
+          "commit_subject" => result[:commit_subject],
+          "execute_completed" => execute_completed
         )
       end
 

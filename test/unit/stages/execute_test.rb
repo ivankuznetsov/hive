@@ -5,7 +5,10 @@ require "hive/markers"
 class HiveStagesExecuteTest < Minitest::Test
   include HiveTestHelper
 
-  TaskStub = Struct.new(:folder, :state_file, :worktree_yml_path, :project_root, :slug, :reviews_dir, :depends_on, :id, keyword_init: true)
+  TaskStub = Struct.new(
+    :folder, :state_file, :worktree_yml_path, :project_root, :slug, :reviews_dir,
+    :depends_on, :id, :stage_index, :stage_name, keyword_init: true
+  )
 
   FakeWorktree = Struct.new(:path, :create_calls, keyword_init: true) do
     def create!(branch_name, default_branch:, base_override: nil)
@@ -129,6 +132,38 @@ class HiveStagesExecuteTest < Minitest::Test
         assert_equal [ [ true, true, :execute_complete ] ], observed
       ensure
         Hive::Markers.define_singleton_method(:set, original) if original
+      end
+    end
+  end
+
+  def test_recover_committed_residue_completes_a_clean_descendant_commit
+    with_tmp_git_repo do |worktree|
+      with_tmp_dir do |dir|
+        task = build_task(dir)
+        task.project_root = worktree
+        task.define_singleton_method(:worktree_path) { worktree }
+        git = Hive::GitOps.new(worktree)
+        baseline = git.head_sha
+        branch = git.current_branch
+        write_pointer(
+          task,
+          "path" => worktree, "branch" => branch,
+          "execute_base_head" => baseline
+        )
+        Hive::Markers.set(
+          task.state_file, :error,
+          reason: "dirty_worktree", marker_id: "dirty-1"
+        )
+        File.write(File.join(worktree, "recovered.txt"), "recovered\n")
+        run!("git", "-C", worktree, "add", "recovered.txt")
+        run!("git", "-C", worktree, "commit", "-m", "recovered", "--quiet")
+
+        result = Hive::Stages::Execute.recover_committed_residue!(
+          task, Hive::Config::DEFAULTS, worktree
+        )
+
+        assert_equal :execute_complete, result.fetch(:status)
+        assert_equal :execute_complete, Hive::Markers.current(task.state_file).name
       end
     end
   end
@@ -1024,7 +1059,9 @@ class HiveStagesExecuteTest < Minitest::Test
       slug: "demo-260522-aaaa",
       reviews_dir: File.join(folder, "reviews"),
       depends_on: depends_on,
-      id: 2
+      id: 2,
+      stage_index: 4,
+      stage_name: "execute"
     )
   end
 

@@ -636,7 +636,8 @@ class AgentGitGateTest < Minitest::Test
       valid_read.merge(stdout: Object.new),
       valid_read.merge(overflow: nil),
       valid_read.merge(exitstatus: -1),
-      valid_read.merge(exitstatus: Object.new)
+      valid_read.merge(exitstatus: Object.new),
+      valid_read.merge(exitstatus: nil)
     ].each do |attributes|
       assert_raises(Hive::AgentGitGate::InvalidRequest) do
         Hive::AgentGitGate::ReadResult.new(**attributes)
@@ -689,6 +690,22 @@ class AgentGitGateTest < Minitest::Test
       assert_raises(Hive::AgentGitGate::InvalidRequest) do
         Hive::AgentGitGate::PublicationReceipt.new(**attributes)
       end
+    end
+  end
+
+  def test_signal_death_is_valid_exactly_when_overflow_was_proven
+    killed = Hive::AgentGitGate::ReadResult.new(
+      operation: :object_content, stdout: "a", stderr: "",
+      exitstatus: nil, overflow: true
+    )
+
+    refute_predicate killed, :success?
+
+    assert_raises(Hive::AgentGitGate::InvalidRequest) do
+      Hive::AgentGitGate::ReadResult.new(
+        operation: :object_content, stdout: "", stderr: "",
+        exitstatus: nil, overflow: false
+      )
     end
   end
 

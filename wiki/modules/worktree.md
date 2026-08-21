@@ -208,8 +208,9 @@ credentials or agent output.
 entries, residue paths, branch, HEAD, and untracked count. Paths remain exact
 for internal recovery operations, while every JSON, text, and diagnostic
 surface bounds and redacts secret-shaped path text. The
-mutating verbs are admitted only while the task carries either `ERROR
-reason=ensure_clean_on_exit_failed` or `EXECUTE_WAITING
+mutating verbs are admitted only while the task carries `ERROR
+reason=ensure_clean_on_exit_failed`, the current execute contract's `ERROR
+reason=dirty_worktree`, or the historical `EXECUTE_WAITING
 reason=dirty_worktree`, and they run under the task lock:
 
 ```text

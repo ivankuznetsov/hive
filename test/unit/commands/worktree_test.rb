@@ -135,6 +135,25 @@ class HiveCommandsWorktreeTest < Minitest::Test
                  `git -C #{@worktree} log -1 --pretty=%s`.strip
   end
 
+  def test_commit_residue_accepts_error_dirty_worktree_from_execute
+    Hive::Markers.set(
+      @task.state_file, :error,
+      reason: "dirty_worktree", marker_id: "execute-dirty-1", attempt_id: "attempt-1"
+    )
+    FileUtils.mkdir_p(File.join(@worktree, "wiki"))
+    File.write(File.join(@worktree, "wiki", "residue.md"), "residue\n")
+
+    payload = run_command("commit-residue")
+
+    assert_equal "commit-residue", payload.fetch("action")
+    assert_equal [ "wiki/residue.md" ], payload.fetch("committed_paths")
+    assert payload.fetch("clean")
+    marker = Hive::Markers.current(@task.state_file)
+    assert_equal :error, marker.name
+    assert_equal "dirty_worktree", marker.attrs.fetch("reason")
+    assert_equal "execute-dirty-1", marker.attrs.fetch("marker_id")
+  end
+
   def test_commit_residue_rejects_secret_content_without_committing_or_leaking_it
     FileUtils.mkdir_p(File.join(@worktree, "wiki"))
     secret = "AKIAABCDEFGHIJKLMNOP"

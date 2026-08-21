@@ -139,7 +139,7 @@ module Hive
       def recovery_marker!(task)
         marker = Hive::Markers.current(task.state_file)
         reason = marker.attrs["reason"].to_s
-        eligible = (marker.name == :error && reason == "ensure_clean_on_exit_failed") ||
+        eligible = (marker.name == :error && %w[ensure_clean_on_exit_failed dirty_worktree].include?(reason)) ||
                    (marker.name == :execute_waiting && reason == "dirty_worktree")
         return marker if eligible
 

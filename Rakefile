@@ -212,6 +212,28 @@ namespace :coverage do
   rescue ArgumentError, KeyError, HiveTestCoverage::ShardManifestError => e
     abort "coverage shard manifest error: #{e.message}"
   end
+
+  desc "Land a sweep-produced per-file timings file as the checked-in shard partition input"
+  task :timings do
+    source = ENV["HIVE_TIMINGS_SOURCE"]
+    abort "usage: HIVE_TIMINGS_SOURCE=<sweep timings.json> rake coverage:timings" unless source
+    require "json"
+    payload = JSON.parse(File.read(source))
+    abort "unexpected timings schema: #{payload['schema'].inspect}" unless payload["schema"] == "hive-shard-timings.v1"
+    seconds = payload.fetch("seconds_per_run")
+    abort "timings payload is empty" if seconds.empty?
+
+    missing = HIVE_DEFAULT_TEST_FILES.reject { |file| seconds.key?(file) }
+    if missing.any?
+      warn "warning: #{missing.length} default-suite file(s) absent from the timings payload " \
+           "(they will fall back to byte-size weighting): #{missing.first(5).join(', ')}..."
+    end
+
+    root = File.expand_path(__dir__)
+    destination = File.join(root, "test", "support", "shard_timings.json")
+    File.write(destination, JSON.pretty_generate(payload))
+    puts "Landed shard timings (#{seconds.length} files, seeds #{payload['seeds'].inspect}) -> #{destination}"
+  end
 end
 
 # Smoke suite — opt-in, runs against real agent CLIs and tmp homes/repos.

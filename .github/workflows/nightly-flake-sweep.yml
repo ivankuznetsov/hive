@@ -1,0 +1,109 @@
+name: Nightly flake sweep
+
+# Moves flake discovery off agents' PRs: runs the default suite once per seed
+# in a single process each, merges the reports into order-dependent-flake
+# candidates (failing under some seeds but not others) plus per-file mean
+# timings for the runtime-based shard partition. Candidate filing is
+# deduplicated by test name via issue search; timings land as an artifact and
+# reach the repo only through `rake coverage:timings` + a reviewed commit.
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-flake-sweep
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    name: sweep seeds ${{ matrix.seed }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: ["101", "202", "303"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Run suite under seed ${{ matrix.seed }}
+        env:
+          HIVE_SWEEP_REPORT: ${{ runner.temp }}/sweep-report-${{ matrix.seed }}.json
+        run: |
+          bundle exec ruby script/flake_sweep.rb --seed "${{ matrix.seed }}" \
+            --report "$HIVE_SWEEP_REPORT"
+      - name: Retain sweep report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sweep-report-${{ matrix.seed }}
+          path: ${{ runner.temp }}/sweep-report-${{ matrix.seed }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  analyze:
+    name: analyze candidates and timings
+    needs: sweep
+    if: ${{ always() }}
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: sweep-report-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/sweeps
+      - name: Merge reports into candidates and timings
+        id: merge
+        continue-on-error: true
+        env:
+          HIVE_SWEEP_DIR: ${{ runner.temp }}/sweeps
+        run: |
+          reports="$(find "$HIVE_SWEEP_DIR" -name 'sweep-report-*.json' | sort | paste -sd, -)"
+          bundle exec ruby script/flake_sweep_report.rb \
+            --reports "$reports" \
+            --candidates "${{ runner.temp }}/flake-candidates.json" \
+            --timings "${{ runner.temp }}/shard-timings.json"
+      - name: Retain merged analysis
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flake-analysis
+          path: |
+            ${{ runner.temp }}/flake-candidates.json
+            ${{ runner.temp }}/shard-timings.json
+          if-no-files-found: warn
+          retention-days: 30
+      - name: File or update the flake-candidate issue
+        if: ${{ steps.merge.outcome == 'success' && hashFiles(format('{0}/flake-candidates.json', runner.temp)) != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATES_PATH: ${{ runner.temp }}/flake-candidates.json
+        run: |
+          set -euo pipefail
+          marker="flake-sweep-report"
+          existing="$(gh issue list --state open --search "\"$marker\" in:title" --json number --jq '.[0].number' || true)"
+          body="$(ruby script/render_flake_issue.rb "$CANDIDATES_PATH")"
+          title="Flake sweep report ($marker)"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --label "ci-flake" --body "$body" || \
+              gh issue create --title "$title" --body "$body"
+          fi

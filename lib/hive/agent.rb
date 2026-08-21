@@ -21,7 +21,7 @@ module Hive
     FINAL_MESSAGE_TAIL_BYTES = 64 * 1024
     TERMINATION_GRACE_SECONDS = 3
     COMPLETION_EVENT_GRACE_SECONDS = 3
-    OPENCODE_INSPECTION_TIMEOUT_SECONDS = 10
+    OPENCODE_INSPECTION_TIMEOUT_SECONDS = 60
     OPENCODE_INSPECTION_JSON_ATTEMPTS = 3
     OPENCODE_INSPECTION_RETRY_DELAY_SECONDS = 0.5
     OPENCODE_CAPTURE_DRAIN_SECONDS = 30
@@ -983,11 +983,13 @@ module Hive
       end
       deadline = Time.now + OPENCODE_INSPECTION_TIMEOUT_SECONDS
       status = nil
+      inspection_timed_out = false
       until status
         captured = Process.wait2(pid, Process::WNOHANG)
         status = captured.last if captured
         break if status
         if Time.now >= deadline
+          inspection_timed_out = true
           kill_group(pgid)
           sleep_grace_then_kill(pgid, pid)
           status = begin
@@ -1004,9 +1006,14 @@ module Hive
       success = status&.success? == true && !stdout_capture.fetch(:truncated)
       diagnostic = unless success
         AgentCliRuntime::Redactor.diagnostic(
-          stderr_capture.fetch(:data).empty? ?
-            "OpenCode sanitized export inspection failed" :
+          if inspection_timed_out
+            "OpenCode sanitized export inspection timed out after " \
+              "#{OPENCODE_INSPECTION_TIMEOUT_SECONDS} seconds"
+          elsif stderr_capture.fetch(:data).empty?
+            "OpenCode sanitized export inspection failed"
+          else
             stderr_capture.fetch(:data)
+          end
         )
       end
       {
@@ -1316,17 +1323,18 @@ module Hive
 
       normalized = result[:normalized_outcome]
       if normalized && !normalized.completed?
+        diagnostic = result[:inspection_diagnostic] || normalized.diagnostic
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(
             @task.state_file,
             :error,
             reason: normalized.kind.to_s,
-            message: normalized.diagnostic.to_s.byteslice(0, 200)
+            message: diagnostic.to_s.byteslice(0, 200)
           )
         end
         result[:status] = :error
         result[:error_reason] = normalized.kind.to_s
-        result[:error_message] = normalized.diagnostic
+        result[:error_message] = diagnostic
         return
       end
 

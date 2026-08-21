@@ -390,8 +390,10 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       end
 
       assert_equal :error, result.fetch(:status)
-      assert_match(/sanitized export inspection failed/,
+      assert_match(/sanitized export inspection timed out after 0.05 seconds/,
                    result.fetch(:inspection_diagnostic))
+      assert_match(/sanitized export inspection timed out after 0.05 seconds/,
+                   result.fetch(:error_message))
     end
 
     with_fixture(mode: :inspection_empty_failure) do |fixture|
@@ -404,6 +406,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       end
       assert_match(/sanitized export inspection failed/,
                    result.fetch(:inspection_diagnostic))
+      assert_match(/sanitized export inspection failed/,
+                   result.fetch(:error_message))
     end
   end
 

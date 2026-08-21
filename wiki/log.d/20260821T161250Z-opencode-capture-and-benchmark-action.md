@@ -10,6 +10,9 @@
   non-model export inspection up to three bounded attempts. This handles the
   live OpenCode race where a large export exited zero but ended mid-object;
   persistently malformed evidence still fails closed with a bounded diagnostic.
+- Allow large local exports up to sixty seconds and preserve an inspection
+  timeout or CLI failure as the task's diagnostic instead of replacing it with
+  the generic missing-export message.
 - Accepted a correlated tool-only OpenCode terminal step with empty prose as a
   completed normalized run. Sanitized export, terminal finish evidence, and
   the stage's required artifact remain mandatory, so an empty or partial

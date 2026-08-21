@@ -306,7 +306,7 @@ module Hive
           persist_day(state) if @lane_created
           @lane_created = false
           hold = held_lane(load_holds, engine)
-          [ Marshal.load(Marshal.dump(lane)), Marshal.load(Marshal.dump(hold)) ]
+          [ lane, hold ]
         end
       end
 

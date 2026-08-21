@@ -1159,7 +1159,8 @@ module Hive
           "provider" => (attrs["provider"] || attrs["provider_account_id"] ||
             value(row, :provider)).to_s,
           "status_code" => (attrs["status_code"] || attrs["status"]).to_s,
-          "message_digest" => Digest::SHA256.hexdigest(normalized_message)
+          "message_digest" => Digest::SHA256.hexdigest(normalized_message),
+          "progress_revision" => dirty_progress_revision(row, attrs)
         ))
       end
 
@@ -1210,6 +1211,27 @@ module Hive
           except_request_id: retry_request_id, state_home: @state_home
         )
         request_queue.fetch(retry_request_id, state_home: @state_home) || request
+      end
+
+      # A dirty-worktree stop is a clean Pi handoff, not proof that the same
+      # work failed again. Bind that failure class to Hive's observed commit
+      # evidence so a newly committed checkpoint starts the short retry ladder
+      # again, while repeated stops at the same revision still converge on the
+      # deterministic-failure park.
+      def dirty_progress_revision(row, attrs)
+        return "" unless attrs["reason"].to_s == "dirty_worktree"
+
+        Array(value(row, :evidence)).reverse_each do |item|
+          next unless item.is_a?(Hash)
+          next unless (item["type"] || item[:type]).to_s == "commit"
+          next unless (item["observation"] || item[:observation]).to_s ==
+                      "dirty_worktree"
+
+          sha = (item["sha"] || item[:sha]).to_s
+          return sha.downcase if sha.match?(/\A[0-9a-f]{40,64}\z/i)
+        end
+
+        ""
       end
 
       def source_receipt_for(marker:, task:, project:)

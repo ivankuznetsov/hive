@@ -162,12 +162,13 @@ module Hive
       end
 
       def commit_residue(task, cfg, worktree_path)
+        reason = @complete_execute ? :execute_residue_recovery : :operator_recovery
         result = Hive::Stages::CleanExit.run!(
           worktree_path: worktree_path,
           stage: "#{task.stage_index}-#{task.stage_name}",
           task: task,
           cfg: cfg,
-          reason: :operator_recovery,
+          reason: reason,
           subject: (@message unless @message.to_s.empty?)
         )
         unless %i[clean auto_committed].include?(result[:status])

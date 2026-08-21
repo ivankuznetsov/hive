@@ -220,8 +220,9 @@ hive worktree discard-residue <slug> [--paths path [path ...]] [--json]
 hive worktree repair <slug> --strategy commit|discard [--json]
 ```
 
-Commit recovery reuses the full CleanExit scope, symlink, secret-content, and
-signing policy gates. Owned-pointer validation resolves the expected worktree
+Ordinary commit recovery reuses the full CleanExit scope, symlink,
+secret-content, and signing policy gates. Owned-pointer validation resolves the
+expected worktree
 root from the task's project root; it never feeds an already-resolved worktree
 directory back into the project-root configuration resolver. Discard recovery
 accepts only normalized paths that are
@@ -238,7 +239,11 @@ worktree on its expected branch, and a new `HEAD` descending from the saved
 `execute_base_head`. It then applies Execute's normal completion boundary and
 writes `EXECUTE_COMPLETE` without launching the implementation model again.
 This preserves the already-produced candidate and avoids a recovery loop where
-a shell-less model makes another edit solely because it was relaunched.
+a shell-less model makes another edit solely because it was relaunched. Because
+this boundary snapshots the whole already-produced implementation, it bypasses
+the review-fix filename allowlist like the pre-fix residue snapshot does; the
+staged-symlink, secret-content, signing, owned-pointer, branch, ancestry, and
+cleanliness gates remain mandatory.
 
 ## Path-prefix validation
 

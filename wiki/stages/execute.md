@@ -69,6 +69,10 @@ contains uncommitted edits from the failed agent. Those edits are durable
 implementation progress; ownership, branch, ancestry, and tamper checks still
 run. If a successful agent exit still leaves dirt, Execute writes a fresh
 `ERROR reason=dirty_worktree`, so retry backoff and lineage remain scheduler-owned.
+The explicit `hive worktree commit-residue --complete-execute` recovery path can
+snapshot that whole implementation even when planned files fall outside the
+review-fix filename allowlist, while retaining staged-symlink, secret-content,
+signing, ownership, branch, ancestry, and cleanliness gates.
 
 ## Implementation sub-agent (`spawn_implementation`)
 

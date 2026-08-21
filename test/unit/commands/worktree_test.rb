@@ -180,6 +180,54 @@ class HiveCommandsWorktreeTest < Minitest::Test
     assert_equal :execute_complete, Hive::Markers.current(@task.state_file).name
   end
 
+  def test_complete_execute_recovery_preserves_out_of_scope_implementation_paths
+    Hive::Markers.set(
+      @task.state_file, :error,
+      reason: "dirty_worktree", marker_id: "execute-dirty-scope", attempt_id: "attempt-scope"
+    )
+    FileUtils.mkdir_p(File.join(@worktree, "web", "config"))
+    File.write(File.join(@worktree, "web", "config", "routes.rb"), "# planned route\n")
+    recovery = lambda do |task, _cfg, _worktree_path|
+      Hive::Markers.set(task.state_file, :execute_complete)
+    end
+
+    payload = with_replaced_singleton_method(
+      Hive::Stages::Execute, :recover_committed_residue!, recovery
+    ) do
+      run_command("commit-residue", complete_execute: true)
+    end
+
+    assert_equal [ "web/config/routes.rb" ], payload.fetch("committed_paths")
+    assert payload.fetch("execute_completed")
+    body = `git -C #{@worktree} log -1 --pretty=%B`
+    assert_includes body, "Hive-Auto-Commit-Reason: execute_residue_recovery"
+  end
+
+  def test_complete_execute_recovery_keeps_secret_content_gate
+    Hive::Markers.set(
+      @task.state_file, :error,
+      reason: "dirty_worktree", marker_id: "execute-dirty-secret", attempt_id: "attempt-secret"
+    )
+    FileUtils.mkdir_p(File.join(@worktree, "web", "config"))
+    secret = "AKIAABCDEFGHIJKLMNOP"
+    File.write(File.join(@worktree, "web", "config", "routes.rb"), "#{secret}\n")
+    recovered = false
+    recovery = ->(*) { recovered = true }
+
+    out, error = with_replaced_singleton_method(
+      Hive::Stages::Execute, :recover_committed_residue!, recovery
+    ) do
+      run_command_error("commit-residue", complete_execute: true)
+    end
+
+    payload = JSON.parse(out)
+    assert_instance_of Hive::WorktreeError, error
+    assert_equal "worktree_error", payload.fetch("error_kind")
+    refute_includes payload.fetch("message"), secret
+    refute recovered
+    assert_equal "seed", `git -C #{@worktree} log -1 --pretty=%s`.strip
+  end
+
   def test_commit_residue_rejects_secret_content_without_committing_or_leaking_it
     FileUtils.mkdir_p(File.join(@worktree, "wiki"))
     secret = "AKIAABCDEFGHIJKLMNOP"

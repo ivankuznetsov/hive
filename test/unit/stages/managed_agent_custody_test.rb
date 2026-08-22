@@ -92,16 +92,76 @@ class ManagedAgentCustodyTest < Minitest::Test
     end
   end
 
+  def test_opencode_review_can_write_only_its_report_without_shell
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      captured = capture_launch(task, output, cfg: opencode_config)
+
+      assert_equal "workspace-write", captured.fetch(:permission_mode)
+      assert_equal :opencode, captured.fetch(:profile).name
+      assert_equal "openrouter/stealth/ox-alpha", captured.fetch(:model)
+      assert_equal "high", captured.fetch(:effort)
+      assert_equal [ task.folder ], captured.fetch(:additional_write_roots)
+      assert_equal [ output ], captured.fetch(:opencode_edit_patterns)
+      assert_empty captured.fetch(:opencode_bash_patterns)
+    end
+  end
+
+  def test_opencode_fix_can_edit_the_owned_worktree_and_run_shell_commands
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-fix-report.json")
+      captured = capture_launch(
+        task, output, cfg: opencode_config, actor: "patrol_fix",
+        stage: "fix", log_label: "patrol-fix-fix"
+      )
+
+      assert_equal [ task.project_root, task.folder ],
+                   captured.fetch(:additional_write_roots)
+      assert_equal [ File.join(task.project_root, "**"), output ],
+                   captured.fetch(:opencode_edit_patterns)
+      assert_equal [ "*" ], captured.fetch(:opencode_bash_patterns)
+    end
+  end
+
   private
 
-  def launch(task, output)
+  def launch(task, output, cfg: {}, actor: "patrol_review", stage: "inbox",
+             log_label: "patrol-fix-inbox")
     Hive::Stages::ManagedAgentCustody.launch_agent(
-      task: task, cfg: {}, prompt: "Inspect the selected finding.",
+      task: task, cfg: cfg, prompt: "Inspect the selected finding.",
       output_path: output, protected_files: PROTECTED_FILES,
-      actor: "patrol_review", slot: "stages.inbox", cwd: task.project_root,
-      add_dirs: [ task.project_root, task.folder ], stage: "inbox",
-      log_label: "patrol-fix-inbox"
+      actor: actor, slot: "stages.#{stage}", cwd: task.project_root,
+      add_dirs: [ task.project_root, task.folder ], stage: stage,
+      log_label: log_label
     )
+  end
+
+  def capture_launch(task, output, **options)
+    captured = nil
+    spawn = lambda do |_task, **kwargs|
+      captured = kwargs
+      kwargs.fetch(:agent_custody).call do
+        File.write(output, "{}")
+        { status: :ok }
+      end
+    end
+    with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+      launch(task, output, **options)
+    end
+    captured
+  end
+
+  def opencode_config
+    {
+      "patrol" => {
+        "agent" => "codex",
+        "fix" => {
+          "agent" => "opencode",
+          "model" => "openrouter/stealth/ox-alpha",
+          "effort" => "high"
+        }
+      }
+    }
   end
 
   def with_task

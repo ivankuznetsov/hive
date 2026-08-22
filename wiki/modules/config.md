@@ -666,6 +666,12 @@ explicit selected OpenCode config whose top-level `model` is exact may supply
 the default. Skill-bearing OpenCode plan roles use `/ce-plan` by default and
 must pass native skill/plugin readiness before spawn.
 
+Patrol Fix can instead keep its complete repair identity under
+`patrol.fix.{agent,model,effort}`. Discovery remains on `patrol.agent`. When the
+two identities use different providers, use `models.patrol_review` for a
+discovery-only route; `models.patrol` is deliberately coarse and therefore
+applies to both review and fix identities.
+
 `timeout_sec.review_ci` (default 3600) is enforced as a hard per-process kill in `Review::CiFix#run_ci_once` — TERM the pgid on expiry, 3s grace, then KILL — not just as an outer-loop budget check.
 
 ## Stage runners reach into config like this
@@ -682,6 +688,7 @@ cfg.dig("plan_review", "coverage", "required")
 cfg.dig("babysitter", "enabled")
 cfg.dig("babysitter", "max_concurrent_prs")
 cfg.dig("patrol", "review_prs")
+cfg.dig("patrol", "fix", "agent")
 cfg.dig("patrol", "review", "reviewers")
 cfg.dig("daemon", "auto_retry", "enabled")
 cfg.dig("bot", "chat_id_allowlist")

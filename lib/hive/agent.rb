@@ -877,8 +877,8 @@ module Hive
 
     def selected_base_environment
       %w[
-        HOME LANG LC_ALL LOGNAME PATH SHELL SSL_CERT_DIR SSL_CERT_FILE
-        USER
+        GEM_HOME GEM_PATH HOME LANG LC_ALL LOGNAME PATH SHELL SSL_CERT_DIR
+        SSL_CERT_FILE USER
       ].each_with_object({}) do |key, selected|
         value = @launch_environment.key?(key) ?
           @launch_environment[key] : ENV[key]

@@ -430,6 +430,13 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       end
       assert_equal "C.explicit", selected.fetch("LANG")
       assert_equal "/host/path", selected.fetch("PATH")
+
+      selected = with_env(
+        "GEM_HOME" => "/operator/gem-home",
+        "GEM_PATH" => "/operator/gem-path"
+      ) { agent.send(:selected_base_environment) }
+      assert_equal "/operator/gem-home", selected.fetch("GEM_HOME")
+      assert_equal "/operator/gem-path", selected.fetch("GEM_PATH")
     end
   end
 

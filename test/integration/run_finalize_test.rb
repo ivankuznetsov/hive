@@ -150,6 +150,48 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
+  # Project clones are allowed to fetch only the default branch. A feature
+  # branch can still be configured with origin as its upstream and be fully
+  # published, but `branch@{u}` is then undefined because the fetch refspec
+  # does not map that branch. Finalize must observe the exact remote ref and
+  # complete instead of retrying an already-pushed branch forever.
+  def test_finalize_accepts_published_branch_outside_fetch_refspec
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        slug = "fix-bug-260424-aaaa"
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        run!("git", "-C", worktree_path, "config", "--unset-all", "remote.origin.fetch")
+        run!("git", "-C", worktree_path, "config", "--add", "remote.origin.fetch",
+             "+refs/heads/main:refs/remotes/origin/main")
+
+        _out, _err, upstream_status = Open3.capture3(
+          "git", "-C", worktree_path, "rev-parse", "#{slug}@{u}"
+        )
+        refute upstream_status.success?,
+               "fixture must reproduce the narrow-refspec branch@{u} failure"
+
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          pr_url: https://github.com/acme/app/pull/9
+          pr_number: 9
+          ---
+
+          ## Summary
+          final
+
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
+        MD
+
+        capture_io { Hive::Commands::Run.new(task_dir).call }
+
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :complete, marker.name,
+                     "an exact remote HEAD match must not be reported as unpushed_commits"
+      end
+    end
+  end
+
   # A remote-side auto-rebase (e.g. base churn while several PRs merge in
   # quick succession) advances the PR branch and rebases the fix onto it,
   # leaving the local finalize worktree on the old base with a commit whose

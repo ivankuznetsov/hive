@@ -48,6 +48,19 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_completion_probe_must_be_callable
+    Dir.mktmpdir("hive-agent-completion-probe-contract") do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: make_task(dir), prompt: "test", max_budget_usd: 1,
+          timeout_sec: 5, completion_probe: true
+        )
+      end
+
+      assert_equal "completion_probe must be callable", error.message
+    end
+  end
+
   def run_delta_before_write(dir, max_turns: nil, max_tokens: nil)
     task = make_task(dir)
     output = File.join(dir, "findings.json")

@@ -404,6 +404,13 @@ class ConfigTest < Minitest::Test
       File.write(config_path, "patrol:\n  fix:\n    agent: missing\n")
       unknown = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/patrol\.fix\.agent.*not a registered AgentProfile/, unknown.message)
+
+      File.write(
+        config_path,
+        "patrol:\n  fix:\n    agent: opencode\n    model: ox-alpha\n    effort: high\n"
+      )
+      invalid = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/patrol\.fix identity.*exact provider\/model route/, invalid.message)
     end
   end
 

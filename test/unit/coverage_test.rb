@@ -110,6 +110,47 @@ class HiveTestCoverageTest < Minitest::Test
     assert_same result.fetch("/branch.rb"), sparse.fetch("/branch.rb")
   end
 
+  # Regression: a pre-`exit!` sparse flush used to call Coverage.result with
+  # its default stop: true, ending measurement for the rest of that process.
+  # A fork parent (or a stubbed `exit!` that never reaches Kernel#exit!) keeps
+  # running tests afterwards, so every line it executed later vanished — and
+  # the "not enabled" rescue swallowed the second dump, so the shard still
+  # reported green while thousands of lines silently went uncovered.
+  def test_sparse_flush_keeps_measuring_lines_executed_afterwards
+    with_tmp_dir do |dir|
+      lib = File.join(dir, "lib")
+      FileUtils.mkdir_p(lib)
+      File.write(File.join(lib, "before_flush.rb"), "module BeforeFlushProbe; VALUE = 1; end\n")
+      File.write(File.join(lib, "after_flush.rb"), "module AfterFlushProbe; VALUE = 2; end\n")
+      support = File.expand_path("../support/coverage.rb", __dir__)
+      script = File.join(dir, "probe.rb")
+      File.write(script, <<~PROBE)
+        require #{support.dump}
+        HiveTestCoverage.start!(root: #{dir.dump})
+        $LOAD_PATH.unshift(#{lib.dump})
+        require "before_flush"
+        HiveTestCoverage.dump_process_result!(sparse: true)
+        require "after_flush"
+        HiveTestCoverage.dump_process_result!
+        keys = Dir.glob(File.join(#{dir.dump}, "coverage", ".resultset", "**", "*.marshal"))
+          .flat_map { |file| Marshal.load(File.binread(file)).keys }
+        probes = keys.select { |key| key.end_with?("_flush.rb") }
+        puts probes.map { |key| File.basename(key) }.uniq.sort.join(",")
+      PROBE
+
+      output = IO.popen(
+        { "HIVE_COVERAGE_RUN_ID" => "flush-probe" },
+        [ RbConfig.ruby, script ],
+        err: File::NULL,
+        &:read
+      )
+
+      assert_predicate $?, :success?, "coverage probe subprocess failed"
+      assert_equal "after_flush.rb,before_flush.rb", output.strip,
+        "code executed after a sparse flush must still be measured"
+    end
+  end
+
   def test_reload_preloaded_entrypoint_filters_constant_redefinition_warnings_only
     with_tmp_dir do |dir|
       lib = File.join(dir, "lib")

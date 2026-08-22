@@ -127,11 +127,18 @@ module HiveTestCoverage
     FileUtils.mkdir_p(@resultset_dir)
     path = File.join(@resultset_dir, "#{Process.pid}-#{object_id}.marshal")
     tmp_path = "#{path}.tmp"
-    result = Coverage.result
+    # stop: false is load-bearing. Coverage.result ends measurement by
+    # default, and the pre-`exit!` sparse flush can run in a process that
+    # keeps executing tests afterwards (a fork parent, or a stubbed `exit!`
+    # that never reaches Kernel#exit!). Stopping there silently drops every
+    # line that process runs later: the rescue below swallows the resulting
+    # "not enabled" error and the shard still reports green. clear: false
+    # keeps results cumulative, so the process's final dump is a superset
+    # that overwrites this same pid-keyed path.
+    result = Coverage.result(stop: false, clear: false)
     result = sparse_process_result(result) if sparse
     File.binwrite(tmp_path, Marshal.dump(result))
     File.rename(tmp_path, path)
-    @dumped = true
   rescue RuntimeError => e
     # Coverage.result raises this specific message when measurement was
     # already stopped (another at_exit hook drained it first). That's the

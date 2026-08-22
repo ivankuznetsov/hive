@@ -405,6 +405,17 @@ subprocess results under six-runner contention. The downstream aggregate still
 enumerates every `lib/` source, treats absent entries as unloaded, and enforces
 the same exact line threshold; lazy collection does not weaken the final gate.
 
+`HiveTestCoverage.dump_process_result!` reads `Coverage.result(stop: false,
+clear: false)`. The keyword arguments are load-bearing: `Coverage.result`
+ends measurement by default, and the pre-`exit!` sparse flush can run in a
+process that keeps executing tests afterwards (a fork parent, or a stubbed
+`exit!` that never reaches `Kernel#exit!`). Stopping there dropped every line
+that process ran later, and the "coverage measurement is not enabled" rescue
+swallowed the final dump — so a shard reported green while thousands of lines
+silently went uncovered, with the deficit migrating between shards whenever
+the partition reshuffled. Keeping results cumulative lets each process's last
+dump overwrite its own pid-keyed file as a superset.
+
 In CI (`CI=true`), tests that exercise backgrounding commands must force a foreground path (for example `foreground: true`) or stub daemonization. Otherwise the test process can daemonize before Minitest `after_run` writes `coverage/coverage.json`, leaving the parent coverage task with a missing report while child output keeps streaming. Bundler evaluates the gemspec before coverage starts, so the bootstrap reloads the preloaded `lib/hive/version.rb`, `lib/hive/errors.rb`, and `lib/hive.rb` files in dependency order. Reloaded code must therefore be idempotent; for example, self-derived enum constants must exclude `:ALL` to stay reload-safe.
 
 `Rakefile`:

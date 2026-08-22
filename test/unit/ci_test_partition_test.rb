@@ -203,7 +203,7 @@ class CiTestPartitionTest < Minitest::Test
     workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
     jobs = workflow.fetch("jobs")
 
-    %w[coverage-shards expensive-test-gates e2e launchd-macos].each do |job_name|
+    %w[coverage-shards expensive-test-gates tui-reactivity-latency e2e launchd-macos].each do |job_name|
       upload = jobs.fetch(job_name).fetch("steps").find do |step|
         step["uses"] == UPLOAD_ARTIFACT_ACTION &&
           step.dig("with", "path").to_s.include?("tmp/ci-failure-evidence.json")
@@ -233,6 +233,22 @@ class CiTestPartitionTest < Minitest::Test
     assert_includes verdict.fetch("run"), "HIVE_SWEEP_RESULT"
     assert_operator steps.index(retain), :<, steps.index(verdict)
     assert_operator steps.index(issue), :<, steps.index(verdict)
+  end
+
+  def test_absolute_tui_latency_is_advisory_and_separate_from_required_scaling
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+    jobs = workflow.fetch("jobs")
+    advisory = jobs.fetch("tui-reactivity-latency")
+    run = advisory.fetch("steps").find { |step| step["name"] == "Measure absolute TUI latency" }
+
+    assert_equal "TUI reactivity absolute latency (advisory)", advisory.fetch("name")
+    assert_equal true, advisory.fetch("continue-on-error")
+    assert_equal "1", run.fetch("env").fetch("HIVE_TUI_PERF_ABSOLUTE")
+    assert_equal "bundle exec rake test:tui_reactivity_perf", run.fetch("run")
+
+    required_needs = jobs.fetch("required-test-gate").fetch("needs")
+    refute_includes required_needs, "tui-reactivity-latency"
+    assert_includes required_needs, "expensive-test-gates"
   end
 
   def test_workflow_creator_hostile_campaign_is_opt_in

@@ -3,6 +3,7 @@ require "json"
 require "shellwords"
 require "time"
 require "hive/agent_limit"
+require "hive/artifacts/runtime_residue_recovery"
 require "hive/attempts/generation"
 require "hive/attempts/command_progress"
 require "hive/attempts/repository"
@@ -142,7 +143,8 @@ module Hive
                      safety: Hive::Daemon::AutoRetrySafety.method(:safe_to_retry?),
                      generation_resolver: nil, attempt_store: nil,
                      attempt_store_factory: nil,
-                     runtime_digest: Hive::RuntimeIdentity.source_digest)
+                     runtime_digest: Hive::RuntimeIdentity.source_digest,
+                      runtime_residue_recovery: nil)
         @state_home = state_home
         @request_queue = dispatch_repository
         @task_resolver = task_resolver || method(:resolve_task)
@@ -155,7 +157,9 @@ module Hive
         @runtime_digest = runtime_digest.to_s
         unless @runtime_digest.match?(/\A[0-9a-f]{64}\z/)
           raise ArgumentError, "recovery runtime digest is invalid"
-        end
+         @runtime_residue_recovery = runtime_residue_recovery ||
+           Hive::Artifacts::RuntimeResidueRecovery.new.method(:recover)
+         end
       end
 
       # The single retry ladder. Every retry in Hive is paced by this, so
@@ -323,6 +327,20 @@ module Hive
               reason: "stale_observation",
               remediation: "take a fresh operational snapshot and retry its action",
               retry_count: retry_count, provider_hint: provider_hint(row)
+            )
+          end
+
+          begin
+            @runtime_residue_recovery.call(
+              task: locked_task, marker: current,
+              intended_stage: value(row, :stage)
+            )
+          rescue Hive::Artifacts::RuntimeResidueRecovery::RecoveryError => e
+            return receipt(
+              "blocked", failure_origin: failure_origin, owner: "hive",
+              reason: "runtime_residue_recovery_failed",
+              remediation: e.message, retry_count: retry_count,
+              provider_hint: provider_hint(row)
             )
           end
 

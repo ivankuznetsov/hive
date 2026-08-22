@@ -14,6 +14,7 @@ require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
 require "hive/plan_review/transition_guard"
+require "hive/patrol_fix/projection"
 require "hive/plan_review/approval_policy"
 
 module Hive
@@ -219,6 +220,21 @@ module Hive
         label: "Manually steered",
         command: nil
       },
+      patrol_fix_rejected: {
+        key: Hive::Schemas::TaskActionKind::PATROL_FIX_REJECTED,
+        label: "Rejected (parked)",
+        command: nil
+      },
+      patrol_fix_blocked: {
+        key: Hive::Schemas::TaskActionKind::PATROL_FIX_BLOCKED,
+        label: "Blocked (parked)",
+        command: nil
+      },
+      patrol_fix_escalated: {
+        key: Hive::Schemas::TaskActionKind::PATROL_FIX_ESCALATED,
+        label: "Escalated (parked)",
+        command: nil
+      },
       agent_running: {
         # Marker is `:agent_working` — a `hive run` is in flight. Surfacing
         # a workflow command here would send the user (or an agent loop)
@@ -254,7 +270,7 @@ module Hive
       Hive::Schemas::TaskActionKind::PLAN_REVIEW_RETRY => "plan-review-run"
     ).freeze
 
-    attr_reader :task, :marker, :project_name, :projection
+    attr_reader :task, :marker, :project_name, :projection, :patrol_fix
 
     # Default grace window for placeholder AGENT_WORKING markers (no PID
     # attribute) before they classify as orphaned. Mirrors the daemon's
@@ -286,6 +302,7 @@ module Hive
       @agent_marker_grace_sec = agent_marker_grace_sec
       @live_task_lock = live_task_lock
       @clock = clock
+      @patrol_fix = load_patrol_fix
       @plan_review = plan_review.equal?(PLAN_REVIEW_UNRESOLVED) ?
         load_plan_review : plan_review
     end
@@ -390,8 +407,23 @@ module Hive
     def action
       override = universal_action
       return override if override
+      return patrol_fix_action if patrol_fix
 
       kind_action
+    end
+
+    def patrol_fix_action
+      return ACTIONS.fetch(:error) if patrol_fix["state"] == "invalid"
+      return ACTIONS.fetch(:done) if patrol_fix["archived"] == true
+
+      case patrol_fix.dig("outcome", "kind")
+      when "rejected" then ACTIONS.fetch(:patrol_fix_rejected)
+      when "blocked" then ACTIONS.fetch(:patrol_fix_blocked)
+      when "escalated" then ACTIONS.fetch(:patrol_fix_escalated)
+      else
+        return ACTIONS.fetch(:ready_to_advance) if patrol_fix.dig("action", "kind") == "advance"
+        ACTIONS.fetch(:generic_ready_to_run)
+      end
     end
 
     def universal_action
@@ -625,6 +657,15 @@ module Hive
       else
         Hive::TaskProjection.project(records: [], marker: marker)
       end
+    end
+
+    def load_patrol_fix
+      return nil unless task_workflow.controller?
+
+      Hive::PatrolFix::Projection.new(
+        task_folder: task.folder,
+        stage: "#{task.stage_index}-#{task.stage_name}"
+      ).to_h
     end
 
     def projected_marker(value)

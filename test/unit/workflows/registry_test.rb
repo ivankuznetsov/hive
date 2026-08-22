@@ -30,10 +30,11 @@ class WorkflowsRegistryTest < Minitest::Test
     assert_equal [
       Hive::Workflows::Registry.fetch(:coding),
       Hive::Workflows::Registry.fetch(:content),
-      Hive::Workflows::Registry.fetch(:bench)
+      Hive::Workflows::Registry.fetch(:bench),
+      Hive::Workflows::Registry.fetch(:"patrol-fix")
     ],
                  Hive::Workflows::Registry.all
-    assert_equal [ :coding, :content, :bench ], Hive::Workflows::Registry.ids
+    assert_equal [ :coding, :content, :bench, :"patrol-fix" ], Hive::Workflows::Registry.ids
   end
 
   def test_registered_test_workflow_is_visible_to_enumeration

@@ -7,7 +7,6 @@ require "hive/attempts/dispatcher"
 require "hive/module_package/managed_store"
 require "hive/modules/decision_journal"
 require "hive/modules/hook_attempt"
-require "hive/modules/migration/patrols"
 require "hive/modules/trigger_evaluator"
 require "hive/workflow_package/canonical_json"
 
@@ -45,18 +44,14 @@ module Hive
         return nil unless admission_open?(admission_open)
 
         assert_project!(event)
-        with_migration_admission_lock(module_name, dry_run: dry_run) do
-          return nil unless admission_open?(admission_open)
-
-          dispatch_under_migration_lock(
-            module_name: module_name, hook_id: hook_id, event: event,
-            dry_run: dry_run, admission_open: admission_open
-          )
-        end
+        dispatch_locked(
+          module_name: module_name, hook_id: hook_id, event: event,
+          dry_run: dry_run, admission_open: admission_open
+        )
       end
 
-      def dispatch_under_migration_lock(module_name:, hook_id:, event:, dry_run:,
-                                        admission_open:)
+      def dispatch_locked(module_name:, hook_id:, event:, dry_run:,
+                          admission_open:)
         return nil unless admission_open?(admission_open)
 
         lifecycle = dry_run ? method(:without_lifecycle_lock) : @store.method(:with_admission)
@@ -146,18 +141,14 @@ module Hive
                 admission_open: -> { true })
         return nil unless admission_open?(admission_open)
 
-        with_migration_admission_lock(module_name, dry_run: false) do
-          return nil unless admission_open?(admission_open)
-
-          retry_under_migration_lock(
-            module_name: module_name, hook_attempt: hook_attempt,
-            previous_attempt: previous_attempt, admission_open: admission_open
-          )
-        end
+        retry_locked(
+          module_name: module_name, hook_attempt: hook_attempt,
+          previous_attempt: previous_attempt, admission_open: admission_open
+        )
       end
 
-      def retry_under_migration_lock(module_name:, hook_attempt:, previous_attempt:,
-                                     admission_open:)
+      def retry_locked(module_name:, hook_attempt:, previous_attempt:,
+                       admission_open:)
         return nil unless admission_open?(admission_open)
 
         hook_id = hook_attempt.subject.fetch("hook")
@@ -199,17 +190,6 @@ module Hive
         predicate.call == true
       rescue StandardError
         false
-      end
-
-      def with_migration_admission_lock(module_name, dry_run:)
-        unless !dry_run && Hive::Modules::Migration::Patrols::MODULES.include?(module_name.to_s)
-          return yield
-        end
-
-        project_root = File.dirname(@store.hive_state_path)
-        Hive::Modules::Migration::Patrols.with_migration_lock(
-          project_root, hive_state_path: @store.hive_state_path, shared: true
-        ) { yield }
       end
 
       def load_context(module_name, hook_id, read_only: false, selection: UNSET_SELECTION)

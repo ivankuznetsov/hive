@@ -365,8 +365,9 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
     "max_features_per_cycle" => 12,
     "max_fixes_per_feature_per_cycle" => 1,
     "max_fix_attempts_per_cycle" => 6,
+    "max_rework_cycles" => 2,
     "max_prs_per_cycle" => 3,
-    "max_agent_spawns_per_day" => 8,
+    "scheduled_discovery_launches_per_engine_per_day" => 4,
     "draft_prs" => false,
     "review_prs" => true,
     "include" => [],
@@ -412,22 +413,19 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
 `worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `permissions: "yolo"` preserves existing launch behavior unless a project or stage opts into a narrower Claude tool scope; `Config.permission_spec(cfg, stage)` returns the exact stage spec (`plan.permissions`, `review.ci.permissions`, reviewer-entry `permissions`, etc.) when present, otherwise the project default, with no field merge. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `review.adhoc.reviewers: nil` inherits `review.reviewers`, while an explicit `[]` means zero ad-hoc reviewers, and `review.adhoc.fix: false` keeps ad-hoc PR reviews review-only unless an operator opts into local fix commits with `true`. `daemon.auto_retry.enabled` is **inert**: automatic `ERROR` / `REVIEW_ERROR` retry is unconditional and governed by a single backoff ladder in `RecoveryCoordinator`. The key is still shape-validated so an existing config with a typo fails loudly rather than looking meaningful; to pause a project use `daemon.enabled: false`. `patrol.review.reviewers` defaults to the single native Codex reviewer (`name: codex-native-review`, `kind: codex_review`), which runs Codex's built-in `review` subcommand and needs no CE skill; fresh init can optionally add Codex or Claude CE `ce-code-review` entries for patrol PRs. `daemon.max_concurrent_patrol_scans` (default `1`, validated `>= 1`) is a **per-project** cap bounding daemon-scheduled `hive patrol PROJECT` scans on a **separate** in-flight budget from task dispatch: a long codex-backed scan never consumes a `daemon.max_concurrent_runs` task slot — scans are tagged `kind: :patrol_scan` in the dispatcher and excluded from the per-project/global task caps, counted only against this independent cap. `ConcurrencyController#can_dispatch_patrol_scan?` counts only the **given project's** running scans (`entry[:kind] == :patrol_scan && entry[:project] == project`), so the default `1` means one scan per project at a time and **different projects patrol in parallel** rather than being serialized/starved by a global count (see `→ :patrol_scan_cap`).
 
 **Patrol is opt-in.** `resolve_patrol_mode!` derives scheduling and the daily
-agent-launch ceiling when
+scheduled-discovery ceiling for each Patrol engine when
 `mode:` is explicitly present. A config with no Patrol section, or one without
 `mode:`, remains disabled. `medium` is the init prompt default, not a
 config-resolution default. The modes are `ultrapatrol` (timer/30m), `high`
  (timer/2h), `medium` (timer/4h), `low` (new commits), and `off`; their daily
-launch values are respectively 36, 18, 8, 2, and disabled. An explicit
-`max_agent_spawns_per_day` overrides the derived value and is shared by ordinary
-and Architecture Patrol review/fix launches. Overrides must be integers of at
-least 2, matching the lowest built-in mode, so review and fix work both retain
-a path to progress. Modes never change finding/PR
+per-engine launch values are respectively 16, 8, 4, 2, and disabled for
+ordinary scheduling. The legacy `max_agent_spawns_per_day` key is inert and
+cannot distort either engine lane. Modes never change finding/PR
 caps, diversity, confidence, or alpha gates. Patrol has no token budget or
 token-based admission; usage totals remain telemetry. `hive migrate`, including
-the automatic fleet migration run by `hive update`, deletes the retired token,
-per-cycle launch, architecture-specific launch, USD, and multiplier keys while
-preserving `max_agent_spawns_per_day`, then requests one daemon restart after
-the fleet succeeds.
+the automatic fleet migration run by `hive update`, deletes retired token,
+per-cycle launch, architecture-specific launch, USD, and multiplier keys, then
+requests one daemon restart after the fleet succeeds.
 Standalone migration requests the normal best-effort restart immediately after
 that independent config commit, before later project-specific preparation can
 fail; fleet mode injects the coalescing restart request instead.
@@ -435,23 +433,27 @@ fail; fleet mode injects the coalescing restart request instead.
 `patrol.max_features_per_cycle` defaults to 12, is validated as an integer at
 least one, bounds each ordinary-patrol reviewer batch, and is likewise not
 changed by `patrol.mode`; `max_fix_attempts_per_cycle` separately bounds fix
-attempts. Ordinary component mapping defaults to four owned and four context files; its reviewer
+attempts. `patrol.max_rework_cycles` defaults to 2 and is a non-negative
+integer. It bounds completed independent Patrol Fix review decisions: once the
+cap is reached, `rework` is removed from the allowed prompt and strict report
+parser rather than accepted and discarded after the model returns. Ordinary
+component mapping defaults to four owned and four context files; its reviewer
 initially receives only up to four owned files selected under a 32 KiB source
 budget. Architecture mapping retains its wider six-owned and six-context
 logical component, then applies the
 same four-file/32 KiB initial review view. The first entrypoint is retained even
 when it alone is larger.
 
-**Architecture patrol separates discovery, review output, and mutation.**
+**Architecture patrol is discovery-only.**
 `Config::DEFAULTS["refactor_patrol"]["enabled"]`, `auto_fix.enabled`, and
 `issue_filing.enabled` are false, so missing or older partial config grants no
 new discovery, mutation, or remote-write authority. Fresh init recommends the
-full workflow, writes that answer explicitly to discovery, auto-fix, and issue
-filing, and uses issues as the fallback review surface. Existing projects opt
-in explicitly.
+discovery engine and writes only that answer. Accepted findings enter the
+shared Patrol Fix workflow. Existing projects opt in explicitly.
 The block also owns an optional refactor identity (`agent`, `model`, `effort`)
 that inherits the resolved execute identity field by field, plus optional
-auto-fix identity overrides that inherit the resolved refactor identity. It
+historical auto-fix identity overrides that can configure downstream Patrol
+Fix identity. It
 also owns confidence/run caps, language-neutral include/exclude rules,
 `docs|format|lint|public_contract|typecheck|test` commands, actual patch caps,
 and the categorical `fix`/`discuss`/`dismiss` route policy. The default
@@ -573,7 +575,7 @@ include:
 6. **`validate_claude_permission_mode!`** — `claude.permission_mode` must be one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, or `plan`. Both the tmux launcher and the headless `-p` path resolve this value to the same Claude Code flags via `AgentProfile#permission_flags`: `bypassPermissions` → `--dangerously-skip-permissions`, any other mode → `--permission-mode <mode>`. Fresh init suggests `bypassPermissions` so dogfood runs do not pause on file-operation approval prompts, while `auto` keeps Claude Code auto-mode rules.
 7. **`validate_permissions!`** — top-level, stage-level, review-role, and reviewer-entry `permissions:` specs are parsed by `Hive::PermissionScope` and must be `yolo`, `read-only`, or a valid `scoped` map. Shape errors, unknown presets/keys, malformed `Tool(specifier)` rules, unresolvable file-rule paths, unsupported file-tool path rules (use `Read(path)` / `Edit(path)`), and `bash:` plus `tools:` fail during config load; runner capability is checked later when the stage profile is known. Scoped rules run in Claude `dontAsk` mode. Task-relative `Read(path)` / `Edit(path)` rules are resolved to absolute permission patterns at spawn time, including Claude's POSIX drive form on Windows. Qualified `Edit` covers every built-in file-edit tool, so all file-edit denies are removed to prevent a bare deny from overriding the path grant. Claude merges these CLI rules with loaded managed/user/project/local permission settings, so the descriptor expresses the requested Hive scope rather than overriding trusted operator policy from those sources.
 8. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
-9. **`validate_patrol!`** — `patrol.mode` must be one of `ultrapatrol`, `high`, `medium`, `low`, or `off`; `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence, 0–100 alpha, per-feature/run counts, interval, `max_agent_spawns_per_day >= 2`, and command shape are validated before the scheduler or `hive patrol` command can run. `patrol.review.reviewers` uses the same reviewer-entry validation as `review.reviewers`, but it is a separate list used only by synthetic `Patrol: ...` review tasks.
+9. **`validate_patrol!`** — `patrol.mode` must be one of `ultrapatrol`, `high`, `medium`, `low`, or `off`; `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence, 0–100 alpha, per-feature/run counts, interval, `scheduled_discovery_launches_per_engine_per_day >= 2`, and command shape are validated before the scheduler or `hive patrol` command can run. The selected mode always projects the closed 2/4/8/16 table; the projected key is not an independent override. `patrol.review.reviewers` uses the same reviewer-entry validation as `review.reviewers`, but it is a separate list used only by synthetic `Patrol: ...` review tasks.
 10. **`validate_refactor_patrol!`** — validates discovery/auto-fix/issue booleans and nested shapes, agent names, confidence/run counts, the whole-run review deadline, include/exclude paths, all six commands including `docs` and `public_contract`, and semantic scope plus contract/dependency policy booleans. File count and diff size are publication evidence, not config or mutation gates; runtime mutation remains protected by root/path confinement, `.hive-state` and protected-path checks, secret scanning, dependency and public-contract guards, and applicable validation commands. Invalid side-effect policy fails at config load, not in a background action.
 11. **`validate_daemon!`** — daemon numeric bounds, booleans, and nested hashes are checked before the daemon starts. The nested `daemon.auto_retry` block must be a hash, and `daemon.auto_retry.enabled` must be boolean when present.
 12. **`validate_dependency_gate_stage!`** — `dependency_gate_stage` must be exactly `8-finalize` or `9-done`. Runtime admission then checks reachability against the prerequisite task's selected workflow rather than assuming the coding descriptor.

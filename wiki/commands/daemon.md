@@ -132,19 +132,13 @@ Discovery children run:
 hive refactor-patrol PROJECT --job-manifest MANIFEST --json
 ```
 
-After classification, separately authorized action resumes run the same
-immutable job with `--actions`; both phases emit `hive-refactor-patrol.v4` to a
-job-bound result file consumed by the supervisor. Candidate selection shares
-one immutable ownership/config/identity snapshot across due jobs for the tick,
-but reservation re-resolves live ownership and config before claiming. Action
-execution repeats fresh consent, ownership, claim, and generation fences before
-every external effect and mandatory review handoff.
+Discovery emits `hive-refactor-patrol.v4` to a job-bound result file consumed
+by the supervisor. Completed dispositions are reserved directly in the shared
+Patrol Fix `AdmissionStore`, and the job terminalizes. There is no Architecture Patrol
+action phase, fixer, issue filer, PR opener, or review handoff.
 
-The three gates are independent. `refactor_patrol.enabled` permits discovery
-only; `refactor_patrol.auto_fix.enabled` permits confined fix/PR attempts; and
-`refactor_patrol.issue_filing.enabled` permits deduplicated issues. Fresh init
-recommends the full workflow with a default-yes answer and writes both
-external-effect gates on; choosing no writes all three gates off. Missing
+`refactor_patrol.enabled` controls discovery. Downstream Patrol Fix admission
+and workflow capacity are independent of the Architecture scheduler. Missing
 `refactor_patrol` config in an existing project remains inert because discovery
 is still disabled, and older discovery-only configs do not inherit mutation or
 issue-filing authority. See [[commands/refactor-patrol]] for the job and policy model.

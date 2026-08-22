@@ -107,6 +107,10 @@ details rather than potentially credential-bearing transport output.
   PR policy remain outside the component.
 - Managed draft-PR AgentReport and handoff use the closed read vocabulary,
   exact absence publication, and root-confined cleanup.
+- Patrol Fix publication delegates its exact worktree reads, expected-absence
+  branch push, and idempotent cleanup through the gate. The separate
+  `Hive::GithubPublication` controller owns durable PR identity and replay;
+  `AgentGitGate` still knows nothing about GitHub records or workflow stages.
 - Refactor patrol captures one managed push URL, uses managed remote
   observations, and publishes through the exact expected-OID/absence gate.
   Its append-only action ledger remains the authority deciding which old OID is
@@ -135,8 +139,9 @@ data trustworthy. Agent invocation guarantees belong to
 - `test/unit/managed_git_test.rb` pins environment/config/command hardening.
 - `test/unit/gh_test.rb`, `test/unit/worktree_test.rb`,
   `test/unit/stages/agent_report_test.rb`,
-  `test/unit/stages/draft_pr_handoff_test.rb`, and
-  `test/unit/refactor_patrol/pr_opener_test.rb` pin the Hive adapters.
+  `test/unit/stages/draft_pr_handoff_test.rb`,
+  `test/unit/github_publication_test.rb`, and
+  `test/unit/stages/open_pr_test.rb` pin the Hive adapters.
 - `test/unit/component_boundaries_test.rb` proves clean loading and rejects
   production `Hive::ManagedGit` bypasses.
 

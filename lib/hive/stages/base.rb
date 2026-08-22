@@ -374,8 +374,9 @@ module Hive
       # Prepare one actor launch from one managed snapshot, so its prompt and
       # permission scope cannot observe different configuration generations.
       def actor_prompt_and_scope(cfg, stage_name, task, profile, prompt:,
-                                 managed_slot: "stages.#{stage_name}", **scope_kwargs)
-        with_permission_config_error_marker(task) do
+                                 managed_slot: "stages.#{stage_name}",
+                                 mark_permission_error: true, **scope_kwargs)
+        build = lambda do
           context = task.managed_runtime_context(managed_slot) if
             task.respond_to?(:managed_workflow?) && task.managed_workflow?
           prompt = task.managed_prompt(managed_slot, prompt, context) if context
@@ -387,6 +388,9 @@ module Hive
             scope[:runtime_policy]&.host_outputs?
           [ prompt, scope ]
         end
+        return build.call unless mark_permission_error
+
+        with_permission_config_error_marker(task, &build)
       end
 
       # The three tool-scoping kwargs every spawn site forwards from a
@@ -553,11 +557,12 @@ module Hive
           message: "run started"
         )
         result = yield
+        event_task = task_after_controller_move(task, result)
         if cfg && ensure_clean_on_exit_enabled?(cfg) && WORKTREE_OWNING_STAGES.include?(stage)
-          enforce_outcome = enforce_clean_exit!(task, cfg, stage)
+          enforce_outcome = enforce_clean_exit!(event_task, cfg, stage)
           if enforce_outcome.is_a?(Hash) && enforce_outcome[:status] == :auto_committed
             result = reconcile_auto_committed_execute_residue(
-              task, cfg, stage, result
+              event_task, cfg, stage, result
             )
           end
           # When CleanExit overwrites the runner's marker to
@@ -574,23 +579,23 @@ module Hive
             )
           end
         end
-        marker = Hive::Markers.current(task.state_file)
-        record_stage_activity(task, stage, "exited", marker: marker)
-        record_waiting_questions(task, stage, marker)
-        emit_marker_event(task, stage, marker)
+        marker = Hive::Markers.current(event_task.state_file)
+        record_stage_activity(event_task, stage, "exited", marker: marker)
+        record_waiting_questions(event_task, stage, marker)
+        emit_marker_event(event_task, stage, marker)
         Hive::Events.emit(
-          task_folder: task.folder,
-          slug: task.slug,
+          task_folder: event_task.folder,
+          slug: event_task.slug,
           stage: stage,
           event_type: :stage_exit,
           message: stage_exit_message(marker)
         )
         result
       rescue SystemExit => e
-        emit_rescue_close(task, stage, "system_exit status=#{e.status}")
+        emit_rescue_close(task_after_controller_exception(task), stage, "system_exit status=#{e.status}")
         raise
       rescue StandardError => e
-        emit_rescue_close(task, stage, "#{e.class}: #{e.message}")
+        emit_rescue_close(task_after_controller_exception(task), stage, "#{e.class}: #{e.message}")
         raise
       end
 
@@ -617,6 +622,47 @@ module Hive
         warn "[hive] execute residue auto-commit could not complete the stage: #{e.message}"
         result
       end
+
+      # Patrol Fix is the one controller workflow whose route action can move
+      # the same task folder from review back to fix inside a runner call. The
+      # move is represented by a trusted controller result, but the generic
+      # stage wrapper still owns exit events. Rebind only this workflow and
+      # validate the returned path before any post-run reads, so the caller's
+      # old Task never recreates or dereferences the vanished source folder.
+      def task_after_controller_move(task, result)
+        destination = result.is_a?(Hash) && result[:moved_task_folder]
+        return task unless destination
+        return task unless task.workflow.controller?
+
+        moved = Hive::Task.new(destination, workflow_generation: task.workflow_generation)
+        unless moved.project_root == task.project_root && moved.slug == task.slug &&
+               moved.workflow.controller?
+          raise Hive::InvalidTaskPath, "Patrol Fix runner returned a foreign moved task"
+        end
+        moved
+      end
+      private_class_method :task_after_controller_move
+
+      # A route mutation can durably move the task before its Hive-state commit
+      # acknowledges the transition. If that acknowledgement raises, the
+      # controller result never reaches the normal rebinding path above. Find
+      # the one existing Patrol Fix folder so rescue events cannot recreate the
+      # vanished source-stage path.
+      def task_after_controller_exception(task)
+        return task if File.directory?(task.folder)
+        return task unless task.workflow.controller?
+
+        matches = task.workflow.stage_dirs.filter_map do |stage_dir|
+          folder = File.join(task.hive_state_path, "stages", stage_dir, task.slug)
+          folder if File.directory?(folder)
+        end
+        return task unless matches.length == 1
+
+        task_after_controller_move(task, moved_task_folder: matches.first)
+      rescue Hive::Error, SystemCallError
+        task
+      end
+      private_class_method :task_after_controller_exception
 
       # Read `stages.ensure_clean_on_exit` (default true). Explicit
       # `false` opts the whole invariant out — useful for legacy projects

@@ -542,13 +542,13 @@ class InitPromptsTest < Minitest::Test
     end
   end
 
-  def test_interactive_refactor_patrol_discloses_default_auto_fix_and_issue_fallback
+  def test_interactive_refactor_patrol_discloses_shared_workflow_handoff
     prompts, output = make_prompts(interactive_input(refactor_patrol: ""))
 
     prompts.collect
 
-    assert_match(/attempt confined fixes and pull requests/, output.string)
-    assert_match(/GitHub issues remain the fallback review surface/, output.string)
+    assert_match(/enter the shared Patrol Fix workflow/, output.string)
+    assert_match(/does not edit code or publish to GitHub/, output.string)
   end
 
   def test_interactive_refactor_patrol_no_disables_discovery

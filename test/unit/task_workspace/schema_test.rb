@@ -114,7 +114,7 @@ class TaskWorkspaceSchemaTest < Minitest::Test
       task: {
         "project" => "hive", "slug" => "task", "id" => 42,
         "stage" => "4-execute", "generation" => 3,
-        "workflow" => "content", "archived" => false
+        "workflow" => "content", "patrol_fix" => nil, "archived" => false
       },
       status: {
         "state" => "current", "freshness" => "fresh",

@@ -161,7 +161,7 @@ module Hive
         retry_state && now < Time.iso8601(retry_state.fetch("not_before"))
       end
 
-      def record_failure!(project_root, progress, error, now)
+      def record_failure!(project_root, progress, error, now, not_before: nil)
         failures = progress.dig("retry", "failures").to_i + 1
         exponent = [ failures - 1, 30 ].min
         ceiling = [ @backoff_base_sec * (2**exponent), @backoff_max_sec ].min
@@ -169,9 +169,14 @@ module Hive
         sample = 0.0 unless sample.finite?
         sample = sample.clamp(0.0, 1.0)
         delay = [ ceiling * (0.5 + sample), @backoff_max_sec ].min
+        eligible_at = now + delay
+        if not_before
+          requested = not_before.is_a?(Time) ? not_before : Time.iso8601(not_before.to_s)
+          eligible_at = requested if requested > eligible_at
+        end
         progress["retry"] = {
           "failures" => failures,
-          "not_before" => (now + delay).utc.iso8601(6),
+          "not_before" => eligible_at.utc.iso8601(6),
           "last_error" => "#{error.class}: #{error.message}"[0, 2000]
         }
         touch!(progress, now)

@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hive-patrol-fix-projection.v1.json",
+  "title": "Hive Patrol Fix Projection (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "state", "stage", "task_generation", "evidence_revision", "sources", "aliases", "issues", "successor", "decision", "outcome", "blocker_owner", "validation", "review", "publication", "timing", "archived", "diagnostic", "action"],
+  "properties": {
+    "schema": {"const": "hive-patrol-fix-projection"},
+    "schema_version": {"const": 1},
+    "state": {"enum": ["current", "invalid"]},
+    "stage": {"enum": ["1-inbox", "2-fix", "3-validate", "4-review", "5-publish", "6-done"]},
+    "task_generation": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+    "evidence_revision": {"anyOf": [{"$ref": "hive-patrol-fix-task-manifest.v1.json#/$defs/evidenceRevision"}, {"type": "null"}]},
+    "sources": {"type": "array", "maxItems": 64, "items": {"$ref": "hive-patrol-fix-task-manifest.v1.json#/$defs/source"}},
+    "aliases": {"type": "array", "maxItems": 128, "items": {"$ref": "hive-patrol-fix-task-manifest.v1.json#/$defs/alias"}},
+    "issues": {"type": "array", "maxItems": 64, "items": {"$ref": "hive-patrol-fix-task-manifest.v1.json#/$defs/issue"}},
+    "successor": {"anyOf": [{"$ref": "hive-patrol-fix-task-manifest.v1.json#/$defs/successor"}, {"type": "null"}]},
+    "decision": {"anyOf": [{"$ref": "#/$defs/decision"}, {"type": "null"}]},
+    "outcome": {"anyOf": [{"$ref": "#/$defs/outcome"}, {"type": "null"}]},
+    "blocker_owner": {"type": ["string", "null"], "maxLength": 128},
+    "validation": {"anyOf": [{"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/validationPayload"}, {"type": "null"}]},
+    "review": {"anyOf": [{"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/reviewDecisionPayload"}, {"type": "null"}]},
+    "publication": {"anyOf": [{"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/publicationPayload"}, {"type": "null"}]},
+    "timing": {"$ref": "#/$defs/timing"},
+    "archived": {"type": "boolean"},
+    "diagnostic": {"anyOf": [{"$ref": "#/$defs/diagnostic"}, {"type": "null"}]},
+    "action": {"$ref": "#/$defs/action"}
+  },
+  "$defs": {
+    "timing": {
+      "type": "object", "additionalProperties": false,
+      "required": ["started_at", "stage_started_at", "parked_seconds", "parked_since", "rework_count"],
+      "properties": {
+        "started_at": {"type": ["string", "null"], "format": "date-time"},
+        "stage_started_at": {"type": ["string", "null"], "format": "date-time"},
+        "parked_seconds": {"type": "integer", "minimum": 0},
+        "parked_since": {"type": ["string", "null"], "format": "date-time"},
+        "rework_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "decision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["receipt_id", "stage", "payload"],
+      "properties": {
+        "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "stage": {"enum": ["inbox", "review"]},
+        "payload": {"anyOf": [
+          {"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/decisionPayload"},
+          {"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/reviewDecisionPayload"}
+        ]}
+      }
+    },
+    "outcome": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "receipt_id", "rationale", "blocker_owner"],
+      "properties": {
+        "kind": {"enum": ["rejected", "blocked", "escalated"]},
+        "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "rationale": {"type": "string", "minLength": 1, "maxLength": 16384},
+        "blocker_owner": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "diagnostic": {
+      "type": "object", "additionalProperties": false, "required": ["summary"],
+      "properties": {
+        "code": {"enum": ["cleanup_failed"]},
+        "summary": {"type": "string", "maxLength": 512}
+      }
+    },
+    "action": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "runnable"],
+      "properties": {
+        "kind": {"enum": ["ready", "advance", "parked", "done", "invalid"]},
+        "runnable": {"type": "boolean"}
+      }
+    }
+  }
+}

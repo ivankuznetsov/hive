@@ -33,7 +33,7 @@ class ModelRoutingSurfaceTest < Minitest::Test
       lib/hive/refactor_patrol/agent_identity.rb
     ],
     "patrol_fix" => %w[
-      lib/hive/patrol/fixer.rb
+      lib/hive/stages/patrol_fix/fix.rb
       lib/hive/refactor_patrol/agent_identity.rb
     ],
     "open_pr" => %w[lib/hive/implementation_identity/resolver.rb],

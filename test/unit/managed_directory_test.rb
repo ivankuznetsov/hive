@@ -177,6 +177,26 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_missing_reads_and_enumeration_fail_closed
+    with_tmp_dir do |anchor|
+      root = File.join(anchor, "missing")
+      directory = Hive::ManagedDirectory.new(
+        root: root, anchor: anchor, label: "test state"
+      )
+
+      assert_raises(Hive::ConfigError) { directory.each_child("records").to_a }
+      assert_raises(Hive::ConfigError) do
+        directory.read("record.json", max_bytes: 16)
+      end
+
+      directory.define_singleton_method(:with_session) do |**|
+        raise Hive::ConfigError, "unsafe session"
+      end
+      error = assert_raises(Hive::ConfigError) { directory.prepare! }
+      assert_equal "unsafe session", error.message
+    end
+  end
+
   def test_accepts_the_filesystem_root_as_the_nearest_existing_anchor
     root = File.join(
       File::SEPARATOR,

@@ -109,6 +109,18 @@ class StagesResolverTest < Minitest::Test
     assert_equal Hive::Stages::Agent.method(:run!), runner
   end
 
+  def test_every_patrol_fix_stage_resolves_only_through_the_first_party_runner
+    descriptor = Hive::Workflows::PatrolFix::DESCRIPTOR
+
+    descriptor.stages.each do |stage|
+      runner = Hive::Stages::Resolver.resolve(
+        task(stage.name, workflow: descriptor), descriptor: descriptor
+      )
+
+      assert_equal Hive::PatrolFix::Runner.method(:run!), runner
+    end
+  end
+
   def test_present_non_agent_stage_raises_stage_error
     descriptor = Hive::Workflow.new(
       id: :synthetic,

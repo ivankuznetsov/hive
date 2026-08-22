@@ -1124,7 +1124,9 @@ module Hive
               legacy_stage_dirs = []
             end
             safe_send_message(chat_id: update.chat_id,
-                              text: render_queue(rows, legacy_stage_dirs: legacy_stage_dirs),
+                              text: render_queue(
+                                rows, legacy_stage_dirs: legacy_stage_dirs
+                              ),
                               parse_mode: :html,
                               reply_markup: status_keyboard(rows))
           end

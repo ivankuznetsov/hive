@@ -1,38 +1,30 @@
-require "json"
 require "digest"
+require "json"
 require "time"
 require "hive/refactor_patrol/agent_identity"
 
 module Hive
   module RefactorPatrol
-    # Captures the complete action authority used by a merged-PR occurrence
-    # and intersects it with current configuration. Current policy can revoke
-    # or narrow work, but can never grant an older job new authority.
+    # Immutable discovery snapshot retained in the v4 job envelope. The action
+    # fields preserve the released record shape for readers; no runtime
+    # component interprets them as mutation authority.
     module Policy
-      CONFIDENCE = %w[low medium high].freeze
-      COMMANDS = %w[docs format lint public_contract typecheck test].freeze
       CAP_BOOLEANS = %w[
         single_feature_only allow_dependency_bumps allow_public_api_changes
         allow_cross_feature
       ].freeze
 
-      Result = Struct.new(:config, :authority, :reasons, :error, keyword_init: true) do
-        def authorized?(kind)
-          authority.fetch(kind.to_s, false)
-        end
-      end
-
       module_function
 
       def capture(cfg, now: Time.now)
         refactor = cfg.fetch("refactor_patrol")
-        fix_identity = Hive::RefactorPatrol::AgentIdentity.new(cfg: cfg).fix
+        identity = Hive::RefactorPatrol::AgentIdentity.new(cfg: cfg).fix
         action = {
           "default_branch" => cfg.fetch("default_branch").to_s,
-          "auto_fix_agent" => fix_identity.provider.to_s,
-          "auto_fix_model" => fix_identity.model.to_s,
-          "auto_fix_effort" => fix_identity.requested_effort,
-          "auto_fix_launcher_identity" => fix_identity.launcher_identity.to_s,
+          "auto_fix_agent" => identity.provider.to_s,
+          "auto_fix_model" => identity.model.to_s,
+          "auto_fix_effort" => identity.requested_effort,
+          "auto_fix_launcher_identity" => identity.launcher_identity.to_s,
           "min_confidence" => refactor.fetch("min_confidence").to_s,
           "commands" => json_copy(refactor.fetch("commands")),
           "caps" => CAP_BOOLEANS.to_h do |key|
@@ -41,113 +33,13 @@ module Hive
         }
         {
           "discovery" => refactor.fetch("enabled") == true,
-          "auto_fix" => refactor.dig("auto_fix", "enabled") == true,
-          "issue_filing" => refactor.dig("issue_filing", "enabled") == true,
+          "auto_fix" => false,
+          "issue_filing" => false,
           "action" => action,
           "epoch" => ::Digest::SHA256.hexdigest(JSON.generate(action)),
           "captured_at" => now.utc.iso8601
         }
       end
-
-      def intersect(snapshot, current_cfg)
-        effective = json_copy(current_cfg)
-        authority = { "fix" => false, "issue" => false }
-        reasons = { "fix" => [], "issue" => [] }
-        action = snapshot["action"] if snapshot.is_a?(Hash)
-        unless action.is_a?(Hash)
-          return Result.new(
-            config: effective, authority: authority, reasons: reasons,
-            error: "policy_snapshot_missing"
-          )
-        end
-
-        current = current_cfg.fetch("refactor_patrol")
-        target = effective.fetch("refactor_patrol")
-        discovery = snapshot["discovery"] == true && current["enabled"] == true
-        fix_enabled = discovery && snapshot["auto_fix"] == true &&
-                      current.dig("auto_fix", "enabled") == true
-        issue_enabled = discovery && snapshot["issue_filing"] == true &&
-                        current.dig("issue_filing", "enabled") == true
-
-        target["enabled"] = discovery
-        target.fetch("auto_fix")["enabled"] = fix_enabled
-        target.fetch("issue_filing")["enabled"] = issue_enabled
-
-        target["min_confidence"] = stricter_confidence(
-          action.fetch("min_confidence"), current.fetch("min_confidence")
-        )
-        intersect_caps!(target.fetch("caps"), action.fetch("caps"), current.fetch("caps"))
-
-        commands_match = intersect_commands!(
-          target.fetch("commands"), action.fetch("commands"), current.fetch("commands")
-        )
-        snapshot_agent = action.fetch("auto_fix_agent").to_s
-        current_identity = Hive::RefactorPatrol::AgentIdentity.new(cfg: current_cfg).fix
-        agent_match = !snapshot_agent.empty? && snapshot_agent == current_identity.provider.to_s
-        full_identity_snapshot = action.key?("auto_fix_model") ||
-                                 action.key?("auto_fix_launcher_identity")
-        identity_match = if full_identity_snapshot
-          action.fetch("auto_fix_model").to_s == current_identity.model.to_s &&
-            action["auto_fix_effort"].to_s == current_identity.requested_effort.to_s &&
-            action.fetch("auto_fix_launcher_identity").to_s == current_identity.launcher_identity.to_s
-        else
-          true
-        end
-        branch_match = action.fetch("default_branch").to_s == current_cfg.fetch("default_branch").to_s
-        target.fetch("auto_fix")["agent"] = snapshot_agent
-        if full_identity_snapshot
-          target.fetch("auto_fix")["model"] = action.fetch("auto_fix_model").to_s
-          target.fetch("auto_fix")["effort"] = action["auto_fix_effort"]
-        end
-
-        reasons.fetch("fix") << "validation_commands_changed" unless commands_match
-        reasons.fetch("fix") << "auto_fix_agent_changed" unless agent_match
-        reasons.fetch("fix") << "auto_fix_identity_changed" unless identity_match
-        reasons.fetch("fix") << "default_branch_changed" unless branch_match
-        authority["fix"] = fix_enabled && commands_match && agent_match && identity_match && branch_match
-        authority["issue"] = issue_enabled
-
-        Result.new(config: effective, authority: authority, reasons: reasons, error: nil)
-      rescue KeyError, TypeError, ArgumentError, Hive::ImplementationIdentity::Error
-        Result.new(
-          config: effective || json_copy(current_cfg),
-          authority: { "fix" => false, "issue" => false },
-          reasons: { "fix" => [], "issue" => [] },
-          error: "policy_snapshot_invalid"
-        )
-      end
-
-      def stricter_confidence(snapshot, current)
-        snapshot_index = CONFIDENCE.index(snapshot.to_s)
-        current_index = CONFIDENCE.index(current.to_s)
-        raise ArgumentError, "unknown confidence" unless snapshot_index && current_index
-
-        CONFIDENCE.fetch([ snapshot_index, current_index ].max)
-      end
-      private_class_method :stricter_confidence
-
-      def intersect_caps!(target, snapshot, current)
-        target.delete("max_files")
-        target.delete("max_diff_lines")
-        target["single_feature_only"] = snapshot.fetch("single_feature_only") == true ||
-                                         current.fetch("single_feature_only") == true
-        %w[allow_dependency_bumps allow_public_api_changes allow_cross_feature].each do |key|
-          target[key] = snapshot.fetch(key) == true && current.fetch(key) == true
-        end
-      end
-      private_class_method :intersect_caps!
-
-      def intersect_commands!(target, snapshot, current)
-        match = true
-        COMMANDS.each do |key|
-          before = snapshot[key]
-          now = current[key]
-          target[key] = before == now ? before : nil
-          match = false unless before == now
-        end
-        match
-      end
-      private_class_method :intersect_commands!
 
       def json_copy(value)
         JSON.parse(JSON.generate(value))

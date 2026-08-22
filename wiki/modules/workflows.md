@@ -36,6 +36,7 @@ tags: [module, workflow, result, verbs, selection, human-stage, outcomes, termin
 - `Hive::Workflows::Coding::DESCRIPTOR` — the default built-in descriptor (`id: :coding`), matching the current nine-stage pipeline exactly. Its action semantics for coding `:agent`/`:inert` stages live in `Hive::Workflows::Coding::ACTION_DISPATCH`; execute/review/finalize route by their runtime primitive kinds.
 - `Hive::Workflows::Content::DESCRIPTOR` — built-in non-coding descriptor (`id: :content`) for `inbox -> research -> outline -> draft -> critique -> done`. `inbox` is inert and captures `idea.md`; every later stage is a generic `kind: :agent` stage with `status_mode: :state_file_marker`, slash-skill metadata, explicit budgets/timeouts, and `done` writing the terminal `article.md`. `Content::BUDGET_USD` is the single frozen source for the shipped per-run caps: research `3.0`, outline `1.5`, draft `3.0`, critique `2.0`, and done `2.0`.
 - `Hive::Workflows::Bench::DESCRIPTOR` — built-in hive-bench descriptor (`id: :bench`) for `inbox -> extract -> generate -> judge -> publish -> done`. The four generic agent stages use packaged instructions under `templates/builtins/bench/` and pin their lightweight shell-control work to Codex rather than consuming the Claude account being benchmarked. Extract/publish allow one hour; generate/judge allow seven days so a serialized campaign is not killed by the generic one-hour fallback. Generate distinguishes provider-only pending cells from real failures: the former use `Hive::Markers.set` to write `ERROR reason=limits_reached retry_after=...` with canonical recovery identity and attempt metadata, while missing, malformed, contradictory, or non-limit failed cells remain manual `WAITING`. Judge completion requires a numeric 0–10 round-two `final` from every configured deliberation judge; a fail-soft `final: null` remains visible in the transcript, keeps the stage `WAITING`, and is excluded from the retry skip-set so a later run can recover it. `Hive::Workflows::Bench.install_runtime!` snapshots the packaged campaign example, runner image, and harness into `.hive-state/bench-runtime` and commits it on `hive/state`, so `hive init . --workflow bench` needs neither a project-local descriptor nor a separate hive-bench checkout. The runtime is workflow data in the one registered project, not another Hive installation or scheduler. Maintained campaigns are separate `bench` tasks in that project. The packaged candidate registry includes serialized Sol/Terra/Grok comparisons plus Opus-5-plan and Fable-5-plan variants with Sol-high execution and an explicit Sol/Opus review panel. Every candidate declares provider-neutral `models:` routes; the shared Agent CLI Runtime compiles provider argv, and the benchmark keeps no Codex/Grok model wrappers. Generate selects the Codex-0.144+ `sol` image for any GPT-5.6 stage, and that image also carries Grok for mixed cells.
+- `Hive::Workflows::PatrolFix::DESCRIPTOR` — controller-owned descriptor (`id: :patrol-fix`) for `inbox -> fix -> validate -> review -> publish -> done`. Its active stages declare `kind: controller` and `controller: :patrol_fix`; the resolver uses that capability to select the first-party Patrol Fix runner without matching a workflow id or stage-name list. `done` remains inert. This keeps controller-specific task rebinding and status/action behavior attached to the descriptor while ordinary `agent`, `council`, and inert stages retain the generic runners.
 - `Hive::Workflows::Registry.fetch(:coding)` / `.default` — descriptor lookup. Unknown ids raise `Hive::Workflows::UnknownWorkflow`.
 - `Hive::Workflows::Registry.all` / `.ids` — live enumeration of registered descriptors/ids (`:coding`, `:content`, `:bench`, plus any scoped test/runtime registrations and the active project's discovered descriptors). Test helpers override this at call time so runtime-registered workflows participate in status scans and slug resolution.
 - `Hive::WorkflowSelection.fetch!(name, project_root: Dir.pwd)` — CLI-facing selector validation used by [[commands/init]], [[commands/new]], and project-aware callers. Blank/nil normalizes to `coding`; unknown names raise `Hive::Workflows::UnknownWorkflow` with `valid workflows: ...` from the live registry after project descriptor discovery.
@@ -238,6 +239,21 @@ resolution described above.
 Hermetic coverage lives in `test/unit/workflows/content_test.rb`,
 `test/integration/content_workflow_stage_test.rb`, and
 `test/integration/content_workflow_e2e_test.rb`.
+
+## Patrol Fix workflow projection
+
+Patrol Fix uses the normal task workflow concurrency for
+Inbox/Fix/Validate/Review/Publish/Done after discovery admission. Discovery
+allowances stay outside workflow capacity. The common daemon-owned operational
+projection reports the active stage, parked/provider state, rework and
+rejection outcomes, successor linkage, and exact PR-created/open fields without
+giving any status adapter a second task-state interpretation or mutation path.
+The controller descriptor is also the shared capability check used by command,
+action, and stage-wrapper paths, so those paths do not carry a parallel
+`patrol_fix_id?` predicate. Review and publication share one exact worktree
+snapshot helper for custody, HEAD, cleanliness, bounded diff, and digest
+validation; Inbox and Review output readers share the same strict JSON reader
+while retaining their route and schema ownership.
 
 ## Durable human stages
 

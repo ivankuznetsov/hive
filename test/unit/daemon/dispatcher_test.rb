@@ -418,6 +418,39 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  class FakePatrolFixAdmissionScheduler
+    attr_reader :ticks, :completed, :cancelled
+    attr_writer :results
+
+    def initialize(results: [])
+      @results = results
+      @ticks = []
+      @completed = []
+      @cancelled = []
+    end
+
+    def tick(now:)
+      @ticks << now
+      @results
+    end
+
+    def complete(dispatch_token:, exit_code:, envelope:, now:)
+      @completed << {
+        dispatch_token: dispatch_token, exit_code: exit_code,
+        envelope: envelope, now: now
+      }
+      Hive::Daemon::PatrolFixAdmissionScheduler::Event.new(
+        source: dispatch_token.fetch(:source),
+        occurrence_id: dispatch_token.fetch(:occurrence_id),
+        status: :decision_completed
+      )
+    end
+
+    def cancel(dispatch_token:, now:)
+      @cancelled << { dispatch_token: dispatch_token, now: now }
+    end
+  end
+
   # ── construction helpers ───────────────────────────────────────────────
 
   def make_dispatcher(rows: [], dry_run: false, with_merge_watcher: false,
@@ -427,9 +460,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       with_answer_digest_scheduler: false,
                       refactor_patrol_merge_reconciler: nil,
                       refactor_patrol_scheduler: nil, patrol_arbiter: nil,
+                      patrol_fix_admission_scheduler: nil,
                       attempt_dispatcher: nil, attempt_reconciler: nil,
                       operational_snapshot: nil, module_runtime: nil,
-                      module_migration_coordinator: nil,
                       recovery_coordinator: nil,
                       plan_approval: Hive::Daemon::PlanApproval,
                       runtime_ready_callback: nil, clock: nil)
@@ -474,6 +507,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       refactor_patrol_merge_reconciler: refactor_patrol_merge_reconciler,
       patrol_scheduler: patrol_scheduler,
       refactor_patrol_scheduler: refactor_patrol_scheduler,
+      patrol_fix_admission_scheduler: patrol_fix_admission_scheduler,
       patrol_arbiter: patrol_arbiter,
       answer_digest_scheduler: answer_digest_scheduler,
       dry_run: dry_run,
@@ -483,7 +517,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
       attempt_reconciler: attempt_reconciler,
       operational_snapshot: operational_snapshot,
       module_runtime: module_runtime,
-      module_migration_coordinator: module_migration_coordinator,
       recovery_coordinator: recovery_coordinator,
       plan_approval: plan_approval,
       runtime_ready_callback: runtime_ready_callback,
@@ -503,6 +536,151 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler,
       answer_digest_scheduler
     ]
+  end
+
+  def test_patrol_fix_admission_scheduler_has_an_independent_dispatcher_tick
+    event = Hive::Daemon::PatrolFixAdmissionScheduler::Event.new(
+      source: "ordinary_patrol", occurrence_id: "ordinary:finding-1:v1",
+      status: :acknowledged, task_slug: "repair-refresh-abc123",
+      retry_at: nil, reason: nil
+    )
+    scheduler = FakePatrolFixAdmissionScheduler.new(results: [ event ])
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [], patrol_fix_admission_scheduler: scheduler
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ T0 ], scheduler.ticks
+    logged = logger.events.find { |name, _attrs| name == :patrol_fix_admission }
+    assert_equal "ordinary:finding-1:v1", logged.last.fetch(:occurrence_id)
+    assert_equal :acknowledged, logged.last.fetch(:status)
+  end
+
+  def test_patrol_fix_semantic_dispatch_uses_the_shared_supervisor_and_completion_token
+    token = {
+      kind: :patrol_fix_semantic_admission, project: "p1",
+      source: "ordinary_patrol", occurrence_id: "ordinary:finding-1:v1",
+      reservation_id: "a" * 64
+    }
+    event = Hive::Daemon::PatrolFixAdmissionScheduler::Event.new(
+      source: "ordinary_patrol", occurrence_id: token.fetch(:occurrence_id),
+      status: :decision_dispatch,
+      command: "hive __patrol-fix-semantic-decision p1 --source ordinary_patrol " \
+               "--occurrence-id ordinary:finding-1:v1 --reservation-id #{'a' * 64} --json",
+      dispatch_token: token
+    )
+    scheduler = FakePatrolFixAdmissionScheduler.new(results: [ event ])
+    dispatcher, supervisor, controller, logger = make_dispatcher(
+      rows: [], patrol_fix_admission_scheduler: scheduler
+    )
+
+    dispatcher.tick(now: T0)
+
+    spawned = supervisor.spawned.fetch(0)
+    assert_equal token, spawned.fetch(:dispatch_token)
+    assert_equal "patrol-fix-semantic-admission", spawned.fetch(:stage)
+    assert_equal 1, controller.task_running_count(project: "p1")
+
+    supervisor.next_exits = [
+      ChildExit.new(
+        pid: spawned.fetch(:pid), exit_code: 0, project: "p1",
+        slug: spawned.fetch(:slug), stage: spawned.fetch(:stage),
+        command: spawned.fetch(:command), state_file_path: nil,
+        started_at: T0, finished_at: T0 + 1,
+        json_envelope: { "ok" => true }, dispatch_token: token
+      )
+    ]
+    dispatcher.send(:reap_completed, now: T0 + 1)
+
+    assert_equal token, scheduler.completed.fetch(0).fetch(:dispatch_token)
+    assert_equal 0, controller.task_running_count(project: "p1")
+    completion = logger.events.find { |name, _| name == :patrol_fix_semantic_completion }
+    assert_equal :decision_completed, completion.last.fetch(:status)
+  end
+
+  def test_patrol_fix_semantic_reservation_is_cancelled_if_capacity_closes_before_spawn
+    token = {
+      kind: :patrol_fix_semantic_admission, project: "p1",
+      source: "ordinary_patrol", occurrence_id: "ordinary:finding-1:v1",
+      reservation_id: "a" * 64
+    }
+    event = Hive::Daemon::PatrolFixAdmissionScheduler::Event.new(
+      source: token.fetch(:source), occurrence_id: token.fetch(:occurrence_id),
+      status: :decision_dispatch, command: "hive __patrol-fix-semantic-decision p1",
+      dispatch_token: token
+    )
+    scheduler = FakePatrolFixAdmissionScheduler.new(results: [ event ])
+    dispatcher, supervisor, controller = make_dispatcher(
+      rows: [], patrol_fix_admission_scheduler: scheduler
+    )
+    controller.define_singleton_method(:can_dispatch?) { |**| :global_cap }
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    assert_equal token, scheduler.cancelled.fetch(0).fetch(:dispatch_token)
+  end
+
+  def test_patrol_fix_tick_failure_is_logged_and_keeps_daemon_alive
+    scheduler = FakePatrolFixAdmissionScheduler.new
+    scheduler.define_singleton_method(:tick) { |now:| raise "admission store failed at #{now}" }
+    dispatcher, = make_dispatcher(rows: [], patrol_fix_admission_scheduler: scheduler)
+    logger = dispatcher.instance_variable_get(:@logger)
+
+    dispatcher.tick(now: T0)
+
+    fatal = logger.events.find { |name, _| name == :fatal }
+    assert_match(/admission scheduler raised: RuntimeError/, fatal.last.fetch(:message))
+  end
+
+  def test_patrol_fix_reservation_is_cancelled_when_shutdown_starts_after_tick
+    token = {
+      kind: :patrol_fix_semantic_admission, project: "p1",
+      source: "ordinary_patrol", occurrence_id: "ordinary:finding-1:v1",
+      reservation_id: "a" * 64
+    }
+    event = Hive::Daemon::PatrolFixAdmissionScheduler::Event.new(
+      source: token.fetch(:source), occurrence_id: token.fetch(:occurrence_id),
+      status: :decision_dispatch, command: "hive semantic", dispatch_token: token
+    )
+    scheduler = FakePatrolFixAdmissionScheduler.new(results: [ event ])
+    dispatcher, supervisor = make_dispatcher(
+      rows: [], patrol_fix_admission_scheduler: scheduler
+    )
+    scheduler.define_singleton_method(:tick) do |now:|
+      dispatcher.request_shutdown!
+      [ event ]
+    end
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    assert_equal token, scheduler.cancelled.fetch(0).fetch(:dispatch_token)
+  end
+
+  def test_patrol_fix_dispatch_failure_is_settled_and_logged
+    token = {
+      kind: :patrol_fix_semantic_admission, project: "p1",
+      source: "ordinary_patrol", occurrence_id: "ordinary:finding-1:v1",
+      reservation_id: "a" * 64
+    }
+    event = Hive::Daemon::PatrolFixAdmissionScheduler::Event.new(
+      source: token.fetch(:source), occurrence_id: token.fetch(:occurrence_id),
+      status: :decision_dispatch, command: "hive semantic", dispatch_token: token
+    )
+    scheduler = FakePatrolFixAdmissionScheduler.new(results: [ event ])
+    dispatcher, = make_dispatcher(rows: [], patrol_fix_admission_scheduler: scheduler)
+    logger = dispatcher.instance_variable_get(:@logger)
+    dispatcher.define_singleton_method(:dispatch_command) { |*args, **kwargs| raise "spawn failed" }
+
+    dispatcher.tick(now: T0)
+
+    assert_equal token, scheduler.completed.fetch(0).fetch(:dispatch_token)
+    fatal = logger.events.find do |name, attrs|
+      name == :fatal && attrs[:message].to_s.include?("semantic dispatch failed")
+    end
+    assert_equal :decision_completed, fatal.last.fetch(:recovery_status)
   end
 
   def test_blocked_recovery_survives_repeated_dispatch_ticks_without_slots_or_spawns
@@ -612,33 +790,29 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
 
-  def test_module_migration_and_runtime_results_are_logged_while_idle_is_silent
-    migration = FakeModuleTick.new(results: [ { project: "p1", status: :shadowing, blockers: {} } ])
+  def test_module_runtime_results_are_logged_while_idle_is_silent
     runtime = FakeModuleTick.new(results: [
       { project: "idle", status: :idle, decisions: 0, schedules: 0, reason: nil },
       { project: "p1", status: :ok, decisions: 1, schedules: 1, reason: nil }
     ])
     dispatcher, _supervisor, _controller, logger = make_dispatcher(
-      module_runtime: runtime, module_migration_coordinator: migration
+      module_runtime: runtime
     )
 
     dispatcher.tick(now: T0)
 
-    assert_equal [ T0 ], migration.ticks
     assert_equal [ T0 ], runtime.ticks
     assert runtime.admission_open.call,
            "module runtime must share the daemon shutdown admission predicate"
-    assert logger.events.any? { |name, attrs| name == :module_migration && attrs[:project] == "p1" }
     module_events = logger.events.select { |name, _attrs| name == :module_runtime }
     assert_equal [ "p1" ], module_events.map { |_name, attrs| attrs.fetch(:project) }
   end
 
-  def test_module_collaborator_failures_are_isolated_and_later_tick_work_continues
-    migration = FakeModuleTick.new(error: IOError.new("migration disk full"))
+  def test_module_runtime_failures_are_isolated_and_later_tick_work_continues
     runtime = FakeModuleTick.new(error: RuntimeError.new("runtime failed"))
     dispatcher, supervisor, _controller, logger = make_dispatcher(
       rows: [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ],
-      module_runtime: runtime, module_migration_coordinator: migration
+      module_runtime: runtime
     )
 
     dispatcher.tick(now: T0)
@@ -646,7 +820,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
     messages = logger.events.filter_map do |name, attrs|
       attrs[:message] if name == :fatal
     end
-    assert messages.any? { |message| message.include?("module migration raised") }
     assert messages.any? { |message| message.include?("module runtime raised") }
     assert_equal 1, supervisor.spawned.size
   end
@@ -891,52 +1064,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     assert_equal candidate, patrol.reserved.fetch(0).fetch(:candidate)
     assert_equal "hive patrol p1", supervisor.spawned.fetch(0).fetch(:command)
-  end
-
-  def test_patrol_dispatch_rechecks_migration_ownership_at_spawn_boundary
-    dispatcher, _supervisor, _controller, logger = make_dispatcher
-    candidate = {
-      project: "p1", patrol_kind: :architecture,
-      slug: "refactor-patrol-job-7", stage: "refactor-patrol",
-      migration_entry: {
-        "path" => "/tmp/project", "hive_state_path" => "/tmp/project/.hive-state"
-      }
-    }
-    observed = []
-    blocked = lambda do |project_root, module_name, authority:, hive_state_path:, &block|
-      observed << [ project_root, module_name, authority, hive_state_path ]
-      block.call(false)
-    end
-    with_replaced_singleton_method(
-      Hive::Modules::Migration::Patrols, :with_admission, blocked
-    ) do
-      dispatcher.send(:dispatch_patrol_with_gates, candidate, now: T0)
-    end
-    assert_equal(
-      [
-        "/tmp/project", "architecture-patrol", :legacy,
-        "/tmp/project/.hive-state"
-      ],
-      observed.fetch(0)
-    )
-    assert logger.events.any? do |name, attributes|
-      name == :skipped &&
-        attributes[:reason] == "migration_ownership_changed"
-    end
-
-    admitted = []
-    dispatcher.define_singleton_method(:dispatch_patrol_with_admission) do |value, now:|
-      admitted << [ value, now ]
-    end
-    allowed = lambda do |*_args, **_kwargs, &block|
-      block.call(true)
-    end
-    with_replaced_singleton_method(
-      Hive::Modules::Migration::Patrols, :with_admission, allowed
-    ) do
-      dispatcher.send(:dispatch_patrol_with_gates, candidate, now: T0)
-    end
-    assert_equal [ [ candidate, T0 ] ], admitted
   end
 
   def test_patrol_config_exit_backs_off_without_dropping_project

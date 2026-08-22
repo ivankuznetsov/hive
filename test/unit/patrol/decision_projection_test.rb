@@ -39,4 +39,18 @@ class PatrolDecisionProjectionTest < Minitest::Test
 
     assert_equal "ordinary patrol selection input is malformed", error.message
   end
+
+  def test_event_and_operation_inputs_are_immediately_due
+    event = Hive::Patrol::DecisionProjection.module_event_input("event-1")
+    operation = Hive::Patrol::DecisionProjection.operation_input("run-now")
+
+    assert_equal "due", Hive::Patrol::DecisionProjection.project(event).rationale
+    assert_equal "due", Hive::Patrol::DecisionProjection.project(operation).rationale
+    assert_raises(Hive::ConfigError) do
+      Hive::Patrol::DecisionProjection.module_event_input("")
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::Patrol::DecisionProjection.operation_input("")
+    end
+  end
 end

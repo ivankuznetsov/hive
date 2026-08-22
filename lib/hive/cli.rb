@@ -549,9 +549,6 @@ module Hive
         status [NAME]                     Show the shared redacted status model.
         doctor NAME                       Diagnose without repairing state.
         dry-run NAME                      Evaluate a supplied event without writes.
-        migration status|report|cutover|rollback
-                                          Inspect or advance the durable patrol ownership epoch.
-
       Lifecycle mutations are preview-bound. Run with --dry-run first, review
       every hook, setting, binding, and grant, then repeat with --yes and the
       exact --receipt value. Non-interactive callers must explicitly provide
@@ -582,8 +579,6 @@ module Hive
                       desc: "for schedule dry-run: exact five-field cron binding"
     option :occurred_at, type: :string,
                          desc: "for `dry-run`: ISO 8601 occurrence time"
-    option :reviewer, type: :string,
-                      desc: "for `migration report`: reviewer identity recorded in the gate"
     define_method(:module) do |subcommand = nil, subject = nil|
       require "hive/commands/module"
       Hive::Commands::Module.new(
@@ -592,8 +587,7 @@ module Hive
         settings: options[:setting], hooks: options[:hook], grants: options[:grant],
         mappings: options[:mapping], input_bindings: options[:input_binding],
         allow_escalation: options[:allow_escalation],
-        event_name: options[:event], schedule: options[:schedule], occurred_at: options[:occurred_at],
-        reviewer: options[:reviewer]
+        event_name: options[:event], schedule: options[:schedule], occurred_at: options[:occurred_at]
       ).call
     end
 
@@ -1035,25 +1029,23 @@ module Hive
       patrol.review_prs: false to keep PR-only output.
 
       Use --list for a bounded, read-only finding summary shared with Hive Web.
-      Use --dry-run to map and review without creating fix worktrees,
-      pushing branches, or opening PRs. With --json, a cycle emits
-      hive-patrol.v3; --list emits hive-patrol-findings.v1.
+      Accepted findings are recorded for the shared patrol-fix workflow;
+      this command never edits code, pushes branches, or opens PRs. Use
+      --dry-run to map and review without persisting findings. With --json, a
+      cycle emits hive-patrol.v3; --list emits hive-patrol-findings.v1.
     DESC
     option :dry_run, type: :boolean, default: false,
-                     desc: "map and review, but do not fix, push, or open PRs"
+                     desc: "map and review without persisting findings"
     option :list, type: :boolean, default: false,
                   desc: "list bounded recorded finding health without running Patrol"
-    option :occurrence_id, type: :string, hide: true
     def patrol(project)
       require "hive/commands/patrol"
-      command_options = {
+      Hive::Commands::Patrol.new(
+        project,
         json: options[:json],
         dry_run: options[:dry_run],
         list: options[:list]
-      }
-      occurrence_id = options[:occurrence_id]
-      command_options[:occurrence_id] = occurrence_id unless occurrence_id.nil?
-      Hive::Commands::Patrol.new(project, **command_options).call
+      ).call
     end
 
     desc "refactor-patrol PROJECT", "Discover routed refactor theses for a registered project"
@@ -1074,9 +1066,6 @@ module Hive
       PR mode requires --json, cannot be combined with legacy scope hints, and
       emits hive-refactor-patrol.v4 through an enforceable read-only agent.
 
-      The daemon uses --actions with --job-manifest to resume the immutable
-      per-thesis action ledger after discovery. It emits the same v4 contract.
-
       Use --list or --show JOB_ID to inspect the authoritative durable job
       ledger without enqueueing, claiming, replaying, or resuming work. With
       --json these operations emit hive-refactor-patrol-jobs.v2. List output is
@@ -1093,12 +1082,8 @@ module Hive
     option :pr, type: :string, desc: "analyze one merged PR number or URL with the v4 read-only contract"
     option :job_manifest, type: :string,
                           desc: "analyze one immutable merge-intake manifest (daemon/internal)"
-    option :actions, type: :boolean, default: false,
-                     desc: "resume actions for --job-manifest (daemon/internal)"
     option :result_file, type: :string,
                          desc: "write daemon completion envelope to a fenced result file (internal)"
-    option :occurrence_id, type: :string,
-                           desc: "reuse a durable patrol occurrence (daemon/internal)"
     option :list, type: :boolean, default: false,
                   desc: "list durable architecture-patrol jobs without changing state"
     option :show, type: :string,
@@ -1121,14 +1106,40 @@ module Hive
         changed_since: options[:changed_since],
         pr: options[:pr],
         job_manifest: options[:job_manifest],
-        actions: options[:actions],
         result_file: options[:result_file],
-        occurrence_id: options[:occurrence_id],
         list: options[:list],
         show: options[:show],
         limit: options[:limit],
         cursor: options[:cursor],
         full: options[:full]
+      ).call
+    end
+
+    desc "refactor-patrol-classify PROJECT",
+         "Run one queued merge classifier (daemon/internal)", hide: true
+    option :occurrence_id, type: :string, required: true
+    option :reservation_id, type: :string, required: true
+    option :result_file, type: :string, required: true
+    def refactor_patrol_classify(project)
+      require "hive/commands/refactor_patrol_classify"
+      Hive::Commands::RefactorPatrolClassify.new(
+        project,
+        occurrence_id: options[:occurrence_id],
+        reservation_id: options[:reservation_id],
+        result_file: options[:result_file]
+      ).call
+    end
+
+    desc "__patrol-fix-semantic-decision PROJECT",
+         "Run one reserved Patrol Fix semantic gate (daemon/internal)", hide: true
+    option :source, type: :string, required: true
+    option :occurrence_id, type: :string, required: true
+    option :reservation_id, type: :string, required: true
+    def __patrol_fix_semantic_decision(project)
+      require "hive/commands/patrol_fix_semantic_decision"
+      exit Hive::Commands::PatrolFixSemanticDecision.new(
+        project, source: options[:source], occurrence_id: options[:occurrence_id],
+        reservation_id: options[:reservation_id]
       ).call
     end
 

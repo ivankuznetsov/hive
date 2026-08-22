@@ -21,7 +21,6 @@ require "hive/commands/status"
 require "hive/plan_review"
 require "hive/agent_skills/inspector"
 require "hive/agent_skills/provisioner"
-require "hive/patrol/candidate_selector"
 require "hive/patrol/reviewer"
 require "hive/commands/setup_agents"
 require "hive/tui/snapshot"
@@ -29,8 +28,6 @@ require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/attempts/record"
 require "hive/provider_health"
-require "hive/modules/migration/patrol_decision_projection"
-require "hive/modules/migration/patrol_evidence"
 require "tmpdir"
 
 # Schema files under schemas/ are the published artefact for external
@@ -492,8 +489,14 @@ class SchemaFilesTest < Minitest::Test
                "generic workflow stage dirs are runtime-registered, so stage must not be a coding enum"
     assert_equal Hive::Commands::Status::ICON.keys.map(&:to_s).sort,
                  doc.dig("$defs", "Task", "properties", "marker", "enum").sort
-    assert_equal Hive::Schemas::TaskActionKind::ALL.sort,
+    versioned_actions = Hive::Schemas::TaskActionKind::ALL -
+      Hive::Commands::Status::ADDITIVE_PATROL_FIX_ACTIONS
+    assert_equal versioned_actions.sort,
                  doc.dig("$defs", "Task", "properties", "action", "enum").sort
+    Hive::Commands::Status::ADDITIVE_PATROL_FIX_ACTIONS.each do |action|
+      assert_equal Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+                   Hive::Commands::Status.new.send(:versioned_action_key, action)
+    end
   end
 
   def test_plan_review_route_diagnostics_validate_in_status_contracts
@@ -565,7 +568,7 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_status_schema_matches_tui_snapshot_row_keys
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
     schema_properties = doc.dig("$defs", "Task", "properties").keys
-    snapshot_row_keys = Hive::Tui::Snapshot::Row.members.map(&:to_s) - [ "project_name" ]
+    snapshot_row_keys = Hive::Tui::Snapshot::Row.members.map(&:to_s) - %w[project_name]
     snapshot_row_keys = snapshot_row_keys.map { |key| key == "action_key" ? "action" : key }
 
     assert_empty snapshot_row_keys - schema_properties,
@@ -2325,24 +2328,17 @@ class SchemaFilesTest < Minitest::Test
       "review_errors" => [],
       "findings" => 1,
       "fix_candidates" => 1,
-      "fixes_attempted" => 1,
-      "fixes_validated" => 1,
-      "prs_opened" => 1,
-      "pr_urls" => [ "https://example.com/pr/1" ],
-      "review_handoff_errors" => [
-        { "pr_url" => "https://example.com/pr/2", "reason" => "review_handoff_failed" }
-      ],
-      "fix_results" => [
-        {
-          "finding_id" => "f1", "patch_id" => "p1", "passed" => true,
-          "reason" => "validated", "patch_artifact" => ".hive-state/patrol/patches/p1.json",
-          "detail" => nil, "publication_status" => "opened", "publication_reason" => nil,
-          "publication_detail" => nil, "pr_url" => "https://example.com/pr/1"
-        }
-      ],
+      "fixes_attempted" => 0,
+      "fixes_validated" => 0,
+      "prs_opened" => 0,
+      "pr_urls" => [],
+      "review_handoff_errors" => [],
+      "fix_results" => [],
       "skipped_findings" => [
-        { "finding_id" => "f2", "fingerprint" => "fp2", "reason" => "low_confidence" },
-        { "finding_id" => "f3", "fingerprint" => "fp3", "reason" => "similar_to_existing" }
+        {
+          "finding_id" => "f2", "fingerprint" => "fp2",
+          "reason" => "semantic_duplicate", "canonical_finding_id" => "f1"
+        }
       ],
       "last_scanned_sha" => "abc123"
     }
@@ -2351,13 +2347,11 @@ class SchemaFilesTest < Minitest::Test
     assert_empty errors, "hive-patrol success payload must validate"
   end
 
-  def test_hive_patrol_v3_accepts_every_candidate_selector_skip_reason
+  def test_hive_patrol_v3_accepts_the_discovery_deduplication_reason
     document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
     allowed = document.dig("$defs", "SuccessPayload", "properties", "skipped_findings",
                            "items", "properties", "reason", "enum")
-    produced = Hive::Patrol::CandidateSelector::SKIP_REASONS
-
-    assert_equal produced.sort, allowed.sort
+    assert_equal [ "semantic_duplicate" ], allowed
   end
 
   def test_hive_patrol_v3_review_error_kinds_match_reviewer
@@ -2368,17 +2362,16 @@ class SchemaFilesTest < Minitest::Test
     assert_equal Hive::Patrol::Reviewer::REVIEW_ERROR_KINDS.sort, allowed.sort
   end
 
-  def test_hive_patrol_v3_fix_and_publication_reasons_match_producers
+  def test_hive_patrol_v3_retires_inline_fix_and_publication_results
     document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
-    properties = document.dig("$defs", "SuccessPayload", "properties", "fix_results",
-                              "items", "properties")
+    properties = document.dig("$defs", "SuccessPayload", "properties")
 
-    assert_equal Hive::Commands::Patrol::FIX_RESULT_REASONS.sort,
-                 properties.dig("reason", "enum").sort
-    assert_equal Hive::Patrol::PrOpener::RESULT_STATUSES.map(&:to_s).sort,
-                 properties.dig("publication_status", "enum").compact.sort
-    assert_equal Hive::Patrol::PrOpener::RESULT_REASONS.compact.sort,
-                 properties.dig("publication_reason", "enum").compact.sort
+    %w[fixes_attempted fixes_validated prs_opened].each do |name|
+      assert_equal 0, properties.dig(name, "const")
+    end
+    %w[pr_urls review_handoff_errors fix_results].each do |name|
+      assert_equal 0, properties.dig(name, "maxItems")
+    end
   end
 
   def test_hive_patrol_finding_schema_file_exists_and_accepts_record
@@ -3033,151 +3026,5 @@ class SchemaFilesTest < Minitest::Test
       assert schemer.valid?(payload),
              "hive-act ErrorPayload must accept #{kind}: #{schemer.validate(payload).to_a.inspect}"
     end
-  end
-
-  def test_patrol_evidence_receipt_schema_is_strict_and_composes_u2_values
-    path = Hive::Schemas.schema_path(
-      "hive-patrol-evidence-receipt", version: 1
-    )
-    assert File.file?(path), "schema file missing: #{path}"
-    assert_equal path,
-                 Hive::Schemas.schema_path("hive-patrol-evidence-receipt")
-    schemer = JSONSchemer.schema(Pathname(path))
-    payload = patrol_evidence_receipt_payload
-
-    assert_empty schemer.validate(payload).to_a
-    refute schemer.valid?(payload.merge("unexpected" => true))
-    refute schemer.valid?(payload.merge("candidate_sha" => "not-a-sha"))
-    refute schemer.valid?(
-      payload.merge("effects" => payload.fetch("effects") + [ {} ])
-    )
-    nested = JSON.parse(JSON.generate(payload))
-    nested.fetch("capture").fetch("project")["unexpected"] = true
-    refute schemer.valid?(nested)
-    nested = JSON.parse(JSON.generate(payload))
-    nested.fetch("capture").fetch("trigger")["kind"] = "unknown"
-    refute schemer.valid?(nested)
-
-    with_effect = JSON.parse(JSON.generate(payload))
-    with_effect["effects"] = [
-      JSON.parse(JSON.generate(patrol_effect_receipt_payload))
-    ]
-    assert_empty schemer.validate(with_effect).to_a
-    with_effect.fetch("effects").first.fetch("intent")["unexpected"] = true
-    refute schemer.valid?(with_effect)
-  end
-
-  def test_module_migration_report_v2_accepts_partial_lanes_and_rejects_v1
-    legacy_path = Hive::Schemas.schema_path(
-      "hive-module-migration-report", version: 1
-    )
-    path = Hive::Schemas.schema_path(
-      "hive-module-migration-report", version: 2
-    )
-    assert_equal path,
-                 Hive::Schemas.schema_path("hive-module-migration-report")
-    assert_equal 1,
-                 JSON.parse(File.read(legacy_path))
-                   .dig("oneOf", 0, "properties", "schema_version", "const")
-    assert File.file?(path), "schema file missing: #{path}"
-    schemer = JSONSchemer.schema(JSON.parse(File.read(path)))
-    payload = {
-      "schema" => "hive-module-migration-report",
-      "schema_version" => 2,
-      "report_id" => "report-#{'a' * 64}",
-      "generated_at" => "2026-08-03T12:00:00.000000Z",
-      "candidate_sha" => "b" * 40,
-      "scenario_manifest_digest" => "c" * 64,
-      "status" => "evidence_required",
-      "lanes" => {
-        "deterministic" => nil,
-        "installed_live" => nil
-      },
-      "blockers" => [ "deterministic:evidence_required" ],
-      "supersedes" => nil,
-      "migration" => {
-        "source_schema_version" => 1,
-        "source_digest" => "d" * 64,
-        "archive_digest" => "d" * 64,
-        "disposition" => "evidence_required"
-      }
-    }
-
-    assert_empty schemer.validate(payload).to_a
-    error = Hive::Schemas::ErrorEnvelope.build(
-      schema: "hive-module-migration-report",
-      error: Hive::ConfigError.new("reviewer is required"),
-      error_kind: "error"
-    )
-    assert_empty schemer.validate(error).to_a
-    refute schemer.valid?(payload.merge("schema_version" => 1))
-    refute schemer.valid?(payload.merge("unexpected" => true))
-    refute schemer.valid?(
-      payload.merge("lanes" => payload.fetch("lanes").merge("extra" => nil))
-    )
-  end
-
-  private
-
-  def patrol_evidence_receipt_payload
-    now = Time.utc(2026, 8, 3, 12)
-    selection = Hive::Modules::Migration::PatrolDecisionProjection.build(
-      module_name: "patrol", rationale: "due"
-    )
-    capture = Hive::Modules::Migration::PatrolCapture.build(
-      module_name: "patrol",
-      project: {
-        "project_id" => "project-1", "name" => "demo",
-        "repository" => "owner/demo"
-      },
-      trigger: { "kind" => "manual", "id" => "manual-1" },
-      reservation: { "kind" => "ordinary", "id" => "reservation-1" },
-      owner: "legacy", owner_epoch: 1,
-      selection_input: { "kind" => "operation", "operation" => "test" },
-      selection: selection, outcome_class: "completed",
-      outcome: { "rationale" => "completed", "finding_ids" => [] },
-      occurred_at: now, recorded_at: now
-    )
-    {
-      "schema" => "hive-patrol-evidence-receipt",
-      "schema_version" => 1,
-      "receipt_id" => "evidence-#{'0' * 64}",
-      "run_id" => "run-1",
-      "candidate_sha" => "1" * 40,
-      "catalog_digest" => "2" * 64,
-      "source_digest" => "3" * 64,
-      "manifest_digest" => "4" * 64,
-      "configuration_digest" => "5" * 64,
-      "scenario_manifest_digest" => "6" * 64,
-      "repository" => {
-        "id" => "owner/demo", "sha" => "7" * 40,
-        "change_window" => "window-1"
-      },
-      "capture" => capture.to_h,
-      "module_projection" => selection.to_h,
-      "decision_class" => "positive_finding",
-      "effects" => [],
-      "fault_steps" => [ "restart_after_decision" ],
-      "artifacts" => [
-        { "kind" => "comparison", "digest" => "8" * 64 }
-      ],
-      "reviewer" => "reviewer-1",
-      "generated_at" => now.iso8601(6),
-      "reviewed_at" => (now + 1).iso8601(6)
-    }
-  end
-
-  def patrol_effect_receipt_payload
-    now = Time.utc(2026, 8, 3, 12)
-    intent = Hive::Modules::Migration::EffectIntent.build(
-      module_name: "patrol", occurrence_id: "occ-#{'a' * 64}",
-      authority: "legacy", owner_epoch: 1, sink: "finding",
-      target: "finding-1", idempotency_key: "finding-1",
-      capability: "finding_write", created_at: now
-    )
-    Hive::Modules::Migration::EffectReceipt.build(
-      intent: intent, status: "committed",
-      outcome: { "finding_id" => "finding-1" }, recorded_at: now
-    ).to_h
   end
 end

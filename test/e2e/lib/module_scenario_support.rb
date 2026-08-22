@@ -25,7 +25,6 @@ module Hive
     # only catalog transport and detached process launch are replaced with
     # deterministic local fixtures.
     module ModuleScenarioSupport
-      REPO_ROOT = File.expand_path("../../..", __dir__)
       PROJECT_ID = "e2e-project-0001"
       START = Time.utc(2026, 7, 22, 10, 0, 0)
 
@@ -54,12 +53,11 @@ module Hive
       module_function
 
       def fresh_install!(sandbox:, run_home:)
+        register_demo_entrypoint!
         store = module_store(sandbox)
-        %w[patrol architecture-patrol].each do |name|
-          package = File.join(REPO_ROOT, "modules", name)
-          resolution, descriptor = resolution_for(package)
-          install!(store, package, resolution, descriptor, now: START)
-        end
+        package = File.join(state_path(sandbox), "e2e-packages", "fresh-install")
+        resolution, descriptor = write_demo_package(package, version: "1.0.0", commit: "a" * 40)
+        install!(store, package, resolution, descriptor, now: START)
 
         attempt_store = attempt_store(run_home)
         inspector_rows = Hive::Modules::Inspector.new(
@@ -74,7 +72,7 @@ module Hive
           attempt_store: attempt_store, clock: -> { START + 60 }
         ).list(project)
         raise "CLI and Web status projections differ" unless inspector_rows == web_rows
-        raise "expected two active first-party modules" unless inspector_rows.size == 2 &&
+        raise "expected one active module" unless inspector_rows.one? &&
           inspector_rows.all? { |row| row.fetch("lifecycle_state") == "active" }
 
         write_proof(run_home, "module-fresh-install.json",

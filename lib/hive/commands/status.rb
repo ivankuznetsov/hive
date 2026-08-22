@@ -94,6 +94,9 @@ module Hive
         [ "idle", "READY / IDLE" ]
       ].freeze
       OPERATIONAL_BAND_LIMIT = 5
+      ADDITIVE_PATROL_FIX_ACTIONS = %w[
+        patrol_fix_rejected patrol_fix_blocked patrol_fix_escalated
+      ].freeze
 
       def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false,
                      operational: false, full: false)
@@ -350,7 +353,7 @@ module Hive
         project_context = operational_project_context(projects)
         if scheduler_snapshot.equal?(AUTO_SCHEDULER_SNAPSHOT)
           scheduler_snapshot = if project_context.any? { |_name, context| context["daemon_enabled"] == true }
-            Hive::Daemon::OperationalSnapshot::Reader.new.read
+            Hive::Daemon::OperationalSnapshot::Reader.new.read(now: now)
           end
         end
         Hive::OperationalStatus.new(
@@ -654,7 +657,7 @@ module Hive
           # SCHEMA_VERSIONS policy in lib/hive.rb — no version bump (mirrors
           # `live_task_lock`).
           "unanswered_questions" => unanswered_question_count(row),
-          "action" => row[:action_key],
+          "action" => versioned_action_key(row[:action_key]),
           "action_label" => row[:action_label],
           "suggested_command" => row[:suggested_command],
           "outcomes" => row[:outcomes] || [],
@@ -689,6 +692,13 @@ module Hive
         Hive::BrainstormParser.unanswered_questions(Hive::BrainstormParser.parse(path)).size
       rescue StandardError
         0
+      end
+
+      def versioned_action_key(action_key)
+        return Hive::Schemas::TaskActionKind::NEEDS_INPUT if
+          ADDITIVE_PATROL_FIX_ACTIONS.include?(action_key.to_s)
+
+        action_key
       end
 
       def diagnose_call
@@ -1200,12 +1210,20 @@ module Hive
                 )
                 next
               end
-              marker = Hive::Markers.current(task.state_file)
+              marker = if task.workflow.controller?
+                Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+              else
+                Hive::Markers.current(task.state_file)
+              end
               marker, projection = status_projection(
                 task, marker, project: project_name || project_name_for(task)
               )
               folder_mtime = File.mtime(entry)
-              mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
+              mtime = if task.workflow.controller?
+                folder_mtime
+              else
+                File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
+              end
               # Generic markerless tasks still carry meta.yml. Use that stable
               # task-owned file for the action observation before falling back
               # to the directory mtime. Keep `mtime` on its long-standing
@@ -1570,6 +1588,9 @@ module Hive
         # non-advancing, so it sorts with the other review-complete rows rather
         # than falling below "Error" as an unknown label.
         "Ad-hoc review complete (parked)",
+        "Rejected (parked)",
+        "Blocked (parked)",
+        "Escalated (parked)",
         "Ready to finalize",
         "Ready to archive",
         "Archived",
@@ -1634,7 +1655,8 @@ module Hive
           condition_gate: nil,
           condition_migration: nil,
           condition_warning: nil,
-          plan_review: nil
+          plan_review: nil,
+          patrol_fix: nil
         }
       end
 
@@ -1681,6 +1703,7 @@ module Hive
             condition_migration: action.migration_selection.to_h,
             condition_warning: action.condition_warning,
             plan_review: action.plan_review,
+            patrol_fix: action.patrol_fix,
             state_label: condition_state_label(row, action)
           )
         end

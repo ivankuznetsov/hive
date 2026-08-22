@@ -237,6 +237,7 @@ class DraftPrReceiptTest < Minitest::Test
       invalid = [
         base.merge("repository" => "gitlab.com/acme/widgets"),
         terminal.merge("report_sha256" => "not-a-digest"),
+        terminal.merge("publication_marker" => "<!-- untrusted -->"),
         terminal.merge("push_intent_id" => "not-an-intent"),
         terminal.merge("observed_remote_oid" => "d" * 40),
         terminal.merge("pr_number" => 0),

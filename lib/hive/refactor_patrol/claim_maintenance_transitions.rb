@@ -2,7 +2,7 @@ require "hive/refactor_patrol/job_store"
 
 module Hive
   module RefactorPatrol
-    # Narrow operational port for claim-process attachment and heartbeat
+    # Narrow operational port for discovery-process attachment and heartbeat
     # renewal. These updates do not represent product outcomes and therefore
     # do not create occurrence effects, but they remain generation/lease
     # fenced by JobStore and cannot be invoked directly by command or daemon
@@ -21,25 +21,17 @@ module Hive
       end
 
       def renew(store:, token:, now:, lease_sec:, claim_resolver:)
-        case token.fetch(:kind).to_sym
-        when :discovery
-          store.renew_discovery_claim!(
-            token,
-            now: now,
-            lease_sec: lease_sec,
-            claim_resolver: claim_resolver
-          )
-        when :action
-          store.renew_action_claim!(
-            token,
-            now: now,
-            lease_sec: lease_sec,
-            claim_resolver: claim_resolver
-          )
-        else
+        unless token.fetch(:kind).to_sym == :discovery
           raise JobStore::InconsistentRecord,
                 "refactor patrol claim kind is unsupported"
         end
+
+        store.renew_discovery_claim!(
+          token,
+          now: now,
+          lease_sec: lease_sec,
+          claim_resolver: claim_resolver
+        )
       end
     end
   end

@@ -123,13 +123,14 @@ class NewIdempotencyTest < Minitest::Test
         command = Hive::Commands::New.new(
           project, "task with raced image", slug_override: "raced-attachment-task",
           idempotency_key: "creator:raced-attachment", json: true,
-          attachments: [ [ source, "source.png" ] ]
+          attachments: [ [ source, "source.png" ] ],
+          task_capture_factory: lambda do |**options|
+            Hive::TaskCapture.new(
+              **options,
+              before_lookup: -> { File.binwrite(source, "changed-after-fingerprint") }
+            )
+          end
         )
-        original_lookup = command.method(:find_idempotent_task!)
-        command.define_singleton_method(:find_idempotent_task!) do |*args|
-          File.binwrite(source, "changed-after-fingerprint")
-          original_lookup.call(*args)
-        end
 
         out, = capture_io { command.call! }
         payload = JSON.parse(out)
@@ -321,13 +322,14 @@ class NewIdempotencyTest < Minitest::Test
       )
       command = Hive::Commands::New.new(
         project, "same request", slug_override: "raced-authored",
-        workflow: "editorial", idempotency_key: "creator:authored-race", json: true
+        workflow: "editorial", idempotency_key: "creator:authored-race", json: true,
+        task_capture_factory: lambda do |**options|
+          Hive::TaskCapture.new(
+            **options,
+            before_lookup: -> { File.write(instruction, "Changed during task creation.\n") }
+          )
+        end
       )
-      original_lookup = command.method(:find_idempotent_task!)
-      command.define_singleton_method(:find_idempotent_task!) do |*args|
-        File.write(instruction, "Changed during task creation.\n")
-        original_lookup.call(*args)
-      end
 
       error = assert_raises(Hive::ConcurrentRunError) { command.call! }
 
@@ -336,6 +338,30 @@ class NewIdempotencyTest < Minitest::Test
         File.join(project_root, ".hive-state", "stages", "1-inbox", "raced-authored")
       )
       assert_empty idempotent_tasks(project_root)
+    end
+  end
+
+  def test_non_idempotent_authored_workflow_validation_rejects_drift
+    with_initialized_project do |project_root, project|
+      create_authored_workflow(project_root, "editorial")
+      command = Hive::Commands::New.new(
+        project, "same request", slug_override: "raced-authored",
+        workflow: "editorial", json: true
+      )
+      entry = Hive::Config.find_project(project)
+      workflow_info = command.send(:resolve_workflow, entry)
+      instruction = File.join(
+        project_root, ".hive-state", "workflows", "editorial", "work.md"
+      )
+      File.write(instruction, "Changed during task creation.\n")
+
+      error = assert_raises(Hive::ConcurrentRunError) do
+        command.send(
+          :validate_stable_authored_workflow!, workflow_info,
+          File.join(project_root, ".hive-state")
+        )
+      end
+      assert_match(/owner-authored workflow changed/, error.message)
     end
   end
 
@@ -375,7 +401,7 @@ class NewIdempotencyTest < Minitest::Test
         assert_raises(Errno::EEXIST) do
           Hive::Commands::New.new(
             project, "candidate", slug_override: "owned-candidate",
-            idempotency_key: "creator:owned-candidate", json: true
+            json: true
           ).call!
         end
       end
@@ -390,22 +416,23 @@ class NewIdempotencyTest < Minitest::Test
     with_initialized_project do |project_root, project|
       command = Hive::Commands::New.new(
         project, "same task", slug_override: "locked-task",
-        idempotency_key: "creator:race", json: true
+        idempotency_key: "creator:race", json: true,
+        task_capture_factory: lambda do |**options|
+          Hive::TaskCapture.new(
+            **options,
+            before_candidate: lambda do |_task_dir|
+              commit_lock = File.join(project_root, ".hive-state", ".commit-lock")
+              workflow_lock = File.join(
+                project_root, ".hive-state", "workflows", ".mutation.lock"
+              )
+              raise "candidate creation ran outside workflow mutation lock" unless
+                other_process_lock_state(workflow_lock) == "blocked"
+              raise "candidate creation ran outside commit lock" unless
+                other_process_lock_state(commit_lock) == "blocked"
+            end
+          )
+        end
       )
-      original = command.method(:create_task_candidate!)
-      observe_lock = method(:other_process_lock_state)
-      command.define_singleton_method(:create_task_candidate!) do |*args, **kwargs|
-        commit_lock = File.join(project_root, ".hive-state", ".commit-lock")
-        workflow_lock = File.join(
-          project_root, ".hive-state", "workflows", ".mutation.lock"
-        )
-        raise "candidate creation ran outside workflow mutation lock" unless
-          observe_lock.call(workflow_lock) == "blocked"
-        raise "candidate creation ran outside commit lock" unless
-          observe_lock.call(commit_lock) == "blocked"
-
-        original.call(*args, **kwargs)
-      end
 
       out, = capture_io { command.call! }
       payload = JSON.parse(out)

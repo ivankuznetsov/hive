@@ -161,54 +161,6 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
-  def test_patrol_native_schedule_is_suppressed_until_module_owns_mutation
-    with_runtime(
-      schedules: [ "* * * * *" ],
-      publish_event: false,
-      module_name: "patrol",
-      migration_owner: ->(_entry, _module_name) { "legacy" }
-    ) do |runtime|
-      ledger = Hive::Modules::EventLedger.new(
-        root: File.join(runtime.fetch(:store).hive_state_path, "module-runtime")
-      )
-      count = runtime.fetch(:daemon_runtime).send(
-        :dispatch_schedules,
-        runtime.fetch(:store).selections,
-        store: runtime.fetch(:store),
-        ledger: ledger,
-        entry: runtime.fetch(:entry),
-        now: NOW + 180,
-        admission_open: -> { true }
-      )
-
-      assert_equal 0, count
-      assert_empty ledger.all
-    end
-
-    with_runtime(
-      schedules: [ "* * * * *" ],
-      publish_event: false,
-      module_name: "patrol",
-      migration_owner: ->(_entry, _module_name) { "module" }
-    ) do |runtime|
-      ledger = Hive::Modules::EventLedger.new(
-        root: File.join(runtime.fetch(:store).hive_state_path, "module-runtime")
-      )
-      count = runtime.fetch(:daemon_runtime).send(
-        :dispatch_schedules,
-        runtime.fetch(:store).selections,
-        store: runtime.fetch(:store),
-        ledger: ledger,
-        entry: runtime.fetch(:entry),
-        now: NOW + 180,
-        admission_open: -> { true }
-      )
-
-      assert_equal 1, count
-      assert_equal "patrol", ledger.all.fetch(0).dig("payload", "target_module")
-    end
-  end
-
   def test_tick_drains_a_preexisting_event_once
     with_runtime do |runtime|
       first = runtime.fetch(:daemon_runtime).tick(now: NOW + 1).first
@@ -503,32 +455,9 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
-  def test_default_migration_owner_reads_the_durable_owner
-    with_tmp_dir do |root|
-      runtime = Hive::Modules::DaemonRuntime.new(
-        attempt_store: Object.new,
-        attempt_dispatcher: Object.new,
-        registry: -> { [] }
-      )
-      owner = runtime.instance_variable_get(:@migration_owner)
-
-      assert_equal(
-        "legacy",
-        owner.call(
-          {
-            "path" => root,
-            "hive_state_path" => File.join(root, ".hive-state")
-          },
-          "patrol"
-        )
-      )
-    end
-  end
-
   private
 
-  def with_runtime(schedules: [], publish_event: true, module_name: "demo",
-                   migration_owner: nil, hooks: nil)
+  def with_runtime(schedules: [], publish_event: true, module_name: "demo", hooks: nil)
     with_tmp_dir do |root|
       hooks ||= [
         {
@@ -577,7 +506,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       }
       daemon_runtime = Hive::Modules::DaemonRuntime.new(
         attempt_store: attempt_store, attempt_dispatcher: attempt_dispatcher,
-        registry: -> { [ entry ] }, migration_owner: migration_owner
+        registry: -> { [ entry ] }
       )
       yield(
         store: store, attempt_store: attempt_store, module_dispatcher: module_dispatcher,

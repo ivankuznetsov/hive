@@ -100,6 +100,8 @@ class ModulePackageConfigurationTest < Minitest::Test
     normalize = ->(value, spec) do
       Hive::ModulePackage::Configuration.send(:normalize_setting, "choice", value, spec)
     end
+    assert_equal 2, normalize.call(2, "type" => "integer", "required" => true)
+    assert_equal "value", normalize.call("value", "type" => "string", "required" => true)
     assert_equal 1.5, normalize.call(1.5, "type" => "number", "required" => true)
     assert_raises(Hive::ConfigError) do
       normalize.call(Float::INFINITY, "type" => "number", "required" => true)

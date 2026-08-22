@@ -1299,14 +1299,14 @@ this gap open until architecture patrol either adopts the same
 proof-before-retirement protocol or documents why its existing
 quarantine flow covers interrupted launches.
 
-## Benchmark-only plan-review opt-out needs live parity proof (2026-08-21)
+## Benchmark-only plan-review opt-out live parity proven (2026-08-22)
 
 The local benchmark runtime can now grant an explicit process-local exception
 for projects that serialize `plan_review.enabled: false`; ordinary Hive loads
-still reject that configuration. The first live Pi cell proved the runner
-forwarded the grant and skipped reviewer dispatch, but exposed a second gate:
-the plan-to-execute transition still required a resolution. Focused coverage
-now proves disabled review bypasses prepare, locked verification, and execute
-entry as well as policy dispatch. A complete Pi/OpenCode comparison has not yet
-proven that replacement path live. Keep this boundary local until a fresh cell
-reaches execute without reviewer calls.
+still reject that configuration. The completed Ox Alpha campaign proved the
+grant and replacement transition live across six Pi cells and six OpenCode
+cells: all 12 reached generated terminal results without plan-review dispatch,
+pending rows, or failed rows. Focused coverage continues to pin that disabled
+review bypasses prepare, locked verification, and execute entry as well as
+policy dispatch. Keep the exception benchmark-local; the parity-evidence gap
+itself is closed.

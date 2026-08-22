@@ -187,8 +187,10 @@ bundle exec rake test:babysitter_dry_run_security_matrix
 The required TUI reactivity gate enforces row completeness and archive-size
 scaling without host-speed thresholds. A separate
 `TUI reactivity absolute latency (advisory)` job opts into the absolute budgets
-with `HIVE_TUI_PERF_ABSOLUTE=1`; runner load can make that signal red, but it is
-not a dependency of the protected `rake test (Ruby 3.4)` aggregate.
+with `HIVE_TUI_PERF_ABSOLUTE=1`. Runner load can exceed those workstation-tuned
+budgets, so the measurement step records a warning and retains failure evidence
+without making the job red; the machine-independent scaling proof in the
+protected `rake test (Ruby 3.4)` aggregate remains authoritative.
 
 The packaged-web gate is commit-bound: it archives `HEAD:web` to reproduce the
 release artifact. Commit relevant web changes before using that task locally;

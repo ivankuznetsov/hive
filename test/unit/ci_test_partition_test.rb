@@ -210,7 +210,11 @@ class CiTestPartitionTest < Minitest::Test
           step.dig("with", "path").to_s.include?("tmp/ci-failure-evidence.json")
       end
       assert upload, "#{job_name} runs root Minitest but does not retain its failure evidence"
-      assert_includes %w[failure() always()], upload.fetch("if")
+      if job_name == "tui-reactivity-latency"
+        assert_equal "${{ steps.measure.outcome == 'failure' }}", upload.fetch("if")
+      else
+        assert_includes %w[failure() always()], upload.fetch("if")
+      end
       assert_equal "warn", upload.dig("with", "if-no-files-found")
     end
   end
@@ -251,11 +255,20 @@ class CiTestPartitionTest < Minitest::Test
     jobs = workflow.fetch("jobs")
     advisory = jobs.fetch("tui-reactivity-latency")
     run = advisory.fetch("steps").find { |step| step["name"] == "Measure absolute TUI latency" }
+    report = advisory.fetch("steps").find { |step| step["name"] == "Report absolute TUI latency" }
+    retain = advisory.fetch("steps").find { |step| step["name"] == "Retain failure evidence" }
 
     assert_equal "TUI reactivity absolute latency (advisory)", advisory.fetch("name")
-    assert_equal true, advisory.fetch("continue-on-error")
+    refute advisory.key?("continue-on-error"),
+           "an advisory lane must finish green so exact-head automation can reach terminal success"
+    assert_equal true, run.fetch("continue-on-error")
     assert_equal "1", run.fetch("env").fetch("HIVE_TUI_PERF_ABSOLUTE")
     assert_equal "bundle exec rake test:tui_reactivity_perf", run.fetch("run")
+    assert_equal "${{ always() }}", report.fetch("if")
+    assert_equal "${{ steps.measure.outcome }}",
+                 report.fetch("env").fetch("HIVE_TUI_LATENCY_OUTCOME")
+    assert_includes report.fetch("run"), "GITHUB_STEP_SUMMARY"
+    assert_equal "${{ steps.measure.outcome == 'failure' }}", retain.fetch("if")
 
     required_needs = jobs.fetch("required-test-gate").fetch("needs")
     refute_includes required_needs, "tui-reactivity-latency"

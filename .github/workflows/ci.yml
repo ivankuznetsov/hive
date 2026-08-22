@@ -162,7 +162,6 @@ jobs:
   # still owns row completeness and archive-size scaling.
   tui-reactivity-latency:
     name: TUI reactivity absolute latency (advisory)
-    continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -172,11 +171,24 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
       - name: Measure absolute TUI latency
+        id: measure
+        continue-on-error: true
         env:
           HIVE_TUI_PERF_ABSOLUTE: "1"
         run: bundle exec rake test:tui_reactivity_perf
+      - name: Report absolute TUI latency
+        if: ${{ always() }}
+        env:
+          HIVE_TUI_LATENCY_OUTCOME: ${{ steps.measure.outcome }}
+        run: |
+          if [[ "$HIVE_TUI_LATENCY_OUTCOME" == "failure" ]]; then
+            echo "### ⚠️ Absolute TUI latency exceeded its advisory budget" >> "$GITHUB_STEP_SUMMARY"
+            echo "The required archive-size scaling proof remains authoritative; see the retained failure evidence for this runner's measurement." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ✅ Absolute TUI latency stayed within its advisory budget" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Retain failure evidence
-        if: failure()
+        if: ${{ steps.measure.outcome == 'failure' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: failure-evidence-tui-reactivity-latency

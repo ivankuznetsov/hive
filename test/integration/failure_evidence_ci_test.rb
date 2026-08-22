@@ -70,6 +70,8 @@ module TestFailureEvidenceIntegration
       out, err = Open3.capture2e(
         {
           "CI" => "1",
+          # Model the child fixture's checkout, not an outer hosted runner's.
+          "GITHUB_WORKSPACE" => cwd,
           "GITHUB_STEP_SUMMARY" => summary_path,
           # Run through the repo bundle so the child cannot inherit a
           # half-configured bundler state from this (bundle-exec'd) parent.

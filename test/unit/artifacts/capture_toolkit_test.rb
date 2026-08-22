@@ -107,8 +107,8 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     end
     server.define_singleton_method(:close) { closed << true }
     factory_args = nil
-    factory = lambda do |source_root:, port:|
-      factory_args = [ source_root, port ]
+    factory = lambda do |source_root:, port:, runtime_overlay_root:|
+      factory_args = [ source_root, port, runtime_overlay_root ]
       server
     end
     toolkit.instance_variable_set(:@source_root, Dir.pwd)
@@ -125,7 +125,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
 
     assert_equal true, response.fetch("ok")
     assert_equal "ready", response.dig("payload", "status")
-    assert_equal [ Dir.pwd, 45_678 ], factory_args
+    assert_equal [ Dir.pwd, 45_678, nil ], factory_args
     assert_equal [ [ "bin/rails", "server" ] ], starts
     toolkit.close
     assert_equal [ true ], closed

@@ -24,7 +24,7 @@ module Hive
       def initialize(source_root:, port:, environment: ENV, sandbox_binary: nil,
                      spawner: nil, waiter: nil, process_killer: nil,
                      start_time_resolver: nil, readiness_probe: nil,
-                     clock: nil, sleeper: nil)
+                     clock: nil, sleeper: nil, runtime_overlay_root: nil)
         @source_root = File.realpath(source_root)
         @port = Integer(port)
         raise ArgumentError, "port is outside 1..65535" unless @port.between?(1, 65_535)
@@ -33,7 +33,8 @@ module Hive
         @sandbox = Hive::Artifacts::ProjectCommandSandbox.new(
           source_root: @source_root, environment: @environment,
           sandbox_binary: sandbox_binary, share_network: true,
-          extra_environment: { "PORT" => @port.to_s }
+          extra_environment: { "PORT" => @port.to_s },
+          runtime_overlay_root: runtime_overlay_root
         )
         @spawner = spawner || lambda do |environment, *argv, **options|
           Process.spawn(environment, *argv, **options)

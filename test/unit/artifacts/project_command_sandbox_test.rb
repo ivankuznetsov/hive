@@ -31,7 +31,10 @@ class ArtifactsProjectCommandSandboxTest < Minitest::Test
       refute_includes first, "--share-net"
       assert_includes first.each_cons(3).to_a, [ "--ro-bind", source, source ]
       log = File.join(source, "log")
-      assert_includes first.each_cons(3).to_a, [ "--bind", log, log ]
+      binding = first.each_cons(3).find { |row| row[0] == "--bind" && row[2] == log }
+      refute_nil binding
+      refute_equal log, binding[1]
+      assert binding[1].start_with?(runtime)
       assert_includes first.each_cons(2).to_a, [ "--setenv", "PORT" ]
       refute_includes first, "secret-bus"
       refute_includes first, "secret-agent"
@@ -71,9 +74,43 @@ class ArtifactsProjectCommandSandboxTest < Minitest::Test
 
       bindings = argv.each_cons(3).to_a
       refute_includes bindings, [ "--bind", log, log ]
-      assert_includes bindings, [ "--bind", tmp, tmp ]
+      assert bindings.any? { |row| row[0] == "--bind" && row[2] == tmp && row[1] != tmp }
       assert_includes bindings, [ "--ro-bind", source, source ]
       assert sandbox.close
+    end
+  end
+
+  def test_runtime_writes_use_a_seeded_shared_overlay_without_touching_source
+    Dir.mktmpdir("hive-project-command-sandbox-overlay") do |root|
+      source = File.join(root, "source")
+      storage = File.join(source, "storage")
+      overlay_root = File.join(root, "overlay")
+      FileUtils.mkdir_p([ storage, overlay_root ])
+      File.write(File.join(storage, "primary.sqlite3"), "baseline")
+      sandbox_binary = File.join(root, "bwrap")
+      File.write(sandbox_binary, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, sandbox_binary)
+
+      first = Hive::Artifacts::ProjectCommandSandbox.new(
+        source_root: source, sandbox_binary: sandbox_binary,
+        runtime_overlay_root: overlay_root
+      )
+      argv = first.command_argv([ "/bin/true" ])
+      binding = argv.each_cons(3).find { |row| row[0] == "--bind" && row[2] == storage }
+      overlay = binding.fetch(1)
+      assert_equal "baseline", File.read(File.join(overlay, "primary.sqlite3"))
+      File.write(File.join(overlay, "runtime-blob"), "ephemeral")
+      refute_path_exists File.join(storage, "runtime-blob")
+      assert first.close
+
+      second = Hive::Artifacts::ProjectCommandSandbox.new(
+        source_root: source, sandbox_binary: sandbox_binary,
+        runtime_overlay_root: overlay_root
+      )
+      second.command_argv([ "/bin/true" ])
+      assert_equal "ephemeral", File.read(File.join(overlay, "runtime-blob"))
+      assert second.close
+      assert_path_exists overlay_root
     end
   end
 

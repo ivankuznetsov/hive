@@ -46,7 +46,9 @@ class ArtifactsManagedProjectServerTest < Minitest::Test
       assert_includes argv.each_cons(3).to_a, [ "--ro-bind", source, source ]
       %w[log storage tmp].each do |relative|
         path = File.join(source, relative)
-        assert_includes argv.each_cons(3).to_a, [ "--bind", path, path ]
+        binding = argv.each_cons(3).find { |row| row[0] == "--bind" && row[2] == path }
+        refute_nil binding
+        refute_equal path, binding[1]
       end
       assert_equal [ executable, "--port", "41234" ], argv.last(3)
       refute_includes argv, ENV["DBUS_SESSION_BUS_ADDRESS"] if ENV["DBUS_SESSION_BUS_ADDRESS"]
@@ -369,6 +371,7 @@ class ArtifactsManagedProjectServerTest < Minitest::Test
           File.write("forbidden.txt", "must not escape the runtime boundary")
         rescue Errno::EROFS
         end
+        File.write("tmp/runtime.txt", "ephemeral runtime state")
         server = TCPServer.new("127.0.0.1", Integer(ENV.fetch("PORT")))
         loop do
           socket = server.accept
@@ -390,6 +393,7 @@ class ArtifactsManagedProjectServerTest < Minitest::Test
       assert_equal "http://127.0.0.1:#{port}", receipt.fetch("app_endpoint")
       assert_equal "ok", Net::HTTP.get(URI(receipt.fetch("app_endpoint")))
       refute_path_exists File.join(source, "forbidden.txt")
+      refute_path_exists File.join(source, "tmp", "runtime.txt")
       assert server.close
       assert_raises(Errno::ECONNREFUSED) do
         TCPSocket.new("127.0.0.1", port)

@@ -122,6 +122,7 @@ module Hive
             writable_root: writable_root
           )
           @browser_preflight = start_browser_preflight unless server
+          prepare_project_runtime_root if !server && producer_profile.name == :pi
           @capture_proxy = Hive::Artifacts::CaptureProxy.new(
             app_port: server&.fetch("app_port", nil) ||
               @browser_preflight&.fetch(:app_port)
@@ -281,6 +282,7 @@ module Hive
                   ensure
                     @capture_proxy&.close
                     remove_browser_state_root
+                    remove_project_runtime_root
                     @capture_proxy = nil
                     @managed_web_server = nil
                     @managed_project_server = nil
@@ -471,7 +473,8 @@ module Hive
           @capture_proxy && !@managed_web_server
 
         @managed_project_server ||= Hive::Artifacts::ManagedProjectServer.new(
-          source_root: @source_root, port: @capture_proxy.app_port
+          source_root: @source_root, port: @capture_proxy.app_port,
+          runtime_overlay_root: @project_runtime_root
         )
         receipt = @managed_project_server.start!(argv)
         { "ok" => true, "status" => 0, "payload" => receipt }
@@ -489,7 +492,8 @@ module Hive
           [ key, ENV[key] ]
         end.compact
         sandbox = @project_sandbox_factory.call(
-          source_root: @source_root, environment: ambient
+          source_root: @source_root, environment: ambient,
+          runtime_overlay_root: @project_runtime_root
         )
         result = Hive::Artifacts::TerminalRecorder.new(
           argv: sandbox.command_argv(argv), display_argv: argv,
@@ -506,6 +510,26 @@ module Hive
         }
       ensure
         sandbox&.close
+      end
+
+      def prepare_project_runtime_root
+        @project_runtime_root = Dir.mktmpdir("hive-project-runtime-")
+        File.chmod(0o700, @project_runtime_root)
+      end
+
+      def remove_project_runtime_root
+        return unless @project_runtime_root
+
+        stat = File.lstat(@project_runtime_root)
+        unless stat.directory? && !stat.symlink? && stat.uid == Process.uid
+          raise Hive::ConfigError, "managed project runtime ownership changed"
+        end
+
+        FileUtils.remove_entry_secure(@project_runtime_root)
+      rescue Errno::ENOENT
+        nil
+      ensure
+        @project_runtime_root = nil
       end
 
       def verify_project_provider!(entry)

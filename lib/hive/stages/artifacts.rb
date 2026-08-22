@@ -504,6 +504,11 @@ module Hive
             isolate_environment: true,
             launch_environment: launch_environment,
             agent_custody: agent_custody,
+            # CaptureToolkit owns the Pi evidence policy for the whole
+            # producer attempt. A bounded JSON-repair turn must reuse its
+            # still-live runtime home and capture mailbox; Base otherwise
+            # cleans a runtime policy after one spawn.
+            cleanup_runtime_policy: producer_runtime_policy.nil?,
             **security
           )
         rescue Hive::AgentError => e

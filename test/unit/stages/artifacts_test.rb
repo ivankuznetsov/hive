@@ -1079,6 +1079,44 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_pi_producer_leaves_runtime_policy_cleanup_to_capture_toolkit
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = { "implementation_head" => "a" * 40 }
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      policy = Struct.new(
+        :permission_mode, :allowed_tools, :disallowed_tools
+      ).new(nil, %w[Read], %w[Bash Write Edit])
+      captured = nil
+      spawn = lambda do |_task, agent_custody:, **kwargs|
+        captured = kwargs
+        agent_custody.call do
+          {
+            status: :ok, final_message: '{"evidence":[]}',
+            final_message_truncated: false
+          }
+        end
+      end
+
+      with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Identity, :new, ->(**) { resolver }
+      ) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          Hive::Stages::Artifacts.run_role!(
+            role: "producer", task: task,
+            cfg: { "artifacts" => { "evidence" => { "producer" => { "agent" => "pi" } } } },
+            prompt: "produce", identity: identity,
+            writable_root: File.join(task.folder, "evidence"),
+            producer_runtime_policy: policy
+          )
+        end
+      end
+
+      assert_equal false, captured.fetch(:cleanup_runtime_policy)
+      assert_same policy, captured.fetch(:runtime_policy)
+    end
+  end
+
   def test_role_inherits_stage_local_model_when_it_uses_the_stage_agent
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)

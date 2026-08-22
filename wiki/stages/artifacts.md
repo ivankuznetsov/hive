@@ -107,6 +107,10 @@ completion authority.
    If the capture succeeded but the final producer descriptor is malformed,
    Hive gives one fresh producer context the bounded validation error and prior
    output so it can reuse the private capture and correct only the JSON. The
+   capture toolkit retains ownership of Pi's isolated runtime home and mailbox
+   across that bounded repair spawn, then removes them at attempt teardown;
+   per-spawn cleanup would make the second bubblewrap launch reference a deleted
+   runtime home and force an unnecessary full recapture.
    candidate still crosses the same admission boundary before review; a second
    invalid descriptor ends the attempt.
 7. Re-admit every retained representation deterministically: safe containment,

@@ -20,3 +20,10 @@ access to arbitrary localhost services. Focused tests prove the readiness
 response traverses the real proxy boundary and that its application port is
 free before production; a native smoke with Hive's pinned browser bundle also
 completed successfully.
+
+Capability-blocked pointers are also no longer replayed without observation.
+On a normal guarded scheduler retry, Hive re-runs the producer/reviewer and
+capture preflights for the same immutable evidence generation. This preserves
+sticky reviewer verdicts and recapture exhaustion while allowing a deployed
+tool or runtime repair to recover automatically without an operator issuing
+`hive evidence recover` merely to invalidate infrastructure state.

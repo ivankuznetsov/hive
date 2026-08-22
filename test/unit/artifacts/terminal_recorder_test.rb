@@ -187,6 +187,42 @@ class ArtifactsTerminalRecorderTest < Minitest::Test
     end
   end
 
+  def test_worker_uses_the_loaded_source_runtime_when_no_gem_is_activated
+    Dir.mktmpdir("hive-terminal-recorder-source-runtime") do |root|
+      captured = nil
+      result = {
+        "status" => { "success" => true },
+        "internal_error" => false, "timed_out" => false,
+        "cleanup_failed" => false, "stdout_overflow" => false,
+        "stderr_overflow" => false, "leftover_processes" => false,
+        "stdout" => JSON.generate("exit_status" => 0, "representations" => []),
+        "stderr" => ""
+      }
+      capture = lambda do |**attributes|
+        captured = attributes
+        result
+      end
+      loaded_specs = Gem.loaded_specs.reject { |name, _spec| name == "agent-cli-runtime" }
+
+      with_replaced_singleton_method(Gem, :loaded_specs, -> { loaded_specs }) do
+        with_replaced_singleton_method(
+          Hive::Web::ProjectCaptureProvider, :capture_command_with_custody, capture
+        ) do
+          Hive::Artifacts::TerminalRecorder.new(
+            argv: [ RbConfig.ruby, "-e", "exit" ], cwd: root,
+            cast_path: File.join(root, "proof.cast"),
+            review_path: File.join(root, "proof.txt")
+          ).record!
+        end
+      end
+
+      runtime_feature = $LOADED_FEATURES.find do |path|
+        File.basename(path) == "agent_cli_runtime.rb"
+      end
+      assert_includes captured.fetch(:argv), File.dirname(File.expand_path(runtime_feature))
+    end
+  end
+
   def test_record_normalizes_empty_worker_provider_json_and_configuration_failures
     Dir.mktmpdir("hive-terminal-recorder-normalize") do |root|
       build = lambda do

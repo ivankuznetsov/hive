@@ -182,9 +182,12 @@ revalidates that selected file's exact size and digest before streaming it.
 Write admission and publication remain responsible for complete media decoding,
 OCR, retained-proof validation, and independent review.
 
-A semantic blocker suppresses ordinary daemon retry. The task page, status
-diagnostic, and run output expose an exact command containing the blocked
-generation and recovery digest:
+A semantic reviewer blocker or exhausted recapture budget suppresses ordinary
+daemon retry. A capability blocker is different: no semantic verdict exists,
+so a guarded daemon retry re-runs the controller preflight against the same
+immutable generation and can recover after tools or runtime code change. The
+task page, status diagnostic, and run output expose an exact command containing
+the blocked generation and recovery digest when operator recovery is required:
 
 ```sh
 hive evidence recover PROJECT:SLUG \
@@ -216,9 +219,10 @@ and reviewer capability. Legacy media follows in a visibly labelled
 
 - A valid accepted pointer is projected as `COMPLETE` and surfaces
   `ready_to_finalize`.
-- Capability, review, and recapture-exhaustion blockers are semantic `ERROR`
-  rows with the exact `hive evidence recover` command. Automated recovery does
-  not clear them.
+- Review and recapture-exhaustion blockers are semantic `ERROR` rows with the
+  exact `hive evidence recover` command. Capability blockers remain `ERROR`
+  while unavailable, but each guarded scheduler retry re-runs the controller
+  preflight and may replace the pointer after capability is restored.
 - Integrity, role-launch, source-drift, or malformed-output failures use
   `ERROR reason=outcome_evidence_invalid` and retain their bounded diagnostic;
   they remain ordinary recoverable stage errors.

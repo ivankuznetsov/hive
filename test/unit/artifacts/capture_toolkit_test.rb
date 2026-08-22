@@ -359,6 +359,10 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     end
   end
 
+  # Bubblewrap is absent on some supported hosts (CI included), so the receipt
+  # plumbing is proven against the injected sandbox seam here and the read-only
+  # source boundary -- the guarantee only bubblewrap can enforce -- is proven by
+  # the bubblewrap-gated test below.
   def test_terminal_capture_is_controller_executed_and_receipted
     Dir.mktmpdir("hive-capture-toolkit-terminal") do |root|
       source = File.join(root, "source")
@@ -407,6 +411,43 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         toolkit.verify_captures!(candidate)
       end
+    ensure
+      toolkit&.close
+    end
+  end
+
+  def test_terminal_capture_denies_source_mutation_inside_the_sandbox
+    skip "bubblewrap is unavailable" unless Hive::InvokedBinary.which("bwrap")
+
+    Dir.mktmpdir("hive-capture-toolkit-terminal-sandbox") do |root|
+      source = File.join(root, "source")
+      work = File.join(root, "work")
+      FileUtils.mkdir_p(source)
+      toolkit = Hive::Artifacts::CaptureToolkit.new(
+        codex_runtime_resolver: method(:fake_codex_runtime)
+      )
+      toolkit.prepare!(
+        kinds: [ "terminal" ], task_root: root, source_root: source,
+        source_sha: "a" * 40, writable_root: work
+      )
+
+      out, = capture_io do
+        Hive::Commands::Evidence.new(
+          "terminal", "proof", json: true,
+          command: [
+            "/bin/sh", "-c",
+            "(echo forbidden > mutation.txt) 2>/dev/null || true; echo captured"
+          ],
+          environment: toolkit.launch_environment
+        ).call
+      end
+      payload = JSON.parse(out)
+
+      assert_equal 0, payload.fetch("exit_status")
+      refute_path_exists File.join(source, "mutation.txt")
+      assert toolkit.verify_captures!(
+        [ { "kind" => "terminal", "representations" => payload.fetch("representations") } ]
+      )
     ensure
       toolkit&.close
     end

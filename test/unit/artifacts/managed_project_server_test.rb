@@ -139,6 +139,98 @@ class ArtifactsManagedProjectServerTest < Minitest::Test
     end
   end
 
+  # Bubblewrap is absent on some supported hosts, so the managed lifetime is
+  # proven twice: here against a sandbox stub that only forwards the wrapped
+  # command -- which still spawns, polls for readiness, drains output and tears
+  # down for real -- and below against real bubblewrap for the filesystem
+  # boundary that only bubblewrap can enforce.
+  def test_stubbed_sandbox_serves_only_for_the_managed_lifetime
+    Dir.mktmpdir("hive-managed-project-server-stub") do |root|
+      source = File.join(root, "source")
+      FileUtils.mkdir_p([ File.join(source, "bin"), File.join(source, "tmp") ])
+      sandbox = File.join(root, "bwrap")
+      File.write(sandbox, <<~SH)
+        #!/bin/sh
+        while [ "$1" != "--" ]; do
+          if [ "$1" = "--setenv" ]; then
+            export "$2=$3"
+            shift 3
+          else
+            shift
+          fi
+        done
+        shift
+        exec "$@"
+      SH
+      executable = File.join(source, "bin", "server")
+      File.write(executable, <<~RUBY)
+        #!#{RbConfig.ruby}
+        require "socket"
+        server = TCPServer.new("127.0.0.1", Integer(ENV.fetch("PORT")))
+        loop do
+          socket = server.accept
+          begin
+            socket.readpartial(8192)
+          rescue IOError, SystemCallError, EOFError
+            nil
+          end
+          socket.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+          socket.close
+        end
+      RUBY
+      FileUtils.chmod(0o755, [ sandbox, executable ])
+      probe = TCPServer.new("127.0.0.1", 0)
+      port = probe.local_address.ip_port
+      probe.close
+      server = Hive::Artifacts::ManagedProjectServer.new(
+        source_root: source, port: port, sandbox_binary: sandbox
+      )
+
+      receipt = server.start!([ "bin/server" ])
+
+      assert_equal "ready", receipt.fetch("status")
+      assert_equal "http://127.0.0.1:#{port}", receipt.fetch("app_endpoint")
+      assert_equal "ok", Net::HTTP.get(URI(receipt.fetch("app_endpoint")))
+      assert server.close
+      assert_raises(Errno::ECONNREFUSED) do
+        TCPSocket.new("127.0.0.1", port)
+      end
+    ensure
+      server&.close if server&.receipt
+    end
+  end
+
+  def test_teardown_tolerates_an_already_reaped_server
+    Dir.mktmpdir("hive-managed-project-server-reaped") do |root|
+      source = File.join(root, "source")
+      FileUtils.mkdir_p(File.join(source, "bin"))
+      executable = File.join(source, "bin", "server")
+      sandbox = File.join(root, "bwrap")
+      [ executable, sandbox ].each do |path|
+        File.write(path, "#!/bin/sh\n")
+        FileUtils.chmod(0o755, path)
+      end
+      reaped = []
+      server = Hive::Artifacts::ManagedProjectServer.new(
+        source_root: source, port: 41_235, sandbox_binary: sandbox,
+        spawner: ->(_environment, *_argv, **_options) { 42_425 },
+        waiter: lambda do |_pid|
+          reaped << true
+          raise Errno::ECHILD if reaped.length > 1
+
+          nil
+        end,
+        process_killer: method(:successful_kill),
+        start_time_resolver: ->(_pid) { "start-1" },
+        readiness_probe: ->(_url) { true }
+      )
+
+      assert_equal "ready", server.start!([ "bin/server" ]).fetch("status")
+      assert server.close
+      assert_equal 2, reaped.length
+    end
+  end
+
   def test_real_sandbox_serves_only_for_the_managed_lifetime
     sandbox = Hive::InvokedBinary.which("bwrap")
     skip "bubblewrap is unavailable" unless sandbox

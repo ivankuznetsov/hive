@@ -38,6 +38,145 @@ class InvocationProcessCustodyTest < Minitest::Test
     end
   end
 
+  def test_cleanup_fails_when_a_process_survives_both_signals
+    custody = Hive::InvocationProcessCustody.new(token: "b" * 64)
+    custody.define_singleton_method(:terminate_until_empty) { |*, **| nil }
+    custody.define_singleton_method(:matching_processes) do
+      [ { pid: 4242, start_time: "still-current" } ]
+    end
+
+    error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+      custody.cleanup!
+    end
+
+    assert_match(/1 process\(es\) alive/, error.message)
+  end
+
+  def test_non_procfs_platform_uses_the_bounded_ps_inventory
+    custody = Hive::InvocationProcessCustody.new(
+      token: "c" * 64, proc_root: "/definitely/not/proc"
+    )
+    custody.define_singleton_method(:ps_matches) { [] }
+
+    assert custody.cleanup!
+  end
+
+  def test_procfs_races_and_inventory_errors_are_bounded
+    Dir.mktmpdir("hive-process-custody-proc") do |proc_root|
+      FileUtils.mkdir(File.join(proc_root, "4242"))
+      custody = Hive::InvocationProcessCustody.new(token: "d" * 64, proc_root:)
+
+      # The numeric process row disappearing before environ is read is a normal
+      # procfs race and must not turn successful cleanup into a failure.
+      assert custody.cleanup!
+
+      File.binwrite(File.join(proc_root, "4242", "environ"), "")
+      assert custody.cleanup!, "an empty procfs environment cannot match custody"
+
+      error = with_replaced_singleton_method(Dir, :children, ->(*) { raise Errno::EIO }) do
+        assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+          custody.cleanup!
+        end
+      end
+      assert_match(/procfs is unavailable: Errno::EIO/, error.message)
+    end
+  end
+
+  def test_environment_and_process_identity_fail_closed_when_unbounded_or_missing
+    Dir.mktmpdir("hive-process-custody-environ") do |dir|
+      path = File.join(dir, "environ")
+      File.binwrite(path, "x" * (Hive::InvocationProcessCustody::MAX_ENVIRONMENT_BYTES + 1))
+      custody = Hive::InvocationProcessCustody.new(token: "e" * 64)
+
+      error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+        custody.send(:environment_matches?, path)
+      end
+      assert_match(/environment exceeds its bound/, error.message)
+
+      replacement = ->(*) { nil }
+      with_replaced_singleton_method(Hive::ProcessKill, :process_start_time, replacement) do
+        error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+          custody.send(:capture_identity, 4242)
+        end
+        assert_match(/identity is unavailable for pid 4242/, error.message)
+      end
+    end
+  end
+
+  def test_ps_inventory_validates_availability_status_bounds_and_rows
+    custody = Hive::InvocationProcessCustody.new(token: "f" * 64)
+    success = Struct.new(:success?).new(true)
+    failure = Struct.new(:success?).new(false)
+
+    with_replaced_singleton_method(File, :file?, ->(*) { false }) do
+      error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+        custody.send(:ps_matches)
+      end
+      assert_match(/ps inventory is unavailable/, error.message)
+    end
+
+    replacement = ->(*) { [ "", "no ps", failure ] }
+    with_replaced_singleton_method(Open3, :capture3, replacement) do
+      error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+        custody.send(:ps_matches)
+      end
+      assert_match(/ps inventory failed/, error.message)
+    end
+
+    oversized = "2 command\n" * (Hive::InvocationProcessCustody::MAX_PROCESSES + 1)
+    replacement = ->(*) { [ oversized, "", success ] }
+    with_replaced_singleton_method(Open3, :capture3, replacement) do
+      error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+        custody.send(:ps_matches)
+      end
+      assert_match(/inventory exceeds its bound/, error.message)
+    end
+
+    output = <<~TEXT
+      malformed
+      1 command #{Hive::InvocationProcessCustody::ENVIRONMENT_KEY}=#{"f" * 64}
+      4242 command OTHER=value
+      4243 command #{Hive::InvocationProcessCustody::ENVIRONMENT_KEY}=#{"f" * 64}
+    TEXT
+    replacement = ->(*) { [ output, "", success ] }
+    with_replaced_singleton_method(Open3, :capture3, replacement) do
+      start_time = ->(*) { "start-4243" }
+      with_replaced_singleton_method(Hive::ProcessKill, :process_start_time, start_time) do
+        assert_equal(
+          [ { pid: 4243, start_time: "start-4243" } ],
+          custody.send(:ps_matches)
+        )
+      end
+    end
+
+    replacement = ->(*) { raise Errno::ENOENT }
+    with_replaced_singleton_method(Open3, :capture3, replacement) do
+      error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+        custody.send(:ps_matches)
+      end
+      assert_match(/ps inventory is unavailable: Errno::ENOENT/, error.message)
+    end
+  end
+
+  def test_signal_races_are_ignored_and_permission_failures_are_reported
+    custody = Hive::InvocationProcessCustody.new(token: "0" * 64)
+    target = { pid: 4242, start_time: "current" }
+
+    current = ->(*) { true }
+    with_replaced_singleton_method(Hive::ProcessKill, :captured_process_current?, current) do
+      with_replaced_singleton_method(Process, :kill, ->(*) { raise Errno::ESRCH }) do
+        assert_nil custody.send(:signal_current, "TERM", target)
+      end
+
+      with_replaced_singleton_method(Process, :kill, ->(*) { raise Errno::EPERM }) do
+        error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+          custody.send(:signal_current, "TERM", target)
+        end
+        assert_match(/cannot signal same-user pid 4242/, error.message)
+      end
+    end
+  end
+
   private
 
   def spawn_detached(environment)

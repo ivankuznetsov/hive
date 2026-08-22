@@ -328,6 +328,65 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_live_custody_cleanup_failure_is_returned_as_a_typed_agent_error
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "live-cleanup-failure-260822-aaaa")
+      agent = build_agent(
+        task, fixture,
+        invocation_root: File.join(fixture.fetch(:dir), "invocation-live-cleanup-failure")
+      )
+      cleanup_calls = 0
+      custody = Object.new
+      custody.define_singleton_method(:environment) do
+        { Hive::InvocationProcessCustody::ENVIRONMENT_KEY => "a" * 64 }
+      end
+      custody.define_singleton_method(:cleanup!) do
+        cleanup_calls += 1
+        raise Hive::InvocationProcessCustody::CleanupError, "synthetic survivor"
+      end
+
+      replacement = ->(**) { custody }
+      result = with_replaced_singleton_method(
+        Hive::InvocationProcessCustody, :new, replacement
+      ) do
+        with_env("ANTHROPIC_API_KEY" => "secret-canary") { agent.run! }
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "process_cleanup_failed", result.fetch(:error_reason)
+      assert_match(/synthetic survivor/, result.fetch(:process_cleanup_error))
+      assert_equal 1, cleanup_calls
+    end
+  end
+
+  def test_pre_spawn_failure_reports_a_custody_cleanup_failure
+    with_fixture(mode: :remove_after_probe) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "pre-spawn-cleanup-failure-260822-aaaa")
+      agent = build_agent(
+        task, fixture,
+        invocation_root: File.join(fixture.fetch(:dir), "invocation-pre-spawn-cleanup-failure")
+      )
+      custody = Object.new
+      custody.define_singleton_method(:environment) { {} }
+      custody.define_singleton_method(:cleanup!) do
+        raise Hive::InvocationProcessCustody::CleanupError, "synthetic survivor"
+      end
+
+      replacement = ->(**) { custody }
+      _out, err = capture_io do
+        with_replaced_singleton_method(
+          Hive::InvocationProcessCustody, :new, replacement
+        ) do
+          assert_raises(Errno::ENOENT) do
+            with_env("ANTHROPIC_API_KEY" => "secret-canary") { agent.run! }
+          end
+        end
+      end
+
+      assert_match(/OpenCode process cleanup failed: synthetic survivor/, err)
+    end
+  end
+
   def test_selected_environment_prefers_explicit_values_and_falls_back_to_host_values
     with_fixture do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "environment-260812-aaaa")

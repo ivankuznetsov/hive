@@ -75,7 +75,9 @@ calls `setsid`, reparents a development server to the user service manager,
 and otherwise leaves it listening after the attempt ends; another invocation's
 processes do not match and remain untouched. Linux uses exact NUL-delimited
 `/proc/<pid>/environ` entries; platforms without procfs use the current user's
-bounded `ps xeww` inventory.
+bounded `ps xeww` inventory. Empty procfs environments are ordinary non-matches
+rather than inventory failures, including Ruby's `nil` result for a
+length-bounded read at EOF.
 After a zero exit it may start one non-model `opencode export --sanitize`
 inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that

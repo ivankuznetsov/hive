@@ -96,7 +96,11 @@ module Hive
     end
 
     def environment_matches?(path)
-      bytes = File.binread(path, MAX_ENVIRONMENT_BYTES + 1)
+      # Ruby returns nil (rather than an empty String) when a length-bounded
+      # read starts at EOF. Kernel threads and short-lived system rows can
+      # legitimately expose an empty environ, and simply cannot match our
+      # invocation token.
+      bytes = File.binread(path, MAX_ENVIRONMENT_BYTES + 1) || ""
       if bytes.bytesize > MAX_ENVIRONMENT_BYTES
         raise CleanupError, "process-custody environment exceeds its bound"
       end

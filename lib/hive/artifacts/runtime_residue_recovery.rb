@@ -76,8 +76,8 @@ module Hive
       private
 
       def applicable?(marker, intended_stage)
-        # coding-scoped: compatibility bridge for coding's artifact evidence stage
-        intended_stage.to_s == "7-artifacts" && marker.name.to_s == "error" &&
+        intended_stage.to_s == "7-artifacts" && # coding-scoped: coding artifact evidence recovery
+          marker.name.to_s == "error" &&
           marker.attrs["reason"].to_s == MARKER_REASON &&
           marker.attrs["diagnostic"].to_s == MARKER_DIAGNOSTIC
       end

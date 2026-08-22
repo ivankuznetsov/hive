@@ -27,7 +27,10 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
-  FakeGit = Struct.new(:head, :branch, :dirty, :ancestor_result, :raise_head, :raise_ancestor, keyword_init: true) do
+  FakeGit = Struct.new(
+    :head, :branch, :dirty, :ancestor_result, :raise_head, :raise_ancestor,
+    :message, keyword_init: true
+  ) do
     def head_sha
       raise Hive::GitError, "head failed" if raise_head
 
@@ -46,6 +49,10 @@ class HiveStagesExecuteTest < Minitest::Test
       raise Hive::GitError, "ancestor failed" if raise_ancestor
 
       ancestor_result
+    end
+
+    def commit_message(_revision)
+      message.to_s
     end
   end
 
@@ -343,7 +350,7 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
-  def test_run_pass_accepts_clean_opencode_commit_over_empty_terminal_message
+  def test_run_pass_accepts_attested_clean_opencode_commit_over_empty_terminal_message
     with_tmp_dir do |dir|
       task = build_task(dir)
       write_plan(task)
@@ -353,7 +360,8 @@ class HiveStagesExecuteTest < Minitest::Test
         "execute_base_head" => "base"
       )
       git = FakeGit.new(
-        head: "new-head", branch: task.slug, dirty: false, ancestor_result: true
+        head: "new-head", branch: task.slug, dirty: false, ancestor_result: true,
+        message: "done\n\n#{Hive::Stages::Execute.completion_trailer(File.binread(File.join(task.folder, 'plan.md')))}\n"
       )
       result = {
         status: :error,
@@ -369,6 +377,38 @@ class HiveStagesExecuteTest < Minitest::Test
 
       assert_equal({ commit: "execute_complete", status: :execute_complete }, run_result)
       assert_equal :execute_complete, Hive::Markers.current(task.state_file).name
+    end
+  end
+
+  def test_run_pass_rejects_unattested_clean_opencode_checkpoint_with_empty_terminal_message
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      worktree = File.join(dir, "worktree")
+      write_pointer(
+        task, "path" => worktree, "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "new-head", branch: task.slug, dirty: false,
+        ancestor_result: true, message: "feat: U1 checkpoint\n"
+      )
+      result = {
+        status: :error,
+        exit_code: 0,
+        normalized_outcome_kind: :malformed_output,
+        error_message: "OpenCode terminal assistant message is empty",
+        implementation_provider: "opencode"
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("opencode"), worktree)
+      end
+
+      assert_equal({ commit: "implementer_failed", status: :error }, run_result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "implementer_failed", marker.attrs.fetch("reason")
     end
   end
 
@@ -1087,6 +1127,11 @@ class HiveStagesExecuteTest < Minitest::Test
           assert_same cfg, spawned.fetch(:cfg)
           assert_equal "execute", spawned.fetch(:implementation_stage)
           assert spawned.fetch(:defer_implementation_observation)
+          digest = Digest::SHA256.file(File.join(task.folder, "plan.md")).hexdigest
+          assert_includes(
+            spawned.fetch(:prompt),
+            "Hive-Execute-Complete: #{digest}"
+          )
         end
       end
     end

@@ -43,6 +43,7 @@ module Hive
         task-projection.checkpoint.json
       ].freeze
       CONTROLLER_RECEIPT_DIRECTORIES = %w[context-receipts activity-operations].freeze
+      COMPLETION_TRAILER = "Hive-Execute-Complete".freeze
       UNRESOLVED_IDENTITY = Object.new.freeze
 
       def run!(task, cfg)
@@ -227,7 +228,8 @@ module Hive
 
         commit_recovered = completion_candidate &&
                            current_branch == expected_branch &&
-                           !dirty_worktree && new_commit && ancestor_ok
+                           !dirty_worktree && new_commit && ancestor_ok &&
+                           completion_attested?(worktree_git, head_after, task)
         if agent_failed?(impl_result) && !commit_recovered
           return mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
         end
@@ -342,17 +344,26 @@ module Hive
 
       # OpenCode may finish a successful tool-driven turn with no terminal
       # assistant text. The runtime correctly reports that protocol defect as
-      # malformed output, but execute completion is ultimately a repository
-      # fact: an exit-zero run that left a clean descendant commit on the
-      # expected branch completed the work even when its final chat event was
-      # empty. The caller still verifies every one of those repository facts;
-      # this predicate only identifies the one result shape eligible for that
-      # stronger evidence.
+      # malformed output. A clean descendant commit is only a checkpoint,
+      # though: a multi-unit implementer can commit U1 and continue. The
+      # caller therefore also requires the exact plan-bound completion trailer
+      # that the execute prompt reserves for the final commit.
       def opencode_commit_completion_candidate?(result)
         result &&
           result[:implementation_provider].to_s == "opencode" &&
           result[:exit_code] == 0 &&
           result[:normalized_outcome_kind] == :malformed_output
+      end
+
+      def completion_attested?(worktree_git, head, task)
+        expected = completion_trailer(File.binread(File.join(task.folder, "plan.md")))
+        worktree_git.commit_message(head).lines.any? { |line| line.strip == expected }
+      rescue Hive::GitError, SystemCallError
+        false
+      end
+
+      def completion_trailer(plan_bytes)
+        "#{COMPLETION_TRAILER}: #{Digest::SHA256.hexdigest(plan_bytes)}"
       end
 
       def mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
@@ -461,7 +472,8 @@ module Hive
 
       def spawn_implementation(task, cfg, worktree_path, identity: nil,
                                agent_custody: nil)
-        plan_text = File.read(File.join(task.folder, "plan.md"))
+        plan_path = File.join(task.folder, "plan.md")
+        plan_text = File.read(plan_path)
         prompt = Hive::Stages::Base.render(
           "execute_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
@@ -469,6 +481,7 @@ module Hive
             worktree_path: worktree_path,
             task_folder: task.folder,
             plan_text: plan_text,
+            completion_trailer: completion_trailer(File.binread(plan_path)),
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )

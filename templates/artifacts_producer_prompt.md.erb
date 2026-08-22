@@ -107,6 +107,13 @@ entrypoint itself; a custom evidence script, simulated output, or test runner is
 not a substitute. Focused tests are suitable only for genuinely internal claims
 whose statement is limited to the behavior those tests exercise.
 
+Except for the managed PNG/JPEG/WebP/WebM/MP4 visual exception described
+below, the `original` and `review` paths must be different files. In particular,
+never list one document path twice under different roles or relabel a Markdown
+original as a `text/plain` review. Use `evidence_write` to create a distinct,
+bounded plain-text review file for a document original. The controller rejects
+the entire producer result when any non-visual representation path is reused.
+
 Return only `{ "evidence": [...] }`. Every task-produced entry has this exact
 minimal shape: `{ "kind": "screenshot|video|terminal|document", "summary":
 "...", "claims": ["claim-id"], "representations": [ { "role": "original",

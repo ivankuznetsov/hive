@@ -4,6 +4,8 @@ require "hive/patrol_fix/admission_store"
 require "hive/patrol_fix/source_snapshot"
 
 class PatrolFixAdmissionStoreTest < Minitest::Test
+  include HiveTestHelper
+
   NOW = Time.utc(2026, 8, 20, 12)
 
   def test_reservation_is_exactly_replayable_and_conflicting_identity_fails_closed
@@ -239,6 +241,139 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
       assert_equal "b-new-work", store.pending(limit: 1, now: NOW).fetch(0).fetch("occurrence_id")
       assert_equal "a-live-decision",
                    store.pending(limit: 1, now: NOW + 61).fetch(0).fetch("occurrence_id")
+    end
+  end
+
+  def test_pending_reads_the_inventory_with_one_native_anchor_open
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      %w[c-pending a-pending b-pending].each_with_index do |occurrence, index|
+        store.reserve!(
+          occurrence_id: occurrence,
+          snapshot: source_snapshot(identity: "finding-#{index}"),
+          now: NOW
+        )
+      end
+      directory = store.instance_variable_get(:@directory)
+      native = directory.instance_variable_get(:@native)
+      original_open = native.method(:open_absolute_directory)
+      anchor_opens = 0
+
+      pending = with_replaced_singleton_method(
+        native,
+        :open_absolute_directory,
+        lambda do |path|
+          anchor_opens += 1
+          original_open.call(path)
+        end
+      ) do
+        store.pending
+      end
+
+      assert_equal %w[a-pending b-pending c-pending],
+                   pending.map { |record| record.fetch("occurrence_id") }
+      assert_equal 1, anchor_opens
+    end
+  end
+
+  def test_pending_does_not_create_a_missing_store
+    Dir.mktmpdir do |dir|
+      root = File.join(dir, "admissions")
+      store = Hive::PatrolFix::AdmissionStore.new(root: root)
+
+      assert_empty store.pending
+      refute_path_exists root
+    end
+  end
+
+  def test_pending_directory_traversal_does_not_grow_with_inventory
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "a-pending", snapshot: source_snapshot, now: NOW)
+      directory = store.instance_variable_get(:@directory)
+      native = directory.instance_variable_get(:@native)
+      original_open = native.method(:open_directory)
+
+      measure_opens = lambda do
+        opens = 0
+        with_replaced_singleton_method(
+          native,
+          :open_directory,
+          lambda do |parent, name|
+            opens += 1
+            original_open.call(parent, name)
+          end
+        ) { store.pending }
+        opens
+      end
+
+      one_record_opens = measure_opens.call
+      %w[b-pending c-pending].each_with_index do |occurrence, index|
+        store.reserve!(
+          occurrence_id: occurrence,
+          snapshot: source_snapshot(identity: "finding-extra-#{index}"),
+          now: NOW
+        )
+      end
+
+      assert_equal one_record_opens, measure_opens.call
+    end
+  end
+
+  def test_pending_rejects_unknown_inventory_entries_before_reading_records
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "known", snapshot: source_snapshot, now: NOW)
+      File.binwrite(File.join(dir, "records", "unknown-entry"), "unexpected")
+      directory = store.instance_variable_get(:@directory)
+      reads = []
+      original_read = directory.method(:read_children)
+
+      error = with_replaced_singleton_method(
+        directory,
+        :read_children,
+        lambda do |*args, **kwargs, &block|
+          reads << args
+          original_read.call(*args, **kwargs, &block)
+        end
+      ) do
+        assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) { store.pending }
+      end
+
+      assert_match(/unknown entry/, error.message)
+      assert_empty reads
+    end
+  end
+
+  def test_pending_rejects_inventory_overflow_before_reading_records
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      3.times do |index|
+        store.reserve!(
+          occurrence_id: "pending-#{index}",
+          snapshot: source_snapshot(identity: "finding-#{index}"),
+          now: NOW
+        )
+      end
+      directory = store.instance_variable_get(:@directory)
+      reads = []
+      original_read = directory.method(:read_children)
+
+      error = with_replaced_singleton_method(
+        directory,
+        :read_children,
+        lambda do |*args, **kwargs, &block|
+          reads << args
+          original_read.call(*args, **kwargs, &block)
+        end
+      ) do
+        with_max_records(2) do
+          assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) { store.pending }
+        end
+      end
+
+      assert_match(/bounded limit/, error.message)
+      assert_empty reads
     end
   end
 

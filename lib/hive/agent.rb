@@ -1136,10 +1136,8 @@ module Hive
     def close_prompt_stdin_file(file)
       return unless file
 
-      file.close unless file.closed?
+      file.close
       file.unlink
-    rescue Errno::ENOENT
-      nil
     end
 
     def compiled_invocation

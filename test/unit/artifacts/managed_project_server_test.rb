@@ -108,6 +108,10 @@ class ArtifactsManagedProjectServerTest < Minitest::Test
       assert_raises(Hive::Artifacts::ManagedProjectServer::ServerError) do
         server.start!([ "bin/linked" ])
       end
+      error = assert_raises(Hive::Artifacts::ManagedProjectServer::ServerError) do
+        server.start!([ "bin/absent" ])
+      end
+      assert_includes error.message, "executable is unavailable"
 
       status = Struct.new(:exitstatus).new(7)
       exited = Hive::Artifacts::ManagedProjectServer.new(
@@ -228,6 +232,125 @@ class ArtifactsManagedProjectServerTest < Minitest::Test
       assert_equal "ready", server.start!([ "bin/server" ]).fetch("status")
       assert server.close
       assert_equal 2, reaped.length
+    end
+  end
+
+  # A spawn that never reaches the sandbox still has to release the runtime
+  # boundary. When that teardown also fails, the startup diagnosis is what the
+  # producer needs to act on, so the teardown error is swallowed rather than
+  # replacing the reason the server never came up.
+  def test_spawn_failures_release_the_runtime_and_keep_the_startup_diagnosis
+    Dir.mktmpdir("hive-managed-project-server-spawn") do |root|
+      source = File.join(root, "source")
+      FileUtils.mkdir_p(File.join(source, "bin"))
+      executable = File.join(source, "bin", "server")
+      sandbox = File.join(root, "bwrap")
+      [ executable, sandbox ].each do |path|
+        File.write(path, "#!/bin/sh\n")
+        FileUtils.chmod(0o755, path)
+      end
+      server = nil
+      runtime = nil
+      spawner = lambda do |_environment, *_argv, **_options|
+        # The runtime the sandbox just built is replaced by a symlink, so its
+        # own teardown cannot prove ownership when the failing spawn unwinds.
+        runtime = server.instance_variable_get(:@sandbox)
+                        .instance_variable_get(:@runtime_root)
+        FileUtils.remove_entry_secure(runtime)
+        File.symlink(source, runtime)
+        raise Errno::ENOENT, "bwrap"
+      end
+      server = Hive::Artifacts::ManagedProjectServer.new(
+        source_root: source, port: 41_237, sandbox_binary: sandbox,
+        spawner: spawner, waiter: ->(_pid) { nil },
+        process_killer: method(:successful_kill),
+        start_time_resolver: ->(_pid) { "start-3" },
+        readiness_probe: ->(_url) { true }
+      )
+
+      error = assert_raises(Hive::Artifacts::ManagedProjectServer::ServerError) do
+        server.start!([ "bin/server" ])
+      end
+
+      assert_includes error.message, "could not start"
+      assert_nil server.receipt
+    ensure
+      File.unlink(runtime) if runtime && File.symlink?(runtime)
+    end
+  end
+
+  # Teardown Hive cannot prove is a failure the attempt has to see, and the
+  # sandbox runtime is still released before that failure surfaces so a
+  # half-torn-down capture cannot strand the boundary.
+  def test_unproven_teardown_fails_after_releasing_the_runtime
+    Dir.mktmpdir("hive-managed-project-server-unproven") do |root|
+      source = File.join(root, "source")
+      FileUtils.mkdir_p(File.join(source, "bin"))
+      executable = File.join(source, "bin", "server")
+      sandbox = File.join(root, "bwrap")
+      [ executable, sandbox ].each do |path|
+        File.write(path, "#!/bin/sh\n")
+        FileUtils.chmod(0o755, path)
+      end
+      unproven = lambda do |pid, **|
+        Hive::ProcessKill::Result.new(
+          pid: pid, killed: false, skipped_reason: "start_time_changed"
+        )
+      end
+      server = Hive::Artifacts::ManagedProjectServer.new(
+        source_root: source, port: 41_238, sandbox_binary: sandbox,
+        spawner: ->(_environment, *_argv, **_options) { 42_427 },
+        waiter: ->(_pid) { nil }, process_killer: unproven,
+        start_time_resolver: ->(_pid) { "start-4" },
+        readiness_probe: ->(_url) { true }
+      )
+
+      assert_equal "ready", server.start!([ "bin/server" ]).fetch("status")
+      runtime = server.instance_variable_get(:@sandbox)
+                      .instance_variable_get(:@runtime_root)
+      error = assert_raises(Hive::Artifacts::ManagedProjectServer::ServerError) do
+        server.close
+      end
+
+      assert_includes error.message, "teardown was not proven"
+      assert_includes error.message, "start_time_changed"
+      refute_path_exists runtime
+      assert_nil server.receipt
+      assert server.close
+    end
+  end
+
+  # The producer only ever reads server output through Hive's bounded copy, so
+  # whatever the process wrote to its pipe has to land in that buffer.
+  def test_server_output_is_drained_into_the_bounded_buffer
+    Dir.mktmpdir("hive-managed-project-server-output") do |root|
+      source = File.join(root, "source")
+      FileUtils.mkdir_p(File.join(source, "bin"))
+      executable = File.join(source, "bin", "server")
+      sandbox = File.join(root, "bwrap")
+      [ executable, sandbox ].each do |path|
+        File.write(path, "#!/bin/sh\n")
+        FileUtils.chmod(0o755, path)
+      end
+      spawner = lambda do |_environment, *_argv, **options|
+        options.fetch(:out).write("listening on 41239\n")
+        42_428
+      end
+      server = Hive::Artifacts::ManagedProjectServer.new(
+        source_root: source, port: 41_239, sandbox_binary: sandbox,
+        spawner: spawner, waiter: ->(_pid) { nil },
+        process_killer: method(:successful_kill),
+        start_time_resolver: ->(_pid) { "start-5" },
+        readiness_probe: ->(_url) { true }
+      )
+
+      assert_equal "ready", server.start!([ "bin/server" ]).fetch("status")
+      # The writer closed with the spawn, so the drain thread reaches EOF and
+      # finishes on its own; joining it makes the copy observable.
+      server.instance_variable_get(:@output_thread).join(5)
+
+      assert_includes server.instance_variable_get(:@output), "listening on 41239"
+      assert server.close
     end
   end
 

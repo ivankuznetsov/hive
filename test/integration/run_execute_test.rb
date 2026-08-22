@@ -51,21 +51,15 @@ class RunExecuteTest < Minitest::Test
     ].each { |k| ENV.delete(k) }
   end
 
-  # Driver: implementation agent. Edits task.md to confirm the spawn
-  # actually ran, writes/commits worktree content by default, and can
-  # optionally simulate no-change research runs. Optional plan.md tampering
-  # toggled by env.
+  # Driver: implementation agent. It writes/commits worktree content by
+  # default and can optionally simulate no-change research runs. The
+  # controller owns task.md, so successful fixtures deliberately never touch
+  # it. Optional plan.md tampering is toggled by env.
   def driver_script_body
     <<~RUBY
       #!/usr/bin/env ruby
       require "fileutils"
       task_dir = ENV.fetch("HIVE_EXEC_DRIVER_TASK_DIR")
-
-      # Implementer logs progress under "## Implementation".
-      task_md = File.join(task_dir, "task.md")
-      content = File.read(task_md)
-      content = content.sub(/<!-- AGENT_WORKING.*-->/, "## Implementation\\nstub work")
-      File.write(task_md, content)
 
       if ENV["HIVE_EXEC_DRIVER_TAMPER"]
         File.write(File.join(task_dir, "plan.md"), "TAMPERED CONTENT")

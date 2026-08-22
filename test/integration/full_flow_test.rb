@@ -83,11 +83,6 @@ class FullFlowTest < Minitest::Test
           <!-- COMPLETE -->
         MD
       when "execute-implement"
-        task_md = File.join(folder, "task.md")
-        if File.exist?(task_md)
-          c = File.read(task_md).sub(/<!-- AGENT_WORKING.*-->/, "## Implementation\nstub work")
-          File.write(task_md, c)
-        end
         File.write("implementation.txt", "implemented\n")
         system("git", "add", "implementation.txt") || abort("git add failed")
         system("git", "commit", "-m", "feat: implement flow fixture", "--quiet") || abort("git commit failed")

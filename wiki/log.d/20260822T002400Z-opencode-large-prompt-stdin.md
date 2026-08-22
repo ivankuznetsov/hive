@@ -42,6 +42,9 @@ exclusion assumed the implementer wrote `AGENT_WORKING`; marker ownership has
 since moved entirely to the controller, so there is no legitimate agent write
 inside the custody window. File-tool restriction reduces exposure, while the
 anchor detects and restores writes made through an explicitly granted shell.
+The full-flow and execute integration drivers now model that ownership too:
+their successful implementers commit only worktree changes and never rewrite
+the controller marker as a side effect of proving they launched.
 
 An exit-zero OpenCode run with an empty terminal assistant message remains a
 recorded malformed-output observation. Execute may nevertheless accept it when

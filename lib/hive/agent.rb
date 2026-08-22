@@ -12,6 +12,7 @@ require "hive/agent_limit"
 require "hive/agent/message_extractor"
 require "hive/artifact_firewall"
 require "hive/events"
+require "hive/invocation_process_custody"
 require "hive/lock"
 require "hive/permission_scope"
 require "hive/secret_patterns"
@@ -604,6 +605,9 @@ module Hive
 
     def spawn_opencode_and_wait
       prepared = nil
+      process_custody = nil
+      process_cleanup_finished = false
+      process_cleanup_error = nil
       stdin_file = nil
       result = nil
       prepared = prepare_opencode_invocation
@@ -623,7 +627,10 @@ module Hive
       stderr_thread = capture_bounded_stream(
         stderr_reader, stderr_capture, FINAL_MESSAGE_TAIL_BYTES
       )
-      child_env = opencode_child_environment(prepared)
+      process_custody = Hive::InvocationProcessCustody.new
+      child_env = opencode_child_environment(prepared).merge(
+        process_custody.environment
+      )
       spawn_opts = {
         chdir: @cwd, pgroup: true, out: stdout_writer, err: stderr_writer,
         unsetenv_others: true
@@ -652,6 +659,13 @@ module Hive
       ensure
         trap("INT", old_int || "DEFAULT")
         trap("TERM", old_term || "DEFAULT")
+      end
+      begin
+        process_custody.cleanup!
+        process_cleanup_finished = true
+      rescue Hive::InvocationProcessCustody::CleanupError => e
+        process_cleanup_finished = true
+        process_cleanup_error = AgentCliRuntime::Redactor.diagnostic(e)
       end
       finish_capture_thread(stdout_thread, stdout_reader)
       finish_capture_thread(stderr_thread, stderr_reader)
@@ -719,6 +733,8 @@ module Hive
         status: nil,
         invocation_root: prepared.invocation_root
       }
+      result[:process_cleanup_completed] = process_cleanup_error.nil?
+      result[:process_cleanup_error] = process_cleanup_error if process_cleanup_error
       result
     ensure
       close_opencode_ios(
@@ -728,6 +744,14 @@ module Hive
         thread.kill if thread&.alive?
       end
       close_prompt_stdin_file(stdin_file)
+      if process_custody && !process_cleanup_finished
+        begin
+          process_custody.cleanup!
+        rescue Hive::InvocationProcessCustody::CleanupError => e
+          warn "[hive] OpenCode process cleanup failed: " \
+               "#{AgentCliRuntime::Redactor.diagnostic(e)}"
+        end
+      end
       if prepared
         begin
           prepared.cleanup!
@@ -1202,6 +1226,19 @@ module Hive
     #   = :ok. Used by reviewer/triage spawns where a structured artifact
     #   is the success criterion.
     def handle_exit(result)
+      if result[:process_cleanup_completed] == false
+        if effective_status_mode == :state_file_marker
+          Hive::Markers.set(
+            @task.state_file, :error,
+            reason: "process_cleanup_failed", provider: @profile.name
+          )
+        end
+        result[:status] = :error
+        result[:error_reason] = "process_cleanup_failed"
+        result[:error_message] = result[:process_cleanup_error]
+        return
+      end
+
       if result[:provider_signal]
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(

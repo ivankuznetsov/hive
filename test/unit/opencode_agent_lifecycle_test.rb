@@ -277,6 +277,57 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_success_reaps_a_setsid_descendant_that_escaped_the_run_process_group
+    skip "exact OpenCode process custody requires Linux procfs" unless
+      RUBY_PLATFORM.include?("linux") && File.directory?("/proc")
+
+    with_fixture(mode: :detached_descendant) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "detached-child-260822-aaaa")
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invocation-detached")
+        ).run!
+      end
+      child_pid = Integer(File.read(fixture.fetch(:detached_pid)), 10)
+
+      assert_equal :ok, result.fetch(:status)
+      assert result.fetch(:process_cleanup_completed)
+      refute Hive::ProcessKill.pid_alive?(child_pid)
+    ensure
+      if child_pid && Hive::ProcessKill.pid_alive?(child_pid)
+        begin
+          Process.kill("KILL", child_pid)
+        rescue Errno::ESRCH
+          nil
+        end
+      end
+    end
+  end
+
+  def test_process_cleanup_failure_overrides_a_successful_transcript
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "cleanup-failure-260822-aaaa")
+      agent = build_agent(
+        task, fixture,
+        invocation_root: File.join(fixture.fetch(:dir), "invocation-cleanup-failure"),
+        profile_status: :state_file_marker
+      )
+      result = {
+        process_cleanup_completed: false,
+        process_cleanup_error: "invocation left one process alive"
+      }
+
+      agent.send(:handle_exit, result)
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "process_cleanup_failed", result.fetch(:error_reason)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "process_cleanup_failed", marker.attrs.fetch("reason")
+    end
+  end
+
   def test_selected_environment_prefers_explicit_values_and_falls_back_to_host_values
     with_fixture do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "environment-260812-aaaa")
@@ -516,6 +567,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       calls = File.join(dir, "calls.log")
       stdin = File.join(dir, "stdin.log")
       environment = File.join(dir, "environment.json")
+      detached_pid = File.join(dir, "detached.pid")
       configuration = File.join(dir, "selected-config.json")
       selected_config = {
         "provider" => { "anthropic" => { "npm" => "@ai-sdk/anthropic" } }
@@ -524,14 +576,17 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       File.write(configuration, JSON.generate(selected_config))
       bin = File.join(dir, "opencode")
       File.write(bin, fixture_script(
-        mode:, calls:, stdin:, environment:, source_root: dir
+        mode:, calls:, stdin:, environment:, detached_pid:, source_root: dir
       ))
       File.chmod(0o755, bin)
-      yield({ dir:, work:, calls:, stdin:, environment:, configuration:, bin: })
+      yield({
+        dir:, work:, calls:, stdin:, environment:, detached_pid:,
+        configuration:, bin:
+      })
     end
   end
 
-  def fixture_script(mode:, calls:, stdin:, environment:, source_root:)
+  def fixture_script(mode:, calls:, stdin:, environment:, detached_pid:, source_root:)
     run_help = File.read(File.join(
       source_root_for_fixtures,
       "run-help.txt"
@@ -545,9 +600,13 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     export_output = File.read(File.join(
       source_root_for_fixtures, "session-export-matching.json"
     ))
+    descendant_script =
+      "Process.setsid; File.write(#{detached_pid.dump}, Process.pid.to_s); " \
+      "trap('TERM') { exit! 0 }; sleep"
     <<~RUBY
       #!/usr/bin/ruby --disable-gems
       require "json"
+      require "rbconfig"
       File.open(#{calls.dump}, "a") { |file| file.puts(ARGV.join(" ")) }
       case ARGV
       when ["--version"]
@@ -575,6 +634,14 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
             root = File.dirname(ENV.fetch("XDG_CONFIG_HOME"))
             File.rename(root, "\#{root}.original")
             Dir.mkdir(root, 0700)
+          end
+          if #{mode == :detached_descendant}
+            Process.spawn(
+              RbConfig.ruby, "-e",
+              #{descendant_script.dump},
+              out: File::NULL, err: File::NULL
+            )
+            sleep 0.02 until File.file?(#{detached_pid.dump})
           end
           sleep 10 if #{%i[timeout cancelled].include?(mode)}
           print #{run_output.dump}

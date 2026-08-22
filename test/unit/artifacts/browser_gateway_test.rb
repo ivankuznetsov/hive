@@ -86,6 +86,59 @@ class ArtifactsBrowserGatewayTest < Minitest::Test
     end
   end
 
+  def test_controller_stops_recording_at_deadline_before_delayed_model_turn
+    Dir.mktmpdir("hive-browser-gateway-deadline") do |root|
+      calls = []
+      recording = nil
+      stopped = Queue.new
+      runner = lambda do |_environment, argv|
+        calls << argv
+        if argv.last(3).first(2) == %w[record start]
+          recording = argv[-1]
+          [ "recording\n", "", 0 ]
+        elsif argv.last(2) == %w[record stop]
+          File.binwrite(recording, "bounded-webm-evidence")
+          stopped << true
+          [ "saved #{recording}\n", "", 0 ]
+        else
+          [ "", "", 0 ]
+        end
+      end
+      gateway = Hive::Artifacts::BrowserGateway.new(
+        environment: {}, argv_prefix: [ "agent-browser" ], writable_root: root,
+        origin: "http://capture.invalid", runner: runner,
+        video_duration_probe: ->(_) { 25.0 }, recording_deadline_seconds: 0.01
+      ).start!
+
+      assert gateway.call(%w[record start delayed.webm]).fetch("ok")
+      Timeout.timeout(1) { stopped.pop }
+      assert gateway.call(%w[record stop]).fetch("ok")
+      assert_equal 1, calls.count { |argv| argv.last(2) == %w[record stop] }
+      assert_equal "bounded-webm-evidence", File.binread(File.join(root, "delayed.webm"))
+    ensure
+      gateway&.close
+    end
+  end
+
+  def test_closing_gateway_cancels_recording_deadline
+    Dir.mktmpdir("hive-browser-gateway-deadline-close") do |root|
+      calls = []
+      gateway = Hive::Artifacts::BrowserGateway.new(
+        environment: {}, argv_prefix: [ "agent-browser" ], writable_root: root,
+        origin: "http://capture.invalid",
+        runner: ->(_environment, argv) { calls << argv; [ "", "", 0 ] },
+        recording_deadline_seconds: 0.05
+      ).start!
+
+      assert gateway.call(%w[record start closing.webm]).fetch("ok")
+      assert gateway.close
+      sleep 0.1
+      assert_equal 0, calls.count { |argv| argv.last(2) == %w[record stop] }
+    ensure
+      gateway&.close
+    end
+  end
+
   def test_gateway_rejects_other_origins_paths_and_unbounded_commands
     Dir.mktmpdir("hive-browser-gateway-test") do |root|
       calls = []

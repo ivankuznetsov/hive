@@ -20,6 +20,7 @@ module Hive
       MAX_ARGUMENTS = 64
       MAX_ARGUMENT_BYTES = 8 * 1024
       MAX_VIDEO_DURATION_SECONDS = 30
+      AUTO_STOP_VIDEO_SECONDS = 25
       MEDIA_NAME = /\A[a-z][a-z0-9_-]{0,63}\.(?:png|webm)\z/
       INTERACTION_COMMANDS = %w[
         snapshot click dblclick fill type press keydown keyup hover focus check
@@ -35,7 +36,8 @@ module Hive
       def initialize(environment:, argv_prefix:, writable_root:, origin:,
                      runner: nil, on_publish: nil,
                      max_media_bytes: 256 * 1024 * 1024,
-                     ffprobe_path: nil, video_duration_probe: nil)
+                     ffprobe_path: nil, video_duration_probe: nil,
+                     recording_deadline_seconds: AUTO_STOP_VIDEO_SECONDS)
         @environment = environment.to_h
         @argv_prefix = Array(argv_prefix).map(&:to_s).freeze
         @writable_root = File.realpath(writable_root)
@@ -46,6 +48,13 @@ module Hive
         @ffprobe_path = ffprobe_path&.to_s
         @video_duration_probe = video_duration_probe ||
           (@ffprobe_path && method(:probe_video_duration))
+        @recording_deadline_seconds = Float(recording_deadline_seconds)
+        unless @recording_deadline_seconds.positive? &&
+               @recording_deadline_seconds <= MAX_VIDEO_DURATION_SECONDS
+          raise ArgumentError, "recording deadline must be within the video duration limit"
+        end
+        @recording_mutex = Mutex.new
+        @recording_timer = nil
         @pending_record = nil
       end
 
@@ -59,6 +68,7 @@ module Hive
       end
 
       def close
+        cancel_recording_deadline!
         remove_owned_root(@private_root)
         true
       rescue SystemCallError
@@ -186,7 +196,11 @@ module Hive
         elsif argv == %w[record stop]
           @pending_record
         end
-        stdout, stderr, status = @runner.call(@environment, @argv_prefix + argv)
+        stdout, stderr, status = if argv == %w[record stop]
+          stop_recording
+        else
+          @runner.call(@environment, @argv_prefix + argv)
+        end
         if status.zero? && media
           begin
             validate_recording_duration!(media.fetch(:private)) if argv == %w[record stop]
@@ -197,12 +211,69 @@ module Hive
             # recording even when duration validation or publication fails.
             # Clear the logical session so the producer can immediately make
             # a shorter replacement instead of getting "already active".
-            @pending_record = nil if argv == %w[record stop]
+            clear_pending_record! if argv == %w[record stop]
           end
         elsif argv.first == "record" && argv[1] == "start" && !status.zero?
-          @pending_record = nil
+          clear_pending_record!
+        elsif argv.first == "record" && argv[1] == "start"
+          arm_recording_deadline!
         end
         [ stdout.to_s, stderr.to_s, Integer(status) ]
+      end
+
+      # Model latency is outside the producer's control: a model can issue a
+      # timely `record stop` intent and spend minutes waiting for its next turn
+      # while ffmpeg keeps capturing. Stop the browser process from the
+      # controller, then retain its result until the producer's eventual stop
+      # call publishes the private media through the normal validation path.
+      # The five-second margin absorbs command startup and encoder finalization
+      # without weakening the 30-second admission limit.
+      def arm_recording_deadline!
+        @recording_mutex.synchronize do
+          cancel_recording_deadline_locked!
+          recording = @pending_record
+          @recording_timer = Thread.new(recording) do |expected|
+            Thread.current.report_on_exception = false
+            sleep(@recording_deadline_seconds)
+            @recording_mutex.synchronize do
+              next unless @pending_record.equal?(expected)
+
+              result = @runner.call(@environment, @argv_prefix + %w[record stop])
+              expected[:stopped_result] = result if Integer(result.fetch(2)).zero?
+            rescue StandardError
+              # A failed deadline stop remains retryable by the producer's
+              # explicit stop call; the ordinary command boundary reports it.
+              nil
+            ensure
+              @recording_timer = nil if @recording_timer == Thread.current
+            end
+          end
+        end
+      end
+
+      def stop_recording
+        @recording_mutex.synchronize do
+          cancel_recording_deadline_locked!
+          @pending_record&.delete(:stopped_result) ||
+            @runner.call(@environment, @argv_prefix + %w[record stop])
+        end
+      end
+
+      def clear_pending_record!
+        @recording_mutex.synchronize do
+          cancel_recording_deadline_locked!
+          @pending_record = nil
+        end
+      end
+
+      def cancel_recording_deadline!
+        @recording_mutex.synchronize { cancel_recording_deadline_locked! }
+      end
+
+      def cancel_recording_deadline_locked!
+        timer = @recording_timer
+        @recording_timer = nil
+        timer&.kill unless timer == Thread.current
       end
 
       def validate_recording_duration!(path)

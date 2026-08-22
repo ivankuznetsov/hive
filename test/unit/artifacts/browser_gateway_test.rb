@@ -139,6 +139,56 @@ class ArtifactsBrowserGatewayTest < Minitest::Test
     end
   end
 
+  def test_rejects_an_invalid_controller_recording_deadline
+    Dir.mktmpdir("hive-browser-gateway-deadline-invalid") do |root|
+      error = assert_raises(ArgumentError) do
+        Hive::Artifacts::BrowserGateway.new(
+          environment: {}, argv_prefix: [ "agent-browser" ], writable_root: root,
+          origin: "http://capture.invalid", recording_deadline_seconds: 31
+        )
+      end
+
+      assert_match(/within the video duration limit/, error.message)
+    end
+  end
+
+  def test_failed_controller_deadline_stop_remains_retryable_by_the_producer
+    Dir.mktmpdir("hive-browser-gateway-deadline-retry") do |root|
+      recording = nil
+      stop_attempted = Queue.new
+      stop_calls = 0
+      runner = lambda do |_environment, argv|
+        if argv.last(3).first(2) == %w[record start]
+          recording = argv[-1]
+          [ "recording\n", "", 0 ]
+        elsif argv.last(2) == %w[record stop]
+          stop_calls += 1
+          if stop_calls == 1
+            stop_attempted << true
+            raise IOError, "encoder was still starting"
+          end
+          File.binwrite(recording, "retried-webm-evidence")
+          [ "saved #{recording}\n", "", 0 ]
+        else
+          [ "", "", 0 ]
+        end
+      end
+      gateway = Hive::Artifacts::BrowserGateway.new(
+        environment: {}, argv_prefix: [ "agent-browser" ], writable_root: root,
+        origin: "http://capture.invalid", runner: runner,
+        video_duration_probe: ->(_) { 1.0 }, recording_deadline_seconds: 0.01
+      ).start!
+
+      assert gateway.call(%w[record start retry.webm]).fetch("ok")
+      Timeout.timeout(1) { stop_attempted.pop }
+      assert gateway.call(%w[record stop]).fetch("ok")
+      assert_equal 2, stop_calls
+      assert_equal "retried-webm-evidence", File.binread(File.join(root, "retry.webm"))
+    ensure
+      gateway&.close
+    end
+  end
+
   def test_gateway_rejects_other_origins_paths_and_unbounded_commands
     Dir.mktmpdir("hive-browser-gateway-test") do |root|
       calls = []

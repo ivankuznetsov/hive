@@ -12,6 +12,11 @@
 # ARGV is stripped of this script's flags before the suite starts so the
 # remaining "--seed N" reaches Minitest.process_args via at_exit autorun.
 
+require "digest"
+require "fileutils"
+require "json"
+require "minitest"
+
 report_path = nil
 seed = nil
 flags = []
@@ -41,17 +46,20 @@ gate_test_files = [
   "test/integration/setup_agents_test.rb",
   "test/unit/babysitter/dry_run_security_matrix_test.rb"
 ]
-suite_files = Dir.glob(File.join(root, "test/{unit,integration,babysitter}/**/*_test.rb"))
-  .reject { |path| gate_test_files.include?(path.delete_prefix("#{root}/")) }
-  .sort
+suite_files = if ENV["HIVE_SWEEP_TEST_FILES"].to_s.empty?
+  Dir.glob(File.join(root, "test/{unit,integration,babysitter}/**/*_test.rb"))
+    .reject { |path| gate_test_files.include?(path.delete_prefix("#{root}/")) }
+    .sort
+else
+  ENV.fetch("HIVE_SWEEP_TEST_FILES").split(File::PATH_SEPARATOR).map { |path| File.expand_path(path) }.sort
+end
+relative_suite_files = suite_files.map { |path| path.delete_prefix("#{root}/") }
 
 started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 results = []
 results_lock = Mutex.new
 
-collector = Object.new
-collector.define_singleton_method(:io) { nil }
-collector.define_singleton_method(:options=) { |_o| nil }
+collector = Class.new(Minitest::AbstractReporter).new
 collector.define_singleton_method(:record) do |result|
   location = begin
     result.source_location
@@ -69,10 +77,12 @@ collector.define_singleton_method(:record) do |result|
   }
   results_lock.synchronize { results << entry }
 end
-collector.define_singleton_method(:prerecord) { |*_args| nil }
-collector.define_singleton_method(:report) { nil }
 
-Minitest.reporter << collector
+extension = Module.new
+extension.define_singleton_method(:minitest_plugin_init) do |_options|
+  Minitest.reporter << collector
+end
+Minitest.extensions << extension
 
 at_exit do
   exit_status = $!.is_a?(SystemExit) ? $!.status : ($!.nil? ? 0 : 1)
@@ -81,7 +91,8 @@ at_exit do
   report = {
     "schema" => "hive-flake-sweep-run.v1",
     "seed" => Integer(seed),
-    "suite_files" => suite_files.length,
+    "suite_files" => relative_suite_files,
+    "suite_manifest_sha256" => Digest::SHA256.hexdigest(relative_suite_files.join("\0")),
     "total_seconds" => Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at,
     "per_file_seconds" => per_file,
     "tests_run" => results.count { |entry| !entry["skipped"] },
@@ -89,11 +100,12 @@ at_exit do
       .select { |entry| entry["failed"] }
       .map { |entry| entry.slice("identifier", "file", "message") }
   }
+  FileUtils.mkdir_p(File.dirname(report_path))
   File.write(report_path, JSON.pretty_generate(report))
   warn "flake sweep seed #{seed}: #{report['tests_run']} tests, " \
        "#{report['failures'].length} failures, #{report['total_seconds'].round(1)}s -> #{report_path}"
   exit(exit_status)
 end
 
-require "test_helper"
+require File.join(root, "test", "test_helper")
 suite_files.each { |path| require path }

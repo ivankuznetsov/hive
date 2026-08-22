@@ -213,6 +213,28 @@ class CiTestPartitionTest < Minitest::Test
     end
   end
 
+  def test_nightly_sweep_validates_the_complete_matrix_before_final_verdict
+    workflow = YAML.safe_load_file(
+      File.join(ROOT, ".github", "workflows", "nightly-flake-sweep.yml"),
+      aliases: true,
+    )
+    analyze = workflow.fetch("jobs").fetch("analyze")
+    steps = analyze.fetch("steps")
+    merge = steps.find { |step| step["name"] == "Merge reports into candidates and timings" }
+    issue = steps.find { |step| step["name"] == "File or update the flake-candidate issue" }
+    retain = steps.find { |step| step["name"] == "Retain merged analysis" }
+    verdict = steps.find { |step| step["name"] == "Enforce complete green sweep" }
+
+    assert_includes merge.fetch("run"), "--expected-seeds"
+    refute merge["continue-on-error"], "the wrapper must capture the analyzer status explicitly"
+    assert_includes issue.fetch("if"), "steps.merge.outputs.artifacts"
+    assert_equal "${{ always() }}", verdict.fetch("if")
+    assert_includes verdict.fetch("run"), "HIVE_ANALYSIS_STATUS"
+    assert_includes verdict.fetch("run"), "HIVE_SWEEP_RESULT"
+    assert_operator steps.index(retain), :<, steps.index(verdict)
+    assert_operator steps.index(issue), :<, steps.index(verdict)
+  end
+
   def test_workflow_creator_hostile_campaign_is_opt_in
     with_loaded_rakefile do
       hostile_files = Object.const_get(:HIVE_HOSTILE_TEST_FILES)

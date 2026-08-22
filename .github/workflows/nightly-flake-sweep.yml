@@ -5,7 +5,7 @@ name: Nightly flake sweep
 # candidates (failing under some seeds but not others) plus per-file mean
 # timings for the runtime-based shard partition. Candidate filing is
 # deduplicated by test name via issue search; timings land as an artifact and
-# reach the repo only through `rake coverage:timings` + a reviewed commit.
+# can influence PR CI only through a later reviewed change.
 
 on:
   schedule:
@@ -71,15 +71,24 @@ jobs:
           path: ${{ runner.temp }}/sweeps
       - name: Merge reports into candidates and timings
         id: merge
-        continue-on-error: true
         env:
           HIVE_SWEEP_DIR: ${{ runner.temp }}/sweeps
         run: |
+          set +e
           reports="$(find "$HIVE_SWEEP_DIR" -name 'sweep-report-*.json' | sort | paste -sd, -)"
           bundle exec ruby script/flake_sweep_report.rb \
             --reports "$reports" \
+            --expected-seeds "101,202,303" \
             --candidates "${{ runner.temp }}/flake-candidates.json" \
             --timings "${{ runner.temp }}/shard-timings.json"
+          analysis_status=$?
+          set -e
+          echo "status=$analysis_status" >> "$GITHUB_OUTPUT"
+          if [[ -s "${{ runner.temp }}/flake-candidates.json" && -s "${{ runner.temp }}/shard-timings.json" ]]; then
+            echo "artifacts=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "artifacts=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Retain merged analysis
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -91,7 +100,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
       - name: File or update the flake-candidate issue
-        if: ${{ steps.merge.outcome == 'success' && hashFiles(format('{0}/flake-candidates.json', runner.temp)) != '' }}
+        if: ${{ always() && steps.merge.outputs.artifacts == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATES_PATH: ${{ runner.temp }}/flake-candidates.json
@@ -107,3 +116,11 @@ jobs:
             gh issue create --title "$title" --label "ci-flake" --body "$body" || \
               gh issue create --title "$title" --body "$body"
           fi
+      - name: Enforce complete green sweep
+        if: ${{ always() }}
+        env:
+          HIVE_SWEEP_RESULT: ${{ needs.sweep.result }}
+          HIVE_ANALYSIS_STATUS: ${{ steps.merge.outputs.status }}
+        run: |
+          test "$HIVE_SWEEP_RESULT" = "success"
+          test "$HIVE_ANALYSIS_STATUS" = "0"

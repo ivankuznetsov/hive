@@ -9,11 +9,13 @@
 #
 # Usage:
 #   bundle exec ruby script/flake_sweep_report.rb --reports 'r1.json,r2.json' \
-#     --candidates candidates.json --timings timings.json
+#     --expected-seeds '101,202,303' --candidates candidates.json --timings timings.json
 
+require "digest"
 require "json"
 
 reports = []
+expected_seeds = nil
 candidates_path = nil
 timings_path = nil
 argv = ARGV.dup
@@ -22,6 +24,9 @@ until argv.empty?
   when "--reports"
     argv.shift
     reports = argv.shift.split(",").map { |path| JSON.parse(File.read(path)) }
+  when "--expected-seeds"
+    argv.shift
+    expected_seeds = argv.shift.split(",").map { |seed| Integer(seed) }
   when "--candidates"
     argv.shift
     candidates_path = argv.shift
@@ -32,8 +37,35 @@ until argv.empty?
     abort "unknown argument: #{argv.first.inspect}"
   end
 end
-abort "at least one sweep report is required" if reports.empty?
+abort "--expected-seeds is required" unless expected_seeds&.any?
+abort "expected seeds must be unique" unless expected_seeds.uniq.length == expected_seeds.length
 
+reports.each do |report|
+  abort "unsupported sweep report schema: #{report['schema'].inspect}" unless report["schema"] == "hive-flake-sweep-run.v1"
+
+  files = report["suite_files"]
+  abort "sweep report suite_files must be a non-empty array" unless files.is_a?(Array) && files.any?
+  expected_manifest = Digest::SHA256.hexdigest(files.join("\0"))
+  unless report["suite_manifest_sha256"] == expected_manifest
+    abort "sweep report suite manifest digest does not match its files"
+  end
+end
+
+seeds = reports.map { |report| report.fetch("seed") }
+if seeds.uniq.length != seeds.length
+  abort "duplicate sweep report seeds: #{seeds.tally.select { |_seed, count| count > 1 }.keys.sort.join(',')}"
+end
+unless seeds.sort == expected_seeds.sort
+  abort "expected seeds #{expected_seeds.join(',')}; received #{seeds.sort.join(',')}"
+end
+
+suite_manifests = reports.map { |report| report.fetch("suite_manifest_sha256") }.uniq
+suite_file_sets = reports.map { |report| report.fetch("suite_files") }.uniq
+unless suite_manifests.length == 1 && suite_file_sets.length == 1
+  abort "sweep reports do not share one suite manifest"
+end
+
+reports.sort_by! { |report| expected_seeds.index(report.fetch("seed")) }
 seeds = reports.map { |report| report.fetch("seed") }
 failures_by_test = Hash.new { |hash, key| hash[key] = [] }
 per_file_totals = Hash.new(0.0)

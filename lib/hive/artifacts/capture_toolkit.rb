@@ -9,7 +9,9 @@ require "timeout"
 require "hive/artifacts/browser_gateway"
 require "hive/artifacts/capture_mailbox"
 require "hive/artifacts/capture_proxy"
+require "hive/artifacts/managed_project_server"
 require "hive/artifacts/managed_web_server"
+require "hive/artifacts/project_command_sandbox"
 require "hive/artifacts/outcome_evidence/proof"
 require "hive/artifacts/terminal_recorder"
 require "hive/config"
@@ -269,21 +271,26 @@ module Hive
                 @managed_web_server&.close
               ensure
                 begin
-                  close_browser_preflight
+                  @managed_project_server&.close
                 ensure
-                  @capture_proxy&.close
-                  remove_browser_state_root
-                  @capture_proxy = nil
-                  @managed_web_server = nil
-                  @browser_gateway = nil
-                  @capture_mailbox = nil
-                  @browser_close = nil
-                  @browser_daemon = nil
-                  @browser_socket_root = nil
-                  @producer_add_dirs = []
-                  @producer_permission_arguments = nil
-                  @producer_runtime_policy&.cleanup!
-                  @producer_runtime_policy = nil
+                  begin
+                    close_browser_preflight
+                  ensure
+                    @capture_proxy&.close
+                    remove_browser_state_root
+                    @capture_proxy = nil
+                    @managed_web_server = nil
+                    @managed_project_server = nil
+                    @browser_gateway = nil
+                    @capture_mailbox = nil
+                    @browser_close = nil
+                    @browser_daemon = nil
+                    @browser_socket_root = nil
+                    @producer_add_dirs = []
+                    @producer_permission_arguments = nil
+                    @producer_runtime_policy&.cleanup!
+                    @producer_runtime_policy = nil
+                  end
                 end
               end
             end
@@ -443,13 +450,28 @@ module Hive
           @browser_gateway.call(request.fetch("argv"))
         when "terminal"
           capture_terminal(request.fetch("name"), request.fetch("argv"))
+        when "server"
+          start_project_server(request.fetch("argv"))
         else
           { "ok" => false, "status" => 64, "error" => "capture operation is not admitted" }
         end
       rescue KeyError, TypeError => e
         { "ok" => false, "status" => 64, "error" => "capture request is invalid: #{e.message}" }
-      rescue Hive::Artifacts::TerminalRecorder::CaptureError, Hive::ConfigError => e
+      rescue Hive::Artifacts::ManagedProjectServer::ServerError,
+             Hive::Artifacts::ProjectCommandSandbox::SandboxError,
+             Hive::Artifacts::TerminalRecorder::CaptureError, Hive::ConfigError => e
         { "ok" => false, "status" => 64, "error" => e.message }
+      end
+
+      def start_project_server(argv)
+        raise Hive::ConfigError, "project evidence server is unavailable" unless
+          @capture_proxy && !@managed_web_server
+
+        @managed_project_server ||= Hive::Artifacts::ManagedProjectServer.new(
+          source_root: @source_root, port: @capture_proxy.app_port
+        )
+        receipt = @managed_project_server.start!(argv)
+        { "ok" => true, "status" => 0, "payload" => receipt }
       end
 
       def capture_terminal(name, argv)
@@ -463,8 +485,12 @@ module Hive
         ambient = %w[PATH LANG LC_ALL LC_CTYPE TERM COLORTERM TZ].to_h do |key|
           [ key, ENV[key] ]
         end.compact
+        sandbox = Hive::Artifacts::ProjectCommandSandbox.new(
+          source_root: @source_root, environment: ambient
+        )
         result = Hive::Artifacts::TerminalRecorder.new(
-          argv: argv, cwd: @source_root, cast_path: cast, review_path: review,
+          argv: sandbox.command_argv(argv), display_argv: argv,
+          cwd: @source_root, cast_path: cast, review_path: review,
           environment: ambient
         ).record!
         result.fetch("representations").each { |representation| record_capture!(representation) }
@@ -475,6 +501,8 @@ module Hive
           "ok" => true, "status" => 0,
           "payload" => { "status" => "captured" }.merge(result)
         }
+      ensure
+        sandbox&.close
       end
 
       def verify_project_provider!(entry)

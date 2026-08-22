@@ -82,6 +82,41 @@ class CommandsStatusOperationalTest < Minitest::Test
     end
   end
 
+  def test_supplied_status_payload_skips_workflow_generation_capture
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(
+        File.join(hive_state, "config.yml"),
+        { "daemon" => { "enabled" => true } }.to_yaml
+      )
+      project = { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      command = Hive::Commands::Status.new(json: true)
+      source = command.json_payload([ project ])
+      command.define_singleton_method(:capture_workflow_generations) do |_projects|
+        raise "supplied payload must not trigger generation capture"
+      end
+      original_load = Hive::Config.method(:load)
+      config_loads = 0
+
+      payload = with_replaced_singleton_method(
+        Hive::Config,
+        :load,
+        lambda do |path|
+          config_loads += 1
+          original_load.call(path)
+        end
+      ) do
+        command.operational_payload(
+          [ project ], status_payload: source, scheduler_snapshot: nil
+        )
+      end
+
+      assert_equal "unavailable", payload.dig("scheduler", "status")
+      assert_equal 1, config_loads
+    end
+  end
+
   def test_operational_call_uses_its_own_error_schema
     command = Hive::Commands::Status.new(json: true, operational: true)
 

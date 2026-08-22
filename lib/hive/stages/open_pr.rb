@@ -176,11 +176,15 @@ module Hive
           agent_custody: agent_custody,
           expected_output: expected_output,
           status_mode: :output_file_exists,
-          completion_probe: profile.name == :opencode ?
-            -> { complete_authoring_file?(expected_output) } : nil,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           **launch_arguments
         }
+        # Only Agent/OpenCode understands controller completion probes. Passing
+        # a nil probe through the Claude launcher is still an unknown keyword,
+        # so keep the provider-specific contract out of the shared kwargs.
+        if profile.name == :opencode
+          kwargs[:completion_probe] = -> { complete_authoring_file?(expected_output) }
+        end
         if profile.name == :claude
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(
             task, cfg, **kwargs,

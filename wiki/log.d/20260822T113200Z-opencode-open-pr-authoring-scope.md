@@ -21,3 +21,8 @@ still-running CLI and accepts the validated output. A lifecycle regression
 uses a real sleeping child to prove the trailing turn is reaped, the attempt is
 not marked timed out, and sanitized export is not required after controller
 completion.
+
+The probe keyword is emitted only for OpenCode launches. The first hosted
+full-flow run exposed that passing `completion_probe: nil` through the Claude
+open-PR path violates its strict launcher signature before authoring starts;
+provider-specific controller probes now stay out of shared launch kwargs.

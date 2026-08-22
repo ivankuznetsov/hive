@@ -153,8 +153,10 @@ published OpenCode-capable line while allowing compatible 0.2.x patches;
 component publication and Hive dependency cutover remain separate operations.
 OpenCode's prepared invocation keeps its configuration, data, cache, state,
 and temporary roots private, while Hive forwards the operator-selected
-`GEM_HOME` and `GEM_PATH` alongside the existing base process environment.
-Those two paths are runtime inputs, like `PATH`: dropping them can make a
+`GEM_HOME` and `GEM_PATH` alongside the existing base process environment. A
+systemd daemon commonly has no explicit `GEM_PATH`; in that case Hive supplies
+the effective `Gem.path` of its own Ruby process. Those paths are runtime
+inputs, like `PATH`: dropping them can make a
 repository's checked-in Ruby binstubs fail to load `bundler/setup` even though
 the exact same binstubs work for the operator. Ruby code-injection options such
 as `RUBYOPT` remain outside the forwarded environment.

@@ -439,6 +439,12 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       ) { agent.send(:selected_base_environment) }
       assert_equal "/operator/gem-home", selected.fetch("GEM_HOME")
       assert_equal "/operator/gem-path", selected.fetch("GEM_PATH")
+
+      selected = with_env("GEM_PATH" => nil) do
+        agent.send(:selected_base_environment)
+      end
+      assert_equal Gem.path.join(File::PATH_SEPARATOR),
+                   selected.fetch("GEM_PATH")
     end
   end
 

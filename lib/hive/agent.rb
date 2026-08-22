@@ -876,7 +876,7 @@ module Hive
     end
 
     def selected_base_environment
-      %w[
+      selected = %w[
         GEM_HOME GEM_PATH HOME LANG LC_ALL LOGNAME PATH SHELL SSL_CERT_DIR
         SSL_CERT_FILE USER
       ].each_with_object({}) do |key, selected|
@@ -884,6 +884,8 @@ module Hive
           @launch_environment[key] : ENV[key]
         selected[key] = value.to_s unless value.to_s.empty?
       end
+      selected["GEM_PATH"] ||= Gem.path.join(File::PATH_SEPARATOR)
+      selected
     end
 
     def selected_credential_value(key)

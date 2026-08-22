@@ -329,29 +329,7 @@ module Hive
         thread = Thread.new do
           loop do
             socket = server.accept
-            begin
-              request = +"".b
-              until request.include?("\r\n\r\n") || request.bytesize >= 64 * 1024
-                break unless IO.select([ socket ], nil, nil, 1)
-
-                chunk = socket.read_nonblock(8192, exception: false)
-                break if chunk.nil?
-                next if chunk == :wait_readable
-
-                request << chunk
-              end
-              socket.write(
-                "HTTP/1.1 200 OK\r\n" \
-                "Content-Type: text/html; charset=utf-8\r\n" \
-                "Content-Length: 15\r\n" \
-                "Connection: close\r\n\r\n" \
-                "<!doctype html>"
-              )
-            rescue IOError, SystemCallError
-              nil
-            ensure
-              socket.close unless socket.closed?
-            end
+            serve_browser_preflight(socket)
           end
         rescue IOError, Errno::EBADF
           nil
@@ -364,6 +342,30 @@ module Hive
       rescue SystemCallError
         server&.close
         raise
+      end
+
+      def serve_browser_preflight(socket)
+        request = +"".b
+        until request.include?("\r\n\r\n") || request.bytesize >= 64 * 1024
+          break unless IO.select([ socket ], nil, nil, 1)
+
+          chunk = socket.read_nonblock(8192, exception: false)
+          break if chunk.nil?
+          next if chunk == :wait_readable
+
+          request << chunk
+        end
+        socket.write(
+          "HTTP/1.1 200 OK\r\n" \
+          "Content-Type: text/html; charset=utf-8\r\n" \
+          "Content-Length: 15\r\n" \
+          "Connection: close\r\n\r\n" \
+          "<!doctype html>"
+        )
+      rescue IOError, SystemCallError
+        nil
+      ensure
+        socket.close unless socket.closed?
       end
 
       def close_browser_preflight

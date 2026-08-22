@@ -97,8 +97,10 @@ probe proves that variant exists.
 OpenCode does not accept Hive's default `yolo` stage permission. Use
 `read-only` or a scoped policy. Read-only denies edits, shell, unsafe tools,
 and external writes. Scoped `Write`/`Edit` enables the generated
-workspace-write policy over Hive's resolved working/write roots while still
-denying unrestricted shell. Hive redirects OpenCode config, data, cache, and
+workspace-write policy over Hive's resolved working/write roots. Qualified
+rules such as `Bash(git*)` opt into only the named OpenCode shell patterns;
+bare `Bash` remains invalid, while `Bash(*)` deliberately grants the full
+shell with the Hive OS user's authority. Hive redirects OpenCode config, data, cache, and
 state into a private per-invocation root, ignores ambient project/global
 configuration, forwards only the named credential source, and removes the
 overlay after every lifecycle outcome. This is application-level enforcement,

@@ -82,8 +82,14 @@ module Hive
       def brainstorm_safe?(row)
         path = File.join(row.folder.to_s, "brainstorm.md")
         questions = Hive::BrainstormParser.parse(path)
-        answered = questions.any?(&:answered?)
-        return [ false, "brainstorm answers present" ] if answered
+        answered = questions.select(&:answered?)
+        unless answered.empty?
+          if answered.all?(&:controller_bound_answer?)
+            return [ true, "only controller-bound brainstorm answers present" ]
+          end
+
+          return [ false, "unbound brainstorm answers present" ]
+        end
 
         [ true, "no brainstorm answers present" ]
       end

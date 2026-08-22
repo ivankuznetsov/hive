@@ -494,6 +494,31 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
+  def test_opencode_prepared_pinned_plugin_is_an_expected_resolution
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "opencode")
+      executable(bin)
+      plugin = Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+      config_root = File.join(dir, ".config", "opencode")
+      write(File.join(config_root, "opencode.json"), JSON.generate("plugin" => [ plugin ]))
+      cfg = config(agent: "opencode", bin: bin)
+      cfg["project_root"] = dir
+      runner = FakeRunner.new(
+        [ bin, "--version" ] => result(stdout: "opencode 1.18.18\n")
+      )
+
+      row = inspect_rows(
+        cfg: cfg, project: dir, runner: runner,
+        environment: { "OPENCODE_CONFIG_DIR" => config_root }
+      ).find { |entry| entry.capability_id == "ce-brainstorm" }
+
+      assert_equal "healthy", row.health
+      assert_equal "configured:#{plugin}", row.resolution.fetch("path")
+      assert_equal plugin, row.native.dig("package", "id")
+      assert_nil row.native.dig("package", "install_path")
+    end
+  end
+
   def test_opencode_filesystem_inventory_rejects_non_object_or_non_string_plugins
     with_tmp_dir do |dir|
       profile = Hive::AgentProfiles.lookup(:opencode)

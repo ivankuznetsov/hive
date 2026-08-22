@@ -498,6 +498,10 @@ module Hive
         "trigger" => "continuous",
         "poll_interval_sec" => 600,
         "agent" => "claude",
+        # The unified Patrol Fix workflow may use a different implementation
+        # identity from discovery. Agent, model, and effort stay together so a
+        # provider change cannot inherit a discovery model accidentally.
+        "fix" => {},
         "min_confidence_to_fix" => "medium",
         "min_alpha_to_fix" => 70,
         "max_findings_per_feature" => 3,
@@ -2441,15 +2445,22 @@ module Hive
       patrol = cfg.fetch("patrol")
       patrol_enabled = patrol["enabled"] == true
       patrol_agent = patrol["agent"] || "claude"
+      patrol_fix = patrol.fetch("fix")
+      patrol_fix_agent = patrol_fix["agent"] || patrol_agent
+      patrol_fix_current = model_routing_current(patrol)
+      if patrol_fix["agent"] && patrol_fix_agent.to_s != patrol_agent.to_s
+        patrol_fix_current = Hive::ModelRouting::EMPTY_MODELS
+      end
+      patrol_fix_current = patrol_fix_current.merge(model_routing_current(patrol_fix))
       add_model_routing_call(
         calls, cfg, "patrol_review", patrol_agent,
         enabled: patrol_enabled,
         current: model_routing_current(patrol)
       )
       add_model_routing_call(
-        calls, cfg, "patrol_fix", patrol_agent,
+        calls, cfg, "patrol_fix", patrol_fix_agent,
         enabled: patrol_enabled,
-        current: model_routing_current(patrol)
+        current: patrol_fix_current
       )
       if patrol_enabled && patrol["review_prs"] == true
         add_reviewer_model_routing_calls(calls, cfg, patrol.dig("review", "reviewers"))
@@ -3615,10 +3626,33 @@ module Hive
       end
 
       validate_agent_name!(patrol["agent"], "patrol.agent", source_path)
+      validate_patrol_fix!(patrol, source_path)
       validate_path_glob_list!(patrol["include"], "patrol.include", source_path)
       validate_path_glob_list!(patrol["exclude"], "patrol.exclude", source_path)
       validate_patrol_commands!(patrol, source_path)
       validate_patrol_review!(patrol, source_path)
+    end
+
+    def validate_patrol_fix!(patrol, source_path)
+      fix = patrol["fix"]
+      unless fix.is_a?(Hash)
+        raise ConfigError,
+              "patrol.fix in #{describe_source(source_path)} must be a Hash; " \
+              "got #{fix.inspect} (#{fix.class})"
+      end
+
+      validate_agent_name!(fix["agent"], "patrol.fix.agent", source_path)
+      model = fix["model"]
+      effort = fix["effort"]
+      Hive::ImplementationIdentity.normalize_model(model, concrete: true) if model
+      Hive::ImplementationIdentity.normalize_effort(effort) if effort
+      return unless model
+
+      profile = Hive::AgentProfiles.lookup(fix["agent"] || patrol["agent"] || "claude")
+      profile.identity_arguments(model: model, effort: effort)
+    rescue Hive::ImplementationIdentity::Error => e
+      raise ConfigError,
+            "patrol.fix identity in #{describe_source(source_path)} is invalid: #{e.message}"
     end
 
     def validate_patrol_commands!(patrol, source_path)

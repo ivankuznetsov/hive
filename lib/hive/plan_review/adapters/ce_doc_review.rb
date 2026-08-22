@@ -76,6 +76,22 @@ module Hive
             }
           end
 
+          # Capability checks must use the same project-prepared profile as
+          # the launch below. In particular, OpenCode plugins live in
+          # agents.opencode.plugins and are projected into a hermetic overlay;
+          # probing the stock ambient profile falsely reports those skills as
+          # absent even though the subsequent launch would provide them.
+          def capability_probe(agent:, invocation:, project_root:)
+            profile = Hive::AgentProfiles.lookup(agent, cfg: @cfg)
+            status, message = profile.verify_skill(invocation, project_root:)
+            {
+              "status" => status == :present ? "present" : "unsupported",
+              "diagnostic" => message
+            }
+          rescue StandardError => e
+            { "status" => "unsupported", "diagnostic" => e.message }
+          end
+
           private
 
           def normalize_result(result, request)
@@ -160,10 +176,15 @@ module Hive
           end
         end
 
-        def initialize(runner:, capability_probe: method(:default_capability_probe),
+        def initialize(runner:, capability_probe: nil,
                        capability_resolver: Hive::AgentSkills.method(:capability))
           @runner = runner
-          @capability_probe = capability_probe
+          @capability_probe = capability_probe ||
+            if runner.respond_to?(:capability_probe)
+              runner.method(:capability_probe)
+            else
+              method(:default_capability_probe)
+            end
           @capability_resolver = capability_resolver
         end
 

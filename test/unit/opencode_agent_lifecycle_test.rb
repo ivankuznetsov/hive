@@ -102,6 +102,29 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_implementation_sized_prompt_is_piped_without_crossing_exec_argument_limit
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "large-prompt-260812-aaaa")
+      root = File.join(fixture.fetch(:dir), "invocation-large-prompt")
+      prompt = "implement the reviewed plan\n" + ("x" * 150_000)
+
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture, invocation_root: root, prompt:
+        ).run!
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      run = calls.find { |line| line.start_with?("run --auto ") }
+      assert run
+      assert_operator run.bytesize, :<, 8_192
+      refute_includes run, prompt
+      assert_equal prompt, File.binread(fixture.fetch(:stdin))
+      refute File.exist?(root)
+    end
+  end
+
   def test_nonzero_malformed_timeout_and_inspection_failure_skip_or_bound_inspection
     {
       auth_failure: [ :authentication_failure, 0 ],
@@ -495,6 +518,58 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       marker = Hive::Markers.current(task.state_file)
       assert_equal :error, marker.name
       assert_equal "configuration_failure", marker.attrs.fetch("reason")
+
+      timed_out = Hive::AgentRuntime::NormalizedOutcome.new(
+        provider: :opencode, launcher_identity: "opencode-cli/v1",
+        kind: :timed_out, termination: termination,
+        identity: Hive::AgentRuntime::RouteIdentity.new(
+          requested: route, actual: nil, resolution_status: :unobserved
+        ),
+        diagnostic: "UnknownError: Upstream idle timeout exceeded"
+      )
+      timeout_result = result.merge(normalized_outcome: timed_out)
+
+      agent.send(:handle_exit, timeout_result)
+
+      assert_equal :timeout, timeout_result.fetch(:status)
+      assert_equal "timeout", timeout_result.fetch(:error_reason)
+      timeout_marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, timeout_marker.name
+      assert_equal "timeout", timeout_marker.attrs.fetch("reason")
+      assert_equal "opencode", timeout_marker.attrs.fetch("provider")
+    end
+  end
+
+  def test_completed_state_artifact_beats_empty_terminal_assistant_message
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "completed-file-260812-aaaa")
+      File.write(task.state_file, "# Complete plan\n<!-- COMPLETE -->\n")
+      agent = build_agent(
+        task, fixture,
+        invocation_root: File.join(fixture.fetch(:dir), "invocation-completed-file"),
+        profile_status: :state_file_marker
+      )
+      route = Hive::AgentRuntime::Route.parse(ROUTE)
+      outcome = Hive::AgentRuntime::NormalizedOutcome.new(
+        provider: :opencode, launcher_identity: "opencode-cli/v1",
+        kind: :malformed_output,
+        termination: Hive::AgentRuntime::TerminationEvidence.new(exit_code: 0),
+        identity: Hive::AgentRuntime::RouteIdentity.new(
+          requested: route, actual: nil, resolution_status: :unobserved
+        ),
+        diagnostic: "OpenCode terminal assistant message is empty"
+      )
+      result = {
+        provider_signal: nil, provider_error: nil, output_completed: false,
+        failure_origin: nil, resource_exhaustion: nil, limit_text: nil,
+        timed_out: false, exit_code: 0, normalized_outcome: outcome
+      }
+
+      agent.send(:handle_exit, result)
+
+      assert_equal :complete, result.fetch(:status)
+      assert_equal :complete, Hive::Markers.current(task.state_file).name
+      refute result.key?(:error_reason)
     end
   end
 
@@ -546,6 +621,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       work = File.join(dir, "work")
       FileUtils.mkdir_p(work)
       calls = File.join(dir, "calls.log")
+      stdin = File.join(dir, "stdin.log")
       environment = File.join(dir, "environment.json")
       configuration = File.join(dir, "selected-config.json")
       selected_config = {
@@ -555,14 +631,14 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       File.write(configuration, JSON.generate(selected_config))
       bin = File.join(dir, "opencode")
       File.write(bin, fixture_script(
-        mode:, calls:, environment:, source_root: dir
+        mode:, calls:, stdin:, environment:, source_root: dir
       ))
       File.chmod(0o755, bin)
-      yield({ dir:, work:, calls:, environment:, configuration:, bin: })
+      yield({ dir:, work:, calls:, stdin:, environment:, configuration:, bin: })
     end
   end
 
-  def fixture_script(mode:, calls:, environment:, source_root:)
+  def fixture_script(mode:, calls:, stdin:, environment:, source_root:)
     run_help = File.read(File.join(
       source_root_for_fixtures,
       "run-help.txt"
@@ -596,6 +672,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
         File.unlink(__FILE__) if #{mode == :remove_after_probe}
       else
         if ARGV.first == "run"
+          File.binwrite(#{stdin.dump}, STDIN.read)
           File.write(#{environment.dump}, JSON.generate({
             "XDG_CONFIG_HOME" => ENV["XDG_CONFIG_HOME"],
             "OPENCODE_DISABLE_PROJECT_CONFIG" => ENV["OPENCODE_DISABLE_PROJECT_CONFIG"],

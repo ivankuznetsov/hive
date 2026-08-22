@@ -322,6 +322,9 @@ module Hive
             values[:opencode_edit_patterns] = opencode_edit_patterns(
               profile, runtime_policy.allowed_tools
             )
+            values[:opencode_bash_patterns] = opencode_bash_patterns(
+              profile, runtime_policy.allowed_tools
+            )
           end
           return adapt_opencode_scope!(values, profile, stage_name)
         end
@@ -367,6 +370,9 @@ module Hive
           values[:opencode_edit_patterns] = opencode_edit_patterns(
             profile, scope.allowed_tools
           )
+          values[:opencode_bash_patterns] = opencode_bash_patterns(
+            profile, scope.allowed_tools
+          )
         end
         adapt_opencode_scope!(values, profile, stage_name)
       end
@@ -406,7 +412,8 @@ module Hive
           disallowed_tools: scope.fetch(:disallowed_tools),
           additional_read_roots: scope.fetch(:additional_read_roots, []),
           additional_write_roots: scope.fetch(:additional_write_roots, []),
-          opencode_edit_patterns: scope.fetch(:opencode_edit_patterns, [])
+          opencode_edit_patterns: scope.fetch(:opencode_edit_patterns, []),
+          opencode_bash_patterns: scope.fetch(:opencode_bash_patterns, [])
         }
         kwargs[:runtime_policy] = scope[:runtime_policy] if scope[:runtime_policy]
         kwargs
@@ -483,7 +490,7 @@ module Hive
         granted = Array(values[:allowed_tools]).flat_map do |rule|
           Hive::PermissionScope.granted_tool_names(rule)
         end
-        if granted.include?("Bash")
+        if granted.include?("Bash") && Array(values[:opencode_bash_patterns]).empty?
           raise Hive::ConfigError,
                 "stage #{stage_name} OpenCode permissions cannot grant unrestricted Bash"
         end
@@ -535,6 +542,18 @@ module Hive
         end.uniq
       end
       private_class_method :opencode_edit_patterns
+
+      def opencode_bash_patterns(profile, allowed_tools)
+        return [] unless profile.name == :opencode
+
+        Array(allowed_tools).filter_map do |rule|
+          match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s)
+          next unless match && match[:tool] == "Bash" && match[:specifier]
+
+          match[:specifier]
+        end.uniq
+      end
+      private_class_method :opencode_bash_patterns
 
       MISSING_EXPLICIT_PERMISSION_SPEC = Object.new.freeze
 
@@ -1036,7 +1055,8 @@ module Hive
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
                       routing_resolution: nil, routing_arguments: nil,
                       additional_read_roots: [], additional_write_roots: [],
-                      opencode_edit_patterns: [],
+                      opencode_edit_patterns: [], opencode_bash_patterns: [],
+                      opencode_permission_policy: nil,
                       implementation_stage: nil,
                       defer_implementation_observation: false,
                       resource_guards: nil, agent_custody: nil,
@@ -1186,6 +1206,8 @@ module Hive
               additional_read_roots: additional_read_roots,
               additional_write_roots: additional_write_roots,
               opencode_edit_patterns: opencode_edit_patterns,
+              opencode_bash_patterns: opencode_bash_patterns,
+              opencode_permission_policy: opencode_permission_policy,
               isolate_environment: isolate_environment
             ).run!
             agent_result[:hive_observation_id] = observation.session_id if
@@ -1283,7 +1305,7 @@ module Hive
                          routing_arguments: nil, runtime_policy: nil,
                          implementation_stage: nil,
                          additional_read_roots: [], additional_write_roots: [],
-                         opencode_edit_patterns: [],
+                         opencode_edit_patterns: [], opencode_bash_patterns: [],
                          resource_guards: nil, agent_custody: nil)
         require "hive/claude_launcher"
 
@@ -1311,6 +1333,7 @@ module Hive
             additional_read_roots: additional_read_roots,
             additional_write_roots: additional_write_roots,
             opencode_edit_patterns: opencode_edit_patterns,
+            opencode_bash_patterns: opencode_bash_patterns,
             resource_guards: resource_guards,
             agent_custody: agent_custody
           )
@@ -1339,6 +1362,7 @@ module Hive
             additional_read_roots: additional_read_roots,
             additional_write_roots: additional_write_roots,
             opencode_edit_patterns: opencode_edit_patterns,
+            opencode_bash_patterns: opencode_bash_patterns,
             resource_guards: resource_guards, agent_custody: agent_custody
           )
         end
@@ -1375,7 +1399,8 @@ module Hive
               routing_arguments: routing_arguments, runtime_policy: runtime_policy,
               additional_read_roots: additional_read_roots,
               additional_write_roots: additional_write_roots,
-              opencode_edit_patterns: opencode_edit_patterns
+              opencode_edit_patterns: opencode_edit_patterns,
+              opencode_bash_patterns: opencode_bash_patterns
             )
           end
           record_usage(

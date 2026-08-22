@@ -163,7 +163,7 @@ module Hive
                    opencode_invocation_root: nil,
                    opencode_permission_policy: nil,
                    additional_read_roots: [], additional_write_roots: [],
-                   opencode_edit_patterns: [],
+                   opencode_edit_patterns: [], opencode_bash_patterns: [],
                    isolate_environment: false)
       @task = task
       @prompt = prompt
@@ -183,6 +183,7 @@ module Hive
       @additional_read_roots = Array(additional_read_roots).map(&:to_s).freeze
       @additional_write_roots = Array(additional_write_roots).map(&:to_s).freeze
       @opencode_edit_patterns = Array(opencode_edit_patterns).map(&:to_s).freeze
+      @opencode_bash_patterns = Array(opencode_bash_patterns).map(&:to_s).freeze
       @runtime_policy = runtime_policy
       if runtime_policy && permission_arguments
         raise ArgumentError, "permission_arguments cannot be combined with runtime_policy"
@@ -606,10 +607,12 @@ module Hive
 
     def spawn_opencode_and_wait
       prepared = nil
+      stdin_file = nil
       result = nil
       prepared = prepare_opencode_invocation
       validate_prepared_opencode_skills!(prepared)
       cmd = prepared.invocation.argv
+      stdin_file = stdin_file_for(prepared.invocation.stdin_data)
       log_file = log_path
       write_opencode_spawn_log(log_file, prepared, cmd)
 
@@ -624,10 +627,12 @@ module Hive
         stderr_reader, stderr_capture, FINAL_MESSAGE_TAIL_BYTES
       )
       child_env = opencode_child_environment(prepared)
-      pid = Process.spawn(
-        child_env, *cmd, chdir: @cwd, pgroup: true,
-        out: stdout_writer, err: stderr_writer, unsetenv_others: true
-      )
+      spawn_opts = {
+        chdir: @cwd, pgroup: true, out: stdout_writer, err: stderr_writer,
+        unsetenv_others: true
+      }
+      spawn_opts[:in] = stdin_file if stdin_file
+      pid = Process.spawn(child_env, *cmd, **spawn_opts)
       stdout_writer.close
       stderr_writer.close
       pgid = begin
@@ -725,6 +730,7 @@ module Hive
       [ stdout_thread, stderr_thread ].each do |thread|
         thread.kill if thread&.alive?
       end
+      close_prompt_stdin_file(stdin_file)
       if prepared
         begin
           prepared.cleanup!
@@ -769,6 +775,7 @@ module Hive
         additional_read_roots: @additional_read_roots,
         additional_write_roots: @additional_write_roots,
         edit_patterns: @opencode_edit_patterns,
+        bash_patterns: @opencode_bash_patterns,
         plugins: @profile.opencode_plugins,
         pure: @profile.opencode_pure
       )
@@ -1162,17 +1169,25 @@ module Hive
       false
     end
 
-    def prompt_via_stdin?
-      !compiled_invocation.stdin_data.nil?
+    def prompt_stdin_file
+      stdin_file_for(compiled_invocation.stdin_data)
     end
 
-    def prompt_stdin_file
-      return nil unless prompt_via_stdin?
+    def stdin_file_for(data)
+      return nil if data.nil?
 
       file = Tempfile.new([ "hive-agent-prompt-", ".txt" ])
-      file.write(compiled_invocation.stdin_data)
+      file.chmod(0o600)
+      file.write(data)
       file.rewind
       file
+    end
+
+    def close_prompt_stdin_file(file)
+      return unless file
+
+      file.close
+      file.unlink
     end
 
     def compiled_invocation
@@ -1263,6 +1278,18 @@ module Hive
         return
       end
 
+      # OpenCode can exit zero after completing its file tool call while its
+      # terminal assistant message is empty. The strict transcript normalizer
+      # correctly labels that chat evidence malformed, but a current terminal
+      # stage artifact is stronger completion evidence: the previous marker
+      # was rotated to AGENT_WORKING before launch, so this marker came from
+      # the current attempt. Keep malformed chat from discarding completed
+      # work; an incomplete file still follows the ordinary failure path.
+      if recovered_normalized_failure?(result)
+        result[:status] = Hive::Markers.current(@task.state_file).name
+        return
+      end
+
       if result[:output_completed] && completed_output_file?
         result[:status] = :ok
         return
@@ -1329,6 +1356,22 @@ module Hive
 
       normalized = result[:normalized_outcome]
       if normalized && !normalized.completed?
+        if normalized.kind == :timed_out
+          if effective_status_mode == :state_file_marker
+            Hive::Markers.set(
+              @task.state_file,
+              :error,
+              reason: "timeout",
+              provider: normalized.provider.to_s,
+              message: normalized.diagnostic.to_s.byteslice(0, 200)
+            )
+          end
+          result[:status] = :timeout
+          result[:error_reason] = "timeout"
+          result[:error_message] = normalized.diagnostic
+          return
+        end
+
         diagnostic = result[:inspection_diagnostic] || normalized.diagnostic
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(
@@ -1536,6 +1579,14 @@ module Hive
       when :output_file_exists then completed_output_file?
       else false
       end
+    end
+
+    def recovered_normalized_failure?(result)
+      normalized = result[:normalized_outcome]
+      return false unless normalized && !normalized.completed?
+      return false unless result[:exit_code] == 0
+
+      completed_state_file_artifact?
     end
 
     # Some CLIs report a failed provider turn in their structured event stream

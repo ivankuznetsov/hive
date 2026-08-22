@@ -54,7 +54,10 @@ module Hive
           "classifier_version" => version,
           "workflow_id" => workflow_id.to_s,
           "signals" => signals.to_h.reject { |key, _value| key.to_s == "plan_path" },
-          "policy" => policy_affecting_config(settings),
+          "policy" => policy_affecting_config(
+            settings,
+            model_routing: review_model_routing(config)
+          ),
           "level_sources" => sources
         }
 
@@ -103,18 +106,36 @@ module Hive
       # Installing the skill, correcting the route or shipping the gem could
       # not invalidate it, so the stale block replayed forever while telling
       # the operator to "restore required reviewer capability".
-      def policy_affecting_config(settings)
-        %w[
+      def policy_affecting_config(settings, model_routing: {})
+        configured = %w[
           classifier_version minimum_level coding skip protected_paths
           coverage adapter reviewers routes
         ].to_h do |key|
           [ key, settings[key] ]
         end
+        return configured if model_routing.empty?
+
+        configured.merge("model_routing" => model_routing)
       end
 
       def configuration_fingerprint(config)
         settings = config.fetch("plan_review", config)
-        Hive::CanonicalJSON.digest(policy_affecting_config(settings))
+        Hive::CanonicalJSON.digest(policy_affecting_config(
+          settings,
+          model_routing: review_model_routing(config)
+        ))
+      end
+
+      REVIEW_MODEL_ROUTING_KEYS = %w[
+        plan_review plan_review_adversarial plan_review_verification
+      ].freeze
+
+      def review_model_routing(config)
+        return {} unless config.key?("plan_review") && config["models"].is_a?(Hash)
+
+        REVIEW_MODEL_ROUTING_KEYS.filter_map do |key|
+          [ key, config["models"][key] ] if config["models"].key?(key)
+        end.to_h
       end
     end
   end

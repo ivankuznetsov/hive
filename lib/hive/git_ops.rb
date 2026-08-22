@@ -25,6 +25,19 @@ module Hive
       run_git!("-C", @project_root, "rev-parse", "HEAD").strip
     end
 
+    # Read the full message for one already-resolved commit. Callers use this
+    # for controller-owned protocol trailers, so accept only an object ID:
+    # arbitrary revision syntax would turn a repository fact into an
+    # agent-controlled query language.
+    def commit_message(revision)
+      oid = revision.to_s
+      unless oid.match?(/\A[0-9a-f]{40,64}\z/i)
+        raise GitError, "invalid commit object ID #{revision.inspect}"
+      end
+
+      run_git!("-C", @project_root, "show", "-s", "--format=%B", oid, "--")
+    end
+
     # Reads one historical repository file without allowing revision syntax,
     # path traversal, or unbounded output across the Git process boundary.
     def read_blob_at(revision, path, max_bytes:)

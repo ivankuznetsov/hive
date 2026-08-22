@@ -67,6 +67,14 @@ whole-document/specialist leg. The adversarial leg uses a separate prompt and
 route. Neither reviewer can publish canonical `plan.md`; malformed or free-form
 output has no clearance authority.
 
+The committed capability manifest exposes `ce-doc-review` through every
+Compound Engineering host Hive can route here, including OpenCode's prepared
+plugin overlay. Capability probing uses the same project-prepared profile as
+the reviewer launch, so `agents.opencode.plugins` is visible even when the
+ambient OpenCode configuration does not contain the plugin. Provider selection
+therefore cannot pass configuration and runtime probing only to fail later
+because the review skill contract omitted or ignored that supported host.
+
 Reviewers run from that disposable checkout with search, shell, and network access so
 they can verify a plan against code, wiki context, history, and referenced
 contracts instead of checking only the document against itself. Codex and Grok
@@ -103,8 +111,10 @@ review. An unchanged failed capability probe is recorded as operational
 evidence; after three identical observations the review parks as
 `reviewer_unlaunchable` instead of spawning forever. A changed probe resets the
 series and permits a new reviewer launch. Review identity includes adapter,
-reviewer, and route configuration, while attempt timeout and retry tuning are
-operational and do not invalidate an otherwise identical verdict.
+reviewer, route configuration, and the effective `models.plan_review`,
+`models.plan_review_adversarial`, and `models.plan_review_verification`
+overrides. Unrelated stage-model changes plus attempt timeout and retry tuning
+remain operational and do not invalidate an otherwise identical verdict.
 
 ## Findings, revision, and verification
 
@@ -135,7 +145,18 @@ provider process. Hive's own durable session-start/session-finish writes to
 they cannot be misclassified as planner tampering, while provider writes to
 the same anchors still fail closed and are restored. A launcher that returns
 success without invoking the supplied custody is rejected. Hive then runs a
-disposition/regression verification leg. Each accepted finding
+disposition/regression verification leg. A custody-verified, bounded candidate
+ending in the exact `COMPLETE` marker remains authoritative completion evidence
+when a provider's terminal telemetry is malformed or truncated. Missing,
+non-terminal, oversized, invalid, or tampered candidates still fail closed.
+Planner-revision attempt receipts carry the result-adjudication contract
+version. When an exhausted transient series predates the running contract,
+Hive opens one new bounded attempt series automatically; a fixed harness can
+therefore recover without an operator manufacturing a linked plan generation.
+The task-action classifier exposes only this stale-contract blocked state as
+`plan_reviewing`, allowing the daemon to enter the recovery path while current
+blocked verdicts remain terminal and operator-owned.
+Each accepted finding
 requires explicit fingerprint-bound verification evidence; absence from a
 generic critique does not verify it. A
 remaining or newly discovered actionable finding is reopened in the same

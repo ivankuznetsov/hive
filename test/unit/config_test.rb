@@ -379,6 +379,56 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_accepts_a_dedicated_opencode_patrol_fix_identity
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          patrol_review:
+            model: gpt-5.6-sol
+            effort: xhigh
+        patrol:
+          enabled: true
+          agent: codex
+          fix:
+            agent: opencode
+            model: openrouter/stealth/ox-alpha
+            effort: high
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "codex", cfg.dig("patrol", "agent")
+      assert_equal "gpt-5.6-sol", cfg.dig("models", "patrol_review", "model")
+      assert_equal "opencode", cfg.dig("patrol", "fix", "agent")
+      assert_equal "openrouter/stealth/ox-alpha", cfg.dig("patrol", "fix", "model")
+      assert_equal "high", cfg.dig("patrol", "fix", "effort")
+    end
+  end
+
+  def test_load_rejects_malformed_or_unknown_patrol_fix_identity
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, "patrol:\n  fix: opencode\n")
+
+      malformed = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/patrol\.fix.*must be a Hash/, malformed.message)
+
+      File.write(config_path, "patrol:\n  fix:\n    agent: missing\n")
+      unknown = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/patrol\.fix\.agent.*not a registered AgentProfile/, unknown.message)
+
+      File.write(
+        config_path,
+        "patrol:\n  fix:\n    agent: opencode\n    model: ox-alpha\n    effort: high\n"
+      )
+      invalid = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/patrol\.fix identity.*exact provider\/model route/, invalid.message)
+    end
+  end
+
   def test_load_accepts_incompatible_coarse_field_fully_shadowed_for_reachable_calls
     with_tmp_dir do |dir|
       config_path = File.join(dir, ".hive-state", "config.yml")
@@ -922,6 +972,7 @@ class ConfigTest < Minitest::Test
       assert_equal 2, cfg.dig("patrol", "max_rework_cycles")
       assert_equal false, cfg.dig("patrol", "draft_prs")
       assert_equal true, cfg.dig("patrol", "review_prs")
+      assert_equal({}, cfg.dig("patrol", "fix"))
       assert_equal [], cfg.dig("patrol", "include")
       assert_includes cfg.dig("patrol", "exclude"), "node_modules"
       assert_nil cfg.dig("patrol", "commands", "test")

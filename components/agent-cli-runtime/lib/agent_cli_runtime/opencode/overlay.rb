@@ -66,12 +66,15 @@ module AgentCliRuntime
           preparation.credential_environment_keys
         )
         plugins = selected_plugins(source_config, preparation.plugins)
-        permission = permission_rules(preparation, roots, plugins: plugins)
 
         root = create_root!(preparation.invocation_root)
         cleanup = Cleanup.new(root)
         begin
           paths = create_directories(root)
+          permission = permission_rules(
+            preparation, roots, plugins: plugins,
+            runtime_write_roots: [ paths.fetch(:temporary) ]
+          )
           pure = preparation.pure && plugins.empty?
           config = generated_configuration(
             source_config, plugins, requested_route, permission
@@ -105,7 +108,7 @@ module AgentCliRuntime
                 staged_credential.last, requested_route.provider
               ),
             configured_variants:
-              configured_route_variants(source_config, requested_route)
+              configured_variants(source_config, requested_route)
           )
           probe_result = OpenCode::Probe.call!(probe_request, env: probe_env)
           invocation = compile_invocation(
@@ -177,17 +180,20 @@ module AgentCliRuntime
       end
       private_class_method :validate_provider!
 
-      def configured_route_variants(config, route)
+      # A selected OpenCode configuration may declare a custom model that is
+      # newer than the CLI's bundled provider catalog. With model fetching
+      # disabled for hermetic launches, that declaration is durable route
+      # evidence; the large `models --verbose` inventory is complementary,
+      # not its replacement.
+      def configured_variants(config, route)
         models = config.dig("provider", route.provider, "models")
-        return nil unless models.is_a?(Hash)
+        return nil unless models.is_a?(Hash) && models.key?(route.model)
 
-        definition = models[route.model]
-        return nil unless definition.is_a?(Hash)
-
-        variants = definition["variants"]
+        definition = models.fetch(route.model)
+        variants = definition.is_a?(Hash) ? definition["variants"] : nil
         variants.is_a?(Hash) ? variants.keys.sort.freeze : [].freeze
       end
-      private_class_method :configured_route_variants
+      private_class_method :configured_variants
 
       def validate_nonsecret!(value, key = nil)
         case value
@@ -258,7 +264,8 @@ module AgentCliRuntime
       end
       private_class_method :resolve_roots
 
-      def permission_rules(preparation, roots, plugins: preparation.plugins)
+      def permission_rules(preparation, roots, plugins: preparation.plugins,
+                           runtime_write_roots: [])
         mode = preparation.request.permission_mode
         if mode.nil?
           policy = preparation.permission_policy
@@ -275,7 +282,10 @@ module AgentCliRuntime
         end
 
         external = { "*" => "deny" }
-        (roots.fetch(:read) + roots.fetch(:write)).uniq.each do |root|
+        external_roots = [
+          *roots.fetch(:read), *roots.fetch(:write), *runtime_write_roots
+        ].uniq
+        external_roots.each do |root|
           external[root] = "allow"
           external["#{root}/**"] = "allow"
         end
@@ -307,7 +317,9 @@ module AgentCliRuntime
         # working directory is an implicit write root for workspace-write;
         # additional read roots remain explicitly denied unless the caller
         # also declared them writable.
-        writable_roots = [ roots.fetch(:working), *roots.fetch(:write) ].uniq
+        writable_roots = [
+          roots.fetch(:working), *roots.fetch(:write), *runtime_write_roots
+        ].uniq
         edit = { "*" => "deny" }
         allows = if preparation.edit_patterns.empty?
           writable_roots.flat_map do |root|
@@ -327,8 +339,12 @@ module AgentCliRuntime
             edit[pattern] = "deny"
           end
         end
+        bash = { "*" => "deny" }
+        preparation.bash_patterns.each { |pattern| bash[pattern] = "allow" }
         common.merge(
-          "edit" => edit, "bash" => "deny", "task" => "deny",
+          "edit" => edit,
+          "bash" => preparation.bash_patterns.empty? ? "deny" : bash,
+          "task" => "deny",
           "webfetch" => "deny", "websearch" => "deny",
           "question" => "deny"
         )

@@ -295,6 +295,14 @@ module AgentCliRuntime
       headless_flag: "run",
       output_format_flags: [ "--format", "json" ],
       version_flag: "--version",
+      # `opencode run` reads a non-TTY stdin stream as the initial message.
+      # Keep implementation-sized prompts out of one argv element: Linux
+      # rejects a single argument around 128 KiB with E2BIG even when the
+      # complete argv remains far below ARG_MAX.
+      prompt_style: :piped_stdin,
+      # Bun-backed OpenCode startup can exceed the generic 10-second bound
+      # under sustained host I/O even though the executable is healthy.
+      version_check_timeout_sec: 30,
       min_version: "1.18.16",
       model_argument_builder: ->(model) { opencode_model_arguments(model) },
       effort_argument_builder:

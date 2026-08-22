@@ -18,6 +18,62 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     assert_includes anchored, "plan.md"
   end
 
+  def test_hive_runner_capability_probe_uses_the_project_prepared_opencode_plugin
+    plugin = "compound-engineering@git+https://github.com/EveryInc/" \
+      "compound-engineering-plugin.git#compound-engineering-v3.21.4"
+    runner = Hive::PlanReview::Adapters::CeDocReview::HiveRunner.new(
+      task: nil,
+      cfg: { "agents" => { "opencode" => { "plugins" => [ plugin ] } } }
+    )
+
+    result = runner.capability_probe(
+      agent: "opencode", invocation: "/ce-doc-review", project_root: Dir.pwd
+    )
+    adapter = Hive::PlanReview::Adapters::CeDocReview.new(runner:)
+
+    assert_equal "present", result.fetch("status")
+    assert_includes result.fetch("diagnostic"), "prepared pinned plugin"
+    assert_equal runner, adapter.instance_variable_get(:@capability_probe).receiver
+  end
+
+  def test_hive_runner_capability_probe_degrades_profile_faults_to_unsupported
+    runner = Hive::PlanReview::Adapters::CeDocReview::HiveRunner.new(
+      task: nil, cfg: Hive::Config::DEFAULTS
+    )
+
+    result = with_replaced_singleton_method(
+      Hive::AgentProfiles, :lookup,
+      ->(*, **) { raise "prepared profile registry is unreachable" }
+    ) do
+      runner.capability_probe(
+        agent: "opencode", invocation: "/ce-doc-review", project_root: Dir.pwd
+      )
+    end
+
+    assert_equal "unsupported", result.fetch("status")
+    assert_includes result.fetch("diagnostic"), "prepared profile registry is unreachable"
+  end
+
+  def test_default_capability_probe_reports_a_present_skill
+    profile = Object.new
+    profile.define_singleton_method(:verify_skill) do |invocation, project_root:|
+      [ :present, "#{invocation} is available in #{project_root}" ]
+    end
+    adapter = Hive::PlanReview::Adapters::CeDocReview.new(runner: ->(**) { })
+
+    result = with_replaced_singleton_method(
+      Hive::AgentProfiles, :lookup, ->(*, **) { profile }
+    ) do
+      adapter.send(
+        :default_capability_probe,
+        agent: "codex", invocation: "/ce-doc-review", project_root: Dir.pwd
+      )
+    end
+
+    assert_equal "present", result.fetch("status")
+    assert_includes result.fetch("diagnostic"), "/ce-doc-review is available"
+  end
+
   def test_success_uses_disposable_plan_and_validates_machine_output
     with_request do |request, plan_path|
       original = File.binread(plan_path)

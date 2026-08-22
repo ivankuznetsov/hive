@@ -327,6 +327,33 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  def test_commit_message_reads_full_message_for_exact_object_id
+    with_tmp_git_repo do |dir|
+      File.write(File.join(dir, "attested.txt"), "done\n")
+      run!("git", "-C", dir, "add", "attested.txt")
+      run!(
+        "git", "-C", dir, "commit", "-m", "finish", "-m",
+        "Hive-Execute-Complete: #{'a' * 64}", "--quiet"
+      )
+      ops = Hive::GitOps.new(dir)
+
+      message = ops.commit_message(ops.head_sha)
+
+      assert_includes message, "finish"
+      assert_includes message, "Hive-Execute-Complete: #{'a' * 64}"
+    end
+  end
+
+  def test_commit_message_rejects_revision_syntax
+    with_tmp_git_repo do |dir|
+      error = assert_raises(Hive::GitError) do
+        Hive::GitOps.new(dir).commit_message("HEAD^{commit}")
+      end
+
+      assert_includes error.message, "invalid commit object ID"
+    end
+  end
+
   def test_detached_head_returns_true_on_detached_head
     with_tmp_git_repo do |dir|
       sha = `git -C #{dir} rev-parse HEAD`.strip

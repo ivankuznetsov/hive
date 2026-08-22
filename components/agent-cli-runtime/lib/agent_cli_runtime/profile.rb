@@ -28,7 +28,8 @@ module AgentCliRuntime
                 :cli_capabilities, :declared_capability_support,
                 :credential_environment_keys, :configuration_environment_key,
                 :default_configuration_directory,
-                :permission_policy_required, :result_parser
+                :permission_policy_required, :result_parser,
+                :version_check_timeout_sec
 
     def initialize(name:, bin_default:, headless_flag:, version_flag:,
                    env_bin_override_keys: [], permission_skip_flag: nil,
@@ -42,7 +43,8 @@ module AgentCliRuntime
                    cli_capabilities: {}, raw_cli_arguments_supported: false,
                    credential_environment_keys: [], configuration_environment_key: nil,
                    default_configuration_directory: nil,
-                   permission_policy_required: false, result_parser: nil)
+                   permission_policy_required: false, result_parser: nil,
+                   version_check_timeout_sec: CAPTURE_TIMEOUT_SECONDS)
       normalized_prompt_style = prompt_style.to_sym
       unless PROMPT_STYLES.include?(normalized_prompt_style)
         raise ArgumentError,
@@ -84,6 +86,10 @@ module AgentCliRuntime
       )
       @permission_policy_required = permission_policy_required == true
       @result_parser = result_parser
+      @version_check_timeout_sec = Float(version_check_timeout_sec)
+      unless @version_check_timeout_sec.positive?
+        raise ArgumentError, "version_check_timeout_sec must be positive"
+      end
       @declared_capability_support = build_declared_capability_support
       freeze
     end
@@ -170,7 +176,7 @@ module AgentCliRuntime
     def check_version!(env: ENV)
       executable = bin(env:)
       out, _err, status = bounded_capture3(
-        executable, @version_flag, timeout_sec: CAPTURE_TIMEOUT_SECONDS, env: env
+        executable, @version_flag, timeout_sec: @version_check_timeout_sec, env: env
       )
       unless status.success?
         raise BinaryUnavailable,
@@ -199,7 +205,7 @@ module AgentCliRuntime
             "#{@name} binary not runnable: #{executable} (#{e.class.name.split('::').last})"
     rescue Timeout::Error
       raise BinaryUnavailable,
-            "#{@name} version check timed out after #{CAPTURE_TIMEOUT_SECONDS}s: #{executable}"
+            "#{@name} version check timed out after #{@version_check_timeout_sec}s: #{executable}"
     end
 
     def auth_configuration(home: nil, env: ENV)

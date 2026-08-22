@@ -35,14 +35,15 @@ module Hive
     module Execute
       module_function
 
-      # 4-execute owns plan.md and worktree.yml; task.md is owned but
-      # the implementer agent writes the AGENT_WORKING marker into it,
-      # so it's deliberately NOT in the SHA-protected set here.
+      # The controller writes every execute marker before/after the custody
+      # window. Implementers never own task.md, so protect it alongside the
+      # reviewed plan and worktree pointer.
       PROTECTED_FILES = %w[
-        plan.md worktree.yml task-journal.jsonl task-projection.json
+        task.md plan.md worktree.yml task-journal.jsonl task-projection.json
         task-projection.checkpoint.json
       ].freeze
       CONTROLLER_RECEIPT_DIRECTORIES = %w[context-receipts activity-operations].freeze
+      COMPLETION_TRAILER = "Hive-Execute-Complete".freeze
       UNRESOLVED_IDENTITY = Object.new.freeze
 
       def run!(task, cfg)
@@ -187,7 +188,8 @@ module Hive
           task, cfg, "execute", impl_result
         )
 
-        if agent_failed?(impl_result)
+        completion_candidate = opencode_commit_completion_candidate?(impl_result)
+        if agent_failed?(impl_result) && !completion_candidate
           return mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
         end
 
@@ -222,6 +224,14 @@ module Hive
           !new_commit || worktree_git.ancestor?(baseline_head, head_after)
         rescue Hive::GitError
           return worktree_git_failed(task, cfg, worktree_path, baseline_head)
+        end
+
+        commit_recovered = completion_candidate &&
+                           current_branch == expected_branch &&
+                           !dirty_worktree && new_commit && ancestor_ok &&
+                           completion_attested?(worktree_git, head_after, task)
+        if agent_failed?(impl_result) && !commit_recovered
+          return mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
         end
 
         if new_commit && !ancestor_ok
@@ -378,6 +388,30 @@ module Hive
         %i[error timeout].include?(result[:status])
       end
 
+      # OpenCode may finish a successful tool-driven turn with no terminal
+      # assistant text. The runtime correctly reports that protocol defect as
+      # malformed output. A clean descendant commit is only a checkpoint,
+      # though: a multi-unit implementer can commit U1 and continue. The
+      # caller therefore also requires the exact plan-bound completion trailer
+      # that the execute prompt reserves for the final commit.
+      def opencode_commit_completion_candidate?(result)
+        result &&
+          result[:implementation_provider].to_s == "opencode" &&
+          result[:exit_code] == 0 &&
+          result[:normalized_outcome_kind] == :malformed_output
+      end
+
+      def completion_attested?(worktree_git, head, task)
+        expected = completion_trailer(File.binread(File.join(task.folder, "plan.md")))
+        worktree_git.commit_message(head).lines.any? { |line| line.strip == expected }
+      rescue Hive::GitError, SystemCallError
+        false
+      end
+
+      def completion_trailer(plan_bytes)
+        "#{COMPLETION_TRAILER}: #{Digest::SHA256.hexdigest(plan_bytes)}"
+      end
+
       def mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
         if implementer_hit_limit?(impl_result)
           return apply_execute_outcome(
@@ -484,7 +518,8 @@ module Hive
 
       def spawn_implementation(task, cfg, worktree_path, identity: nil,
                                agent_custody: nil)
-        plan_text = File.read(File.join(task.folder, "plan.md"))
+        plan_path = File.join(task.folder, "plan.md")
+        plan_text = File.read(plan_path)
         prompt = Hive::Stages::Base.render(
           "execute_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
@@ -492,6 +527,7 @@ module Hive
             worktree_path: worktree_path,
             task_folder: task.folder,
             plan_text: plan_text,
+            completion_trailer: completion_trailer(File.binread(plan_path)),
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
@@ -505,6 +541,7 @@ module Hive
           cfg, "execute", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
         )
+        scope = restrict_opencode_task_state_access(scope, task, profile)
         launch_arguments = Hive::Stages::Base.implementation_launch_arguments(
           identity, profile
         )
@@ -565,6 +602,27 @@ module Hive
         merged = result&.merge(implementation_provider: profile.name.to_s)
         merged
       end
+
+      # OpenCode receives the reviewed plan in its prompt and its working
+      # directory is the complete repository worktree. The generic stage scope
+      # also exposes task.folder, which let a file-tool call replace
+      # controller-owned task.md and its live ownership marker. Execute output
+      # and the terminal marker are appended by the controller after the spawn,
+      # so OpenCode needs no task-state file-tool access.
+      def restrict_opencode_task_state_access(scope, task, profile)
+        return scope unless profile.name == :opencode
+
+        task_root = File.expand_path(task.folder)
+        without_task_root = lambda do |roots|
+          Array(roots).reject { |root| File.expand_path(root) == task_root }
+        end
+        scope.merge(
+          add_dirs: without_task_root.call(scope[:add_dirs]),
+          additional_read_roots: without_task_root.call(scope[:additional_read_roots]),
+          additional_write_roots: without_task_root.call(scope[:additional_write_roots])
+        )
+      end
+      private_class_method :restrict_opencode_task_state_access
 
       def record_tamper(task, tampered, who:, restored: false, restore_error: nil)
         Hive::Markers.set(task.state_file, :error,

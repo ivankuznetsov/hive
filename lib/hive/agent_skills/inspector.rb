@@ -634,10 +634,16 @@ module Hive
       end
 
       def expected_resolution_path?(path, target, native)
+        native_spec = @manifest.package(target.package_id).native_for(target.agent)
+        if target.agent == "opencode" &&
+           path == "configured:#{native_spec.package}" &&
+           native.dig("package", "id") == native_spec.package
+          return true
+        end
+
         roots = []
         install_path = native.dig("package", "install_path")
         roots << install_path if install_path
-        native_spec = @manifest.package(target.package_id).native_for(target.agent)
         config_root = config_root_for(native_spec)
         if native_spec.marketplace
           plugin = native_spec.package.split("@", 2).first

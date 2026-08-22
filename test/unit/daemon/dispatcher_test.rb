@@ -1593,7 +1593,43 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "operator", disposition.fetch(:owner)
     assert_equal true, disposition.fetch(:retry_due)
     assert_equal false, disposition.fetch(:retry_safe)
-    assert_includes disposition.fetch(:safety_reason), "answers present"
+    assert_includes disposition.fetch(:safety_reason), "unbound brainstorm answers present"
+  end
+
+  def test_error_retry_keeps_controller_bound_brainstorm_answers_scheduler_owned
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
+    folder = make_existing_row_folder(
+      project: "p1", stage: "2-brainstorm", slug: "bound-answers"
+    )
+    state_file = File.join(folder, "brainstorm.md")
+    File.write(state_file, <<~MD)
+      ## Round 1
+      ### Q1. Continue?
+      ### A1. <!-- hive-answer:v1 -->
+      Yes; resume the same round.
+    MD
+    observed = row(
+      slug: "bound-answers",
+      stage: "2-brainstorm",
+      marker: "error",
+      action: "error",
+      folder: folder,
+      state_file: state_file,
+      marker_attrs: { "reason" => "agent_orphaned" },
+      mtime: T0 - Hive::AgentLimit.retry_cooldown_sec - 1
+    )
+
+    dispatcher.send(:handle_row, observed, now: T0)
+
+    assert_empty supervisor.spawned
+    disposition = snapshot.calls.last.last
+    assert_equal :retry_pending, disposition.fetch(:decision)
+    assert_equal "scheduler", disposition.fetch(:owner)
+    assert_equal true, disposition.fetch(:retry_due)
+    assert_equal true, disposition.fetch(:retry_safe)
+    assert_includes disposition.fetch(:safety_reason),
+                    "controller-bound brainstorm answers"
   end
 
   def test_unknown_durable_admission_results_defer_safely

@@ -23,7 +23,8 @@ class ArtifactsBrowserGatewayTest < Minitest::Test
       end
       gateway = Hive::Artifacts::BrowserGateway.new(
         environment: {}, argv_prefix: %w[agent-browser --session evidence],
-        writable_root: root, origin: "http://capture.invalid", runner: runner
+        writable_root: root, origin: "http://capture.invalid", runner: runner,
+        video_duration_probe: ->(_) { 1.0 }
       ).start!
 
       response = gateway.call([ "snapshot", "-i" ])
@@ -46,6 +47,42 @@ class ArtifactsBrowserGatewayTest < Minitest::Test
       private_root = gateway&.instance_variable_get(:@private_root)
       gateway&.close
       refute File.exist?(private_root) if private_root
+    end
+  end
+
+  def test_overlong_recording_is_rejected_early_and_can_be_replaced
+    Dir.mktmpdir("hive-browser-gateway-duration") do |root|
+      recording = nil
+      runner = lambda do |_environment, argv|
+        if argv.last(3).first(2) == %w[record start]
+          recording = argv[-1]
+          [ "recording\n", "", 0 ]
+        elsif argv.last(2) == %w[record stop]
+          File.binwrite(recording, "webm-evidence")
+          [ "saved #{recording}\n", "", 0 ]
+        else
+          [ "", "", 0 ]
+        end
+      end
+      duration = 31.0
+      gateway = Hive::Artifacts::BrowserGateway.new(
+        environment: {}, argv_prefix: [ "agent-browser" ], writable_root: root,
+        origin: "http://capture.invalid", runner: runner,
+        video_duration_probe: ->(_) { duration }
+      ).start!
+
+      assert gateway.call(%w[record start long.webm]).fetch("ok")
+      rejected = gateway.call(%w[record stop])
+      refute rejected.fetch("ok")
+      assert_match(/exceeds 30 seconds/, rejected.fetch("stderr"))
+      refute_path_exists File.join(root, "long.webm")
+
+      duration = 5.0
+      assert gateway.call(%w[record start short.webm]).fetch("ok")
+      assert gateway.call(%w[record stop]).fetch("ok")
+      assert_equal "webm-evidence", File.binread(File.join(root, "short.webm"))
+    ensure
+      gateway&.close
     end
   end
 

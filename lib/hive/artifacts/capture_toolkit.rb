@@ -171,7 +171,8 @@ module Hive
           @browser_gateway = Hive::Artifacts::BrowserGateway.new(
             environment: browser_environment, argv_prefix: browser_argv,
             writable_root: writable_root, origin: @capture_proxy.origin,
-            on_publish: method(:record_capture!)
+            on_publish: method(:record_capture!),
+            ffprobe_path: media.fetch("ffprobe")
           ).start!
           @browser_command_runner.call(
             browser_environment, browser_argv + [ "open", @capture_proxy.origin ]
@@ -433,7 +434,7 @@ module Hive
             "open <issued-origin-url>", "snapshot [-i|-c]",
             "click/fill/type/select/wait/get/is/find",
             "screenshot <name>.png [--full|--annotate]",
-            "record start <name>.webm", "record stop"
+            "record start <name>.webm", "record stop within 30 seconds"
           ],
           "media_names" => [ "<name>.png", "<name>.webm" ],
           "origin" => @capture_proxy.origin,

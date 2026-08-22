@@ -168,6 +168,106 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_recover_committed_residue_rejects_an_execute_stage_mismatch
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      task.stage_index = 6
+      task.stage_name = "review"
+
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Stages::Execute.recover_committed_residue!(task, {}, File.join(dir, "worktree"))
+      end
+
+      assert_match(/requires a 4-execute task/, error.message)
+    end
+  end
+
+  def test_recover_committed_residue_rejects_invalid_clean_commit_shapes
+    cases = [
+      [ "wrong", "new", true, /branch "wrong"/ ],
+      [ "demo-260522-aaaa", "base", true, /no commit beyond execute_base_head/ ],
+      [ "demo-260522-aaaa", "new", false, /does not descend/ ]
+    ]
+
+    cases.each do |branch, head, ancestor, message|
+      with_tmp_dir do |dir|
+        task = build_task(dir)
+        write_pointer(
+          task,
+          "branch" => task.slug,
+          "execute_base_head" => "base"
+        )
+        git = FakeGit.new(
+          head: head, branch: branch, dirty: false, ancestor_result: ancestor
+        )
+
+        error = with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+          assert_raises(Hive::WorktreeError) do
+            Hive::Stages::Execute.recover_committed_residue!(
+              task, {}, File.join(dir, "worktree")
+            )
+          end
+        end
+
+        assert_match message, error.message
+      end
+    end
+  end
+
+  def test_recover_committed_residue_requires_a_terminal_execute_outcome
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_pointer(
+        task,
+        "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "new", branch: task.slug, dirty: false, ancestor_result: true
+      )
+
+      error = with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :apply_execute_outcome,
+          ->(*, **) { { status: :execute_waiting } }
+        ) do
+          assert_raises(Hive::WorktreeError) do
+            Hive::Stages::Execute.recover_committed_residue!(
+              task, {}, File.join(dir, "worktree")
+            )
+          end
+        end
+      end
+
+      assert_match(/did not satisfy the execute completion boundary/, error.message)
+    end
+  end
+
+  def test_recover_committed_residue_translates_git_validation_failures
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_pointer(
+        task,
+        "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "new", branch: task.slug, dirty: false,
+        ancestor_result: true, raise_ancestor: true
+      )
+
+      error = with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        assert_raises(Hive::WorktreeError) do
+          Hive::Stages::Execute.recover_committed_residue!(
+            task, {}, File.join(dir, "worktree")
+          )
+        end
+      end
+
+      assert_match(/git validation failed: ancestor failed/, error.message)
+    end
+  end
+
   def test_run_exits_when_worktree_pointer_path_is_missing
     with_tmp_dir do |dir|
       task = build_task(dir)

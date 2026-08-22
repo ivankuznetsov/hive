@@ -79,6 +79,29 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_oversized_sanitized_export_is_rejected_with_a_bounded_diagnostic
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-oversized-260822-aaaa")
+      result = with_runtime_constant(
+        AgentCliRuntime::OpenCode::ResultParser, :MAX_EXPORT_BYTES, 32
+      ) do
+        with_agent_constant(:OPENCODE_INSPECTION_RETRY_DELAY_SECONDS, 0) do
+          with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+            build_agent(
+              task, fixture,
+              invocation_root: File.join(fixture.fetch(:dir), "invocation-oversized")
+            ).run!
+          end
+        end
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal :malformed_output, result.fetch(:normalized_outcome_kind)
+      assert_match(/sanitized export exceeded the 32-byte inspection limit/,
+                   result.fetch(:inspection_diagnostic))
+    end
+  end
+
   def test_nonzero_malformed_timeout_and_inspection_failure_skip_or_bound_inspection
     {
       auth_failure: [ :authentication_failure, 0 ],
@@ -625,13 +648,16 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
   end
 
   def with_agent_constant(name, replacement)
-    original = Hive::Agent.const_get(name)
-    Hive::Agent.send(:remove_const, name)
-    Hive::Agent.const_set(name, replacement)
+    with_runtime_constant(Hive::Agent, name, replacement) { yield }
+  end
+
+  def with_runtime_constant(owner, name, replacement)
+    original = owner.const_get(name)
+    owner.send(:remove_const, name)
+    owner.const_set(name, replacement)
     yield
   ensure
-    Hive::Agent.send(:remove_const, name) if
-      Hive::Agent.const_defined?(name, false)
-    Hive::Agent.const_set(name, original)
+    owner.send(:remove_const, name) if owner.const_defined?(name, false)
+    owner.const_set(name, original)
   end
 end

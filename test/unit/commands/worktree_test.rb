@@ -180,6 +180,21 @@ class HiveCommandsWorktreeTest < Minitest::Test
     assert_equal :execute_complete, Hive::Markers.current(@task.state_file).name
   end
 
+  def test_complete_execute_requires_the_dirty_worktree_error_marker
+    @task.stage_index = 4
+    @task.stage_name = "execute"
+    Hive::Markers.set(@task.state_file, :error, reason: "ensure_clean_on_exit_failed")
+    FileUtils.mkdir_p(File.join(@worktree, "wiki"))
+    File.write(File.join(@worktree, "wiki", "residue.md"), "residue\n")
+
+    out, error = run_command_error("commit-residue", complete_execute: true)
+
+    payload = JSON.parse(out)
+    assert_instance_of Hive::WorktreeError, error
+    assert_equal "worktree_error", payload.fetch("error_kind")
+    assert_match(/requires ERROR reason=dirty_worktree/, payload.fetch("message"))
+  end
+
   def test_complete_execute_recovery_preserves_out_of_scope_implementation_paths
     Hive::Markers.set(
       @task.state_file, :error,

@@ -12,8 +12,8 @@ write their own native findings/jobs and reserve accepted work directly in the
 shared `patrol-fix` `AdmissionStore`. They do not fix code, open issues, or
 publish pull requests. There is no Patrol module cutover, shadow comparison,
 occurrence journal, effect delivery layer, or runtime migration subsystem.
-Historical ordinary findings can be imported once with
-`script/migrate_patrol_findings.rb`.
+Historical ordinary findings and accepted Architecture Patrol dispositions can
+be imported once with `script/migrate_patrol_findings.rb`.
 
 ## Runtime shape
 
@@ -123,6 +123,17 @@ Patrol Fix owns the repair workflow:
 4. Review records an independent route decision.
 5. Publish uses `Hive::GithubPublication`.
 
+`patrol.fix` is the one coherent identity for every unified Patrol Fix stage;
+ordinary and Architecture Patrol discovery continue to use their own agents.
+For example, `agent: opencode`, `model: openrouter/stealth/ox-alpha`, and
+`effort: high` select OpenCode only for repair work. The controller supplies
+the bounded OpenCode permission policy directly. Inbox/review may write only
+their exact report and receive no shell permission. Fix may edit the owned
+worktree and its exact report and receives the explicit `Bash(*)` grant needed
+to reproduce, test, and commit the repair. This full-shell grant has the
+authority of the Hive OS user; artifact custody and Git validation remain the
+outcome boundary.
+
 `Hive::GithubPublication` is the single PR-publication mechanism used by
 Patrol Fix and the normal coding open-PR path. It owns durable push/create
 intent, remote reconciliation, expected-absence leases, and exact hosted
@@ -133,15 +144,21 @@ GitHub issue.
 ## One-time historical import
 
 `script/migrate_patrol_findings.rb [PROJECT_ROOT] [--dry-run]` reads active
-ordinary findings from the local native StateStore and creates ordinary
-`patrol-fix` tasks through `TaskCapture`. It is the only Patrol migration
-path. It has no daemon hook, timer, module owner, cutover state, rollback,
-qualification report, or compatibility reader.
+ordinary findings from the local native StateStore and accepted historical
+Architecture Patrol `fix` and `discuss` dispositions from JobStore. Ordinary
+findings become `patrol-fix` tasks through `TaskCapture`; Architecture Patrol
+dispositions are converted by the current source adapter and reserved in the
+shared `AdmissionStore`. Dismissals and historical action records are ignored.
+It is the only Patrol migration path. It has no daemon hook, timer, module
+owner, cutover state, rollback, qualification report, or compatibility reader.
 
 The importer is idempotent by
 `patrol-fix:legacy-finding:<finding-id>`. Matching existing tasks are reused;
 conflicting matching metadata fails closed. Unrelated malformed task metadata
-is ignored.
+is ignored. Architecture reservations are idempotent by occurrence identity and
+source digest, with conflicts rejected before mutation. Legacy ordinary
+findings without a target revision use the current default-branch revision;
+secret-like source text is redacted before task bytes are written.
 
 ## Read models
 

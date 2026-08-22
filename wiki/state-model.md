@@ -659,11 +659,14 @@ publication-summary, and discovery-allowance projections are not persisted.
 
 Patrol Fix has no runtime migration state, source epoch, cutover gate, or
 rollback path. New accepted findings reserve directly in the project
-`AdmissionStore`. Historical ordinary findings can be imported once with
-`script/migrate_patrol_findings.rb`; the script creates normal `patrol-fix`
-tasks through `TaskCapture`, preserves the source finding JSON, and is
-deterministically idempotent. It scans strict task metadata only for matching
-Patrol Fix idempotency keys, so unrelated malformed task metadata does not block
+`AdmissionStore`. Historical active ordinary findings and accepted Architecture
+Patrol `fix`/`discuss` dispositions can be imported once with
+`script/migrate_patrol_findings.rb`. The script creates normal `patrol-fix`
+tasks through `TaskCapture` and reserves architecture snapshots through the
+current source adapter. It is deterministically idempotent and preflights
+conflicting tasks or admissions before mutation. Missing legacy target
+revisions bind to the current default branch, and secret-like finding text is
+redacted before persistence. Unrelated malformed task metadata does not block
 the one-time local import.
 
 ## Patrol discovery state

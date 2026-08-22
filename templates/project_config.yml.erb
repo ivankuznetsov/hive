@@ -410,6 +410,15 @@ patrol:
   # poll_interval_sec / enabled keys can still override the mode.
   mode: <%= patrol_mode.inspect %>
   agent: claude
+  # Optional unified repair identity. Discovery keeps using patrol.agent.
+  # Keep the exact OpenCode provider/model route and reasoning tier together.
+  # If models.patrol is configured above, narrow it to models.patrol_review
+  # before selecting a different fix provider; a coarse patrol route applies
+  # to both identities by design.
+  # fix:
+  #   agent: opencode
+  #   model: openrouter/stealth/ox-alpha
+  #   effort: high
   min_confidence_to_fix: medium
   # Findings are ranked globally by evidence-backed delivery value. Only
   # scores at or above this 0-100 gate are eligible for automatic fixing.

@@ -74,6 +74,12 @@ issue filer, branch creator, PR opener, or review handoff. Historical action
 fields remain readable in old v4 job records and bounded query output, but new
 jobs always emit `actions: []` and no component can execute those records.
 
+Historical accepted `fix` and `discuss` dispositions can be reserved once with
+`script/migrate_patrol_findings.rb [PROJECT_ROOT] [--dry-run]`. The importer
+uses the current source adapter, ignores dismissals and historical action
+records, preflights occurrence conflicts, and is idempotent against existing
+Patrol Fix admissions. It does not revive an Architecture Patrol action lane.
+
 ## Output
 
 Discovery emits `hive-refactor-patrol.v4`, including the immutable source,

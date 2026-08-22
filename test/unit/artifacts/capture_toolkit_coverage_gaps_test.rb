@@ -465,6 +465,52 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
     end
   end
 
+  # The managed project runtime root is created for Pi producers and removed on
+  # teardown. Both halves are private lifecycle seams with no public caller a
+  # unit test can reach, so they are driven directly.
+  def test_project_runtime_root_is_owner_checked_across_its_lifetime
+    toolkit = Toolkit.new
+    toolkit.send(:prepare_project_runtime_root)
+    root = toolkit.instance_variable_get(:@project_runtime_root)
+
+    assert_path_exists root
+    assert_equal 0o700, File.stat(root).mode & 0o7777
+
+    toolkit.send(:remove_project_runtime_root)
+
+    refute_path_exists root
+    assert_nil toolkit.instance_variable_get(:@project_runtime_root)
+  end
+
+  def test_project_runtime_root_teardown_refuses_a_substituted_root
+    Dir.mktmpdir("hive-project-runtime-swap") do |root|
+      target = File.join(root, "target")
+      FileUtils.mkdir_p(target)
+      swapped = File.join(root, "swapped")
+      File.symlink(target, swapped)
+      toolkit = Toolkit.new
+      toolkit.instance_variable_set(:@project_runtime_root, swapped)
+
+      error = assert_raises(Hive::ConfigError) do
+        toolkit.send(:remove_project_runtime_root)
+      end
+
+      assert_match(/runtime ownership changed/, error.message)
+      assert_path_exists target
+    end
+  end
+
+  def test_project_runtime_root_teardown_tolerates_an_already_removed_root
+    toolkit = Toolkit.new
+    toolkit.instance_variable_set(
+      :@project_runtime_root, File.join(Dir.tmpdir, "hive-project-runtime-gone-#{Process.pid}")
+    )
+
+    assert_nil toolkit.send(:remove_project_runtime_root)
+    assert_nil toolkit.instance_variable_get(:@project_runtime_root)
+  end
+
+
   private
 
   def browser_entry

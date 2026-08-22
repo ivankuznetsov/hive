@@ -743,6 +743,44 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_producer_output_with_extra_top_level_keys_gets_one_bounded_repair
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      writable_root = File.join(task.folder, "evidence")
+      prompts = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        output = { "evidence" => [] }
+        output["explanation"] = "captured successfully" if prompts.length == 1
+        {
+          actor: { "context_id" => "producer-#{prompts.length}", "agent" => "pi" },
+          output: output
+        }
+      end
+
+      producer, retained = Hive::Stages::Artifacts.run_producer!(
+        task: task, cfg: {}, identity: outcome_identity,
+        prompt_values: {
+          requirement_json: "{}", prior_evidence_json: "[]", revision_json: "[]",
+          capture_tools_json: "{}", writable_root: writable_root,
+          writable_relative_root: "evidence"
+        },
+        writable_root: writable_root, launch_environment: nil,
+        producer_add_dirs: [], producer_permission_arguments: nil,
+        producer_runtime_policy: nil
+      ) { |candidate, _actor| candidate }
+
+      assert_equal "producer-2", producer.dig(:actor, "context_id")
+      assert_empty retained
+      assert_equal 2, prompts.length
+      assert_includes prompts.last, "producer output must contain only evidence"
+      assert_includes prompts.last, '"explanation": "captured successfully"'
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
   def test_overlong_verdict_reason_gets_one_repair_round_before_the_append
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)

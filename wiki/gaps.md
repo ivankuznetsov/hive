@@ -68,6 +68,14 @@ operator opt-in. Until that gate is supplied, real model transport and live
 provider permission behavior remain unverified; an offline inventory check is
 not equivalent to a model request.
 
+Invocation-token custody now cleans ordinary inherited descendants even after
+`setsid` and reparenting, which is the leak observed during live Webmail
+dogfood. It is lifecycle cleanup, not hostile-process containment: a command
+that deliberately erases the custody environment or delegates a service to an
+external manager without forwarding it can evade the inventory. A dedicated
+cgroup/namespace owner that preserves OpenCode's required repository writes,
+network, and cross-platform support remains a deeper isolation follow-up.
+
 ## Parallel Hive web CI exact-head evidence (2026-08-14)
 
 The serial Hive web job took 441 seconds in exact-head run `31818138021`, led

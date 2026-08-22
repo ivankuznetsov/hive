@@ -67,6 +67,15 @@ process supervision in Hive. `Hive::Agent` prepares a private overlay, starts
 exactly one `opencode run` process with a selected child environment and the
 prepared prompt on owner-private file-backed stdin, captures bounded stdout
 and stderr, and records timeout or cancellation before parsing.
+The selected environment also contains one random invocation-custody ID.
+After the run exits, Hive inventories only processes carrying that exact ID
+and terminates them by PID plus start identity through bounded TERM/KILL
+rounds. This closes the process-group escape where an OpenCode shell command
+calls `setsid`, reparents a development server to the user service manager,
+and otherwise leaves it listening after the attempt ends; another invocation's
+processes do not match and remain untouched. Linux uses exact NUL-delimited
+`/proc/<pid>/environ` entries; platforms without procfs use the current user's
+bounded `ps xeww` inventory.
 After a zero exit it may start one non-model `opencode export --sanitize`
 inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that
@@ -75,8 +84,11 @@ inspection as appropriate.
 Cleanup runs from the process owner's `ensure` path after preparation, spawn,
 inspection, or normalization failures. Only the prepared invocation's owned
 paths are eligible for removal; worktrees, task folders, selected config, and
-credential sources remain caller-owned. The legacy Claude, Codex, Pi, and Grok
-spawn path and mutable result shape are unchanged.
+credential sources remain caller-owned. A descendant that remains alive after
+custody teardown makes an otherwise successful run fail as
+`process_cleanup_failed`; chat completion cannot override leaked process
+ownership. The legacy Claude, Codex, Pi, and Grok spawn path and mutable result
+shape are unchanged.
 
 Implementation-owning stages journal OpenCode's observed route and nullable
 usage only after their artifact-firewall snapshot validates. This keeps

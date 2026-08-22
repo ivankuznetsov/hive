@@ -4,6 +4,7 @@ require "hive/config"
 require "hive/git_ops"
 require "hive/secret_patterns"
 require "hive/secret_scanner"
+require "hive/stages/review/guardrail_waivers"
 
 module Hive
   module Stages
@@ -167,7 +168,7 @@ module Hive
       # index snapshot before committing so a worktree symlink cannot smuggle
       # an external target into history and newly added credential material
       # cannot pass merely because its filename is allowed.
-      def auto_commit_safety_violations(worktree_path, paths)
+      def auto_commit_safety_violations(worktree_path, paths, cfg: nil)
         entries = staged_index_entries(worktree_path, paths)
         return entries unless entries[:success]
 
@@ -195,9 +196,10 @@ module Hive
           )
         end
 
-        return { success: true, violations: violations.uniq } unless violations.empty?
-
-        secrets = staged_secret_violations(worktree_path, entries[:entries], head_objects[:object_ids])
+        secrets = staged_secret_violations(
+          worktree_path, entries[:entries], head_objects[:object_ids],
+          waivers: Hive::Stages::Review::GuardrailWaivers.resolve(cfg || {})
+        )
         return secrets unless secrets[:success]
 
         { success: true, violations: (violations + secrets[:violations]).uniq }
@@ -251,10 +253,10 @@ module Hive
       end
 
       # Scan exact index blobs, including binary content, without a size cap.
-      def staged_secret_violations(worktree_path, entries, head_objects)
+      def staged_secret_violations(worktree_path, entries, head_objects, waivers: Set.new)
         violations = Hive::SecretScanner.staged_findings(
           worktree_path, entries: entries, head_objects: head_objects
-        ).map do |hit|
+        ).reject { |hit| waivers.include?([ "secrets_pattern_match.#{hit.fetch(:name)}", hit.fetch(:sha256) ]) }.map do |hit|
           AutoCommitSafetyViolation.new(
             path: diagnostic_path(hit.fetch(:path)), recovery_path: hit.fetch(:path),
             reason: "staged content matches secret detectors: #{hit.fetch(:name)}"

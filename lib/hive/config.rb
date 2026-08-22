@@ -271,13 +271,22 @@ module Hive
                 "docs/**/*",
                 "wiki/**",
                 "wiki/**/*",
+                # Framework configuration and database definitions are
+                # executable product source, not controller configuration.
+                # Review findings routinely require routes, initializers,
+                # environment policy, migrations, and schema updates. Keep
+                # credential-bearing config paths denied below and let the
+                # post-fix guardrail inspect the resulting code diff.
+                "config/**",
+                "config/**/*",
+                "db/**",
+                "db/**/*",
                 # Nested project roots (monorepo layout): a Rails/JS app under
                 # `web/` keeps its source in `web/app`, `web/lib`, `web/test`,
                 # etc. Mirror the top-level source/test/docs categories under
                 # `web/` so the fix-phase auto-commit can land legitimate web
-                # changes. Sensitive nested dirs (`web/config`, `web/bin`,
-                # `web/db`) are intentionally NOT listed, so they stay outside
-                # the allowlist exactly like their top-level counterparts.
+                # changes. Nested framework config/database roots remain an
+                # explicit project override rather than a recursive wildcard.
                 "web/app/**",
                 "web/app/**/*",
                 "web/lib/**",
@@ -316,8 +325,9 @@ module Hive
                 ".git/**/*",
                 "bin/**",
                 "bin/**/*",
-                "config/**",
-                "config/**/*",
+                "config/master.key",
+                "config/credentials/**",
+                "config/credentials/**/*",
                 ".github/**",
                 ".github/**/*",
                 ".gitlab-ci.yml",
@@ -336,6 +346,8 @@ module Hive
                 "**/.env.*",
                 "**/secrets.yml",
                 "**/secrets.yaml",
+                "**/secret.yml",
+                "**/secret.yaml",
                 "**/credentials.yml",
                 "**/credentials.yaml",
                 "**/credentials.yml.enc",

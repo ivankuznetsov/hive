@@ -521,6 +521,22 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_long_session_export_larger_than_the_old_four_megabyte_cap_completes
+    with_fixture(mode: :large_export) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "large-export-260822-aaaa")
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invocation-large-export")
+        ).run!
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :completed, result.fetch(:normalized_outcome_kind)
+      assert_equal ROUTE, result.fetch(:actual_opencode_route)
+    end
+  end
+
   def test_process_status_fallbacks_and_marker_failure_diagnostic
     with_fixture do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "status-fallback-260812-aaaa")
@@ -778,7 +794,13 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
             warn "export unavailable"
             exit 1
           end
-          print #{export_output.dump}
+          if #{mode == :large_export}
+            export = JSON.parse(#{export_output.dump})
+            export["bounded_test_padding"] = "x" * (5 * 1024 * 1024)
+            print JSON.generate(export)
+          else
+            print #{export_output.dump}
+          end
         else
           warn "unexpected argv: #{ARGV.inspect}"
           exit 64

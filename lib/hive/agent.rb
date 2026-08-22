@@ -978,70 +978,57 @@ module Hive
     end
 
     def capture_opencode_inspection(inspection)
-      stdout_reader, stdout_writer = IO.pipe
-      stderr_reader, stderr_writer = IO.pipe
-      stdout_capture = { data: +"", truncated: false }
-      stderr_capture = { data: +"", truncated: false }
-      stdout_thread = capture_bounded_stream(
-        stdout_reader, stdout_capture,
-        AgentCliRuntime::OpenCode::ResultParser::MAX_EXPORT_BYTES + 1
-      )
-      stderr_thread = capture_bounded_stream(
-        stderr_reader, stderr_capture, FINAL_MESSAGE_TAIL_BYTES
-      )
-      pid = Process.spawn(
-        inspection.environment_for(env: opencode_preparation_environment)
-          .merge(selected_base_environment),
-        *inspection.argv,
-        chdir: @cwd, pgroup: true, out: stdout_writer, err: stderr_writer,
-        unsetenv_others: true
-      )
-      stdout_writer.close
-      stderr_writer.close
-      pgid = begin
-        Process.getpgid(pid)
-      rescue Errno::ESRCH
-        pid
-      end
-      deadline = Time.now + OPENCODE_INSPECTION_TIMEOUT_SECONDS
-      status = nil
-      until status
-        captured = Process.wait2(pid, Process::WNOHANG)
-        status = captured.last if captured
-        break if status
-        if Time.now >= deadline
-          kill_group(pgid)
-          sleep_grace_then_kill(pgid, pid)
-          status = begin
-            Process.wait2(pid).last
-          rescue Errno::ECHILD
-            nil
+      Tempfile.create([ "hive-opencode-export-", ".json" ]) do |stdout_file|
+        Tempfile.create([ "hive-opencode-export-", ".stderr" ]) do |stderr_file|
+          pid = Process.spawn(
+            inspection.environment_for(env: opencode_preparation_environment)
+              .merge(selected_base_environment),
+            *inspection.argv,
+            chdir: @cwd, pgroup: true, out: stdout_file, err: stderr_file,
+            unsetenv_others: true
+          )
+          pgid = begin
+            Process.getpgid(pid)
+          rescue Errno::ESRCH
+            pid
           end
-          break
+          deadline = Time.now + OPENCODE_INSPECTION_TIMEOUT_SECONDS
+          status = nil
+          until status
+            captured = Process.wait2(pid, Process::WNOHANG)
+            status = captured.last if captured
+            break if status
+            if Time.now >= deadline
+              kill_group(pgid)
+              sleep_grace_then_kill(pgid, pid)
+              status = begin
+                Process.wait2(pid).last
+              rescue Errno::ECHILD
+                nil
+              end
+              break
+            end
+            sleep 0.05
+          end
+
+          stdout_file.flush
+          stdout_file.rewind
+          export_limit =
+            AgentCliRuntime::OpenCode::ResultParser::MAX_EXPORT_BYTES + 1
+          stdout = stdout_file.read(export_limit).to_s
+          truncated = !stdout_file.eof?
+          stderr_file.flush
+          stderr_file.rewind
+          stderr = stderr_file.read(FINAL_MESSAGE_TAIL_BYTES).to_s
+          success = status&.success? == true && !truncated
+          diagnostic = unless success
+            AgentCliRuntime::Redactor.diagnostic(
+              stderr.empty? ?
+                "OpenCode sanitized export inspection failed" : stderr
+            )
+          end
+          return { success:, stdout:, diagnostic: }
         end
-        sleep 0.05
-      end
-      finish_capture_thread(stdout_thread, stdout_reader)
-      finish_capture_thread(stderr_thread, stderr_reader)
-      success = status&.success? == true && !stdout_capture.fetch(:truncated)
-      diagnostic = unless success
-        AgentCliRuntime::Redactor.diagnostic(
-          stderr_capture.fetch(:data).empty? ?
-            "OpenCode sanitized export inspection failed" :
-            stderr_capture.fetch(:data)
-        )
-      end
-      {
-        success: success,
-        stdout: stdout_capture.fetch(:data),
-        diagnostic: diagnostic
-      }
-    ensure
-      close_opencode_ios(
-        stdout_writer, stderr_writer, stdout_reader, stderr_reader
-      )
-      [ stdout_thread, stderr_thread ].each do |thread|
-        thread.kill if thread&.alive?
       end
     end
 

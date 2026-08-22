@@ -259,7 +259,11 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   when the fetch-disabled bundled catalog is stale, while an undeclared route
   missing from the CLI inventory still fails closed. A successful run is
   complete only after its terminal message correlates with sanitized session
-  export.
+  export. That export is captured in owner-private temporary files rather than
+  a timed pipe-drain thread, then read through a 64 MiB bound: long review and
+  implementation sessions carry every tool result and legitimately exceed the
+  former 4 MiB short-session ceiling, while malformed or larger evidence still
+  fails closed.
   `Hive::SkillCheck::OpenCode` resolves project/user skills and explicitly
   configured plugin roots. Setup can atomically add the pinned Compound
   Engineering `3.21.4` plugin entry. Skill-bearing roles verify the selected

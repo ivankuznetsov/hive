@@ -4,7 +4,12 @@ module AgentCliRuntime
   module OpenCode
     module ResultParser
       MAX_RUN_BYTES = 4 * 1024 * 1024
-      MAX_EXPORT_BYTES = 4 * 1024 * 1024
+      # Sanitized exports contain the complete session, including every tool
+      # result. A real hour-long review crossed the original 4 MiB ceiling even
+      # though its run event stream and terminal message were both valid. Keep
+      # the input bounded, but size that bound for implementation sessions
+      # rather than short capability fixtures.
+      MAX_EXPORT_BYTES = 64 * 1024 * 1024
       MAX_FINAL_MESSAGE_BYTES = 1024 * 1024
       MAX_EVENTS = 10_000
       MAX_UNKNOWN_EVENTS = 16

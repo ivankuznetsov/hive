@@ -38,7 +38,7 @@ module Hive
 
       def initialize(browser_bundle: nil, tool_resolver: nil, hive_executable: nil,
                      web_server_factory: nil, browser_command_runner: nil,
-                     codex_runtime_resolver: nil)
+                     codex_runtime_resolver: nil, project_sandbox_factory: nil)
         @browser_bundle = browser_bundle || Hive::Web::BrowserBundle.new
         @tool_resolver = tool_resolver || ->(name) { Hive::InvokedBinary.which(name) }
         @hive_executable = File.expand_path(
@@ -47,6 +47,9 @@ module Hive
         @web_server_factory = web_server_factory
         @browser_command_runner = browser_command_runner || method(:run_browser_command)
         @codex_runtime_resolver = codex_runtime_resolver || method(:resolve_codex_runtime)
+        @project_sandbox_factory = project_sandbox_factory || lambda do |**attributes|
+          Hive::Artifacts::ProjectCommandSandbox.new(**attributes)
+        end
         @launch_environment = {}
         @producer_add_dirs = []
         @producer_permission_arguments = nil
@@ -491,7 +494,7 @@ module Hive
         ambient = %w[PATH LANG LC_ALL LC_CTYPE TERM COLORTERM TZ].to_h do |key|
           [ key, ENV[key] ]
         end.compact
-        sandbox = Hive::Artifacts::ProjectCommandSandbox.new(
+        sandbox = @project_sandbox_factory.call(
           source_root: @source_root, environment: ambient
         )
         result = Hive::Artifacts::TerminalRecorder.new(

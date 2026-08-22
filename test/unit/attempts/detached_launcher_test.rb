@@ -76,6 +76,12 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     assert_includes error.message, "detached"
   end
 
+  def test_systemd_scope_probe_falls_back_when_the_user_bus_cannot_be_inspected
+    with_replaced_singleton_method(File, :socket?, ->(_path) { raise Errno::EACCES }) do
+      refute Hive::Attempts::DetachedLauncher.systemd_scope_available?
+    end
+  end
+
   def test_launch_timeout_leaves_an_expirable_launching_reservation
     launcher = Hive::Attempts::DetachedLauncher.new(
       store: Struct.new(:root).new("/attempts"), ready_timeout_sec: 0

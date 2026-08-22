@@ -20,13 +20,16 @@ module Hive
       class SandboxError < Hive::Error; end
 
       def initialize(source_root:, environment: ENV, sandbox_binary: nil,
-                     share_network: false, extra_environment: {})
+                     share_network: false, extra_environment: {},
+                     runtime_overlay_root: nil)
         @source_root = File.realpath(source_root)
         @environment = environment.to_h
         @sandbox_binary = sandbox_binary || Hive::InvokedBinary.which("bwrap")
         @share_network = share_network == true
         @extra_environment = extra_environment.to_h.transform_keys(&:to_s)
+        @runtime_overlay_root = runtime_overlay_root && File.realpath(runtime_overlay_root)
         validate_extra_environment!
+        validate_overlay_root! if @runtime_overlay_root
       rescue Errno::ENOENT, Errno::EACCES, ArgumentError, TypeError => e
         raise SandboxError, "project evidence sandbox is unavailable: #{e.message}"
       end
@@ -50,6 +53,7 @@ module Hive
         true
       ensure
         @runtime_root = nil
+        @writable_source_bindings = nil
       end
 
       private
@@ -59,6 +63,13 @@ module Hive
           !key.match?(/\A[A-Z][A-Z0-9_]*\z/) || value.to_s.include?("\0")
         end
         raise SandboxError, "project evidence sandbox environment is invalid" if invalid
+      end
+
+      def validate_overlay_root!
+        stat = File.lstat(@runtime_overlay_root)
+        unless stat.directory? && !stat.symlink? && stat.uid == Process.uid
+          raise SandboxError, "project evidence sandbox overlay ownership is invalid"
+        end
       end
 
       def prepare_runtime!
@@ -75,8 +86,9 @@ module Hive
       end
 
       def command_prefix
+        bindings = writable_source_bindings
         parent_dirs = Hive::WorkflowPackage::RuntimePolicy.sandbox_parent_dirs(
-          [ @source_root, @runtime_root, *runtime_mounts ]
+          [ @source_root, @runtime_root, *runtime_mounts, *bindings.flatten ]
         )
         argv = [
           @sandbox_binary,
@@ -97,7 +109,7 @@ module Hive
         parent_dirs.each { |path| argv.concat([ "--dir", path ]) }
         runtime_mounts.each { |path| argv.concat([ "--ro-bind", path, path ]) }
         argv.concat([ "--ro-bind", @source_root, @source_root ])
-        writable_source_dirs.each { |path| argv.concat([ "--bind", path, path ]) }
+        bindings.each { |overlay, target| argv.concat([ "--bind", overlay, target ]) }
         argv.concat([ "--bind", @runtime_root, @runtime_root ])
         sandbox_environment.each do |key, value|
           argv.concat([ "--setenv", key, value ])
@@ -115,6 +127,35 @@ module Hive
         rescue Errno::ENOENT, Errno::EACCES
           nil
         end
+      end
+
+      def writable_source_bindings
+        @writable_source_bindings ||= writable_source_dirs.filter_map do |source|
+          relative = source.delete_prefix("#{@source_root}#{File::SEPARATOR}")
+          overlay = File.join(runtime_overlay_root, relative)
+          seed_runtime_overlay(source, overlay)
+          [ overlay, source ]
+        end
+      end
+
+      def runtime_overlay_root
+        root = @runtime_overlay_root || File.join(@runtime_root, "source-runtime")
+        FileUtils.mkdir_p(root, mode: 0o700)
+        validate_overlay_root! if @runtime_overlay_root
+        root
+      end
+
+      def seed_runtime_overlay(source, overlay)
+        return if File.directory?(overlay) && !File.symlink?(overlay)
+
+        temporary = "#{overlay}.prepare-#{Process.pid}-#{Thread.current.object_id}"
+        FileUtils.mkdir_p(temporary, mode: 0o700)
+        entries = Dir.children(source).map { |entry| File.join(source, entry) }
+        FileUtils.cp_r(entries, temporary, preserve: true) unless entries.empty?
+        File.rename(temporary, overlay)
+      rescue Errno::EEXIST, Errno::ENOTEMPTY
+        FileUtils.remove_entry_secure(temporary) if File.directory?(temporary)
+        raise unless File.directory?(overlay) && !File.symlink?(overlay)
       end
 
       def sandbox_environment

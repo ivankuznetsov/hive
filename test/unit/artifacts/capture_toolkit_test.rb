@@ -575,6 +575,47 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     app_thread&.join(1)
   end
 
+  def test_capture_proxy_maps_issued_request_origin_metadata_to_the_loopback_app
+    proxy = Hive::Artifacts::CaptureProxy.new
+    app = TCPServer.new("127.0.0.1", proxy.app_port)
+    requests = Queue.new
+    app_thread = Thread.new do
+      2.times do
+        socket = app.accept
+        requests << socket.readpartial(4096)
+        socket.write("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        socket.close
+      end
+    end
+
+    proxy_request(
+      proxy.proxy_url, "#{proxy.origin}/session",
+      method: "POST",
+      headers: "Origin: #{proxy.origin}\r\nReferer: #{proxy.origin}/session/new?step=1\r\n" \
+               "Connection: close\r\n"
+    )
+    proxy_request(
+      proxy.proxy_url, "#{proxy.origin}/session",
+      method: "POST",
+      headers: "Origin: https://accounts.example.test\r\n" \
+               "Referer: not a uri\r\nConnection: close\r\n"
+    )
+
+    forwarded = requests.pop
+    assert_includes forwarded, "Origin: http://127.0.0.1:#{proxy.app_port}\r\n"
+    assert_includes forwarded,
+                    "Referer: http://127.0.0.1:#{proxy.app_port}/session/new?step=1\r\n"
+    refute_includes forwarded, "Origin: #{proxy.origin}\r\n"
+
+    foreign = requests.pop
+    assert_includes foreign, "Origin: https://accounts.example.test\r\n"
+    assert_includes foreign, "Referer: not a uri\r\n"
+  ensure
+    proxy&.close
+    app&.close
+    app_thread&.join(1)
+  end
+
   def test_capture_proxy_rewrites_only_the_issued_app_redirect_to_the_browser_origin
     proxy = Hive::Artifacts::CaptureProxy.new
     app = TCPServer.new("127.0.0.1", proxy.app_port)
@@ -612,10 +653,10 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     [ "/managed/codex-runtime" ]
   end
 
-  def proxy_request(proxy_url, target, headers: "Connection: close\r\n")
+  def proxy_request(proxy_url, target, headers: "Connection: close\r\n", method: "GET")
     proxy_uri = URI.parse(proxy_url)
     socket = TCPSocket.new(proxy_uri.host, proxy_uri.port)
-    socket.write("GET #{target} HTTP/1.1\r\nHost: ignored\r\n#{headers}\r\n")
+    socket.write("#{method} #{target} HTTP/1.1\r\nHost: ignored\r\n#{headers}\r\n")
     socket.read
   ensure
     socket&.close

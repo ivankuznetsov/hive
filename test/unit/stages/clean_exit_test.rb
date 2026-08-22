@@ -295,6 +295,33 @@ class HiveStagesCleanExitTest < Minitest::Test
     end
   end
 
+  def test_exact_guardrail_waiver_releases_the_same_secret_from_clean_exit
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "test", "integration"))
+      content = "@operator.password = \"password\"\n"
+      File.write(File.join(worktree, "test", "integration", "login_test.rb"), content)
+      hit = Hive::SecretPatterns.scan(content).find do |candidate|
+        candidate[:name] == :password_assignment
+      end
+      cfg = deep_dup_default_cfg
+      cfg["review"]["fix"]["guardrail"] = { "waivers" => [
+        {
+          "pattern" => "secrets_pattern_match.password_assignment",
+          "sha256" => hit.fetch(:sha256)
+        }
+      ] }
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: cfg
+      )
+
+      assert_equal :auto_committed, result[:status]
+      assert_empty `git -C #{worktree} status --porcelain`
+    end
+  end
+
   def test_non_placeholder_password_in_test_tree_returns_safety_violation
     with_tmp_dir do |worktree|
       init_git(worktree)

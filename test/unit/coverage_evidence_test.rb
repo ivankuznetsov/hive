@@ -1,16 +1,23 @@
 require "test_helper"
 require_relative "../support/coverage"
+require_relative "../support/coverage_config_sandbox"
 require "json"
 require "tmpdir"
 
 module TestCoverageEvidence
   class ExportTest < Minitest::Test
+    include HiveCoverageConfigSandbox::TestHelpers
+
     def setup
       @tmp_root = Dir.mktmpdir("hive-cov-ev")
-      HiveTestCoverage.configure!(root: @tmp_root)
+      configure_coverage_root!(@tmp_root)
     end
 
+    # Restoring is load-bearing, not hygiene: leaving @resultset_dir pointed at
+    # @tmp_root sends this process's own at_exit coverage dump into a deleted
+    # scratch directory, silently dropping the whole shard's hits.
     def teardown
+      restore_coverage_config!
       FileUtils.remove_entry(@tmp_root) if @tmp_root && File.directory?(@tmp_root)
     end
 
@@ -94,7 +101,7 @@ module TestCoverageEvidence
     ensure
       FileUtils.remove_entry(@tmp_root) if @tmp_root && File.directory?(@tmp_root)
       @tmp_root = Dir.mktmpdir("hive-cov-ev")
-      HiveTestCoverage.configure!(root: @tmp_root)
+      configure_coverage_root!(@tmp_root)
     end
 
     private

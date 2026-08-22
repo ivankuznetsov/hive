@@ -416,6 +416,19 @@ silently went uncovered, with the deficit migrating between shards whenever
 the partition reshuffled. Keeping results cumulative lets each process's last
 dump overwrite its own pid-keyed file as a superset.
 
+The same measurement-loss class has a second entry point: `configure!`
+repoints `@root`, `@lib_dir`, and `@resultset_dir` on the module singleton,
+so a test that points them at a `Dir.mktmpdir` and never restores them sends
+the shard's own `at_exit` dump into a scratch directory nobody collects. The
+shard still exits zero, and the merged gate falls thousands of lines short
+in whichever shard owns the leaking test file. Tests that need a temporary
+coverage root go through `HiveCoverageConfigSandbox` (`test/support/
+coverage_config_sandbox.rb`), which snapshots and restores every state ivar;
+`with_coverage_config` wraps one assertion, `configure_coverage_root!` /
+`restore_coverage_config!` wrap a whole class via setup/teardown. A lint test
+in `test/unit/coverage_test.rb` fails any `_test.rb` that calls `configure!`
+without a restore path, because the failure mode is silent.
+
 In CI (`CI=true`), tests that exercise backgrounding commands must force a foreground path (for example `foreground: true`) or stub daemonization. Otherwise the test process can daemonize before Minitest `after_run` writes `coverage/coverage.json`, leaving the parent coverage task with a missing report while child output keeps streaming. Bundler evaluates the gemspec before coverage starts, so the bootstrap reloads the preloaded `lib/hive/version.rb`, `lib/hive/errors.rb`, and `lib/hive.rb` files in dependency order. Reloaded code must therefore be idempotent; for example, self-derived enum constants must exclude `:ALL` to stay reload-safe.
 
 `Rakefile`:

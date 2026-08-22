@@ -1,18 +1,63 @@
 require "test_helper"
 require_relative "../support/coverage"
+require_relative "../support/coverage_config_sandbox"
 
 class HiveTestCoverageTest < Minitest::Test
   include HiveTestHelper
+  include HiveCoverageConfigSandbox::TestHelpers
 
-  COVERAGE_STATE_IVARS = %i[
-    @root
-    @lib_dir
-    @coverage_dir
-    @resultset_dir
-    @result_errors
-    @startup_errors
-    @verified_marshal_paths
-  ].freeze
+  # A test that repoints the coverage root and never restores it sends this
+  # process's own at_exit dump into a scratch directory, so every line the
+  # shard ran afterwards goes unmeasured while the shard still exits zero.
+  # The shard is green and the merged gate is thousands of lines short.
+  def test_coverage_config_sandbox_restores_every_state_ivar
+    original = HiveCoverageConfigSandbox.capture
+
+    with_tmp_dir do |dir|
+      with_coverage_config(root: dir) do
+        assert_equal File.join(dir, "lib"), HiveTestCoverage.instance_variable_get(:@lib_dir)
+      end
+    end
+
+    assert_equal original, HiveCoverageConfigSandbox.capture
+  end
+
+  def test_coverage_config_sandbox_restores_after_a_mid_test_repoint
+    original = HiveCoverageConfigSandbox.capture
+
+    with_tmp_dir do |first|
+      with_tmp_dir do |second|
+        configure_coverage_root!(first)
+        configure_coverage_root!(second)
+      end
+    end
+    restore_coverage_config!
+
+    assert_equal original, HiveCoverageConfigSandbox.capture
+  end
+
+  # Lint, not style: `configure!` mutates module state that the running
+  # process's own coverage dump reads, and forgetting to put it back fails
+  # silently. Any test that calls it must also restore it - through
+  # HiveCoverageConfigSandbox::TestHelpers, or its own snapshot/restore pair.
+  def test_every_test_that_repoints_coverage_config_also_restores_it
+    repo_root = File.expand_path("../..", __dir__)
+    restorers = [ "HiveCoverageConfigSandbox", "remove_instance_variable" ]
+
+    offenders = Dir.glob(File.join(repo_root, "test/**/*_test.rb")).sort.select do |path|
+      # This file names the call in its own assertion message.
+      next false if path == File.expand_path(__FILE__)
+
+      source = File.read(path)
+      source.include?("HiveTestCoverage.configure!") &&
+        restorers.none? { |marker| source.include?(marker) }
+    end
+
+    assert_empty offenders.map { |path| path.delete_prefix("#{repo_root}/") },
+                 "these tests repoint HiveTestCoverage without restoring it; include " \
+                 "HiveCoverageConfigSandbox::TestHelpers and use " \
+                 "with_coverage_config / configure_coverage_root! instead"
+  end
 
   def test_unloaded_source_file_counts_executable_lines_as_uncovered
     with_tmp_dir do |dir|
@@ -464,28 +509,5 @@ class HiveTestCoverageTest < Minitest::Test
       "coverage-shard-#{index}",
       "manifest.json"
     )
-  end
-
-  def with_coverage_config(root:)
-    sentinel = Object.new
-    old = COVERAGE_STATE_IVARS.to_h do |ivar|
-      value = if HiveTestCoverage.instance_variable_defined?(ivar)
-        HiveTestCoverage.instance_variable_get(ivar)
-      else
-        sentinel
-      end
-      [ ivar, value ]
-    end
-
-    HiveTestCoverage.configure!(root: root)
-    yield
-  ensure
-    old&.each do |ivar, value|
-      if value.equal?(sentinel)
-        HiveTestCoverage.remove_instance_variable(ivar) if HiveTestCoverage.instance_variable_defined?(ivar)
-      else
-        HiveTestCoverage.instance_variable_set(ivar, value)
-      end
-    end
   end
 end

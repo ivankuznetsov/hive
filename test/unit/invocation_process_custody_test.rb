@@ -355,7 +355,7 @@ class InvocationProcessCustodyTest < Minitest::Test
     reader, writer = IO.pipe
     writer.close_on_exec = false
     wrapper = Process.spawn(
-      environment,
+      environment.merge("RUBYOPT" => nil),
       RbConfig.ruby, "-e", <<~'RUBY', writer.fileno.to_s,
         writer = IO.for_fd(Integer(ARGV.fetch(0)))
         child = fork do

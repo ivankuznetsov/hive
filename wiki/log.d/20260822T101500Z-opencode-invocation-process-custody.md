@@ -32,3 +32,8 @@ If a matching descendant exits between environment inspection and PID identity
 capture, cleanup now treats the vanished process as success. A still-live
 process without a stable start identity continues to fail closed and is never
 signalled.
+
+Detached Ruby fixtures explicitly drop the suite's `RUBYOPT` coverage hook.
+They stand in for external provider processes, and allowing a fixture's delayed
+at-exit dump to race the shard manifest made an otherwise green shard
+unverifiable.

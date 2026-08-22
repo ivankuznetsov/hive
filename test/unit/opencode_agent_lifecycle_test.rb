@@ -702,6 +702,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
           end
           if #{mode == :detached_descendant}
             Process.spawn(
+              { "RUBYOPT" => nil },
               RbConfig.ruby, "-e",
               #{descendant_script.dump},
               out: File::NULL, err: File::NULL

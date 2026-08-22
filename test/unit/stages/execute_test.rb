@@ -482,6 +482,42 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_restores_controller_owned_task_marker_tampering
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      original_task = "# Execute\n\n<!-- AGENT_WORKING -->\n"
+      File.write(task.state_file, original_task)
+      write_pointer(
+        task, "path" => File.join(dir, "worktree"), "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "base", branch: task.slug, dirty: false, ancestor_result: true
+      )
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            agent_custody.call do
+              File.write(task.state_file, "agent replaced controller state\n")
+              { status: :ok }
+            end
+          }
+        ) do
+          result = Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
+          assert_equal({ commit: "implementer_tampered", status: :error }, result)
+        end
+      end
+
+      restored = File.read(task.state_file)
+      assert_includes restored, "# Execute"
+      refute_includes restored, "agent replaced controller state"
+      assert_equal :error, Hive::Markers.current(task.state_file).name
+    end
+  end
+
   def test_execute_custody_protects_controller_workspace_receipts
     with_tmp_dir do |dir|
       task = build_task(dir)

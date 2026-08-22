@@ -35,11 +35,11 @@ module Hive
     module Execute
       module_function
 
-      # 4-execute owns plan.md and worktree.yml; task.md is owned but
-      # the implementer agent writes the AGENT_WORKING marker into it,
-      # so it's deliberately NOT in the SHA-protected set here.
+      # The controller writes every execute marker before/after the custody
+      # window. Implementers never own task.md, so protect it alongside the
+      # reviewed plan and worktree pointer.
       PROTECTED_FILES = %w[
-        plan.md worktree.yml task-journal.jsonl task-projection.json
+        task.md plan.md worktree.yml task-journal.jsonl task-projection.json
         task-projection.checkpoint.json
       ].freeze
       CONTROLLER_RECEIPT_DIRECTORIES = %w[context-receipts activity-operations].freeze

@@ -37,6 +37,12 @@ OpenCode's external file-tool roots. The reviewed plan stays in the prompt and
 the full repository stays in the working directory, but a file-tool call can
 no longer replace `task.md` or its live ownership marker.
 
+The execute custody manifest now protects `task.md` as well. Its former
+exclusion assumed the implementer wrote `AGENT_WORKING`; marker ownership has
+since moved entirely to the controller, so there is no legitimate agent write
+inside the custody window. File-tool restriction reduces exposure, while the
+anchor detects and restores writes made through an explicitly granted shell.
+
 An exit-zero OpenCode run with an empty terminal assistant message remains a
 recorded malformed-output observation. Execute may nevertheless accept it when
 the worktree supplies stronger completion evidence: the expected branch is

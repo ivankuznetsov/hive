@@ -137,6 +137,22 @@ class ArtifactsCaptureProxyCoverageGapsTest < Minitest::Test
     assert_nil proxy.send(:reject, broken, "400 Bad Request")
   end
 
+  def test_rewrite_preserves_an_invalid_location_and_relay_forwards_bytes
+    proxy = Proxy.allocate
+    invalid = "Location: http://%zz\r\n"
+    assert_equal invalid, proxy.send(:rewrite_response, invalid)
+
+    client = fake_client
+    upstream = fake_client
+    reads = [ "payload", nil ]
+    client.define_singleton_method(:read_nonblock) { |*, **| reads.shift }
+    selections = [ [ [ client ] ], [ [ client ] ] ]
+    with_replaced_singleton_method(IO, :select, ->(*) { selections.shift }) do
+      assert_nil proxy.send(:relay, client, upstream)
+    end
+    assert_equal [ "payload" ], upstream.writes
+  end
+
   private
 
   def fake_client

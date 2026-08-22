@@ -161,4 +161,67 @@ class ArtifactsProjectCommandSandboxTest < Minitest::Test
       end
     end
   end
+
+  def test_rejects_a_replaced_overlay_root
+    Dir.mktmpdir("hive-project-command-sandbox-overlay-swap") do |root|
+      source = File.join(root, "source")
+      overlay = File.join(root, "overlay")
+      FileUtils.mkdir_p([ File.join(source, "log"), overlay ])
+      sandbox_binary = File.join(root, "bwrap")
+      File.write(sandbox_binary, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, sandbox_binary)
+      sandbox = Hive::Artifacts::ProjectCommandSandbox.new(
+        source_root: source, sandbox_binary: sandbox_binary,
+        runtime_overlay_root: overlay
+      )
+      FileUtils.remove_entry(overlay)
+      File.symlink(source, overlay)
+
+      error = assert_raises(Hive::Artifacts::ProjectCommandSandbox::SandboxError) do
+        sandbox.command_argv([ "/bin/true" ])
+      end
+      assert_match(/overlay ownership is invalid/, error.message)
+    end
+  end
+
+  def test_overlay_seed_races_converge_only_when_an_overlay_wins
+    Dir.mktmpdir("hive-project-command-sandbox-overlay-race") do |root|
+      source = File.join(root, "source")
+      storage = File.join(source, "storage")
+      overlay_root = File.join(root, "overlay")
+      FileUtils.mkdir_p([ storage, overlay_root ])
+      sandbox_binary = File.join(root, "bwrap")
+      File.write(sandbox_binary, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, sandbox_binary)
+
+      winner = Hive::Artifacts::ProjectCommandSandbox.new(
+        source_root: source, sandbox_binary: sandbox_binary,
+        runtime_overlay_root: overlay_root
+      )
+      original_rename = File.method(:rename)
+      racing_rename = lambda do |temporary, overlay|
+        FileUtils.mkdir_p(overlay)
+        raise Errno::EEXIST, temporary
+      end
+      argv = with_replaced_singleton_method(File, :rename, racing_rename) do
+        winner.command_argv([ "/bin/true" ])
+      end
+      assert argv.each_cons(3).any? { |row| row[0] == "--bind" && row[2] == storage }
+      assert winner.close
+
+      FileUtils.remove_entry(File.join(overlay_root, "storage"))
+      loser = Hive::Artifacts::ProjectCommandSandbox.new(
+        source_root: source, sandbox_binary: sandbox_binary,
+        runtime_overlay_root: overlay_root
+      )
+      lost_rename = ->(temporary, _overlay) { raise Errno::ENOTEMPTY, temporary }
+      assert_raises(Errno::ENOTEMPTY) do
+        with_replaced_singleton_method(File, :rename, lost_rename) do
+          loser.command_argv([ "/bin/true" ])
+        end
+      end
+      assert loser.close
+      assert_respond_to original_rename, :call
+    end
+  end
 end

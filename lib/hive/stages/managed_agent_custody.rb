@@ -24,13 +24,22 @@ module Hive
         validate_regular_or_absent!(task.folder, protected_files)
         output_label = File.basename(output_path)
         prepare_output!(output_path, label: output_label)
-        profile = Hive::Stages::Base.stage_profile(cfg, "patrol")
-        prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
-          cfg, actor, task, profile,
-          prompt: prompt, base_add_dirs: add_dirs,
-          managed_slot: slot, managed_outputs: [ output_path ],
-          mark_permission_error: false
+        fix = cfg.dig("patrol", "fix")
+        fix = {} unless fix.is_a?(Hash)
+        fix_agent = fix["agent"]
+        profile = Hive::Stages::Base.stage_profile(
+          cfg, "patrol", explicit_agent: fix_agent
         )
+        prompt, scope = if profile.name == :opencode
+          [ prompt, opencode_scope(task, actor, cwd, add_dirs, output_path) ]
+        else
+          Hive::Stages::Base.actor_prompt_and_scope(
+            cfg, actor, task, profile,
+            prompt: prompt, base_add_dirs: add_dirs,
+            managed_slot: slot, managed_outputs: [ output_path ],
+            mark_permission_error: false
+          )
+        end
         protected_task_paths = protected_files.to_h do |name|
           [ name, File.join(task.folder, name) ]
         end
@@ -48,8 +57,8 @@ module Hive
           ),
           log_label: log_label, profile: profile,
           **Hive::Stages::Base.model_launch_arguments(
-            cfg, actor, profile,
-            current: Hive::Stages::Base.model_routing_current(cfg["patrol"])
+            cfg, "patrol_fix", profile,
+            current: fix_model_routing_current(cfg, fix, fix_agent)
           ),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only, cfg: cfg, agent_custody: custody
@@ -68,6 +77,41 @@ module Hive
           diagnostic: report&.diagnostic
         }
       end
+
+      def fix_model_routing_current(cfg, fix, fix_agent)
+        patrol = Hive::Stages::Base.model_routing_current(cfg["patrol"])
+        patrol_agent = cfg.dig("patrol", "agent") || "claude"
+        if fix_agent && fix_agent.to_s != patrol_agent.to_s
+          patrol = Hive::ModelRouting::EMPTY_MODELS
+        end
+        patrol.merge(Hive::Stages::Base.model_routing_current(fix))
+      end
+      private_class_method :fix_model_routing_current
+
+      def opencode_scope(task, actor, cwd, add_dirs, output_path)
+        task_root = File.expand_path(task.folder)
+        worktree = File.expand_path(cwd)
+        output = File.expand_path(output_path)
+
+        write_roots = [ task_root ]
+        edit_patterns = [ output ]
+        bash_patterns = []
+        if actor == "patrol_fix"
+          write_roots.unshift(worktree)
+          edit_patterns.unshift(File.join(worktree, "**"))
+          bash_patterns << "*"
+        end
+
+        {
+          add_dirs: Array(add_dirs), permission_mode: "workspace-write",
+          allowed_tools: nil, disallowed_tools: nil,
+          additional_read_roots: Array(add_dirs),
+          additional_write_roots: write_roots,
+          opencode_edit_patterns: edit_patterns,
+          opencode_bash_patterns: bash_patterns
+        }
+      end
+      private_class_method :opencode_scope
 
       def validate_regular_or_absent!(root, names)
         names.each do |name|

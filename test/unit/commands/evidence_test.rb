@@ -230,6 +230,15 @@ class CommandsEvidenceTest < Minitest::Test
       assert_equal "server", requests.first.fetch("operation")
       assert_equal [ "bin/rails", "server", "-p", "45678" ],
                    requests.first.fetch("argv")
+
+      plain = Hive::Commands::Evidence.new(
+        "server", "bin/rails", command: [ "server", "-p", "45678" ],
+        environment: environment
+      )
+
+      out, = capture_io { plain.call }
+
+      assert_includes out, "ready at http://127.0.0.1:45678"
     end
 
     assert_raises(Hive::UsageError) do

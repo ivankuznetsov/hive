@@ -155,6 +155,35 @@ class ArtifactsProjectCommandSandboxTest < Minitest::Test
     end
   end
 
+  def test_fresh_tmp_overlay_replaces_a_non_directory_pids_entry
+    Dir.mktmpdir("hive-project-command-sandbox-pids-file") do |root|
+      source = File.join(root, "source")
+      tmp = File.join(source, "tmp")
+      overlay_root = File.join(root, "overlay")
+      FileUtils.mkdir_p([ tmp, overlay_root ])
+      File.write(File.join(tmp, "pids"), "stale host process state")
+      sandbox_binary = File.join(root, "bwrap")
+      File.write(sandbox_binary, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, sandbox_binary)
+
+      sandbox = Hive::Artifacts::ProjectCommandSandbox.new(
+        source_root: source, sandbox_binary: sandbox_binary,
+        runtime_overlay_root: overlay_root
+      )
+      argv = sandbox.command_argv([ "/bin/true" ])
+      binding = argv.each_cons(3).find { |row| row[0] == "--bind" && row[2] == tmp }
+      overlay_pids = File.join(binding.fetch(1), "pids")
+
+      assert_path_exists overlay_pids
+      assert File.directory?(overlay_pids),
+             "the fresh runtime must always receive a writable pids directory"
+      assert_empty Dir.children(overlay_pids)
+      assert_equal "stale host process state", File.read(File.join(tmp, "pids")),
+                   "normalizing the overlay must not mutate the product worktree"
+      assert sandbox.close
+    end
+  end
+
   def test_rejects_invalid_inputs_and_missing_or_changed_runtime_boundaries
     Dir.mktmpdir("hive-project-command-sandbox-invalid") do |root|
       source = File.join(root, "source")

@@ -25,3 +25,11 @@ The task-action classifier also treats only a blocked transient planner route
 whose recorded result contract is older than the running contract as
 `plan_reviewing`. This makes the recovery reachable by the daemon while
 leaving current blocked plan judgments parked.
+
+Both contract-version readers parse the recorded version with `Integer()`, so
+a receipt carrying a non-numeric string or a non-numeric type raises rather
+than comparing. That case reads as stale in the orchestrator and in the
+task-action classifier: an unreadable version is not a current verdict, so the
+bounded recovery series runs instead of parking the task on a value Hive never
+compared. Regression tests cover both readers for the string and non-numeric
+type inputs.

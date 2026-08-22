@@ -198,6 +198,28 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  # `Integer()` refuses both a non-numeric string and a non-numeric type. A
+  # route carrying either is unreadable adjudication evidence, so the series
+  # must re-run under the current contract instead of trusting a version the
+  # orchestrator never compared.
+  def test_unreadable_planner_revision_contract_version_reads_as_stale
+    orchestrator = Hive::PlanReview::Orchestrator.allocate
+    current = Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
+
+    assert orchestrator.send(
+      :stale_planner_revision_contract?,
+      { "planner_revision_contract_version" => "v1" }
+    )
+    assert orchestrator.send(
+      :stale_planner_revision_contract?,
+      { "planner_revision_contract_version" => { "major" => current } }
+    )
+    refute orchestrator.send(
+      :stale_planner_revision_contract?,
+      { "planner_revision_contract_version" => current }
+    )
+  end
+
   def test_selected_fallback_keeps_the_preferred_request_and_probe_history
     with_task(standard_plan) do |task, cfg|
       preferred = route_identity("grok", "grok-4.6", "grok", "preferred")

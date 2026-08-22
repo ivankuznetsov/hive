@@ -178,6 +178,14 @@ the named browser session before it cleans the managed app/proxy and producer
 process group. Playwright remains a web-system-test dependency, not an
 outcome-evidence capture interface.
 
+The capture proxy keeps the application-facing `Host` on the exact issued
+loopback port, preserving development host allowlists. At that boundary it
+maps only the controller-issued browser origin in `Origin` and `Referer`
+request headers to the same loopback endpoint, so framework CSRF/origin checks
+see metadata consistent with `request.base_url`; foreign values pass through
+unchanged for the application to reject. Exact loopback absolute redirects
+are translated back to the issued browser origin.
+
 When Hive is not itself the reviewed application, Pi visual producers receive
 a second controller-issued capability, `evidence_server`. The producer calls it
 once with a repository executable and arguments that bind to the issued port;

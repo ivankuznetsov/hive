@@ -136,10 +136,12 @@ module Hive
 
       def rewrite_request(head, method, uri, version)
         upgrade = websocket_upgrade?(head)
-        headers = head.lines.drop(1).reject do |line|
+        headers = head.lines.drop(1).filter_map do |line|
           hop_header = line.match?(/\A(?:Host|Proxy-Connection):/i)
           hop_header ||= !upgrade && line.match?(/\A(?:Connection|Upgrade):/i)
-          hop_header || line == "\r\n"
+          next if hop_header || line == "\r\n"
+
+          rewrite_origin_header(line)
         end
         prefix = [
           "#{method} #{uri.request_uri} #{version}\r\n",
@@ -147,6 +149,27 @@ module Hive
         ]
         prefix << "Connection: close\r\n" unless upgrade
         (prefix + headers + [ "\r\n" ]).join
+      end
+
+      # The browser operates on the random controller-issued origin while the
+      # application deliberately receives a loopback Host header. Translate
+      # only that exact origin in request metadata so CSRF/origin checks see
+      # the same endpoint as request.base_url. Foreign Origin and Referer
+      # values pass through unchanged and remain available for the application
+      # to reject.
+      def rewrite_origin_header(line)
+        name, value = line.split(":", 2)
+        return line unless value && %w[Origin Referer].any? { |header| name.casecmp?(header) }
+
+        uri = URI.parse(value.strip)
+        return line unless uri.scheme == "http" && uri.host == hostname &&
+                           uri.port == 80 && uri.userinfo.nil?
+
+        uri.host = "127.0.0.1"
+        uri.port = app_port
+        "#{name}: #{uri}\r\n"
+      rescue URI::InvalidURIError
+        line
       end
 
       # The upstream must see a loopback Host header so an arbitrary project

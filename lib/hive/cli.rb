@@ -788,6 +788,7 @@ module Hive
         recover TARGET --generation SHA256 --recovery-digest SHA256
         rework TARGET --generation SHA256 --recovery-digest SHA256
         terminal NAME -- COMMAND...
+        server COMMAND -- ARGS...
         browser COMMAND [ARG...]
 
       Recovery is admitted only when both values match the current immutable
@@ -806,6 +807,10 @@ module Hive
       `browser` is the controller-scoped agent-browser gateway. It exposes the
       issued origin and a closed interaction vocabulary while Hive confines
       screenshot and recording output to the current attempt.
+
+      `server` starts one repository executable on the issued application port
+      inside an attempt-owned credential-free sandbox and tears it down with
+      the capture session.
     DESC
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :stage, type: :string,

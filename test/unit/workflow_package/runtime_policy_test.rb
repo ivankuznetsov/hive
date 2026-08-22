@@ -1580,7 +1580,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       end
 
       tools_index = policy.cli_flags.index("--tools")
-      assert_equal "read,ls,grep,find,evidence_write,evidence_terminal,evidence_browser",
+      assert_equal "read,ls,grep,find,evidence_write,evidence_terminal,evidence_browser,evidence_server",
                    policy.cli_flags.fetch(tools_index + 1)
       assert_includes policy.cli_flags, "--no-builtin-tools"
       refute_includes policy.cli_flags, "bash"
@@ -1599,6 +1599,9 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       assert_includes extension, 'name: "evidence_write"'
       assert_includes extension, 'name: "evidence_terminal"'
       assert_includes extension, 'name: "evidence_browser"'
+      assert_includes extension, 'name: "evidence_server"'
+      assert_includes extension,
+                      '["evidence", "server", executable, "--json", "--", ...argv]'
       refute_includes extension, "createBashTool"
       refute_includes extension, "createWriteTool"
       assert_equal writable, policy.environment.fetch("HIVE_EVIDENCE_WRITE_ROOT")
@@ -1737,6 +1740,11 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
         task_relative_write_root: "work", hive_executable: "/hive/bin/hive",
         browser: false
       ), 'name: "evidence_browser"'
+      refute_includes Hive::WorkflowPackage::RuntimePolicy.pi_evidence_extension(
+        source_root: source, task_root: task, writable_root: writable,
+        task_relative_write_root: "work", hive_executable: "/hive/bin/hive",
+        browser: false
+      ), 'name: "evidence_server"'
     end
   end
 

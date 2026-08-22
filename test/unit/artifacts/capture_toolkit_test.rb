@@ -90,6 +90,47 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     end
   end
 
+  def test_project_server_gateway_is_controller_owned_and_attempt_scoped
+    toolkit = Hive::Artifacts::CaptureToolkit.new
+    proxy = Struct.new(:app_port) do
+      def close = true
+    end.new(45_678)
+    server = Object.new
+    starts = []
+    closed = []
+    server.define_singleton_method(:start!) do |argv|
+      starts << argv
+      {
+        "driver" => "hive-project-server", "status" => "ready",
+        "app_port" => 45_678, "app_endpoint" => "http://127.0.0.1:45678"
+      }
+    end
+    server.define_singleton_method(:close) { closed << true }
+    factory_args = nil
+    factory = lambda do |source_root:, port:|
+      factory_args = [ source_root, port ]
+      server
+    end
+    toolkit.instance_variable_set(:@source_root, Dir.pwd)
+    toolkit.instance_variable_set(:@capture_proxy, proxy)
+
+    response = with_replaced_singleton_method(
+      Hive::Artifacts::ManagedProjectServer, :new, factory
+    ) do
+      toolkit.send(
+        :handle_capture_request,
+        "operation" => "server", "argv" => [ "bin/rails", "server" ]
+      )
+    end
+
+    assert_equal true, response.fetch("ok")
+    assert_equal "ready", response.dig("payload", "status")
+    assert_equal [ Dir.pwd, 45_678 ], factory_args
+    assert_equal [ [ "bin/rails", "server" ] ], starts
+    toolkit.close
+    assert_equal [ true ], closed
+  end
+
   def test_visual_receipt_uses_only_managed_agent_browser_and_media_preflight
     Dir.mktmpdir("hive-capture-toolkit-generic") do |root|
     entry = FakeBrowser.new(
@@ -338,11 +379,16 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       out, = capture_io do
         Hive::Commands::Evidence.new(
           "terminal", "proof", json: true,
-          command: [ RbConfig.ruby, "-e", "puts 'captured'" ],
+          command: [
+            "/bin/sh", "-c",
+            "(echo forbidden > mutation.txt) 2>/dev/null || true; echo captured"
+          ],
           environment: toolkit.launch_environment
         ).call
       end
       payload = JSON.parse(out)
+      assert_equal 0, payload.fetch("exit_status")
+      refute_path_exists File.join(source, "mutation.txt")
       candidate = [
         {
           "kind" => "terminal", "representations" => payload.fetch("representations")

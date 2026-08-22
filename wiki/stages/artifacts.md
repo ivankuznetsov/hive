@@ -41,6 +41,13 @@ capture or an approval request.
    saved identities and non-ancestor saved bases remain errors.
 3. The implementation worktree must be clean. Evidence covers only the committed
    `base..HEAD` range; staged, unstaged, untracked, or symlink changes fail closed.
+   A compatibility recovery exists only for attempts made by the retired direct
+   runtime-directory bind: after the exact `implementation worktree must be clean`
+   artifact failure, the daemon may quarantine exclusively untracked regular files
+   below `log/`, `storage/`, or `tmp/`. It records a digest journal under the task,
+   refuses tracked/staged/other-path/symlink/large residue, and retries normally.
+   The files are preserved outside the implementation range rather than deleted or
+   auto-committed into the product.
 4. The durable attempt must own the current task generation and `7-artifacts`
    stage before the ledger can be opened.
 
@@ -299,6 +306,25 @@ and reviewer capability. Legacy media follows in a visibly labelled
 - Typed provider failures retain the provider, status code, message, and retry
   time in the warning. They no longer park a reviewed task merely because an
   optional capture role exhausted its provider allowance.
+- Capability, review, and recapture-exhaustion blockers are durable `ERROR`
+  rows with the exact `hive evidence recover` command. Paced automated recovery
+  re-probes capability blockers in the same generation. It does not clear an
+  independent review block or exhausted recapture decision.
+- Integrity, role-launch, source-drift, or malformed-output failures use
+  `ERROR reason=outcome_evidence_invalid` and retain their bounded diagnostic;
+  they remain ordinary recoverable stage errors.
+- The daemon bridges residue from the old direct-bind artifact runtime only for
+  the exact clean-worktree diagnostic and only through the bounded, recoverable
+  quarantine described above. Current capture commands use private runtime
+  overlays, so successful teardown leaves no source residue to recover.
+- A role process that returns a typed provider failure keeps that envelope at
+  the controller boundary. Quota and credit failures publish
+  `ERROR reason=limits_reached provider=<profile> retry_after=<iso8601>` and
+  return `commit=limits_reached`, so daemon recovery observes the normal
+  provider cooldown instead of immediately replaying an expensive inference,
+  producer, or reviewer prompt. Other typed provider failures retain
+  `reason=provider_error`, the provider, status code when supplied, and a
+  bounded message rather than being mislabeled as invalid evidence.
 
 ## Backlinks
 

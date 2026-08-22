@@ -430,6 +430,21 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
     end
   end
 
+  # The terminal-capture sandbox seam is injected by tests that must run where
+  # bubblewrap is absent, so its production default is proven here instead.
+  def test_default_project_sandbox_factory_builds_the_real_sandbox
+    Dir.mktmpdir("hive-capture-toolkit-sandbox-default") do |root|
+      source = File.join(root, "source")
+      FileUtils.mkdir_p(source)
+      factory = Toolkit.new.instance_variable_get(:@project_sandbox_factory)
+
+      sandbox = factory.call(source_root: source, environment: {})
+
+      assert_instance_of Hive::Artifacts::ProjectCommandSandbox, sandbox
+      assert sandbox.close
+    end
+  end
+
   private
 
   def browser_entry

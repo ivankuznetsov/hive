@@ -25,6 +25,7 @@ module Hive
 
       EVIDENCE_ROLES = %w[inference producer reviewer].freeze
       MAX_INFERENCE_ATTEMPTS = 2
+      MAX_PRODUCER_ATTEMPTS = 2
       MAX_REVIEWER_ATTEMPTS = 2
       class RoleOutputError < Hive::Artifacts::OutcomeEvidence::StoreError; end
       class RoleAgentError < StandardError
@@ -240,30 +241,32 @@ module Hive
             end
             producer = nil
             replacements = begin
-              producer_prompt = render_role_prompt(
-                "artifacts_producer_prompt.md.erb", task,
-                requirement_json: JSON.pretty_generate(requirement),
-                prior_evidence_json: JSON.pretty_generate(prior ? prior.fetch("evidence") : []),
-                revision_json: JSON.pretty_generate(revision),
-                capture_tools_json: JSON.pretty_generate(capture_tools),
+              producer, retained = run_producer!(
+                task: task, cfg: cfg, identity: identity,
+                prompt_values: {
+                  requirement_json: JSON.pretty_generate(requirement),
+                  prior_evidence_json: JSON.pretty_generate(
+                    prior ? prior.fetch("evidence") : []
+                  ),
+                  revision_json: JSON.pretty_generate(revision),
+                  capture_tools_json: JSON.pretty_generate(capture_tools),
+                  writable_root: writable_root,
+                  writable_relative_root: writable_relative_root
+                },
                 writable_root: writable_root,
-                writable_relative_root: writable_relative_root
-              )
-              producer = run_role!(
-                role: "producer", task: task, cfg: cfg, prompt: producer_prompt,
-                identity: identity, writable_root: writable_root,
                 launch_environment: capture_toolkit.launch_environment,
                 producer_add_dirs: capture_toolkit.producer_add_dirs,
                 producer_permission_arguments: capture_toolkit.producer_permission_arguments,
                 producer_runtime_policy: capture_toolkit.producer_runtime_policy
-              )
-              candidate = Array(producer.fetch(:output).fetch("evidence"))
-              capture_toolkit.verify_captures!(candidate)
-              ensure_producer_paths!(task, writable_root, candidate)
-              store.retain_candidate!(
-                generation: generation, attempt_id: attempt_id, evidence: candidate,
-                producer: producer.fetch(:actor)
-              )
+              ) do |candidate, actor|
+                capture_toolkit.verify_captures!(candidate)
+                ensure_producer_paths!(task, writable_root, candidate)
+                store.retain_candidate!(
+                  generation: generation, attempt_id: attempt_id,
+                  evidence: candidate, producer: actor
+                )
+              end
+              retained
             ensure
               begin
                 capture_toolkit.close if capture_toolkit.respond_to?(:close)
@@ -311,6 +314,50 @@ module Hive
             return rework_from_review!(
               task, store, requirement, history, attempt, rework_tracker
             )
+          end
+        end
+      end
+
+      # Capture may succeed while the producer's final descriptor contains a
+      # mechanical field owned by the controller, malformed JSON structure, or
+      # another correctable admission error. Inference and review already get
+      # one bounded fresh-context repair; without the same channel here, Hive
+      # discards useful private captures and turns a format typo into a whole
+      # daemon retry. The admission block remains the authority and must pass
+      # before anything reaches the independent reviewer.
+      def run_producer!(task:, cfg:, identity:, prompt_values:, writable_root:,
+                        launch_environment:, producer_add_dirs:,
+                        producer_permission_arguments:, producer_runtime_policy:)
+        repair = nil
+        MAX_PRODUCER_ATTEMPTS.times do |index|
+          producer_prompt = render_role_prompt(
+            "artifacts_producer_prompt.md.erb", task,
+            **prompt_values, repair_json: JSON.pretty_generate(repair || {})
+          )
+          producer = run_role!(
+            role: "producer", task: task, cfg: cfg, prompt: producer_prompt,
+            identity: identity, writable_root: writable_root,
+            launch_environment: launch_environment,
+            producer_add_dirs: producer_add_dirs,
+            producer_permission_arguments: producer_permission_arguments,
+            producer_runtime_policy: producer_runtime_policy
+          )
+          begin
+            output = producer.fetch(:output)
+            unless output.keys == [ "evidence" ]
+              raise RoleOutputError, "producer output must contain only evidence"
+            end
+            candidate = Array(output.fetch("evidence"))
+            return [ producer, yield(candidate, producer.fetch(:actor)) ]
+          rescue RoleOutputError, Hive::Artifacts::OutcomeEvidence::StoreError, KeyError => e
+            raise if index + 1 >= MAX_PRODUCER_ATTEMPTS
+
+            repair = {
+              "validation_error" => e.message.to_s.byteslice(0, 1024).to_s.scrub,
+              "previous_output" => producer[:output],
+              "instruction" =>
+                "Reuse successful controller-issued captures when possible and return corrected JSON immediately."
+            }
           end
         end
       end

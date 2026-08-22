@@ -27,6 +27,16 @@ attempt):
 <%= capture_tools_json %>
 ```
 
+<% if repair_json && repair_json != "{}" %>
+The controller rejected the previous producer descriptor. This is one bounded
+fresh-context repair. Reuse successful controller-issued captures when the
+paths remain available; do not repeat working browser or terminal operations
+merely to correct JSON. Return the corrected exact JSON immediately.
+```json
+<%= repair_json %>
+```
+<% end %>
+
 When `producer_interface` is present, call those named tools directly. They
 are Hive controller-supplied capabilities: `evidence_write` creates only a
 safe document representation below this attempt's evidence root,

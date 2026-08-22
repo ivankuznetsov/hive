@@ -104,6 +104,11 @@ completion authority.
    role paths.
    Screenshot, video, and terminal representations must match a controller
    capture receipt at handoff; producer-written lookalike media fails closed.
+   If the capture succeeded but the final producer descriptor is malformed,
+   Hive gives one fresh producer context the bounded validation error and prior
+   output so it can reuse the private capture and correct only the JSON. The
+   candidate still crosses the same admission boundary before review; a second
+   invalid descriptor ends the attempt.
 7. Re-admit every retained representation deterministically: safe containment,
    size, hash, declared media type, actual image/video decode, terminal-cast or
    document structure, secret patterns, and provider provenance are checked

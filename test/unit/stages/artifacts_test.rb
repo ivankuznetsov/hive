@@ -686,6 +686,63 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_rejected_producer_descriptor_gets_one_fresh_bounded_repair
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      writable_root = File.join(task.folder, "evidence")
+      prompts = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        representation = {
+          "role" => "original", "media_type" => "video/webm",
+          "path" => "evidence/flow.webm"
+        }
+        representation["rendering"] = "temporal" if prompts.length == 1
+        {
+          actor: { "context_id" => "producer-#{prompts.length}", "agent" => "pi" },
+          output: {
+            "evidence" => [
+              {
+                "kind" => "video", "summary" => "The recording proves the flow.",
+                "claims" => [ "claim-flow" ],
+                "representations" => [ representation ]
+              }
+            ]
+          }
+        }
+      end
+
+      producer, retained = Hive::Stages::Artifacts.run_producer!(
+        task: task, cfg: {}, identity: outcome_identity,
+        prompt_values: {
+          requirement_json: "{}", prior_evidence_json: "[]", revision_json: "[]",
+          capture_tools_json: "{}", writable_root: writable_root,
+          writable_relative_root: "evidence"
+        },
+        writable_root: writable_root, launch_environment: nil,
+        producer_add_dirs: [], producer_permission_arguments: nil,
+        producer_runtime_policy: nil
+      ) do |candidate, _actor|
+        representation = candidate.first.fetch("representations").first
+        if representation.key?("rendering")
+          raise Hive::Artifacts::OutcomeEvidence::StoreError,
+                "producer outcome evidence representation contains unknown keys: rendering"
+        end
+        candidate
+      end
+
+      assert_equal "producer-2", producer.dig(:actor, "context_id")
+      refute retained.first.fetch("representations").first.key?("rendering")
+      assert_equal 2, prompts.length
+      assert_includes prompts.last, "contains unknown keys: rendering"
+      assert_includes prompts.last, '"rendering": "temporal"'
+      assert_includes prompts.last, "Reuse successful controller-issued captures"
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
   def test_overlong_verdict_reason_gets_one_repair_round_before_the_append
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
@@ -1201,9 +1258,11 @@ class StagesArtifactsTest < Minitest::Test
           target = File.join(writable_root, "target.md")
           link = File.join(writable_root, "original.md")
           review = File.join(writable_root, "review.txt")
-          File.write(target, "# Checkout\n\nConfirmation is visible.\n")
-          File.symlink(target, link)
-          File.write(review, "Checkout confirmation is visible.\n")
+          unless File.exist?(target)
+            File.write(target, "# Checkout\n\nConfirmation is visible.\n")
+            File.symlink(target, link)
+            File.write(review, "Checkout confirmation is visible.\n")
+          end
           relative = ->(path) { Pathname.new(path).relative_path_from(Pathname.new(task.folder)).to_s }
           representation = lambda do |path, role_name, media_type|
             {

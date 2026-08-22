@@ -42,6 +42,50 @@ class ArtifactsBrowserGatewayCoverageGapsTest < Minitest::Test
     end
   end
 
+  def test_recording_duration_probe_is_fail_closed
+    Dir.mktmpdir("hive-browser-gateway-probe") do |root|
+      invalid = build_gateway(root)
+      invalid.instance_variable_set(:@video_duration_probe, ->(_) { Float::INFINITY })
+      error = assert_raises(Gateway::GatewayError) do
+        invalid.send(:validate_recording_duration!, File.join(root, "missing.webm"))
+      end
+      assert_match(/could not be inspected/, error.message)
+
+      secret = build_gateway(root)
+      secret.instance_variable_set(:@video_duration_probe, ->(_) { raise "secret" })
+      error = assert_raises(Gateway::GatewayError) do
+        secret.send(:validate_recording_duration!, File.join(root, "missing.webm"))
+      end
+      assert_equal "browser recording duration could not be inspected", error.message
+    end
+  end
+
+  def test_default_ffprobe_duration_probe_handles_success_and_failure
+    Dir.mktmpdir("hive-browser-gateway-ffprobe") do |root|
+      probe = File.join(root, "ffprobe")
+      File.write(probe, "#!/bin/sh\nprintf '%s\\n' '{\"format\":{\"duration\":\"2.5\"}}'\n")
+      File.chmod(0o755, probe)
+      gateway = Gateway.new(
+        environment: {}, argv_prefix: [ "agent-browser" ], writable_root: root,
+        origin: "http://capture.invalid", ffprobe_path: probe
+      ).start!
+      assert_equal "2.5", gateway.send(:probe_video_duration, File.join(root, "proof.webm"))
+
+      File.write(probe, "#!/bin/sh\nprintf '%s\\n' 'not-json'\n")
+      error = assert_raises(Gateway::GatewayError) do
+        gateway.send(:probe_video_duration, File.join(root, "proof.webm"))
+      end
+      assert_match(/could not be inspected/, error.message)
+
+      File.write(probe, "#!/bin/sh\nexit 1\n")
+      assert_raises(Gateway::GatewayError) do
+        gateway.send(:probe_video_duration, File.join(root, "proof.webm"))
+      end
+    ensure
+      gateway&.close
+    end
+  end
+
   def test_argument_admission_covers_every_command_shape
     Dir.mktmpdir("hive-browser-gateway-argv") do |root|
       gateway = build_gateway(root)

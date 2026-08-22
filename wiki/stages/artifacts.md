@@ -173,7 +173,12 @@ Playwright, Puppeteer, QML, or ImageMagick. Stable interface state uses a
 screenshot; navigation, ordering, timing, and state transitions use temporal
 video. The gateway accepts only the issued origin, a closed interaction
 vocabulary, and basename PNG/WebM output. It stages media privately and
-publishes it no-follow/exclusive into the writable attempt root. Hive closes
+publishes it no-follow/exclusive into the writable attempt root.
+The controller probes each stopped recording before publication and rejects an
+over-30-second take immediately, clearing the stopped session so the producer
+can capture a shorter replacement in the same attempt. This keeps the capture
+tool's acceptance boundary aligned with final proof admission instead of
+discovering the duration error only after the producer exits. Hive closes
 the named browser session before it cleans the managed app/proxy and producer
 process group. Playwright remains a web-system-test dependency, not an
 outcome-evidence capture interface.

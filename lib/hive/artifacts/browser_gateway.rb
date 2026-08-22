@@ -19,6 +19,7 @@ module Hive
       COMMAND_TIMEOUT_SECONDS = 60
       MAX_ARGUMENTS = 64
       MAX_ARGUMENT_BYTES = 8 * 1024
+      MAX_VIDEO_DURATION_SECONDS = 30
       MEDIA_NAME = /\A[a-z][a-z0-9_-]{0,63}\.(?:png|webm)\z/
       INTERACTION_COMMANDS = %w[
         snapshot click dblclick fill type press keydown keyup hover focus check
@@ -33,7 +34,8 @@ module Hive
 
       def initialize(environment:, argv_prefix:, writable_root:, origin:,
                      runner: nil, on_publish: nil,
-                     max_media_bytes: 256 * 1024 * 1024)
+                     max_media_bytes: 256 * 1024 * 1024,
+                     ffprobe_path: nil, video_duration_probe: nil)
         @environment = environment.to_h
         @argv_prefix = Array(argv_prefix).map(&:to_s).freeze
         @writable_root = File.realpath(writable_root)
@@ -41,6 +43,9 @@ module Hive
         @runner = runner || method(:run_command)
         @on_publish = on_publish
         @max_media_bytes = Integer(max_media_bytes)
+        @ffprobe_path = ffprobe_path&.to_s
+        @video_duration_probe = video_duration_probe ||
+          (@ffprobe_path && method(:probe_video_duration))
         @pending_record = nil
       end
 
@@ -183,13 +188,54 @@ module Hive
         end
         stdout, stderr, status = @runner.call(@environment, @argv_prefix + argv)
         if status.zero? && media
-          publish_media!(media.fetch(:private), media.fetch(:public))
-          stdout = stdout.to_s.gsub(media.fetch(:private), media.fetch(:public))
-          @pending_record = nil if argv == %w[record stop]
+          begin
+            validate_recording_duration!(media.fetch(:private)) if argv == %w[record stop]
+            publish_media!(media.fetch(:private), media.fetch(:public))
+            stdout = stdout.to_s.gsub(media.fetch(:private), media.fetch(:public))
+          ensure
+            # A successful `record stop` has already closed the browser's
+            # recording even when duration validation or publication fails.
+            # Clear the logical session so the producer can immediately make
+            # a shorter replacement instead of getting "already active".
+            @pending_record = nil if argv == %w[record stop]
+          end
         elsif argv.first == "record" && argv[1] == "start" && !status.zero?
           @pending_record = nil
         end
         [ stdout.to_s, stderr.to_s, Integer(status) ]
+      end
+
+      def validate_recording_duration!(path)
+        return unless @video_duration_probe
+
+        duration = Float(@video_duration_probe.call(path), exception: false)
+        unless duration&.positive? && duration.finite?
+          raise GatewayError, "browser recording duration could not be inspected"
+        end
+        return if duration <= MAX_VIDEO_DURATION_SECONDS
+
+        raise GatewayError,
+              "browser recording exceeds #{MAX_VIDEO_DURATION_SECONDS} seconds; " \
+              "record a shorter take"
+      rescue GatewayError
+        FileUtils.rm_f(path)
+        raise
+      rescue StandardError
+        FileUtils.rm_f(path)
+        raise GatewayError, "browser recording duration could not be inspected"
+      end
+
+      def probe_video_duration(path)
+        stdout, _stderr, status = run_command(
+          {},
+          [ @ffprobe_path, "-v", "error", "-show_entries", "format=duration",
+            "-of", "json", path ]
+        )
+        raise GatewayError, "browser recording duration could not be inspected" unless status.zero?
+
+        JSON.parse(stdout).dig("format", "duration")
+      rescue JSON::ParserError, TypeError
+        raise GatewayError, "browser recording duration could not be inspected"
       end
 
       def publish_media!(source, destination)

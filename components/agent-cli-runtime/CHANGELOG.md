@@ -2,11 +2,6 @@
 
 ## Unreleased
 
-- Admit an OpenCode invocation's Hive-owned `TMPDIR` through the deny-first
-  external-directory policy. Workspace-write launches may also edit that
-  ephemeral root; read-only launches can read it but retain their global edit
-  and shell denial. The invocation cleanup still destroys the entire root.
-
 ## 0.2.3 - 2026-08-21
 
 - Classify extracted provider failures once at the runtime boundary as

@@ -601,7 +601,7 @@ module Hive
       # observe the commit. Reuse Execute's guarded recovery boundary so only
       # an owned 4-execute worktree on the expected branch can be promoted.
       def reconcile_auto_committed_execute_residue(task, cfg, stage, result)
-        return result unless stage == "4-execute"
+        return result unless stage == "4-execute" # coding-scoped: execute residue recovery
 
         marker = Hive::Markers.current(task.state_file)
         return result unless marker.name == :error && marker.attrs["reason"] == "dirty_worktree"

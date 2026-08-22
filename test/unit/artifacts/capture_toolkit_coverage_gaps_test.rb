@@ -44,6 +44,37 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
     end
   end
 
+  def test_browser_preflight_cleans_up_socket_and_listener_failures
+    toolkit = Toolkit.new
+    socket_closed = false
+    socket = Object.new
+    socket.define_singleton_method(:closed?) { socket_closed }
+    socket.define_singleton_method(:close) { socket_closed = true }
+    socket.define_singleton_method(:write) { |_| raise Errno::EPIPE }
+    io_select = ->(*) { false }
+    with_replaced_singleton_method(IO, :select, io_select) do
+      assert_nil toolkit.send(:serve_browser_preflight, socket)
+    end
+    assert socket_closed
+
+    listener_closed = false
+    listener = Object.new
+    listener.define_singleton_method(:listen) { |_| raise Errno::EIO }
+    listener.define_singleton_method(:close) { listener_closed = true }
+    with_replaced_singleton_method(TCPServer, :new, ->(*) { listener }) do
+      assert_raises(Errno::EIO) { toolkit.send(:start_browser_preflight) }
+    end
+    assert listener_closed
+
+    failed_listener = Object.new
+    failed_listener.define_singleton_method(:close) { raise Errno::EIO }
+    toolkit.instance_variable_set(
+      :@browser_preflight, { server: failed_listener, thread: Object.new }
+    )
+    assert_nil toolkit.send(:close_browser_preflight)
+    assert_nil toolkit.instance_variable_get(:@browser_preflight)
+  end
+
   def test_managed_web_server_default_and_error_paths
     Dir.mktmpdir("hive-capture-toolkit-server") do |root|
       source = hive_web_source(root)

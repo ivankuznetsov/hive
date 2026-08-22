@@ -2568,7 +2568,12 @@ class AgentTest < Minitest::Test
 
       with_env(
         "HIVE_PI_BIN" => FAKE_BIN,
-        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event)
+        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event),
+        # Keep the fixture alive after it emits the terminal provider event.
+        # Hive deliberately terminates work once the model says its output was
+        # truncated; without the hang, natural exit and TERM race and make the
+        # asserted process status scheduler-dependent.
+        "HIVE_FAKE_CLAUDE_HANG" => "10"
       ) do
         result = Hive::Agent.new(
           task: task,
@@ -2580,10 +2585,7 @@ class AgentTest < Minitest::Test
           expected_output: output
         ).run!
 
-        # The reader may terminate the process as soon as Pi reports the
-        # output limit, before the fixture reaches its natural zero exit.
-        assert_includes [ 0, -Signal.list.fetch("TERM") ], result[:exit_code]
-        refute result[:timed_out]
+        assert_equal(-Signal.list.fetch("TERM"), result[:exit_code])
         assert_equal :error, result[:status]
         assert_equal "model_output_limit", result[:error_reason]
         assert_equal "model_output_limit", result.dig(:resource_exhaustion, :reason)

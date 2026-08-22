@@ -329,7 +329,7 @@ module Hive
         )
 
         tool_names = %w[read ls grep find evidence_write evidence_terminal]
-        tool_names << "evidence_browser" if browser
+        tool_names.concat(%w[evidence_browser evidence_server]) if browser
         flags = [
           "--no-builtin-tools", "--no-extensions", "--no-skills",
           "--no-prompt-templates", "--no-context-files",
@@ -1007,6 +1007,21 @@ module Hive
               }),
               async execute(_id, params, signal) {
                 return runHive(["evidence", "browser", params.command, ...params.argv], signal);
+              }
+            }));
+
+            pi.registerTool(defineTool({
+              name: "evidence_server",
+              label: "Start project evidence server",
+              description: "Start one repository application command on the controller-issued evidence port and keep it under Hive custody for this attempt.",
+              parameters: Type.Object({
+                argv: Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), {
+                  minItems: 1, maxItems: 64
+                })
+              }),
+              async execute(_id, params, signal) {
+                const [executable, ...argv] = params.argv;
+                return runHive(["evidence", "server", executable, "--json", "--", ...argv], signal);
               }
             }));
           TYPESCRIPT

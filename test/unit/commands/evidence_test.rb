@@ -208,6 +208,35 @@ class CommandsEvidenceTest < Minitest::Test
     end
   end
 
+  def test_project_server_is_controller_scoped_and_returns_readiness
+    requests = []
+    response = {
+      "ok" => true, "status" => 0,
+      "payload" => {
+        "driver" => "hive-project-server", "status" => "ready",
+        "app_port" => 45_678, "app_endpoint" => "http://127.0.0.1:45678"
+      }
+    }
+    with_capture_mailbox(->(request) { requests << request; response }) do |environment|
+      command = Hive::Commands::Evidence.new(
+        "server", "bin/rails", json: true,
+        command: [ "server", "-p", "45678" ], environment: environment
+      )
+
+      out, = capture_io { command.call }
+      payload = JSON.parse(out)
+
+      assert_equal "ready", payload.fetch("status")
+      assert_equal "server", requests.first.fetch("operation")
+      assert_equal [ "bin/rails", "server", "-p", "45678" ],
+                   requests.first.fetch("argv")
+    end
+
+    assert_raises(Hive::UsageError) do
+      Hive::Commands::Evidence.new("server", nil, environment: {}).call
+    end
+  end
+
   def test_terminal_and_browser_runtime_failures_are_usage_errors
     failed = ->(_request) do
       { "ok" => false, "status" => 64, "error" => "capture failed" }

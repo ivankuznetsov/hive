@@ -58,7 +58,10 @@ completion authority.
    `ffmpeg`, `ffprobe`, and Tesseract. The browser gets one random `.invalid`
    origin mapped through a controller-owned proxy to one issued loopback app
    port, rather than access to every localhost service. Hive opens and verifies
-   that exact session before production. The producer receives only a bounded
+   that exact session before production. For non-Hive web projects, a temporary
+   controller-owned readiness page occupies the issued application port only
+   for this navigation check; Hive closes it before launching the producer so
+   the real project server can bind that same port. The producer receives only a bounded
    filesystem mailbox used by `hive evidence`; the raw browser socket,
    controller-private browser state, and media staging stay outside its sandbox.
    Codex's managed network proxy runs in limited mode with no admitted domains

@@ -64,12 +64,20 @@ completion authority.
    the real project server can bind that same port. The producer receives only a bounded
    filesystem mailbox used by `hive evidence`; the raw browser socket,
    controller-private browser state, and media staging stay outside its sandbox.
-   Codex's managed network proxy runs in limited mode with no admitted domains
-   and local binding enabled, so a producer may start the issued application
-   port but cannot connect directly to arbitrary loopback services. The
+   For non-Hive visual proof, a Pi producer also receives `hive evidence server`:
+   it selects one executable repository command, while Hive runs that command
+   on the exact issued port in a credential-free bubblewrap sandbox, proves HTTP
+   readiness, keeps it alive for the attempt, and tears it down by exact process
+   identity. The project source is read-only except for existing runtime
+   `log/`, `storage/`, and `tmp/` directories. Codex's managed network proxy runs
+   in limited mode with no admitted domains and local binding enabled, so the
+   managed application cannot connect directly to arbitrary loopback services. The
    controller executes admitted browser/terminal operations, records exact
    file receipts, and exclusively publishes basename-only PNG/WebM media into
-   the evidence root.
+   the evidence root. Controller-side terminal commands use the same
+   credential-free project sandbox: source is read-only, conventional runtime
+   directories remain writable, and the retained transcript shows the requested
+   product command rather than Hive's sandbox wrapper.
    Missing capabilities
    publish a semantic blocker before the producer starts.
 6. Launch a distinct **producer** context with one writable root under the active
@@ -141,6 +149,15 @@ publishes it no-follow/exclusive into the writable attempt root. Hive closes
 the named browser session before it cleans the managed app/proxy and producer
 process group. Playwright remains a web-system-test dependency, not an
 outcome-evidence capture interface.
+
+When Hive is not itself the reviewed application, Pi visual producers receive
+a second controller-issued capability, `evidence_server`. The producer calls it
+once with a repository executable and arguments that bind to the issued port;
+it never starts a long-lived process through terminal capture or a detached
+shell. Hive validates that exact executable beneath the frozen source root,
+starts it with a closed environment and bounded diagnostics, waits for the
+issued HTTP endpoint, and owns teardown. Other producer profiles retain their
+existing workspace sandbox behavior.
 
 Inside a durable explicitly routed attempt, that admitted provider/model/effort
 is authoritative for all three fresh role processes and is what actor receipts

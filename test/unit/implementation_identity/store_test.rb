@@ -570,7 +570,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
     end
   end
 
-  def test_default_attempt_store_runs_layout_migration_without_an_override
+  def test_default_attempt_store_opens_current_layout_without_migration
     with_tmp_dir do |root|
       task = TaskStub.new(folder: root, state_file: File.join(root, "task.md"), slug: "task",
                           id: 1, project_root: root)
@@ -581,7 +581,8 @@ class ImplementationIdentityStoreTest < Minitest::Test
         assert_equal File.join(root, "attempts", "v4"),
                      store.instance_variable_get(:@attempt_store).root
       end
-      assert File.file?(File.join(root, "attempts", "v2"))
+      refute File.exist?(File.join(root, "attempts", "v2"))
+      refute File.exist?(File.join(root, "recovery-migration-v6.json"))
     end
   end
 

@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-08-21
+updated: 2026-08-22
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage]
 ---
 
@@ -26,6 +26,11 @@ admitted without a restart. Each project has one `AdmissionStore`; one corrupt
 store produces a bounded failed event while the remaining project ports continue.
 Patrol Fix otherwise uses the standard task/status contracts and adds no daemon
 operational projection.
+
+Daemon and bot startup never run storage migrations. Operators perform every
+global and project cutover explicitly through `hive migrate` or
+`hive migrate --all` while those processes are stopped. Startup opens only the
+current attempt layout and contains no legacy migration preflight or watcher.
 
 `StatusConsumer` passes through the additive condition projection fields and
 the project-level `hidden_archived_task_count` from ordinary `hive status

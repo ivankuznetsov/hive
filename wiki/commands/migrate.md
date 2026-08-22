@@ -32,11 +32,12 @@ the command instead names the restore path plus exact `forget` and `prune`
 cleanup commands while keeping the fleet result visibly incomplete.
 
 Before project-local changes, the command runs the owner-private recovery-state
-cutover for the current Hive state home. Daemon and bot startup run the same
-cutover before opening their stores or queues. A foreground default attempt
-store opens only the physical v4 layout after the cutover. Obsolete v1 roots
-or competing material v2/v3/v4 roots fail closed, so an upgrade cannot
-silently choose or create a second authority.
+cutover for the current Hive state home. Stop the daemon and bot, run
+`hive migrate` or `hive migrate --all`, then restart them. Runtime commands do
+not discover or perform this cutover. A foreground default attempt store opens
+only the physical v4 layout that the explicit command prepared. Obsolete v1
+roots or competing material v2/v3/v4 roots fail closed inside the migration
+command, so the cutover never silently chooses a second authority.
 
 The v4 cutover verifies daily admission accounting against both bounded hot
 records and immutable permanent proofs. Terminal attempts may already have
@@ -158,6 +159,10 @@ final records into permanent proof. Only then does it write
 documents, and remove superseded recovery receipts.
 
 Runtime opens only v4: there is no dual reader, reverse migration, or hydration
+path. This command is the sole authority that invokes the global recovery
+migration. `hive status`, daemon startup, bot startup, and ordinary attempt
+store construction neither perform nor monitor it. The operator must complete
+the one-off command before starting current runtime processes.
 back into v2/v3. An obsolete v1 tree, material competing-root collision, live
 writer or possibly active attempt, unsupported attempt schema, unsafe tree entry, changed corpus, or
 invalid checkpoint/fence fails closed with the evidence preserved. Re-running

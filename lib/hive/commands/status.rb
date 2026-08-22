@@ -16,6 +16,7 @@ require "hive/diagnostic_evidence"
 require "hive/diagnostic_helpers"
 require "hive/secret_patterns"
 require "hive/task_action"
+require "hive/attempts/store"
 require "hive/task_projection/store"
 require "hive/task_closure"
 require "hive/implementation_identity/resolver"
@@ -175,6 +176,7 @@ module Hive
           projects, workflow_generations: workflow_generations
         )
         archive_backfiller = shared_archive_backfiller
+        owns_attempt_store = acquire_status_attempt_store
         projects.each do |project|
           render_project(
             project, project_count: projects.size,
@@ -193,6 +195,8 @@ module Hive
                "(#{e.class}: #{e.message}); skipping it so other projects still display"
           puts "#{project['name']}: failed to load (#{e.message})"
         end
+      ensure
+        @status_attempt_store = nil if owns_attempt_store
       end
 
       def operational_payload(projects, scheduler_snapshot: AUTO_SCHEDULER_SNAPSHOT, status_payload: nil,
@@ -371,6 +375,7 @@ module Hive
       def json_payload(projects, stages: nil, exclude_archived: false, admission_context: nil,
                        now: Time.now.utc, workflow_generations: nil,
                        include_archive_index: false)
+        owns_attempt_store = acquire_status_attempt_store
         now = now.utc
         @next_retention_boundary = nil
         workflow_generations ||= capture_workflow_generations(projects)
@@ -400,6 +405,8 @@ module Hive
             )
           end
         }
+      ensure
+        @status_attempt_store = nil if owns_attempt_store
       end
 
       # Isolate per-project failures. A single project with a malformed
@@ -1171,6 +1178,15 @@ module Hive
 
       def collect_rows(hive_state, stages: nil, exclude_archived: false, now: Time.now.utc,
                        workflow_generation: nil, project_name: nil)
+        unless @status_attempt_store
+          return with_status_attempt_store do
+            collect_rows(
+              hive_state, stages: stages, exclude_archived: exclude_archived, now: now,
+              workflow_generation: workflow_generation, project_name: project_name
+            )
+          end
+        end
+
         rows = []
         known_stage_dirs = workflow_stage_dirs(workflow_generation)
         terminal_stage_dirs = workflow_terminal_stage_dirs(workflow_generation)
@@ -1330,9 +1346,20 @@ module Hive
       end
 
       def status_projection(task, marker, project: nil)
-        projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
+        unless @status_attempt_store
+          return with_status_attempt_store do
+            status_projection(task, marker, project: project)
+          end
+        end
+
+        attempt_store = status_attempt_store
+        projection = Hive::TaskProjection::Store.new(
+          task_folder: task.folder, attempt_store: attempt_store
+        ).read(marker: marker)
         project ||= project_name_for(task)
-        closure = Hive::TaskClosure.projection(task, project: project)
+        closure = Hive::TaskClosure.projection(
+          task, project: project, attempt_store: attempt_store
+        )
         projection = projection.with_closure(closure) if closure
         [ marker, projection ]
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
@@ -1348,6 +1375,24 @@ module Hive
           raw: nil
         )
         [ error_marker, Hive::TaskProjection.project(records: [], marker: error_marker) ]
+      end
+
+      def status_attempt_store
+        @status_attempt_store || raise(Hive::Error, "status attempt store is outside a scan")
+      end
+
+      def with_status_attempt_store
+        owns_store = acquire_status_attempt_store
+        yield
+      ensure
+        @status_attempt_store = nil if owns_store
+      end
+
+      def acquire_status_attempt_store
+        return false if @status_attempt_store
+
+        @status_attempt_store = Hive::Attempts::Store.runtime(create_directories: false)
+        true
       end
 
       def annotate_dependencies(rows, project, admission_context: nil)

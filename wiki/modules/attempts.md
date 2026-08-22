@@ -84,7 +84,8 @@ other candidate entry points.
 Hive still has narrow, cataloged internal construction sites: the daemon
 composition root wires reconciliation and loss processing, the private
 supervisor argv adapter starts the owner wrapper, module inspection and
-dry-run preview open the canonical store read-only, and compatibility adapters
+dry-run preview open the canonical store read-only, the `hive status` scan
+hoists one read-only store for the whole scan, and compatibility adapters
 plus `TaskClosure`'s active-attempt verification do the same. These sites are
 not alternate admission producers. The component-boundary test pins each
 file/constant pair and rejects the same construction from any newly listed

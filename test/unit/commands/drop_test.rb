@@ -615,10 +615,21 @@ class DropCommandTest < Minitest::Test
     end
   end
 
-  def wait_for_pid_file(path)
-    deadline = Time.now + 2
-    sleep 0.01 until File.exist?(path) || Time.now >= deadline
-    Integer(File.read(path))
+  # File.write creates the file before the pid lands inside it, so waiting on
+  # existence alone can read "" and blow up in Integer(). Poll the contents.
+  def wait_for_pid_file(path, timeout: 5)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    contents = ""
+    loop do
+      contents = File.read(path) if File.exist?(path)
+      break if contents.match?(/\A[0-9]+\z/)
+      break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+      sleep 0.01
+    end
+    flunk "timed out waiting #{timeout}s for child pid file #{File.basename(path)}" unless contents.match?(/\A[0-9]+\z/)
+
+    Integer(contents)
   end
 
   def process_group_alive?(pgid)

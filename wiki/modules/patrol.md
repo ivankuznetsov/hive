@@ -145,20 +145,21 @@ GitHub issue.
 
 `script/migrate_patrol_findings.rb [PROJECT_ROOT] [--dry-run]` reads active
 ordinary findings from the local native StateStore and accepted historical
-Architecture Patrol `fix` and `discuss` dispositions from JobStore. Ordinary
-findings become `patrol-fix` tasks through `TaskCapture`; Architecture Patrol
-dispositions are converted by the current source adapter and reserved in the
-shared `AdmissionStore`. Dismissals and historical action records are ignored.
+Architecture Patrol `fix` and `discuss` dispositions from JobStore. Both lanes
+use their current source adapters and reserve immutable snapshots in the shared
+`AdmissionStore`; the importer creates no workflow task folders. The ordinary
+admission scheduler materializes a task only after semantic admission and
+workflow-capacity checks. Dismissals and historical action records are ignored.
 It is the only Patrol migration path. It has no daemon hook, timer, module
 owner, cutover state, rollback, qualification report, or compatibility reader.
 
-The importer is idempotent by
-`patrol-fix:legacy-finding:<finding-id>`. Matching existing tasks are reused;
-conflicting matching metadata fails closed. Unrelated malformed task metadata
-is ignored. Architecture reservations are idempotent by occurrence identity and
-source digest, with conflicts rejected before mutation. Legacy ordinary
-findings without a target revision use the current default-branch revision;
-secret-like source text is redacted before task bytes are written.
+The importer is idempotent by each adapter's occurrence identity and source
+digest. Duplicate ordinary finding IDs and conflicts across either lane are
+rejected before mutation; existing matching admissions are reused. It never
+scans existing workflow tasks.
+Legacy ordinary findings without a target revision use the current
+default-branch revision; secret-like source text is redacted before admission
+bytes are written.
 
 ## Read models
 

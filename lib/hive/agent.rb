@@ -23,6 +23,7 @@ module Hive
     TERMINATION_GRACE_SECONDS = 3
     COMPLETION_EVENT_GRACE_SECONDS = 3
     OPENCODE_INSPECTION_TIMEOUT_SECONDS = 10
+    OPENCODE_OUTPUT_COMPLETION_GRACE_SECONDS = 5
     OPENCODE_CAPTURE_BYTES =
       AgentCliRuntime::OpenCode::ResultParser::MAX_RUN_BYTES + 1
     TOKEN_LIMIT_REASON = "token_limit".freeze
@@ -162,6 +163,7 @@ module Hive
                    opencode_permission_policy: nil,
                    additional_read_roots: [], additional_write_roots: [],
                    opencode_edit_patterns: [], opencode_bash_patterns: [],
+                   completion_probe: nil,
                    isolate_environment: false)
       @task = task
       @prompt = prompt
@@ -182,6 +184,10 @@ module Hive
       @additional_write_roots = Array(additional_write_roots).map(&:to_s).freeze
       @opencode_edit_patterns = Array(opencode_edit_patterns).map(&:to_s).freeze
       @opencode_bash_patterns = Array(opencode_bash_patterns).map(&:to_s).freeze
+      unless completion_probe.nil? || completion_probe.respond_to?(:call)
+        raise ArgumentError, "completion_probe must be callable"
+      end
+      @completion_probe = completion_probe
       @runtime_policy = runtime_policy
       if runtime_policy && permission_arguments
         raise ArgumentError, "permission_arguments cannot be combined with runtime_policy"
@@ -655,7 +661,7 @@ module Hive
       old_int = install_chained_signal_trap("INT", &cancellation_handler)
       old_term = install_chained_signal_trap("TERM", &cancellation_handler)
       begin
-        timed_out, status = wait_for_opencode_process(pid, pgid)
+        timed_out, status, output_completed = wait_for_opencode_process(pid, pgid)
       ensure
         trap("INT", old_int || "DEFAULT")
         trap("TERM", old_term || "DEFAULT")
@@ -728,7 +734,7 @@ module Hive
         inspection_diagnostic: inspection_diagnostic,
         unknown_event_summaries: outcome.unknown_events,
         resource_exhaustion: nil,
-        output_completed: outcome.completed?,
+        output_completed: output_completed || outcome.completed?,
         provider_signal: nil,
         status: nil,
         invocation_root: prepared.invocation_root
@@ -932,6 +938,7 @@ module Hive
 
     def wait_for_opencode_process(pid, pgid)
       deadline = Time.now + @timeout_sec
+      completion_deadline = nil
       loop do
         remaining = deadline - Time.now
         if remaining <= 0
@@ -942,10 +949,27 @@ module Hive
           rescue StandardError
             nil
           end
-          return [ true, status ]
+          return [ true, status, false ]
         end
         captured = Process.wait2(pid, Process::WNOHANG)
-        return [ false, captured.last ] if captured
+        return [ false, captured.last, false ] if captured
+
+        if @completion_probe&.call
+          completion_deadline ||=
+            Time.now + OPENCODE_OUTPUT_COMPLETION_GRACE_SECONDS
+          if Time.now >= completion_deadline
+            kill_group(pgid)
+            sleep_grace_then_kill(pgid, pid)
+            status = begin
+              Process.wait2(pid).last
+            rescue StandardError
+              nil
+            end
+            return [ false, status, true ]
+          end
+        else
+          completion_deadline = nil
+        end
 
         sleep [ remaining, 0.1 ].min
       end

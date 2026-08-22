@@ -176,6 +176,8 @@ module Hive
           agent_custody: agent_custody,
           expected_output: expected_output,
           status_mode: :output_file_exists,
+          completion_probe: profile.name == :opencode ?
+            -> { complete_authoring_file?(expected_output) } : nil,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           **launch_arguments
         }
@@ -307,6 +309,17 @@ module Hive
         raise Hive::StageError, "#{AUTHORING_FILE} must be a regular file, not a symlink"
       rescue SystemCallError, IOError => e
         raise Hive::StageError, "#{AUTHORING_FILE} is unreadable: #{e.class}: #{e.message}"
+      end
+
+      # OpenCode can finish its file tool call and then spend minutes in an
+      # empty trailing provider turn. Once the exact controller input is fully
+      # parseable, Agent gives the CLI a short normal-exit grace and then owns
+      # termination. Invalid or partially-written JSON never trips the probe.
+      def complete_authoring_file?(path)
+        read_authoring(path)
+        true
+      rescue Hive::StageError, JSON::ParserError
+        false
       end
 
       def complete_publication(task, publication)

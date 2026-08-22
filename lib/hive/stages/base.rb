@@ -1028,6 +1028,7 @@ module Hive
                       additional_read_roots: [], additional_write_roots: [],
                       opencode_edit_patterns: [], opencode_bash_patterns: [],
                       opencode_permission_policy: nil,
+                      completion_probe: nil,
                       implementation_stage: nil,
                       defer_implementation_observation: false,
                       resource_guards: nil, agent_custody: nil,
@@ -1179,6 +1180,7 @@ module Hive
               opencode_edit_patterns: opencode_edit_patterns,
               opencode_bash_patterns: opencode_bash_patterns,
               opencode_permission_policy: opencode_permission_policy,
+              completion_probe: completion_probe,
               isolate_environment: isolate_environment
             ).run!
             agent_result[:hive_observation_id] = observation.session_id if

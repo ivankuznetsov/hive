@@ -100,6 +100,48 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_valid_controller_output_stops_a_hung_trailing_turn_after_grace
+    with_fixture(mode: :output_then_hang) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "completed-output-260822-aaaa")
+      output = File.join(task.folder, "pr-draft.json")
+      root = File.join(fixture.fetch(:dir), "invocation-completed-output")
+      writer = Thread.new do
+        Timeout.timeout(5) do
+          sleep 0.02 until File.exist?(fixture.fetch(:calls)) &&
+            File.readlines(fixture.fetch(:calls)).any? { |line| line.start_with?("run --auto ") }
+        end
+        File.write(output, JSON.generate("title" => "Title", "body" => "Body"))
+      end
+      probe = lambda do
+        parsed = JSON.parse(File.binread(output))
+        parsed.keys.sort == %w[body title]
+      rescue Errno::ENOENT, JSON::ParserError
+        false
+      end
+
+      result = with_agent_constant(:OPENCODE_OUTPUT_COMPLETION_GRACE_SECONDS, 0.05) do
+        with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+          build_agent(
+            task, fixture, invocation_root: root,
+            timeout_sec: 5, profile_status: :output_file_exists,
+            expected_output: output, completion_probe: probe
+          ).run!
+        end
+      end
+      writer.join
+
+      assert_equal :ok, result.fetch(:status)
+      assert result.fetch(:output_completed)
+      refute result.fetch(:timed_out)
+      refute File.exist?(root)
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal 1, calls.count { |line| line.start_with?("run --auto ") }
+      assert_equal 0, calls.count { |line| line.start_with?("export ses_") }
+    ensure
+      writer&.kill if writer&.alive?
+    end
+  end
+
   def test_pre_spawn_failure_still_cleans_the_prepared_overlay
     with_fixture(mode: :remove_after_probe) do |fixture|
       task = make_task(fixture.fetch(:dir))
@@ -709,7 +751,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
             )
             sleep 0.02 until File.file?(#{detached_pid.dump})
           end
-          sleep 10 if #{%i[timeout cancelled].include?(mode)}
+          sleep 10 if #{%i[timeout cancelled output_then_hang].include?(mode)}
           print #{run_output.dump}
           warn "authentication failed" if #{mode == :auth_failure}
           exit(#{mode == :auth_failure ? 1 : 0})

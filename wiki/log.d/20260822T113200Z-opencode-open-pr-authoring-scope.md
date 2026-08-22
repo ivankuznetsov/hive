@@ -12,3 +12,12 @@ generated permission overlay. The controller remains the only code path that
 can push the branch or mutate GitHub. A focused regression starts from a broad
 project permission containing `Bash(*)` and pins the effective workspace-write
 root, exact edit pattern, and empty Bash pattern set.
+
+The same live attempt wrote all durable output and then remained CPU-active in
+an empty trailing provider turn. OpenCode output-file actors can now supply a
+controller validator as a completion probe. For open-PR authoring, a strict
+`pr-draft.json` parse starts a five-second normal-exit grace; Hive then stops a
+still-running CLI and accepts the validated output. A lifecycle regression
+uses a real sleeping child to prove the trailing turn is reaped, the attempt is
+not marked timed out, and sanitized export is not required after controller
+completion.

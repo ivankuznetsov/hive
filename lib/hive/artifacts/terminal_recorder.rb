@@ -5,6 +5,7 @@ require "json"
 require "pty"
 require "rbconfig"
 require "shellwords"
+require "agent_cli_runtime"
 require "hive/atomic_file"
 require "hive/web/project_capture_provider"
 
@@ -75,7 +76,7 @@ module Hive
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout_seconds + 1
         load_paths = [
           File.expand_path("../..", __dir__),
-          *Gem.loaded_specs.fetch("agent-cli-runtime").full_require_paths
+          *agent_cli_runtime_load_paths
         ].uniq
         worker_environment = {
           "PATH" => ENV.fetch("PATH", "/usr/local/bin:/usr/bin:/bin")
@@ -105,6 +106,18 @@ module Hive
         end
 
         JSON.parse(result.fetch("stdout"))
+      end
+
+      def agent_cli_runtime_load_paths
+        spec = Gem.loaded_specs["agent-cli-runtime"]
+        return spec.full_require_paths if spec
+
+        feature = $LOADED_FEATURES.find do |path|
+          File.basename(path) == "agent_cli_runtime.rb"
+        end
+        raise KeyError, "agent-cli-runtime load path is unavailable" unless feature
+
+        [ File.dirname(File.expand_path(feature)) ]
       end
 
       def worker_request

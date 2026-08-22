@@ -106,11 +106,19 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       "tesseract" => "/usr/bin/tesseract", "env" => "/usr/bin/env"
     }
     browser_commands = []
+    browser_preflight_response = nil
     toolkit = Hive::Artifacts::CaptureToolkit.new(
       browser_bundle: bundle, tool_resolver: ->(name) { tools[name] },
       hive_executable: "/opt/hive/bin/hive",
       codex_runtime_resolver: method(:fake_codex_runtime),
-      browser_command_runner: ->(environment, argv) { browser_commands << [ environment, argv ] }
+      browser_command_runner: lambda do |environment, argv|
+        browser_commands << [ environment, argv ]
+        if argv[-2] == "open"
+          browser_preflight_response = proxy_request(
+            environment.fetch("AGENT_BROWSER_PROXY"), argv.last
+          )
+        end
+      end
     )
 
     receipt = toolkit.prepare!(
@@ -164,6 +172,11 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     refute toolkit.launch_environment.key?("AGENT_BROWSER_EXECUTABLE_PATH")
     assert_equal "open", browser_commands.first.last[-2]
     assert_equal receipt.dig("web", "origin"), browser_commands.first.last.last
+    assert_includes browser_preflight_response, "200 OK"
+    assert browser_preflight_response.end_with?("<!doctype html>")
+    app_endpoint = URI(receipt.dig("web", "app_endpoint"))
+    released_port = TCPServer.new(app_endpoint.host, app_endpoint.port)
+    released_port.close
     toolkit.close
     refute File.exist?(socket_root)
     refute File.exist?(mailbox_root)

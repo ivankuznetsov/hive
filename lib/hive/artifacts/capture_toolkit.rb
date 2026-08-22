@@ -53,6 +53,7 @@ module Hive
         @browser_daemon = nil
         @browser_socket_root = nil
         @browser_state_root = nil
+        @browser_preflight = nil
         @capture_receipts = {}
       end
 
@@ -112,8 +113,10 @@ module Hive
             source_root: source_root, source_sha: source_sha,
             writable_root: writable_root
           )
+          @browser_preflight = start_browser_preflight unless server
           @capture_proxy = Hive::Artifacts::CaptureProxy.new(
-            app_port: server&.fetch("app_port", nil)
+            app_port: server&.fetch("app_port", nil) ||
+              @browser_preflight&.fetch(:app_port)
           )
           @launch_environment.merge!(
             "HIVE_EVIDENCE_APP_PORT" => @capture_proxy.app_port.to_s,
@@ -164,6 +167,7 @@ module Hive
           @browser_command_runner.call(
             browser_environment, browser_argv + [ "open", @capture_proxy.origin ]
           )
+          close_browser_preflight
           receipt["web"] = browser_receipt(entry, server, writable_root)
           receipt["media"] = media
         end
@@ -269,19 +273,23 @@ module Hive
               begin
                 @managed_web_server&.close
               ensure
-                @capture_proxy&.close
-                remove_browser_state_root
-                @capture_proxy = nil
-                @managed_web_server = nil
-                @browser_gateway = nil
-                @capture_mailbox = nil
-                @browser_close = nil
-                @browser_daemon = nil
-                @browser_socket_root = nil
-                @producer_add_dirs = []
-                @producer_permission_arguments = nil
-                @producer_runtime_policy&.cleanup!
-                @producer_runtime_policy = nil
+                begin
+                  close_browser_preflight
+                ensure
+                  @capture_proxy&.close
+                  remove_browser_state_root
+                  @capture_proxy = nil
+                  @managed_web_server = nil
+                  @browser_gateway = nil
+                  @capture_mailbox = nil
+                  @browser_close = nil
+                  @browser_daemon = nil
+                  @browser_socket_root = nil
+                  @producer_add_dirs = []
+                  @producer_permission_arguments = nil
+                  @producer_runtime_policy&.cleanup!
+                  @producer_runtime_policy = nil
+                end
               end
             end
           end
@@ -308,6 +316,65 @@ module Hive
         @managed_web_server.start!
       rescue Hive::Artifacts::ManagedWebServer::ServerError => e
         raise Hive::ConfigError, "managed Hive Web capture is unavailable: #{e.message}"
+      end
+
+      # A non-Hive web project starts its own application server inside the
+      # producer sandbox. The browser session still has to be proven usable
+      # before that producer is launched. Serve one controller-owned readiness
+      # page on the issued application port for the preflight navigation, then
+      # release the port so the producer can bind the real application.
+      def start_browser_preflight
+        server = TCPServer.new("127.0.0.1", 0)
+        server.listen(8)
+        thread = Thread.new do
+          loop do
+            socket = server.accept
+            begin
+              request = +"".b
+              until request.include?("\r\n\r\n") || request.bytesize >= 64 * 1024
+                break unless IO.select([ socket ], nil, nil, 1)
+
+                chunk = socket.read_nonblock(8192, exception: false)
+                break if chunk.nil?
+                next if chunk == :wait_readable
+
+                request << chunk
+              end
+              socket.write(
+                "HTTP/1.1 200 OK\r\n" \
+                "Content-Type: text/html; charset=utf-8\r\n" \
+                "Content-Length: 15\r\n" \
+                "Connection: close\r\n\r\n" \
+                "<!doctype html>"
+              )
+            rescue IOError, SystemCallError
+              nil
+            ensure
+              socket.close unless socket.closed?
+            end
+          end
+        rescue IOError, Errno::EBADF
+          nil
+        end
+        thread.report_on_exception = false
+        {
+          server: server, thread: thread,
+          app_port: server.local_address.ip_port
+        }
+      rescue SystemCallError
+        server&.close
+        raise
+      end
+
+      def close_browser_preflight
+        return unless @browser_preflight
+
+        @browser_preflight.fetch(:server).close
+        @browser_preflight.fetch(:thread).join(1)
+      rescue IOError, SystemCallError
+        nil
+      ensure
+        @browser_preflight = nil
       end
 
       def hive_web_source?(source_root)

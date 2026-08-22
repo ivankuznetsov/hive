@@ -16,6 +16,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
 
       result = with_env(
         "ANTHROPIC_API_KEY" => "secret-canary",
+        "GEM_PATH" => "/operator/gems",
         "OPENAI_API_KEY" => "ambient-must-not-cross"
       ) { agent.run! }
 
@@ -41,6 +42,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       assert_equal "true", environment.fetch("OPENCODE_DISABLE_PROJECT_CONFIG")
       assert environment.fetch("selected_credential_present")
       refute environment.fetch("ambient_credential_present")
+      assert_equal "/operator/gems", environment.fetch("gem_path")
       refute_includes File.read(result.fetch(:log_file)), "secret-canary"
     end
   end
@@ -742,7 +744,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
             "XDG_CONFIG_HOME" => ENV["XDG_CONFIG_HOME"],
             "OPENCODE_DISABLE_PROJECT_CONFIG" => ENV["OPENCODE_DISABLE_PROJECT_CONFIG"],
             "selected_credential_present" => !ENV["ANTHROPIC_API_KEY"].to_s.empty?,
-            "ambient_credential_present" => !ENV["OPENAI_API_KEY"].to_s.empty?
+            "ambient_credential_present" => !ENV["OPENAI_API_KEY"].to_s.empty?,
+            "gem_path" => ENV["GEM_PATH"]
           }))
           if #{mode == :replace_root_during_run}
             root = File.dirname(ENV.fetch("XDG_CONFIG_HOME"))

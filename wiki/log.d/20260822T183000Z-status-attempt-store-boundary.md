@@ -11,3 +11,6 @@ date: 2026-08-22
 - Authorization is unchanged in kind: `TaskProjection::Store` and `TaskClosure`
   were already authorized to open the same read-only store per row; status now
   opens it once per scan instead.
+- `test/unit/component_boundaries_test.rb` mirrors the catalog's authorized
+  construction sites as a literal, so the committed-catalog assertion needed the
+  same `lib/hive/commands/status.rb` entry.

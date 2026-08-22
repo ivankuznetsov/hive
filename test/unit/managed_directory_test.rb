@@ -582,6 +582,9 @@ class ManagedDirectoryTest < Minitest::Test
         root: root, anchor: anchor, label: "test state"
       )
 
+      assert_raises(Hive::ConfigError) do
+        directory.with_read_session { flunk }
+      end
       assert_nil directory.with_read_session(missing: true) { flunk }
       refute_path_exists root
 
@@ -606,6 +609,26 @@ class ManagedDirectoryTest < Minitest::Test
 
       assert_equal 1, anchor_opens
       assert_nil Thread.current[:hive_managed_directory_sessions]
+
+      storage_error = assert_raises(Errno::EIO) do
+        directory.with_read_session { raise Errno::EIO, "block failure" }
+      end
+      assert_includes storage_error.message, "block failure"
+
+      config_error = assert_raises(Hive::ConfigError) do
+        directory.with_read_session do
+          raise Hive::ConfigError, "unsafe nested read"
+        end
+      end
+      assert_equal "unsafe nested read", config_error.message
+
+      with_replaced_singleton_method(
+        native,
+        :open_absolute_directory,
+        ->(_path) { raise Errno::EIO, "root failure" }
+      ) do
+        assert_raises(Hive::ConfigError) { directory.with_read_session { flunk } }
+      end
     end
   end
 
@@ -624,6 +647,36 @@ class ManagedDirectoryTest < Minitest::Test
         directory.read_children(
           "records", names: [ "../outside" ], max_bytes: 5
         ).to_a
+      end
+
+      missing = Hive::ManagedDirectory.new(
+        root: File.join(root, "missing"), anchor: root, label: "missing state"
+      )
+      assert_empty missing.read_children(
+        ".", names: [ "record" ], max_bytes: 5, missing: true
+      ).to_a
+      assert_raises(Hive::ConfigError) do
+        missing.read_children(
+          ".", names: [ "record" ], max_bytes: 5
+        ).to_a
+      end
+
+      native = directory.instance_variable_get(:@native)
+      original_open = native.method(:open_directory)
+      with_replaced_singleton_method(
+        native,
+        :open_directory,
+        lambda do |parent, name|
+          raise Errno::EIO, name if name == "records"
+
+          original_open.call(parent, name)
+        end
+      ) do
+        assert_raises(Hive::ConfigError) do
+          directory.read_children(
+            "records", names: [ "a" ], max_bytes: 5
+          ).to_a
+        end
       end
     end
   end

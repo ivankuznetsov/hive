@@ -62,26 +62,30 @@ The default fast loop for implementation is `rake coverage:changed` (or the
 equivalent focused files via `bin/test`). It maps git-diff-touched `lib/`
 sources to their mirrored test files, runs only those, and enforces exact
 line coverage on the changed sources; the global 100% gate stays CI's job.
-Mapping is fail-open: an unmapped source warns and relies on per-file
-coverage enforcement as the safety net. `HIVE_COVERAGE_BASE` overrides the
-merge base.
+Mapping accepts only mirrored paths or the explicit override table in
+`test/support/changed_coverage.rb`; an unmapped or ambiguous basename fails
+loudly instead of running a plausibly unrelated test. `HIVE_COVERAGE_BASE`
+overrides the merge base.
 
 ```bash
-bundle exec rake coverage:changed   # changed sources + their focused tests + exact coverage
-bin/test test/unit/example_test.rb  # bundler-free fallback wrapper for focused files
+bundle exec rake coverage:changed                         # changed sources + focused exact coverage
+bin/test test/unit/a_test.rb test/integration/b_test.rb   # every named file, with a plain-Ruby fallback
 ```
 
-Known-flaky tests are handled by quarantine-with-retry, not skips: entries
-in `test/support/flake_quarantine.rb` (evidence-gated, reason-dated) get one
-in-process retry via minitest-retry; every retry is logged and counted in CI
-failure evidence. A retrying test that still fails fails the suite. The
-retry machinery raises if the gem is missing under Bundler and degrades to
-"no retries" with a warning otherwise, so a machine with no installed bundle
-can still load `test_helper` and run focused files. The
-nightly seed sweep (`.github/workflows/nightly-flake-sweep.yml`) discovers
-order-dependent flakes across seeds and files a deduplicated tracking issue;
-its per-file timings land through `HIVE_TIMINGS_SOURCE=<json> rake coverage:timings`
-and feed the runtime-based CI shard partition.
+Known flakes are measured before they are masked. The nightly seed sweep
+(`.github/workflows/nightly-flake-sweep.yml`) runs the exact default-suite
+manifest under seeds 101, 202, and 303. Analysis accepts only that complete,
+unique seed set with identical manifest digests; missing, duplicate, corrupt,
+or suite-mismatched reports produce no derived candidates or timings. Complete
+failing matrices retain their analysis and issue evidence before the workflow
+reports failure. The resulting timing and flake artifacts are evidence for a
+later reviewed change; required PR CI does not consume them automatically.
+
+Root Minitest suites emit `tmp/ci-failure-evidence.json` on CI failures with
+the seed, test identifier, source location, and focused repro command. Every
+root-Minitest-owning job in `ci.yml` retains that file: coverage shards,
+expensive proof gates, e2e harness library tests, the advisory TUI latency job,
+and the macOS launchd proof.
 
 During implementation, run the smallest relevant test files directly:
 
@@ -178,6 +182,12 @@ bundle exec rake test:tui_reactivity_perf
 bundle exec rake test:setup_agents_integration
 bundle exec rake test:babysitter_dry_run_security_matrix
 ```
+
+The required TUI reactivity gate enforces row completeness and archive-size
+scaling without host-speed thresholds. A separate
+`TUI reactivity absolute latency (advisory)` job opts into the absolute budgets
+with `HIVE_TUI_PERF_ABSOLUTE=1`; runner load can make that signal red, but it is
+not a dependency of the protected `rake test (Ruby 3.4)` aggregate.
 
 The packaged-web gate is commit-bound: it archives `HEAD:web` to reproduce the
 release artifact. Commit relevant web changes before using that task locally;

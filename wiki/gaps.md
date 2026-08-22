@@ -118,6 +118,20 @@ run `31861365214` consumed all 1,727 process results across six shards, retained
 100% line coverage, and passed all 23 gates. This closes the artifact-transport
 and source-catalog ownership proof gap.
 
+## CI velocity measurement gaps (2026-08-22)
+
+PR #1167 now keeps required CI on the hosted-proven six-way byte partition and
+adds a complete-set nightly seed-sweep producer. Focused tests prove the sweep
+starts, admits exactly seeds 101/202/303 with one shared suite manifest, rejects
+partial or incompatible inputs before deriving artifacts, and preserves a
+complete failing analysis before its final red verdict. The scheduled workflow
+does not exist on the default branch yet, so there is no hosted three-seed
+artifact to justify runtime-based repartitioning or an evidence-backed retry
+entry. Those consumers remain deliberately absent until a later reviewed PR
+can cite the real artifact. The new absolute TUI latency job is likewise
+source- and local-run-pinned but has no stable hosted baseline yet; its signal
+is advisory while the deterministic scale gate remains required.
+
 ## Task workspace forward evidence and live-provider gaps (2026-08-12)
 
 - Tasks admitted before the task-workspace capture seams normally have no

@@ -174,11 +174,14 @@ screenshot; navigation, ordering, timing, and state transitions use temporal
 video. The gateway accepts only the issued origin, a closed interaction
 vocabulary, and basename PNG/WebM output. It stages media privately and
 publishes it no-follow/exclusive into the writable attempt root.
-The controller probes each stopped recording before publication and rejects an
-over-30-second take immediately, clearing the stopped session so the producer
-can capture a shorter replacement in the same attempt. This keeps the capture
-tool's acceptance boundary aligned with final proof admission instead of
-discovering the duration error only after the producer exits. Hive closes
+The controller stops an active recording after 25 seconds even if provider
+latency delays the producer's next turn, retaining that private result until a
+later `record stop` publishes it. It also probes every stopped recording before
+publication and rejects an over-30-second take immediately, clearing the stopped
+session so the producer can capture a shorter replacement in the same attempt.
+The five-second controller margin covers command startup and encoder
+finalization while keeping the capture tool's acceptance boundary aligned with
+final proof admission. Hive closes
 the named browser session before it cleans the managed app/proxy and producer
 process group. Playwright remains a web-system-test dependency, not an
 outcome-evidence capture interface.

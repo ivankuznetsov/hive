@@ -330,8 +330,12 @@ module AgentCliRuntime
             edit[pattern] = "deny"
           end
         end
+        bash = { "*" => "deny" }
+        preparation.bash_patterns.each { |pattern| bash[pattern] = "allow" }
         common.merge(
-          "edit" => edit, "bash" => "deny", "task" => "deny",
+          "edit" => edit,
+          "bash" => preparation.bash_patterns.empty? ? "deny" : bash,
+          "task" => "deny",
           "webfetch" => "deny", "websearch" => "deny",
           "question" => "deny"
         )

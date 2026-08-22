@@ -160,7 +160,7 @@ module Hive
                    opencode_invocation_root: nil,
                    opencode_permission_policy: nil,
                    additional_read_roots: [], additional_write_roots: [],
-                   opencode_edit_patterns: [],
+                   opencode_edit_patterns: [], opencode_bash_patterns: [],
                    isolate_environment: false)
       @task = task
       @prompt = prompt
@@ -180,6 +180,7 @@ module Hive
       @additional_read_roots = Array(additional_read_roots).map(&:to_s).freeze
       @additional_write_roots = Array(additional_write_roots).map(&:to_s).freeze
       @opencode_edit_patterns = Array(opencode_edit_patterns).map(&:to_s).freeze
+      @opencode_bash_patterns = Array(opencode_bash_patterns).map(&:to_s).freeze
       @runtime_policy = runtime_policy
       if runtime_policy && permission_arguments
         raise ArgumentError, "permission_arguments cannot be combined with runtime_policy"
@@ -771,6 +772,7 @@ module Hive
         additional_read_roots: @additional_read_roots,
         additional_write_roots: @additional_write_roots,
         edit_patterns: @opencode_edit_patterns,
+        bash_patterns: @opencode_bash_patterns,
         plugins: @profile.opencode_plugins,
         pure: @profile.opencode_pure
       )

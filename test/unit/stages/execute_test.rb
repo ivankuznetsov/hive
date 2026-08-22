@@ -343,6 +343,97 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_accepts_clean_opencode_commit_over_empty_terminal_message
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      worktree = File.join(dir, "worktree")
+      write_pointer(
+        task, "path" => worktree, "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "new-head", branch: task.slug, dirty: false, ancestor_result: true
+      )
+      result = {
+        status: :error,
+        exit_code: 0,
+        normalized_outcome_kind: :malformed_output,
+        error_message: "OpenCode terminal assistant message is empty",
+        implementation_provider: "opencode"
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("opencode"), worktree)
+      end
+
+      assert_equal({ commit: "execute_complete", status: :execute_complete }, run_result)
+      assert_equal :execute_complete, Hive::Markers.current(task.state_file).name
+    end
+  end
+
+  def test_run_pass_rejects_dirty_opencode_commit_with_empty_terminal_message
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      worktree = File.join(dir, "worktree")
+      write_pointer(
+        task, "path" => worktree, "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "new-head", branch: task.slug, dirty: true, ancestor_result: true
+      )
+      result = {
+        status: :error,
+        exit_code: 0,
+        normalized_outcome_kind: :malformed_output,
+        error_message: "OpenCode terminal assistant message is empty",
+        implementation_provider: "opencode"
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("opencode"), worktree)
+      end
+
+      assert_equal({ commit: "implementer_failed", status: :error }, run_result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "implementer_failed", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_run_pass_rejects_nonzero_opencode_commit_with_empty_terminal_message
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      worktree = File.join(dir, "worktree")
+      write_pointer(
+        task, "path" => worktree, "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "new-head", branch: task.slug, dirty: false, ancestor_result: true
+      )
+      result = {
+        status: :error,
+        exit_code: 1,
+        normalized_outcome_kind: :malformed_output,
+        error_message: "OpenCode terminal assistant message is empty",
+        implementation_provider: "opencode"
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("opencode"), worktree)
+      end
+
+      assert_equal({ commit: "implementer_failed", status: :error }, run_result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "implementer_failed", marker.attrs.fetch("reason")
+    end
+  end
+
   def test_run_pass_attributes_failure_to_persisted_provider
     with_tmp_dir do |dir|
       task = build_task(dir)

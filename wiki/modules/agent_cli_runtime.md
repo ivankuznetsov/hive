@@ -77,7 +77,9 @@ Prepared overlays reserve every XDG/config/disable key, remove selected
 per-agent permission blocks, forward credentials only when they match the
 requested provider, and emit worktree-relative edit patterns. Nested read-only
 exceptions are re-applied after writable rules because OpenCode uses the last
-matching permission. Probe children start from an explicitly cleared
+matching permission. Workspace-write requests may also carry explicit
+deny-first Bash patterns; absent patterns keep shell denied, and the patterns
+remain application permissions rather than an OS sandbox. Probe children start from an explicitly cleared
 environment, and cleanup refuses a replaced invocation root without masking a
 completed Hive result.
 

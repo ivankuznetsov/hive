@@ -174,7 +174,8 @@ preparation = AgentCliRuntime::OpenCodePreparationRequest.new(
   },
   credential_environment_keys: ["ANTHROPIC_API_KEY"],
   additional_read_roots: [Dir.pwd],
-  additional_write_roots: [Dir.pwd]
+  additional_write_roots: [Dir.pwd],
+  bash_patterns: ["git*", "bundle*", "bin/*"]
 )
 
 prepared = AgentCliRuntime.prepare!(preparation)
@@ -222,8 +223,10 @@ to call twice. Call it from the process owner's `ensure` path after every
 pre-spawn and post-spawn outcome.
 
 `read-only` denies edits, shell, unsafe tools, and external writes.
-`workspace-write` permits edits only under the declared write roots and still
-denies unrestricted shell. A `nil` permission mode is rejected unless the
+`workspace-write` permits edits only under the declared write roots. Shell is
+denied unless the caller supplies explicit OpenCode `bash_patterns`; those
+patterns are application permissions, not an OS sandbox. A `nil` permission
+mode is rejected unless the
 consumer supplies an explicit typed `OpenCodePermissionPolicy`; the ordinary
 preparation API never silently falls back to a bypass. Plugin sources are
 explicit, and `--pure` remains enabled when no plugin was selected.

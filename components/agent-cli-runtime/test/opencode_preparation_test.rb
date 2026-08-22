@@ -332,6 +332,31 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
     end
   end
 
+  def test_workspace_write_compiles_only_declared_bash_patterns
+    with_fixture_cli do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        FileUtils.mkdir_p(work)
+        prepared = AgentCliRuntime.prepare!(
+          preparation_request(
+            work:, root: File.join(dir, "invocation"), source: selected_config(dir),
+            permission_mode: "workspace-write",
+            bash_patterns: [ "bundle*", "bin/*", "git*" ]
+          ),
+          env: fixture.fetch(:env)
+        )
+        bash = JSON.parse(File.read(prepared.configuration_path)).dig("permission", "bash")
+
+        assert_equal "deny", bash.fetch("*")
+        assert_equal "allow", bash.fetch("bundle*")
+        assert_equal "allow", bash.fetch("bin/*")
+        assert_equal "allow", bash.fetch("git*")
+      ensure
+        prepared&.cleanup!
+      end
+    end
+  end
+
   def test_selected_agent_permissions_cannot_override_generated_policy
     with_fixture_cli do |fixture|
       Dir.mktmpdir do |dir|
@@ -657,7 +682,8 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
                           credential_file: nil, model: "anthropic/claude-sonnet-4-5",
                           permission_mode: "read-only", permission_policy: nil,
                           additional_read_roots: [], additional_write_roots: [],
-                          edit_patterns: [], prompt: "make the atomic edit")
+                          edit_patterns: [], bash_patterns: [],
+                          prompt: "make the atomic edit")
     AgentCliRuntime::OpenCodePreparationRequest.new(
       request: AgentCliRuntime::Request.new(
         profile: :opencode,
@@ -675,7 +701,8 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
       permission_policy:,
       additional_read_roots:,
       additional_write_roots:,
-      edit_patterns:
+      edit_patterns:,
+      bash_patterns:
     )
   end
 

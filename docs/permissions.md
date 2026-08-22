@@ -72,9 +72,11 @@ native skill, then denies edits, Bash, task delegation, web tools, questions,
 and undeclared external directories. `scoped` becomes `workspace-write` when
 the tool declaration includes Write/Edit authority. It permits edits only in
 the working/declaration-derived write roots, keeps read-only extra roots
-non-writable, and still denies unrestricted Bash and web tools. A scoped policy
-that asks for Bash is rejected; Hive does not claim filesystem confinement
-while leaving a general shell open.
+non-writable, and still denies web tools. Bash remains denied unless the scope
+contains qualified rules such as `Bash(git*)` or `Bash(bin/*)`; Hive compiles
+only those exact OpenCode permission patterns over a deny-first base. Bare
+`Bash` remains invalid. `Bash(*)` is an explicit full-shell opt-in, not
+filesystem confinement: commands run with the Hive OS user's authority.
 
 The selected source config and credentials remain caller-owned and read-only.
 Hive redirects OpenCode config, data, cache, and state into owner-private paths,

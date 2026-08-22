@@ -271,13 +271,14 @@ module AgentCliRuntime
     :configuration_path, :configuration,
     :credential_environment_keys, :credential_file,
     :permission_policy, :additional_read_roots,
-    :additional_write_roots, :edit_patterns, :plugins, :pure
+    :additional_write_roots, :edit_patterns, :bash_patterns, :plugins, :pure
   ) do
     def initialize(request:, working_directory:, invocation_root:,
                    configuration_path: nil, configuration: nil,
                    credential_environment_keys: [], credential_file: nil,
                    permission_policy: nil, additional_read_roots: [],
-                   additional_write_roots: [], edit_patterns: [], plugins: [], pure: true)
+                   additional_write_roots: [], edit_patterns: [],
+                   bash_patterns: [], plugins: [], pure: true)
       unless request.is_a?(Request)
         raise ArgumentError, "request must be an AgentCliRuntime::Request"
       end
@@ -300,6 +301,10 @@ module AgentCliRuntime
         raise ArgumentError,
               "credential environment keys cannot override the OpenCode overlay: #{reserved.join(', ')}"
       end
+      normalized_bash_patterns = Immutable.strings(bash_patterns)
+      if normalized_bash_patterns.any?(&:empty?)
+        raise ArgumentError, "OpenCode bash patterns must be non-empty"
+      end
 
       super(
         request: request,
@@ -316,6 +321,7 @@ module AgentCliRuntime
         additional_read_roots: Immutable.strings(additional_read_roots),
         additional_write_roots: Immutable.strings(additional_write_roots),
         edit_patterns: Immutable.strings(edit_patterns),
+        bash_patterns: normalized_bash_patterns,
         plugins: Immutable.strings(plugins),
         pure: pure != false
       )

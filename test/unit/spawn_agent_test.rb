@@ -959,6 +959,7 @@ class SpawnAgentTest < Minitest::Test
                    scope.fetch(:additional_read_roots)
       assert_equal [ File.join(task_folder, "reviews", "**") ],
                    scope.fetch(:opencode_edit_patterns)
+      assert_empty scope.fetch(:opencode_bash_patterns)
       assert_includes scope.fetch(:additional_write_roots), task_folder
     ensure
       scope&.fetch(:runtime_policy)&.cleanup!
@@ -1072,6 +1073,7 @@ class SpawnAgentTest < Minitest::Test
       assert_equal scope.fetch(:additional_write_roots),
                    kwargs.fetch(:additional_write_roots)
       assert_empty kwargs.fetch(:opencode_edit_patterns)
+      assert_empty kwargs.fetch(:opencode_bash_patterns)
     end
   end
 
@@ -1122,6 +1124,29 @@ class SpawnAgentTest < Minitest::Test
         )
       end
       assert_match(/cannot grant unrestricted Bash/, bash.message)
+    end
+  end
+
+  def test_stage_permission_scope_preserves_qualified_opencode_bash_patterns
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      cfg = {
+        "execute" => {
+          "permissions" => {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit", "Bash(bundle*)", "Bash(git*)" ]
+          }
+        }
+      }
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        cfg, "execute", task, opencode_scope_profile
+      )
+
+      assert_equal [ "bundle*", "git*" ],
+                   scope.fetch(:opencode_bash_patterns)
+      assert_equal scope.fetch(:opencode_bash_patterns),
+                   Hive::Stages::Base.tool_scope_kwargs(scope).fetch(:opencode_bash_patterns)
     end
   end
 

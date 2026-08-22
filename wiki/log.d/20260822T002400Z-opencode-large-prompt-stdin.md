@@ -25,3 +25,20 @@ moved off argv; the regression now fails if either supervisor drops stdin or
 silently moves an implementation-sized prompt back onto argv.
 The live dogfood retry is the provider-backed proof that installed OpenCode
 accepts the same transport for an execute worker.
+
+**Execution capability:** The same run then showed that file-only
+workspace-write cannot satisfy 4-execute: Ox could author files but explicitly
+reported that it could not install gems, run tests, or create the clean commit
+the stage requires. OpenCode preparation now accepts only qualified Bash
+patterns from a scoped policy and compiles them over a deny-first rule; bare
+`Bash` is still rejected, while `Bash(*)` is a deliberate project opt-in.
+Execute also removes its controller-owned task-state directory from
+OpenCode's external file-tool roots. The reviewed plan stays in the prompt and
+the full repository stays in the working directory, but a file-tool call can
+no longer replace `task.md` or its live ownership marker.
+
+An exit-zero OpenCode run with an empty terminal assistant message remains a
+recorded malformed-output observation. Execute may nevertheless accept it when
+the worktree supplies stronger completion evidence: the expected branch is
+clean and has a new descendant commit. A dirty tree, missing commit, branch
+mismatch, non-descendant commit, or nonzero exit cannot use this recovery.

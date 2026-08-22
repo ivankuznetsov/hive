@@ -187,7 +187,8 @@ module Hive
           task, cfg, "execute", impl_result
         )
 
-        if agent_failed?(impl_result)
+        completion_candidate = opencode_commit_completion_candidate?(impl_result)
+        if agent_failed?(impl_result) && !completion_candidate
           return mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
         end
 
@@ -222,6 +223,13 @@ module Hive
           !new_commit || worktree_git.ancestor?(baseline_head, head_after)
         rescue Hive::GitError
           return worktree_git_failed(task, cfg, worktree_path, baseline_head)
+        end
+
+        commit_recovered = completion_candidate &&
+                           current_branch == expected_branch &&
+                           !dirty_worktree && new_commit && ancestor_ok
+        if agent_failed?(impl_result) && !commit_recovered
+          return mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
         end
 
         if new_commit && !ancestor_ok
@@ -330,6 +338,21 @@ module Hive
         return true if result.nil?
 
         %i[error timeout].include?(result[:status])
+      end
+
+      # OpenCode may finish a successful tool-driven turn with no terminal
+      # assistant text. The runtime correctly reports that protocol defect as
+      # malformed output, but execute completion is ultimately a repository
+      # fact: an exit-zero run that left a clean descendant commit on the
+      # expected branch completed the work even when its final chat event was
+      # empty. The caller still verifies every one of those repository facts;
+      # this predicate only identifies the one result shape eligible for that
+      # stronger evidence.
+      def opencode_commit_completion_candidate?(result)
+        result &&
+          result[:implementation_provider].to_s == "opencode" &&
+          result[:exit_code] == 0 &&
+          result[:normalized_outcome_kind] == :malformed_output
       end
 
       def mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
@@ -459,6 +482,7 @@ module Hive
           cfg, "execute", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
         )
+        scope = restrict_opencode_task_state_access(scope, task, profile)
         launch_arguments = Hive::Stages::Base.implementation_launch_arguments(
           identity, profile
         )
@@ -519,6 +543,27 @@ module Hive
         merged = result&.merge(implementation_provider: profile.name.to_s)
         merged
       end
+
+      # OpenCode receives the reviewed plan in its prompt and its working
+      # directory is the complete repository worktree. The generic stage scope
+      # also exposes task.folder, which let a file-tool call replace
+      # controller-owned task.md and its live ownership marker. Execute output
+      # and the terminal marker are appended by the controller after the spawn,
+      # so OpenCode needs no task-state file-tool access.
+      def restrict_opencode_task_state_access(scope, task, profile)
+        return scope unless profile.name == :opencode
+
+        task_root = File.expand_path(task.folder)
+        without_task_root = lambda do |roots|
+          Array(roots).reject { |root| File.expand_path(root) == task_root }
+        end
+        scope.merge(
+          add_dirs: without_task_root.call(scope[:add_dirs]),
+          additional_read_roots: without_task_root.call(scope[:additional_read_roots]),
+          additional_write_roots: without_task_root.call(scope[:additional_write_roots])
+        )
+      end
+      private_class_method :restrict_opencode_task_state_access
 
       def record_tamper(task, tampered, who:, restored: false, restore_error: nil)
         Hive::Markers.set(task.state_file, :error,

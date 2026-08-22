@@ -3,7 +3,7 @@ title: 5-open-pr stage
 type: stage
 source: lib/hive/stages/open_pr.rb, lib/hive/github_publication.rb, templates/open_pr_prompt.md.erb
 created: 2026-05-13
-updated: 2026-08-21
+updated: 2026-08-22
 tags: [stage, pr, github]
 ---
 
@@ -31,6 +31,11 @@ state. Patrol Fix uses the same controller.
 
 The authoring prompt forbids `git push`, `gh`, remote-state claims, and edits
 outside `pr-draft.json`. The agent never writes `pr.md` or a completion marker.
+For OpenCode, that contract is enforced independently of project permissions:
+the generated invocation allows an edit only to the exact `pr-draft.json`
+path and denies Bash. This prevents a broad project-level shell rule from
+bypassing OpenCode's external-directory policy to reach host Git credentials
+or perform a second publication path.
 
 `Hive::GithubPublication::Controller` owns all remote effects:
 

@@ -249,6 +249,44 @@ class HiveStagesOpenPrTest < Minitest::Test
     end
   end
 
+  def test_opencode_authoring_scope_overrides_project_bash_with_exact_output_edit
+    with_task do |task, _repo, _base_oid|
+      output = File.join(task.folder, Hive::Stages::OpenPr::AUTHORING_FILE)
+      FileUtils.rm_f(output)
+      profile = Hive::AgentProfiles.lookup(:opencode)
+      project_cfg = {
+        "open_pr" => {
+          "permissions" => {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit", "Bash(*)" ]
+          }
+        }
+      }
+      captured = nil
+
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :spawn_agent,
+        lambda do |*_args, **kwargs|
+          captured = kwargs
+          { status: :error }
+        end
+      ) do
+        Hive::Stages::OpenPr.spawn_open_pr_agent(
+          task, project_cfg, "prompt", profile, task.folder,
+          launch_arguments: { identity_arguments: [] },
+          expected_output: output
+        )
+      end
+
+      assert_equal "workspace-write", captured.fetch(:permission_mode)
+      assert_equal [ output ], captured.fetch(:opencode_edit_patterns)
+      assert_empty captured.fetch(:opencode_bash_patterns)
+      assert_equal [ task.folder ], captured.fetch(:additional_write_roots)
+      assert_nil captured.fetch(:allowed_tools)
+      assert_nil captured.fetch(:disallowed_tools)
+    end
+  end
+
   def test_rendered_prompt_explicitly_forbids_remote_mutation
     with_task do |task, repo, _base_oid|
       prompt = Hive::Stages::OpenPr.render_prompt(

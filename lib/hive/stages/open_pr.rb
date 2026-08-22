@@ -27,6 +27,20 @@ module Hive
                             Hive::GithubPublication::MAX_BODY_BYTES + 1_024
       Authoring = Data.define(:title, :body)
 
+      # OpenCode's permission overlay is its enforcement boundary. The
+      # open-PR agent is only a metadata author, so letting a project-level
+      # scope grant Bash turns it into a second, uncontrolled publisher: a
+      # shell can reach the host Git credential helper even when OpenCode's
+      # own external-directory tool rule is narrow. Pin this actor to its one
+      # controller-consumed output. The publication controller remains the
+      # sole owner of git push and GitHub mutations.
+      def opencode_authoring_permissions(path)
+        {
+          "preset" => "scoped",
+          "tools" => [ "Edit(#{File.expand_path(path)})" ]
+        }
+      end
+
       def run!(task, cfg, git_gateway: nil, github_gateway: nil, controller: nil)
         pointer = Hive::Stages::Base.worktree_pointer_or_exit(task)
         authoring = if File.exist?(authoring_path(task))
@@ -140,9 +154,15 @@ module Hive
         launch_arguments ||=
           Hive::Stages::Base.implementation_launch_arguments(identity, profile)
         expected_output ||= authoring_path(task)
+        permission_kwargs = if profile.name == :opencode
+          { explicit_permission_spec: opencode_authoring_permissions(expected_output) }
+        else
+          {}
+        end
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "open_pr", task, profile,
-          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS,
+          **permission_kwargs
         )
         kwargs = {
           prompt: prompt,

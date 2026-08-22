@@ -1426,7 +1426,7 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
-  def test_controller_replays_accepted_blocked_capability_and_attempt_terminal_states
+  def test_controller_replays_accepted_semantic_blocked_and_attempt_terminal_states
     scenarios = %i[accepted_identity blocked_identity accepted_generation accepted_attempt capability]
     scenarios.each do |scenario|
       Dir.mktmpdir("hive-artifacts-stage") do |dir|
@@ -1434,7 +1434,9 @@ class StagesArtifactsTest < Minitest::Test
         identity = outcome_identity
         resolver = Struct.new(:value) { def resolve = value }.new(identity)
         requirement = outcome_requirement(identity)
-        pointer = if scenario == :blocked_identity || scenario == :capability
+        pointer = if scenario == :blocked_identity
+          blocked_pointer(requirement.fetch("generation"), reason: "review_blocked")
+        elsif scenario == :capability
           blocked_pointer(requirement.fetch("generation"))
         else
           accepted_pointer(requirement.fetch("generation"))
@@ -1485,6 +1487,35 @@ class StagesArtifactsTest < Minitest::Test
         assert_equal(expected == :error ? :error : :complete,
                      Hive::Markers.current(task.state_file).name, scenario)
       end
+    end
+  end
+
+  def test_controller_reprobes_a_prior_capability_block_on_guarded_retry
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = outcome_identity
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      requirement = outcome_requirement(identity)
+      published = []
+      store = terminal_store(requirement, [], published)
+      store.define_singleton_method(:blocked_for_identity?) { |_value| true }
+      prior_pointer = blocked_pointer(requirement.fetch("generation"))
+      store.define_singleton_method(:current) { prior_pointer }
+      prepared = false
+      toolkit = Object.new
+      toolkit.define_singleton_method(:prepare!) do |**|
+        prepared = true
+        raise Hive::ConfigError, "capture remains unavailable"
+      end
+
+      result = Hive::Stages::Artifacts.run_outcome_evidence!(
+        task, {}, identity_resolver: resolver, store: store,
+        capture_toolkit: toolkit
+      )
+
+      assert prepared
+      assert_equal :error, result.fetch(:status)
+      assert_equal "capability_blocked", published.first.fetch(:reason)
     end
   end
 
@@ -2113,9 +2144,9 @@ class StagesArtifactsTest < Minitest::Test
     { "generation" => generation, "attempt_id" => "attempt-accepted" }
   end
 
-  def blocked_pointer(generation)
+  def blocked_pointer(generation, reason: "capability_blocked")
     {
-      "generation" => generation, "reason" => "capability_blocked",
+      "generation" => generation, "reason" => reason,
       "recovery_digest" => "d" * 64, "attempt_count" => 0,
       "failed_targets" => [ "claim-flow" ]
     }

@@ -114,6 +114,47 @@ class ArtifactsProjectCommandSandboxTest < Minitest::Test
     end
   end
 
+  def test_fresh_tmp_overlay_drops_host_pid_files_but_reuse_keeps_live_ones
+    Dir.mktmpdir("hive-project-command-sandbox-pids") do |root|
+      source = File.join(root, "source")
+      tmp = File.join(source, "tmp")
+      source_pids = File.join(tmp, "pids")
+      overlay_root = File.join(root, "overlay")
+      FileUtils.mkdir_p([ source_pids, overlay_root ])
+      File.write(File.join(source_pids, "server.pid"), "2")
+      File.write(File.join(tmp, "seed-cache"), "keep")
+      sandbox_binary = File.join(root, "bwrap")
+      File.write(sandbox_binary, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, sandbox_binary)
+
+      first = Hive::Artifacts::ProjectCommandSandbox.new(
+        source_root: source, sandbox_binary: sandbox_binary,
+        runtime_overlay_root: overlay_root
+      )
+      argv = first.command_argv([ "/bin/true" ])
+      binding = argv.each_cons(3).find { |row| row[0] == "--bind" && row[2] == tmp }
+      overlay = binding.fetch(1)
+      overlay_pid = File.join(overlay, "pids", "server.pid")
+
+      refute_path_exists overlay_pid,
+                         "host PID ownership must not enter a fresh namespace"
+      assert_equal "keep", File.read(File.join(overlay, "seed-cache"))
+      assert_equal "2", File.read(File.join(source_pids, "server.pid")),
+                   "seeding must not mutate the product worktree"
+      File.write(overlay_pid, "77")
+      assert first.close
+
+      second = Hive::Artifacts::ProjectCommandSandbox.new(
+        source_root: source, sandbox_binary: sandbox_binary,
+        runtime_overlay_root: overlay_root
+      )
+      second.command_argv([ "/bin/true" ])
+      assert_equal "77", File.read(overlay_pid),
+                   "a reused attempt overlay must preserve its live server PID"
+      assert second.close
+    end
+  end
+
   def test_rejects_invalid_inputs_and_missing_or_changed_runtime_boundaries
     Dir.mktmpdir("hive-project-command-sandbox-invalid") do |root|
       source = File.join(root, "source")

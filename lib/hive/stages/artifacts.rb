@@ -731,10 +731,14 @@ module Hive
         fenced = text.match(
           /\A(?<preamble>.*?)```json[ \t]*\r?\n(?<json>.*?)\r?\n```[ \t]*(?:\r?\n)?\z/m
         )
-        raise original_error unless fenced && !fenced[:preamble].include?("```")
+        trailing = text.match(
+          /\A(?<preamble>.*?)(?:\r?\n){2,}[ \t]*(?<json>\{.*\})[ \t]*(?:\r?\n)?\z/m
+        )
+        candidate = fenced || trailing
+        raise original_error unless candidate && !candidate[:preamble].include?("```")
 
         JSON.parse(
-          fenced[:json], object_class: Hive::Artifacts::OutcomeEvidence::Document::StrictHash,
+          candidate[:json], object_class: Hive::Artifacts::OutcomeEvidence::Document::StrictHash,
           allow_duplicate_key: false
         )
       end

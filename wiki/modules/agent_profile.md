@@ -292,7 +292,10 @@ sanitized export supplied it.
   mappings run the static CLI inside bubblewrap with only the task, package,
   and descriptor-declared extra read roots mounted. Bounded OpenCode actors use
   the same portable output-materialization boundary with an invocation-owned
-  deny-first overlay and no unrestricted shell. Caller context does not
+  deny-first overlay and no unrestricted shell. The overlay admits its own
+  cleanup-bound `TMPDIR` as an external directory so a model can consume
+  intermediate analysis it created there; other generated config, data, cache,
+  state, and credential paths remain outside the model's declared roots. Caller context does not
   widen a bounded actor; only explicit `yolo` inherits the owning project root.
   For all portable runners, Hive asks
   for schema-constrained file content under a read-only policy and atomically

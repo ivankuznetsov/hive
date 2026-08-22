@@ -145,6 +145,11 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
         assert_equal "deny", config.dig("permission", "edit")
         assert_equal "deny", config.dig("permission", "bash")
         assert_equal "deny", config.dig("permission", "external_directory", "*")
+        temporary = prepared.environment.fetch("TMPDIR")
+        assert_equal "allow",
+                     config.dig("permission", "external_directory", temporary)
+        assert_equal "allow",
+                     config.dig("permission", "external_directory", "#{temporary}/**")
         assert_equal original, File.binread(source)
 
         calls = File.readlines(fixture.fetch(:log), chomp: true)
@@ -274,6 +279,11 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
                      policy.dig("external_directory", "#{readable}/**")
         assert_equal "allow",
                      policy.dig("external_directory", "#{writable}/**")
+        temporary = prepared.environment.fetch("TMPDIR")
+        assert_equal "allow", policy.dig("external_directory", temporary)
+        assert_equal "allow", policy.dig("external_directory", "#{temporary}/**")
+        assert_equal "allow", policy.dig("edit", temporary)
+        assert_equal "allow", policy.dig("edit", "#{temporary}/**")
       ensure
         prepared&.cleanup!
       end

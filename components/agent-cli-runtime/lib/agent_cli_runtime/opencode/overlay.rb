@@ -66,12 +66,15 @@ module AgentCliRuntime
           preparation.credential_environment_keys
         )
         plugins = selected_plugins(source_config, preparation.plugins)
-        permission = permission_rules(preparation, roots, plugins: plugins)
 
         root = create_root!(preparation.invocation_root)
         cleanup = Cleanup.new(root)
         begin
           paths = create_directories(root)
+          permission = permission_rules(
+            preparation, roots, plugins: plugins,
+            runtime_write_roots: [ paths.fetch(:temporary) ]
+          )
           pure = preparation.pure && plugins.empty?
           config = generated_configuration(
             source_config, plugins, requested_route, permission
@@ -261,7 +264,8 @@ module AgentCliRuntime
       end
       private_class_method :resolve_roots
 
-      def permission_rules(preparation, roots, plugins: preparation.plugins)
+      def permission_rules(preparation, roots, plugins: preparation.plugins,
+                           runtime_write_roots: [])
         mode = preparation.request.permission_mode
         if mode.nil?
           policy = preparation.permission_policy
@@ -278,7 +282,10 @@ module AgentCliRuntime
         end
 
         external = { "*" => "deny" }
-        (roots.fetch(:read) + roots.fetch(:write)).uniq.each do |root|
+        external_roots = [
+          *roots.fetch(:read), *roots.fetch(:write), *runtime_write_roots
+        ].uniq
+        external_roots.each do |root|
           external[root] = "allow"
           external["#{root}/**"] = "allow"
         end
@@ -310,7 +317,9 @@ module AgentCliRuntime
         # working directory is an implicit write root for workspace-write;
         # additional read roots remain explicitly denied unless the caller
         # also declared them writable.
-        writable_roots = [ roots.fetch(:working), *roots.fetch(:write) ].uniq
+        writable_roots = [
+          roots.fetch(:working), *roots.fetch(:write), *runtime_write_roots
+        ].uniq
         edit = { "*" => "deny" }
         allows = if preparation.edit_patterns.empty?
           writable_roots.flat_map do |root|

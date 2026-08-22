@@ -4,15 +4,7 @@ on:
   push:
     branches:
       - main
-    paths:
-      - "install.sh"
-      - "packaging/**"
-      - ".github/workflows/install-smoke.yml"
   pull_request:
-    paths:
-      - "install.sh"
-      - "packaging/**"
-      - ".github/workflows/install-smoke.yml"
 
 jobs:
   shell:

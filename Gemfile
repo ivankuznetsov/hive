@@ -19,8 +19,6 @@ gemspec
 
 group :development, :test do
   gem "minitest", "~> 6.0"
-  # Quarantine-with-retry for known-flaky tests; see test/support/flake_quarantine.rb.
-  gem "minitest-retry", "~> 0.3", require: false
   gem "rake", "~> 13.0"
   gem "rubocop", "~> 1.89", require: false
   gem "rubocop-rails-omakase", "~> 1.1", require: false

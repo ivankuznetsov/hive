@@ -139,13 +139,12 @@ class CiTestPartitionTest < Minitest::Test
       coverage_gate = workflow.fetch("jobs").fetch("test")
       assert_equal "coverage (Ruby 3.4)", coverage_gate.fetch("name")
       assert_equal "${{ always() }}", coverage_gate.fetch("if")
-      assert_equal [ "changes", "coverage-shards" ], coverage_gate.fetch("needs")
+      assert_equal "coverage-shards", coverage_gate.fetch("needs")
       shard_verdict = coverage_gate.fetch("steps").find { |step| step["name"] == "Require every coverage collector" }
       assert_equal "bash", shard_verdict.fetch("shell")
       assert_equal "${{ needs.coverage-shards.result }}",
                    shard_verdict.dig("env", "HIVE_COVERAGE_SHARDS_RESULT")
-      assert_includes shard_verdict.fetch("run"), 'test "$HIVE_COVERAGE_SHARDS_RESULT" = "success"'
-      assert_includes shard_verdict.fetch("run"), "HIVE_CHANGES_CODE"
+      assert_equal 'test "$HIVE_COVERAGE_SHARDS_RESULT" = "success"', shard_verdict.fetch("run")
       coverage_notice = coverage_gate.fetch("steps").find { |step| step["name"] == "Aggregation-only notice (no tests run in this job)" }
       assert coverage_notice, "coverage merge job must self-describe as an aggregator"
       assert_includes coverage_notice.fetch("run"), "GITHUB_STEP_SUMMARY"
@@ -166,7 +165,7 @@ class CiTestPartitionTest < Minitest::Test
       required_gate = workflow.fetch("jobs").fetch("required-test-gate")
       assert_equal "rake test (Ruby 3.4)", required_gate.fetch("name")
       assert_equal "${{ always() }}", required_gate.fetch("if")
-      assert_equal %w[changes test expensive-test-gates e2e], required_gate.fetch("needs")
+      assert_equal %w[test expensive-test-gates e2e], required_gate.fetch("needs")
 
       required_step = required_gate.fetch("steps").find { |step| step["name"] == "Require coverage, functional e2e, and expensive proof gates" }
       assert_equal "${{ needs.test.result }}",
@@ -177,15 +176,27 @@ class CiTestPartitionTest < Minitest::Test
                    required_step.fetch("env").fetch("HIVE_E2E_RESULT")
       assert_equal "bash", required_step.fetch("shell")
       assert_equal <<~SHELL, required_step.fetch("run")
-        if [[ "$HIVE_CHANGES_CODE" != "true" ]]; then
-          echo "docs-only diff: heavy proofs short-circuited; required gate reports success"
-          exit 0
-        fi
         test "$HIVE_COVERAGE_RESULT" = "success"
         test "$HIVE_EXPENSIVE_GATES_RESULT" = "success"
         test "$HIVE_E2E_RESULT" = "success"
       SHELL
     end
+  end
+
+  def test_required_proofs_do_not_use_path_based_shortcuts
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+    jobs = workflow.fetch("jobs")
+
+    refute jobs.key?("changes"), "required CI must not classify broad path groups as proof-free"
+    %w[coverage-shards expensive-test-gates e2e web-tests].each do |job_name|
+      job = jobs.fetch(job_name)
+      refute_equal "changes", job["needs"]
+      refute_includes job.fetch("if", ""), "needs.changes"
+    end
+
+    install_smoke = File.read(File.join(ROOT, ".github", "workflows", "install-smoke.yml"))
+    refute_match(/^\s+paths:\s*$/, install_smoke,
+                 "install smoke must report on every PR until branch protection and ownership are proven")
   end
 
   def test_workflow_creator_hostile_campaign_is_opt_in
@@ -286,11 +297,10 @@ class CiTestPartitionTest < Minitest::Test
     web_gate = jobs.fetch("web")
     assert_equal "Hive web (Rails tests + system)", web_gate.fetch("name")
     assert_equal "${{ always() }}", web_gate.fetch("if")
-    assert_equal [ "changes", "web-tests" ], web_gate.fetch("needs")
+    assert_equal "web-tests", web_gate.fetch("needs")
     gate_step = web_gate.fetch("steps").find { |step| step["name"] == "Require Rails integration, system, and golden-path gates" }
     assert_equal "${{ needs.web-tests.result }}", gate_step.dig("env", "HIVE_WEB_TESTS_RESULT")
-    assert_includes gate_step.fetch("run"), 'test "$HIVE_WEB_TESTS_RESULT" = "success"'
-    assert_includes gate_step.fetch("run"), "HIVE_CHANGES_CODE"
+    assert_equal 'test "$HIVE_WEB_TESTS_RESULT" = "success"', gate_step.fetch("run")
     web_notice = web_gate.fetch("steps").find { |step| step["name"] == "Aggregation-only notice (no tests run in this job)" }
     assert web_notice, "web aggregate job must self-describe as an aggregator"
   end

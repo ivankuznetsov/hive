@@ -90,28 +90,8 @@ module TestFailureEvidenceUnit
           "bundle exec ruby -Itest -Ilib test/unit/sample_test.rb --seed 424242 --name SampleTest#test_bites",
           failure.fetch("repro_command"),
         )
-      end
-    end
-
-    def test_quarantine_retries_surface_on_green_and_red_runs
-      Dir.mktmpdir do |dir|
-        summary_path = File.join(dir, "summary.md")
-        evidence_path = File.join(dir, "evidence.json")
-
-        HiveFailureEvidence.retries << "SampleTest#test_flaky retried once and passed (seed 7)"
-        reporter = HiveFailureEvidence::Reporter.new({ seed: 7 })
-        with_emission_env(summary_path, evidence_path) { reporter.report }
-        refute_path_exists summary_path
-
-        reporter.record(failing_result)
-        with_emission_env(summary_path, evidence_path) { reporter.report }
-        summary = File.read(summary_path)
-        assert_includes summary, "Quarantine retries used (1)"
-        assert_includes summary, "SampleTest#test_flaky retried once and passed (seed 7)"
-        payload = JSON.parse(File.read(evidence_path))
-        assert_equal [ "SampleTest#test_flaky retried once and passed (seed 7)" ], payload.fetch("quarantine_retries")
-      ensure
-        HiveFailureEvidence.retries.clear
+        refute payload.key?("quarantine_retries"),
+               "failure evidence must not advertise a retry channel that CI does not use"
       end
     end
   end

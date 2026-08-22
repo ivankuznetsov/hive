@@ -15,13 +15,8 @@ module HiveFailureEvidence
   REPRO_PREFIX = "bundle exec ruby -Itest -Ilib"
 
   class << self
-    # Retry/quarantine bookkeeping appended by later harness layers so green
-    # runs still surface how often quarantined tests needed their retry.
-    attr_accessor :retries
-
     attr_accessor :summary_path_override, :evidence_path_override
   end
-  self.retries = []
 
   FailureEntry = Struct.new(
     :test_identifier,
@@ -129,11 +124,6 @@ module HiveFailureEvidence
         lines << "- `#{failure.test_identifier}`"
         lines << "  - repro: `#{failure.repro_command}`"
       end
-      unless HiveFailureEvidence.retries.empty?
-        lines << ""
-        lines << "### Quarantine retries used (#{HiveFailureEvidence.retries.length})"
-        HiveFailureEvidence.retries.each { |line| lines << "- #{line}" }
-      end
       lines.join("\n") << "\n"
     end
 
@@ -142,8 +132,7 @@ module HiveFailureEvidence
       payload = {
         "schema" => "hive-ci-failure-evidence/v1",
         "seed" => @seed,
-        "failures" => @failures.map(&:as_json),
-        "quarantine_retries" => HiveFailureEvidence.retries.dup
+        "failures" => @failures.map(&:as_json)
       }
       File.write(evidence_path, JSON.pretty_generate(payload))
     end

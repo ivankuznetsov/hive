@@ -148,6 +148,14 @@ jobs:
         env:
           HIVE_CI_GATE_TASK: ${{ matrix.task }}
         run: bundle exec rake "$HIVE_CI_GATE_TASK"
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: failure-evidence-${{ matrix.name }}
+          path: tmp/ci-failure-evidence.json
+          if-no-files-found: ignore
+          retention-days: 14
 
   required-test-gate:
     name: rake test (Ruby 3.4)
@@ -207,7 +215,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hive-e2e-report
-          path: ${{ runner.temp }}/hive-e2e-runs
+          path: |
+            ${{ runner.temp }}/hive-e2e-runs
+            tmp/ci-failure-evidence.json
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
@@ -463,3 +473,11 @@ jobs:
             launchctl bootout "gui/$(id -u)" "$plist" 2>/dev/null \
               || launchctl unload "$plist" 2>/dev/null || true
           done
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: failure-evidence-launchd-macos
+          path: tmp/ci-failure-evidence.json
+          if-no-files-found: ignore
+          retention-days: 14

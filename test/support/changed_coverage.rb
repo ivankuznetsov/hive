@@ -5,12 +5,12 @@ require "shellwords"
 # Local fast-loop machinery behind `rake coverage:changed`: map git-diff
 # touched lib sources to their focused test files, and enforce the exact
 # line-coverage contract on the changed sources only. The global 100% gate
-# stays CI's job. Mapping is fail-open: a touched source with no confident
-# test-file mapping warns loudly (the per-file coverage enforcement still
-# catches genuinely uncovered lines).
+# stays CI's job. Mapping is intentionally conservative: a touched source
+# needs a mirrored test path or an explicit override.
 module HiveChangedCoverage
   SOURCE_PATTERN = %r{\Alib/.*\.rb\z}
   TEST_ROOTS = %w[test/unit test/integration test/babysitter].freeze
+  MappingError = Class.new(StandardError)
 
   # Deliberate source-to-test exceptions where naming conventions do not hold.
   # Values are repo-relative test files or empty arrays (no focused test).
@@ -34,24 +34,18 @@ module HiveChangedCoverage
   def test_files_for(source)
     return SOURCE_TEST_OVERRIDES.fetch(source, []).dup if SOURCE_TEST_OVERRIDES.key?(source)
 
-    relative = source.delete_prefix("lib/")
-    stem = relative.delete_suffix(".rb")
+    stem = source.delete_prefix("lib/").delete_suffix(".rb")
+    stems = [ stem, stem.delete_prefix("hive/") ].uniq
 
-    direct = TEST_ROOTS.map { |root| File.join(root, "#{stem}_test.rb") }
+    direct = TEST_ROOTS.product(stems).map { |root, candidate| File.join(root, "#{candidate}_test.rb") }
       .select { |path| File.exist?(path) }
     return direct.sort unless direct.empty?
 
-    # Convention break: fall back to any test file sharing the source's
-    # basename (e.g. lib/hive/commands/run.rb -> test/unit/commands/run_test.rb
-    # lives under a mirrored path, but lib/hive/x.rb -> test/unit/x_test.rb
-    # does not). Still nothing? Fail open with a warning; the coverage
-    # enforcement on the source itself remains the safety net.
     basename = File.basename(stem)
-    fallback = Dir.glob("test/{unit,integration,babysitter}/**/#{basename}_test.rb").sort
-    unless fallback.empty?
-      warn "coverage:changed: no mirrored test file for #{source}; using basename matches #{fallback.join(', ')}"
-    end
-    fallback
+    matches = Dir.glob("test/{unit,integration,babysitter}/**/#{basename}_test.rb").sort
+    detail = matches.empty? ? "no basename matches exist" : "basename matches are ambiguous: #{matches.join(', ')}"
+    raise MappingError,
+          "coverage:changed: no mirrored test file for #{source}; add an explicit override (#{detail})"
   end
 
   def test_files_for_sources(sources)

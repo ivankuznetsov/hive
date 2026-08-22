@@ -10,15 +10,18 @@ module TestChangedCoverage
       assert_includes files, "test/integration/run_error_envelope_test.rb".sub("run_error_envelope", "run") if files.include?("test/integration/run_test.rb")
     end
 
-    def test_basename_fallback_warns_when_no_mirrored_file_exists
+    def test_basename_only_match_is_rejected_as_ambiguous
       source = nil
       # Find a real lib source whose mirrored test path does not exist but
       # whose basename matches some test file somewhere in the suite.
       Dir.glob("lib/**/*.rb").each do |path|
-        relative = path.delete_prefix("lib/").delete_suffix(".rb")
-        next if HiveChangedCoverage::TEST_ROOTS.any? { |root| File.exist?(File.join(root, "#{relative}_test.rb")) }
+        stem = path.delete_prefix("lib/").delete_suffix(".rb")
+        stems = [ stem, stem.delete_prefix("hive/") ].uniq
+        next if HiveChangedCoverage::TEST_ROOTS.product(stems).any? do |root, candidate|
+          File.exist?(File.join(root, "#{candidate}_test.rb"))
+        end
 
-        basename = File.basename(relative)
+        basename = File.basename(stem)
         fallbacks = Dir.glob("test/{unit,integration,babysitter}/**/#{basename}_test.rb")
         next if fallbacks.empty?
 
@@ -28,10 +31,11 @@ module TestChangedCoverage
 
       skip "no basename-fallback case currently exists in the tree" unless source
 
-      capture_io do
-        @files = HiveChangedCoverage.test_files_for(source)
+      error = assert_raises(HiveChangedCoverage::MappingError) do
+        HiveChangedCoverage.test_files_for(source)
       end
-      refute_empty @files
+      assert_includes error.message, source
+      assert_includes error.message, "explicit override"
     end
 
     def test_unmappable_source_fails_open_with_no_tests_and_a_warning

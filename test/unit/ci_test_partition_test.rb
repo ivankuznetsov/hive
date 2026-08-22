@@ -199,6 +199,20 @@ class CiTestPartitionTest < Minitest::Test
                  "install smoke must report on every PR until branch protection and ownership are proven")
   end
 
+  def test_every_root_minitest_job_retains_failure_evidence
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+    jobs = workflow.fetch("jobs")
+
+    %w[coverage-shards expensive-test-gates e2e launchd-macos].each do |job_name|
+      upload = jobs.fetch(job_name).fetch("steps").find do |step|
+        step["uses"] == UPLOAD_ARTIFACT_ACTION &&
+          step.dig("with", "path").to_s.include?("tmp/ci-failure-evidence.json")
+      end
+      assert upload, "#{job_name} runs root Minitest but does not retain its failure evidence"
+      assert_includes %w[failure() always()], upload.fetch("if")
+    end
+  end
+
   def test_workflow_creator_hostile_campaign_is_opt_in
     with_loaded_rakefile do
       hostile_files = Object.const_get(:HIVE_HOSTILE_TEST_FILES)
@@ -353,14 +367,15 @@ class CiTestPartitionTest < Minitest::Test
 
     scenario = e2e_steps.find { |step| step["name"] == "Run real-subprocess scenarios" }
     upload = e2e_steps.find { |step| step["uses"] == UPLOAD_ARTIFACT_ACTION }
+    upload_paths = upload.fetch("with").fetch("path").lines.map(&:strip).reject(&:empty?)
     assert_equal download.fetch("with").fetch("name"), upload.fetch("with").fetch("name")
-    assert_equal(
+    assert_includes(
+      upload_paths,
       scenario.fetch("env").fetch("HIVE_E2E_RUNS_DIR"),
-      upload.fetch("with").fetch("path")
     )
-    assert_equal(
+    assert_includes(
+      upload_paths,
       integrity.fetch("env").fetch("HIVE_E2E_RUNS_DIR"),
-      upload.fetch("with").fetch("path")
     )
     assert_equal(
       enforce.fetch("env").fetch("HIVE_E2E_RUNS_DIR"),

@@ -1601,6 +1601,9 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       assert_includes extension, 'name: "evidence_browser"'
       assert_includes extension, 'name: "evidence_server"'
       assert_includes extension,
+                      '["evidence", "browser", ...params.argv]'
+      refute_includes extension, "params.command"
+      assert_includes extension,
                       '["evidence", "server", executable, "--json", "--", ...argv]'
       refute_includes extension, "createBashTool"
       refute_includes extension, "createWriteTool"

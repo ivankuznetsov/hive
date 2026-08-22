@@ -532,7 +532,225 @@ module Hive
         nil
       end
 
-      def self.sandbox_parent_dirs(paths, excluded:)
+      def self.grok_bwrap_prefix(executable:, auth_path:, runtime_home:, directories:, cwd:)
+        paths = directories + [ cwd ]
+        parent_dirs = paths.flat_map do |path|
+          parents = []
+          cursor = File.dirname(path)
+          while cursor != File.dirname(cursor)
+            parents << cursor
+            cursor = File.dirname(cursor)
+          end
+          parents
+        end.uniq.reject do |path|
+          %w[/tmp /usr /usr/local /usr/local/bin /etc /proc /dev /auth /runtime-home].include?(path)
+        end.sort_by { |path| [ path.count(File::SEPARATOR), path ] }
+
+        prefix = [
+          GROK_SANDBOX_PATH,
+          "--die-with-parent", "--new-session", "--unshare-all", "--share-net",
+          "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+          "--dir", "/usr", "--dir", "/usr/local", "--dir", "/usr/local/bin",
+          "--ro-bind", executable, "/usr/local/bin/grok",
+          "--dir", "/etc", "--ro-bind", "/etc/ssl", "/etc/ssl",
+          "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
+          "--ro-bind", "/etc/hosts", "/etc/hosts",
+          "--dir", "/auth", "--ro-bind", auth_path, "/auth/auth.json",
+          "--bind", runtime_home, "/runtime-home"
+        ]
+        parent_dirs.each { |path| prefix.concat([ "--dir", path ]) }
+        directories.uniq.each { |path| prefix.concat([ "--ro-bind", path, path ]) }
+        prefix.concat([
+          "--setenv", "HOME", "/runtime-home",
+          "--setenv", "GROK_HOME", "/runtime-home/.grok",
+          "--setenv", "GROK_AUTH_PATH", "/auth/auth.json",
+          "--setenv", "PATH", "/usr/local/bin",
+          "--chdir", cwd,
+          "--"
+        ])
+      end
+
+      def self.pi_bwrap_prefix(executable:, auth_path:, runtime_home:, directories:, cwd:,
+                               readonly_mounts: {}, writable_directories: [])
+        parent_dirs = sandbox_parent_dirs(
+          directories + [ cwd ] + writable_directories + readonly_mounts.values
+        )
+        runtime_mount = PI_RUNTIME_MOUNT
+        prefix = [
+          PI_SANDBOX_PATH,
+          "--die-with-parent", "--new-session", "--unshare-all", "--share-net",
+          "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+          "--ro-bind", "/usr", "/usr",
+          "--symlink", "usr/bin", "/bin", "--symlink", "usr/bin", "/sbin",
+          "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64",
+          "--ro-bind", File.dirname(executable), runtime_mount,
+          "--dir", "/etc", "--ro-bind", "/etc/ssl", "/etc/ssl",
+          "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
+          "--ro-bind", "/etc/hosts", "/etc/hosts",
+          "--bind", runtime_home, "/runtime-home",
+          "--ro-bind", auth_path, "/runtime-home/.pi/agent/auth.json"
+        ]
+        models_path = File.join(File.dirname(auth_path), "models.json")
+        if File.file?(models_path)
+          prefix.concat(
+            [ "--ro-bind", File.realpath(models_path), "/runtime-home/.pi/agent/models.json" ]
+          )
+        end
+        parent_dirs.each { |path| prefix.concat([ "--dir", path ]) }
+        directories.uniq.each { |path| prefix.concat([ "--ro-bind", path, path ]) }
+        readonly_mounts.each do |host, guest|
+          prefix.concat([ "--dir", guest, "--ro-bind", host, guest ])
+        end
+        writable_directories.uniq.each do |path|
+          prefix.concat([ "--bind", path, path ])
+        end
+        prefix.concat([
+          "--setenv", "HOME", "/runtime-home",
+          "--setenv", "PI_CODING_AGENT_DIR", "/runtime-home/.pi/agent",
+          "--setenv", "PATH", "#{runtime_mount}:/usr/bin",
+          "--chdir", cwd,
+          "--"
+        ])
+      end
+
+      def self.pi_evidence_extension(source_root:, task_root:, writable_root:,
+                                     task_relative_write_root:, hive_executable:, browser:)
+        browser_tool = if browser
+          <<~TYPESCRIPT
+            pi.registerTool(defineTool({
+              name: "evidence_browser",
+              label: "Capture browser evidence",
+              description: "Run one controller-admitted browser capture action. Pass the complete action argv, beginning with open, snapshot, click, fill, wait, screenshot, or record.",
+              parameters: Type.Object({
+                argv: Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), {
+                  minItems: 1, maxItems: 64
+                })
+              }),
+              async execute(_id, params, signal) {
+                return runHive(["evidence", "browser", ...params.argv], signal);
+              }
+            }));
+
+            pi.registerTool(defineTool({
+              name: "evidence_server",
+              label: "Start project evidence server",
+              description: "Start one repository application command on the controller-issued evidence port and keep it under Hive custody for this attempt.",
+              parameters: Type.Object({
+                argv: Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), {
+                  minItems: 1, maxItems: 64
+                })
+              }),
+              async execute(_id, params, signal) {
+                const [executable, ...argv] = params.argv;
+                return runHive(["evidence", "server", executable, "--json", "--", ...argv], signal);
+              }
+            }));
+          TYPESCRIPT
+        else
+          ""
+        end
+
+        <<~TYPESCRIPT
+          import { Type } from "@earendil-works/pi-ai";
+          import {
+            createFindTool, createGrepTool, createLsTool, createReadTool,
+            defineTool, type ExtensionAPI
+          } from "@earendil-works/pi-coding-agent";
+          import { realpathSync, writeFileSync } from "node:fs";
+          import { isAbsolute, relative, resolve, sep } from "node:path";
+
+          const roots = #{JSON.generate([ source_root, task_root ])};
+          const writeRoot = #{JSON.generate(writable_root)};
+          const taskRelativeWriteRoot = #{JSON.generate(task_relative_write_root)};
+          const hiveExecutable = #{JSON.generate(hive_executable)};
+
+          function confinedPath(raw: unknown): string {
+            const candidate = realpathSync(resolve(process.cwd(), typeof raw === "string" ? raw : "."));
+            if (!roots.some((root) => candidate === root || candidate.startsWith(root + sep))) {
+              throw new Error("read path escapes the frozen source and task roots");
+            }
+            return candidate;
+          }
+
+          function scopedReadTool(tool: any) {
+            return {
+              ...tool,
+              async execute(id: string, params: any, signal: AbortSignal, onUpdate: any, ctx: any) {
+                confinedPath(params.path);
+                return tool.execute(id, params, signal, onUpdate, ctx);
+              }
+            };
+          }
+
+          function toolText(text: string, details: any = {}) {
+            return { content: [{ type: "text" as const, text }], details };
+          }
+
+          export default function (pi: ExtensionAPI) {
+            const cwd = process.cwd();
+            pi.registerTool(scopedReadTool(createReadTool(cwd)));
+            pi.registerTool(scopedReadTool(createLsTool(cwd)));
+            pi.registerTool(scopedReadTool(createGrepTool(cwd)));
+            pi.registerTool(scopedReadTool(createFindTool(cwd)));
+
+            async function runHive(argv: string[], signal: AbortSignal) {
+              const result = await pi.exec("/usr/bin/ruby", [hiveExecutable, ...argv], {
+                signal, timeout: 70000
+              });
+              const text = [result.stdout, result.stderr].filter(Boolean).join("\\n").slice(0, 524288);
+              if (result.code !== 0) throw new Error(text || `Hive evidence command failed (${result.code})`);
+              return toolText(text, { status: result.code });
+            }
+
+            pi.registerTool(defineTool({
+              name: "evidence_write",
+              label: "Write evidence document",
+              description: "Write one text, Markdown, or JSON representation under the controller-owned evidence root.",
+              parameters: Type.Object({
+                name: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,63}\\\\.(txt|md|json)$" }),
+                content: Type.String({ minLength: 1, maxLength: 4194304 })
+              }),
+              async execute(_id, params) {
+                if (!/^[a-z][a-z0-9_-]{0,63}\\.(txt|md|json)$/.test(params.name)) {
+                  throw new Error("evidence filename is invalid");
+                }
+                const destination = resolve(writeRoot, params.name);
+                if (relative(writeRoot, destination).startsWith("..") || isAbsolute(relative(writeRoot, destination))) {
+                  throw new Error("evidence filename escapes the attempt root");
+                }
+                if (Buffer.byteLength(params.content, "utf8") > 4194304) {
+                  throw new Error("evidence document is oversized");
+                }
+                writeFileSync(destination, params.content, { encoding: "utf8", flag: "wx", mode: 0o600 });
+                const mediaType = params.name.endsWith(".md") ? "text/markdown" :
+                  (params.name.endsWith(".json") ? "application/json" : "text/plain");
+                return toolText(JSON.stringify({
+                  path: `${taskRelativeWriteRoot}/${params.name}`, media_type: mediaType
+                }), { path: `${taskRelativeWriteRoot}/${params.name}`, media_type: mediaType });
+              }
+            }));
+
+            pi.registerTool(defineTool({
+              name: "evidence_terminal",
+              label: "Capture terminal evidence",
+              description: "Record one exact target command through Hive's controller-owned PTY capture boundary. Pass only the target command argv; this tool adds the Hive evidence-terminal prefix.",
+              parameters: Type.Object({
+                name: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,63}$" }),
+                argv: Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), {
+                  minItems: 1, maxItems: 64
+                })
+              }),
+              async execute(_id, params, signal) {
+                return runHive(["evidence", "terminal", params.name, "--json", "--", ...params.argv], signal);
+              }
+            }));
+
+            #{browser_tool}
+          }
+        TYPESCRIPT
+      end
+
+      def self.sandbox_parent_dirs(paths, excluded: [])
         paths.flat_map do |path|
           parents = []
           cursor = File.dirname(path)

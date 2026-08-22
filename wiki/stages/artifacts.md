@@ -178,6 +178,12 @@ the named browser session before it cleans the managed app/proxy and producer
 process group. Playwright remains a web-system-test dependency, not an
 outcome-evidence capture interface.
 
+The typed Pi `evidence_browser` tool accepts one complete action `argv`, with
+the action verb as its first element (for example `open, ISSUED_ORIGIN` or
+`snapshot, -i`). It has no parallel `command` field. Keeping one argv matches
+the prompt's command examples and prevents the extension from duplicating an
+already-present verb into `open open URL` before the exact-origin gateway.
+
 The capture proxy keeps the application-facing `Host` on the exact issued
 loopback port, preserving development host allowlists. At that boundary it
 maps only the controller-issued browser origin in `Origin` and `Referer`

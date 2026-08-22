@@ -1,10 +1,10 @@
 require "hive/errors"
-require "hive/modules/migration/patrol_decision_projection"
 
 module Hive
   module Patrol
     module DecisionProjection
       TRIGGERS = %w[continuous timer new_commits].freeze
+      Selection = Data.define(:rationale)
       SCHEDULE_KEYS = %w[
         branch_changed enabled kind timer_due trigger
       ].freeze
@@ -42,10 +42,7 @@ module Hive
         when "module_event", "operation"
           "due"
         end
-        Hive::Modules::Migration::PatrolDecisionProjection.build(
-          module_name: "patrol",
-          rationale: rationale
-        )
+        Selection.new(rationale: rationale)
       end
 
       def validate_input!(input)

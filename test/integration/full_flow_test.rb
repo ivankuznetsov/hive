@@ -3,6 +3,8 @@ require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/run"
 require "hive/commands/status"
+require "hive/github_publication"
+require "hive/stages/open_pr"
 
 class FullFlowTest < Minitest::Test
   include HiveTestHelper
@@ -37,7 +39,7 @@ class FullFlowTest < Minitest::Test
       HIVE_FLOW_FOLDER HIVE_FLOW_PHASE HIVE_FLOW_FINDINGS HIVE_FLOW_PASS
       HIVE_FLOW_DRIVER_LOG HIVE_FAKE_GH_PR_EXISTS
       HIVE_FAKE_GH_PR_EXISTS_FILE HIVE_FAKE_GH_PR_EXISTS_URL HIVE_FAKE_GH_PR_EXISTS_NUMBER
-      HIVE_FAKE_GH_HEAD_REF_OID HIVE_FAKE_GH_PR_METADATA_URL
+      HIVE_FAKE_GH_HEAD_REF_OID HIVE_FAKE_GH_HEAD_REF_NAME HIVE_FAKE_GH_PR_METADATA_URL
       HIVE_FAKE_GH_PR_METADATA_NUMBER
     ].each { |k| ENV.delete(k) }
     Array(@spawned_worktrees).each { |p| FileUtils.rm_rf(p) }
@@ -97,25 +99,10 @@ class FullFlowTest < Minitest::Test
         # never reach this branch from a hive run; placed here only so
         # the case-statement is exhaustive.
       when "open-pr"
-        File.write(File.join(folder, "pr.md"), <<~MD)
-          ---
-          pr_url: https://github.com/acme/app/pull/42
-          pr_number: 42
-          ---
-
-          ## Summary
-          stub
-
-          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/42 is_draft=true -->
-        MD
-        # validate_complete_marker (open-pr stage) re-runs `gh pr list`
-        # post-spawn and requires the URL to match. Touch the flag
-        # file so fake-gh starts reporting the PR exists for the
-        # subsequent lookup.
-        if (flag = ENV["HIVE_FAKE_GH_PR_EXISTS_FILE"])
-          FileUtils.mkdir_p(File.dirname(flag))
-          File.write(flag, "")
-        end
+        File.write(
+          File.join(folder, "pr-draft.json"),
+          '{"title":"Fix README whitespace","body":"## Summary\\n\\nStub publication."}'
+        )
       when "artifacts"
         File.write(File.join(folder, "artifact.md"), <<~MD)
           ## Artifacts
@@ -240,9 +227,8 @@ class FullFlowTest < Minitest::Test
 
         ENV["HIVE_FLOW_FOLDER"] = open_pr_dir
         ENV["HIVE_FLOW_PHASE"] = "open-pr"
-        # validate_complete_marker re-runs `gh pr list` post-spawn;
-        # fake-gh reports the PR exists only when this flag file is
-        # present, and the driver writes it during the open-pr phase.
+        # The shared publication controller creates the PR. fake-gh records
+        # that create and exposes the exact REST inventory on reconciliation.
         flag_file = File.join(@driver_dir, "pr-exists.flag")
         ENV["HIVE_FAKE_GH_PR_EXISTS_FILE"] = flag_file
         ENV["HIVE_FAKE_GH_PR_EXISTS_URL"] = "https://github.com/acme/app/pull/42"
@@ -251,7 +237,16 @@ class FullFlowTest < Minitest::Test
         ENV["HIVE_FAKE_GH_PR_METADATA_NUMBER"] = "42"
         ENV["HIVE_FAKE_GH_HEAD_REF_OID"] =
           run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
-        capture_io { Hive::Commands::Run.new(open_pr_dir).call }
+        ENV["HIVE_FAKE_GH_HEAD_REF_NAME"] = slug
+        identity = { "host" => "github.com", "repository" => "acme/app" }
+        local_git = Hive::GithubPublication::GitGateway.new(allow_local_transport: true)
+        with_replaced_singleton_method(Hive::Gh, :repository_identity, ->(*, **) { identity }) do
+          with_replaced_singleton_method(
+            Hive::Stages::OpenPr, :default_git_gateway, ->(_cfg) { local_git }
+          ) do
+            capture_io { Hive::Commands::Run.new(open_pr_dir).call }
+          end
+        end
         assert_equal :complete, Hive::Markers.current(File.join(open_pr_dir, "pr.md")).name
 
         # 5-open-pr → 6-review (autonomous loop). Configure a minimal

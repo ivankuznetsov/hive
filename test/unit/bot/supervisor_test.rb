@@ -11,7 +11,8 @@ class HiveBotSupervisorTest < Minitest::Test
                    :marker, :attrs, :diagnostic,
                    :id, :display_name, :pr_url,
                    keyword_init: true)
-  StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, keyword_init: true)
+  StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs,
+                            :error, :envelope, :warning, keyword_init: true)
 
   FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears,
                             :commands_registered, :raise_on_set_my_commands,

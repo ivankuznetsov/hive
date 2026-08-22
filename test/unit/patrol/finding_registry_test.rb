@@ -72,6 +72,42 @@ class HivePatrolFindingRegistryTest < Minitest::Test
     end
   end
 
+  def test_non_persisting_admission_updates_only_the_in_memory_lifecycle
+    with_tmp_dir do |dir|
+      store = Hive::Patrol::StateStore.new(dir)
+      store.ensure!
+      store.write_finding(finding(id: "old", target_sha: "a" * 40, state: "active"))
+      persisted = File.binread(File.join(store.root, "findings", "old.json"))
+
+      registry = Hive::Patrol::FindingRegistry.new(
+        state: store, target_sha: "b" * 40,
+        clock: -> { Time.utc(2026, 7, 22, 12) }
+      )
+      result = registry.admit([ finding(id: "new") ], persist: false)
+
+      assert_equal "superseded",
+                   registry.instance_variable_get(:@existing).fetch(0).lifecycle_state
+      assert_equal "new", result.findings.fetch(0).id
+      assert_equal persisted, File.binread(File.join(store.root, "findings", "old.json"))
+    end
+  end
+
+  def test_state_store_rejects_malformed_feature_batches
+    with_tmp_dir do |dir|
+      store = Hive::Patrol::StateStore.new(dir)
+      feature = Struct.new(:id).new("")
+
+      assert_raises(Hive::ConfigError) { store.write_features([ feature ]) }
+
+      valid = Hive::Patrol::Feature.new(
+        id: "queue", kind: "service", entrypoints: [ "queue.rb" ],
+        owned_files: [ "queue.rb" ], context_files: [], tests: []
+      )
+      assert_equal [ valid ], store.write_features([ valid ])
+      assert File.file?(File.join(store.root, "features", "queue.json"))
+    end
+  end
+
   def test_shipping_retry_reuses_same_target_active_record_without_persisting_the_duplicate
     with_tmp_dir do |dir|
       store = Hive::Patrol::StateStore.new(dir)
@@ -126,117 +162,6 @@ class HivePatrolFindingRegistryTest < Minitest::Test
         assert_equal "recurrence_after_terminal", recurrence.lifecycle_reason
         assert_equal "b" * 40, recurrence.target_sha
       end
-    end
-  end
-
-  def test_old_terminal_ledger_does_not_redisposition_a_newer_recurrence
-    with_tmp_dir do |dir|
-      store = Hive::Patrol::StateStore.new(dir)
-      store.ensure!
-      old = finding(id: "old", target_sha: "a" * 40, state: "resolved")
-      store.write_finding(old)
-      recurrence = finding(id: "new")
-      recurrence.fingerprint = old.fingerprint
-      registry = Hive::Patrol::FindingRegistry.new(state: store, target_sha: "b" * 40)
-      result = registry.admit([ recurrence ], retry_active: true)
-      store.write_finding(result.persistable_findings.fetch(0))
-      registry = Hive::Patrol::FindingRegistry.new(state: store, target_sha: "b" * 40)
-
-      registry.reconcile!(
-        fingerprints: {
-          old.fingerprint => { "state" => "merged", "target_sha" => "a" * 40 }
-        },
-        dismissed: {}
-      )
-
-      states = store.findings.to_h { |item| [ item.id, item.lifecycle_state ] }
-      assert_equal "resolved", states.fetch("old")
-      assert_equal "active", states.fetch("new")
-
-      registry.reconcile!(
-        fingerprints: {
-          old.fingerprint => { "state" => "merged", "target_sha" => "b" * 40 }
-        },
-        dismissed: {}
-      )
-
-      recurrence_state = store.findings.find { |item| item.id == "new" }.lifecycle_state
-      assert_equal "resolved", recurrence_state,
-                   "terminal evidence for the recurrence's own target must still close it"
-    end
-  end
-
-  def test_reconciles_merged_and_dismissed_ledgers_to_terminal_states
-    with_tmp_dir do |dir|
-      store = Hive::Patrol::StateStore.new(dir)
-      store.ensure!
-      merged = finding(id: "merged", state: "active")
-      dismissed = finding(id: "dismissed", state: "active")
-      store.write_finding(merged)
-      store.write_finding(dismissed)
-      registry = Hive::Patrol::FindingRegistry.new(state: store, target_sha: "c" * 40)
-
-      registry.reconcile!(
-        fingerprints: { merged.fingerprint => { "state" => "merged" } },
-        dismissed: { dismissed.fingerprint => { "state" => "dismissed" } }
-      )
-
-      states = store.findings.to_h { |item| [ item.id, item.lifecycle_state ] }
-      assert_equal "resolved", states.fetch("merged")
-      assert_equal "rejected", states.fetch("dismissed")
-    end
-  end
-
-  def test_reconciliation_reuses_loaded_records_and_one_timestamp_per_transition
-    with_tmp_dir do |dir|
-      store = Hive::Patrol::StateStore.new(dir)
-      store.ensure!
-      record = finding(id: "merged", state: "active")
-      store.write_finding(record)
-      reads = 0
-      original_findings = store.method(:findings)
-      store.define_singleton_method(:findings) do
-        reads += 1
-        original_findings.call
-      end
-      clock_calls = 0
-      now = Time.utc(2026, 7, 22, 12, 0, 0)
-      registry = Hive::Patrol::FindingRegistry.new(
-        state: store, target_sha: "c" * 40,
-        clock: -> { clock_calls += 1; now }
-      )
-
-      registry.reconcile!(
-        fingerprints: { record.fingerprint => { "state" => "merged" } },
-        dismissed: {}
-      )
-
-      assert_equal 1, reads
-      assert_equal 1, clock_calls
-      assert_equal now.iso8601, original_findings.call.first.lifecycle_updated_at
-    end
-  end
-
-  def test_in_memory_transition_updates_lifecycle_without_persisting
-    with_tmp_dir do |dir|
-      store = Hive::Patrol::StateStore.new(dir)
-      store.ensure!
-      record = finding(id: "memory", state: "active")
-      now = Time.utc(2026, 7, 22, 13, 0, 0)
-      registry = Hive::Patrol::FindingRegistry.new(
-        state: store, target_sha: "a" * 40, clock: -> { now }
-      )
-
-      transitioned = registry.transition_current!(
-        record, state: "superseded", reason: "newer_target_evidence", persist: false
-      )
-
-      assert_same record, transitioned
-      assert_equal "superseded", record.lifecycle_state
-      assert_equal "newer_target_evidence", record.lifecycle_reason
-      assert_equal now.iso8601, record.lifecycle_updated_at
-      assert_nil record.superseded_by
-      assert_empty store.findings
     end
   end
 

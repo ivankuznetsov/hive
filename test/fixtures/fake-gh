@@ -75,6 +75,26 @@ case "${1:-}" in
         exit "${HIVE_FAKE_GH_LIST_EXIT:-0}"
         ;;
       create)
+        if [[ -n "${HIVE_FAKE_GH_PR_EXISTS_FILE:-}" ]]; then
+          title=""
+          body_file=""
+          base="main"
+          prev=""
+          for a in "$@"; do
+            [[ "$prev" == "--title" ]] && title="$a"
+            [[ "$prev" == "--body-file" ]] && body_file="$a"
+            [[ "$prev" == "--base" ]] && base="$a"
+            prev="$a"
+          done
+          marker_file="${HIVE_FAKE_GH_PR_EXISTS_FILE}"
+          mkdir -p "$(dirname "$marker_file")"
+          printf '%s' "$title" > "${marker_file}.title"
+          printf '%s' "$base" > "${marker_file}.base"
+          if [[ -n "$body_file" && -f "$body_file" ]]; then
+            cp -- "$body_file" "${marker_file}.body"
+          fi
+          : > "$marker_file"
+        fi
         printf 'https://example.com/pr/2\n'
         exit "${HIVE_FAKE_GH_CREATE_EXIT:-0}"
         ;;
@@ -148,6 +168,35 @@ case "${1:-}" in
         ;;
       *) exit 0 ;;
     esac
+    ;;
+  api)
+    if [[ -n "${HIVE_FAKE_GH_PR_EXISTS_FILE:-}" && -f "${HIVE_FAKE_GH_PR_EXISTS_FILE}" ]]; then
+      ruby -rjson -e '
+        url = ENV.fetch("HIVE_FAKE_GH_PR_EXISTS_URL", "https://github.com/acme/app/pull/9")
+        number = Integer(ENV.fetch("HIVE_FAKE_GH_PR_EXISTS_NUMBER", "9"))
+        repository = url[%r{github\.com/([^/]+/[^/]+)/pull/}, 1] || "acme/app"
+        marker = ENV.fetch("HIVE_FAKE_GH_PR_EXISTS_FILE")
+        record = {
+          "number" => number, "html_url" => url, "state" => "open",
+          "merged_at" => nil, "draft" => true,
+          "title" => File.binread("#{marker}.title"),
+          "body" => File.binread("#{marker}.body"),
+          "head" => {
+            "ref" => ENV.fetch("HIVE_FAKE_GH_HEAD_REF_NAME", "fake-head"),
+            "sha" => ENV.fetch("HIVE_FAKE_GH_HEAD_REF_OID", "fake-head-oid"),
+            "repo" => { "full_name" => repository }
+          },
+          "base" => {
+            "ref" => File.binread("#{marker}.base"),
+            "repo" => { "full_name" => repository }
+          }
+        }
+        puts JSON.generate([[record]])
+      '
+    else
+      printf '[[]]\n'
+    fi
+    exit "${HIVE_FAKE_GH_LIST_EXIT:-0}"
     ;;
   *) exit 0 ;;
 esac

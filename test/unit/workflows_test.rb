@@ -152,17 +152,32 @@ class WorkflowsTest < Minitest::Test
       "1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-open-pr",
       "6-review", "7-artifacts", "8-finalize", "9-done",
       "2-research", "3-outline", "4-draft", "5-critique", "6-done",
-      "2-extract", "3-generate", "4-judge", "5-publish"
+      "2-extract", "3-generate", "4-judge", "5-publish",
+      "2-fix", "3-validate", "4-review"
     ]
     expected_names = [
       "inbox", "brainstorm", "plan", "execute", "open-pr",
       "review", "artifacts", "finalize", "done",
       "research", "outline", "draft", "critique",
-      "extract", "generate", "judge", "publish"
+      "extract", "generate", "judge", "publish", "fix", "validate"
     ]
 
     assert_equal expected_dirs, Hive::Workflows.all_stage_dirs
     assert_equal expected_names, Hive::Workflows.all_stage_names
+  end
+
+  def test_patrol_fix_is_a_first_party_change_workflow_and_cannot_be_shadowed
+    descriptor = Hive::Workflows::Registry.fetch(:"patrol-fix")
+
+    assert_equal %w[1-inbox 2-fix 3-validate 4-review 5-publish 6-done],
+                 descriptor.stage_dirs
+    assert_equal :change, descriptor.result.kind
+    assert_includes descriptor.result.capabilities, :publication
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Workflows::Registry.register!(descriptor, project: true, source_path: "workflows/patrol-fix.yml")
+    end
+    assert_includes error.message, "collides with registered workflow"
   end
 
   def test_all_stage_dirs_and_names_include_registered_workflows

@@ -108,63 +108,17 @@ Module dry-run calls the pure trigger evaluator and writes nothing. This is
 different from legacy `hive patrol --dry-run`, which retains its established
 agent-launching and state behavior.
 
-## First-party Patrol modules
+## Patrol discovery is native
 
-`modules/patrol` registers setup, scheduled-scan, and task-completed entrypoints
-around the existing ordinary Patrol engine. `modules/architecture-patrol`
-registers setup, scheduled discovery, merged-PR discovery, and action
-entrypoints around the existing post-merge engine. The existing merge
-reconciler remains the only GitHub intake producer; the module consumes its
-immutable manifest and does not add another poller.
+Ordinary Patrol and Architecture Patrol are no longer packaged as first-party
+modules. Their module manifests, adapters, migration ownership state, shadow
+comparison, qualification reports, cutover/rollback commands, and daemon
+coordinator have been removed.
 
-The adapters keep `.hive-state/patrol/`,
-`.hive-state/refactor_patrol/`, global terminal action proofs, budgets,
-dismissals, fingerprints, claims, manifests, artifacts, and recovery receipts
-authoritative in place. Adapter admission preflights the installed
-repository-write, GitHub-mutation, command, host, filesystem, and secret grants
-before calling either legacy engine. The legacy engines do not yet receive a
-capability-bound gateway object at every side-effect seam, so module mutator
-cutover remains blocked until that enforcement is structural rather than
-preflight-only. First-party identity grants no consent exemption.
-
-## Shadow migration and rollback
-
-When both Patrol modules are installed, the daemon can fence new legacy
-reservations, wait for exact legacy children and module attempts to quiesce,
-and bind current configuration/state roots without copying them. Legacy
-remains the sole mutator. Module-side shadow records are stored under:
-
-```text
-.hive-state/module-runtime/migration/
-├── patrols.json
-├── shadow/{patrol,architecture-patrol}/*.json
-└── report.json
-```
-
-The cutover report requires at least seven elapsed UTC days and ten comparable
-decisions per module, one unchanged configuration digest, reviewer sign-off,
-zero unexplained differences, and zero module-side or duplicate effects.
-Fixture timestamps and module self-comparisons test the gate code but are
-explicitly non-comparable. The existing merged-PR reconciler publishes an
-immutable `legacy_mutator_capture` for Architecture Patrol. Ordinary Patrol
-schedule events do not yet carry an independent capture, remain
-non-comparable, and therefore cannot satisfy the production evidence window.
-
-```bash
-hive module migration status --json
-hive module migration report --reviewer OPERATOR --yes --json
-hive module migration cutover --yes --json
-hive module migration rollback --yes --json
-```
-
-Report, cutover, and rollback are administrative human decisions. A request
-first fences both owners; the daemon advances the single durable ownership
-epoch only after exact quiescence and eligible evidence. Scheduler reservation
-and child registration hold the same durable migration admission lock, so
-ownership cannot change in the reserve-to-spawn gap.
-Rollback code restores legacy ownership and the previous module
-generation/configuration when available, while retaining unchanged
-checkpoints, high-water marks, events, attempts, and artifacts.
+Both discovery engines keep their native stores and reserve accepted findings
+directly in the shared Patrol Fix `AdmissionStore`. Historical ordinary
+findings use the explicit one-time `script/migrate_patrol_findings.rb`
+importer; there is no runtime migration lane.
 
 Public catalog promotion, tags, packages, releases, and deployment are separate
 release-authorized work.

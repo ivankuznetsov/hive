@@ -210,6 +210,77 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
+  def test_dry_run_previews_ambiguous_merge_without_provider_classification_or_job
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      gh.details[7] = details(7, at: T0)
+      provider_calls = 0
+      classifier_factory = lambda do |candidate, _cfg|
+        Hive::RefactorPatrol::MergeClassifier.new(
+          root: File.join(candidate.fetch("hive_state_path"), "refactor_patrol", "v2", "merge-classifications"),
+          decision_provider: lambda do |_prompt|
+            provider_calls += 1
+            raise "provider must not run during dry-run preview"
+          end
+        )
+      end
+      intake = reconciler(
+        dir, gh, dry_run: true, classifier_factory: classifier_factory
+      )
+
+      result = intake.ingest(
+        project: "demo", pr: "https://github.com/acme/demo/pull/7", now: T0
+      )
+
+      assert_nil result.fetch("job_id")
+      assert_equal "would_classify", result.dig("classification", "status")
+      assert_equal 0, provider_calls
+      assert_empty job_store(dir).jobs
+      refute Dir.exist?(File.join(dir, ".hive-state", "refactor_patrol", "v2", "merge-classifications"))
+    end
+  end
+
+  def test_settled_feature_redelivery_stays_in_classification_queue_without_job_or_event
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      gh.details[7] = details(7, at: T0)
+      classifier = Hive::RefactorPatrol::MergeClassifier.new(
+        root: File.join(dir, ".hive-state", "refactor_patrol", "v2", "merge-classifications"),
+        decision_provider: ->(_prompt) {
+          {
+            "decision" => "feature", "rationale" => "New capability",
+            "evidence" => [ "Production behavior" ], "model_receipt" => "fake:model"
+          }
+        }
+      )
+      events = 0
+      publisher = Object.new
+      publisher.define_singleton_method(:pull_request_merged) { |*| events += 1 }
+      intake = reconciler(
+        dir, gh, classifier_factory: ->(*) { classifier },
+        module_event_publisher: publisher
+      )
+
+      pending = intake.ingest(project: "demo", pr: "7", now: T0)
+      occurrence_id = pending.dig("classification", "occurrence_id")
+      reservation_id = "d" * 64
+      classifier.claim!(
+        occurrence_id, reservation_id: reservation_id,
+        owner: "daemon", now: T0, lease_sec: 60
+      )
+      classifier.run_occurrence(
+        occurrence_id, reservation_id: reservation_id, now: T0 + 1
+      )
+      accepted = intake.ingest(project: "demo", pr: "7", now: T0 + 2)
+
+      assert_equal "feature", accepted.dig("classification", "status")
+      assert_nil accepted.fetch("job_id")
+      assert_empty job_store(dir).jobs
+      assert_equal 0, events
+      assert_nil classifier.fetch_occurrence(occurrence_id)["materialization"]
+    end
+  end
+
   def test_paginated_cursor_is_durable_and_restart_resumes_without_refetching_first_page
     with_tmp_dir do |dir|
       clock = FakeMonotonic.new
@@ -662,7 +733,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
-  def test_intake_snapshots_the_complete_action_policy
+  def test_intake_disables_legacy_action_policy_even_when_old_config_enables_it
     with_tmp_dir do |dir|
       gh = FakeGh.new
       gh.details = { 2 => details(2, at: T0) }
@@ -676,8 +747,8 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       )
       policy = job_store(dir).jobs.fetch(0).fetch("policy")
 
-      assert_equal true, policy.fetch("auto_fix")
-      assert_equal true, policy.fetch("issue_filing")
+      assert_equal false, policy.fetch("auto_fix")
+      assert_equal false, policy.fetch("issue_filing")
       assert_equal "codex", policy.dig("action", "auto_fix_agent")
       refute policy.dig("action", "caps").key?("max_files")
       refute policy.dig("action", "caps").key?("max_diff_lines")
@@ -1164,10 +1235,129 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
+  def test_feature_resolution_binds_every_materialized_manifest_once
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      manifest = { "job_id" => "job-1", "manifest_checksum" => "a" * 64 }
+      classification = { "status" => "feature", "occurrence_id" => "c" * 64 }
+      resolver = Object.new
+      resolver.define_singleton_method(:resolve_classified) do |*_, **|
+        Hive::RefactorPatrol::PrManifestResolver::Resolution.new(
+          manifests: [ manifest ], classification: classification
+        )
+      end
+      bindings = []
+      classifier = Object.new
+      classifier.define_singleton_method(:bind_materialization!) do |*args, **kwargs|
+        bindings << [ args, kwargs ]
+      end
+      intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
+        registry: -> { [] }, config_loader: ->(*) { enabled_cfg }, gh: gh,
+        github_gateway: gh, resolver_factory: ->(*) { resolver },
+        classifier_factory: ->(*) { classifier }
+      )
+      transitions = Object.new
+      transitions.define_singleton_method(:enqueue) { |**| { "job_id" => "job-1" } }
+      intake.instance_variable_set(:@architecture_intake_transitions, transitions)
+
+      result = intake.send(
+        :ingest_for, entry_for(dir), enabled_cfg, pr: "7", expected: nil,
+        now: T0, timeout_sec: 1
+      )
+
+      assert_equal [ "job-1" ], result.fetch("job_ids")
+      assert_equal [ "job-1" ], bindings.fetch(0).fetch(1).fetch(:job_ids)
+      assert_equal [ "a" * 64 ], bindings.fetch(0).fetch(1).fetch(:manifest_checksums)
+    end
+  end
+
+  def test_default_classifier_provider_and_retryable_ingest_are_bounded
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
+        registry: -> { [] }, config_loader: ->(*) { enabled_cfg },
+        gh: gh, github_gateway: gh
+      )
+      classifier = intake.send(:classifier_for, entry_for(dir), enabled_cfg)
+      runner = Object.new
+      runner.define_singleton_method(:call) { |prompt| { "prompt" => prompt } }
+      result = with_replaced_singleton_method(
+        Hive::RefactorPatrol::MergeClassifierRunner, :new, ->(**) { runner }
+      ) do
+        classifier.instance_variable_get(:@decision_provider).call("classify")
+      end
+      assert_equal "classify", result.fetch("prompt")
+
+      retry_at = T0 + 300
+      intake.define_singleton_method(:ingest_for) do |*_, **|
+        raise Hive::RefactorPatrol::MergeClassifier::Retryable.new(
+          "provider busy", retry_at: retry_at
+        )
+      end
+      previous = { "overlap_occurrences" => [] }
+      progress = intake.instance_variable_get(:@progress_store).build(
+        registration: "demo", host: "github.com", repository: "acme/demo",
+        default_branch: "main", previous: previous,
+        merged_since: T0 - 3600, now: T0
+      )
+      progress.fetch("scan").merge!(
+        "phase" => "ingest", "items" => [ summary(7, at: T0) ],
+        "result_count" => 1
+      )
+      error = assert_raises(Hive::Daemon::RefactorPatrolMergeReconciler::GithubFailure) do
+        intake.send(
+          :ingest_step, entry_for(dir), enabled_cfg, previous, progress,
+          now: T0, timeout_sec: 1
+        )
+      end
+      assert_equal retry_at, error.retry_at
+    end
+  end
+
   private
 
   def reconciler(dir, gh, cfg: enabled_cfg, name: "demo", **options)
     entry = entry_for(dir, name: name)
+    explicit_classifier = options.key?(:classifier_factory)
+    options[:classifier_factory] ||= lambda do |candidate, _candidate_cfg|
+      classifier = Hive::RefactorPatrol::MergeClassifier.new(
+        root: File.join(
+          candidate.fetch("hive_state_path"), "refactor_patrol", "v2", "merge-classifications"
+        ),
+        decision_provider: lambda do |_prompt|
+          {
+            "decision" => "feature", "rationale" => "fake feature merge",
+            "evidence" => [ "production source changed" ], "model_receipt" => "fake:model"
+          }
+        end
+      )
+      classifier.define_singleton_method(:hydrate) do |input, now: Time.now.utc|
+        call(input, now: now)
+      end
+      classifier
+    end
+    unless explicit_classifier
+      options[:resolver_factory] ||= lambda do |candidate, candidate_cfg, gateway, dry_run|
+        resolver = Hive::RefactorPatrol::PrManifestResolver.new(
+          project_root: candidate.fetch("path"), registration: candidate.fetch("name"),
+          default_branch: candidate_cfg.fetch("default_branch"), cfg: candidate_cfg,
+          github_gateway: gateway, dry_run: dry_run,
+          hive_state_path: candidate["hive_state_path"]
+        )
+        wrapper = Object.new
+        wrapper.define_singleton_method(:resolve_classified) do |pr, **kwargs|
+          manifest = resolver.resolve(pr, timeout_sec: kwargs[:timeout_sec])
+          Hive::RefactorPatrol::PrManifestResolver::Resolution.new(
+            manifests: [ manifest ],
+            classification: {
+              "status" => "adopted", "decision" => nil,
+              "reason" => "existing_manifest_v2"
+            }
+          )
+        end
+        wrapper
+      end
+    end
     Hive::Daemon::RefactorPatrolMergeReconciler.new(
       registry: -> { [ entry ] },
       config_loader: ->(_path) { cfg },
@@ -1221,8 +1411,13 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     summary(number, at: at).merge(
       "state" => "MERGED",
       "base_sha" => "a" * 40,
+      "title" => "Improve feature #{number}", "body" => "Adds product behavior",
+      "labels" => [ "feature" ], "author" => "dev",
+      "publication_provenance" => { "kind" => "none", "marker" => nil },
       "changed_files" => 1,
-      "files" => [ { "path" => "lib/pr_#{number}.rb", "status" => "modified" } ]
+      "files" => [ {
+        "path" => "lib/pr_#{number}.rb", "status" => "modified", "patch" => "@@ -1 +1 @@"
+      } ]
     )
   end
 

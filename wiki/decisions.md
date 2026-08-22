@@ -18,17 +18,14 @@ tags: [decisions, adr, plan-review]
 **Decision:** Hive remains the canonical monorepo and the first and primary consumer of every reusable component. Establish and enforce internal Ruby boundaries first: one supported entry point or facade, structured public values and errors, an acyclic dependency direction, explicit state/schema/lock ownership, clean-process loading, and all Hive production consumers routed through the boundary. Existing module wiki pages plus one component catalog are the canonical agent context; do not add a parallel `.context.md` hierarchy.
 
 Implementation readiness and standalone product value are different rankings.
-The current audit retains six `boundary-ready` components: UserService, Agent
-ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger.
-`Hive::Attempts::API` and Patrol Effect Evidence remain guarded `candidate`
-rows. Attempts has focused clean-load behavior, result contracts, and exact
-internal composition sites without adding generic lifecycle, cancellation,
-export, or raw-store APIs. Patrol has one bounded U3 exception: its single
-occurrence store sits behind a validator/outbox/effect facade; separate product
-gateways compose admission, sender, and receipt collaborators; and oversized
-runner/scheduler transition mechanics are delegated to claim/plan/discovery/
-occurrence coordinators. Compressed candidate-bound evidence and production
-qualification are not complete. U8
+The current audit retains eleven `boundary-ready` components, including Patrol
+Fix Workflow Core, and four guarded `candidate` rows: Provider Health, Provider
+Routing Policy, Provider Routing Operations, and `Hive::Attempts::API`.
+Attempts has focused clean-load behavior, result contracts, and exact internal
+composition sites without adding generic lifecycle, cancellation, export, or
+raw-store APIs. The former Patrol Effect Evidence candidate and its migration
+exception were retired when Patrol discovery moved to direct native stores and
+direct Patrol Fix admission. U8
 removed the former reciprocal Attempts/WorkLedger catalog edge by keeping
 `TaskProjection::Store` as a Hive-owned adapter rather than WorkLedger-owned
 source. RunReceipt remains the strongest standalone opportunity without
@@ -763,7 +760,7 @@ status returns to its released v0.6.9 v1 shape without `job_store_resets`, while
 retaining later valid fields such as the `binary_drift: unreadable` state. This
 decision supersedes ADR-041.
 
-## ADR-043: Architecture Patrol uses categorical routes and one daily launch allowance
+## ADR-043: Architecture Patrol uses categorical routes and independent discovery allowances
 
 **Status:** Active
 
@@ -780,25 +777,26 @@ explicit `fix`, `discuss`, or `dismiss` route plus categorical route reasons and
 `architecture_effects`. Verified, sufficiently confident, unblocked work may
 `fix`; strategic or safety decisions `discuss`; unverifiable or inadmissible
 work `dismiss`es. Numerical leverage and thresholds are deleted. Ordinary and
-Architecture Patrol share one project-wide agent lock and one mode-derived
-UTC-day launch allowance: 36/18/8/2 for ultrapatrol/high/medium/low. Metered and
-unmetered review/fix launches count equally. Hive writes an unmetered
-reservation under the registered project name before the provider child starts
-and updates the same row on completion, so controller loss does not reopen the
-slot and same-basename projects remain independent. Explicit overrides must be
-at least 2 so review cannot permanently starve fix work. Token totals are telemetry only;
-there is no Patrol token budget or token-based admission. Architecture JobStore
-starts fresh at v4 and never reads or rewrites v3. `hive update` runs fleet
-migration that deletes retired token/per-cycle/specialized quota keys while
-preserving an explicit `max_agent_spawns_per_day` override.
+Architecture Patrol have independent scheduled-discovery lanes under the
+stable registry project ID. Each lane receives 16/8/4/2 launches for
+ultrapatrol/high/medium/low; the legacy shared override is inert. Hive writes
+an atomic reservation to a strict UTC-date ledger immediately before a
+scheduled provider child starts, so controller loss does not reopen the slot
+and neither engine can starve the other. Fix, remediation, review, publication,
+and post-merge work do not consume discovery capacity. Accepted `fix` and
+`discuss` dispositions enter the shared Patrol Fix workflow; Architecture
+Patrol has no action or publication engine. Token totals are
+telemetry only; there is no Patrol token budget or token-based admission.
+Architecture JobStore starts fresh at v4 and never reads or rewrites v3.
 
 **Consequences:** Existing v3 JobStore bytes remain recoverable as files but
-have no runtime continuity. `discuss` creates an issue action; `fix` is PR-first
-with a dormant deterministic-nonfixable issue fallback; `dismiss` creates no
-action. Ordinary transient discovery retries after 60 seconds; provider
-`token_limit`/`turn_limit` discovery and action retries use one fixed hour;
-Hive daily launch exhaustion sleeps until the next UTC day. Wall-clock, turn,
-feature/fix/PR, process-custody, and daemon concurrency bounds remain. This
+have no runtime continuity. New v4 jobs terminalize after discovery with an
+empty action list. Historical v4 action fields remain queryable but cannot be
+claimed or executed. Ordinary transient discovery retries after 60 seconds; provider
+provider discovery retry deadlines are durable per engine and may cross UTC
+midnight; Hive daily launch exhaustion sleeps until the next UTC day for only
+the exhausted lane. Wall-clock, turn,
+feature, process-custody, and daemon concurrency bounds remain. This
 decision supersedes ADR-042.
 
 ## ADR-032: Per-stage controls overlay the current durable identity

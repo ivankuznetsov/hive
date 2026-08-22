@@ -7,7 +7,7 @@ updated: 2026-08-13
 tags: [github, gh, module, pr, closure, evidence]
 ---
 
-**TLDR**: `Hive::Gh` is the shared GitHub CLI adapter for PR publication, finalization, review mirroring, babysitter context, authentication, and repository identity. It wraps `gh` subprocesses with non-interactive defaults, a bounded network timeout, typed return structs, and fail-loud JSON parsing. Managed Git observation/publication delegates to the boundary-ready [[modules/agent_git_gate]]. `Hive::Gh::RepositoryIdentity` owns strict GitHub host and owner/name validation. Architecture-patrol-specific issue, merged-PR intake, and publication-proof protocol lives behind `Hive::RefactorPatrol::GithubGateway` instead of widening this global helper.
+**TLDR**: `Hive::Gh` is the shared GitHub CLI adapter for PR publication, finalization, review mirroring, babysitter context, authentication, and repository identity. It wraps `gh` subprocesses with non-interactive defaults, a bounded network timeout, typed return structs, and fail-loud JSON parsing. Managed Git observation/publication delegates to the boundary-ready [[modules/agent_git_gate]]. `Hive::Gh::RepositoryIdentity` owns strict GitHub host and owner/name validation. Architecture-patrol-specific merged-PR intake lives behind `Hive::RefactorPatrol::GithubGateway` instead of widening this global helper.
 
 ## API Map
 
@@ -50,10 +50,8 @@ shapes and fail-closed reconciliation rules out of unrelated GitHub callers.
 
 | Adapter API | Purpose |
 |-------------|---------|
-| `issues_for_repository` / `issues_with_marker` / `create_issue` | Validate the complete exact-host issue inventory, exclude pull requests, reconcile exact markers, and create a bounded body through a temporary file. |
 | `merged_pr_details` | Resolve one merged PR plus its complete paginated file/status/rename manifest against the checkout's canonical host and repository. Identity lookup, authentication, metadata, and files share one monotonic deadline. |
 | `merged_prs_page` | Fetch and validate one cursor-addressed GraphQL page of strictly typed merged-PR occurrence identities for catch-up, using stable creation order and one exact ISO timestamp `merged:<lower>..<upper>` qualifier for the fixed merge-time window. |
-| `verify_pr_identity!` | Re-read a newly created patrol PR and require the expected URL, repository, OPEN non-draft state, branch, head OID, and base before handoff. |
 
 ## Subprocess Contract
 
@@ -85,41 +83,20 @@ credential/SSH helper selection cannot execute in controller context; GitHub
 HTTPS credentials are delegated only to `gh auth git-credential`, while SSH
 uses the controller's agent socket and standard client.
 
-Architecture patrol strengthens that boundary for external transactions through
-`Hive::RefactorPatrol::GithubGateway`. The
-source manifest supplies repository identity plus a PR URL whose host is
-authoritative; lookup validates branch, base, head OID, hidden action marker,
-and exact host/repository identity. A push may
-replace a remote OID only with an exact force-with-lease tied to a proven
-superseded patch generation, while a new branch uses an exact absence lease.
-That authority is derived from the durable action ledger, not from the remote
-branch name: the old publication attempt must have immutable `push_complete`
-proof for that commit plus an immutable pre-create supersession record.
-`PrOpener` passes that exact old commit to `Hive::Gh.push_branch!` as the
-expected remote OID; `Hive::Gh` enforces the lease but does not decide which
-generation is replaceable. Any unrelated OID remains a conflict.
-The publisher captures one validated origin push URL and reuses it for OID
-lookup and push; multiple URLs or later named-remote rewrites cannot broaden or
-redirect that transaction. Publication pushes an immutable OID under the exact
-ledger-authorized OID/absence lease and returns only after a second remote
-observation proves the result. The receipt contains a transport fingerprint,
-not the URL or credentials. An arbitrary existing branch is a conflict.
-Existing same-branch OPEN PRs are reconcilable only when `isDraft` is explicitly false;
-an OPEN draft is conflicting remote state rather than proof of publication.
-After creation, `verify_pr_identity!` independently proves the PR still names
-the validated patch before any `6-review` handoff. Issue reconciliation reads
-the complete open/closed inventory and prefers an exact v2 marker. Only when no
-marker matches may the caller apply architecture patrol's strict markerless
-legacy-body parser and pairwise semantic-family compatibility; malformed or
-ambiguous historical matches fail closed. These helpers provide remote
-evidence, while durable creation intent, ownership/handoff fences, and fencing
-generation remain owned by [[commands/refactor-patrol]]'s job aggregate.
+`Hive::GithubPublication` composes this Git boundary with a small GitHub
+transport. It queries pull requests only for the exact owner/branch head,
+matches a controller marker plus exact repository/base/head/title/body
+identity, and uses an expected-absence push lease. An arbitrary existing branch
+is a conflict. After a push or create call, a fresh observation must prove the
+exact remote OID and hosted PR identity. Definite failures may retry only when
+the remote still proves absence; unknown attempted outcomes are
+reconciliation-only. Coding Open PR and Patrol Fix Publish share this one
+controller.
 
 ## Tests
 
 - `test/unit/gh_test.rb` covers shared frontmatter, secret-scan, PR lookup, managed remote observations, exact-OID/absence publication delegation, restrictive draft-PR body tempfiles, repository identity, subprocess, and status APIs. The same file exercises `GithubGateway`'s created-PR proof, exact-host merged-PR detail intake, and GraphQL pagination through an injected transport, including the single-qualifier exact timestamp range used for merge catch-up.
-- `test/unit/gh_issue_helpers_test.rb` covers `GithubGateway`'s full paginated inventory, pull-request exclusion, exact-marker delegation, explicit host/repository issue creation, and malformed/cross-repository fail-closed behavior. `test/unit/refactor_patrol/issue_filer_test.rb` covers exact-marker precedence plus strict legacy semantic grouping, malformed historical bodies, and pairwise-ambiguous matches.
-- `test/unit/refactor_patrol/pr_opener_test.rb` pins exact absence/OID leases and pre-create trunk checks. `test/unit/refactor_patrol/action_runner_test.rb` covers the real-git crash/restart path from a durably pushed stale generation through supersession, exact old-OID replacement, one verified PR, and one mandatory review handoff.
+- `test/unit/github_publication_test.rb` pins exact absence/OID leases, branch-scoped inventory, adoption, retry-safe definite failures, and reconciliation-only unknown outcomes.
 - `test/unit/daemon/pr_merge_watcher_test.rb`, `test/unit/daemon/dispatcher_test.rb`, and `test/integration/run_stage_action_test.rb` cover the merged-finalize-error archive path that uses `pr_state`.
 
 ## Backlinks

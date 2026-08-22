@@ -44,6 +44,13 @@ module Hive
         }
       }.freeze
 
+      CONTROLLER_RUNNERS = {
+        patrol_fix: lambda {
+          require "hive/patrol_fix/runner"
+          Hive::PatrolFix::Runner.method(:run!)
+        }
+      }.freeze
+
       module_function
 
       def resolve(task, descriptor: Hive::Workflows::Registry.default)
@@ -55,8 +62,12 @@ module Hive
           runner = CODING_RUNNERS[task.stage_name]
           return runner.call if runner
         end
+        if descriptor.stage_named(task.stage_name) && descriptor.controller
+          runner = CONTROLLER_RUNNERS[descriptor.controller]
+          return runner.call if runner
+        end
 
-        stage = descriptor.stages.find { |candidate| candidate.name == task.stage_name }
+        stage = descriptor.stage_named(task.stage_name)
         if stage&.kind == :agent
           require "hive/stages/agent"
           return Hive::Stages::Agent.method(:run!)

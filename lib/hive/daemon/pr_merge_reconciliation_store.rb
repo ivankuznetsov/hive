@@ -42,7 +42,7 @@ module Hive
       REMOTE_STATES = %w[
         unknown open merged closed_unmerged delivered_elsewhere ambiguous
       ].freeze
-      ARCHITECTURE_STATES = %w[pending accepted deferred failed not_required].freeze
+      ARCHITECTURE_STATES = %w[pending accepted deferred failed blocked not_required].freeze
       ARCHIVE_STATES = %w[pending blocked archived failed superseded].freeze
       OUTCOME_STATES = %w[candidate rejected].freeze
       REMOTE_POLL_HOLD_REASONS = %w[observed_head_changed].freeze

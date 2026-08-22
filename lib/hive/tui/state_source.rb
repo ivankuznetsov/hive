@@ -573,15 +573,23 @@ module Hive
           payload,
           archive_payload: archive_payload_from_cache(payload, archived_cache)
         )
+        next_mtime_fingerprint = mtime_fingerprint_for(snapshot)
+        next_policy_fingerprint = policy_fingerprint_for(snapshot)
+        published_at = Time.now
+
         @current_payload = payload
-        @current = snapshot
-        @current_seen_at = Time.now
+        @current_seen_at = published_at
         @last_full_parse_at = @current_seen_at
         @next_retention_boundary = next_retention_boundary
-        @mtime_fingerprint = mtime_fingerprint_for(snapshot)
-        @policy_fingerprint = policy_fingerprint_for(snapshot)
+        @mtime_fingerprint = next_mtime_fingerprint
+        @policy_fingerprint = next_policy_fingerprint
         @snapshot_archived_cache = archived_cache
         @last_error = nil
+        # Publish the lock-free reader pointer last. Once a reader observes
+        # this snapshot, every change detector that belongs to it is already
+        # installed; a mutation during fingerprint capture therefore cannot
+        # be mistaken for part of the newly published baseline.
+        @current = snapshot
       end
 
       def capture_dependency_context(context)

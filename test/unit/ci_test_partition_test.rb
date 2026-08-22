@@ -190,8 +190,6 @@ class CiTestPartitionTest < Minitest::Test
       workflow = File.read(File.join(ROOT, ".github", "workflows", "ci.yml"))
 
       assert_equal %w[
-        test/unit/packaging/patrol_evidence_candidate_test.rb
-        test/unit/packaging/patrol_evidence_sandbox_test.rb
         test/unit/packaging/workflow_creator_values_test.rb
       ], hostile_files.sort
       assert hostile_files.all? { |file| default_files.include?(file) },

@@ -105,8 +105,10 @@ module Hive
       # supervisor prepends a one-line banner to the rendered `/status`
       # reply when present. nil on a clean fetch. Mirrors the daemon's
       # StatusConsumer::Result#warning.
-      Result = Data.define(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning) do
-        def initialize(ok:, rows: [], legacy_stage_dirs: [], error: nil, envelope: nil, warning: nil)
+      Result = Data.define(:ok, :rows, :legacy_stage_dirs,
+                           :error, :envelope, :warning) do
+        def initialize(ok:, rows: [], legacy_stage_dirs: [],
+                       error: nil, envelope: nil, warning: nil)
           super
         end
       end

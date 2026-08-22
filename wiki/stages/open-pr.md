@@ -1,76 +1,60 @@
 ---
 title: 5-open-pr stage
 type: stage
-source: lib/hive/stages/open_pr.rb, templates/open_pr_prompt.md.erb
+source: lib/hive/stages/open_pr.rb, lib/hive/github_publication.rb, templates/open_pr_prompt.md.erb
 created: 2026-05-13
 updated: 2026-08-21
 tags: [stage, pr, github]
 ---
 
-**TLDR**: Pushes the feature branch and opens a draft GitHub PR before autonomous review starts. This gives humans a normal `gh pr checkout <number>` entry point while hive continues to use local files as the authoritative review state.
+**TLDR**: The stage asks an agent only to author a bounded title/body draft.
+`Hive::GithubPublication` exclusively inventories the branch, pushes the exact
+commit, creates or adopts the draft pull request, and records durable recovery
+state. Patrol Fix uses the same controller.
 
 ## Preconditions
 
-1. `worktree.yml` must be a regular controller-owned pointer from 4-execute
-   with the exact task slug as its branch and deterministic path.
-2. The pointed worktree must exist, be registered by the project repository,
-   have that branch checked out, and share the project's Git common directory.
-3. `gh auth status` must succeed; unavailable GitHub auth is a hard failure.
+1. `worktree.yml` is the controller-owned pointer produced by 4-execute.
+2. The pointed worktree is registered, clean, on the exact task branch, ahead
+   of the configured base, and has a bounded exact binary diff.
+3. Git and GitHub repository identities resolve to the same host/repository.
 
-The first two checks are the shared `Hive::Stages::Base.worktree_pointer_or_exit` policy also used by [[stages/finalize]], so their warnings and exit status cannot drift.
+## Stage/controller split
 
-## Steps performed (`Stages::OpenPr.run!`)
+`Stages::OpenPr` owns local workflow policy:
 
-1. Check pull requests for the branch with `gh pr list --head <branch> --state all`.
-2. Secret-scan every current OPEN PR body before pushing or spawning a
-   body-authoring agent. This closes the retry window where a known leaked body
-   could otherwise be republished before the next post-write scan.
-3. If an OPEN PR exists, write `pr.md` with `idempotent=true` and the
-   controller-observed full `head_oid`, secret-scan it, and finish without
-   spawning an agent.
-4. If a MERGED PR exists for the current local `HEAD` (`headRefOid` match),
-   write `pr.md` with `merged=true` and that immutable head binding,
-   secret-scan it, write `summary.md`, and finish without spawning an agent.
-5. Secret-scan the local PR source, then push the branch with `git push -u origin <branch>`.
-   A missing `pr.md` is the normal first-entry shape and contributes an empty
-   local source; remote bodies are still fetched and scanned.
-6. Render `templates/open_pr_prompt.md.erb` with the plan and execute output wrapped in a per-spawn `<user_supplied>` nonce.
-7. Spawn the open-pr agent in the worktree. Controller-owned task files are
-   captured before spawn and restored atomically on a mismatch; the resulting
-   error carries `reason=open_pr_tampered` and `restored=true|false`. The full
-   controller-owned anchor set remains protected, including the authoritative
-   task journal and projection. A late terminal observation for the preceding
-   execute attempt must acquire the same ordinary task ownership lock as stage
-   execution; while open PR owns that lock, the daemon returns `:pending`
-   immediately and retries the observation after the stage releases. The
-   provider therefore retains ordinary repository, shell, and network access,
-   controller bookkeeping stays outside its custody window, and direct
-   provider edits still produce `open_pr_tampered` and are restored.
-   The prompt invokes `/ce-commit-push-pr`, requires
-   `gh pr create --draft`, forbids
-   another push, requires `pr.md` frontmatter with `pr_url`, `pr_number`, and
-   full `head_oid`, and
-   ends with a required completion section that makes the
-   `<!-- COMPLETE pr_url=... is_draft=true -->` marker the last line.
-8. Treat the resulting marker and `pr.md` URL as untrusted until a fresh,
-   branch-scoped GitHub observation proves the same URL at the exact local
-   `HEAD`. An unobserved or mismatched URL records an error without fetching,
-   editing, or closing that URL. Only after this proof does the controller
-   canonicalize the immutable PR identity, secret-scan the PR body, and run
-   any leak remediation.
+- read and validate `worktree.yml`;
+- reuse or author strict `pr-draft.json` containing only `title` and `body`;
+- construct and revalidate the exact publication request before every remote
+  phase;
+- map controller results to `pr.md`, markers, and merged-task completion.
 
-## Marker → commit action
+The authoring prompt forbids `git push`, `gh`, remote-state claims, and edits
+outside `pr-draft.json`. The agent never writes `pr.md` or a completion marker.
 
-- `:complete` → `pr_opened_draft`.
-- Existing OPEN PR → `open_pr_already_open` with `idempotent=true`.
-- Existing MERGED PR for local HEAD → `open_pr_already_merged` with `merged=true` and `summary.md` written.
-- Secret scan failure → `ERROR reason=secret_in_pr_body` or `ERROR reason=secret_scan_fetch_failed`.
-- Every `ERROR`, including `timeout`, remains daemon-retryable after the shared
-  cooldown when no live task lock exists and current safety evidence passes.
-  The ordinary stage re-entry discovers an externally created OPEN PR instead
-  of creating a duplicate. A repeated failure writes a new marker and restarts
-  the cooldown; retries do not exhaust.
+`Hive::GithubPublication::Controller` owns all remote effects:
+
+- secret-scan title, body, and exact diff;
+- query only the repository/head-branch PR inventory;
+- adopt exactly one canonical marker/title/body/base/head match;
+- reject foreign branches and ambiguous candidates;
+- push only with an expected-absence lease and verify the remote OID;
+- create the PR only after intent is durable and exact local/remote evidence is
+  revalidated;
+- safely retry a failed absent-branch push or a definite `gh pr create`
+  failure; unknown attempted outcomes remain reconciliation-only.
+
+The durable controller state stores identities and digests, never raw title,
+body, or diff bytes.
+
+## Outcomes
+
+- OPEN or DRAFT exact PR: write canonical `pr.md` and `pr_opened_draft`.
+- MERGED exact PR: write `pr.md`, `summary.md`, and downstream terminal markers.
+- CLOSED exact PR: fail closed.
+- Conflict, secret, ambiguous inventory, or unknown remote outcome: write an
+  attributed `github_publication_*` error and leave the task retryable.
 
 ## Backlinks
 
-- [[stages/execute]] · [[stages/review]] · [[state-model]]
+- [[stages/execute]] · [[stages/review]] · [[state-model]] · [[modules/patrol]]

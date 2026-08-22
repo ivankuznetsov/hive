@@ -136,7 +136,11 @@ module Hive
         require "hive/task_action"
         require "hive/task_projection/store"
 
-        marker = Hive::Markers.current(task.state_file)
+        marker = if task.workflow.controller?
+          Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+        else
+          Hive::Markers.current(task.state_file)
+        end
         projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
         config = Hive::Config.load(task.project_root)
         action = Hive::TaskAction.for(
@@ -182,6 +186,10 @@ module Hive
       end
 
       def observation_mtime_source(task)
+        if task.workflow.controller?
+          return task.meta_yml_path if File.exist?(task.meta_yml_path)
+          return task.folder
+        end
         return task.state_file if File.exist?(task.state_file)
         return task.meta_yml_path if File.exist?(task.meta_yml_path)
 

@@ -8,7 +8,6 @@ require "hive/modules/dispatcher"
 require "hive/modules/event_ledger"
 require "hive/modules/event_scope"
 require "hive/modules/hook_attempt"
-require "hive/modules/migration/patrols"
 require "hive/modules/schedule_planner"
 
 module Hive
@@ -21,18 +20,12 @@ module Hive
       RETRY_DELAY_SEC = 3600
 
       def initialize(attempt_store:, attempt_dispatcher:, registry: -> { Hive::Config.registered_projects },
-                     planner: SchedulePlanner.new, migration_owner: nil,
+                     planner: SchedulePlanner.new,
                      clock: -> { Time.now.utc })
         @attempt_store = attempt_store
         @attempt_dispatcher = attempt_dispatcher
         @registry = registry
         @planner = planner
-        @migration_owner = migration_owner || lambda do |entry, module_name|
-          Hive::Modules::Migration::Patrols.owner_for(
-            entry.fetch("path"), module_name,
-            hive_state_path: entry["hive_state_path"]
-          )
-        end
         @clock = clock
       end
 
@@ -174,8 +167,6 @@ module Hive
           next [] unless admission_open?(admission_open)
 
           module_name = selection.fetch("name")
-          next [] unless schedule_owner?(entry, module_name)
-
           configuration = store.configuration(
             module_name, selection.dig("active", "configuration_digest")
           )
@@ -210,12 +201,6 @@ module Hive
           count += 1
         end
         count
-      end
-
-      def schedule_owner?(entry, module_name)
-        return true unless Hive::Modules::Migration::Patrols::MODULES.include?(module_name)
-
-        @migration_owner.call(entry, module_name) == "module"
       end
 
       def read_event_cursor(path)

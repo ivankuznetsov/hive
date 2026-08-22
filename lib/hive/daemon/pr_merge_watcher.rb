@@ -370,7 +370,7 @@ module Hive
           identity, candidate, remote, now: now
         )
         checkpoint!(identity, candidate, architecture, now: now)
-        return architecture if architecture.fetch(:status) == :deferred
+        return architecture if %i[deferred blocked].include?(architecture.fetch(:status))
         if @dry_run
           return {
             status: :dry_run,
@@ -498,8 +498,43 @@ module Hive
             next_poll_at: now + @poll_interval_sec
           }
         end
+        classification = receipt.is_a?(Hash) ? receipt["classification"] : nil
         architecture = if receipt.nil?
           current.merge("status" => "not_required", "last_error" => nil)
+        elsif classification&.fetch("status", nil) == "skip"
+          current.merge(
+            "status" => "not_required",
+            "request_id" => classification.fetch("occurrence_id"),
+            "receipt" => classification.fetch("snapshot_digest"),
+            "last_error" => nil
+          )
+        elsif classification&.fetch("status", nil) == "blocked"
+          return {
+            status: :blocked,
+            remote: remote,
+            architecture: current.merge(
+              "status" => "blocked",
+              "request_id" => classification.fetch("occurrence_id"),
+              "receipt" => classification.fetch("snapshot_digest"),
+              "last_error" => classification.fetch("reason").to_s
+            ),
+            archive: candidate.fetch("archive").merge(
+              "status" => "blocked",
+              "last_error" => "post-merge classification is blocked"
+            )
+          }
+        elsif %w[pending retry_wait would_classify].include?(classification&.fetch("status", nil))
+          return {
+            status: :deferred,
+            remote: remote,
+            architecture: current.merge(
+              "status" => "deferred",
+              "request_id" => classification["occurrence_id"],
+              "receipt" => classification["snapshot_digest"],
+              "last_error" => "post-merge classification is #{classification.fetch('status')}"
+            ),
+            next_poll_at: now + @poll_interval_sec
+          }
         else
           current.merge(
             "status" => "accepted",

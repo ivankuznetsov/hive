@@ -38,11 +38,17 @@ class WebBrowserBundleTest < Minitest::Test
     end
   end
 
+  def bundle_with_fake_install(**arguments)
+    Hive::Web::BrowserBundle.new(**arguments).tap do |bundle|
+      bundle.define_singleton_method(:probe_npm!) { true }
+    end
+  end
+
   def test_populates_once_and_reuses_pinned_agent_browser_and_chrome
     with_package do |package|
       Dir.mktmpdir("hive-browser-cache") do |cache|
         calls = []
-        bundle = Hive::Web::BrowserBundle.new(
+        bundle = bundle_with_fake_install(
           package_root: package, cache_root: cache,
           runner: populate_runner(calls: calls), tool_probe: -> { "v22.23.1" }
         )
@@ -70,7 +76,7 @@ class WebBrowserBundleTest < Minitest::Test
     with_package do |package|
       Dir.mktmpdir("hive-browser-cache") do |cache|
         build = lambda do
-          Hive::Web::BrowserBundle.new(
+          bundle_with_fake_install(
             package_root: package, cache_root: cache,
             runner: populate_runner, tool_probe: -> { "v22.23.1" }
           ).ensure!
@@ -86,7 +92,7 @@ class WebBrowserBundleTest < Minitest::Test
   def test_failed_or_incomplete_install_never_publishes_partial_cache
     with_package do |package|
       Dir.mktmpdir("hive-browser-cache") do |cache|
-        failed = Hive::Web::BrowserBundle.new(
+        failed = bundle_with_fake_install(
           package_root: package, cache_root: cache,
           runner: ->(*) { false }, tool_probe: -> { "v22.23.1" }
         )
@@ -94,7 +100,7 @@ class WebBrowserBundleTest < Minitest::Test
         assert_match(/npm install failed/, error.message)
         refute Dir.glob(File.join(cache, "*", "manifest.json")).any?
 
-        missing = Hive::Web::BrowserBundle.new(
+        missing = bundle_with_fake_install(
           package_root: package, cache_root: cache,
           runner: ->(*) { true }, tool_probe: -> { "v22.23.1" }
         )
@@ -116,7 +122,7 @@ class WebBrowserBundleTest < Minitest::Test
           File.write(cli, "native")
           true
         end
-        bundle = Hive::Web::BrowserBundle.new(
+        bundle = bundle_with_fake_install(
           package_root: package, cache_root: cache, runner: no_browser,
           tool_probe: -> { "v22.23.1" }
         )
@@ -133,7 +139,7 @@ class WebBrowserBundleTest < Minitest::Test
           end
           result
         end
-        bundle = Hive::Web::BrowserBundle.new(
+        bundle = bundle_with_fake_install(
           package_root: package, cache_root: cache, runner: mutation,
           tool_probe: -> { "v22.23.1" }
         )

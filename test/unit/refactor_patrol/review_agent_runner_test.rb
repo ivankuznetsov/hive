@@ -308,7 +308,7 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
       end
 
       refute File.exist?(spawned), "unsupported Claude must fail before the review agent starts"
-      assert_budget_lock_available(dir)
+      assert_discovery_allowance_available(dir)
     end
   end
 
@@ -328,7 +328,7 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
         end
         assert_includes error.message, "cannot enforce read-only"
       end
-      assert_budget_lock_available(dir)
+      assert_discovery_allowance_available(dir)
     end
   end
 
@@ -564,12 +564,13 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
 
   private
 
-  def assert_budget_lock_available(project_root)
-    budget = Hive::Patrol::LaunchBudget.new(project_root, cfg: cfg)
-    assert budget.send(:acquire_launch_lock),
-           "pre-launch validation must not strand the project patrol lock"
-  ensure
-    budget&.send(:release_launch_lock)
+  def assert_discovery_allowance_available(project_root)
+    snapshot = Hive::Patrol::LaunchBudget.new(
+      project_root, cfg: cfg, engine: :architecture
+    ).allowance_snapshot
+    assert_equal "available", snapshot.fetch(:status)
+    assert_equal 4, snapshot.fetch(:remaining),
+                 "pre-launch validation must not consume discovery allowance"
   end
 
   def cfg

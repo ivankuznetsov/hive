@@ -1,5 +1,6 @@
 require "hive"
 require "hive/commands/status"
+require "time"
 
 module Hive
   module Tui
@@ -185,9 +186,11 @@ module Hive
         payload = payload_keywords if payload.nil? && !payload_keywords.empty?
         payload ||= {}
         project_payloads = Array(payload["projects"])
-        projects = project_payloads.map { |p| build_project_view(p) }
+        projects = project_payloads.map do |project|
+          build_project_view(project, generated_at: payload["generated_at"])
+        end
         archive_projects = Array(archive_payload && archive_payload["projects"]).map do |project|
-          build_project_view(project)
+          build_project_view(project, generated_at: archive_payload["generated_at"])
         end
         new(
           generated_at: payload["generated_at"],
@@ -204,7 +207,7 @@ module Hive
       # JSON order against their unknown peers; within a known group the
       # original JSON order is preserved so Status's mtime-desc ranking
       # within a stage is honoured.
-      def self.build_project_view(payload)
+      def self.build_project_view(payload, generated_at: nil)
         payload ||= {}
         name = payload["name"]
         indexed = Array(payload["tasks"]).map.with_index { |t, i| [ build_row(t, name), i ] }

@@ -2,6 +2,7 @@ require "hive"
 require "hive/workflows/bench"
 require "hive/workflows/coding"
 require "hive/workflows/content"
+require "hive/workflows/patrol_fix"
 
 module Hive
   module Workflows
@@ -32,7 +33,8 @@ module Hive
       WORKFLOWS = {
         coding: Coding::DESCRIPTOR,
         content: Content::DESCRIPTOR,
-        bench: Bench::DESCRIPTOR
+        bench: Bench::DESCRIPTOR,
+        Hive::PatrolFix::WORKFLOW_ID => PatrolFix::DESCRIPTOR
       }.freeze
 
       module_function

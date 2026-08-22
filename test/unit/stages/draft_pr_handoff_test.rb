@@ -470,6 +470,25 @@ class StagesDraftPrHandoffTest < Minitest::Test
     refute File.exist?(body_path), "temporary PR body must be removed"
   end
 
+  def test_projection_preserves_controller_successor_marker_inside_body_bound
+    report = Hive::Stages::AgentReport.parse(VALID_REPORT)
+    marker = "<!-- hive-patrol-fix-successor:v1 digest=#{'a' * 64} -->"
+
+    projected = Hive::Stages::DraftPrHandoff.send(
+      :project_report, report, publication_marker: marker
+    )
+
+    assert projected.body.end_with?(marker)
+    assert_operator projected.body.bytesize, :<=, Hive::Stages::DraftPrHandoff::MAX_PR_BODY_CHARS
+
+    assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+      Hive::Stages::DraftPrHandoff.send(
+        :project_report, report,
+        publication_marker: "x" * (Hive::Stages::DraftPrHandoff::MAX_PR_BODY_CHARS + 1)
+      )
+    end
+  end
+
   def test_blocked_and_unknown_agent_decisions_fail_closed
     with_handoff_fixture do |fixture|
       blocked = Hive::Stages::AgentReport::Report.new(
@@ -536,6 +555,14 @@ class StagesDraftPrHandoffTest < Minitest::Test
     end
     receipt["head_oid"] = state.head_oid
     receipt["report_sha256"] = "d" * 64
+    assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+      Hive::Stages::DraftPrHandoff.send(
+        :record_agent_validation!, task, receipt, VALID_REPORT, state, "/tmp"
+      )
+    end
+    receipt["report_sha256"] = Digest::SHA256.hexdigest(VALID_REPORT)
+    receipt["publication_marker"] =
+      "<!-- hive-patrol-fix-successor:v1 digest=#{'e' * 64} -->"
     assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
       Hive::Stages::DraftPrHandoff.send(
         :record_agent_validation!, task, receipt, VALID_REPORT, state, "/tmp"
@@ -667,12 +694,34 @@ class StagesDraftPrHandoffTest < Minitest::Test
       "state" => "OPEN", "headRepository" => "acme/widgets.git",
       "headRefName" => "fix", "headRefOid" => "b" * 40,
       "baseRefName" => "main", "baseRefOid" => "a" * 40,
-      "number" => 7, "url" => "https://github.com/acme/widgets/pull/7"
+      "number" => 7, "url" => "https://github.com/acme/widgets/pull/7", "body" => "Body"
     }
     assert_equal 7, Hive::Stages::DraftPrHandoff.send(:validate_pr!, pr, receipt).fetch("number")
     assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
       Hive::Stages::DraftPrHandoff.send(:validate_pr!, pr.merge("number" => "bad"), receipt)
     end
+  end
+
+  def test_pr_validation_requires_exact_bound_successor_marker
+    marker = "<!-- hive-patrol-fix-successor:v1 digest=#{'a' * 64} -->"
+    receipt = {
+      "repository" => "github.com/acme/widgets", "task_branch" => "fix",
+      "head_oid" => "b" * 40, "base_branch" => "main", "base_oid" => "a" * 40,
+      "publication_marker" => marker
+    }
+    pr = {
+      "state" => "OPEN", "headRepository" => "acme/widgets.git",
+      "headRefName" => "fix", "headRefOid" => "b" * 40,
+      "baseRefName" => "main", "baseRefOid" => "a" * 40,
+      "number" => 7, "url" => "https://github.com/acme/widgets/pull/7"
+    }
+
+    assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+      Hive::Stages::DraftPrHandoff.send(:validate_pr!, pr.merge("body" => "Body"), receipt)
+    end
+    assert_equal 7, Hive::Stages::DraftPrHandoff.send(
+      :validate_pr!, pr.merge("body" => "Body\n\n#{marker}"), receipt
+    ).fetch("number")
   end
 
   def test_observed_and_remote_identity_mismatches_are_rejected

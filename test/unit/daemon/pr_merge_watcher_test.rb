@@ -263,6 +263,83 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     end
   end
 
+  def test_terminal_skip_classification_archives_as_not_required_without_a_job
+    with_merge_project(stages: [ "7-artifacts" ]) do |tasks, _home|
+      gh = FakeGh.new(state: "MERGED")
+      closure = FakeClosure.new
+      intake = FakeIntake.new
+      intake.outcomes = [ {
+        "job_id" => nil,
+        "classification" => {
+          "status" => "skip", "decision" => "skip", "reason" => "docs_only",
+          "occurrence_id" => "a" * 64, "snapshot_digest" => "b" * 64
+        }
+      } ]
+      watcher, store = build_watcher(
+        gh: gh, task_closure: closure, merge_intake: intake
+      )
+      watcher.observe([ row_for(tasks.first) ], now: T0)
+
+      assert_equal :archived, watcher.tick(now: T0).first.fetch(:status)
+      candidate = store.load(identity_for(tasks.first.project_root))
+        .fetch("candidates").values.first
+      assert_equal "not_required", candidate.dig("architecture", "status")
+      assert_equal "a" * 64, candidate.dig("architecture", "request_id")
+      assert_equal 1, closure.calls.length
+    end
+  end
+
+  def test_permanently_blocked_classification_parks_merge_without_archiving
+    with_merge_project(stages: [ "7-artifacts" ]) do |tasks, _home|
+      gh = FakeGh.new(state: "MERGED")
+      closure = FakeClosure.new
+      intake = FakeIntake.new
+      intake.outcomes = [ {
+        "job_id" => nil,
+        "classification" => {
+          "status" => "blocked", "decision" => nil, "reason" => "missing_metadata",
+          "occurrence_id" => "a" * 64, "snapshot_digest" => "b" * 64
+        }
+      } ]
+      watcher, store = build_watcher(
+        gh: gh, task_closure: closure, merge_intake: intake
+      )
+      watcher.observe([ row_for(tasks.first) ], now: T0)
+
+      assert_equal :blocked, watcher.tick(now: T0).first.fetch(:status)
+      candidate = store.load(identity_for(tasks.first.project_root))
+        .fetch("candidates").values.first
+      assert_equal "blocked", candidate.dig("architecture", "status")
+      assert_equal "blocked", candidate.dig("archive", "status")
+      assert_empty closure.calls
+    end
+  end
+
+  def test_pending_classification_defers_merge_until_the_next_poll
+    with_merge_project(stages: [ "7-artifacts" ]) do |tasks, _home|
+      intake = FakeIntake.new
+      intake.outcomes = [ {
+        "classification" => {
+          "status" => "retry_wait", "occurrence_id" => "a" * 64,
+          "snapshot_digest" => "b" * 64
+        }
+      } ]
+      watcher, store = build_watcher(
+        gh: FakeGh.new(state: "MERGED"), task_closure: FakeClosure.new,
+        merge_intake: intake, poll_interval_sec: 60
+      )
+      watcher.observe([ row_for(tasks.first) ], now: T0)
+
+      result = watcher.tick(now: T0).first
+
+      assert_equal :deferred, result.fetch(:status)
+      candidate = store.load(identity_for(tasks.first.project_root))
+        .fetch("candidates").values.first
+      assert_equal "deferred", candidate.dig("architecture", "status")
+      assert_match(/retry_wait/, candidate.dig("architecture", "last_error"))
+    end
+  end
+
   def test_architecture_intake_failure_is_durable_and_retryable
     with_merge_project(stages: [ "7-artifacts" ]) do |tasks, _home|
       gh = FakeGh.new(state: "MERGED")

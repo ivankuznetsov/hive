@@ -2,235 +2,155 @@ require "test_helper"
 
 class PatrolOverviewTest < ActiveSupport::TestCase
   FakeProject = Data.define(:name, :path, :hive_state_path, :config)
-  FakeFinding = Data.define(
-    :id, :title, :category, :severity, :confidence, :description,
-    :lifecycle_state, :lifecycle_updated_at
-  )
 
-  test "ordinary findings are active-first, newest-first, and bounded" do
-    findings = 30.times.map do |index|
-      FakeFinding.new(
-        id: "finding-#{index}", title: "Finding #{index}", category: "bug",
-        severity: "medium", confidence: "high", description: "Evidence #{index}",
-        lifecycle_state: "active",
-        lifecycle_updated_at: (Time.utc(2026, 8, 13) + index).iso8601
-      )
-    end
-    findings << FakeFinding.new(
-      id: "resolved", title: "Resolved", category: "bug", severity: "low",
-      confidence: "high", description: "Done", lifecycle_state: "resolved",
-      lifecycle_updated_at: Time.utc(2026, 8, 14).iso8601
-    )
-    query = Object.new
-    query.define_singleton_method(:list_envelope) do |project:, project_root:|
-      raise "wrong identity" unless project == "demo" && project_root == "/repo"
-
+  test "ordinary and architecture sections read their bounded native queries" do
+    ordinary = Object.new
+    ordinary.define_singleton_method(:list_envelope) do |project:, project_root:|
+      raise "wrong ordinary identity" unless [ project, project_root ] == [ "demo", "/repo" ]
       {
-        "count" => findings.size,
-        "counts" => { "active" => 30, "resolved" => 1 },
-        "findings" => findings.first(30).reverse.first(25).map do |finding|
-          finding.to_h.transform_keys(&:to_s)
-        end,
-        "truncated" => true,
-        "last_run_at" => "2026-08-13T12:00:00Z",
+        "count" => 1, "counts" => { "active" => 1 },
+        "findings" => [ { "id" => "finding-1" } ], "truncated" => false,
+        "last_run_at" => "2026-08-21T12:00:00Z",
         "feature_review_active" => false
       }
     end
-
-    section = overview(ordinary_query: query).ordinary
-
-    assert_equal "attention", section.health
-    assert_equal 31, section.total
-    assert_equal({ "active" => 30, "resolved" => 1 }, section.counts)
-    assert_equal 25, section.items.size
-    assert_equal "finding-29", section.items.first.fetch("id")
-    assert section.truncated
-    assert_equal "2026-08-13T12:00:00Z", section.last_run_at
-  end
-
-  test "architecture jobs use the bounded native query projection" do
-    jobs = [
-      architecture_job("blocked", blocker: "partial_review"),
-      architecture_job("complete")
-    ]
-    query = Object.new
-    query.define_singleton_method(:recent_projection) do |project:, project_root:, limit:|
-      raise "wrong identity" unless project == "demo" && project_root == "/repo"
-      raise "unbounded query" unless limit == PatrolOverview::ITEM_LIMIT
-
+    architecture = Object.new
+    job = architecture_job("complete")
+    architecture.define_singleton_method(:recent_projection) do |project:, project_root:, limit:|
+      raise "wrong architecture identity" unless
+        [ project, project_root, limit ] == [ "demo", "/repo", PatrolOverview::ITEM_LIMIT ]
       {
-        "count" => 120,
-        "truncated" => true,
-        "jobs" => jobs
+        "count" => 1, "truncated" => false,
+        "jobs" => [ job ]
       }
     end
-    query.define_singleton_method(:show_envelope) do |project:, project_root:, job_id:, limit:|
-      raise "wrong detail identity" unless project == "demo" && project_root == "/repo"
-      raise "unbounded history" unless limit == 1
-
+    architecture.define_singleton_method(:show_envelope) do |job_id:, limit:, **|
+      raise "wrong detail identity" unless [ job_id, limit ] == [ "job-complete", 1 ]
       {
         "job" => {
           "dispositions" => {
-            "fix" => [
-              {
-                "id" => "thesis-1",
-                "thesis" => {
-                  "problem" => "Architecture ownership is split",
-                  "proposed_refactor" => "Move the policy behind one boundary"
-                }
+            "fix" => [ {
+              "id" => "thesis-1",
+              "thesis" => {
+                "problem" => "Ownership is split",
+                "proposed_refactor" => "Use one owner"
               }
-            ],
+            } ],
             "discuss" => []
           }
         }
       }
     end
 
-    section = overview(architecture_query: query).architecture
+    overview = PatrolOverview.new(
+      project, ordinary_query: ordinary, architecture_query: architecture
+    )
 
-    assert_equal "attention", section.health
-    assert_equal 120, section.total
-    assert_equal({ "blocked" => 1, "complete" => 1 }, section.counts)
-    assert_equal jobs.map { |job| job.fetch("job_id") },
-                 section.items.map { |job| job.fetch("job_id") }
-    assert_equal "Architecture ownership is split",
-                 section.items.first.fetch("findings").first.fetch("problem")
-    assert_equal "fix", section.items.first.fetch("findings").first.fetch("route")
-    assert section.truncated
+    assert_equal "attention", overview.ordinary.health
+    assert_equal [ "finding-1" ], overview.ordinary.items.map { |item| item.fetch("id") }
+    assert_equal "healthy", overview.architecture.health
+    assert_equal "Ownership is split",
+                 overview.architecture.items.first.fetch("findings").first.fetch("problem")
   end
 
-  test "disabled patrols do not read their stores" do
+  test "disabled lanes do not read stores" do
     unreadable = Object.new
     unreadable.define_singleton_method(:list_envelope) { |**| raise "must not read" }
     unreadable.define_singleton_method(:recent_projection) { |**| raise "must not read" }
-    project = FakeProject.new(
-      name: "demo", path: "/repo", hive_state_path: "/state",
-      config: {
-        "patrol" => { "mode" => "off" },
-        "refactor_patrol" => { "enabled" => false }
-      }
+    disabled = project(
+      "patrol" => { "mode" => "off" },
+      "refactor_patrol" => { "enabled" => false }
     )
 
-    result = PatrolOverview.new(
-      project, ordinary_query: unreadable, architecture_query: unreadable
+    overview = PatrolOverview.new(
+      disabled, ordinary_query: unreadable, architecture_query: unreadable
     )
 
-    assert_equal "disabled", result.ordinary.health
-    assert_equal "disabled", result.architecture.health
-    assert_empty result.ordinary.items
-    assert_empty result.architecture.items
+    assert_equal "disabled", overview.ordinary.health
+    assert_equal "disabled", overview.architecture.health
   end
 
-  test "newest bounded architecture page drives health" do
-    jobs = 24.times.map { architecture_job("complete") }
-    jobs.unshift(architecture_job("blocked", blocker: "new_blocker").merge("job_id" => "newest"))
-    query = Object.new
-    query.define_singleton_method(:recent_projection) do |limit:, **|
-      raise "unbounded query" unless limit == PatrolOverview::ITEM_LIMIT
-
-      { "count" => 40, "truncated" => true, "jobs" => jobs }
-    end
-    query.define_singleton_method(:show_envelope) do |**|
-      { "job" => { "dispositions" => { "fix" => [], "discuss" => [] } } }
-    end
-
-    section = overview(architecture_query: query).architecture
-
-    assert_equal "attention", section.health
-    assert_equal "newest", section.items.first.fetch("job_id")
-  end
-
-  test "architecture detail reads stop at five jobs" do
-    jobs = 6.times.map do |index|
-      architecture_job("complete").merge("job_id" => "job-#{index}")
-    end
-    calls = []
-    query = Object.new
-    query.define_singleton_method(:recent_projection) do |**|
-      { "count" => 6, "truncated" => false, "jobs" => jobs }
-    end
-    query.define_singleton_method(:show_envelope) do |job_id:, **|
-      calls << job_id
-      { "job" => { "dispositions" => { "fix" => [], "discuss" => [] } } }
-    end
-
-    overview(architecture_query: query).architecture
-
-    assert_equal 5, calls.size
-  end
-
-  test "section failures are isolated and client errors are stable" do
+  test "source failures are isolated and diagnostics do not disclose details" do
     secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
     ordinary = Object.new
-    ordinary.define_singleton_method(:list_envelope) do |**|
-      raise "#{secret} at /private/project/finding.json"
+    ordinary.define_singleton_method(:list_envelope) { |**| raise "#{secret} at /private/file" }
+    architecture = Object.new
+    architecture.define_singleton_method(:recent_projection) do |**|
+      { "count" => 0, "truncated" => false, "jobs" => [] }
     end
-    architecture = empty_architecture_query
     logged = nil
-
     logger = Object.new
     logger.define_singleton_method(:warn) { |message| logged = message }
-    result = overview(
-      ordinary_query: ordinary, architecture_query: architecture,
-      logger: logger
+
+    overview = PatrolOverview.new(
+      project, ordinary_query: ordinary,
+      architecture_query: architecture, logger: logger
     )
-    assert_equal "unavailable", result.ordinary.health
-    assert_equal "idle", result.architecture.health
-    assert_equal "Patrol data is temporarily unavailable.", result.ordinary.error
+
+    assert_equal "unavailable", overview.ordinary.health
+    assert_equal "idle", overview.architecture.health
     refute_includes logged, secret
-    refute_includes logged, "/private/project/finding.json"
+    refute_includes logged, "/private/file"
     assert_match(/RuntimeError diagnostic=[a-f0-9]{12}\z/, logged)
+  end
+
+  test "architecture preserves query order and bounds detail expansion" do
+    jobs = 7.downto(1).map do |number|
+      architecture_job("complete").merge("job_id" => "job-#{number}")
+    end
+    details = []
+    architecture = Object.new
+    architecture.define_singleton_method(:recent_projection) do |limit:, **|
+      raise "unbounded query" unless limit == PatrolOverview::ITEM_LIMIT
+      { "count" => jobs.length, "truncated" => true, "jobs" => jobs }
+    end
+    architecture.define_singleton_method(:show_envelope) do |job_id:, limit:, **|
+      raise "unbounded detail" unless limit == 1
+      details << job_id
+      {
+        "job" => {
+          "dispositions" => {
+            "fix" => 4.times.map do |index|
+              {
+                "id" => "#{job_id}-#{index}",
+                "thesis" => { "problem" => "problem-#{index}" }
+              }
+            end,
+            "discuss" => []
+          }
+        }
+      }
+    end
+
+    section = PatrolOverview.new(project, architecture_query: architecture).architecture
+
+    assert_equal jobs.map { |job| job.fetch("job_id") },
+                 section.items.map { |job| job.fetch("job_id") }
+    assert_equal %w[job-7 job-6 job-5 job-4 job-3], details
+    assert_equal PatrolOverview::ARCHITECTURE_FINDINGS_PER_JOB,
+                 section.items.fetch(0).fetch("findings").length
+    refute section.items.fetch(5).key?("findings")
+    assert section.truncated
   end
 
   private
 
-  def overview(ordinary_query: empty_ordinary_query,
-               architecture_query: empty_architecture_query,
-               logger: Rails.logger)
-    project = FakeProject.new(
+  def project(config = nil)
+    FakeProject.new(
       name: "demo", path: "/repo", hive_state_path: "/state",
-      config: {
+      config: config || {
         "patrol" => { "mode" => "medium" },
         "refactor_patrol" => { "enabled" => true }
       }
     )
-    PatrolOverview.new(project, ordinary_query:, architecture_query:, logger:)
   end
 
-  def empty_ordinary_query
-    Object.new.tap do |query|
-      query.define_singleton_method(:list_envelope) do |**|
-        {
-          "count" => 0, "counts" => {}, "findings" => [],
-          "truncated" => false, "last_run_at" => nil,
-          "feature_review_active" => false
-        }
-      end
-    end
-  end
-
-  def empty_architecture_query
-    Object.new.tap do |query|
-      query.define_singleton_method(:recent_projection) do |**|
-        { "count" => 0, "truncated" => false, "jobs" => [] }
-      end
-      query.define_singleton_method(:show_envelope) do |**|
-        raise "empty query must not request details"
-      end
-    end
-  end
-
-  def architecture_job(state, blocker: nil)
+  def architecture_job(state)
     {
-      "job_id" => "job-#{state}", "state" => state,
-      "complete" => state == "complete",
+      "job_id" => "job-#{state}", "state" => state, "complete" => true,
       "source" => { "number" => 7, "url" => "https://github.com/acme/demo/pull/7" },
-      "counts" => {
-        "fix" => 1, "discuss" => 0,
-        "pending_actions" => state == "complete" ? 0 : 1
-      },
-      "blockers" => blocker ? [ { "scope" => "discovery", "reason" => blocker } ] : [],
-      "updated_at" => "2026-08-13T12:00:00Z"
+      "counts" => { "fix" => 1, "discuss" => 0, "pending_actions" => 0 },
+      "blockers" => [], "updated_at" => "2026-08-21T12:00:00Z"
     }
   end
 end

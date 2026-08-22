@@ -8,8 +8,8 @@ require "hive/stages/agent"
 require "hive/stages/agent_report"
 require "hive/stages/draft_pr_handoff"
 require "hive/stages/base"
+require "hive/stages/managed_agent_custody"
 require "hive/worktree"
-require "open3"
 
 module Hive
   module Stages
@@ -77,10 +77,10 @@ module Hive
         task_control_paths = PROTECTED_FILES.to_h do |name|
           [ name, File.join(task.folder, name) ]
         end
-        custody_manifest = Hive::ArtifactFirewall::Manifest.new(
+        custody_manifest = Hive::Stages::ManagedAgentCustody.manifest(
           root: task.folder,
-          protected_anchors: task_control_paths.merge(git_control_paths),
-          permitted_writable_roots: [ task.folder, context.worktree_path ],
+          worktree_path: context.worktree_path,
+          protected_task_paths: task_control_paths,
           required_outputs: { File.basename(report_path) => report_path }
         )
         agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
@@ -192,50 +192,9 @@ module Hive
       private_class_method :write_failure_marker!
 
       def git_control_paths!(worktree_path)
-        common = git_path!(worktree_path, "--path-format=absolute", "--git-common-dir")
-        git_dir = git_path!(worktree_path, "--absolute-git-dir")
-        paths = {
-          "worktree .git pointer" => File.join(worktree_path, ".git"),
-          "repository config" => File.join(common, "config"),
-          "worktree config" => File.join(git_dir, "config.worktree")
-        }
-        home = ENV["HOME"].to_s
-        unless home.empty?
-          paths["global Git config"] = File.join(home, ".gitconfig")
-          paths["XDG Git config"] = File.join(home, ".config", "git", "config")
-        end
-        xdg = ENV["XDG_CONFIG_HOME"].to_s
-        paths["explicit XDG Git config"] = File.join(xdg, "git", "config") unless xdg.empty?
-        global = ENV["GIT_CONFIG_GLOBAL"].to_s
-        paths["global Git config override"] = global unless global.empty?
-        system = ENV["GIT_CONFIG_SYSTEM"].to_s
-        paths["system Git config override"] = system unless system.empty?
-        unique_git_control_paths(paths, worktree_path)
+        Hive::Stages::ManagedAgentCustody.git_control_paths!(worktree_path)
       end
       private_class_method :git_control_paths!
-
-      def unique_git_control_paths(paths, worktree_path)
-        seen = {}
-        paths.each_with_object({}) do |(label, path), unique|
-          expanded = File.expand_path(path, worktree_path)
-          next if seen[expanded]
-
-          seen[expanded] = true
-          unique[label] = expanded
-        end
-      end
-      private_class_method :unique_git_control_paths
-
-      def git_path!(worktree_path, *args)
-        out, err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", *args)
-        unless status.success?
-          detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
-          raise Hive::StageError, "managed worktree Git control path is unavailable: #{detail[0, 200]}"
-        end
-
-        File.expand_path(out.to_s.strip, worktree_path)
-      end
-      private_class_method :git_path!
 
       def terminal_receipt(task)
         receipt_path = Hive::DraftPrReceipt.path(task.folder)
@@ -302,28 +261,12 @@ module Hive
       private_class_method :report_path!
 
       def prepare_report_output!(path)
-        stat = File.lstat(path)
-        raise Hive::StageError, "fix-report.md must be a regular file, not a symlink" if stat.symlink?
-        raise Hive::StageError, "fix-report.md must be a regular file" unless stat.file?
-
-        File.unlink(path)
-      rescue Errno::ENOENT
-        nil
-      rescue SystemCallError, IOError => e
-        raise Hive::StageError, "could not prepare fix-report.md: #{e.class}: #{e.message}"
+        Hive::Stages::ManagedAgentCustody.prepare_output!(path, label: "fix-report.md")
       end
       private_class_method :prepare_report_output!
 
       def validate_protected_files!(task_folder)
-        PROTECTED_FILES.each do |name|
-          stat = File.lstat(File.join(task_folder, name))
-          unless stat.file? && !stat.symlink?
-            raise Hive::StageError,
-                  "protected task file #{name} must be a regular file"
-          end
-        rescue Errno::ENOENT
-          next
-        end
+        Hive::Stages::ManagedAgentCustody.validate_regular_or_absent!(task_folder, PROTECTED_FILES)
       end
       private_class_method :validate_protected_files!
 

@@ -19,15 +19,16 @@ Updated: 2026-08-16
 Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents compile provider-neutral invocations through `Hive::AgentRuntime` and configurable AgentProfile adapters (`claude` default, `codex`, `pi`, `grok`, `opencode`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. Agent operation is centered on the additive operational status contract, coherent daemon scheduler snapshots, bounded semantic `hive watch`, tokenized routine `hive act`, native semantic `hive task` inspection, and stable-ID semantic E2E profiles; the legacy full JSON graph remains compatible. Hive packages one canonical operating skill projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, Pi `/skill:hive`, and OpenCode `/hive`, with read-only `hive doctor`, consent-safe setup, deterministic trusted pre-release proof, and optional authenticated live diagnostics.
 
 Reusable mechanisms remain in this monorepo behind the canonical
-[[component-boundaries]] catalog. The fifteen-row internal graph has ten
+[[component-boundaries]] catalog. The sixteen-row internal graph has eleven
 `boundary-ready` facades—UserService, Agent ABI, Agent Artifact Firewall,
-Skillpack, Safe Agent Git Gate, WorkLedger, and Workflow Creator Values/Text
+Skillpack, Safe Agent Git Gate, WorkLedger, Patrol Fix Workflow Core, and Workflow Creator Values/Text
 Safety plus the composed Workflow Creator and deterministic Workflow Creator
 Execution custody—and five guarded candidates: Provider Health, Provider
 Routing Policy, Provider Routing Operations, Attempts admission, and Patrol
-Effect Evidence. The graph has ten declared component edges, including the
+Effect Evidence. The graph has eleven declared component edges, including the
 read-only routing projection's dependencies on Attempts, Provider Health, and
-routing policy. Patrol's U3
+routing policy plus Patrol Fix's downward dependency on the Safe Agent Git
+Gate for exact local worktree reads. Patrol's U3
 qualification fence is the only migration exception. Hive
 is the first and primary consumer, and internal readiness does not imply a gem,
 version, repository, or release.
@@ -36,7 +37,7 @@ Agent spawns that own controller artifacts use the boundary-ready
 `Hive::ArtifactFirewall` for same-user protected-anchor custody, required
 regular-output admission, bounded redacted reports, and verified safe restore;
 stage markers and success policy remain above that boundary.
-Post-agent Git and architecture-patrol publication use the boundary-ready
+Post-agent Git plus coding and Patrol Fix publication use the boundary-ready
 `Hive::AgentGitGate`: a closed read vocabulary, exact detached materialization,
 and exact expected-OID publication with non-secret before/after receipts.
 

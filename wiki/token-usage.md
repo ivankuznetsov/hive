@@ -24,7 +24,7 @@ Usage is captured at the same boundary that runs stage agents:
 1. `Hive::Agent#spawn_and_wait` reads every stdout/stderr line from the child process, writes it to the stage log, parses JSON once, and passes decoded records through `Hive::AgentRuntime.extract_usage`, which delegates provider decoding to `agent-cli-runtime`.
 2. The last non-nil usage hash normally becomes `result[:usage]`; `result[:model]` is kept as a best-effort model field. When `max_tokens` is present, `Hive::Agent::StreamTokenMeter` also derives a monotonic live input-plus-output total; cached tokens remain in telemetry but do not advance the stop meter. Reaching the limit sends TERM, escalates to KILL after a three-second grace independently of the wall-clock timeout, returns `resource_exhaustion.reason: token_limit`, and records the meter's aggregate usage. Patrol Claude reviews stop after their expected output or four completed turns, with the fourth reserved for emergency finalization. Ordinary fixes also treat a completed `fix.json` as the agent-phase boundary; Hive still independently parses and validates its proof and edits. Because Claude can emit `Write` and the same turn's final usage delta in either order, Hive allows up to three seconds for the missing protocol event, captures it when present, and terminates before another model turn. A completed artifact remains subject to the caller's schema and evidence validation.
 3. `Hive::Stages::Base.spawn_agent` calls `Hive::UsageDb.record!` after `agent.run!` returns, even when the spawn exits non-zero, as long as a usage event was captured.
-4. Patrol is not a stage runner, so `Hive::Patrol::LaunchBudget` reserves ordinary review/fix launches as `patrol-review-unmetered` / `patrol-fix-unmetered` and architecture launches as `refactor-patrol-review-unmetered` / `refactor-patrol-fix-unmetered` before the provider child starts, with `project_slug` set to the registered project name. Normal completion updates that same session row with final telemetry and removes the `-unmetered` suffix only when positive usage is present. An abandoned reservation is an observed launch, not a claim that the provider consumed zero tokens.
+4. Patrol is not a stage runner, so `Hive::Patrol::LaunchBudget` records scheduled ordinary review launches as `patrol-review-unmetered` and scheduled current-main Architecture launches as `refactor-patrol-review-unmetered` before the provider child starts, with `project_slug` set to the registered project name. Normal completion updates that same session row with final telemetry and removes the `-unmetered` suffix only when positive usage is present. Fix stages write completion telemetry without requesting discovery admission; merged-PR Architecture reviews use a non-discovery telemetry source. An abandoned scheduled reservation is an observed launch, not a claim that the provider consumed zero tokens.
 
 That placement deliberately excludes sessions launched outside Hive and avoids scraping `~/.claude/projects/*.jsonl` or any on-disk agent log after the fact. See [[modules/agent]], [[modules/agent_profile]], [[modules/patrol]], and [[stages/index]].
 
@@ -171,20 +171,22 @@ The scope hash accepts `project_slug:` and `task_slug:` filters. `task_slug` is 
 
 The aggregate also returns `:patrol` buckets by summing rows whose `stage` starts with `patrol` **or** `refactor-patrol`, honoring the same scope and time-window filters. This is a cross-cutting attribution bucket: patrol tokens still belong to their actual agent rows (`claude`, `codex`, `pi`, `grok`, or `opencode`) and still contribute to `TOTAL`; the patrol bucket is not added into `TOTAL` a second time.
 
-`Hive::UsageDb.patrol_activity` is the durable current-UTC-day source for
-input/output/cached totals, aggregate Patrol launches, ordinary/architecture
-attribution, and unmetered counts. `Hive::Patrol::LaunchBudget` uses only
-`agent_spawns` for admission: ordinary review/fix and Architecture Patrol
-review/fix share the mode-derived daily ceiling, and every recorded metered or
-unmetered row consumes one slot. Token totals remain telemetry and never admit,
-deny, or terminate Patrol work. The project-keyed lock is held for the complete
-agent lifetime, and the unmetered reservation is durable before the provider
-child starts. A competing process returns `agent_in_flight`; a controller crash
-releases the kernel lock but leaves its launch counted. Daily exhaustion backs
-off to the next UTC day.
-A UsageDb read/write failure blocks later launches because Hive cannot prove the
-durable count, while still warning and releasing the lock. Existing wall-clock,
-turn, process-custody, feature, fix, and PR caps remain independent controls.
+`Hive::UsageDb.patrol_activity` remains the current-UTC-day telemetry source for
+input/output/cached totals, aggregate Patrol launches, engine attribution, and
+unmetered counts. Admission instead uses the bounded owner-private Patrol
+allowance ledger next to UsageDb. Its independent ordinary and Architecture
+lanes are keyed by stable project ID and UTC date and follow the selected mode's
+16/8/4/2 ceiling. An atomic pre-spawn reservation survives controller loss.
+Daily exhaustion resets at the next UTC date; provider retry holds are durable
+per lane and may cross midnight. Fix/review/publish/remediation and post-merge
+work do not consume scheduled discovery allowance.
+
+On the first day after this ledger is introduced, exact legacy discovery rows
+seed their corresponding engine lane while known fix/non-discovery rows are
+excluded. Ambiguous attribution parks only that lane until the next UTC day.
+After seeding, UsageDb failures affect telemetry but cannot create or remove
+capacity. Existing wall-clock, turn, process-custody, feature, fix, and PR caps
+remain independent controls.
 
 ## TUI Surfaces
 

@@ -200,6 +200,7 @@ module Hive
             task_value("condition_task_generation") || task_value("task_generation"),
           "workflow" => task_value("workflow") ||
             (@native_task.workflow.id if @native_task.workflow.respond_to?(:id)),
+          "patrol_fix" => task_value("patrol_fix"),
           "archived" => @archive ||
             task_value("action").to_s == Hive::Schemas::TaskActionKind::ARCHIVED
         }

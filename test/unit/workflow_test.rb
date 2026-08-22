@@ -16,6 +16,15 @@ class WorkflowTest < Minitest::Test
     assert_equal :never, never.archive_visibility_retention_days
   end
 
+  def test_patrol_fix_declares_controller_ownership_in_its_descriptor
+    descriptor = Hive::Workflows::PatrolFix::DESCRIPTOR
+
+    assert descriptor.controller?
+    assert_equal :patrol_fix, descriptor.controller
+    assert_equal :controller, descriptor.stage_named("inbox").kind
+    assert_equal :inert, descriptor.stages.last.kind
+  end
+
   def test_archive_visibility_retention_rejects_invalid_direct_values
     stage = Hive::Workflow::Stage.new(name: "done", index: 1, state_file: "done.md", kind: :inert)
 
@@ -549,6 +558,16 @@ class WorkflowTest < Minitest::Test
   def test_workflow_rejects_empty_stage_list
     error = assert_raises(ArgumentError) { Hive::Workflow.new(id: :empty, stages: []) }
     assert_match(/at least one stage/, error.message)
+  end
+
+  def test_workflow_controller_must_be_a_symbol
+    stage = Hive::Workflow::Stage.new(
+      name: "done", index: 1, state_file: "done.md", kind: :inert
+    )
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(id: :invalid, stages: [ stage ], controller: "patrol_fix")
+    end
+    assert_match(/controller must be a Symbol/, error.message)
   end
 
   def test_workflow_rejects_gapped_or_unordered_indices

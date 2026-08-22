@@ -7,7 +7,6 @@ require "tmpdir"
 require "hive/module_package/command_target"
 require "hive/modules/capability_context"
 require "hive/modules/entrypoints"
-require "hive/modules/first_party"
 require "hive/workflows/descriptor_parser"
 
 module Hive
@@ -202,16 +201,14 @@ module Hive
       end
 
       def self.capture_snapshot(target:, configuration:, package_root: nil)
-        new(first_party_loader: -> { true }).capture_snapshot(
+        new.capture_snapshot(
           target: target, configuration: configuration, package_root: package_root
         )
       end
 
       def initialize(entrypoints: Hive::Modules::Entrypoints,
-                     first_party_loader: Hive::Modules::FirstParty.method(:load!),
                      command_runner: CommandRunner.new, workflow_runner: nil)
         @entrypoints = entrypoints
-        @first_party_loader = first_party_loader
         @command_runner = command_runner
         @workflow_runner = workflow_runner || method(:workflow_admission_unavailable!)
       end
@@ -223,7 +220,6 @@ module Hive
       end
 
       def validate_generation!(package_root, configuration)
-        @first_party_loader.call
         configuration.contract.fetch("hooks").each do |hook|
           target = hook.fetch("target")
           case target.fetch("kind")
@@ -271,8 +267,7 @@ module Hive
 
         result = case target.fetch("kind")
         when "entrypoint"
-          @first_party_loader.call
-          @entrypoints.fetch(target.fetch("id")).call(
+            @entrypoints.fetch(target.fetch("id")).call(
             project: project, module_name: module_name, hook_id: hook_id,
             event: event, configuration: configuration
           )

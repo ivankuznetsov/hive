@@ -18,7 +18,6 @@ class ModulesTargetExecutorTest < Minitest::Test
       command_calls = []
       Hive::Modules::Entrypoints.register("demo.run") { |context| entrypoint_calls << context; 7 }
       executor = Hive::Modules::TargetExecutor.new(
-        first_party_loader: -> { true },
         command_runner: lambda do |argv:, chdir:, environment:, grants:, secret_values:|
           assert_empty environment
           assert_empty secret_values
@@ -65,7 +64,6 @@ class ModulesTargetExecutorTest < Minitest::Test
         permissions: permissions("external_commands" => [ "bin/check" ])
       )
       executor = Hive::Modules::TargetExecutor.new(
-        first_party_loader: -> { true },
         command_runner: ->(**values) { calls << values; 0 }
       )
 
@@ -116,7 +114,6 @@ class ModulesTargetExecutorTest < Minitest::Test
       )
       calls = []
       executor = Hive::Modules::TargetExecutor.new(
-        first_party_loader: -> { true },
         workflow_runner: lambda do |**values|
           calls << values.merge(descriptor_exists: File.file?(values.fetch(:descriptor_path)))
           11
@@ -133,7 +130,7 @@ class ModulesTargetExecutorTest < Minitest::Test
       assert_equal :review, calls.fetch(0).fetch(:workflow).id
       assert calls.fetch(0).fetch(:descriptor_exists)
 
-      blocked = Hive::Modules::TargetExecutor.new(first_party_loader: -> { true })
+      blocked = Hive::Modules::TargetExecutor.new
       error = assert_raises(Hive::Modules::TargetExecutor::WorkflowAdmissionUnavailable) do
         blocked.call(
           target: descriptor.hooks.first.fetch("target"), target_snapshot: snapshot,
@@ -153,7 +150,7 @@ class ModulesTargetExecutorTest < Minitest::Test
         descriptor, generation: resolution, settings: {}, hooks: { "review" => true },
         grants: exact_grants(descriptor)
       )
-      executor = Hive::Modules::TargetExecutor.new(first_party_loader: -> { true })
+      executor = Hive::Modules::TargetExecutor.new
 
       assert executor.health_check.call(root, configuration)
     end
@@ -170,7 +167,7 @@ class ModulesTargetExecutorTest < Minitest::Test
         permissions: permissions("external_commands" => [ "git" ])
       )
       executor = Hive::Modules::TargetExecutor.new(
-        first_party_loader: -> { true }, command_runner: runner
+        command_runner: runner
       )
 
       error = assert_raises(Hive::ConfigError) do
@@ -362,7 +359,7 @@ class ModulesTargetExecutorTest < Minitest::Test
   end
 
   def test_target_contract_errors_fail_closed_before_dispatch
-    executor = Hive::Modules::TargetExecutor.new(first_party_loader: -> { true })
+    executor = Hive::Modules::TargetExecutor.new
     malformed = Struct.new(:contract, :grants).new(
       { "hooks" => [ { "target" => { "kind" => "future", "id" => "x" } } ] },
       permissions
@@ -436,7 +433,7 @@ class ModulesTargetExecutorTest < Minitest::Test
         0
       end
       executor = Hive::Modules::TargetExecutor.new(
-        first_party_loader: -> { true }, command_runner: command_runner
+        command_runner: command_runner
       )
       package = File.join(root, "secret-command-package")
       requested = permissions(
@@ -503,7 +500,7 @@ class ModulesTargetExecutorTest < Minitest::Test
         descriptor, generation: resolution, settings: {}, hooks: { "review" => true },
         grants: exact_grants(descriptor)
       )
-      executor = Hive::Modules::TargetExecutor.new(first_party_loader: -> { true })
+      executor = Hive::Modules::TargetExecutor.new
       target = descriptor.hooks.first.fetch("target")
       snapshot = executor.capture_snapshot(
         target: target, configuration: configuration, package_root: root
@@ -570,7 +567,6 @@ class ModulesTargetExecutorTest < Minitest::Test
         File.join(root, "review.yml"), descriptor_file.fetch("content")
       )
       unreadable = Hive::Modules::TargetExecutor.new(
-        first_party_loader: -> { true }
       )
       unreadable.define_singleton_method(:snapshot_file) { |*| raise Errno::EIO }
       assert_raises(Hive::ConfigError) do

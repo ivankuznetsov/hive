@@ -3,18 +3,55 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-20
+updated: 2026-08-21
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
-## Patrol v4 needs installed fleet dogfood (2026-08-14)
+## Unified Patrol Fix live execution
 
-Focused tests prove scoreless route normalization, fresh v4 JobStore isolation,
-automatic retired-config removal, and the single per-agent runaway fuse. This
-change has not yet been installed over the registered project fleet or observed
-through a real Architecture Patrol discovery, `fix` PR, `discuss` issue, and
-token-limit retry. Retain those four live receipts after merge before treating
-the operational migration as release-proven.
+The current simplification keeps historical Architecture Patrol issue-action and
+policy fields readable for replay compatibility. The retired issue effect is
+still parked fail-closed; removing that persisted vocabulary is separate from
+the completed Patrol Fix migration-subsystem deletion.
+
+The Inbox/Fix/Validate/Review/Publish path has focused local proof for exact worktree and
+receipt custody, failed-validation continuation, independent decision parsing,
+generation-safe rework/reopen, parked outcomes, and exactly-once coding
+successors. Local bare remotes and injected GitHub inventories also prove
+expected-absence publication, lost-response reconciliation, exact hosted-PR
+adoption, strict publication receipts, cleanup diagnostics, and the PR-gated
+Done move. The workflow has not yet run a real configured provider or GitHub
+publication against a disposable project. End-to-end dogfood belongs to the
+plan's final lifecycle verification; no current evidence claims live PR
+production.
+
+The one-time importer has focused proof for active-finding selection,
+deterministic idempotency, dry-run behavior, and normal `TaskCapture` output.
+There is intentionally no migration preflight, cutover state, rollback, or
+runtime reconciliation path.
+U11 closes the four admission-runtime blockers without adding another
+coordinator: the daemon inventories only exact Patrol Fix task manifests,
+fails visibly on owned corruption while ignoring unrelated task bytes, binds
+the complete owned inventory count/digest/head, and supplies one deterministic
+top-64 context capped at 192 KiB. Exact source/alias/lineage overlap ranks
+before path and lexical relevance; every selected row carries bounded evidence,
+affected code, remediation, manifest digest, and a digest of those exact bytes.
+Each reserved decision attempt receives exactly one provider launch through
+the existing `ChildSupervisor`, with no candidate-page fan-out. An occurrence
+may retry later under bounded provider backoff. A durable AdmissionStore
+reservation fences late, expired, restarted, or never-launched children, and
+the parent alone retains materialization and source-acknowledgement authority.
+
+The remaining gap is live delivery evidence, not local runtime behavior. The
+new fake-provider lifecycle proves both source engines, a cross-source duplicate,
+rework, a separately parked escalation successor, one local publication, and
+restart replay. The frozen historical corpus exercises the four production LLM
+prompt/parser seams and the dogfood report schema can retain one exact source to
+PR trace, but no configured real provider, enabled-project discovery round,
+hosted GitHub PR, hosted CI, or natural finding was executed in this change.
+Keep release/dogfood incomplete until the opt-in historical corpus has actual
+provider/model receipts and one naturally discovered finding reaches `done`
+with an exact PR and zero duplicate replay.
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
@@ -167,53 +204,6 @@ stable class and scope.
   hosted run reports the first failing checkpoint; no local test can promote
   this candidate to trusted release evidence.
 
-- Patrol capture/effect boundaries and the U3a receipt, independent verifier,
-  duplicate index, qualification value, two-lane report, and one-off report
-  conversion are source- and focused-test-pinned. A narrow `Patrols` facade
-  now selects exactly one comparable terminal shadow decision by module and
-  trigger identity under the shared migration lock, constructs its canonical
-  receipt from record-owned capture, projection, and effects, and admits raw
-  receipt documents only after independently supplied bindings verify before
-  digest-CAS merging report v2. A reduced, opt-in U3b successor now commits a
-  strict real-reader catalogue, archives and privately installs the exact
-  candidate gem, installs the first-party modules through the public CLI and a
-  local Git catalogue URL rewrite, and drives prepared real ordinary and
-  Architecture Patrol shadow records through the internal installed-CLI
-  receipt/admission process facade with bounded process custody and retained
-  secret-scanned evidence.
-  This is deliberately only a prepared-record installed-CLI smoke. Its
-  same-head controls are not independent, fixture/prepared-record ingestion is
-  not a fresh scheduler-driven fault matrix, and the private gem is not a live
-  package-channel install. Interior crash contracts are linked to focused tests
-  rather than mislabelled E2E. Current report-v2 cutover remains deliberately
-  refused at the operator boundary. The complete fresh scheduler/fault matrix
-  is deferred until an observed defect or explicit operator readmission
-  justifies the additional architecture. A proposed reduced U3c may prove
-  exact installed candidate, both first-party modules,
-  sandbox/process/resource custody, and a separate authenticated provider
-  transport probe. The controller must already be on protected `main` and may
-  evaluate only a distinct later candidate. The result must retain explicit fences:
-  prepared records are not a fresh matrix, the provider probe is not a Patrol
-  decision, and the result cannot write the report's `installed_live` lane or
-  emit `evidence_ready_for_operator`. Full U3b/U3c would still need independent
-  controls, freshly driven decisions for both modules, and explicit
-  wall-clock/DST, weekly cadence, quota reset, credential expiry, restart, and
-  log-rotation coverage.
-  The reduced source boundary now implements the read-only controller mode,
-  exact protected-main control-tree check, live project/registry/repository/state
-  binding, one-hour canonical one-time authorization, immutable admitted source
-  plus opaque gemspec inventory, digest-bound runtime closure, aggregate-bounded
-  writable storage, closed provider predicate, locked publication, and
-  result-only retained evidence. Its credential-free contract tests include an
-  opt-in detached-process campaign outside default CI. No real container or
-  provider invocation has authenticated this infrastructure yet; that remains a
-  separate post-merge exact-head operator authorization, not a source claim.
-  Long-lived external resource drift remains a declared U3c live limitation,
-  not something elapsed time can prove equivalent. Elapsed telemetry remains
-  useful, but neither it nor a seven-day window substitutes for diversity and
-  protocol completeness. The reduced smoke closes none of U3-ARCH-005, full
-  U3c qualification, catalogue promotion, or mutator cutover authority.
-
 - Project-owned artifact providers currently require Linux
   `PR_SET_CHILD_SUBREAPER` plus `/proc` ancestry so detached descendants remain
   in exact custody through output drain and teardown. Provider capture fails
@@ -305,16 +295,12 @@ stable class and scope.
 
 ## Internal component boundary gap
 
-- The internal graph now retains nine catalog rows: UserService, Agent
-  ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger
-  are `boundary-ready`; Attempts admission, Patrol Effect Evidence, and
-  Workflow Creator Values remain `candidate`. Skillpack to Agent ABI is the
-  only component dependency. Patrol retains one bounded U3 exception for
-  compressed candidate evidence and production qualification. Workflow Creator
-  Values/Text Safety retains exactly one U1a1c exception because it has no production
-  consumer yet; Attempts remains unready because Hive has no
-  demonstrated need for a supported reconciliation, supervision, capacity,
-  loss-processing, cancellation, export, or raw-store lifecycle API.
+- The internal graph retains fifteen catalog rows. Eleven are
+  `boundary-ready`; Provider Health, Provider Routing Policy, Provider Routing
+  Operations, and Attempts remain `candidate`. Patrol Effect Evidence and its
+  U3 migration exception were deleted. Attempts remains unready because Hive
+  has no demonstrated need for a supported reconciliation, supervision,
+  capacity, loss-processing, cancellation, export, or raw-store lifecycle API.
 - U1a1vt closes the inherited `U1A1V-R02-ARCH-002` combined metric proof at
   498 lines / 34 callables / 55 decisions while keeping both files inside the
   per-method R43 limits. The candidate must not be described as boundary-ready
@@ -344,8 +330,8 @@ stable class and scope.
 | `lib/hive/commands/*.rb` | ✓ `wiki/commands/*` pages cover the active command surface, including daemon, bot, web, init, new, generate-name, status/archive listing, run, stage-action, markers, migrate, findings, metrics, update, uninstall, wiki, bench-submit, digest, and rebase-status. |
 | `lib/hive/commands/{connect,disconnect}.rb`, `lib/hive/screenote/**` | ✓ [[commands/screenote]], [[modules/config]], and [[stages/artifacts]] cover Screenote OAuth setup, credential storage, MCP injection, and fail-soft artifact behavior. |
 | `lib/hive/stages/*.rb`, `lib/hive/stages/review/**` | ✓ [[stages/index]] plus per-stage pages; review submodules are covered by [[stages/review]]. |
-| `lib/hive/patrol/*`, `lib/hive/commands/patrol.rb` | ✓ [[modules/patrol]] and [[commands/patrol]] cover the repository-patrol engine, PR opener, fingerprint/dismissal state, and patrol-to-`6-review` handoff. |
-| `lib/hive/refactor_patrol/*`, `lib/hive/commands/refactor_patrol.rb`, daemon architecture-patrol scheduling | ✓ [[commands/refactor-patrol]], [[modules/daemon]], [[modules/config]], [[modules/gh]], [[state-model]], and [[testing]] cover language-neutral merge discovery, durable jobs/actions, scheduling, fencing, publication, and recovery. |
+| `lib/hive/patrol/*`, `lib/hive/commands/patrol.rb` | ✓ [[modules/patrol]] and [[commands/patrol]] cover ordinary discovery, native finding state, direct Patrol Fix admission, scheduling, and launch allowances. |
+| `lib/hive/refactor_patrol/*`, `lib/hive/commands/refactor_patrol.rb`, daemon architecture-patrol scheduling | ✓ [[commands/refactor-patrol]], [[modules/daemon]], [[modules/config]], [[modules/gh]], [[state-model]], and [[testing]] cover merge classification, frozen batches, direct v4 jobs, scheduled slices, discovery claims/checkpoints, and direct Patrol Fix admission. |
 | `lib/hive/daemon/*` | ✓ [[modules/daemon]] and [[commands/daemon]] cover dispatcher, healer, display-name backfiller, queues, merge watcher, status consumer, logging, and service/queue command surfaces. |
 | `lib/hive/babysitter/**`, `lib/hive/commands/babysit.rb`, `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh.rb` | ✓ [[modules/babysitter]] and [[commands/babysit]] cover the experimental PR babysitter process, lifecycle command, GitHub PR repair loop, generated dry-run launcher handoff, and executable `git`/`gh` default-deny stub API boundaries. |
 | `lib/hive/bot/*` | ✓ [[modules/bot]] and [[commands/bot]] |
@@ -417,7 +403,6 @@ Residual audits of commits `6a6cf990`, `2d15e9ee`, and `5e8723fa` carried this b
 19. **`hv` unsafe fallback-path removal is unit-pinned but not live-smoked.** Commit `00a8bca5` removed `/usr/bin/hive` and `/opt/hive/bin/hive` from `bin/hv`'s implicit candidate list so the fallback launcher does not accidentally exec Apache Hive from common system locations; `test/unit/hv_test.rb` covers the removed path strings and the `HIVE_BIN_OVERRIDE` custom-path escape hatch. This refresh did not find an in-tree artifact showing a live host with Apache Hive at one of those paths and the installed `hv` wrapper returning the new exit-127/custom-override behavior.
 20. **v0.3.0 release prep is source-synced but not artifact-verified in-tree.** Commit `64b11b41` sets `Hive::VERSION` and `Gemfile.lock`'s path gem to `0.3.0`, adds the `CHANGELOG.md` release section for hivebox alpha, session-limit healing, dispatch-request/drop schema v2, golden-path E2E, and Windows installer harness coverage, and points README/install Linux installer snippets at `v0.3.0`. The committed `Gemfile.lock` diff changes only the local `hive-cli` path-gem version; no third-party dependency constraints or resolved versions changed. Commit `aa160a2c` hardens the pinned v0.1.0 install-smoke verifier's `jq` provisioning path, and PR #474's post-push GitHub Actions run `27500473396` passed `verify-release.sh (end-to-end behavior)` at that head. This refresh still did not find an in-tree artifact showing `packaging/verify-release.sh --version=v0.3.0`, channel verification against a published GitHub Release, Homebrew tap update, AUR package, or a published `ghcr.io/ivankuznetsov/hivebox:0.3.0` image after the tag exists.
 21. **Daemon/TUI latency reductions are unit-pinned but not live-smoked.** Commits `0f4d9373`, `c1a63370`, and `7375c51d` remove the daemon SUCCESS cooldown, add the `daemon.fast_poll_sec` cheap child-reap/state-file mtime probe, and make `Hive::Tui::StateSource` skip `Status#json_payload` reparses when its watched mtime fingerprint is unchanged. Unit tests cover the controller, dispatcher, config bounds, and TUI state source. This refresh did not find an in-tree artifact showing a live daemon plus `hive tui` run where a completed child advances to the next stage within the intended ~1s window and the TUI avoids unchanged-status reparse work under real project load.
-22. **Patrol-to-review handoff and scoped patrol reviewers are unit-pinned but not live-smoked.** Commit `4d0541d6` adds `Hive::Patrol::ReviewHandoff`, defaults `patrol.review_prs` to true, and updates `PrOpener` so opened patrol PRs keep their local worktree and create synthetic `.hive-state/stages/6-review/patrol-.../` tasks with `task.md`, `worktree.yml`, `pr.md`, `reviews/`, and `meta.yml` display names. Commit `464b64a9` adds `patrol.review.reviewers`, adds `patrol_reviewers` to the `hive-init.v1` success payload, and makes `Hive::Stages::Review.reviewer_specs_for` select that list when `task.md` frontmatter has `source: patrol`. Commit `b2e568ba` changes the patrol default to `codex-native-review` (`kind: codex_review`), with optional Codex/Claude CE `ce-code-review` entries still available from `hive init`; `852cc10c` keeps the patrol mode default at `medium`. `test/unit/patrol/pr_opener_test.rb`, `test/unit/config_test.rb`, `test/unit/commands/init/prompts_test.rb`, `test/unit/stages/review/run_reviewers_test.rb`, `test/unit/reviewers/codex_review_test.rb`, and `test/integration/patrol_command_test.rb` cover the handoff, config, prompt, schema, selector, native-reviewer, and handoff shapes, but no in-tree artifact was found showing a real `hive patrol PROJECT` run opening a GitHub PR and the daemon/TUI subsequently picking up the synthetic review task with only the scoped native Codex patrol reviewer.
 23. **Archive listing is unit-pinned but not live-smoked.** Commits `01e86e1a` through `93fb45fb` add `Hive::ArchiveFilter`, required `tasks[].folder_mtime`, daily text/TUI hiding for old `9-done` rows, an unfiltered TUI Archive pane, and no-target `hive archive` listing/JSON filtering through `Hive::Commands::Status`; the archive-filter cleanup removes the dead `marker_name` input from `ArchiveFilter.hide?`, making the marker-agnostic age policy explicit. Focused unit/integration tests cover the policy, status text/JSON boundaries, TUI projection/cursor behavior, CLI routing, and empty archive message, including marker-independent hiding and fail-open behavior when no timestamp is available. This refresh did not find an in-tree live artifact from a real registered project showing the full operator workflow (`hive status`, `hive tui` -> `z`, `hive archive --json`) after aged done folders exist.
 24. **Provider-limit recovery is unit/integration-pinned but not post-fix live-smoked.** `Hive::AgentLimit` and the headless/tmux/review writers classify quota/rate/usage-credit walls as `limits_reached` while filtering healthy UI-limit text. Provider reset dates remain visible estimates, but the daemon schedules readiness solely from the latest quota marker mtime, submits after the default one-hour interval even when the provider advertises a later date, and never exhausts a recovery budget. `test/unit/agent_limit_test.rb`, `test/unit/daemon/{stale_agent_healer,recovery_coordinator}_test.rb`, and `test/integration/daemon_auto_retry_test.rb` pin the display/scheduling split, shared cooldown, durable-history retry count, and repeated unbounded retries. No in-tree live artifact yet shows an installed daemon observing a real July-25-style hold, retrying after a user resets usage/switches account/tops up credits, and advancing the task while status/TUI retains the provider estimate. A large cohort limited at the same time can also become eligible in the same daemon tick; normal concurrency caps still bound dispatch, but that synchronized recovery shape has not been live load-smoked.
 25. **Babysitter stale-runtime restart was live-smoked and exposed a restart argv bug.** On 2026-06-07, a live detached babysitter started before the current checkout correctly printed the stale-runtime restart recommendation, but `hive babysit restart --detach` daemonized after running through the `restart` code path and left the long-lived process recorded as `ruby bin/hive babysit restart --detach`. A second restart then blocked while waiting on that same process. The fix re-execs detached restart as the canonical `hive babysit start --detach` command before daemonizing, resolves the stable installed wrapper through `Hive::InvokedBinary.path`, aborts restart if stop leaves a potentially live PID behind, keeps the 600-second stop drain for active PR repair agents, and removes stopped/stale PID files only when the current payload still matches the one being stopped; `test/unit/commands/babysit_test.rb` covers the detached re-exec, wrapper resolution failure, refused-stop abort, re-exec failure, post-grace exit race, and replacement-PID preservation contracts. The branch was live-smoked locally by replacing the stale process and verifying the long-lived argv became `ruby bin/hive babysit start --detach`.
@@ -569,170 +554,15 @@ Dependency lock uncertainty is unchanged: the root bundle has
 
 ## Open enhancements
 
-## Installable patrol modules require live shadow evidence (2026-07-22)
+## Separate Patrol launch lanes need installed rollover proof (2026-08-21)
 
-The package, lifecycle, event, attempt, adapter, migration, comparison, and
-rollback contracts have deterministic fixture coverage. U2 now supplies
-finalized ordinary positive and negative captures with strict immutable
-selection inputs/projections separated from terminal outcomes, durable
-per-window attempt generations, compacted sequence high-water/floor fences for
-scheduled/module-event/architecture-job traffic, a bounded fail-closed exact
-fence for manual/direct traffic, one occurrence spanning the Architecture
-Patrol job, discovery, action, and final decision, live effect-time
-generation/grant checks, stable process/thread sender locks with persisted
-uncertainty but no lease/PID authority, gateway-owned retry-safe local absence,
-remote-absence refusal, store-minted byte-stable receipts, canonical outboxes,
-restart-persistent normalized recovery backoff, direct v3-only JobStore runtime
-that ignores obsolete v2 jobs, exact-digest-bound
-shadow-v1 conversion, and bounded occurrence/intent evidence indices. Those fixtures
-prove the repaired boundary but intentionally do not satisfy the operational
-rollout gate.
-
-U3 still needs to make the candidate-bound compressed evidence protocol part of
-the test harness, feed it from these finalized occurrences without consulting
-EvidenceStore for recovery, and produce the elapsed production qualification
-set. Until that proof exists, Patrol Effect Evidence remains a catalog
-`candidate`; neither module mutator cutover nor boundary promotion is complete.
-The local storage contract now covers portable bounded repair/history cursors,
-streamed occurrence/report inventories, descriptor-relative component custody,
-managed-component and lock symlink refusal, public oversized-record failure,
-and source/archive/replacement-bound v1 conversion. It is a same-user
-integrity/custody guard, not a hostile-process sandbox; the U3 live
-qualification still has to prove the operational evidence stream under the
-supported deployment filesystems.
-
-Native module workflow targets also remain execution-disabled. Activation
-validates and snapshots their package files, but safe admission still needs
-module provenance in task metadata, an idempotent hook-run-to-task CAS,
-module-pinned task/status/daemon resolution across update and uninstall, and
-permission intersection between the module grant snapshot and workflow stage.
-
-Before mutator cutover, each installed first-party patrol module still needs at
-least seven elapsed UTC days and ten comparable production decisions with
-legacy as the sole mutator, reviewer sign-off, zero unexplained differences,
-and zero duplicate findings/jobs/issues/PRs. Hosted exact-head CI and PR
-mergeability are likewise delivery-stage evidence, not facts synthesized by
-local execute tests.
-
-- **Ordinary-patrol alpha weights are Hive-corpus calibrated, not yet cross-project calibrated.** The 0–100 scorer, semantic clustering, component cooldown, and proof gates are language-neutral, but the empirical audit behind the default threshold used 218 generated PRs from this repository. No checked-in evidence yet compares acceptance, duplicate rate, surface diversity, or delivered weighted alpha across unrelated Python, TypeScript, Go, Rust, JVM, infrastructure, or mixed-language projects. Persisted immutable finding/selection/outcome metadata now makes that calibration possible; a future evaluation should tune weights from several repositories without using raw patrol count as a positive signal for already-overpatrolled surfaces.
-
-- **Ordinary-patrol exact publication recovery is locally pinned, not live-smoked.** Unit/integration coverage now fetches the explicit remote branch under a bounded transport deadline, replaces unmaterializable scan pins, binds proof/branch push/PR identity/review handoff to exact Git SHAs, uses expected-OID leases, and rechecks the live remote head/base immediately before first and retried task handoff. No disposable hosted-repository run has yet advanced the default branch during ordinary-patrol publication or failed/retried the real GitHub `6-review` handoff, so remote-provider race behavior remains proven by fake-`gh` contracts rather than a live trace.
-
-- **Generic workflows have no dedicated stale/error resting-marker surface** — `TaskAction#generic_action`'s `else` arm classifies every non-`{complete,waiting,none}` marker as `generic_ready_to_run` / `ready_to_run` ("Ready to run") with no diagnostic, so a future non-coding workflow that invents a stale/error-style resting marker (other than `:error`/`:agent_working`, which the universal overrides already catch) would read as "ready to run" with no signal, unlike the coding path's dedicated stale/error arms. Dormant today for production workflows; a future descriptor-workflow follow-up should wire a generic error/stale surface without changing coding's bespoke action map. See [[modules/task_action]].
-
-- **Daemon quarantine is invisible to operators** — after the transient
-  backoff schedule (60/120/300s) is exhausted, `ConcurrencyController`
-  quarantines the `[project, slug]` pair for the daemon's lifetime. The state
-  lives only in daemon memory: `hive status` (and therefore the hivebox web
-  grid) recomputes the row from filesystem markers and shows the gate label
-  (e.g. "Ready to open PR") as if the task were merely waiting, while the
-  daemon logs `blocked reason=quarantined` every tick. Observed live during
-  the 2026-06-11 dogfood: three ssh-push failures in `5-open-pr` quarantined
-  the task and nothing surfaced in the UI. There is also no operator-facing
-  lift short of restarting the daemon or running the stage command manually.
-  Candidate fix: persist quarantine (or at least the last `stage_exit` error
-  + blocked reason) somewhere `Commands::Status` can read, render it as an
-  error row, and let a manual/web dispatch clear it.
-
-- **Review fix-phase agent loss goes undetected** — observed live 2026-06-11:
-  the tmux server was killed (pre-fix sweep from a long-running old-code
-  child) while two `6-review` tasks were in `phase=fix pass=02`. The reviewer
-  phase stamps `tmux_session_terminated` errors promptly, but the FIX phase
-  parents sat for ~1h with `Last event: agent_start — phase=fix`, no error
-  marker, no live agent, and rows honestly-but-wrongly showing "Agent
-  running" (live run lock → healer skips). Likely cause: with the tmux
-  server itself gone, the session-liveness probe errors instead of returning
-  false, and the fix-phase wait treats that as retryable. Candidate fix:
-  treat "no tmux server" as session-terminated in the fix-phase sentinel,
-  mirroring the reviewer-phase handling. Recovery today: TERM the `hive
-  review` parent; the daemon re-dispatches and the stage resumes its pass.
-  Commit `b6bba5d6` only covers returned error text that clearly indicates a
-  provider usage/credit limit; it does not close this lost-tmux/liveness
-  detection gap.
-
-- **Brainstorm answers written within one daemon tick of round-end are
-  swallowed** — found by the hivebox golden-path E2E. The resume watcher
-  only sees state-file edits NEWER than its baseline, and the baseline is
-  seeded by the first classification tick after the round's active owner is
-  observed complete (legacy child exit or durable attempt terminalization).
-  An operator answering inside that window (the push-updating web
-  UI shows questions the moment the agent writes them, before the child
-  even exits) strands the task at `needs_input` until some later edit. The
-  E2E syncs on the daemon's own event log to avoid the window
-  (`wait_for_answer_window!`); a product fix would be dispatching on
-  first sight when `answers_pending` is already false, or seeding the
-  baseline from the round's dispatch mtime instead of the current one.
-  The distinct same-second precision variant is fixed: `StatusConsumer`
-  now re-stats local `state_file` paths so an answer written after the
-  baseline in the same wall-clock second still compares newer than the
-  agent's fractional post-child mtime.
-
-## Aggregate council resource caps (2026-07-09)
-
-Workflow `budget_usd` and `timeout_sec` values are deliberately applied per
-reviewer/retry/round/revise spawn, not to the council as a whole. A council with
-multiple reviewers or rounds can therefore consume several times its stage
-budget. The current docs make that multiplication explicit, but Hive has no
-aggregate council cost or wall-clock cap yet. Add one only with clear semantics
-for partially completed rounds, command reviewers, and profiles that cannot
-natively enforce dollar budgets.
-
-## Grok live review and telemetry verification (2026-07-10, narrowed 2026-07-25)
-
-The Grok profile's argv, device/API-key authentication, `GROK_AUTH_PATH` / `GROK_HOME`, and
-streaming text-event contract are verified against the installed CLI and its
-documentation. Hive now manages Compound Engineering through Grok's native
-plugin commands, verifies enabled installed-plugin skills through
-`Hive::SkillCheck::Grok`, and renders the Grok reviewer with
-`/ce-code-review`; local `grok inspect --json` evidence confirmed that the
-installed plugin exposes that skill. Two runtime boundaries remain open:
-
-- A full token-consuming Hive reviewer spawn has not yet captured a real Grok
-  `/ce-code-review` artifact through 6-review. Offline tests and the native
-  inspection prove discovery, enablement, prompt rendering, and expected
-  package ownership, but not the model's final report behavior.
-- Current `streaming-json` terminal events expose no token counts. Hive leaves
-  Grok usage unavailable rather than storing fake zeroes. Add a captured-stream
-  fixture and extractor mapping if a future CLI version publishes usage.
-
-## Daemon concurrency-limit reload live verification (2026-07-10)
-
-The pre-fix defect was reproduced live: after changing
-`max_concurrent_per_project` from 3 to 4 and running `hive daemon reload`, the
-daemon logged `config_reloaded` but continued returning `project_cap` at three
-live project runs. Focused tests now pin in-place refresh of all four
-controller-owned limits while preserving controller identity and existing
-in-flight accounting. A live daemon running a release containing the fix has
-not yet repeated the same 3→4 reload and dispatched the fourth task without a
-restart; capture that daemon-log sequence after deployment to close this gap.
-
-## Architecture-patrol remote recovery is locally pinned, not live-smoked (2026-07-11)
-
-The v2 architecture-patrol lifecycle has fake-`gh`, unit, and integration
-coverage for immutable merge intake, language-neutral discovery, durable
-feature checkpoints, dead-owner claim recovery, isolated fixes, issue routing,
-creation intents, exact repository/branch reconciliation, mandatory `6-review`
-handoff, and read-only provider enforcement. This refresh did not run a
-disposable live GitHub or GitHub Enterprise repository through branch push, PR
-creation, issue creation, open/closed reconciliation, crash-after-intent
-recovery, and handoff creation. Until that smoke exists, the checked-in tests
-prove Hive's local state machine and command contracts, not the complete hosted
-provider behavior under real network ambiguity.
-
-## Shared Patrol launch ceiling needs installed mixed-lane proof (2026-08-20)
-
-Focused unit and integration coverage proves that ordinary review/fix and
-Architecture Patrol review/fix count the same metered and unmetered UsageDb
-rows, that the mode derives 36/18/8/2 daily launches, and that daily exhaustion
-backs off to the next UTC day. Fault tests also prove that the pre-spawn
-reservation survives controller loss or a final telemetry-write failure, and
-that matching checkout basenames remain isolated by registered project name.
-The current source has not yet been installed and
-observed across a UTC rollover with both patrol lanes active. Capture one live
-medium project that reaches eight combined launches, emits no ninth provider
-process, sleeps without hot retries, and resumes after rollover. Token totals
-are intentionally telemetry-only, so no provider stream fixtures are required
-for launch admission.
+Focused tests prove separate ordinary and Architecture per-project daily launch
+allowances, durable pre-spawn reservations, lane-local provider holds, and UTC
+rollover. The current source has not yet been installed and observed across a
+UTC rollover with both lanes active. Capture one live medium project that
+exhausts each four-launch lane independently, emits no fifth process in either
+lane, avoids hot retry, and resumes both lanes after rollover. Token totals are
+telemetry-only and do not authorize launches.
 
 ## Three incident e2e fixtures remain sibling-gated (updated 2026-08-11)
 
@@ -1271,17 +1101,32 @@ hard custody ceiling and fail closed before provider launch. Solve this with a
 durable receipt retention/compaction design that preserves authority evidence,
 not by adding another custody topology or raising the hard ceiling again.
 
-## Architecture patrol lacks interrupted-attempt recovery (2026-08-21)
+## Patrol Fix has no interrupted-attempt recovery (2026-08-21)
 
-Ordinary patrol now settles a process-interrupted local fix attempt
-(adopt the exact patch receipt, or prove the deterministic checkout
-disposable before recording `interrupted_fix_attempt`).
-`RefactorPatrol::Fixer` has the same killed-process exposure — an
-interrupted architecture fix can leave its worktree and branch behind
-with no receipt — but has no symmetric recovery path. The asymmetry is
-deliberate for this change set: architecture patrol's job store owns a
-different custody model, and bolting the ordinary proof/retire protocol
-onto it without design review would risk discarding operator work. Keep
-this gap open until architecture patrol either adopts the same
-proof-before-retirement protocol or documents why its existing
-quarantine flow covers interrupted launches.
+Ordinary patrol used to settle a process-interrupted local fix attempt in
+`Patrol::Fixer#recover_interrupted_attempt`: adopt the exact patch receipt, or
+prove the deterministic checkout disposable before recording
+`interrupted_fix_attempt`. Consolidating discovery and fixing removed both
+`Patrol::Fixer` and `RefactorPatrol::Fixer`, and the unified
+[[modules/patrol]] Fix workflow has no equivalent — a killed Patrol Fix child
+can leave a worktree and branch behind with no receipt, for either source.
+`Commands::Patrol` no longer calls `recover_pending_fix_attempts!` at all.
+
+This is a known regression against `main`, not a resolved gap. The replacement
+belongs in the Patrol Fix stage machinery (worktree generations plus the
+admission store already hold the durable identity the old proof reconstructed
+from Git), so port it there rather than reviving the deleted engines. Keep this
+gap open until Patrol Fix proves an interrupted local generation either
+adoptable or disposable before reuse, and preserves dirty, broken-registration,
+or uniquely committed residue as operator-owned.
+
+## Open PR custody documentation lost detail in the publication merge (2026-08-21)
+
+`wiki/stages/open-pr.md` was rewritten around the shared
+`Hive::GithubPublication` engine while `main` independently documented the
+open-pr agent custody window and the pre-push secret-scan ordering. The merge
+kept the consolidated engine description, so the custody anchor set, the
+`open_pr_tampered` restore contract, and the ownership-lock interaction with a
+late terminal execute observation are no longer described on the page even
+though the behaviour still exists in `lib/hive/stages/open_pr.rb`. Re-document
+those steps against the consolidated engine.

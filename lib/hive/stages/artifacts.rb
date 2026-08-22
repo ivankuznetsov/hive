@@ -114,8 +114,11 @@ module Hive
           return { commit: action_for(:complete), status: :complete }
         end
         if store.blocked_for_identity?(identity)
-          publish_blocked_marker!(task, store.current)
-          return { commit: "error", status: :error }
+          pointer = store.current
+          unless pointer.fetch("reason") == "capability_blocked"
+            publish_blocked_marker!(task, pointer)
+            return { commit: "error", status: :error }
+          end
         end
 
         requirement = store.requirement_for_identity(identity)

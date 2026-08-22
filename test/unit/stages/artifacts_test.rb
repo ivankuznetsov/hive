@@ -2185,9 +2185,23 @@ class StagesArtifactsTest < Minitest::Test
         { "evidence" => [] },
         Hive::Stages::Artifacts.parse_role_output!(fenced, "producer")
       )
+      prefixed = <<~OUTPUT
+        Capture is complete. Final evidence:
+
+        {"evidence":[]}
+      OUTPUT
+      assert_equal(
+        { "evidence" => [] },
+        Hive::Stages::Artifacts.parse_role_output!(prefixed, "producer")
+      )
       assert_raises(Hive::Stages::Artifacts::RoleOutputError) do
         Hive::Stages::Artifacts.parse_role_output!(
           "```json\n{\"evidence\":[]}\n```\ntrailing prose", "producer"
+        )
+      end
+      assert_raises(Hive::Stages::Artifacts::RoleOutputError) do
+        Hive::Stages::Artifacts.parse_role_output!(
+          "Capture is complete.\n\n{\"evidence\":[]}\ntrailing prose", "producer"
         )
       end
       assert_raises(Hive::Stages::Artifacts::RoleOutputError) do

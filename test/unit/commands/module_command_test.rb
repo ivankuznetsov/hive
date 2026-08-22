@@ -39,22 +39,6 @@ class ModuleCommandTest < Minitest::Test
     end
     assert_equal [ "" ], constructors.dig(:status, 0)
 
-    require "hive/commands/module/migration"
-    with_replaced_singleton_method(
-      Hive::Commands::Module::Migration, :new,
-      ->(*args, **options) { constructors[:migration] = [ args, options ]; fake }
-    ) do
-      assert_equal :called,
-                   Hive::Commands::Module.new(
-                     "migration", "status", project_root: "/project", reviewer: "reviewer"
-                   ).call!
-    end
-    assert_equal [ "status" ], constructors.dig(:migration, 0)
-    assert_equal "reviewer", constructors.dig(:migration, 1, :reviewer)
-
-    assert_raises(Hive::Commands::Module::UsageError) do
-      Hive::Commands::Module.new("migration", nil, project_root: "/project").call!
-    end
     assert_raises(Hive::Commands::Module::UsageError) do
       Hive::Commands::Module.new("inspect", nil, project_root: "/project").call!
     end
@@ -115,10 +99,7 @@ class ModuleCommandTest < Minitest::Test
       [ "inspect", "demo" ] => "hive-module-status",
       [ "status", "demo" ] => "hive-module-status",
       [ "doctor", "demo" ] => "hive-module-doctor",
-      [ "dry-run", "demo" ] => "hive-module-dry-run",
-      [ "migration", "status" ] => "hive-module-migration",
-      [ "migration", "report" ] => "hive-module-migration-report",
-      [ "migration", "deterministic-qualification" ] => "hive-module-migration-report"
+      [ "dry-run", "demo" ] => "hive-module-dry-run"
     }
     mappings.each do |(verb, subject), schema|
       command = Hive::Commands::Module.new(verb, subject, project_root: "/project")

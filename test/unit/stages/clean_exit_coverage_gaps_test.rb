@@ -1,6 +1,7 @@
 require_relative "../../test_helper"
 
 require "hive/markers"
+require "hive/commands/run"
 require "hive/stages/auto_commit"
 require "hive/stages/base"
 require "hive/stages/clean_exit"
@@ -94,6 +95,56 @@ class CleanExitCoverageGapsTest < Minitest::Test
         assert_nil Hive::Stages::Base.send(:read_worktree_path, task),
                    "corrupt worktree.yml must not crash; line 279"
       end
+    end
+  end
+
+  def test_controller_move_rejects_a_foreign_task_in_stage_and_command_boundaries
+    workflow = Object.new
+    workflow.define_singleton_method(:controller?) { true }
+    original = Struct.new(
+      :workflow, :workflow_generation, :project_root, :slug, keyword_init: true
+    ).new(
+      workflow: workflow, workflow_generation: "generation-1",
+      project_root: "/project", slug: "repair"
+    )
+    moved = original.dup
+    moved.project_root = "/other-project"
+
+    with_replaced_singleton_method(Hive::Task, :new, ->(*, **) { moved }) do
+      assert_raises(Hive::InvalidTaskPath) do
+        Hive::Stages::Base.send(
+          :task_after_controller_move, original,
+          moved_task_folder: "/other-project/task"
+        )
+      end
+      assert_raises(Hive::InvalidTaskPath) do
+        Hive::Commands::Run.allocate.send(
+          :task_after_patrol_fix_move, original,
+          moved_task_folder: "/other-project/task"
+        )
+      end
+    end
+  end
+
+  def test_controller_exception_rebinding_failure_keeps_the_original_task
+    workflow = Object.new
+    workflow.define_singleton_method(:controller?) { true }
+    workflow.define_singleton_method(:stage_dirs) { raise Hive::ConfigError, "bad workflow" }
+    task = Struct.new(:folder, :workflow, keyword_init: true).new(
+      folder: "/missing/task", workflow: workflow
+    )
+
+    assert_same task, Hive::Stages::Base.send(:task_after_controller_exception, task)
+  end
+
+  def test_lightweight_task_with_a_missing_worktree_pointer_exits
+    task = Task.new("/missing", "/missing/task.md", nil, nil, "repair")
+    with_replaced_singleton_method(Hive::Worktree, :read_pointer, ->(*) { nil }) do
+      _out, err, status = with_captured_exit do
+        Hive::Stages::Base.send(:worktree_pointer_or_exit, task)
+      end
+      assert_equal 1, status
+      assert_match(/worktree pointer.*no longer exists/, err)
     end
   end
 

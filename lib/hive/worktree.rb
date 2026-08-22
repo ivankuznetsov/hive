@@ -54,8 +54,10 @@ module Hive
     def exists?
       return false unless File.directory?(path)
 
-      list_worktree_paths.include?(path)
+      registered?
     end
+
+    def registered? = list_worktree_paths.include?(path)
 
     def create!(branch_name, default_branch:, base_override: nil)
       FileUtils.mkdir_p(File.dirname(path))
@@ -323,6 +325,32 @@ module Hive
       args << path
       out, err, status = Open3.capture3("git", "-C", @project_root, *args)
       raise WorktreeError, "git worktree remove failed: #{err.strip.empty? ? out : err}" unless status.success?
+
+      :removed
+    end
+
+    # Disposable exact-revision worktrees may be interrupted between creating
+    # their filesystem path and Git registration. Clean the two remnants
+    # independently so either partial state is removed on the next ensure.
+    def discard!(force: false)
+      removal_error = nil
+      begin
+        remove!(force: force) if registered?
+      rescue WorktreeError => error
+        removal_error = error
+      ensure
+        if File.symlink?(path)
+          File.unlink(path)
+        elsif File.exist?(path)
+          FileUtils.rm_rf(path)
+        end
+      end
+
+      if removal_error && registered?
+        remove!(force: force)
+        removal_error = nil
+      end
+      raise removal_error if removal_error
 
       :removed
     end

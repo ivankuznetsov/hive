@@ -64,7 +64,7 @@ class ReposTest < ActionDispatch::IntegrationTest
                   "the architecture patrol choice must govern its auto-fix policy"
     assert_select "input[name='settings[refactor_patrol_issue_filing]']", 0,
                   "the architecture patrol choice must govern its issue fallback"
-    assert_match(/Accepted findings attempt confined fixes and pull requests/, response.body)
+    assert_match(/Accepted findings enter the shared Patrol Fix workflow/, response.body)
     assert_select "input[name='settings[budgets][brainstorm]']", 1
   end
 
@@ -123,10 +123,10 @@ class ReposTest < ActionDispatch::IntegrationTest
                  "GitHub publishing must stay enabled by default for PR review comments"
     assert_equal true, parsed_config.dig("refactor_patrol", "enabled"),
                  "an omitted web checkbox value must use the fresh-init discovery recommendation"
-    assert_equal true, parsed_config.dig("refactor_patrol", "auto_fix", "enabled"),
-                 "recommended architecture patrol must attempt confined fixes"
-    assert_equal true, parsed_config.dig("refactor_patrol", "issue_filing", "enabled"),
-                 "recommended discovery must produce reviewable GitHub issues"
+    refute parsed_config.fetch("refactor_patrol").key?("auto_fix"),
+           "fresh architecture config must not contain the retired fix gate"
+    refute parsed_config.fetch("refactor_patrol").key?("issue_filing"),
+           "fresh architecture config must not contain the retired issue gate"
   ensure
     Hive::Commands::Init.define_singleton_method(:new, original_init_new) if original_init_new
   end
@@ -184,8 +184,8 @@ class ReposTest < ActionDispatch::IntegrationTest
     assert_redirected_to "/repos"
     config = YAML.safe_load_file(File.join(dir, ".hive-state", "config.yml"))
     assert_equal false, config.dig("refactor_patrol", "enabled")
-    assert_equal false, config.dig("refactor_patrol", "auto_fix", "enabled")
-    assert_equal false, config.dig("refactor_patrol", "issue_filing", "enabled")
+    refute config.fetch("refactor_patrol").key?("auto_fix")
+    refute config.fetch("refactor_patrol").key?("issue_filing")
   end
 
   test "tampered architecture patrol input is rejected" do
@@ -209,8 +209,6 @@ class ReposTest < ActionDispatch::IntegrationTest
     config = YAML.safe_load_file(config_path)
     refactor_patrol = config.fetch("refactor_patrol")
     refactor_patrol["enabled"] = false
-    refactor_patrol.fetch("auto_fix")["enabled"] = false
-    refactor_patrol.fetch("issue_filing")["enabled"] = false
     File.write(config_path, config.to_yaml)
     system("git", "-C", state_dir, "add", "config.yml", exception: true)
     system("git", "-C", state_dir, "commit", "-qm", "disable architecture patrol", exception: true)
@@ -230,8 +228,8 @@ class ReposTest < ActionDispatch::IntegrationTest
     persisted = YAML.safe_load_file(config_path)
     assert_equal false, persisted.dig("refactor_patrol", "enabled"),
                  "rerunning setup must not replace an existing discovery policy"
-    assert_equal false, persisted.dig("refactor_patrol", "auto_fix", "enabled")
-    assert_equal false, persisted.dig("refactor_patrol", "issue_filing", "enabled")
+    refute persisted.fetch("refactor_patrol").key?("auto_fix")
+    refute persisted.fetch("refactor_patrol").key?("issue_filing")
   end
 
   test "rerun setup rebinds the project default workflow on disk" do

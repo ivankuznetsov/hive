@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hive-patrol-fix-task-manifest.v1.json",
+  "title": "Hive Patrol Fix Task Manifest (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "task", "evidence_revision", "target_revision", "sources", "aliases", "relations"],
+  "properties": {
+    "schema": {"const": "hive-patrol-fix-task-manifest"},
+    "schema_version": {"const": 1},
+    "task": {"$ref": "#/$defs/task"},
+    "evidence_revision": {"$ref": "#/$defs/evidenceRevision"},
+    "target_revision": {"$ref": "#/$defs/revision"},
+    "sources": {
+      "type": "array", "minItems": 1, "maxItems": 64,
+      "items": {"$ref": "#/$defs/source"}
+    },
+    "aliases": {
+      "type": "array", "maxItems": 128,
+      "items": {"$ref": "#/$defs/alias"}
+    },
+    "relations": {"$ref": "#/$defs/relations"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}[a-z0-9]$"},
+    "task": {
+      "type": "object", "additionalProperties": false,
+      "required": ["slug", "generation"],
+      "properties": {
+        "slug": {"$ref": "#/$defs/slug"},
+        "generation": {"type": "integer", "minimum": 1}
+      }
+    },
+    "evidenceRevision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["generation", "digest"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 1},
+        "digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["engine", "identity", "target_revision", "evidence", "affected_code", "reproduction_guidance", "discovery_run", "semantic_lineage"],
+      "properties": {
+        "engine": {"enum": ["ordinary_patrol", "architecture_patrol"]},
+        "identity": {"type": "string", "minLength": 1, "maxLength": 512},
+        "target_revision": {"$ref": "#/$defs/revision"},
+        "evidence": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 16384}},
+        "affected_code": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"type": "string", "minLength": 1, "maxLength": 1024}},
+        "reproduction_guidance": {"type": "string", "minLength": 1, "maxLength": 16384},
+        "discovery_run": {"type": "string", "minLength": 1, "maxLength": 512},
+        "semantic_lineage": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 512}}
+      }
+    },
+    "alias": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "value"],
+      "properties": {
+        "kind": {"enum": ["ordinary_finding", "architecture_thesis", "canonical_task", "legacy_issue", "external_issue"]},
+        "value": {"type": "string", "minLength": 1, "maxLength": 2048}
+      }
+    },
+    "successor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["project", "slug"],
+      "properties": {
+        "project": {"type": "string", "minLength": 1, "maxLength": 128},
+        "slug": {"$ref": "#/$defs/slug"}
+      }
+    },
+    "issue": {
+      "type": "object", "additionalProperties": false,
+      "required": ["url", "number"],
+      "properties": {
+        "url": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "number": {"type": "integer", "minimum": 1}
+      }
+    },
+    "relations": {
+      "type": "object", "additionalProperties": false,
+      "required": ["successor", "issues"],
+      "properties": {
+        "successor": {"anyOf": [{"$ref": "#/$defs/successor"}, {"type": "null"}]},
+        "issues": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/issue"}}
+      }
+    }
+  }
+}

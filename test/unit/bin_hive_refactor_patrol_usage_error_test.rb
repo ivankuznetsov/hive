@@ -32,11 +32,10 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
     refute payload.key?("complete")
   end
 
-  def test_pr_job_manifest_and_actions_usage_errors_are_schema_valid_v4
+  def test_pr_and_job_manifest_usage_errors_are_schema_valid_v4
     selectors = [
       [ "--pr", "7" ],
-      [ "--job-manifest", "/tmp/job.json" ],
-      [ "--actions" ]
+      [ "--job-manifest", "/tmp/job.json" ]
     ]
 
     selectors.each do |selector|
@@ -49,23 +48,6 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
       refute payload.key?("job_id")
       refute payload.key?("source_pr")
       refute payload.key?("complete")
-    end
-  end
-
-  def test_last_negative_actions_form_keeps_current_usage_error_v4
-    selectors = [
-      [ "--actions", "--no-actions" ],
-      [ "--actions", "--skip-actions" ],
-      [ "--actions=true", "--actions=false" ]
-    ]
-
-    selectors.each do |selector|
-      payload = run_usage_error(
-        "refactor-patrol", "demo", "extra", *selector, "--json"
-      )
-
-      assert_equal 4, payload.fetch("schema_version"), selector.inspect
-      assert schema.valid?(payload), "#{selector.inspect}: #{validation_errors(payload)}"
     end
   end
 

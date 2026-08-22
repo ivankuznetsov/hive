@@ -58,33 +58,6 @@ module Hive
         Result.new(findings: admitted, persistable_findings: persistable, skipped: skipped)
       end
 
-      # PR/dismissal ledgers are authoritative terminal evidence. Reconcile
-      # lifecycle state before selecting new work so merged and explicitly
-      # dismissed findings do not continue to appear active indefinitely.
-      def reconcile!(fingerprints:, dismissed:, persist: true)
-        @existing.each do |finding|
-          next if lifecycle(finding) == "superseded"
-
-          fingerprint = finding.fingerprint.to_s
-          ledger = fingerprints[fingerprint]
-          ledger_state = ledger.is_a?(Hash) ? ledger["state"].to_s : ""
-          dismissal = dismissed[fingerprint]
-          if %w[merged resolved].include?(ledger_state) && ledger_applies?(ledger, finding)
-            transition(finding, "resolved", "patrol_pr_#{ledger_state}", persist: persist)
-          elsif dismissal.is_a?(Hash) && ledger_applies?(dismissal, finding)
-            transition(finding, "rejected", "patrol_pr_dismissed", persist: persist)
-          end
-        end
-      end
-
-      def transition_current!(finding, state:, reason:, persist: true)
-        transition(finding, state, reason, persist: persist)
-      end
-
-      def active_findings
-        @existing.select { |finding| lifecycle(finding) == "active" }
-      end
-
       private
 
       def supersede_active_matches(matches, replacement, persist:)
@@ -147,15 +120,6 @@ module Hive
 
       def lifecycle(finding)
         finding.lifecycle_state.to_s.empty? ? "active" : finding.lifecycle_state.to_s
-      end
-
-      def ledger_applies?(entry, finding)
-        ledger_target = entry["target_sha"].to_s.downcase
-        if ledger_target.empty?
-          return finding.lifecycle_reason.to_s != "recurrence_after_terminal"
-        end
-
-        ledger_target == finding.target_sha.to_s.downcase
       end
 
       def skip_entry(finding, canonical)

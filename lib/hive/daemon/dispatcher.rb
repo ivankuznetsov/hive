@@ -24,6 +24,7 @@ require "hive/daemon/logger"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/refactor_patrol_scheduler"
+require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/daemon/patrol_arbiter"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/refactor_patrol_merge_reconciler"
@@ -36,7 +37,6 @@ require "hive/install_channel"
 require "hive/commands/update"
 require "hive/attempts/api"
 require "hive/attempts/generation"
-require "hive/modules/migration/coordinator"
 require "hive/terminal_outcome"
 
 module Hive
@@ -74,6 +74,7 @@ module Hive
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
                      merge_watcher: nil, refactor_patrol_merge_reconciler: nil,
                      patrol_scheduler: nil, refactor_patrol_scheduler: nil,
+                     patrol_fix_admission_scheduler: nil,
                      patrol_arbiter: nil, answer_digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
@@ -82,7 +83,6 @@ module Hive
                      operational_snapshot: nil, recovery_coordinator: nil,
                      plan_approval: Hive::Daemon::PlanApproval,
                      module_runtime: nil,
-                     module_migration_coordinator: nil,
                      runtime_ready_callback: nil,
                      clock: nil)
         @config = config
@@ -94,6 +94,7 @@ module Hive
         @refactor_patrol_merge_reconciler = refactor_patrol_merge_reconciler
         @patrol_scheduler = patrol_scheduler
         @refactor_patrol_scheduler = refactor_patrol_scheduler
+        @patrol_fix_admission_scheduler = patrol_fix_admission_scheduler
         @patrol_arbiter = patrol_arbiter
         @answer_digest_scheduler = answer_digest_scheduler
         @dry_run = dry_run
@@ -105,7 +106,6 @@ module Hive
         @runtime_ready_callback = runtime_ready_callback
         @clock = clock
         @module_runtime = module_runtime
-        @module_migration_coordinator = module_migration_coordinator
         @attempt_snapshot = nil
         @last_terminal_recovery_prune_at = nil
         @recovery_coordinator = recovery_coordinator || RecoveryCoordinator.new(
@@ -379,17 +379,6 @@ module Hive
         # Drain them only from the daemon, after attempt reconciliation and PR
         # intake, so no command-side producer can become a second dispatcher.
         begin
-          @module_migration_coordinator&.tick(now: now)&.each do |migration_result|
-            @logger.event(:module_migration, **migration_result)
-          end
-        rescue StandardError => e
-          @logger.event(
-            :fatal, message: "module migration raised: #{e.class}: #{e.message}",
-            keeping_previous: true
-          )
-        end
-
-        begin
           @module_runtime&.tick(
             now: now, admission_open: -> { admission_open? }
           )&.each do |module_result|
@@ -446,6 +435,12 @@ module Hive
         # from double-dispatching. Single-writer invariant: only the
         # daemon spawns `hive run`-class verbs.
         process_dispatch_requests(now: now, rows: result.rows)
+
+        # Accepted-source admission is an independent control lane. It is
+        # intentionally ticked before discovery scheduling and never enters
+        # the patrol-scan controller path; its injected predicate consults
+        # normal workflow capacity instead.
+        run_patrol_fix_admission_scheduler_tick(now: now)
 
         # 3c. Project-level patrol scans are not task rows, so they do
         # not go through Policy. They still pass through the same
@@ -833,6 +828,7 @@ module Hive
           if entry.exit_code == Hive::ExitCodes::CONFIG &&
              !global_digest_stage?(entry.stage) &&
              !patrol_stage?(entry.stage) &&
+             entry.dispatch_token&.[](:kind) != :patrol_fix_semantic_admission &&
              entry.json_envelope&.dig("error_kind") != "admission_error"
             @controller.record_project_dropped(project: entry.project)
             @logger.event(:project_dropped, project: entry.project)
@@ -859,6 +855,19 @@ module Hive
               event,
               project: entry.project,
               **(result || { status: :retry })
+            )
+          end
+          if entry.dispatch_token &&
+             entry.dispatch_token[:kind] == :patrol_fix_semantic_admission
+            result = @patrol_fix_admission_scheduler&.complete(
+              dispatch_token: entry.dispatch_token, exit_code: entry.exit_code,
+              envelope: entry.json_envelope, now: now
+            )
+            @logger.event(
+              :patrol_fix_semantic_completion,
+              project: entry.project, occurrence_id: result&.occurrence_id,
+              status: result&.status, retry_at: result&.retry_at,
+              reason: result&.reason
             )
           end
           complete_digest_scheduler_for(entry, now: now)
@@ -931,6 +940,77 @@ module Hive
         @digest_scheduler_fatal_signatures.delete(label)
       rescue StandardError => e
         log_digest_scheduler_fatal(label, e)
+      end
+
+      def run_patrol_fix_admission_scheduler_tick(now:)
+        return unless @patrol_fix_admission_scheduler
+        return unless admission_open?
+
+        @patrol_fix_admission_scheduler.tick(now: now).each do |result|
+          @logger.event(
+            :patrol_fix_admission,
+            source: result.source,
+            occurrence_id: result.occurrence_id,
+            status: result.status,
+            task_slug: result.task_slug,
+            retry_at: result.retry_at,
+            reason: result.reason
+          )
+          dispatch_patrol_fix_semantic(result, now: now) if
+            result.status == :decision_dispatch
+        end
+      rescue StandardError => error
+        @logger.event(
+          :fatal,
+          message: "Patrol Fix admission scheduler raised: #{error.class}: #{error.message}",
+          keeping_previous: true
+        )
+      end
+
+      def dispatch_patrol_fix_semantic(result, now:)
+        token = result.dispatch_token
+        return unless token && result.command
+        unless admission_open?
+          @patrol_fix_admission_scheduler.cancel(dispatch_token: token, now: now)
+          return
+        end
+
+        project = token.fetch(:project)
+        gate = @controller.can_dispatch?(
+          project: project, slug: "patrol-fix-admission", now: now
+        )
+        unless gate == :ok
+          @patrol_fix_admission_scheduler.cancel(dispatch_token: token, now: now)
+          @logger.event(
+            :blocked, project: project, slug: "patrol-fix-admission",
+            stage: "patrol-fix-semantic-admission", action: "semantic_admission",
+            reason: gate.to_s
+          )
+          return
+        end
+        dispatched = dispatch_command(
+          result.command, project: project,
+          slug: "patrol-fix-admission-#{result.occurrence_id.to_s[0, 24]}",
+          stage: "patrol-fix-semantic-admission",
+          state_file_mtime: nil, state_file_path: nil, now: now,
+          trigger: "patrol_fix_semantic_admission", kind: :patrol_fix_semantic,
+          dispatch_token: token
+        )
+        @patrol_fix_admission_scheduler.cancel(dispatch_token: token, now: now) if
+          dispatched == :shutdown
+      rescue StandardError => error
+        completion = @patrol_fix_admission_scheduler.complete(
+          dispatch_token: token, exit_code: Hive::ExitCodes::SOFTWARE,
+          envelope: {
+            "error_class" => error.class.name,
+            "error" => error.message.to_s[0, 512]
+          }, now: now
+        )
+        @logger.event(
+          :fatal, project: token && token[:project],
+          message: "Patrol Fix semantic dispatch failed: #{error.class}: #{error.message}",
+          recovery_status: completion&.status
+        )
       end
 
       def run_refactor_patrol_merge_reconciler_tick(now:)
@@ -1834,28 +1914,7 @@ module Hive
           )
         end
 
-        entry = patrol_dispatch[:migration_entry] || patrol_dispatch[:entry]
-        return dispatch_patrol_with_admission(patrol_dispatch, now: now) unless entry
-
-        architecture = patrol_dispatch[:patrol_kind]&.to_sym == :architecture
-        module_name = architecture ? "architecture-patrol" : "patrol"
-        Hive::Modules::Migration::Patrols.with_admission(
-          entry.fetch("path"), module_name, authority: :legacy,
-          hive_state_path: entry["hive_state_path"]
-        ) do |allowed|
-          unless allowed
-            @logger.event(
-              :skipped, project: patrol_dispatch[:project],
-              slug: patrol_dispatch[:slug] || Hive::Daemon::PatrolScheduler::PATROL_SLUG,
-              stage: patrol_dispatch[:stage], action: "patrol",
-              reason: "migration_ownership_changed"
-            )
-            return
-          end
-          return unless admission_open?
-
-          dispatch_patrol_with_admission(patrol_dispatch, now: now)
-        end
+        dispatch_patrol_with_admission(patrol_dispatch, now: now)
       end
 
       def dispatch_patrol_with_admission(patrol_dispatch, now:)

@@ -370,6 +370,15 @@ class TaskActionTest < Minitest::Test
     assert_nil action.command, "an incoherent execute-stage non-terminal marker offers no runnable command"
   end
 
+  def test_patrol_fix_default_actions_distinguish_advance_from_run
+    classifier = Hive::TaskAction.allocate
+    classifier.instance_variable_set(:@patrol_fix, { "action" => { "kind" => "advance" } })
+    assert_equal "ready_to_advance", classifier.send(:patrol_fix_action).fetch(:key)
+
+    classifier.instance_variable_set(:@patrol_fix, { "action" => { "kind" => "run" } })
+    assert_equal "ready_to_run", classifier.send(:patrol_fix_action).fetch(:key)
+  end
+
   def test_open_pr_complete_is_ready_for_review
     task = fake_task(stage_name: "open-pr", stage_index: 5)
     action = Hive::TaskAction.for(task, marker(:complete))

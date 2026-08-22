@@ -82,7 +82,8 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         initial_hidden_archived_task_count: 2,
         final_hidden_archived_task_count: 2,
         controller: { "limits" => { "global" => 2 }, "in_flight" => 2 },
-        queue: { "pending" => 1 }, recoveries: {}, now: T0 + 1
+        queue: { "pending" => 1 },
+        recoveries: {}, now: T0 + 1
       )
 
       snapshot = reader.read(now: T0 + 2)

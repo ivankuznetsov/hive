@@ -18,11 +18,6 @@ class HiveRefactorPatrolClaimMaintenanceTransitionsTest < Minitest::Test
       @calls << [ :renew_discovery, token, options ]
       :discovery
     end
-
-    def renew_action_claim!(token, **options)
-      @calls << [ :renew_action, token, options ]
-      :action
-    end
   end
 
   def setup
@@ -61,7 +56,7 @@ class HiveRefactorPatrolClaimMaintenanceTransitionsTest < Minitest::Test
     )
   end
 
-  def test_renews_each_supported_claim_kind
+  def test_renews_discovery_claim
     resolver = ->(_claim) { :unresolved }
 
     discovery = @transitions.renew(
@@ -71,25 +66,15 @@ class HiveRefactorPatrolClaimMaintenanceTransitionsTest < Minitest::Test
       lease_sec: 600,
       claim_resolver: resolver
     )
-    action = @transitions.renew(
-      store: @store,
-      token: { kind: :action, generation: 4 },
-      now: @now,
-      lease_sec: 600,
-      claim_resolver: resolver
-    )
-
     assert_equal :discovery, discovery
-    assert_equal :action, action
-    assert_equal %i[renew_discovery renew_action],
-                 @store.calls.map(&:first)
+    assert_equal [ :renew_discovery ], @store.calls.map(&:first)
   end
 
   def test_rejects_unknown_claim_kind_without_mutating_the_store
     assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
       @transitions.renew(
         store: @store,
-        token: { kind: :unknown, generation: 1 },
+        token: { kind: :action, generation: 1 },
         now: @now,
         lease_sec: 600,
         claim_resolver: nil

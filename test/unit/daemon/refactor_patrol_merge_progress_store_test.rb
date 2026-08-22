@@ -47,6 +47,21 @@ class HiveDaemonRefactorPatrolMergeProgressStoreTest < Minitest::Test
     end
   end
 
+  def test_provider_retry_deadline_is_never_shortened_by_transport_backoff
+    with_tmp_dir do |dir|
+      store = build_store(backoff_base_sec: 5, backoff_max_sec: 10)
+      progress = progress_for(store, checkpoint_state)
+
+      store.record_failure!(
+        dir, progress, Hive::GhError.new("provider limited"), T0,
+        not_before: T0 + 300
+      )
+
+      assert_equal T0 + 300, Time.iso8601(progress.dig("retry", "not_before"))
+      assert store.retry_pending?(progress, T0 + 299)
+    end
+  end
+
   def test_identity_drift_is_quarantined_without_rewriting_progress
     with_tmp_dir do |dir|
       store = build_store

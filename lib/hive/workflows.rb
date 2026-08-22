@@ -19,7 +19,6 @@ module Hive
     # ⟹ coding" defaulting rule gates every coding-only daemon/bot branch,
     # so it lives here once instead of being re-spelled at each consumer.
     CODING_ID = :coding
-
     # Optional `interactive: true` flag marks verbs that need the user's
     # tty during execution (stdin prompts, interactive `gh pr create`,
     # claude tool-permission asks). The TUI's `BubbleModel#dispatch_command`

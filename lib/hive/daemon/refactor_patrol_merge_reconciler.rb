@@ -7,11 +7,11 @@ require "hive/atomic_file"
 require "hive/config"
 require "hive/gh"
 require "hive/daemon/refactor_patrol_merge_progress_store"
-require "hive/modules/migration/evidence_store"
-require "hive/modules/migration/patrols"
 require "hive/refactor_patrol/architecture_intake_transitions"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/github_gateway"
+require "hive/refactor_patrol/merge_classifier"
+require "hive/refactor_patrol/merge_classifier_runner"
 require "hive/refactor_patrol/policy"
 require "hive/refactor_patrol/pr_manifest_resolver"
 require "hive/workflows"
@@ -19,8 +19,9 @@ require "hive/workflows"
 module Hive
   module Daemon
     # Durable catch-up and immediate-merge intake for architecture patrol.
-    # Reconciler state is only a replayable GitHub cursor; immutable manifests
-    # and JobStore aggregates remain the authoritative lifecycle records.
+    # Reconciler state is only a replayable GitHub cursor. ClassificationStore
+    # owns accepted-but-unclaimed work; immutable owner manifests and JobStore
+    # aggregates become authority only after batch materialization.
     class RefactorPatrolMergeReconciler
       SCHEMA = "hive-refactor-patrol-reconciler".freeze
       SCHEMA_VERSION = 2
@@ -43,10 +44,11 @@ module Hive
       class ScanInvalidated < Hive::Error; end
 
       class GithubFailure < Hive::Error
-        attr_reader :original
+        attr_reader :original, :retry_at
 
-        def initialize(original)
+        def initialize(original, retry_at: nil)
           @original = original
+          @retry_at = retry_at
           super(original.message)
           set_backtrace(original.backtrace)
         end
@@ -65,8 +67,8 @@ module Hive
                      backoff_base_sec: DEFAULT_BACKOFF_BASE_SEC,
                      backoff_max_sec: DEFAULT_BACKOFF_MAX_SEC,
                      monotonic_clock: nil, jitter: nil, progress_store: nil,
-                     module_event_publisher: nil, migration_snapshot: nil,
-                     evidence_store_factory: nil)
+                     classifier_factory: nil,
+                     module_event_publisher: nil)
         @registry = registry
         @config_loader = config_loader
         @gh = gh
@@ -88,30 +90,11 @@ module Hive
         )
         @resolver_factory = resolver_factory || method(:build_resolver)
         @job_store_factory = job_store_factory
+        @classifier_factory = classifier_factory
         @dry_run = dry_run
         @module_event_publisher = module_event_publisher
-        @migration_snapshot = migration_snapshot || lambda do |entry|
-          Hive::Modules::Migration::Patrols.ownership_snapshot(
-            entry.fetch("path"), "architecture-patrol",
-            hive_state_path: entry["hive_state_path"]
-          )
-        end
-        @evidence_store_factory = evidence_store_factory || lambda do |entry|
-          state = entry["hive_state_path"] ||
-                  File.join(entry.fetch("path"), ".hive-state")
-          Hive::Modules::Migration::EvidenceStore.new(
-            root: File.join(
-              state, "module-runtime", "migration", "patrol-evidence"
-            )
-          )
-        end
         @architecture_intake_transitions =
-          Hive::RefactorPatrol::ArchitectureIntakeTransitions.new(
-            config_loader: @config_loader,
-            migration_snapshot: @migration_snapshot,
-            evidence_store_factory: @evidence_store_factory,
-            admission_error: Blocked
-          )
+          Hive::RefactorPatrol::ArchitectureIntakeTransitions.new
         @next_poll_at = nil
         @rotation_offset = 0
       end
@@ -289,7 +272,8 @@ module Hive
       rescue GithubFailure => e
         begin
           progress && @progress_store.record_failure!(
-            project_root, progress, e.original, failure_time(now)
+            project_root, progress, e.original, failure_time(now),
+            not_before: e.retry_at
           )
         rescue StandardError => persistence_error
           return blocked_result(
@@ -319,19 +303,63 @@ module Hive
 
       def ingest_for(entry, cfg, pr:, expected:, now:, timeout_sec:)
         resolver = @resolver_factory.call(entry, cfg, @github_gateway, @dry_run)
-        manifest = resolver.resolve(pr, timeout_sec: timeout_sec)
-        assert_manifest_matches!(manifest, expected) if expected
-        store = job_store_for(entry)
-        result = @architecture_intake_transitions.enqueue(
-          entry: entry,
-          store: store,
-          manifest: manifest,
-          policy: policy_snapshot(cfg, now),
-          now: now,
-          dry_run: @dry_run
+        classifier = classifier_for(entry, cfg)
+        if @dry_run
+          preview = resolver.preview_classification(
+            pr, classifier: classifier,
+            target_head: expected && expected.fetch("merge_sha"), timeout_sec: timeout_sec
+          )
+          assert_manifest_matches!(preview.manifest, expected) if expected && preview.manifest
+          return {
+            "job_id" => preview.manifest && preview.manifest.fetch("job_id"),
+            "classification" => preview.classification
+          }
+        end
+        resolution = resolver.resolve_classified(
+          pr, classifier: classifier,
+          target_head: expected && expected.fetch("merge_sha"),
+          timeout_sec: timeout_sec
         )
-        @module_event_publisher&.pull_request_merged(entry, manifest) unless @dry_run
-        result
+        manifests = resolution.manifests
+        if manifests.empty?
+          return {
+            "job_id" => nil,
+            "classification" => resolution.classification
+          }
+        end
+        manifests.each { |manifest| assert_manifest_matches!(manifest, expected) } if expected
+        store = job_store_for(entry)
+        results = manifests.map do |manifest|
+          result = @architecture_intake_transitions.enqueue(
+            entry: entry, store: store, manifest: manifest,
+            policy: policy_snapshot(cfg, now), now: now, dry_run: @dry_run
+          )
+          @module_event_publisher&.pull_request_merged(entry, manifest) unless @dry_run
+          result
+        end
+        if resolution.classification.fetch("status") == "feature"
+          classifier.bind_materialization!(
+            resolution.classification.fetch("occurrence_id"),
+            job_ids: manifests.map { |manifest| manifest.fetch("job_id") },
+            manifest_checksums: manifests.map { |manifest| manifest.fetch("manifest_checksum") },
+            now: now
+          )
+        end
+        results.first.merge("job_ids" => manifests.map { |manifest| manifest.fetch("job_id") })
+      end
+
+      def classifier_for(entry, cfg)
+        return @classifier_factory.call(entry, cfg) if @classifier_factory
+
+        state_root = entry["hive_state_path"] || File.join(entry.fetch("path"), ".hive-state")
+        Hive::RefactorPatrol::MergeClassifier.new(
+          root: File.join(state_root, "refactor_patrol", "v2", "merge-classifications"),
+          decision_provider: lambda do |prompt|
+            Hive::RefactorPatrol::MergeClassifierRunner.new(
+              project_root: entry.fetch("path"), cfg: cfg
+            ).call(prompt)
+          end
+        )
       end
 
       def build_resolver(entry, cfg, github_gateway, dry_run)
@@ -341,7 +369,8 @@ module Hive
           default_branch: default_branch(cfg),
           cfg: cfg,
           github_gateway: github_gateway,
-          dry_run: dry_run
+          dry_run: dry_run,
+          hive_state_path: entry["hive_state_path"]
         )
       end
 
@@ -473,16 +502,18 @@ module Hive
 
         item = candidates.fetch(index)
         begin
-          ingest_for(
+          result = ingest_for(
             entry, cfg, pr: item.fetch("url"), expected: item, now: now,
             timeout_sec: timeout_sec
           )
+          scan.fetch("enqueued_prs") << item.fetch("number") if result["job_id"]
+          scan["enqueued_prs"].uniq!
         rescue Hive::GhError => e
           raise GithubFailure, e
+        rescue Hive::RefactorPatrol::MergeClassifier::Retryable => e
+          raise GithubFailure.new(e, retry_at: e.retry_at)
         end
         scan["ingest_index"] = index + 1
-        scan.fetch("enqueued_prs") << item.fetch("number")
-        scan["enqueued_prs"].uniq!
         progress["retry"] = nil
         @progress_store.touch!(progress, now)
 

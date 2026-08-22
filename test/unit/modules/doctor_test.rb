@@ -85,10 +85,6 @@ class ModulesDoctorTest < Minitest::Test
       assert_equal "ok", runtime.fetch(0).fetch("status")
       assert_equal "valid-run", runtime.fetch(0).fetch("subject")
 
-      migration = doctor.send(:migration_checks, "patrol")
-      assert_equal "error", migration.fetch(0).fetch("status")
-      assert_equal "unadopted", migration.fetch(0).fetch("subject")
-
       original_new = Hive::Modules::TargetExecutor.method(:new)
       healthy_executor = Object.new
       healthy_executor.define_singleton_method(:validate_generation!) { |*| true }

@@ -280,7 +280,6 @@ sanitized export supplied it.
   argv through `AgentRuntime.require_capability!`, while retaining the
   Claude-specific admission and turn-limit policy.
 - `Hive::RefactorPatrol::ReviewAgentRunner` — uses Claude's read-only permission scope or a profile-declared native read-only sandbox, and pins the resolved refactor model/effort arguments.
-- `Hive::RefactorPatrol::Fixer` — accepts only a profile with `workspace_write_supported?` and invokes it through the special `workspace-write` permission mode.
 - `Stages::Base.record_usage` — stores the package-normalized usage returned through `AgentRuntime.extract_usage` as per-spawn rows in `Hive::UsageDB`.
 - `Hive::Config.validate_role_agent_names!` and `validate_reviewers!` — every `agent:` field in `review.{ci,triage,fix,browser_test}` and `review.reviewers[]` must resolve via `AgentProfiles.lookup`.
 - `Hive::WorkflowPackage::RuntimePolicy` — legacy packages can still compile

@@ -47,9 +47,7 @@ HIVE_COVERAGE_SHARDS = begin
   shards.freeze
 end
 HIVE_HOSTILE_TEST_FILES = FileList[
-  "test/unit/packaging/workflow_creator_values_test.rb",
-  "test/unit/packaging/patrol_evidence_candidate_test.rb",
-  "test/unit/packaging/patrol_evidence_sandbox_test.rb"
+  "test/unit/packaging/workflow_creator_values_test.rb"
 ].to_a.freeze
 
 # Default local suite. Self-contained, uses fake-claude / fake-gh, and makes no
@@ -244,16 +242,6 @@ namespace :e2e do
   desc "Remove old e2e run artifacts"
   task :clean do
     ruby "bin/hive-e2e", "clean"
-  end
-
-  Rake::TestTask.new(:patrol_qualification_reduced) do |t|
-    t.libs << "test"
-    t.libs << "lib"
-    t.test_files = FileList[
-      "test/e2e/qualification/patrol_qualification_test.rb"
-    ]
-    t.warning = false
-    t.description = "Run the opt-in reduced installed-CLI Patrol qualification smoke"
   end
 end
 

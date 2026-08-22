@@ -20,6 +20,103 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_classification_is_supervised_claimed_once_and_terminal_skip_leaves_queue
+    with_project do |dir, entry, store|
+      classifier = Hive::RefactorPatrol::MergeClassifier.new(
+        root: File.join(entry.fetch("hive_state_path"), "refactor_patrol", "v2", "merge-classifications"),
+        decision_provider: lambda do |_prompt|
+          {
+            "decision" => "skip", "rationale" => "Not a feature",
+            "evidence" => [ "Maintenance only" ], "model_receipt" => "fake:model"
+          }
+        end
+      )
+      record = classifier.hydrate(classification_snapshot, now: T0)
+      options = {
+        classifier_factory: ->(*) { classifier }
+      }
+      first = scheduler(entry, store, **options)
+      second = scheduler(entry, store, **options)
+      candidate = first.candidates(now: T0).fetch(0)
+
+      dispatch = first.reserve(candidate, now: T0)
+      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        second.reserve(candidate, now: T0)
+      end
+      assert_equal "classification_claim_unavailable", error.reason
+      assert_includes dispatch.fetch(:command), "refactor-patrol-classify"
+      refute_includes dispatch.fetch(:command), "read-only"
+
+      classifier.run_occurrence(
+        record.fetch("occurrence_id"),
+        reservation_id: dispatch.dig(:dispatch_token, :reservation_id), now: T0 + 1
+      )
+      result = first.complete(
+        dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 0,
+        envelope: { "decision" => "feature" }, now: T0 + 2
+      )
+
+      assert_equal :closed, result.fetch(:status)
+      assert_empty first.candidates(now: T0 + 3)
+    end
+  end
+
+  def test_oversized_feature_scope_splits_into_distinct_owners_and_binds_once
+    with_project do |_dir, entry, store|
+      classifier = Hive::RefactorPatrol::MergeClassifier.new(
+        root: File.join(entry.fetch("hive_state_path"), "refactor_patrol", "v2", "merge-classifications"),
+        decision_provider: lambda do |_prompt|
+          {
+            "decision" => "feature", "rationale" => "New capability",
+            "evidence" => [ "Production behavior added" ], "model_receipt" => "fake:model"
+          }
+        end
+      )
+      paths = 513.times.map { |index| "lib/features/#{index}.rb" }
+      record = classifier.call(classification_snapshot(paths: paths), now: T0)
+      slice_mapper = Object.new
+      slice_mapper.define_singleton_method(:call) do |analysis_sha:, paths:, **|
+        Hive::RefactorPatrol::PostMergeSliceMapper::Mapping.new(
+          analysis_sha: analysis_sha,
+          path_mappings: paths.map do |path|
+            { "path" => path, "slice_ids" => [ "shared-slice" ] }
+          end
+        )
+      end
+      active = scheduler(
+        entry, store,
+        cfg: enabled_cfg.merge(
+          "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" }
+        ),
+        classifier_factory: ->(*) { classifier },
+        post_merge_slice_mapper: slice_mapper,
+        checkout_guard_factory: ->(*) { Guard.new(sha: "c" * 40) },
+      )
+
+      first_candidate = active.candidates(now: T0 + 1).find do |item|
+        item.fetch(:action_phase) == :post_merge
+      end
+      first_dispatch = active.reserve(first_candidate, now: T0 + 1)
+      active.cancel(first_dispatch, reason: "test_next_chunk", now: T0 + 2)
+      assert_nil classifier.fetch_occurrence(record.fetch("occurrence_id"))["materialization"]
+
+      second_candidate = active.candidates(now: T0 + 3).find do |item|
+        item.fetch(:action_phase) == :post_merge
+      end
+      second_dispatch = active.reserve(second_candidate, now: T0 + 3)
+
+      jobs = store.jobs.sort_by { |job| job.fetch("created_at") }
+      assert_equal 2, jobs.size
+      assert_equal 2, jobs.map { |job| job.fetch("job_id") }.uniq.size
+      assert_equal [ 512, 1 ], jobs.map { |job| job.dig("source", "changed_paths").size }
+      assert_equal paths, jobs.flat_map { |job| job.dig("source", "changed_paths") }
+      binding = classifier.fetch_occurrence(record.fetch("occurrence_id")).fetch("materialization")
+      assert_equal jobs.map { |job| job.fetch("job_id") }, binding.fetch("job_ids")
+      assert_equal 2, binding.fetch("job_ids").uniq.size
+      active.cancel(second_dispatch, reason: "test_complete", now: T0 + 4)
+    end
+  end
+
   def test_reserves_oldest_due_job_with_stable_identity_and_durable_manifest_command
     with_project do |dir, entry, store|
       enqueue(store, job_id: "new", number: 8, merged_at: T0 + 60)
@@ -65,56 +162,17 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_reservation_rechecks_migration_ownership_after_candidate_discovery
-    with_project do |_dir, entry, store|
-      enqueue(store)
-      scheduler = scheduler(entry, store)
-      candidate = scheduler.candidates(now: T0).first
-      scheduler.instance_variable_set(:@migration_ownership, ->(*) { false })
-
-      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
-        scheduler.reserve(candidate, now: T0)
-      end
-
-      assert_equal "migration_ownership_changed", error.reason
-    end
-  end
-
-  def test_reservation_rejects_a_malformed_live_migration_snapshot
-    with_project do |_dir, entry, store|
-      enqueue(store)
-      scheduler = scheduler(entry, store)
-      candidate = scheduler.candidates(now: T0).first
-      scheduler.instance_variable_set(
-        :@migration_snapshot,
-        ->(*) { { "owner" => "legacy", "admission" => true, "epoch" => 0 } }
-      )
-
-      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
-        scheduler.reserve(candidate, now: T0)
-      end
-
-      assert_equal "migration_ownership_changed", error.reason
-      assert_equal "queued", store.read_job("job-7").fetch("state")
-    end
-  end
-
-  def test_candidate_pass_snapshots_registration_identity_and_continuation_ledger_once
+  def test_candidate_pass_snapshots_registration_identity_once
     with_project do |_dir, entry, store|
       enqueue(store, job_id: "first", number: 7, merged_at: T0)
       enqueue(store, job_id: "second", number: 8, merged_at: T0 + 1)
       identity_calls = 0
-      ledger_calls = 0
       ownership = Hive::RefactorPatrol::RepositoryOwnership.new(
         registry: -> { [ entry ] },
         config_loader: ->(_path) { enabled_cfg },
         identity_resolver: lambda do |_candidate, _cfg|
           identity_calls += 1
           repository_identity
-        end,
-        continuation_resolver: lambda do |_candidate, _cfg|
-          ledger_calls += 1
-          []
         end
       )
       scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
@@ -129,149 +187,9 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
 
       assert_equal %w[first second], candidates.map { |candidate| candidate.fetch(:job_id) }
       assert_equal 1, identity_calls
-      assert_equal 1, ledger_calls
 
       scheduler.reserve(candidates.first, now: T0 + 2)
       assert_equal 2, identity_calls, "reservation must re-resolve live repository identity"
-      assert_equal 2, ledger_calls, "reservation must re-read live continuation ownership"
-    end
-  end
-
-  def test_candidate_pass_accepts_injected_ownership_resolver_without_snapshot_api
-    with_project do |_dir, entry, store|
-      enqueue(store)
-      calls = 0
-      ownership = lambda do |**|
-        calls += 1
-        Hive::RefactorPatrol::RepositoryOwnership::Decision.new(authority: :full)
-      end
-      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
-        job_store_factory: ->(_path) { store },
-        repository_ownership: ownership,
-        checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a",
-        claim_resolver: ->(_attempt) { :resolved }
-      )
-
-      assert_equal [ "job-7" ], scheduler.candidates(now: T0).map { |item| item.fetch(:job_id) }
-      assert_equal 1, calls
-    end
-  end
-
-  def test_reserves_classified_job_for_action_resume_without_a_discovery_claim
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      scheduler = scheduler(entry, store)
-
-      candidates = scheduler.candidates(now: T0)
-      assert_equal [ :action ], candidates.map { |item| item.fetch(:action_phase) }
-      dispatch = scheduler.reserve(candidates.first, now: T0)
-
-      assert_equal "refactor-patrol-action-job-actions", dispatch.fetch(:slug)
-      assert_includes dispatch.fetch(:command), "--actions"
-      assert_includes dispatch.fetch(:command), "--job-manifest"
-      assert_includes dispatch.fetch(:command), "--result-file"
-      assert_match(/action-job-action-[a-f0-9]+\.json\z/, dispatch.dig(:dispatch_token, :result_path))
-      assert_equal :action, dispatch.dig(:dispatch_token, :phase)
-      assert_equal "classified", store.read_job("action-job").fetch("state")
-      scheduler.spawned(
-        dispatch, pid: 1234, process_start_time: "boot", pgid: 1234, now: T0 + 1
-      )
-      assert_empty store.read_job("action-job").fetch("actions"),
-                   "the child ActionRunner owns the per-action fence"
-    end
-  end
-
-  def test_discovery_and_actions_remain_eligible_without_a_daily_allowance_gate
-    with_project do |dir, entry, store|
-      enqueue(store, job_id: "queued-review")
-      write_action_job(dir, store)
-      instance = scheduler(entry, store)
-
-      candidates = instance.candidates(now: T0)
-
-      assert_equal %w[action-job queued-review],
-                   candidates.map { |item| item.fetch(:job_id) }.sort
-      assert_equal %i[action discovery],
-                   candidates.map { |item| item.fetch(:action_phase) }.sort
-    end
-  end
-
-  def test_malformed_action_child_result_records_durable_action_backoff
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      scheduler = scheduler(entry, store)
-      dispatch = scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
-
-      result = scheduler.complete(
-        dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 1,
-        envelope: nil, now: T0 + 1
-      )
-
-      assert_equal :retry, result.fetch(:status)
-      aggregate = store.read_job("action-job")
-      assert_equal "action_child_failed_or_signaled", aggregate.fetch("attempts").last.fetch("reason")
-      assert_empty scheduler.candidates(now: T0 + 3600)
-      assert_equal [ "action-job" ], scheduler.candidates(now: T0 + 3601).map { |item| item.fetch(:job_id) }
-    end
-  end
-
-  def test_action_reservation_blocks_when_registered_repository_identity_drifted
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
-        job_store_factory: ->(_path) { store },
-        repository_resolver: ->(_entry, _cfg) { repository_identity("other/repository") },
-        checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a"
-      )
-      candidate = scheduler.candidates(now: T0).first
-
-      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
-        scheduler.reserve(candidate, now: T0)
-      end
-
-      assert_equal "repository_identity_drift", error.reason
-      aggregate = store.read_job("action-job")
-      assert_equal "repository_identity_drift", aggregate.fetch("attempts").last.fetch("reason")
-      assert_empty aggregate.fetch("actions")
-      assert_empty scheduler.candidates(now: T0 + 3599)
-      assert_equal [ "action-job" ],
-                   scheduler.candidates(now: T0 + 3600).map { |item| item.fetch(:job_id) }
-    end
-  end
-
-  def test_repository_drift_does_not_block_reconcile_only_action_continuation
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      initialized = store.initialize_actions!(
-        "action-job", specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ],
-        now: T0
-      )
-      action_id = initialized.fetch("actions").first.fetch("canonical_action_id")
-      token = store.claim_action!("action-job", action_id, owner: "seed", now: T0)
-      store.record_creation_intent!(
-        token,
-        intent: {
-          "operation" => "create_pr", "canonical_action_id" => action_id,
-          "repository" => "acme/demo", "branch" => "hive-refactor/action-job",
-          "commit_sha" => "c" * 40
-        },
-        now: T0
-      )
-      store.release_action!(token, outcome: "remote_outcome_unknown", now: T0, backoff_sec: 0)
-      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
-        job_store_factory: ->(_path) { store },
-        repository_resolver: ->(_entry, _cfg) { repository_identity("other/repository") },
-        checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a"
-      )
-
-      dispatch = scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
-
-      assert_equal :action, dispatch.dig(:dispatch_token, :phase)
-      assert_includes dispatch.fetch(:command), "--actions"
-      refute store.read_job("action-job").fetch("complete")
     end
   end
 
@@ -396,55 +314,6 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_duplicate_registration_blocks_action_continuation_with_remote_intent
-    with_tmp_dir do |root|
-      first_dir = File.join(root, "first")
-      second_dir = File.join(root, "second")
-      [ first_dir, second_dir ].each { |dir| FileUtils.mkdir_p(dir) }
-      entries = [ entry(first_dir, "demo"), entry(second_dir, "duplicate") ]
-      first_store = Hive::RefactorPatrol::JobStore.new(
-        first_dir
-      )
-      write_action_job(first_dir, first_store)
-      initialized = first_store.initialize_actions!(
-        "action-job",
-        specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ],
-        now: T0
-      )
-      action_id = initialized.fetch("actions").first.fetch("canonical_action_id")
-      token = first_store.claim_action!("action-job", action_id, owner: "seed", now: T0)
-      first_store.record_creation_intent!(
-        token,
-        intent: {
-          "operation" => "create_pr", "canonical_action_id" => action_id,
-          "repository" => "acme/demo", "branch" => "hive-refactor/action-job",
-          "commit_sha" => "c" * 40
-        },
-        now: T0
-      )
-      first_store.release_action!(
-        token, outcome: "remote_outcome_unknown", now: T0, backoff_sec: 0
-      )
-      stores = {
-        first_dir => first_store,
-        second_dir => Hive::RefactorPatrol::JobStore.new(
-          second_dir
-        )
-      }
-      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-        registry: -> { entries }, config_loader: ->(_path) { enabled_cfg },
-        job_store_factory: ->(path) { stores.fetch(path) },
-        repository_resolver: ->(_entry, _cfg) { repository_identity },
-        checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a"
-      )
-
-      assert_empty scheduler.candidates(now: T0)
-      aggregate = first_store.read_job("action-job")
-      assert_equal "duplicate_repository_registration", aggregate.fetch("attempts").last.fetch("reason")
-      assert_equal "remote_outcome_unknown", aggregate.fetch("actions").first.fetch("outcome")
-    end
-  end
-
   def test_completion_checkpoints_only_exit_zero_schema_valid_exact_complete_envelope
     with_project do |_dir, entry, store|
       enqueue(store)
@@ -483,89 +352,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       )
       assert_equal :closed, completed.fetch(:status)
       assert store.read_job("job-7").fetch("complete")
-      evidence = Hive::Modules::Migration::EvidenceStore.new(
-        root: File.join(
-          entry.fetch("hive_state_path"), "module-runtime", "migration",
-          "patrol-evidence"
-        )
-      )
-      finalized = evidence.captures.find do |capture|
-        capture.outcome["completion_status"] == "closed"
-      end
-      refute_nil finalized
-      assert_equal "complete", finalized.outcome.fetch("rationale")
-      event = Hive::Modules::EventLedger.new(
-        root: File.join(entry.fetch("hive_state_path"), "module-runtime")
-      ).all.find do |candidate_event|
-        candidate_event.dig(
-          "payload", "legacy_mutator_capture", "capture_id"
-        ) == finalized.capture_id
-      end
-      refute_nil event
-      assert_equal "legacy_architecture_patrol_completion",
-                   event.dig("source", "type")
       assert_empty scheduler.candidates(now: T0 + 3600), "completed zero must be terminal exactly once"
-    end
-  end
-
-  def test_restart_reconciles_exact_completed_checkpoint_from_active_occurrence
-    with_project do |dir, entry, store|
-      enqueue(store)
-      scheduler = scheduler(entry, store)
-      dispatch = scheduler.reserve(
-        scheduler.candidates(now: T0).first, now: T0
-      )
-      scheduler.spawned(
-        dispatch,
-        pid: 2235,
-        process_start_time: "boot-final",
-        pgid: 2235,
-        now: T0 + 1
-      )
-      original_settlement = store.method(:settle_effect!)
-      failed_intent = nil
-      store.define_singleton_method(:settle_effect!) do |intent, **options|
-        if failed_intent.nil? &&
-           intent.target.end_with?(":checkpoint")
-          failed_intent = intent
-          raise "simulated receipt crash"
-        end
-
-        original_settlement.call(intent, **options)
-      end
-
-      assert_raises(RuntimeError) do
-        scheduler.complete(
-          dispatch_token: dispatch.fetch(:dispatch_token),
-          exit_code: 0,
-          envelope: complete_zero_envelope(entry),
-          now: T0 + 2
-        )
-      end
-      assert store.read_job("job-7").fetch("complete")
-      assert_equal "dispatch_uncertain",
-                   store.effect_state(failed_intent).fetch("state")
-
-      restarted_store = Hive::RefactorPatrol::JobStore.new(
-        dir
-      )
-      restarted = scheduler(entry, restarted_store)
-      assert_empty restarted.candidates(now: T0 + 3)
-
-      receipts = Hive::Modules::Migration::EvidenceStore.new(
-        root: File.join(
-          entry.fetch("hive_state_path"),
-          "module-runtime",
-          "migration",
-          "patrol-evidence"
-        )
-      ).receipts.select do |receipt|
-        receipt.intent.intent_id == failed_intent.intent_id
-      end
-      assert_equal [ "reconciled" ],
-                   receipts.map(&:status).uniq
-      assert_nil restarted_store.occurrence_for_job("job-7"),
-                 "fully projected terminal occurrences retire"
     end
   end
 
@@ -595,7 +382,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       enqueue(store)
       scheduler = scheduler(entry, store)
       dispatch = scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
-      scheduler.define_singleton_method(:checkpoint_discovery_through_gateway!) do |*, **|
+      scheduler.define_singleton_method(:checkpoint_discovery!) do |*, **|
         raise Hive::RefactorPatrol::JobStore::StaleClaim, "claim already settled"
       end
 
@@ -889,35 +676,26 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_daily_launch_limit_skips_discovery_candidates_until_the_next_utc_day
+  def test_scheduled_discovery_exhaustion_does_not_block_post_merge_candidates
     old_path = Hive::UsageDb.path
     with_project do |dir, entry, store|
       Hive::UsageDb.path = File.join(dir, "usage.db")
-      8.times do
+      8.times do |index|
+        stage = index.even? ? "patrol-review" : "refactor-patrol-review"
         Hive::UsageDb.record!(
           agent: "codex", model: nil, project_slug: entry.fetch("name"),
-          task_slug: "patrol-review", stage: "patrol-review",
+          task_slug: stage, stage: stage,
           started_at: T0, ended_at: T0, input: 1, output: 1, cached: 0
         )
       end
       enqueue(store)
       scheduler = scheduler(entry, store)
 
-      assert_empty scheduler.candidates(now: T0)
       assert_equal [ "job-7" ],
-                   scheduler.candidates(now: T0 + 43_200).map { |item| item.fetch(:job_id) }
+                   scheduler.candidates(now: T0).map { |item| item.fetch(:job_id) }
     end
   ensure
     Hive::UsageDb.path = old_path
-  end
-
-  def test_action_progress_digest_ignores_hash_insertion_order
-    with_project do |_dir, entry, store|
-      instance = scheduler(entry, store)
-
-      assert_equal instance.send(:job_digest, { "b" => 2, "a" => { "d" => 4, "c" => 3 } }),
-                   instance.send(:job_digest, { "a" => { "c" => 3, "d" => 4 }, "b" => 2 })
-    end
   end
 
   def test_dry_run_leaves_authoritative_job_bytes_unchanged
@@ -1114,10 +892,6 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     with_tmp_dir do |dir|
       entry = entry(dir, "demo")
       failing_store = Object.new
-      failing_store.define_singleton_method(
-        :each_recovery_active_occurrence
-      ) { |&| nil }
-      install_recovery_protocol(failing_store)
       failing_store.define_singleton_method(:claimable_jobs) do |**|
         raise Hive::RefactorPatrol::JobStore::CorruptRecord, "broken index"
       end
@@ -1131,441 +905,6 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       event = scheduler.drain_events.fetch(0)
       assert_equal "scheduler_error", event.fetch(:reason)
       assert_match(/broken index/, event.fetch(:error))
-    end
-  end
-
-  def test_occurrence_recovery_failure_is_identified_and_backed_off
-    with_tmp_dir do |dir|
-      entry = entry(dir, "demo")
-      token = "sk-#{'a' * 30}"
-      capture = Hive::Modules::Migration::PatrolCapture.build(
-        module_name: "architecture-patrol",
-        project: {
-          "project_id" => entry.fetch("project_id"),
-          "name" => entry.fetch("name"),
-          "repository" => "acme/demo"
-        },
-        trigger: {
-          "kind" => "pull_request.merged",
-          "id" => "merge-7",
-          "manifest_digest" => "m" * 64,
-          "merge_sha" => "a" * 40
-        },
-        reservation: {
-          "kind" => "architecture",
-          "id" => "job-7",
-          "job_id" => "job-7"
-        },
-        owner: "legacy",
-        owner_epoch: 1,
-        selection_input: {
-          "kind" => "candidate",
-          "job_id" => "job-7",
-          "phase" => "discovery"
-        },
-        selection:
-          Hive::Modules::Migration::PatrolDecisionProjection.build(
-            module_name: "architecture-patrol",
-            rationale: "due",
-            job_id: "job-7",
-            phase: "discovery"
-          ),
-        outcome_class: nil,
-        outcome: nil,
-        occurred_at: T0,
-        recorded_at: T0
-      )
-      reads = 0
-      failing_store = Object.new
-      failing_store.define_singleton_method(
-        :each_recovery_active_occurrence
-      ) do |&block|
-        block.call(
-          "occurrence_id" => capture.occurrence_id,
-          "phase" => "reserved",
-          "provisional_capture" => capture.to_h,
-          "outbox" => []
-        )
-      end
-      failing_store.define_singleton_method(:read_job) do |_job_id|
-        reads += 1
-        raise Hive::RefactorPatrol::JobStore::CorruptRecord,
-              "recovery failed #{token}: #{"x" * 600}"
-      end
-      install_recovery_protocol(failing_store)
-      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-        registry: -> { [ entry ] },
-        config_loader: ->(_path) { enabled_cfg },
-        job_store_factory: ->(_path) { failing_store },
-        repository_resolver: ->(_entry, _cfg) { repository_identity }
-      )
-
-      assert_empty scheduler.candidates(now: T0)
-      first = scheduler.drain_events.fetch(0)
-      assert_equal "demo", first.fetch(:project)
-      assert_equal capture.occurrence_id,
-                   first.fetch(:occurrence_id)
-      assert_equal "job-7", first.fetch(:job_id)
-      assert_equal "architecture_occurrence",
-                   first.fetch(:recovery)
-      assert_equal "CorruptRecord", first.fetch(:error_class).split("::").last
-      assert_equal 512, first.fetch(:error).bytesize
-      refute_includes first.fetch(:error), token
-      assert_includes first.fetch(:error),
-                      "[REDACTED:openai_api_key]"
-      assert_equal 1, first.fetch(:retry_count)
-      assert_equal 60, first.fetch(:retry_in_sec)
-      durable = failing_store.recovery_backoff(now: T0).fetch(
-        "failure"
-      )
-      assert_equal durable.fetch("error_class"),
-                   first.fetch(:error_class)
-      assert_equal durable.fetch("error_message"),
-                   first.fetch(:error)
-
-      assert_empty scheduler.candidates(now: T0 + 59)
-      assert_empty scheduler.drain_events
-      assert_equal 1, reads
-
-      assert_empty scheduler.candidates(now: T0 + 60)
-      second = scheduler.drain_events.fetch(0)
-      assert_equal 2, reads
-      assert_equal 2, second.fetch(:retry_count)
-      assert_equal 300, second.fetch(:retry_in_sec)
-    end
-  end
-
-  def test_merged_pr_retirement_compacts_and_fences_replay_after_restart
-    with_tmp_dir do |dir|
-      journal_root = File.join(dir, "architecture-occurrences")
-      captures = []
-
-      with_constant(
-        Hive::Modules::Migration::OccurrenceJournalState,
-        :MAX_SEQUENCE_HIGH_WATERS,
-        2
-      ) do
-        3.times do |index|
-          timestamp = T0 + index
-          value = manifest(
-            job_id: "job-#{index + 1}",
-            number: index + 1,
-            merged_at: timestamp,
-            registration: "demo"
-          )
-          capture =
-            Hive::RefactorPatrol::TransitionGateway
-            .capture_for_manifest(
-              manifest: value,
-              project_id: "demo-id",
-              owner: "legacy",
-              owner_epoch: 1,
-              recorded_at: timestamp
-            )
-          captures << capture
-          assert_equal "architecture",
-                       capture.reservation.fetch("kind")
-          assert_equal timestamp.iso8601(6),
-                       capture.reservation.fetch(
-                         "window_started_at"
-                       )
-          assert_equal 1,
-                       capture.reservation.fetch(
-                         "attempt_generation"
-                       )
-          journal =
-            Hive::Modules::Migration::OccurrenceJournal.new(
-              journal_root,
-              module_name: "architecture-patrol"
-            )
-          journal.reserve!(capture, now: timestamp)
-          final = Hive::Modules::Migration::PatrolCapture.build(
-            module_name: capture.module_name,
-            project: capture.project,
-            trigger: capture.trigger,
-            reservation: capture.reservation,
-            owner: capture.owner,
-            owner_epoch: capture.owner_epoch,
-            selection_input: capture.selection_input,
-            selection: capture.selection,
-            outcome_class: "complete",
-            outcome: { "rationale" => "complete" },
-            occurred_at: capture.occurred_at,
-            recorded_at: timestamp + 1
-          )
-          journal.finalize!(final, now: timestamp + 1)
-          journal.pending_outbox(
-            capture.occurrence_id
-          ).each do |entry|
-            journal.acknowledge_outbox!(
-              capture.occurrence_id,
-              kind: entry.fetch("kind"),
-              entry_id: entry.fetch("id"),
-              digest: entry.fetch("digest")
-            )
-          end
-          assert_nil Hive::Modules::Migration::OccurrenceJournal.new(
-            journal_root,
-            module_name: "architecture-patrol"
-          ).fetch(capture.occurrence_id)
-        end
-
-        restarted =
-          Hive::Modules::Migration::OccurrenceJournal.new(
-            journal_root,
-            module_name: "architecture-patrol"
-          )
-        assert_raises(Hive::ConfigError) do
-          restarted.reserve!(captures.first, now: T0 + 3)
-        end
-        later_manifest = manifest(
-          job_id: "job-4",
-          number: 4,
-          merged_at: T0 + 4,
-          registration: "demo"
-        )
-        later =
-          Hive::RefactorPatrol::TransitionGateway
-          .capture_for_manifest(
-            manifest: later_manifest,
-            project_id: "demo-id",
-            owner: "legacy",
-            owner_epoch: 1,
-            recorded_at: T0 + 4
-          )
-        restarted.reserve!(later, now: T0 + 4)
-        assert_equal later.occurrence_id,
-                     restarted.fetch(
-                       later.occurrence_id
-                     ).fetch("occurrence_id")
-      end
-    end
-  end
-
-  def test_architecture_producers_build_the_same_canonical_occurrence
-    value = manifest(
-      job_id: "job-7",
-      number: 7,
-      merged_at: T0,
-      registration: "demo"
-    )
-    transition_capture =
-      Hive::RefactorPatrol::TransitionGateway.capture_for_manifest(
-        manifest: value,
-        project_id: "demo-id",
-        owner: "legacy",
-        owner_epoch: 1,
-        recorded_at: T0
-      )
-    reserved = nil
-    store = Object.new
-    store.define_singleton_method(
-      :occurrence_capture
-    ) { |_job_id| nil }
-    store.define_singleton_method(
-      :reserve_occurrence!
-    ) do |_job_id, capture:, now:|
-      reserved = [ capture, now ]
-    end
-    lifecycle =
-      Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle.new(
-        migration_authority: :legacy,
-        dry_run: false,
-        evidence_store_factory: ->(_entry) { Object.new },
-        event_publisher: Object.new,
-        module_schedule: "*/10 * * * *",
-        reservation_error:
-          Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked
-      )
-    lifecycle_capture = lifecycle.reserve(
-      store: store,
-      entry: {
-        "project_id" => "demo-id",
-        "name" => "demo",
-        "repository_identity" => "github.com/acme/demo"
-      },
-      aggregate: {
-        "job_id" => value.fetch("job_id"),
-        "created_at" => T0.iso8601,
-        "source" =>
-          value.fetch("source").merge(
-            "manifest_checksum" =>
-              value.fetch("manifest_checksum")
-          )
-      },
-      migration: {
-        "owner" => "legacy",
-        "epoch" => 1
-      },
-      now: T0
-    )
-
-    assert_equal transition_capture.to_h,
-                 lifecycle_capture.to_h
-    assert_equal [ lifecycle_capture, T0 ], reserved
-
-    ordinary_capture = Hive::Daemon::PatrolScheduler
-      .new(registry: -> { [] })
-      .send(
-        :capture_reservation,
-        {
-          "project_id" => "demo-id", "name" => "demo",
-          "repository_identity" => "github.com/acme/demo"
-        },
-        { "owner" => "legacy", "admission" => true, "epoch" => 1 },
-        T0, poll_interval_sec: 600,
-        selection_input: {
-          "kind" => "operation", "operation" => "qualification-proof"
-        },
-        selection: Hive::Modules::Migration::PatrolDecisionProjection.build(
-          module_name: "patrol", rationale: "due"
-        )
-      )
-    assert_equal ordinary_capture.project.fetch("repository"),
-                 lifecycle_capture.project.fetch("repository")
-  end
-
-  def test_recovery_store_initialization_errors_keep_the_original_diagnostic
-    with_tmp_dir do |dir|
-      project = entry(dir, "demo")
-      error_class = Class.new(StandardError)
-      original = error_class.new("state unavailable: \xFF".b)
-      expected =
-        Hive::Modules::Migration::OccurrenceJournalState
-        .normalize_error(original)
-      masking_store = Object.new
-      masking_store.define_singleton_method(:recovery_backoff) do |now:|
-        now
-        raise original
-      end
-      masking_store.define_singleton_method(
-        :record_recovery_failure!
-      ) do |**|
-        raise RuntimeError, "masking persistence error"
-      end
-      factories = [
-        ->(_path) { raise original },
-        ->(_path) { masking_store }
-      ]
-
-      factories.each do |factory|
-        scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-          registry: -> { [ project ] },
-          config_loader: ->(_path) { enabled_cfg },
-          job_store_factory: factory,
-          repository_resolver: ->(_entry, _cfg) {
-            repository_identity
-          }
-        )
-
-        assert_empty scheduler.candidates(now: T0)
-        event = scheduler.drain_events.fetch(0)
-        assert_equal "recovery_state_unavailable",
-                     event.fetch(:blocker)
-        assert_equal expected.fetch("error_class"),
-                     event.fetch(:error_class)
-        assert_equal expected.fetch("error_message"),
-                     event.fetch(:error)
-        assert event.fetch(:error).valid_encoding?
-        refute_match(/masking persistence/, event.fetch(:error))
-      end
-    end
-  end
-
-  def test_recovery_persistence_failure_and_unscoped_failure_are_reported
-    with_tmp_dir do |dir|
-      project = entry(dir, "demo")
-      capture = Hive::Modules::Migration::PatrolCapture.build(
-        module_name: "architecture-patrol",
-        project: {
-          "project_id" => project.fetch("project_id"),
-          "name" => project.fetch("name"),
-          "repository" => "acme/demo"
-        },
-        trigger: {
-          "kind" => "pull_request.merged",
-          "id" => "merge-7",
-          "manifest_digest" => "m" * 64,
-          "merge_sha" => "a" * 40
-        },
-        reservation: {
-          "kind" => "architecture",
-          "id" => "job-7",
-          "job_id" => "job-7"
-        },
-        owner: "legacy",
-        owner_epoch: 1,
-        selection_input: {
-          "kind" => "candidate",
-          "job_id" => "job-7",
-          "phase" => "discovery"
-        },
-        selection:
-          Hive::Modules::Migration::PatrolDecisionProjection.build(
-            module_name: "architecture-patrol",
-            rationale: "due",
-            job_id: "job-7",
-            phase: "discovery"
-          ),
-        outcome_class: nil,
-        outcome: nil,
-        occurred_at: T0,
-        recorded_at: T0
-      )
-      occurrence_failure = Object.new
-      occurrence_failure.define_singleton_method(
-        :each_recovery_active_occurrence
-      ) do |&block|
-        block.call(
-          "occurrence_id" => capture.occurrence_id,
-          "phase" => "reserved",
-          "provisional_capture" => capture.to_h,
-          "outbox" => []
-        )
-      end
-      occurrence_failure.define_singleton_method(:recovery_backoff) do |now:|
-        now
-        { "generation" => 0, "failure" => nil, "blocked" => false }
-      end
-      occurrence_failure.define_singleton_method(:read_job) do |_job_id|
-        raise Hive::RefactorPatrol::JobStore::CorruptRecord,
-              "occurrence recovery failed"
-      end
-      occurrence_failure.define_singleton_method(
-        :record_recovery_failure!
-      ) { |**| raise IOError, "journal unavailable" }
-      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-        registry: -> { [ project ] },
-        config_loader: ->(_path) { enabled_cfg },
-        job_store_factory: ->(_path) { occurrence_failure },
-        repository_resolver: ->(_entry, _cfg) { repository_identity }
-      )
-
-      assert_empty scheduler.candidates(now: T0)
-      unavailable = scheduler.drain_events.fetch(0)
-      assert_equal "recovery_state_unavailable",
-                   unavailable.fetch(:blocker)
-      assert_equal capture.occurrence_id,
-                   unavailable.fetch(:occurrence_id)
-
-      unscoped_failure = Object.new
-      install_recovery_protocol(unscoped_failure)
-      unscoped_failure.define_singleton_method(
-        :each_recovery_active_occurrence
-      ) { raise IOError, "inventory unavailable" }
-      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-        registry: -> { [ project ] },
-        config_loader: ->(_path) { enabled_cfg },
-        job_store_factory: ->(_path) { unscoped_failure },
-        repository_resolver: ->(_entry, _cfg) { repository_identity }
-      )
-
-      assert_empty scheduler.candidates(now: T0)
-      blocked = scheduler.drain_events.fetch(0)
-      assert_equal "recovery_failed", blocked.fetch(:blocker)
-      assert_nil blocked.fetch(:occurrence_id)
-      assert_nil blocked.fetch(:job_id)
-      assert_equal 1, blocked.fetch(:retry_count)
     end
   end
 
@@ -1623,8 +962,8 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       assert_equal 1, guard_calls
       retired = store.read_job("job-7")
       assert retired.fetch("complete")
-      assert_equal 1, retired.fetch("attempts").last.fetch("transitions").size,
-                   "retirement must use the qualified architecture transition gateway"
+      assert_equal "source_no_longer_on_trunk",
+                   retired.fetch("attempts").last.fetch("reason")
       assert_empty scheduler.candidates(now: T0 + 10_000)
       assert_equal 1, guard_calls, "a retired source must never re-enter checkout validation"
     end
@@ -1658,110 +997,6 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       assert_equal "source_no_longer_on_trunk", error.reason
       assert_equal "retired", error.evidence.fetch("retirement")
       assert_equal before, store.read_job("job-7")
-    end
-  end
-
-  def test_source_missing_from_trunk_terminalizes_unpublished_action_plan_together
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      store.initialize_actions!(
-        "action-job",
-        specifications: [
-          { "thesis_id" => "fix", "kind" => "fix" }
-        ],
-        now: T0
-      )
-      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
-        job_store_factory: ->(_path) { store },
-        repository_resolver: ->(_entry, _cfg) { repository_identity },
-        checkout_guard_factory: ->(*) {
-          Object.new.tap do |guard|
-            guard.define_singleton_method(:validate_and_snapshot!) do |merge_sha:, **|
-              raise Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk.new(
-                merge_sha: merge_sha,
-                trunk_sha: "head"
-              )
-            end
-          end
-        }, owner: "daemon-a"
-      )
-
-      candidate = scheduler.candidates(now: T0).find do |item|
-        item.fetch(:job_id) == "action-job"
-      end
-      assert_equal :action, candidate.fetch(:action_phase)
-      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
-        scheduler.reserve(candidate, now: T0)
-      end
-
-      assert_equal "source_no_longer_on_trunk", error.reason
-      retired = store.read_job("action-job")
-      assert retired.fetch("complete")
-      assert_nil retired.fetch("zero_reason")
-      assert retired.fetch("actions").all? { |action| action.fetch("terminal") }
-      assert_equal [ "source_no_longer_on_trunk" ],
-                   retired.fetch("actions").map { |action| action.fetch("outcome") }.uniq
-    end
-  end
-
-  def test_source_missing_from_trunk_repeats_idempotently_for_remote_continuation
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      initialized = store.initialize_actions!(
-        "action-job",
-        specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ],
-        now: T0
-      )
-      action_id = initialized.dig("actions", 0, "canonical_action_id")
-      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
-        job_store_factory: ->(_path) { store },
-        repository_resolver: ->(_entry, _cfg) { repository_identity },
-        checkout_guard_factory: ->(*) {
-          Object.new.tap do |guard|
-            guard.define_singleton_method(:validate_and_snapshot!) do |merge_sha:, **|
-              raise Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk.new(
-                merge_sha: merge_sha, trunk_sha: "head"
-              )
-            end
-          end
-        },
-        owner: "daemon-a", claim_resolver: ->(_claim) { :resolved }
-      )
-      candidate = scheduler.candidates(now: T0).find do |item|
-        item.fetch(:job_id) == "action-job"
-      end
-      token = store.claim_action!(
-        "action-job", action_id, owner: "crashed-runner", now: T0
-      )
-      store.record_creation_intent!(
-        token,
-        intent: {
-          "operation" => "create_pr", "canonical_action_id" => action_id,
-          "repository" => "acme/demo", "branch" => "hive-refactor/#{action_id}",
-          "commit_sha" => "d" * 40
-        },
-        now: T0
-      )
-
-      first = scheduler.reserve(candidate, now: T0)
-      second = scheduler.reserve(candidate, now: T0 + 1)
-
-      assert_equal :action, first.dig(:dispatch_token, :phase)
-      assert_equal :action, second.dig(:dispatch_token, :phase)
-      aggregate = store.read_job("action-job")
-      refute aggregate.fetch("complete")
-      refute aggregate.dig("actions", 0, "terminal")
-      retirements = aggregate.fetch("attempts").select do |attempt|
-        attempt["kind"] == "source_retirement"
-      end
-      assert_equal 1, retirements.size
-      claim = store.claim_action!(
-        "action-job", action_id, owner: "reconciler", authority: true,
-        now: T0 + 2
-      )
-      assert claim.fetch(:continuation_only)
     end
   end
 
@@ -1831,24 +1066,6 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_action_continuation_converts_disabled_discovery_to_continuation_authority
-    decision = Hive::RefactorPatrol::RepositoryOwnership::Decision.new(
-      authority: :blocked, reason: "architecture_patrol_disabled", evidence: { "enabled" => false }
-    )
-    scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-      registry: -> { [] }, repository_ownership: ->(**) { decision }
-    )
-    entry = { "name" => "demo", "path" => "/tmp/demo", "_refactor_patrol_cfg" => enabled_cfg }
-    aggregate = { "job_id" => "job-7", "source" => {}, "actions" => [] }
-
-    converted = scheduler.send(
-      :repository_ownership_decision, entry, aggregate, phase: :action
-    )
-
-    assert_equal :continuation_only, converted.authority
-    assert_equal "architecture_patrol_disabled", converted.reason
-  end
-
   def test_block_store_failure_still_emits_a_visible_event
     with_tmp_dir do |dir|
       entry = entry(dir, "demo")
@@ -1896,505 +1113,305 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_action_missing_envelope_and_completion_projection_include_pending_actions
-    scheduler = Hive::Daemon::RefactorPatrolScheduler.new(registry: -> { [] })
-    assert_equal "action_missing_envelope",
-                 scheduler.send(:action_completion_failure_reason, 0, nil)
-    assert_equal "action_malformed_or_mismatched_envelope",
-                 scheduler.send(:action_completion_failure_reason, 0, {})
-    aggregate = {
-      "source" => { "number" => 7, "url" => "url" },
-      "dispositions" => { "fix" => [ {} ], "discuss" => [], "dismiss" => [] },
-      "actions" => [
-        { "canonical_action_id" => "done", "outcome" => "pr_opened", "terminal" => true },
-        { "canonical_action_id" => "pending", "outcome" => "claimed", "terminal" => false }
+  def test_classification_work_handles_due_retry_and_isolates_corrupt_records
+    with_tmp_dir do |dir|
+      configured_entry = entry(dir, "demo").merge("_refactor_patrol_cfg" => enabled_cfg)
+      records = [
+        { "occurrence_id" => "due", "status" => "retry_wait", "retry_at" => T0.iso8601 },
+        { "occurrence_id" => "later", "status" => "retry_wait", "retry_at" => (T0 + 60).iso8601 },
+        { "occurrence_id" => "bad", "status" => "retry_wait", "retry_at" => "never" }
       ]
-    }
+      classifier = Object.new
+      classifier.define_singleton_method(:eligible_records) { |**| records }
+      batches = Object.new
+      batches.define_singleton_method(:unclaimed_occurrence_ids) { |_records| [] }
+      active = scheduler(
+        configured_entry, Hive::RefactorPatrol::JobStore.new(dir),
+        classifier_factory: ->(*) { classifier },
+        post_merge_batch_store_factory: ->(*) { batches }
+      )
 
-    projection = scheduler.send(
-      :completion_result, :retry, { job_id: "job-7" }, nil, aggregate: aggregate
-    )
+      work = active.send(:classification_work, configured_entry, nil, T0)
 
-    assert_equal :retry, projection.fetch(:status)
-    assert_equal "job-7", projection.fetch(:job_id)
-    assert_equal 7, projection.fetch(:pr_number)
-    assert_equal "url", projection.fetch(:pr_url)
-    assert_equal 1, projection.fetch(:fix_count)
-    assert_equal 0, projection.fetch(:discuss_count)
-    assert_equal 0, projection.fetch(:dismiss_count)
-    assert_equal 2, projection.fetch(:action_count)
-    assert_equal 1, projection.fetch(:terminal_action_count)
-    assert_equal [ "pending" ], projection.fetch(:pending_action_ids)
-    assert_equal({ "done" => "pr_opened", "pending" => "claimed" }, projection.fetch(:action_outcomes))
+      assert_equal [ "due" ], work.map { |item| item.dig(:classification, "occurrence_id") }
+      event = active.drain_events.fetch(0)
+      assert_equal "classification_admission_failed", event.fetch(:reason)
+      assert_equal "bad", event.fetch(:occurrence_id)
+    end
+  end
 
-    classified = scheduler.send(
-      :completion_result,
-      :classified,
-      { job_id: "job-7" },
+  def test_classification_completion_maps_all_terminal_states_and_failures
+    with_tmp_dir do |dir|
+      configured_entry = entry(dir, "demo").merge("_refactor_patrol_cfg" => enabled_cfg)
+      record = nil
+      classifier = Object.new
+      classifier.define_singleton_method(:fetch_occurrence) { |_id| record }
+      classifier.define_singleton_method(:release_claim!) do |_id, **|
+        record = record.merge("claim" => nil)
+      end
+      active = scheduler(
+        configured_entry, Hive::RefactorPatrol::JobStore.new(dir),
+        classifier_factory: ->(*) { classifier }
+      )
+      token = {
+        registration: "demo", classification_occurrence_id: "occurrence-1",
+        reservation_id: "reservation-1"
+      }
+
+      assert_equal :blocked, active.send(:complete_classification, token, 0, T0).fetch(:status)
       {
-        "fix" => [ {}, {} ],
-        "discuss" => [ {} ],
-        "dismiss" => []
-      },
-      aggregate: aggregate
-    )
-    assert_equal :classified, classified.fetch(:status)
-    assert_equal 2, classified.fetch(:fix_count)
-    assert_equal 1, classified.fetch(:discuss_count)
-    assert_equal({ "done" => "pr_opened", "pending" => "claimed" }, classified.fetch(:action_outcomes))
-    assert_equal Time.at(0).utc, scheduler.send(:parse_time, "not-a-time")
-  end
-
-  def test_broken_project_config_blocks_pending_action_work_too
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-        registry: -> { [ entry ] },
-        config_loader: ->(_path) { raise Hive::ConfigError, "invalid config" },
-        job_store_factory: ->(_path) { store },
-        repository_resolver: ->(_entry, _cfg) { repository_identity },
-        checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a"
-      )
-
-      assert_empty scheduler.candidates(now: T0)
-
-      aggregate = store.read_job("action-job")
-      assert_equal "project_config_unavailable", aggregate.fetch("attempts").last.fetch("reason")
-    end
-  end
-
-  def test_valid_incomplete_action_envelope_without_job_progress_is_cooled_down
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      scheduler = scheduler(entry, store)
-      dispatch = scheduler.reserve(
-        scheduler.candidates(now: T0).find do |candidate|
-          candidate.fetch(:job_id) == "action-job"
-        end,
-        now: T0
-      )
-      aggregate = store.read_job("action-job")
-      envelope = action_envelope(entry, aggregate)
-
-      result = scheduler.complete(
-        dispatch_token: dispatch.fetch(:dispatch_token),
-        exit_code: 0, envelope: envelope, now: T0 + 1
-      )
-
-      assert_equal :retry, result.fetch(:status)
-      blocked = store.read_job("action-job")
-      assert_equal "action_no_progress",
-                   blocked.fetch("attempts").last.fetch("reason")
-      assert_empty scheduler.candidates(now: T0 + 3600)
-      assert_equal [ "action-job" ],
-                   scheduler.candidates(now: T0 + 3601).map { |item| item.fetch(:job_id) }
-    end
-  end
-
-  def test_valid_incomplete_action_envelope_with_job_progress_remains_pending
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      scheduler = scheduler(entry, store)
-      dispatch = scheduler.reserve(
-        scheduler.candidates(now: T0).find do |candidate|
-          candidate.fetch(:job_id) == "action-job"
-        end,
-        now: T0
-      )
-      store.initialize_actions!(
-        "action-job",
-        specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ],
-        now: T0 + 1
-      )
-      aggregate = store.read_job("action-job")
-
-      result = scheduler.complete(
-        dispatch_token: dispatch.fetch(:dispatch_token),
-        exit_code: 0,
-        envelope: action_envelope(entry, aggregate),
-        now: T0 + 2
-      )
-
-      assert_equal :action_pending, result.fetch(:status)
-      refute_equal "action_no_progress",
-                   store.read_job("action-job").fetch("attempts").last&.fetch("reason", nil)
-    end
-  end
-
-  def test_effect_capacity_rolls_to_a_fresh_terminally_fenced_occurrence
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      scheduler = scheduler(entry, store)
-      predecessor = store.occurrence_capture("action-job")
-
-      with_constant(
-        Hive::Modules::Migration::PatrolEvidence,
-        :MAX_EFFECTS_PER_OCCURRENCE,
-        2
-      ) do
-        candidates = scheduler.candidates(now: T0)
-        assert_equal [ "action-job" ],
-                     candidates.map { |item| item.fetch(:job_id) }
-        aggregate = store.read_job("action-job")
-        refute_equal predecessor.occurrence_id,
-                     aggregate.fetch("occurrence_id")
-        assert store.occurrence_terminalized?(predecessor)
-        assert_empty store.occurrence_for_job(
-          "action-job"
-        ).fetch("effects")
-        event = scheduler.drain_events.fetch(0)
-        assert_equal :recovered, event.fetch(:status)
-        assert_equal "effect_capacity_rolled_over", event.fetch(:reason)
+        "feature" => :classified, "skip" => :closed,
+        "blocked" => :blocked, "retry_wait" => :retry
+      }.each do |status, expected|
+        record = {
+          "occurrence_id" => "occurrence-1", "status" => status,
+          "reason" => status, "claim" => { "reservation_id" => "reservation-1" }
+        }
+        assert_equal expected,
+                     active.send(:complete_classification, token, 0, T0).fetch(:status)
       end
+
+      classifier.define_singleton_method(:fetch_occurrence) { |_id| raise "corrupt" }
+      failure = active.send(:complete_classification, token, 0, T0)
+      assert_equal "classification_completion_failed", failure.fetch(:reason)
     end
   end
 
-  def test_discovery_capacity_rolls_before_claiming_another_worker
+  def test_classification_cancel_releases_claim_and_completion_summary_is_bounded
+    with_tmp_dir do |dir|
+      configured_entry = entry(dir, "demo").merge("_refactor_patrol_cfg" => enabled_cfg)
+      releases = []
+      classifier = Object.new
+      classifier.define_singleton_method(:release_claim!) do |occurrence_id, **arguments|
+        releases << [ occurrence_id, arguments ]
+      end
+      active = scheduler(
+        configured_entry, Hive::RefactorPatrol::JobStore.new(dir),
+        classifier_factory: ->(*) { classifier }
+      )
+      dispatch = {
+        entry: configured_entry,
+        dispatch_token: {
+          phase: :classification, classification_occurrence_id: "occurrence-1",
+          reservation_id: "reservation-1"
+        }
+      }
+
+      assert_same dispatch, active.cancel(dispatch, reason: "shutdown", now: T0)
+      assert_equal "occurrence-1", releases.fetch(0).fetch(0)
+
+      aggregate = {
+        "source" => { "number" => 7, "url" => "https://example.test/7" },
+        "dispositions" => { "fix" => [], "discuss" => [], "dismiss" => [] },
+        "actions" => [
+          { "canonical_action_id" => "done", "terminal" => true, "outcome" => "complete" },
+          { "canonical_action_id" => "pending", "terminal" => false, "outcome" => nil }
+        ]
+      }
+      summary = active.send(
+        :completion_result, :action_pending, { job_id: "job-1" }, {}, aggregate: aggregate
+      )
+      assert_equal 1, summary.fetch(:terminal_action_count)
+      assert_equal [ "pending" ], summary.fetch(:pending_action_ids)
+      assert_equal({ "done" => "complete" }, summary.fetch(:action_outcomes))
+      assert_equal Time.at(0).utc, active.send(:parse_time, "not-a-time")
+    end
+  end
+
+  def test_candidate_scan_contains_store_failure_and_supports_a_plain_ownership_resolver
     with_project do |_dir, entry, store|
       enqueue(store)
-      predecessor = store.occurrence_capture("job-7")
-      scheduler = scheduler(entry, store)
-
-      with_constant(
-        Hive::Modules::Migration::PatrolEvidence,
-        :MAX_EFFECTS_PER_OCCURRENCE,
-        15
-      ) do
-        candidates = scheduler.candidates(now: T0)
-
-        assert_equal [ "job-7" ],
-                     candidates.map { |item| item.fetch(:job_id) }
-        assert_equal :discovery,
-                     candidates.fetch(0).fetch(:action_phase)
-        refute_equal predecessor.occurrence_id,
-                     store.read_job("job-7").fetch("occurrence_id")
-        assert store.occurrence_terminalized?(predecessor)
-        event = scheduler.drain_events.fetch(0)
-        assert_equal 14, event.dig(:evidence, "reserved_effects")
-      end
-    end
-  end
-
-  def test_saturated_occurrence_rolls_over_a_provably_inactive_claim
-    with_project do |_dir, entry, store|
-      enqueue(store)
-      predecessor = store.occurrence_capture("job-7")
-      expired = store.claim_discovery!(
-        "job-7",
-        owner: "daemon-crashed",
-        analysis_sha: "head",
-        now: T0,
-        lease_sec: 7200,
-        owner_pid: 4242,
-        owner_process_start_time: "boot-dead"
-      )
-      scheduler = scheduler(entry, store)
-
-      with_constant(
-        Hive::Modules::Migration::PatrolEvidence,
-        :MAX_EFFECTS_PER_OCCURRENCE,
-        15
-      ) do
-        candidates = scheduler.candidates(now: T0 + 120)
-
-        assert_equal [ "job-7" ],
-                     candidates.map { |item| item.fetch(:job_id) }
-        recovered = store.read_job("job-7")
-        refute_equal predecessor.occurrence_id,
-                     recovered.fetch("occurrence_id")
-        assert_equal "superseded",
-                     recovered.fetch("attempts").last.fetch("state")
-        assert_equal "effect_capacity_rollover",
-                     recovered.fetch("attempts").last.fetch("outcome")
-        assert store.occurrence_terminalized?(predecessor)
-        dispatch = scheduler.reserve(
-          candidates.fetch(0), now: T0 + 120
+      ownership = lambda do |**|
+        Hive::RefactorPatrol::RepositoryOwnership::Decision.new(
+          authority: :full, reason: "unique_owner", evidence: []
         )
-        assert_equal expired.fetch(:generation) + 1,
-                     dispatch.dig(:dispatch_token, :generation)
       end
+      active = scheduler(entry, store, repository_ownership: ownership)
+      assert_equal [ "job-7" ], active.candidates(now: T0).map { |row| row.fetch(:job_id) }
+
+      broken = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(*) { enabled_cfg },
+        job_store_factory: ->(*) { raise "store unavailable" },
+        repository_ownership: ownership
+      )
+      assert_empty broken.candidates(now: T0)
+      assert_includes broken.drain_events.map { |event| event.fetch(:reason) },
+                      "recovery_state_unavailable"
     end
   end
 
-  def test_saturated_occurrence_denies_an_abandoned_prepared_effect_before_rollover
-    with_project do |_dir, entry, store|
-      enqueue(store)
-      predecessor = store.occurrence_capture("job-7")
-      expired = store.claim_discovery!(
-        "job-7",
-        owner: "daemon-crashed",
-        analysis_sha: "head",
-        now: T0,
-        lease_sec: 60,
-        owner_pid: 4242,
-        owner_process_start_time: "boot-dead"
-      )
-      intent = Hive::Modules::Migration::EffectIntent.build(
-        module_name: "architecture-patrol",
-        occurrence_id: predecessor.occurrence_id,
-        authority: predecessor.owner,
-        owner_epoch: predecessor.owner_epoch,
-        sink: "discovery",
-        target: "job-7:checkpoint-progress",
-        idempotency_key: "job-7:abandoned-progress",
-        capability: "filesystem_write",
-        claim_generation: expired.fetch(:generation),
-        scope: { "job_id" => "job-7" },
-        created_at: T0 + 1
-      )
-      store.prepare_effect!(intent, now: T0 + 1)
-      scheduler = scheduler(entry, store)
-
-      with_constant(
-        Hive::Modules::Migration::PatrolEvidence,
-        :MAX_EFFECTS_PER_OCCURRENCE,
-        16
+  def test_default_classifier_provider_and_batch_recovery_boundaries
+    with_tmp_dir do |dir|
+      configured_entry = entry(dir, "demo").merge("_refactor_patrol_cfg" => enabled_cfg)
+      active = scheduler(configured_entry, Hive::RefactorPatrol::JobStore.new(dir))
+      classifier = active.send(:classifier_for, configured_entry)
+      runner = Object.new
+      runner.define_singleton_method(:call) { |prompt| { "prompt" => prompt } }
+      result = with_replaced_singleton_method(
+        Hive::RefactorPatrol::MergeClassifierRunner, :new, ->(**) { runner }
       ) do
-        candidates = scheduler.candidates(now: T0 + 120)
-
-        assert_equal [ "job-7" ],
-                     candidates.map { |item| item.fetch(:job_id) }
-        assert store.occurrence_terminalized?(predecessor)
+        classifier.instance_variable_get(:@decision_provider).call("classify")
       end
+      assert_equal "classify", result.fetch("prompt")
+
+      batches = Object.new
+      batches.define_singleton_method(:pending) do |**|
+        [ { "batch_id" => "ok" }, { "batch_id" => "broken" } ]
+      end
+      active.define_singleton_method(:post_merge_batch_store_for) { |_| batches }
+      active.define_singleton_method(:materialize_batch_record) do |_entry, _store, batch, _now|
+        raise "cannot materialize" if batch.fetch("batch_id") == "broken"
+        true
+      end
+      active.send(:recover_post_merge_batches, configured_entry, Object.new, T0)
+      event = active.drain_events.fetch(0)
+      assert_equal "post_merge_batch_recovery_failed", event.fetch(:reason)
+      assert_equal "broken", event.fetch(:batch_id)
     end
   end
 
-  def test_saturated_occurrence_does_not_roll_over_an_unresolved_claim
-    with_project do |_dir, entry, store|
-      enqueue(store)
-      predecessor = store.occurrence_capture("job-7")
-      store.claim_discovery!(
-        "job-7",
-        owner: "daemon-live",
-        analysis_sha: "head",
-        now: T0,
-        lease_sec: 60,
-        owner_pid: 4242,
-        owner_process_start_time: "boot-live"
-      )
-      scheduler = scheduler(
-        entry, store,
-        claim_liveness_resolver: ->(_claim) { :unresolved }
+  def test_batch_materialization_uses_live_config_and_injected_resolver
+    with_tmp_dir do |dir|
+      raw_entry = entry(dir, "demo")
+      resolver_calls = []
+      resolver = Object.new
+      resolver.define_singleton_method(:materialize_batch) { |*| raise "stop after resolution" }
+      active = scheduler(
+        raw_entry, Hive::RefactorPatrol::JobStore.new(dir),
+        manifest_resolver_factory: lambda do |candidate, cfg|
+          resolver_calls << [ candidate, cfg ]
+          resolver
+        end,
+        classifier_factory: ->(*) { Object.new }
       )
 
-      with_constant(
-        Hive::Modules::Migration::PatrolEvidence,
-        :MAX_EFFECTS_PER_OCCURRENCE,
-        15
-      ) do
-        candidates = scheduler.candidates(now: T0 + 120)
-
-        assert_equal [ "job-7" ],
-                     candidates.map { |item| item.fetch(:job_id) }
-        assert_equal predecessor.occurrence_id,
-                     store.read_job("job-7").fetch("occurrence_id")
-        assert_empty scheduler.drain_events
+      assert_raises(RuntimeError) do
+        active.send(:materialize_batch_record, raw_entry, Object.new, { "members" => [] }, T0)
       end
+      assert_equal "main", resolver_calls.fetch(0).fetch(1).fetch("default_branch")
     end
   end
 
-  def test_rollover_claim_probe_fails_closed_for_errors_actions_and_invalid_times
-    with_project do |_dir, entry, store|
-      instance = scheduler(
-        entry, store,
-        claim_liveness_resolver: ->(_claim) { raise "probe failed" }
-      )
-      expired = {
-        "attempts" => [ {
-          "kind" => Hive::RefactorPatrol::JobStore::DISCOVERY_ATTEMPT_KIND,
-          "occurrence_id" => "occ-7", "state" => "claimed",
-          "expires_at" => (T0 - 1).iso8601
-        } ],
-        "actions" => []
+  def test_post_merge_reservation_revalidates_and_contains_recovery_failures
+    with_tmp_dir do |dir|
+      configured_entry = entry(dir, "demo").merge("_refactor_patrol_cfg" => enabled_cfg)
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      record = {
+        "occurrence_id" => "occurrence-1", "status" => "feature",
+        "decision" => "feature", "materialization" => nil,
+        "snapshot" => classification_snapshot
       }
-      assert instance.send(
-        :blocking_claim_for_occurrence?, expired, "occ-7", now: T0
-      )
-
-      action = {
-        "attempts" => [],
-        "actions" => [ { "claims" => [ {
-          "occurrence_id" => "occ-7", "state" => "running"
-        } ] } ]
-      }
-      assert instance.send(
-        :blocking_claim_for_occurrence?, action, "occ-7", now: T0
-      )
-
-      invalid = Marshal.load(Marshal.dump(expired))
-      invalid.fetch("attempts").first["expires_at"] = "not-a-time"
-      assert instance.send(
-        :blocking_claim_for_occurrence?, invalid, "occ-7", now: T0
-      )
-      assert instance.send(
-        :blocking_claim_for_occurrence?, {}, "occ-7", now: T0
-      )
-    end
-  end
-
-
-  def test_dry_run_capacity_check_never_resolves_or_terminates_a_claim
-    with_project do |_dir, entry, store|
-      enqueue(store)
-      predecessor = store.occurrence_capture("job-7")
-      store.claim_discovery!(
-        "job-7", owner: "daemon-live", analysis_sha: "head",
-        now: T0, lease_sec: 60, owner_pid: Process.pid,
-        owner_process_start_time: Hive::Lock.process_start_time(Process.pid)
-      )
-      scheduler = scheduler(
-        entry, store, dry_run: true,
-        claim_liveness_resolver: ->(_claim) { raise "must not inspect" }
-      )
-
-      with_constant(
-        Hive::Modules::Migration::PatrolEvidence,
-        :MAX_EFFECTS_PER_OCCURRENCE,
-        15
-      ) do
-        candidates = scheduler.candidates(now: T0 + 120)
-
-        assert_equal [ "job-7" ],
-                     candidates.map { |item| item.fetch(:job_id) }
-        assert_equal predecessor.occurrence_id,
-                     store.read_job("job-7").fetch("occurrence_id")
+      candidate = { classification_occurrence_id: "occurrence-1" }
+      classifier = Object.new
+      current = record
+      classifier.define_singleton_method(:fetch_occurrence) { |_| current }
+      mapper = Object.new
+      mapper.define_singleton_method(:call) do |paths:, analysis_sha:, **|
+        Hive::RefactorPatrol::PostMergeSliceMapper::Mapping.new(
+          analysis_sha: analysis_sha,
+          path_mappings: paths.map { |path| { "path" => path, "slice_ids" => [ "slice" ] } }
+        )
       end
-    end
-  end
+      active = scheduler(
+        configured_entry, store, classifier_factory: ->(*) { classifier },
+        post_merge_slice_mapper: mapper,
+        checkout_guard_factory: ->(*) { Guard.new(sha: "c" * 40) }
+      )
+      active.define_singleton_method(:post_merge_candidates) { |*| [ record ] }
 
-  def test_rollover_rechecks_migration_ownership_inside_the_shared_fence
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      predecessor = store.occurrence_capture("action-job")
-      ownership_checks = 0
-      scheduler = scheduler(entry, store)
-      scheduler.instance_variable_set(
-        :@migration_ownership,
+      current = nil
+      changed = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        active.send(:reserve_post_merge, candidate, configured_entry, enabled_cfg, T0)
+      end
+      assert_equal "post_merge_classification_changed", changed.reason
+
+      fetches = 0
+      classifier.define_singleton_method(:fetch_occurrence) do |_|
+        fetches += 1
+        fetches == 1 ? record : nil
+      end
+      stale_freshness = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        active.send(:reserve_post_merge, candidate, configured_entry, enabled_cfg, T0)
+      end
+      assert_equal "post_merge_classification_changed", stale_freshness.reason
+
+      current = record
+      classifier.define_singleton_method(:fetch_occurrence) { |_| current }
+      batch_store = Object.new
+      batch_store.define_singleton_method(:claim!) do |**|
+        raise Hive::RefactorPatrol::PostMergeBatchStore::Conflict, "claimed"
+      end
+      batch_store.define_singleton_method(:batches_for_occurrence) { |_| [] }
+      active.define_singleton_method(:post_merge_batch_store_for) { |_| batch_store }
+      missing = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        active.send(:reserve_post_merge, candidate, configured_entry, enabled_cfg, T0)
+      end
+      assert_equal "post_merge_batch_claim_changed", missing.reason
+
+      batch = { "status" => "claimed", "analysis_sha" => "c" * 40 }
+      batch_store.define_singleton_method(:batches_for_occurrence) { |_| [ batch ] }
+      aggregate = {
+        "job_id" => "job-1",
+        "source" => { "number" => 7, "url" => "https://github.com/acme/demo/pull/7" }
+      }
+      active.define_singleton_method(:materialize_batch_record) do |*|
+        { aggregate: aggregate }
+      end
+      active.define_singleton_method(:reserve) { |*args, **kwargs| :recovered }
+      assert_equal :recovered,
+                   active.send(:reserve_post_merge, candidate, configured_entry, enabled_cfg, T0)
+
+      active.instance_variable_set(
+        :@checkout_guard_factory,
         lambda do |*|
-          ownership_checks += 1
-          ownership_checks == 1
+          Object.new.tap do |guard|
+            guard.define_singleton_method(:validate_and_snapshot!) do |merge_sha:, **|
+              raise Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk.new(
+                merge_sha: merge_sha, trunk_sha: "f" * 40
+              )
+            end
+          end
         end
       )
-
-      with_constant(
-        Hive::Modules::Migration::PatrolEvidence,
-        :MAX_EFFECTS_PER_OCCURRENCE,
-        2
-      ) do
-        assert_empty scheduler.candidates(now: T0)
-
-        assert_equal predecessor.occurrence_id,
-                     store.read_job("action-job").fetch("occurrence_id")
-        event = scheduler.drain_events.fetch(0)
-        assert_equal "effect_capacity_rollover_failed",
-                     event.fetch(:reason)
-        assert_match(/migration ownership changed/,
-                     event.dig(:evidence, "error"))
+      stale = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        active.send(:reserve_post_merge, candidate, configured_entry, enabled_cfg, T0)
       end
+      assert_equal "source_no_longer_on_trunk", stale.reason
+
+      active.instance_variable_set(
+        :@checkout_guard_factory, ->(*) { raise Hive::GitError, "offline" }
+      )
+      failed = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        active.send(:reserve_post_merge, candidate, configured_entry, enabled_cfg, T0)
+      end
+      assert_equal "post_merge_batch_materialization_failed", failed.reason
     end
   end
 
-  def test_full_effect_capacity_rolls_without_a_257th_effect
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      occurrence = store.occurrence_for_job("action-job")
-      intent = Hive::Modules::Migration::EffectIntent.build(
-        module_name: "architecture-patrol",
-        occurrence_id: occurrence.fetch("occurrence_id"),
-        authority: "legacy",
-        owner_epoch: 1,
-        sink: "job",
-        target: "action-job",
-        idempotency_key: "action-job:capacity-test",
-        capability: "filesystem_write",
-        claim_generation: 1,
-        scope: { "job_id" => "action-job" },
-        created_at: T0 + 1
+  def test_discovery_retirement_transition_failure_is_contained
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      active = scheduler(
+        entry, store,
+        checkout_guard_factory: lambda do |*|
+          Object.new.tap do |guard|
+            guard.define_singleton_method(:validate_and_snapshot!) do |merge_sha:, **|
+              raise Hive::RefactorPatrol::CheckoutGuard::SourceNoLongerOnTrunk.new(
+                merge_sha: merge_sha, trunk_sha: "f" * 40
+              )
+            end
+          end
+        end
       )
-      store.prepare_effect!(intent, now: T0 + 1)
-      store.mark_dispatch_uncertain!(intent, now: T0 + 1)
-      store.settle_effect!(
-        intent,
-        status: "committed",
-        outcome: { "transition_status" => "applied" },
-        now: T0 + 1
-      )
+      transitions = Object.new
+      transitions.define_singleton_method(:retire) { |**| :retry }
+      transitions.define_singleton_method(:block) { |**| true }
+      active.instance_variable_set(:@discovery_transitions, transitions)
 
-      with_constant(
-        Hive::Modules::Migration::PatrolEvidence,
-        :MAX_EFFECTS_PER_OCCURRENCE,
-        2
-      ) do
-        scheduler = scheduler(entry, store)
-
-        candidates = scheduler.candidates(now: T0 + 2)
-        assert_equal [ "action-job" ],
-                     candidates.map { |item| item.fetch(:job_id) }
-        event = scheduler.drain_events.fetch(0)
-        assert_equal :recovered, event.fetch(:status)
-        assert_equal "effect_capacity_rolled_over", event.fetch(:reason)
-        assert_equal 2, event.dig(:evidence, "effect_count")
-        assert_empty store.occurrence_for_job(
-          "action-job"
-        ).fetch("effects")
+      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        active.reserve(active.candidates(now: T0).fetch(0), now: T0)
       end
-    end
-  end
-
-  def test_recovery_finishes_a_successor_reserved_before_pointer_advance
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      scheduler = scheduler(entry, store)
-      lifecycle = scheduler.instance_variable_get(
-        :@occurrence_lifecycle
-      )
-      predecessor = store.occurrence_capture("action-job")
-      successor = lifecycle.send(
-        :successor_capture, predecessor, now: T0 + 1
-      )
-      store.reserve_successor_occurrence!(
-        "action-job",
-        predecessor: predecessor,
-        capture: successor,
-        now: T0 + 1
-      )
-
-      assert_equal predecessor.occurrence_id,
-                   store.read_job("action-job").fetch("occurrence_id")
-      candidates = scheduler.candidates(now: T0 + 2)
-
-      assert_equal successor.occurrence_id,
-                   store.read_job("action-job").fetch("occurrence_id")
-      assert store.occurrence_terminalized?(predecessor)
-      assert_equal [ "action-job" ],
-                   candidates.map { |item| item.fetch(:job_id) }
-    end
-  end
-
-  def test_valid_complete_action_envelope_reports_closed_and_store_errors_retry
-    with_project do |dir, entry, store|
-      write_action_job(dir, store)
-      aggregate = store.read_job("action-job").merge("complete" => true, "state" => "complete")
-      fake_store = Object.new
-      fake_store.define_singleton_method(:read_job) { |_job_id| aggregate }
-      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
-        job_store_factory: ->(_path) { fake_store },
-        repository_resolver: ->(_entry, _cfg) { repository_identity }
-      )
-      token = { registration: "demo", job_id: "action-job", phase: :action }
-      envelope = action_envelope(entry, aggregate)
-
-      assert_equal :closed, scheduler.complete(
-        dispatch_token: token, exit_code: 0, envelope: envelope, now: T0
-      ).fetch(:status)
-
-      fake_store.define_singleton_method(:block_actions!) do |*|
-        raise Hive::RefactorPatrol::JobStore::CorruptRecord, "cannot persist block"
-      end
-      assert_equal :retry, scheduler.complete(
-        dispatch_token: token, exit_code: 0, envelope: {}, now: T0
-      ).fetch(:status)
+      assert_equal "checkout_guard", error.reason
     end
   end
 
@@ -2412,12 +1429,14 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   end
 
   def scheduler(entry, store, claim_resolver: ->(_attempt) { :resolved },
-                claim_liveness_resolver: claim_resolver, **options)
+                cfg: enabled_cfg,
+                claim_liveness_resolver: claim_resolver,
+                checkout_guard_factory: ->(*) { Guard.new }, **options)
     Hive::Daemon::RefactorPatrolScheduler.new(
-      registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
+      registry: -> { [ entry ] }, config_loader: ->(_path) { cfg },
       job_store_factory: ->(_path) { store },
       repository_resolver: ->(_entry, _cfg) { repository_identity },
-      checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a",
+      checkout_guard_factory: checkout_guard_factory, owner: "daemon-a",
       claim_resolver: claim_resolver,
       claim_liveness_resolver: claim_liveness_resolver,
       **options
@@ -2446,6 +1465,22 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     { "repository" => repository, "host" => host }
   end
 
+  def classification_snapshot(number: 7, paths: [ "lib/feature.rb" ], merged_at: T0)
+    {
+      "repository" => "acme/demo", "number" => number,
+      "url" => "https://github.com/acme/demo/pull/#{number}",
+      "base_branch" => "main", "base_sha" => "a" * 40,
+      "merge_sha" => format("%040x", number), "merged_at" => merged_at.iso8601,
+      "target_head" => "c" * 40, "title" => "Add feature", "body" => "Capability",
+      "labels" => [ "feature" ], "author" => "dev",
+      "changed_paths" => paths,
+      "files" => paths.map do |path|
+        { "path" => path, "status" => "modified", "patch" => "@@ -1 +1 @@" }
+      end,
+      "publication_provenance" => { "kind" => "none", "marker" => nil }
+    }
+  end
+
   def enqueue(store, job_id: "job-7", number: 7, merged_at: T0, registration: "demo")
     manifest = manifest(job_id: job_id, number: number, merged_at: merged_at, registration: registration)
     publish_manifest(store, manifest)
@@ -2457,105 +1492,14 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   end
 
   def enqueue_manifest(store, value, **options)
-    capture = Hive::RefactorPatrol::TransitionGateway.capture_for_manifest(
+    Hive::RefactorPatrol::ArchitectureIntakeTransitions.new.enqueue(
+      entry: nil,
+      store: store,
       manifest: value,
-      project_id: "demo-id",
-      owner: "legacy",
-      owner_epoch: 1,
-      recorded_at: options.fetch(:now)
+      policy: options.fetch(:policy),
+      now: options.fetch(:now),
+      dry_run: options.fetch(:dry_run, false)
     )
-    store.reserve_manifest_occurrence!(
-      value, capture: capture, now: options.fetch(:now)
-    )
-    intent = Hive::Modules::Migration::EffectIntent.build(
-      module_name: "architecture-patrol",
-      occurrence_id: capture.occurrence_id,
-      authority: capture.owner,
-      owner_epoch: capture.owner_epoch,
-      sink: "job",
-      target: value.fetch("job_id"),
-      idempotency_key: [
-        value.fetch("job_id"),
-        "enqueue",
-        value.fetch("manifest_checksum")
-      ].join(":"),
-      capability: "filesystem_write",
-      claim_generation: capture.owner_epoch,
-      scope: { "job_id" => value.fetch("job_id") },
-      created_at: capture.recorded_at
-    )
-    store.prepare_effect!(intent, now: options.fetch(:now))
-    store.mark_dispatch_uncertain!(intent, now: options.fetch(:now))
-    store.settle_effect!(
-      intent,
-      status: "committed",
-      outcome: { "transition_status" => "applied" },
-      now: options.fetch(:now)
-    )
-    store.enqueue_manifest!(
-      value,
-      occurrence_id: capture.occurrence_id,
-      intake_transition_id: intent.intent_id,
-      **options
-    )
-  end
-
-  def install_recovery_protocol(store)
-    generation = 0
-    failure = nil
-    store.define_singleton_method(:recovery_backoff) do |now:|
-      {
-        "generation" => generation,
-        "failure" => failure,
-        "blocked" =>
-          failure &&
-          now < Time.iso8601(failure.fetch("next_eligible_at"))
-      }
-    end
-    store.define_singleton_method(
-      :record_recovery_failure!
-    ) do |operation:, occurrence_id: nil, job_id: nil, error:, now:|
-      same = failure &&
-             failure.fetch("operation") == operation &&
-             failure["occurrence_id"] == occurrence_id &&
-             failure["job_id"] == job_id
-      count = same ? failure.fetch("failure_count") + 1 : 1
-      interval = [ 60, 300, 900 ][[ count - 1, 2 ].min]
-      generation += 1
-      diagnostic =
-        Hive::Modules::Migration::OccurrenceJournalState
-        .normalize_error(error)
-      failure = {
-        "generation" => generation,
-        "operation" => operation,
-        "occurrence_id" => occurrence_id,
-        "job_id" => job_id,
-        "failure_count" => count,
-        "next_eligible_at" => (now + interval).iso8601(6),
-        "error_class" => diagnostic.fetch("error_class"),
-        "error_message" => diagnostic.fetch("error_message")
-      }
-    end
-    store.define_singleton_method(
-      :clear_recovery_failure!
-    ) do |expected_generation:|
-      next false unless expected_generation == generation
-
-      failure = nil
-      true
-    end
-    store
-  end
-
-  def with_constant(owner, name, replacement)
-    original = owner.const_get(name)
-    owner.send(:remove_const, name)
-    owner.const_set(name, replacement)
-    yield
-  ensure
-    owner.send(:remove_const, name) if
-      owner.const_defined?(name, false)
-    owner.const_set(name, original)
   end
 
   def manifest(job_id:, number:, merged_at:, registration:)
@@ -2596,62 +1540,5 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       ],
       "zero_reason" => "no_theses", "attempts" => [], "actions" => []
     }
-  end
-
-  def action_envelope(entry, aggregate)
-    {
-      "schema" => "hive-refactor-patrol", "schema_version" => 4, "ok" => true,
-      "job_id" => aggregate.fetch("job_id"), "project" => entry.fetch("name"),
-      "project_root" => entry.fetch("path"), "dry_run" => false,
-      "source_pr" => aggregate.fetch("source"), "analysis_sha" => aggregate.fetch("analysis_sha"),
-      "complete" => aggregate.fetch("complete"), "features_mapped" => 0,
-      "fix" => [], "discuss" => [], "dismiss" => [], "review_errors" => [],
-      "feature_results" => [], "zero_reason" => nil, "attempts" => [], "actions" => []
-    }
-  end
-
-  def write_action_job(dir, store)
-    data = manifest(job_id: "action-job", number: 9, merged_at: T0, registration: "demo")
-    publish_manifest(store, data)
-    aggregate = enqueue_manifest(
-      store,
-      data,
-      policy: {
-        "discovery" => true,
-        "auto_fix" => true,
-        "issue_filing" => false
-      },
-      now: T0
-    )
-    snapshot = {
-      "id" => "fix", "feature_id" => "checkout", "feature" => "Checkout",
-      "problem" => "Scattered policy", "cost" => "Repeated edits",
-      "evidence" => [ { "file" => "lib/demo.rb", "claim" => "policy repeats" } ],
-      "proposed_refactor" => "Consolidate policy",
-      "feature_boundary" => { "owned_files" => [ "lib/demo.rb" ], "entrypoints" => [] },
-      "route" => "fix", "architecture_effects" => [ "one policy owner" ],
-      "confidence" => "high", "risk" => { "flags" => [] },
-      "required_validation" => { "commands" => [ "test" ] },
-      "admissible" => true, "admissibility_reason" => "anchored",
-      "follow_up_approval_state" => "pending", "fingerprint" => "fp-accepted"
-    }
-    store.write_job!(
-      aggregate.merge(
-        "analysis_sha" => "head",
-        "state" => "classified", "complete" => false,
-        "dispositions" => {
-          "fix" => [
-            {
-              "id" => "fix", "feature_id" => "checkout", "fingerprint" => "fp-accepted",
-              "route" => "fix", "admissible" => true, "reasons" => [], "thesis" => snapshot
-            }
-          ],
-          "discuss" => [], "dismiss" => []
-        },
-        "feature_results" => [], "review_errors" => [], "zero_reason" => nil,
-        "attempts" => [], "actions" => [],
-        "updated_at" => T0.iso8601
-      )
-    )
   end
 end

@@ -129,6 +129,14 @@ module Hive
 
       def do_call
         task = resolve_task
+        if task.workflow.controller?
+          require "hive/patrol_fix/stage_transition"
+          return Hive::PatrolFix::StageTransition.with_lock(task) { run_task(task) }
+        end
+        run_task(task)
+      end
+
+      def run_task(task)
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
           Hive::DependencySnapshot.enforce_admission!(task)
           Hive::Attempts::Context.current&.validate_generation!(task)
@@ -166,6 +174,7 @@ module Hive
             end
             raise
           end
+          task = task_after_patrol_fix_move(task, result)
           commit_after(
             task, result, config: cfg, terminal_snapshot: terminal_snapshot,
             completion_time: legacy_completed_at,
@@ -176,6 +185,20 @@ module Hive
           terminal_snapshot&.close
         end
       end
+
+      def task_after_patrol_fix_move(task, result)
+        return task unless task.workflow.controller?
+        destination = result.is_a?(Hash) && result[:moved_task_folder]
+        return task unless destination
+
+        moved = Hive::Task.new(destination, workflow_generation: task.workflow_generation)
+        unless moved.project_root == task.project_root && moved.slug == task.slug &&
+               moved.workflow.controller?
+          raise Hive::InvalidTaskPath, "Patrol Fix runner returned a foreign moved task"
+        end
+        moved
+      end
+      private :task_after_patrol_fix_move
 
       def resolve_task
         Hive::TaskResolver.new(

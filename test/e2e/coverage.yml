@@ -21,7 +21,7 @@ coverage:
     code: [test/e2e/scenarios/full_pipeline_happy_path.yml]
   - id: module.lifecycle_install
     title: Module installation lifecycle
-    description: Reviewed first-party modules activate project-locally and expose one shared redacted CLI and web status.
+    description: A reviewed module package activates project-locally and exposes one shared redacted CLI and web status.
     maturity: required
     profiles: [release]
     constraints: { platforms: [], providers: [] }

@@ -1,4 +1,5 @@
 require "fileutils"
+require "date"
 require "securerandom"
 require "time"
 require "hive/billing_evidence"
@@ -431,6 +432,56 @@ module Hive
     rescue StandardError => e
       warn "[hive] patrol usage aggregate failed: #{e.class}: #{e.message}"
       zero_patrol_activity(available: false)
+    end
+
+    # Upgrade-only seed for the discovery allowance ledger. Exact historical
+    # review stages are attributable; fix/action rows are deliberately ignored.
+    # Patrol-like rows that cannot be assigned to one discovery engine park the
+    # corresponding lane until the next UTC day rather than guessing capacity.
+    def patrol_discovery_seed(scope:, date:)
+      day = Date.iso8601(date.to_s)
+      since = Time.utc(day.year, day.month, day.day).iso8601
+      before = (Time.utc(day.year, day.month, day.day) + 86_400).iso8601
+      with_database(create: true) do |db|
+        ensure_schema!(db)
+        sql = +"SELECT stage, source FROM token_usage WHERE started_at >= ? AND started_at < ?"
+        binds = [ since, before ]
+        unless blank?(scope && scope[:project_slug])
+          sql << " AND project_slug = ?"
+          binds << scope[:project_slug].to_s
+        end
+        rows = db.execute(sql, binds)
+        result = {
+          available: true,
+          ordinary: { count: 0, ambiguous: 0 },
+          architecture: { count: 0, ambiguous: 0 }
+        }
+        rows.each do |stage, source|
+          next if source.to_s == "patrol_non_discovery_launch"
+
+          value = stage.to_s
+          case value
+          when /\Apatrol-review(?:-unmetered)?\z/
+            result.fetch(:ordinary)[:count] += 1
+          when /\Arefactor-patrol-review(?:-unmetered)?\z/
+            result.fetch(:architecture)[:count] += 1
+          when /\Apatrol-fix(?:-|\z)/, /\Arefactor-patrol-fix(?:-|\z)/
+            next
+          when /\Arefactor-patrol/
+            result.fetch(:architecture)[:ambiguous] += 1
+          when /\Apatrol/
+            result.fetch(:ordinary)[:ambiguous] += 1
+          end
+        end
+        result
+      end
+    rescue StandardError => e
+      warn "[hive] patrol discovery seed failed: #{e.class}: #{e.message}"
+      {
+        available: false,
+        ordinary: { count: 0, ambiguous: 0 },
+        architecture: { count: 0, ambiguous: 0 }
+      }
     end
 
     def ensure_schema!(db)

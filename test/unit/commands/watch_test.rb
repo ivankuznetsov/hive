@@ -469,12 +469,12 @@ class CommandsWatchTest < Minitest::Test
 
   def test_human_output_escapes_controls_and_epipe_exits_cleanly
     unsafe = task(
-      project: "a\e[2J", state: "waiting_on_you", owner: "operator",
-      reason: "choose\nnow"
+      project: "demo", state: "waiting_on_you", owner: "operator",
+      reason: "choose\e[2J\nnow"
     )
     output = StringIO.new
     build_watch(
-      source: FakeSource.new(snapshot(unsafe)), targets: [ "a\e[2J:task" ],
+      source: FakeSource.new(snapshot(unsafe)), targets: [ "demo:task" ],
       output: output, json_lines: false
     ).call
     assert_includes output.string, "\\x1B"
@@ -639,7 +639,6 @@ class CommandsWatchTest < Minitest::Test
       "action_id" => "workflow.advance", "risk_class" => "routine_idempotent",
       "confirmation_required" => true, "observation_token" => "drop"
     }
-
     events, = run_json_watch(source: FakeSource.new(snapshot(enriched)), targets: [ "demo:task" ])
     projected = events.first.fetch("targets").first
 
@@ -649,6 +648,23 @@ class CommandsWatchTest < Minitest::Test
       "action_id" => "workflow.advance", "risk_class" => "routine_idempotent",
       "confirmation_required" => true
     }, projected.fetch("action_policy"))
+  end
+
+  def test_skewed_patrol_fix_additions_do_not_enter_frozen_watch_events
+    enriched = task
+    enriched["patrol_fix"] = { "future_section" => [ Object.new ] }
+    source_snapshot = snapshot(enriched)
+    source_snapshot.full_graph.fetch("projects").first["patrol_fix"] = {
+      "project" => "demo", "future_section" => "unknown"
+    }
+
+    events, = run_json_watch(
+      source: FakeSource.new(source_snapshot), targets: [ "demo:task" ]
+    )
+
+    refute events.first.key?("patrol_fix_projects")
+    refute events.first.fetch("targets").first.key?("patrol_fix")
+    assert_watch_schema(events)
   end
 
   def test_default_signal_handlers_are_installed_for_the_bounded_call

@@ -386,6 +386,17 @@ enters the polite live region. Tables scroll inside named regions, identifiers
 wrap, and layout reflows to one column without removing decisive state or
 controls.
 
+## Patrol Fix observation
+
+The daemon-owned common Patrol Fix projection joins final task rows with
+discovery and admission observations. A task row may carry its bounded
+`patrol_fix` stage/decision/successor/publication overlay, while its project
+row carries the full validated `patrol_fix` operational document. Workspace,
+TUI, Watch, bot, and web consumers pass those observations through; they do not
+open ordinary or Architecture Patrol stores and do not gain a second mutation
+path. Operator changes continue through the generation-guarded
+`OperationalAction` boundary.
+
 ## Tests
 
 - `test/unit/task_workspace/` pins v1/v2 schemas, bounded readers, semantic

@@ -310,6 +310,9 @@
             "agent_running",
             "archived",
             "manual_steering",
+            "patrol_fix_rejected",
+            "patrol_fix_blocked",
+            "patrol_fix_escalated",
             "error",
             "admission_error"
           ]

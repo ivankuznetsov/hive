@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hive-patrol-fix-receipt.v1.json",
+  "title": "Hive Patrol Fix Receipt (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "receipt_id", "kind", "stage", "task", "evidence_revision", "recorded_at", "payload"],
+  "properties": {
+    "schema": {"const": "hive-patrol-fix-receipt"},
+    "schema_version": {"const": 1},
+    "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "kind": {"enum": ["decision", "fix", "validation", "publication", "reopen"]},
+    "stage": {"enum": ["inbox", "fix", "validate", "review", "publish"]},
+    "task": {"$ref": "#/$defs/task"},
+    "evidence_revision": {"$ref": "#/$defs/evidenceRevision"},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "payload": {"type": "object"}
+  },
+  "oneOf": [
+    {"$ref": "#/$defs/decisionReceipt"},
+    {"$ref": "#/$defs/fixReceipt"},
+    {"$ref": "#/$defs/validationReceipt"},
+    {"$ref": "#/$defs/publicationReceipt"},
+    {"$ref": "#/$defs/reopenReceipt"}
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}[a-z0-9]$"},
+    "task": {
+      "type": "object", "additionalProperties": false, "required": ["slug", "generation"],
+      "properties": {"slug": {"$ref": "#/$defs/slug"}, "generation": {"type": "integer", "minimum": 1}}
+    },
+    "evidenceRevision": {
+      "type": "object", "additionalProperties": false, "required": ["generation", "digest"],
+      "properties": {"generation": {"type": "integer", "minimum": 1}, "digest": {"$ref": "#/$defs/digest"}}
+    },
+    "decisionPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["route", "rationale", "evidence", "blocker_owner", "head_revision"],
+      "properties": {
+        "route": {"enum": ["fix", "publish", "rework", "escalate", "reject", "blocked"]},
+        "rationale": {"type": "string", "minLength": 1, "maxLength": 16384},
+        "evidence": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 16384}},
+        "blocker_owner": {"type": "string", "minLength": 1, "maxLength": 128},
+        "head_revision": {"$ref": "#/$defs/revision"}
+      }
+    },
+    "reviewDecisionPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["route", "rationale", "evidence", "blocker_owner", "head_revision", "diff_digest", "fix_receipt_id", "validation_receipt_id"],
+      "properties": {
+        "route": {"enum": ["publish", "rework", "escalate", "reject", "blocked"]},
+        "rationale": {"type": "string", "minLength": 1, "maxLength": 16384},
+        "evidence": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 16384}},
+        "blocker_owner": {"type": "string", "minLength": 1, "maxLength": 128},
+        "head_revision": {"$ref": "#/$defs/revision"},
+        "diff_digest": {"$ref": "#/$defs/digest"},
+        "fix_receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "validation_receipt_id": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "fixPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["worktree_generation", "worktree", "branch", "base_revision", "head_revision", "diff_digest", "validation_commands"],
+      "properties": {
+        "worktree_generation": {"type": "integer", "minimum": 1},
+        "worktree": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "branch": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "base_revision": {"$ref": "#/$defs/revision"},
+        "head_revision": {"$ref": "#/$defs/revision"},
+        "diff_digest": {"$ref": "#/$defs/digest"},
+        "validation_commands": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/selectedCommand"}}
+      }
+    },
+    "selectedCommand": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity", "command", "provenance"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1, "maxLength": 128},
+        "command": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "provenance": {"const": "agent"}
+      }
+    },
+    "command": {
+      "type": "object", "additionalProperties": false, "required": ["identity", "provenance", "command_digest", "started_at", "finished_at", "duration_ms", "exit_status", "timed_out", "output_truncated", "stdout", "stderr", "result_digest"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "provenance": {"enum": ["controller", "agent"]},
+        "command_digest": {"$ref": "#/$defs/digest"},
+        "started_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": "string", "format": "date-time"},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "exit_status": {"type": "integer", "minimum": 0},
+        "timed_out": {"type": "boolean"},
+        "output_truncated": {"type": "boolean"},
+        "stdout": {"type": "string", "maxLength": 4000},
+        "stderr": {"type": "string", "maxLength": 4000},
+        "result_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "validationPayload": {
+      "type": "object", "additionalProperties": false, "required": ["verdict", "worktree_head", "commands"],
+      "properties": {
+        "verdict": {"enum": ["passed", "failed", "blocked"]},
+        "worktree_head": {"$ref": "#/$defs/revision"},
+        "commands": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/command"}}
+      }
+    },
+    "publicationPayload": {
+      "type": "object", "additionalProperties": false, "required": ["id", "publication_id", "number", "url", "host", "repository", "base_branch", "creation_base_revision", "branch", "head_revision", "diff_digest", "title_digest", "body_digest", "marker_digest", "state", "observed_at"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^github:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$", "maxLength": 272},
+        "publication_id": {"type": "string", "pattern": "^pub-[0-9a-f]{32}$"},
+        "number": {"type": "integer", "minimum": 1},
+        "url": {"type": "string", "format": "uri", "minLength": 1, "maxLength": 4096},
+        "host": {"type": "string", "minLength": 1, "maxLength": 253},
+        "repository": {"type": "string", "minLength": 3, "maxLength": 255},
+        "base_branch": {"type": "string", "minLength": 1, "maxLength": 241},
+        "creation_base_revision": {"$ref": "#/$defs/revision"},
+        "branch": {"type": "string", "minLength": 1, "maxLength": 241},
+        "head_revision": {"$ref": "#/$defs/revision"},
+        "diff_digest": {"$ref": "#/$defs/digest"},
+        "title_digest": {"$ref": "#/$defs/digest"},
+        "body_digest": {"$ref": "#/$defs/digest"},
+        "marker_digest": {"$ref": "#/$defs/digest"},
+        "state": {"enum": ["open", "draft", "closed", "merged"]},
+        "observed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "reopenPayload": {
+      "type": "object", "additionalProperties": false, "required": ["outcome_receipt_id", "operator", "carried_receipts"],
+      "properties": {
+        "outcome_receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "operator": {"type": "string", "minLength": 1, "maxLength": 256},
+        "carried_receipts": {"type": "array", "maxItems": 2, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 128}}
+      }
+    },
+    "decisionReceipt": {
+      "properties": {"kind": {"const": "decision"}},
+      "oneOf": [
+        {
+          "properties": {
+            "stage": {"const": "inbox"},
+            "payload": {
+              "allOf": [
+                {"$ref": "#/$defs/decisionPayload"},
+                {"properties": {"route": {"enum": ["fix", "escalate", "reject", "blocked"]}}}
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "stage": {"const": "review"},
+            "payload": {
+              "allOf": [
+                {"$ref": "#/$defs/reviewDecisionPayload"},
+                {"properties": {"route": {"enum": ["publish", "rework", "escalate", "reject", "blocked"]}}}
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "fixReceipt": {"properties": {"kind": {"const": "fix"}, "stage": {"const": "fix"}, "payload": {"$ref": "#/$defs/fixPayload"}}},
+    "validationReceipt": {"properties": {"kind": {"const": "validation"}, "stage": {"const": "validate"}, "payload": {"$ref": "#/$defs/validationPayload"}}},
+    "publicationReceipt": {"properties": {"kind": {"const": "publication"}, "stage": {"const": "publish"}, "payload": {"$ref": "#/$defs/publicationPayload"}}},
+    "reopenReceipt": {"properties": {"kind": {"const": "reopen"}, "stage": {"enum": ["inbox", "review"]}, "payload": {"$ref": "#/$defs/reopenPayload"}}}
+  }
+}

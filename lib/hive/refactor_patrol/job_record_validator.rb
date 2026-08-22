@@ -273,9 +273,135 @@ module Hive
           inconsistent!("source number must be a positive integer", path)
         end
         string_array!(source["changed_paths"], "source changed_paths", path) if source.key?("changed_paths")
+        if source.key?("changed_paths")
+          paths = source.fetch("changed_paths")
+          unless paths.size <= 10_000 && paths.uniq == paths &&
+                 paths.all? { |item| PrManifest.valid_relative_path?(item) && item.bytesize <= 4_096 }
+            inconsistent!("source changed_paths is invalid", path)
+          end
+        end
         timestamp!(source["merged_at"], "source merged_at", path) if source.key?("merged_at")
         if source.key?("manifest_checksum")
-          nonempty_string!(source["manifest_checksum"], "source manifest_checksum", path)
+          digest!(source["manifest_checksum"], "source manifest_checksum", path)
+        end
+        if source.key?("lane") || source.key?("classification") || source.key?("provenance")
+          validate_post_merge_source!(source, path)
+        end
+      end
+
+      def validate_post_merge_source!(source, path)
+        unless source["lane"] == "post_merge" &&
+               %w[lane classification provenance].all? { |key| source.key?(key) }
+          inconsistent!("source post-merge authority is incomplete", path)
+        end
+        classification = strict_hash!(
+          source.fetch("classification"),
+          required: PrManifest::CLASSIFICATION_KEYS,
+          allowed: PrManifest::CLASSIFICATION_KEYS,
+          label: "source classification", path: path
+        )
+        unless classification.fetch("decision") == "feature" &&
+               classification.fetch("attempts").is_a?(Integer) &&
+               classification.fetch("attempts").between?(0, 10)
+          inconsistent!("source classification decision is invalid", path)
+        end
+        %w[occurrence_id snapshot_digest changed_paths_digest].each do |key|
+          digest!(classification.fetch(key), "source classification #{key}", path)
+        end
+        %w[reason rationale model_receipt].each do |key|
+          bounded_string!(classification.fetch(key), "source classification #{key}", path)
+        end
+        evidence = classification.fetch("evidence")
+        unless evidence.is_a?(Array) && evidence.size <= 16
+          inconsistent!("source classification evidence is invalid", path)
+        end
+        evidence.each { |item| bounded_string!(item, "source classification evidence", path) }
+        timestamp!(classification.fetch("classified_at"), "source classification classified_at", path)
+        prefilter = strict_hash!(
+          classification.fetch("prefilter"),
+          required: PrManifest::PREFILTER_KEYS, allowed: PrManifest::PREFILTER_KEYS,
+          label: "source classification prefilter", path: path
+        )
+        unless prefilter.fetch("decision") == "ambiguous"
+          inconsistent!("source classification prefilter is invalid", path)
+        end
+        bounded_string!(prefilter.fetch("reason"), "source classification prefilter reason", path)
+        prefilter_evidence = prefilter.fetch("evidence")
+        unless prefilter_evidence.is_a?(Array) && prefilter_evidence.size <= 16
+          inconsistent!("source classification prefilter evidence is invalid", path)
+        end
+        prefilter_evidence.each do |item|
+          bounded_string!(item, "source classification prefilter evidence", path)
+        end
+
+        provenance = strict_hash!(
+          source.fetch("provenance"), required: PrManifest::PROVENANCE_KEYS,
+          allowed: PrManifest::PROVENANCE_KEYS, label: "source provenance", path: path
+        )
+        merges = provenance.fetch("merges")
+        unless merges.is_a?(Array) && merges.size.between?(1, 8)
+          inconsistent!("source provenance merges are invalid", path)
+        end
+        total_paths = 0
+        merges.each do |merge|
+          strict_hash!(
+            merge, required: PrManifest::MERGE_PROVENANCE_KEYS,
+            allowed: PrManifest::MERGE_PROVENANCE_KEYS,
+            label: "source merge provenance", path: path
+          )
+          bounded_string!(merge.fetch("repository"), "source merge repository", path)
+          unless merge.fetch("number").is_a?(Integer) && merge.fetch("number").positive? &&
+                 merge.fetch("merge_sha").to_s.match?(/\A[0-9a-f]{40,64}\z/)
+            inconsistent!("source merge identity is invalid", path)
+          end
+          timestamp!(merge.fetch("merged_at"), "source merge merged_at", path)
+          digest!(
+            merge.fetch("classification_occurrence_id"),
+            "source merge classification occurrence", path
+          )
+          mappings = merge.fetch("path_mappings")
+          unless mappings.is_a?(Array) &&
+                 mappings.map { |mapping| mapping.is_a?(Hash) && mapping["path"] }.uniq.size == mappings.size
+            inconsistent!("source merge path mappings are invalid", path)
+          end
+          mappings.each do |mapping|
+            strict_hash!(
+              mapping, required: PrManifest::PATH_MAPPING_KEYS,
+              allowed: PrManifest::PATH_MAPPING_KEYS,
+              label: "source merge path mapping", path: path
+            )
+            unless PrManifest.valid_relative_path?(mapping.fetch("path")) &&
+                   mapping.fetch("path").bytesize <= 4_096 &&
+                   mapping.fetch("slice_ids").is_a?(Array) &&
+                   mapping.fetch("slice_ids").size.between?(1, 32) &&
+                   mapping.fetch("slice_ids").uniq == mapping.fetch("slice_ids")
+              inconsistent!("source merge path mapping is invalid", path)
+            end
+            mapping.fetch("slice_ids").each do |slice_id|
+              bounded_string!(slice_id, "source merge slice id", path)
+              inconsistent!("source merge slice id is too long", path) if slice_id.bytesize > 256
+            end
+          end
+          total_paths += mappings.size
+        end
+        inconsistent!("source provenance path bound is exceeded", path) if total_paths > 512
+        mapped_paths = merges.flat_map do |merge|
+          merge.fetch("path_mappings").map { |mapping| mapping.fetch("path") }
+        end
+        unless mapped_paths.uniq == source.fetch("changed_paths")
+          inconsistent!("source provenance does not cover changed_paths", path)
+        end
+      end
+
+      def digest!(value, label, path)
+        inconsistent!("#{label} must be a SHA-256 digest", path) unless
+          value.to_s.match?(/\A[0-9a-f]{64}\z/)
+      end
+
+      def bounded_string!(value, label, path)
+        unless value.is_a?(String) && !value.empty? && value.bytesize <= 2_000 &&
+               value.valid_encoding? && !value.include?("\0")
+          inconsistent!("#{label} is invalid", path)
         end
       end
 

@@ -61,7 +61,7 @@
     },
     "Task": {
       "type": "object", "additionalProperties": false,
-      "required": ["project", "slug", "id", "stage", "generation", "workflow", "archived"],
+      "required": ["project", "slug", "id", "stage", "generation", "workflow", "patrol_fix", "archived"],
       "properties": {
         "project": { "type": "string", "minLength": 1, "maxLength": 255 },
         "slug": { "type": "string", "minLength": 1, "maxLength": 255 },
@@ -69,6 +69,12 @@
         "stage": { "type": "string", "minLength": 1, "maxLength": 255 },
         "generation": { "type": ["integer", "string", "null"] },
         "workflow": { "type": ["string", "null"], "maxLength": 255 },
+        "patrol_fix": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "hive-patrol-fix-projection.v1.json" }
+          ]
+        },
         "archived": { "type": "boolean" }
       }
     },

@@ -8,6 +8,7 @@ require "hive/atomic_file"
 require "hive/draft_pr_receipt"
 require "hive/gh"
 require "hive/markers"
+require "hive/patrol_fix/successor_materializer"
 require "hive/secret_patterns"
 require "hive/worktree"
 
@@ -136,7 +137,9 @@ module Hive
       def publish!(task, context, report, report_source, receipt, root, cfg)
         preflight_remote!(context, cfg)
         assert_local_identity!(context, receipt.fetch("head_oid"))
-        projected = project_report(report)
+        projected = project_report(
+          report, publication_marker: receipt["publication_marker"]
+        )
         scan_sha = scan_publication!(
           context, receipt.fetch("head_oid"), report_source, projected
         )
@@ -196,13 +199,18 @@ module Hive
 
       def record_agent_validation!(task, receipt, report_source, repository_state, root)
         digest = ::Digest::SHA256.hexdigest(report_source)
+        publication_marker = Hive::PatrolFix::SuccessorMaterializer.publication_marker(
+          task.folder, missing: true
+        )
         if receipt.fetch("phase") == "worktree_created"
+          attributes = {
+            "head_oid" => repository_state.head_oid,
+            "report_sha256" => digest
+          }
+          attributes["publication_marker"] = publication_marker if publication_marker
           return Hive::DraftPrReceipt.advance!(
             task.folder, from: "worktree_created", to: "agent_validated",
-            attributes: {
-              "head_oid" => repository_state.head_oid,
-              "report_sha256" => digest
-            },
+            attributes: attributes,
             worktree_root: root
           )
         end
@@ -211,6 +219,9 @@ module Hive
         end
         if receipt["report_sha256"] && receipt["report_sha256"] != digest
           raise IdentityError, "fix-report.md changed after agent validation"
+        end
+        if receipt["publication_marker"] != publication_marker
+          raise IdentityError, "coding successor provenance changed after agent validation"
         end
 
         receipt
@@ -353,6 +364,8 @@ module Hive
         mismatches << "head OID" unless pr["headRefOid"].to_s.downcase == receipt.fetch("head_oid")
         mismatches << "base branch" unless pr["baseRefName"].to_s == receipt.fetch("base_branch")
         mismatches << "base OID" unless pr["baseRefOid"].to_s.downcase == receipt.fetch("base_oid")
+        marker = receipt["publication_marker"]
+        mismatches << "publication provenance" if marker && !pr["body"].to_s.include?(marker)
         raise IdentityError, "pull request identity mismatch: #{mismatches.join(', ')}" unless mismatches.empty?
 
         number = Integer(pr["number"].to_s, 10)
@@ -449,7 +462,7 @@ module Hive
       end
       private_class_method :assert_local_identity!
 
-      def project_report(report)
+      def project_report(report, publication_marker: nil)
         fields = {
           "Reproduction" => report.reproduction,
           "Cause" => report.cause,
@@ -459,7 +472,12 @@ module Hive
         }.transform_values { |value| safe_summary(value) }
         title = safe_summary(report.suggested_pr_title, max: MAX_PR_TITLE_CHARS)
         body = fields.map { |label, value| "## #{label}\n#{value}" }.join("\n\n")
-        body = body[0, MAX_PR_BODY_CHARS]
+        suffix = publication_marker ? "\n\n#{publication_marker}" : ""
+        if suffix.bytesize > MAX_PR_BODY_CHARS
+          raise IdentityError, "publication provenance exceeds the PR body bound"
+        end
+        body = body.byteslice(0, MAX_PR_BODY_CHARS - suffix.bytesize).to_s
+        body = body.scrub("") + suffix
         scan_text!(title, source: "PR title")
         scan_text!(body, source: "PR body")
         Result.new(title: title, body: body)

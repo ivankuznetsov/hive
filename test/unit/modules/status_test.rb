@@ -284,7 +284,7 @@ class ModulesStatusTest < Minitest::Test
     end
   end
 
-  def test_inspector_projects_conflicts_decisions_migration_and_legacy_history
+  def test_inspector_projects_conflicts_decisions_and_legacy_history
     with_installed_module do |root, store|
       legacy = Object.new
       legacy.define_singleton_method(:inspect_selected) do |_name, cfg:|
@@ -330,29 +330,6 @@ class ModulesStatusTest < Minitest::Test
         "active" => nil, "previous" => nil
       }
       assert_empty inspector.send(:build_status, tombstone, NOW).fetch("hooks")
-
-      original_diagnostic = Hive::Modules::Migration::Patrols.method(:diagnostic)
-      begin
-        Hive::Modules::Migration::Patrols.define_singleton_method(:diagnostic) do |*|
-          { "status" => "corrupt", "admission" => false }
-        end
-        assert_equal(
-          "migration_state_corrupt",
-          inspector.send(:migration_failure, "patrol")
-        )
-        Hive::Modules::Migration::Patrols.define_singleton_method(:diagnostic) do |*|
-          { "status" => "module", "admission" => false }
-        end
-        assert_equal "migration_fenced", inspector.send(:migration_failure, "patrol")
-        Hive::Modules::Migration::Patrols.define_singleton_method(:diagnostic) do |*|
-          { "status" => "module", "admission" => true }
-        end
-        assert_nil inspector.send(:migration_failure, "patrol")
-      ensure
-        Hive::Modules::Migration::Patrols.define_singleton_method(
-          :diagnostic, original_diagnostic
-        )
-      end
 
       generation = File.join(root, "legacy-generation")
       configuration = File.join(root, "legacy-configuration.json")

@@ -603,10 +603,12 @@ module Hive
 
     def spawn_opencode_and_wait
       prepared = nil
+      stdin_file = nil
       result = nil
       prepared = prepare_opencode_invocation
       validate_prepared_opencode_skills!(prepared)
       cmd = prepared.invocation.argv
+      stdin_file = stdin_file_for(prepared.invocation.stdin_data)
       log_file = log_path
       write_opencode_spawn_log(log_file, prepared, cmd)
 
@@ -621,10 +623,12 @@ module Hive
         stderr_reader, stderr_capture, FINAL_MESSAGE_TAIL_BYTES
       )
       child_env = opencode_child_environment(prepared)
-      pid = Process.spawn(
-        child_env, *cmd, chdir: @cwd, pgroup: true,
-        out: stdout_writer, err: stderr_writer, unsetenv_others: true
-      )
+      spawn_opts = {
+        chdir: @cwd, pgroup: true, out: stdout_writer, err: stderr_writer,
+        unsetenv_others: true
+      }
+      spawn_opts[:in] = stdin_file if stdin_file
+      pid = Process.spawn(child_env, *cmd, **spawn_opts)
       stdout_writer.close
       stderr_writer.close
       pgid = begin
@@ -722,6 +726,7 @@ module Hive
       [ stdout_thread, stderr_thread ].each do |thread|
         thread.kill if thread&.alive?
       end
+      close_prompt_stdin_file(stdin_file)
       if prepared
         begin
           prepared.cleanup!
@@ -1114,17 +1119,27 @@ module Hive
       false
     end
 
-    def prompt_via_stdin?
-      !compiled_invocation.stdin_data.nil?
+    def prompt_stdin_file
+      stdin_file_for(compiled_invocation.stdin_data)
     end
 
-    def prompt_stdin_file
-      return nil unless prompt_via_stdin?
+    def stdin_file_for(data)
+      return nil if data.nil?
 
       file = Tempfile.new([ "hive-agent-prompt-", ".txt" ])
-      file.write(compiled_invocation.stdin_data)
+      file.chmod(0o600)
+      file.write(data)
       file.rewind
       file
+    end
+
+    def close_prompt_stdin_file(file)
+      return unless file
+
+      file.close unless file.closed?
+      file.unlink
+    rescue Errno::ENOENT
+      nil
     end
 
     def compiled_invocation

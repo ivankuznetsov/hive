@@ -63,6 +63,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       assert run
       assert_operator run.bytesize, :<, 8_192
       refute_includes run, prompt
+      assert_equal prompt, File.binread(fixture.fetch(:stdin))
       refute File.exist?(root)
     end
   end
@@ -513,6 +514,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       work = File.join(dir, "work")
       FileUtils.mkdir_p(work)
       calls = File.join(dir, "calls.log")
+      stdin = File.join(dir, "stdin.log")
       environment = File.join(dir, "environment.json")
       configuration = File.join(dir, "selected-config.json")
       selected_config = {
@@ -522,14 +524,14 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       File.write(configuration, JSON.generate(selected_config))
       bin = File.join(dir, "opencode")
       File.write(bin, fixture_script(
-        mode:, calls:, environment:, source_root: dir
+        mode:, calls:, stdin:, environment:, source_root: dir
       ))
       File.chmod(0o755, bin)
-      yield({ dir:, work:, calls:, environment:, configuration:, bin: })
+      yield({ dir:, work:, calls:, stdin:, environment:, configuration:, bin: })
     end
   end
 
-  def fixture_script(mode:, calls:, environment:, source_root:)
+  def fixture_script(mode:, calls:, stdin:, environment:, source_root:)
     run_help = File.read(File.join(
       source_root_for_fixtures,
       "run-help.txt"
@@ -562,6 +564,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
         File.unlink(__FILE__) if #{mode == :remove_after_probe}
       else
         if ARGV.first == "run"
+          File.binwrite(#{stdin.dump}, STDIN.read)
           File.write(#{environment.dump}, JSON.generate({
             "XDG_CONFIG_HOME" => ENV["XDG_CONFIG_HOME"],
             "OPENCODE_DISABLE_PROJECT_CONFIG" => ENV["OPENCODE_DISABLE_PROJECT_CONFIG"],

@@ -59,8 +59,8 @@ owner-private XDG config/data/cache/state homes, compiles deny-first permission
 rules, and returns a `PreparedInvocation`. The value exposes discrete argv,
 non-secret child-environment overrides, requested-route evidence, generated
 paths, and idempotent `cleanup!`; it never starts `opencode run`. The process
-owner forwards only the named credential keys and must invoke cleanup from its
-own lifecycle `ensure`.
+owner forwards only the named credential keys, binds any compiled `stdin_data`
+to the run process, and must invoke cleanup from its own lifecycle `ensure`.
 
 The OpenCode route-aware probe requires `1.18.16+`, all pinned run/export
 flags, a selected authentication source, and an exact `provider/model` plus

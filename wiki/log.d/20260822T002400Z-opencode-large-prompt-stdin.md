@@ -10,10 +10,14 @@ large enough to make `execve` reject the process.
 **Fix:** The built-in OpenCode profile now uses the CLI's non-TTY stdin prompt
 transport. Prepared invocations keep the same discrete run, model, variant,
 directory, permission, and JSON-output arguments while carrying the rendered
-prompt in `stdin_data`, which Hive already feeds through an owner-private
-temporary file.
+prompt in `stdin_data`. Hive's dedicated OpenCode supervisor now feeds those
+bytes through an owner-private temporary file; the generic supervisor already
+did so for other stdin-style profiles, but the specialized prepare/inspect
+lifecycle previously dropped them.
 
 **Regression:** Component preparation asserts the ordinary argv/stdin shape
 and a 150 KB prompt that remains byte-identical on stdin and absent from argv.
+The full Hive lifecycle fake executable reads and records stdin so a dropped
+prepared payload fails the regression instead of passing on argv shape alone.
 The live dogfood retry is the provider-backed proof that installed OpenCode
 accepts the same transport for an execute worker.

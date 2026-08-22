@@ -64,8 +64,9 @@ contract.
 
 OpenCode uses the component's additive prepared-invocation ABI while keeping
 process supervision in Hive. `Hive::Agent` prepares a private overlay, starts
-exactly one `opencode run` process with a selected child environment, captures
-bounded stdout and stderr, and records timeout or cancellation before parsing.
+exactly one `opencode run` process with a selected child environment and the
+prepared prompt on owner-private file-backed stdin, captures bounded stdout
+and stderr, and records timeout or cancellation before parsing.
 After a zero exit it may start one non-model `opencode export --sanitize`
 inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that

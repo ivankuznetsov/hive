@@ -229,6 +229,11 @@ module Hive
                 producer_profile: producer_profile
               )
             rescue Hive::ConfigError => e
+              begin
+                capture_toolkit.close if capture_toolkit.respond_to?(:close)
+              ensure
+                remove_producer_work!(task, writable_root)
+              end
               pointer = store.publish_blocked!(
                 generation: generation, reason: "capability_blocked",
                 failed_targets: revision.any? ? revision.map { |item| item.fetch("target_id") } :

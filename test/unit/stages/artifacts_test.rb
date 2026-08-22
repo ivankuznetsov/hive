@@ -1954,10 +1954,16 @@ class StagesArtifactsTest < Minitest::Test
       store.define_singleton_method(:review_context_for_identity) do |_value|
         { "path" => "outcome-evidence/context.diff" }
       end
+      failed_root = nil
+      closed = false
       toolkit = Object.new
-      toolkit.define_singleton_method(:prepare!) do |**|
+      toolkit.define_singleton_method(:prepare!) do |writable_root:, **|
+        failed_root = writable_root
+        FileUtils.mkdir_p(writable_root)
+        File.write(File.join(writable_root, "partial-capture"), "private")
         raise Hive::ConfigError, "ffmpeg unavailable"
       end
+      toolkit.define_singleton_method(:close) { closed = true }
 
       result = Hive::Stages::Artifacts.run_outcome_evidence!(
         task, {}, identity_resolver: resolver, store: store, capture_toolkit: toolkit
@@ -1967,6 +1973,9 @@ class StagesArtifactsTest < Minitest::Test
       assert_equal "capability_blocked", published.first.fetch(:reason)
       assert_equal [ "claim-flow" ], published.first.fetch(:failed_targets)
       assert_equal :error, Hive::Markers.current(task.state_file).name
+      assert closed, "partially prepared capture tooling must be closed"
+      refute_path_exists failed_root,
+                         "capability failure must not leave a private attempt directory"
     end
   end
 

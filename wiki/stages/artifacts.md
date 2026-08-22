@@ -104,14 +104,17 @@ completion authority.
    role paths.
    Screenshot, video, and terminal representations must match a controller
    capture receipt at handoff; producer-written lookalike media fails closed.
-   If the capture succeeded but the final producer descriptor is malformed,
-   Hive gives one fresh producer context the bounded validation error and prior
-   output so it can reuse the private capture and correct only the JSON. The
+   If the capture succeeded but the producer returns an empty final message or
+   a malformed descriptor, Hive gives one fresh producer context the bounded
+   validation error and prior output (or `null` when there was no output) so it
+   can reuse the private capture and correct only the JSON. Output parsing runs
+   inside this repair boundary; an empty provider response cannot bypass it and
+   consume a whole evidence recapture. The
    capture toolkit retains ownership of Pi's isolated runtime home and mailbox
    across that bounded repair spawn, then removes them at attempt teardown;
    per-spawn cleanup would make the second bubblewrap launch reference a deleted
    runtime home and force an unnecessary full recapture.
-   candidate still crosses the same admission boundary before review; a second
+   The candidate still crosses the same admission boundary before review; a second
    invalid descriptor ends the attempt.
 7. Re-admit every retained representation deterministically: safe containment,
    size, hash, declared media type, actual image/video decode, terminal-cast or

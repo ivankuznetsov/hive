@@ -743,6 +743,102 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_empty_producer_output_gets_one_fresh_bounded_repair
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      writable_root = File.join(task.folder, "evidence")
+      FileUtils.mkdir_p(writable_root)
+      capture = File.join(writable_root, "flow.webm")
+      File.binwrite(capture, "captured-before-empty-output")
+      prompts = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        if prompts.length == 1
+          raise Hive::Stages::Artifacts::RoleOutputError,
+                "producer output is missing or oversized"
+        end
+
+        {
+          actor: { "context_id" => "producer-2", "agent" => "pi" },
+          output: {
+            "evidence" => [
+              {
+                "kind" => "video", "summary" => "The recording proves the flow.",
+                "claims" => [ "claim-flow" ],
+                "representations" => [
+                  {
+                    "role" => "original", "media_type" => "video/webm",
+                    "path" => "evidence/flow.webm"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      end
+
+      producer, retained = Hive::Stages::Artifacts.run_producer!(
+        task: task, cfg: {}, identity: outcome_identity,
+        prompt_values: {
+          requirement_json: "{}", prior_evidence_json: "[]", revision_json: "[]",
+          capture_tools_json: "{}", writable_root: writable_root,
+          writable_relative_root: "evidence"
+        },
+        writable_root: writable_root, launch_environment: nil,
+        producer_add_dirs: [], producer_permission_arguments: nil,
+        producer_runtime_policy: nil
+      ) do |candidate, _actor|
+        assert_path_exists capture,
+                           "the repair turn must retain controller-issued captures"
+        candidate
+      end
+
+      assert_equal "producer-2", producer.dig(:actor, "context_id")
+      assert_equal 1, retained.length
+      assert_equal 2, prompts.length
+      assert_includes prompts.last, "producer output is missing or oversized"
+      assert_includes prompts.last, '"previous_output": null'
+      assert_includes prompts.last, "Reuse successful controller-issued captures"
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
+  def test_producer_launch_store_failure_is_not_mislabeled_as_output_repair
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      writable_root = File.join(task.folder, "evidence")
+      prompts = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        raise Hive::Artifacts::OutcomeEvidence::StoreError,
+              "producer modified protected task state"
+      end
+
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Hive::Stages::Artifacts.run_producer!(
+          task: task, cfg: {}, identity: outcome_identity,
+          prompt_values: {
+            requirement_json: "{}", prior_evidence_json: "[]", revision_json: "[]",
+            capture_tools_json: "{}", writable_root: writable_root,
+            writable_relative_root: "evidence"
+          },
+          writable_root: writable_root, launch_environment: nil,
+          producer_add_dirs: [], producer_permission_arguments: nil,
+          producer_runtime_policy: nil
+        ) { |candidate, _actor| candidate }
+      end
+
+      assert_equal "producer modified protected task state", error.message
+      assert_equal 1, prompts.length,
+                   "launch and custody failures must not enter descriptor repair"
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
   def test_producer_output_with_extra_top_level_keys_gets_one_bounded_repair
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)

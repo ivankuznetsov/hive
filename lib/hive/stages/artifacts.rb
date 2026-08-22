@@ -334,15 +334,16 @@ module Hive
             "artifacts_producer_prompt.md.erb", task,
             **prompt_values, repair_json: JSON.pretty_generate(repair || {})
           )
-          producer = run_role!(
-            role: "producer", task: task, cfg: cfg, prompt: producer_prompt,
-            identity: identity, writable_root: writable_root,
-            launch_environment: launch_environment,
-            producer_add_dirs: producer_add_dirs,
-            producer_permission_arguments: producer_permission_arguments,
-            producer_runtime_policy: producer_runtime_policy
-          )
+          producer = nil
           begin
+            producer = run_role!(
+              role: "producer", task: task, cfg: cfg, prompt: producer_prompt,
+              identity: identity, writable_root: writable_root,
+              launch_environment: launch_environment,
+              producer_add_dirs: producer_add_dirs,
+              producer_permission_arguments: producer_permission_arguments,
+              producer_runtime_policy: producer_runtime_policy
+            )
             output = producer.fetch(:output)
             unless output.keys == [ "evidence" ]
               raise RoleOutputError, "producer output must contain only evidence"
@@ -350,11 +351,17 @@ module Hive
             candidate = Array(output.fetch("evidence"))
             return [ producer, yield(candidate, producer.fetch(:actor)) ]
           rescue RoleOutputError, Hive::Artifacts::OutcomeEvidence::StoreError, KeyError => e
+            # Store errors raised before run_role! returns describe a failed
+            # or unsafe launch, not a repairable descriptor. Once the role
+            # returned, however, store validation is exactly what this bounded
+            # repair turn exists to correct.
+            raise if e.is_a?(Hive::Artifacts::OutcomeEvidence::StoreError) &&
+              !e.is_a?(RoleOutputError) && !producer
             raise if index + 1 >= MAX_PRODUCER_ATTEMPTS
 
             repair = {
               "validation_error" => e.message.to_s.byteslice(0, 1024).to_s.scrub,
-              "previous_output" => producer[:output],
+              "previous_output" => producer&.fetch(:output, nil),
               "instruction" =>
                 "Reuse successful controller-issued captures when possible and return corrected JSON immediately."
             }

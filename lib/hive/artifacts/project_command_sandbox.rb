@@ -133,7 +133,7 @@ module Hive
         @writable_source_bindings ||= writable_source_dirs.filter_map do |source|
           relative = source.delete_prefix("#{@source_root}#{File::SEPARATOR}")
           overlay = File.join(runtime_overlay_root, relative)
-          seed_runtime_overlay(source, overlay)
+          seed_runtime_overlay(source, overlay, relative: relative)
           [ overlay, source ]
         end
       end
@@ -145,7 +145,7 @@ module Hive
         root
       end
 
-      def seed_runtime_overlay(source, overlay)
+      def seed_runtime_overlay(source, overlay, relative:)
         return if File.directory?(overlay) && !File.symlink?(overlay)
 
         temporary = "#{overlay}.prepare-#{Process.pid}-#{Thread.current.object_id}"
@@ -153,9 +153,32 @@ module Hive
         entries = Dir.children(source).map { |entry| File.join(source, entry) }
         FileUtils.cp_r(entries, temporary, preserve: true) unless entries.empty?
         File.rename(temporary, overlay)
+        clear_seeded_process_state!(relative, overlay)
       rescue Errno::EEXIST, Errno::ENOTEMPTY
         FileUtils.remove_entry_secure(temporary) if File.directory?(temporary)
         raise unless File.directory?(overlay) && !File.symlink?(overlay)
+      end
+
+      # A PID names a process in the source host's namespace. It can never be
+      # valid in a fresh bubblewrap PID namespace, so copying Rails' conventional
+      # tmp/pids directory makes an absent server look live (`pid: 2` is a common
+      # collision). Clear it once while seeding the attempt overlay. Reused
+      # overlays deliberately skip this method so a server started later in the
+      # same capture keeps its live ownership file.
+      def clear_seeded_process_state!(relative, overlay)
+        return unless relative == "tmp"
+
+        pids = File.join(overlay, "pids")
+        stat = File.lstat(pids)
+        if stat.directory? && !stat.symlink?
+          FileUtils.remove_entry_secure(pids)
+        else
+          File.unlink(pids)
+        end
+      rescue Errno::ENOENT
+        nil
+      ensure
+        FileUtils.mkdir_p(pids, mode: 0o700) if relative == "tmp"
       end
 
       def sandbox_environment

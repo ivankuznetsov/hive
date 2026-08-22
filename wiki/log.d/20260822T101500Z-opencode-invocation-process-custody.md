@@ -17,3 +17,11 @@ exit so ancestry and process-group custody are both lost, and proves the child
 is terminated while a second invocation's child remains alive. The OpenCode
 lifecycle fixture independently proves the custody ID crosses the prepared
 environment and cleanup happens before a successful agent result returns.
+
+The failure paths are covered against a synthetic procfs root: a process that
+outlives both signals, an entry whose environment disappears mid-inventory, an
+oversized or unreadable environment, a match with no PID start identity, the
+`ps xeww` fallback and its unavailability, and exiting versus unsignalable
+targets. On the agent side, a failing reap turns a clean transcript into
+`process_cleanup_failed`, and a reap failure while unwinding is warned rather
+than swallowed.

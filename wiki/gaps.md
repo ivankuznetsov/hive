@@ -76,6 +76,16 @@ external manager without forwarding it can evade the inventory. A dedicated
 cgroup/namespace owner that preserves OpenCode's required repository writes,
 network, and cross-platform support remains a deeper isolation follow-up.
 
+Custody teardown reads a candidate's environment and its PID start identity as
+two separate steps, so a descendant that exits between them is reported as
+`process-custody identity is unavailable for pid <n>` and fails the run. The
+observed outcome — the process is gone — is the success condition, so this is a
+false failure rather than a leak. It was seen once in roughly fifty local runs
+of `invocation_process_custody_test.rb` and was not reproducible afterwards, so
+the exact window is unconfirmed. Whether a vanished candidate should be omitted
+from the inventory instead of ending the run is an open call: omitting keeps the
+"never signal a pid without identity" guard while dropping the false failure.
+
 ## Parallel Hive web CI exact-head evidence (2026-08-14)
 
 The serial Hive web job took 441 seconds in exact-head run `31818138021`, led

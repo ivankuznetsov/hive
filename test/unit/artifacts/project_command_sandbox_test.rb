@@ -42,6 +42,41 @@ class ArtifactsProjectCommandSandboxTest < Minitest::Test
     end
   end
 
+  # A conventional runtime directory can vanish between the directory check
+  # and the realpath that proves it stays inside the source root. The boundary
+  # then leaves that directory read-only instead of failing the whole capture,
+  # because a missing writable directory is not a boundary violation.
+  def test_writable_source_dirs_that_vanish_mid_scan_are_dropped
+    Dir.mktmpdir("hive-project-command-sandbox-race") do |root|
+      source = File.join(root, "source")
+      FileUtils.mkdir_p([ File.join(source, "log"), File.join(source, "tmp") ])
+      sandbox_binary = File.join(root, "bwrap")
+      File.write(sandbox_binary, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, sandbox_binary)
+      sandbox = Hive::Artifacts::ProjectCommandSandbox.new(
+        source_root: source, sandbox_binary: sandbox_binary, environment: {}
+      )
+      log = File.join(source, "log")
+      tmp = File.realpath(File.join(source, "tmp"))
+      original = File.method(:realpath)
+      racing = lambda do |path, *rest|
+        raise Errno::ENOENT, path if path == log
+
+        original.call(path, *rest)
+      end
+
+      argv = with_replaced_singleton_method(File, :realpath, racing) do
+        sandbox.command_argv([ "/bin/true" ])
+      end
+
+      bindings = argv.each_cons(3).to_a
+      refute_includes bindings, [ "--bind", log, log ]
+      assert_includes bindings, [ "--bind", tmp, tmp ]
+      assert_includes bindings, [ "--ro-bind", source, source ]
+      assert sandbox.close
+    end
+  end
+
   def test_rejects_invalid_inputs_and_missing_or_changed_runtime_boundaries
     Dir.mktmpdir("hive-project-command-sandbox-invalid") do |root|
       source = File.join(root, "source")

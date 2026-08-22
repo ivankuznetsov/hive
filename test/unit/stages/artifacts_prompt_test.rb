@@ -103,6 +103,8 @@ class StagesArtifactsPromptTest < Minitest::Test
       assert_includes producer, "custom evidence script"
       assert_includes producer, "application/x-asciinema+json"
       assert_includes producer, "Video original/review media types"
+      assert_includes producer, "never list one document path twice"
+      assert_includes producer, "Use `evidence_write` to create a distinct"
       assert_match(/any nonempty\s+subset/, producer)
       assert_match(/preserves the last evidence/, producer)
       assert_includes producer, "same controller-issued path for both roles"

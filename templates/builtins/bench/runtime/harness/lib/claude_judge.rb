@@ -3,6 +3,7 @@
 require "open3"
 require "json"
 require "lib/judge_output"
+require "lib/agent_limit"
 
 module HiveBench
   # Production judge_fn for HiveBench::Judge, backed by the local claude CLI
@@ -30,12 +31,16 @@ module HiveBench
     def judge_fn(bin: "claude", model: nil, timeout_s: DEFAULT_TIMEOUT)
       lambda do |prompt:, seed:|
         _ = seed
-        argv = ["timeout", timeout_s.to_s, bin, "-p"]
-        argv += ["--model", model] if model
+        argv = [ "timeout", timeout_s.to_s, bin, "-p" ]
+        argv += [ "--model", model ] if model
         out, err, status = Open3.capture3(*argv, stdin_data: prompt.to_s)
         raise Error, "claude judge timed out after #{timeout_s}s" if status.exitstatus == 124
 
         unless status.success?
+          if AgentLimit.limit_hit?(err)
+            raise ProviderLimitError, "claude judge exited #{status.exitstatus}: #{err.strip[0, 300]}"
+          end
+
           detail = err.strip
           detail = out.strip if detail.empty?
           raise Error, "claude judge exited #{status.exitstatus}: #{detail[0, 300]}"

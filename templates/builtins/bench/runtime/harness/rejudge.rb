@@ -25,11 +25,15 @@ require "lib/claude_judge"
 require "lib/openrouter_judge"
 require "lib/codex_judge"
 require "lib/judge_provenance"
+require "lib/agent_limit"
+require "lib/judge_slate"
 
 module HiveBench
   # Offline re-judge: same scoring contract as RunAll, but the diff comes from
   # existing artifacts instead of a fresh generation.
   module Rejudge
+    FAILURE_EVENT_VERSION = 1
+
     module_function
 
     NO_GATE = Gate::Result.new(status: :no_gate, subset: "judged", reason: "rejudge (no gate)", details: {})
@@ -43,7 +47,7 @@ module HiveBench
             restorer: GitRestore.new, withhold_reference: false, only_missing_judges: false,
             plan_source: :frozen, judge_efforts: {}, minimum_samples: 1)
       bases = Corpus.load(root: corpus_root, checkout_source: source)
-                    .to_h { |e| [e["task_id"], { base: e.dig("source", "base_commit"), entry: e }] }
+                    .to_h { |e| [ e["task_id"], { base: e.dig("source", "base_commit"), entry: e } ] }
       records = cells.map do |old|
         rejudge_cell(old, bases, search_dirs, judges, scorer, restorer,
                      withhold_reference: withhold_reference, only_missing: only_missing_judges,
@@ -64,13 +68,17 @@ module HiveBench
       plan = plan_source == :candidate ? candidate_plan(search_dirs, old) || read_plan(info[:entry]) : read_plan(info[:entry])
       reference = withhold_reference ? nil : read_reference(info[:entry])
       wanted = if only_missing
-                 judges.reject do |name, _|
-                   judge_satisfied?((old["judges"] || {})[name], minimum_samples: minimum_samples)
-                 end
-               else
-                 judges
-               end
-      judged = diff.strip.empty? ? {} : judge_all(wanted, plan, diff, reference)
+        judges.reject do |name, _|
+          judge_satisfied?((old["judges"] || {})[name], minimum_samples: minimum_samples)
+        end
+      else
+        judges
+      end
+      judged = if diff.strip.empty?
+        {}
+      else
+        judge_all(wanted, plan, diff, reference, task_id: old["task_id"], agent_id: old["agent_id"])
+      end
       warn "  judged #{old["agent_id"]} #{old["task_id"]} (#{diff.lines.size} diff lines): #{judged.transform_values(&:mean).inspect}"
       rec = scorer.cell_record(cell: cell_meta(old), gate: NO_GATE, judges: judged)
       # Keep the cell's existing judge scores; the fresh ones fill the gaps.
@@ -81,11 +89,18 @@ module HiveBench
     # Fail soft per judge: a flaky/limited judge (e.g. an OpenRouter key-limit 403)
     # is skipped with a warning rather than crashing the whole re-judge — the cell
     # keeps the judges that succeeded, and the failed one can be re-run later.
-    def judge_all(judges, plan, diff, reference)
+    def judge_all(judges, plan, diff, reference, task_id:, agent_id:)
       judges.each_with_object({}) do |(name, judge), acc|
         acc[name] = judge.call(plan: plan, candidate_diff: diff, reference: reference)
       rescue StandardError => e
-        warn "  judge #{name} failed (#{e.class}: #{e.message.to_s[0, 80]}) — skipping this judge"
+        failure = "#{e.class}: #{e.message}"
+        warn JudgeSlate.failure_event(
+          task_id: task_id,
+          agent_id: agent_id,
+          judge: name,
+          limits_reached: e.is_a?(ProviderLimitError),
+          detail: failure
+        )
       end
     end
 

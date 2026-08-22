@@ -70,7 +70,7 @@ class StagesArtifactsPromptTest < Minitest::Test
         requirement_json: "{}", prior_evidence_json: "[]", revision_json: "[]",
         capture_tools_json: '{"web":{"driver":"agent-browser"}}',
         writable_root: File.join(task.folder, "evidence"),
-        writable_relative_root: "evidence"
+        writable_relative_root: "evidence", repair_json: "{}"
       )
       reviewer = Hive::Stages::Artifacts.render_role_prompt(
         "artifacts_reviewer_prompt.md.erb", task,

@@ -575,6 +575,36 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     app_thread&.join(1)
   end
 
+  def test_capture_proxy_rewrites_only_the_issued_app_redirect_to_the_browser_origin
+    proxy = Hive::Artifacts::CaptureProxy.new
+    app = TCPServer.new("127.0.0.1", proxy.app_port)
+    app_thread = Thread.new do
+      [
+        "http://127.0.0.1:#{proxy.app_port}/setup/operator?step=1",
+        "https://accounts.example.test/login"
+      ].each do |location|
+        socket = app.accept
+        socket.readpartial(4096)
+        socket.write(
+          "HTTP/1.1 302 Found\r\nLocation: #{location}\r\n" \
+          "Content-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        socket.close
+      end
+    end
+
+    response = proxy_request(proxy.proxy_url, "#{proxy.origin}/")
+    foreign = proxy_request(proxy.proxy_url, "#{proxy.origin}/login")
+
+    assert_includes response, "Location: #{proxy.origin}/setup/operator?step=1\r\n"
+    refute_includes response, "Location: http://127.0.0.1:#{proxy.app_port}"
+    assert_includes foreign, "Location: https://accounts.example.test/login\r\n"
+  ensure
+    proxy&.close
+    app&.close
+    app_thread&.join(1)
+  end
+
   private
 
   def fake_codex_runtime(profile)

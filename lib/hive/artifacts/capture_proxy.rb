@@ -98,7 +98,7 @@ module Hive
         upstream = Socket.tcp("127.0.0.1", app_port, connect_timeout: READ_TIMEOUT_SECONDS)
         upstream.write(rewrite_request(head, method, uri, version))
         upstream.write(remainder) unless remainder.empty?
-        relay(client, upstream)
+        relay_response(client, upstream)
       rescue URI::InvalidURIError, ProxyError
         reject(client, "400 Bad Request")
       rescue SystemCallError, IOError
@@ -149,6 +149,29 @@ module Hive
         (prefix + headers + [ "\r\n" ]).join
       end
 
+      # The upstream must see a loopback Host header so an arbitrary project
+      # cannot escape its development host allowlist. Frameworks such as Rails
+      # consequently emit absolute redirects back to that loopback host. The
+      # browser is intentionally allowed to visit only the random issued
+      # origin, so translate only that exact controller-owned endpoint at the
+      # proxy boundary. Relative and foreign redirects pass through unchanged.
+      def rewrite_response(head)
+        head.each_line.map do |line|
+          next line unless line.match?(/\ALocation:/i)
+
+          name, value = line.split(":", 2)
+          uri = URI.parse(value.to_s.strip)
+          next line unless uri.scheme == "http" && uri.host == "127.0.0.1" &&
+                           uri.port == app_port && uri.userinfo.nil?
+
+          uri.host = hostname
+          uri.port = 80
+          "#{name}: #{uri}\r\n"
+        rescue URI::InvalidURIError
+          line
+        end.join
+      end
+
       def websocket_upgrade?(head)
         connection = nil
         upgrade = nil
@@ -161,6 +184,13 @@ module Hive
         end
         upgrade.to_s.strip.casecmp?("websocket") &&
           connection.to_s.split(",").any? { |token| token.strip.casecmp?("upgrade") }
+      end
+
+      def relay_response(client, upstream)
+        head, remainder = read_header(upstream)
+        client.write(rewrite_response(head))
+        client.write(remainder) unless remainder.empty?
+        relay(client, upstream)
       end
 
       def relay(client, upstream)

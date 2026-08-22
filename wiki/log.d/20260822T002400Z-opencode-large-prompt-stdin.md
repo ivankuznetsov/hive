@@ -17,7 +17,11 @@ lifecycle previously dropped them.
 
 **Regression:** Component preparation asserts the ordinary argv/stdin shape
 and a 150 KB prompt that remains byte-identical on stdin and absent from argv.
-The full Hive lifecycle fake executable reads and records stdin so a dropped
-prepared payload fails the regression instead of passing on argv shape alone.
+Both the full Hive lifecycle fake executable and the skill-dependent OpenCode
+integration driver read and record stdin, assert that the prompt is absent
+from argv, and preserve the `/ce-plan` invocation check against that stream.
+A CI-only failure exposed the stale integration assertion after transport
+moved off argv; the regression now fails if either supervisor drops stdin or
+silently moves an implementation-sized prompt back onto argv.
 The live dogfood retry is the provider-backed proof that installed OpenCode
 accepts the same transport for an execute worker.

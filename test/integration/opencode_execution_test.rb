@@ -106,6 +106,8 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
         assert_equal "feat: fake OpenCode execution", commit_subject.strip
 
         observation = observations.fetch(0)
+        assert_operator observation.fetch("stdin_bytes"), :>, 0
+        refute observation.fetch("prompt_in_argv")
         assert_confined_workspace_write_policy(
           observation.fetch("permission"),
           working_directory: worktree,
@@ -161,6 +163,8 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
       assert_equal :complete, result.fetch(:status)
       assert_equal :complete, Hive::Markers.current(task.state_file).name
       observation = observations.fetch(0)
+      assert_operator observation.fetch("stdin_bytes"), :>, 0
+      refute observation.fetch("prompt_in_argv")
       assert observation.fetch("skill_invocation_present")
       assert_equal "allow", observation.dig("permission", "skill")
       assert_confined_workspace_write_policy(
@@ -267,6 +271,7 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
       require "json"
 
       command = ARGV.first
+      prompt = command == "run" ? STDIN.read : ""
       directory_index = ARGV.index("--dir")
       working_directory = directory_index && ARGV[directory_index + 1]
       File.open(#{@calls.dump}, "a", 0o600) do |file|
@@ -300,7 +305,9 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
             "working_directory" => working_directory,
             "invocation_root" => File.dirname(ENV.fetch("XDG_CONFIG_HOME")),
             "permission" => permission,
-            "skill_invocation_present" => ARGV.last.include?("/ce-plan"),
+            "stdin_bytes" => prompt.bytesize,
+            "prompt_in_argv" => ARGV.include?(prompt),
+            "skill_invocation_present" => prompt.include?("/ce-plan"),
             "selected_credential_present" => !ENV["ANTHROPIC_API_KEY"].to_s.empty?,
             "ambient_credential_present" => !ENV["OPENAI_API_KEY"].to_s.empty?
           }

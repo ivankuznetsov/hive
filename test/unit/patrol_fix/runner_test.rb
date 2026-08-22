@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/patrol_fix/runner"
+require "hive/stages/patrol_fix/inbox"
 
 class PatrolFixRunnerTest < Minitest::Test
   include HiveTestHelper

@@ -19,5 +19,9 @@ elif [[ "${HIVE_TEST_REQUIRE_BUNDLE:-}" == "1" ]]; then
   exit 1
 else
   echo "bin/test: bundle unavailable or incomplete; running with plain ruby" >&2
+  # A parent `bundle exec` injects Bundler through RUBYOPT/RUBYLIB. Leaving
+  # those active makes this branch re-enter that bundle with whichever `ruby`
+  # PATH selects, which can be a different and incompatible Ruby installation.
+  unset RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH BUNDLER_SETUP BUNDLER_VERSION
   exec ruby -Itest -Ilib -e "$runner" "$@"
 fi

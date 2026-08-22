@@ -72,6 +72,12 @@ bundle exec rake coverage:changed                         # locked bundle + focu
 bin/test test/unit/a_test.rb test/integration/b_test.rb   # every named file, with a plain-Ruby fallback
 ```
 
+The plain-Ruby fallback clears inherited Bundler activation before
+launching the `ruby` selected by `PATH`. That matters when `bin/test` is itself
+called from a bundled parent: the fallback must not re-enter the parent's bundle
+under a different system Ruby. Set `HIVE_TEST_REQUIRE_BUNDLE=1` for authoritative
+coverage or CI checks, where an unlocked fallback must fail closed instead.
+
 Known flakes are measured before they are masked. The nightly seed sweep
 (`.github/workflows/nightly-flake-sweep.yml`) runs the exact default-suite
 manifest under seeds 101, 202, and 303. Analysis accepts only that complete,

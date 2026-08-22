@@ -10,9 +10,25 @@ class BinTestTest < Minitest::Test
     assert_runs_both("BUNDLE_GEMFILE" => File.join(ROOT, "Gemfile"))
   end
 
-  def test_plain_ruby_fallback_keeps_the_same_multiple_file_contract
-    assert_runs_both("PATH" => "/usr/bin:/bin") do |output|
+  def test_plain_ruby_fallback_drops_parent_bundle_activation
+    Dir.mktmpdir("bin-test-plain") do |dir|
+      first = File.join(dir, "first.rb")
+      second = File.join(dir, "second.rb")
+      poison = File.join(dir, "poison.rb")
+      File.write(first, 'puts "loaded plain first"')
+      File.write(second, 'puts "loaded plain second"')
+      File.write(poison, 'abort "plain fallback inherited RUBYOPT"')
+
+      output, status = Open3.capture2e(
+        { "PATH" => "/usr/bin:/bin", "RUBYOPT" => "-r#{poison}" },
+        File.join(ROOT, "bin", "test"), first, second,
+        chdir: ROOT,
+      )
+
+      assert status.success?, output
       assert_includes output, "bundle unavailable or incomplete"
+      assert_includes output, "loaded plain first"
+      assert_includes output, "loaded plain second"
     end
   end
 

@@ -1,5 +1,6 @@
 require "test_helper"
 require "json"
+require "shellwords"
 require "tmpdir"
 
 module TestFailureEvidenceUnit
@@ -75,8 +76,11 @@ module TestFailureEvidenceUnit
         summary = File.read(summary_path)
         assert_includes summary, "Failed tests (1)"
         assert_includes summary, "`SampleTest#test_bites`"
-        assert_includes summary,
-          "repro: `bundle exec ruby -Itest -Ilib test/unit/sample_test.rb --seed 424242 --name SampleTest#test_bites`"
+        expected_repro = Shellwords.join(
+          %w[bundle exec ruby -Itest -Ilib test/unit/sample_test.rb --seed 424242 --name] +
+          [ "SampleTest#test_bites" ]
+        )
+        assert_includes summary, "repro: `#{expected_repro}`"
 
         payload = JSON.parse(File.read(evidence_path))
         assert_equal "hive-ci-failure-evidence/v1", payload.fetch("schema")
@@ -86,10 +90,7 @@ module TestFailureEvidenceUnit
         assert_equal "test/unit/sample_test.rb", failure.fetch("file")
         assert_equal 17, failure.fetch("line")
         assert_includes failure.fetch("message"), "Minitest::Assertion"
-        assert_equal(
-          "bundle exec ruby -Itest -Ilib test/unit/sample_test.rb --seed 424242 --name SampleTest#test_bites",
-          failure.fetch("repro_command"),
-        )
+        assert_equal expected_repro, failure.fetch("repro_command")
         refute payload.key?("quarantine_retries"),
                "failure evidence must not advertise a retry channel that CI does not use"
       end
@@ -99,10 +100,11 @@ module TestFailureEvidenceUnit
   class EdgeCaseTest < Minitest::Test
     include Helpers
 
-    def test_zero_failures_write_nothing
+    def test_zero_failures_remove_stale_child_evidence_and_write_no_summary
       Dir.mktmpdir do |dir|
         summary_path = File.join(dir, "summary.md")
         evidence_path = File.join(dir, "evidence.json")
+        File.write(evidence_path, "stale child evidence")
 
         reporter = HiveFailureEvidence::Reporter.new({ seed: 1 })
         with_emission_env(summary_path, evidence_path) { reporter.report }
@@ -142,7 +144,16 @@ module TestFailureEvidenceUnit
       entry = HiveFailureEvidence::FailureEntry.from_result(result, 9)
 
       assert_nil entry.file
-      assert_includes entry.repro_command, "--name SampleTest#test_bites"
+      assert_equal "SampleTest#test_bites", Shellwords.split(entry.repro_command).last
+    end
+
+    def test_source_location_inside_repo_is_portable
+      result = failing_result
+      result.source_location = [ File.join(HiveFailureEvidence::REPO_ROOT, "test/unit/sample_test.rb"), 17 ]
+
+      entry = HiveFailureEvidence::FailureEntry.from_result(result, 9)
+
+      assert_equal "test/unit/sample_test.rb", entry.file
     end
   end
 

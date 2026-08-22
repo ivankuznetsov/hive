@@ -604,9 +604,8 @@ module HiveTestCoverage
   # human log (print_report) stays capped; this exported form never is.
   # Called by the merge task before the gate aborts so red runs still publish
   # evidence. Fail-open: emission problems warn but never mask a gate result.
-  def export_evidence!(report, test_files_by_shard: nil)
+  def export_evidence!(report)
     FileUtils.mkdir_p(@coverage_dir)
-    export_shard_map!(test_files_by_shard) if test_files_by_shard
     uncovered = Array(value(report, :files))
       .select { |file| Array(value(file, :uncovered_lines)).any? }
       .map do |file|
@@ -669,7 +668,9 @@ module HiveTestCoverage
     end
     return if lines.empty?
 
-    File.write(ENV.fetch("GITHUB_STEP_SUMMARY"), (lines.join("\n") << "\n"))
+    File.open(ENV.fetch("GITHUB_STEP_SUMMARY"), "a") do |file|
+      file.write(lines.join("\n") << "\n")
+    end
   end
 
   def read_report(path)

@@ -95,7 +95,7 @@ module TestCoverageEvidence
 
       assert_silent do
         capture_io do
-          HiveTestCoverage.export_evidence!(report, test_files_by_shard: [ [ "x_test.rb" ] ])
+          HiveTestCoverage.export_evidence!(report)
         end
       end
     ensure

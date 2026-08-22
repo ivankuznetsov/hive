@@ -3,9 +3,9 @@ name: Nightly flake sweep
 # Moves flake discovery off agents' PRs: runs the default suite once per seed
 # in a single process each, merges the reports into order-dependent-flake
 # candidates (failing under some seeds but not others) plus per-file mean
-# timings for the runtime-based shard partition. Candidate filing is
-# deduplicated by test name via issue search; timings land as an artifact and
-# can influence PR CI only through a later reviewed change.
+# timings as evidence for a later reviewed shard-partition change. Candidate
+# filing is deduplicated by an exact issue-title match; required PR CI never
+# consumes these artifacts automatically.
 
 on:
   schedule:
@@ -107,9 +107,12 @@ jobs:
         run: |
           set -euo pipefail
           marker="flake-sweep-report"
-          existing="$(gh issue list --state open --search "\"$marker\" in:title" --json number --jq '.[0].number' || true)"
           body="$(ruby script/render_flake_issue.rb "$CANDIDATES_PATH")"
           title="Flake sweep report ($marker)"
+          existing="$(
+            gh issue list --state open --limit 1000 --json number,title |
+              jq -r --arg title "$title" '[.[] | select(.title == $title)] | first | .number // empty'
+          )"
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$body"
           else

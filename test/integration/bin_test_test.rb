@@ -16,6 +16,18 @@ class BinTestTest < Minitest::Test
     end
   end
 
+  def test_authoritative_mode_refuses_an_unlocked_fallback
+    output, status = Open3.capture2e(
+      { "HIVE_TEST_REQUIRE_BUNDLE" => "1", "PATH" => "/usr/bin:/bin" },
+      File.join(ROOT, "bin", "test"),
+      "test/test_helper.rb",
+      chdir: ROOT,
+    )
+
+    refute status.success?, output
+    assert_includes output, "locked bundle is required"
+  end
+
   private
 
   def assert_runs_both(environment)

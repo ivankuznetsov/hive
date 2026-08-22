@@ -25,7 +25,7 @@ unless candidates.empty?
   lines << "" unless lines.empty?
   lines << "## Order-dependent candidates (fail under some seeds, pass under others)"
   lines << ""
-  lines << "Quarantine candidates for `test/support/flake_quarantine.rb` after confirming the failure signature:"
+  lines << "Confirm each failure signature before proposing any retry or quarantine policy:"
   lines << ""
   candidates.each do |entry|
     lines << "- `#{entry['test']}` (`#{entry['file']}`) — failing seeds #{entry['failing_seeds'].inspect}: #{entry['sample_message']}"
@@ -33,6 +33,6 @@ unless candidates.empty?
 end
 lines << ""
 lines << "---"
-lines << "Timings artifact: download the run's `flake-analysis` artifact and land it with `HIVE_TIMINGS_SOURCE=<shard-timings.json> rake coverage:timings`."
+lines << "Timings artifact: the run's `flake-analysis` artifact is evidence for a later reviewed shard-partition change; required CI does not consume it automatically."
 
 puts lines.join("\n")

@@ -14,6 +14,9 @@ runner='files = ARGV.take_while { |arg| !arg.start_with?("-") }; abort "bin/test
 
 if command -v bundle >/dev/null 2>&1 && bundle check >/dev/null 2>&1; then
   exec bundle exec ruby -Itest -Ilib -e "$runner" "$@"
+elif [[ "${HIVE_TEST_REQUIRE_BUNDLE:-}" == "1" ]]; then
+  echo "bin/test: the locked bundle is required but unavailable or incomplete" >&2
+  exit 1
 else
   echo "bin/test: bundle unavailable or incomplete; running with plain ruby" >&2
   exec ruby -Itest -Ilib -e "$runner" "$@"

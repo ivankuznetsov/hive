@@ -208,7 +208,7 @@ namespace :coverage do
     end
     HiveTestCoverage.report!
     report = HiveTestCoverage.read_report(report_path)
-    HiveTestCoverage.export_evidence!(report, test_files_by_shard: HIVE_COVERAGE_SHARDS)
+    HiveTestCoverage.export_evidence!(report)
     abort HiveTestCoverage.failure_message(report) unless HiveTestCoverage.coverage_ok?(report)
   rescue ArgumentError, KeyError, HiveTestCoverage::ShardManifestError => e
     abort "coverage shard manifest error: #{e.message}"
@@ -247,13 +247,16 @@ namespace :coverage do
       ENV["HIVE_COVERAGE_RUN_ID"] = run_id
       ENV["RUBYOPT"] = [ "-I#{File.join(root, 'test')} -rhive_coverage_boot", ENV["RUBYOPT"] ].compact.join(" ")
 
-      argv = [ "ruby", "-Itest", "-Ilib", *test_files ]
-      # Mirror bin/test: prefer the project bundle but keep the fast loop
-      # working in minimal agent sandboxes without an installed bundle.
-      if system("bundle", "check", out: File::NULL, err: File::NULL, chdir: root)
-        argv = [ "bundle", "exec", *argv ]
-      end
-      success = system(*argv, chdir: root)
+      # Reuse the focused runner so multiple mapped files are all loaded and
+      # Bundler/plain-Ruby selection has one implementation. The test helper
+      # is the coverage bootstrap for explicit no-focused-test overrides.
+      focused_files = test_files.empty? ? [ "test/test_helper.rb" ] : test_files
+      success = system(
+        { "HIVE_TEST_REQUIRE_BUNDLE" => "1" },
+        File.join(root, "bin", "test"),
+        *focused_files,
+        chdir: root
+      )
       abort "coverage:changed: focused tests failed" unless success
 
       HiveTestCoverage.configure!(root: root)
@@ -263,6 +266,7 @@ namespace :coverage do
       abort "coverage:changed failed:\n  - #{failures.join("\n  - ")}" unless failures.empty?
       puts "coverage:changed: exact line coverage holds for all #{sources.length} changed source(s)"
     ensure
+      FileUtils.rm_rf(File.join(root, "coverage", ".resultset", run_id)) if root && run_id
       old_env.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
     end
   end

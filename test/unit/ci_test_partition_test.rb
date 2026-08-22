@@ -138,6 +138,7 @@ class CiTestPartitionTest < Minitest::Test
 
       coverage_gate = workflow.fetch("jobs").fetch("test")
       assert_equal "coverage (Ruby 3.4)", coverage_gate.fetch("name")
+      assert_equal 20, coverage_gate.fetch("timeout-minutes")
       assert_equal "${{ always() }}", coverage_gate.fetch("if")
       assert_equal "coverage-shards", coverage_gate.fetch("needs")
       shard_verdict = coverage_gate.fetch("steps").find { |step| step["name"] == "Require every coverage collector" }
@@ -210,6 +211,7 @@ class CiTestPartitionTest < Minitest::Test
       end
       assert upload, "#{job_name} runs root Minitest but does not retain its failure evidence"
       assert_includes %w[failure() always()], upload.fetch("if")
+      assert_equal "warn", upload.dig("with", "if-no-files-found")
     end
   end
 
@@ -225,14 +227,23 @@ class CiTestPartitionTest < Minitest::Test
     retain = steps.find { |step| step["name"] == "Retain merged analysis" }
     verdict = steps.find { |step| step["name"] == "Enforce complete green sweep" }
 
-    assert_includes merge.fetch("run"), "--expected-seeds"
+    expected_seeds = workflow.dig("jobs", "sweep", "strategy", "matrix", "seed")
+    assert_includes merge.fetch("run"), "--expected-seeds \"#{expected_seeds.join(',')}\""
     refute merge["continue-on-error"], "the wrapper must capture the analyzer status explicitly"
     assert_includes issue.fetch("if"), "steps.merge.outputs.artifacts"
+    refute_includes issue.fetch("run"), "--search"
+    assert_includes issue.fetch("run"), "--arg title"
+    assert_includes issue.fetch("run"), ".title == $title"
     assert_equal "${{ always() }}", verdict.fetch("if")
     assert_includes verdict.fetch("run"), "HIVE_ANALYSIS_STATUS"
     assert_includes verdict.fetch("run"), "HIVE_SWEEP_RESULT"
     assert_operator steps.index(retain), :<, steps.index(verdict)
     assert_operator steps.index(issue), :<, steps.index(verdict)
+
+    issue_renderer = File.read(File.join(ROOT, "script", "render_flake_issue.rb"))
+    refute_includes issue_renderer, "flake_quarantine"
+    refute_includes issue_renderer, "coverage:timings"
+    assert_includes issue_renderer, "required CI does not consume it automatically"
   end
 
   def test_absolute_tui_latency_is_advisory_and_separate_from_required_scaling
@@ -404,17 +415,10 @@ class CiTestPartitionTest < Minitest::Test
     )
 
     scenario = e2e_steps.find { |step| step["name"] == "Run real-subprocess scenarios" }
-    upload = e2e_steps.find { |step| step["uses"] == UPLOAD_ARTIFACT_ACTION }
-    upload_paths = upload.fetch("with").fetch("path").lines.map(&:strip).reject(&:empty?)
+    upload = e2e_steps.find { |step| step.dig("with", "name") == "hive-e2e-report" }
     assert_equal download.fetch("with").fetch("name"), upload.fetch("with").fetch("name")
-    assert_includes(
-      upload_paths,
-      scenario.fetch("env").fetch("HIVE_E2E_RUNS_DIR"),
-    )
-    assert_includes(
-      upload_paths,
-      integrity.fetch("env").fetch("HIVE_E2E_RUNS_DIR"),
-    )
+    assert_equal scenario.fetch("env").fetch("HIVE_E2E_RUNS_DIR"), upload.dig("with", "path")
+    assert_equal integrity.fetch("env").fetch("HIVE_E2E_RUNS_DIR"), upload.dig("with", "path")
     assert_equal(
       enforce.fetch("env").fetch("HIVE_E2E_RUNS_DIR"),
       download.fetch("with").fetch("path")

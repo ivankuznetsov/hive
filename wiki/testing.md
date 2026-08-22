@@ -58,7 +58,7 @@ authorized run on the unchanged exact head can produce authenticated evidence.
 
 ## Local feedback loop
 
-The default fast loop for implementation is `rake coverage:changed` (or the
+The default fast loop for implementation is `bundle exec rake coverage:changed` (or the
 equivalent focused files via `bin/test`). It maps git-diff-touched `lib/`
 sources to their mirrored test files, runs only those, and enforces exact
 line coverage on the changed sources; the global 100% gate stays CI's job.
@@ -68,7 +68,7 @@ loudly instead of running a plausibly unrelated test. `HIVE_COVERAGE_BASE`
 overrides the merge base.
 
 ```bash
-bundle exec rake coverage:changed                         # changed sources + focused exact coverage
+bundle exec rake coverage:changed                         # locked bundle + focused exact coverage
 bin/test test/unit/a_test.rb test/integration/b_test.rb   # every named file, with a plain-Ruby fallback
 ```
 
@@ -76,7 +76,8 @@ Known flakes are measured before they are masked. The nightly seed sweep
 (`.github/workflows/nightly-flake-sweep.yml`) runs the exact default-suite
 manifest under seeds 101, 202, and 303. Analysis accepts only that complete,
 unique seed set with identical manifest digests; missing, duplicate, corrupt,
-or suite-mismatched reports produce no derived candidates or timings. Complete
+suite-mismatched, incompletely loaded, zero-test, or test-count-mismatched
+reports produce no derived candidates or timings. Complete
 failing matrices retain their analysis and issue evidence before the workflow
 reports failure. The resulting timing and flake artifacts are evidence for a
 later reviewed change; required PR CI does not consume them automatically.

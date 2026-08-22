@@ -4,8 +4,8 @@
 #  - an order-dependent-flake candidate list: tests failing in at least one
 #    seed but not all (a test failing everywhere is a real regression, not a
 #    seed-order flake);
-#  - a shard-timings payload keyed by test file, consumed by
-#    `rake coverage:timings` to land the checked-in partition input.
+#  - a shard-timings payload keyed by test file, retained as evidence for a
+#    later reviewed partition change.
 #
 # Usage:
 #   bundle exec ruby script/flake_sweep_report.rb --reports 'r1.json,r2.json' \
@@ -49,6 +49,7 @@ reports.each do |report|
   unless report["suite_manifest_sha256"] == expected_manifest
     abort "sweep report suite manifest digest does not match its files"
   end
+  abort "sweep report did not finish loading its suite" unless report["suite_loaded"] == true
 end
 
 seeds = reports.map { |report| report.fetch("seed") }
@@ -63,6 +64,12 @@ suite_manifests = reports.map { |report| report.fetch("suite_manifest_sha256") }
 suite_file_sets = reports.map { |report| report.fetch("suite_files") }.uniq
 unless suite_manifests.length == 1 && suite_file_sets.length == 1
   abort "sweep reports do not share one suite manifest"
+end
+
+tests_run_per_seed = reports.map { |report| Integer(report.fetch("tests_run")) }
+abort "sweep report ran no tests" unless tests_run_per_seed.all?(&:positive?)
+unless tests_run_per_seed.uniq.length == 1
+  abort "sweep reports disagree on tests_run: #{tests_run_per_seed.inspect}"
 end
 
 reports.sort_by! { |report| expected_seeds.index(report.fetch("seed")) }
@@ -84,11 +91,10 @@ order_dependent, consistently_failing = failures_by_test
   .partition { |_identifier, occurrences| occurrences.length < seeds.length }
   .map(&:to_h)
 
-
 payload = {
   "schema" => "hive-flake-sweep-report.v1",
   "seeds" => seeds,
-  "tests_run_per_seed" => reports.map { |report| report.fetch("tests_run") },
+  "tests_run_per_seed" => tests_run_per_seed,
   "order_dependent_candidates" => order_dependent.map do |identifier, occurrences|
     {
       "test" => identifier,

@@ -57,6 +57,48 @@ class FlakeSweepReportTest < Minitest::Test
     end
   end
 
+  def test_zero_test_report_is_rejected_without_derived_artifacts
+    reports = EXPECTED_SEEDS.map { |seed| report(seed:) }
+    reports.first["tests_run"] = 0
+
+    with_reports(reports) do |paths, candidates, timings|
+      output, status = run_report(paths, candidates, timings)
+
+      refute status.success?
+      assert_includes output, "ran no tests"
+      refute_path_exists candidates
+      refute_path_exists timings
+    end
+  end
+
+  def test_incomplete_suite_load_is_rejected_without_derived_artifacts
+    reports = EXPECTED_SEEDS.map { |seed| report(seed:) }
+    reports.first["suite_loaded"] = false
+
+    with_reports(reports) do |paths, candidates, timings|
+      output, status = run_report(paths, candidates, timings)
+
+      refute status.success?
+      assert_includes output, "did not finish loading"
+      refute_path_exists candidates
+      refute_path_exists timings
+    end
+  end
+
+  def test_seed_runs_must_execute_the_same_number_of_tests
+    reports = EXPECTED_SEEDS.map { |seed| report(seed:) }
+    reports.last["tests_run"] = 2
+
+    with_reports(reports) do |paths, candidates, timings|
+      output, status = run_report(paths, candidates, timings)
+
+      refute status.success?
+      assert_includes output, "disagree on tests_run"
+      refute_path_exists candidates
+      refute_path_exists timings
+    end
+  end
+
   private
 
   def report(seed:, suite_files: [ "test/unit/sample_test.rb" ], failures: [])
@@ -65,6 +107,7 @@ class FlakeSweepReportTest < Minitest::Test
       "seed" => seed,
       "suite_files" => suite_files,
       "suite_manifest_sha256" => Digest::SHA256.hexdigest(suite_files.join("\0")),
+      "suite_loaded" => true,
       "tests_run" => 1,
       "per_file_seconds" => { suite_files.first => 1.0 },
       "failures" => failures

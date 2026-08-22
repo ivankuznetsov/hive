@@ -58,6 +58,7 @@ relative_suite_files = suite_files.map { |path| path.delete_prefix("#{root}/") }
 started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 results = []
 results_lock = Mutex.new
+suite_loaded = false
 
 collector = Class.new(Minitest::AbstractReporter).new
 collector.define_singleton_method(:record) do |result|
@@ -93,6 +94,7 @@ at_exit do
     "seed" => Integer(seed),
     "suite_files" => relative_suite_files,
     "suite_manifest_sha256" => Digest::SHA256.hexdigest(relative_suite_files.join("\0")),
+    "suite_loaded" => suite_loaded,
     "total_seconds" => Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at,
     "per_file_seconds" => per_file,
     "tests_run" => results.count { |entry| !entry["skipped"] },
@@ -109,3 +111,4 @@ end
 
 require File.join(root, "test", "test_helper")
 suite_files.each { |path| require path }
+suite_loaded = true

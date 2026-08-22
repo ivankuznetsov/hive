@@ -30,6 +30,7 @@ class FlakeSweepTest < Minitest::Test
       assert_equal 101, payload.fetch("seed")
       assert_equal [ fixture ], payload.fetch("suite_files")
       assert_match(/\A[0-9a-f]{64}\z/, payload.fetch("suite_manifest_sha256"))
+      assert_equal true, payload.fetch("suite_loaded")
       assert_equal 1, payload.fetch("tests_run")
     end
   end

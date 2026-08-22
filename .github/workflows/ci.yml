@@ -68,7 +68,7 @@ jobs:
         with:
           name: failure-evidence-shard-${{ matrix.shard }}
           path: tmp/ci-failure-evidence.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
   test:
@@ -76,7 +76,7 @@ jobs:
     if: ${{ always() }}
     needs: coverage-shards
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Aggregation-only notice (no tests run in this job)
         shell: bash
@@ -119,7 +119,7 @@ jobs:
           path: |
             coverage/uncovered.json
             coverage/shards.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
   expensive-test-gates:
@@ -154,7 +154,7 @@ jobs:
         with:
           name: failure-evidence-${{ matrix.name }}
           path: tmp/ci-failure-evidence.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
   # Absolute timings vary with hosted-runner load, so they remain visible but
@@ -181,7 +181,7 @@ jobs:
         with:
           name: failure-evidence-tui-reactivity-latency
           path: tmp/ci-failure-evidence.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
   required-test-gate:
@@ -237,15 +237,21 @@ jobs:
         env:
           HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
         run: ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --integrity-only
-      - name: Retain e2e reports and failure evidence
+      - name: Retain e2e reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hive-e2e-report
-          path: |
-            ${{ runner.temp }}/hive-e2e-runs
-            tmp/ci-failure-evidence.json
+          path: ${{ runner.temp }}/hive-e2e-runs
           include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: failure-evidence-e2e
+          path: tmp/ci-failure-evidence.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -506,5 +512,5 @@ jobs:
         with:
           name: failure-evidence-launchd-macos
           path: tmp/ci-failure-evidence.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14

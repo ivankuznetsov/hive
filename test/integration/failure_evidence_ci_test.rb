@@ -1,6 +1,8 @@
 require "test_helper"
 require "json"
 require "open3"
+require "pathname"
+require "shellwords"
 require "tmpdir"
 
 # Proves the full hosted-runner contract: a real failing Minitest process
@@ -10,8 +12,11 @@ require "tmpdir"
 module TestFailureEvidenceIntegration
   class CiEmissionTest < Minitest::Test
     def test_failing_subprocess_emits_summary_json_and_working_repro
-      Dir.mktmpdir("hive-fail-ev") do |dir|
-        test_path = File.join(dir, "sample_failure_test.rb")
+      FileUtils.mkdir_p(File.join(REPO_ROOT, "tmp"))
+      Dir.mktmpdir("hive-fail-ev", File.join(REPO_ROOT, "tmp")) do |root|
+        dir = File.join(root, "path with spaces")
+        FileUtils.mkdir_p(dir)
+        test_path = File.join(dir, "sample failure test.rb")
         File.write(test_path, <<~RUBY)
           require "test_helper"
 
@@ -31,23 +36,24 @@ module TestFailureEvidenceIntegration
         assert_equal "hive-ci-failure-evidence/v1", payload.fetch("schema")
         failure = payload.fetch("failures").fetch(0)
         assert_equal "SampleFailureTest#test_bites", failure.fetch("test")
-        assert_equal "sample_failure_test.rb", File.basename(failure.fetch("file"))
+        assert_equal "sample failure test.rb", File.basename(failure.fetch("file"))
+        assert failure.fetch("file").start_with?("tmp/"), failure.fetch("file")
+        refute Pathname.new(failure.fetch("file")).absolute?
         seed = payload.fetch("seed")
         repro = failure.fetch("repro_command")
-        assert_includes repro, "--seed #{seed}"
-        assert_includes repro, "--name SampleFailureTest#test_bites"
+        repro_argv = Shellwords.split(repro)
+        assert_equal seed.to_s, repro_argv.fetch(repro_argv.index("--seed") + 1)
+        assert_equal "SampleFailureTest#test_bites", repro_argv.fetch(repro_argv.index("--name") + 1)
+        assert_includes repro, "path\\ with\\ spaces"
 
         summary = File.read(summary_path)
         assert_includes summary, "Failed tests (1)"
         assert_includes summary, "`SampleFailureTest#test_bites`"
 
         # The recorded repro command must target exactly this one test.
-        argv = repro.delete_prefix(HiveFailureEvidence::REPRO_PREFIX).split
         out, err, _status = Open3.capture3(
           { "BUNDLE_GEMFILE" => File.join(REPO_ROOT, "Gemfile") },
-          RbConfig.ruby,
-          *%w[-Itest -Ilib],
-          *argv.flat_map { |arg| arg.start_with?("--") ? arg.split(" ", 2) : [ arg ] },
+          *repro_argv,
           chdir: REPO_ROOT,
         )
         combined = out + err

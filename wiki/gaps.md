@@ -122,8 +122,9 @@ and source-catalog ownership proof gap.
 
 PR #1167 now keeps required CI on the hosted-proven six-way byte partition and
 adds a complete-set nightly seed-sweep producer. Focused tests prove the sweep
-starts, admits exactly seeds 101/202/303 with one shared suite manifest, rejects
-partial or incompatible inputs before deriving artifacts, and preserves a
+starts, admits exactly seeds 101/202/303 with one shared suite manifest, a
+completed suite load, and one positive test count, rejects partial or
+incompatible inputs before deriving artifacts, and preserves a
 complete failing analysis before its final red verdict. The scheduled workflow
 does not exist on the default branch yet, so there is no hosted three-seed
 artifact to justify runtime-based repartitioning or an evidence-backed retry

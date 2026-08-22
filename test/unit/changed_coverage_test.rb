@@ -6,8 +6,7 @@ module TestChangedCoverage
     def test_mirrored_convention_maps_source_to_its_test_files
       files = HiveChangedCoverage.test_files_for("lib/hive/commands/run.rb")
 
-      assert_includes files, "test/unit/commands/run_test.rb"
-      assert_includes files, "test/integration/run_error_envelope_test.rb".sub("run_error_envelope", "run") if files.include?("test/integration/run_test.rb")
+      assert_equal [ "test/unit/commands/run_test.rb" ], files
     end
 
     def test_basename_only_match_is_rejected_as_ambiguous
@@ -38,15 +37,10 @@ module TestChangedCoverage
       assert_includes error.message, "explicit override"
     end
 
-    def test_unmappable_source_fails_open_with_no_tests_and_a_warning
-      out, _err = capture_io do
-        files = HiveChangedCoverage.test_files_for_sources([ "lib/hive/version.rb" ])
+    def test_explicit_override_can_require_only_the_coverage_bootstrap
+      files = HiveChangedCoverage.test_files_for_sources([ "lib/hive/version.rb" ])
 
-        assert_empty files
-      end
-      # version.rb maps through the explicit override (empty), which is a
-      # deliberate no-test exception rather than a warning case.
-      refute_includes out, "no mirrored test file"
+      assert_empty files
     end
 
     def test_override_table_takes_precedence_over_conventions

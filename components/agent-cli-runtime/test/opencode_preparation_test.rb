@@ -7,6 +7,7 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
     profile = AgentCliRuntime::Profiles.fetch(:opencode)
     assert_equal "1.18.16", profile.min_version
     assert_equal "opencode-cli/v1", profile.launcher_identity
+    assert_equal :piped_stdin, profile.prompt_style
     assert_equal [ "--model", "anthropic/claude-sonnet-4-5" ],
                  profile.identity_arguments(
                    model: "anthropic/claude-sonnet-4-5",
@@ -103,9 +104,9 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
           fixture.fetch(:bin), "run", "--auto",
           "--model", "anthropic/claude-sonnet-4-5",
           "--variant", "high", "--dir", work, "--pure",
-          "--format", "json", "make the atomic edit"
+          "--format", "json"
         ], prepared.invocation.argv
-        assert_nil prepared.invocation.stdin_data
+        assert_equal "make the atomic edit", prepared.invocation.stdin_data
         assert_equal :opencode, prepared.invocation.provider
         assert_equal "anthropic/claude-sonnet-4-5", prepared.requested_route.to_s
         assert_equal [ "ANTHROPIC_API_KEY" ],
@@ -159,6 +160,32 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
         prepared.cleanup!
         assert File.file?(source)
         assert File.directory?(work)
+      end
+    end
+  end
+
+  def test_prepared_invocation_pipes_a_prompt_larger_than_linux_allows_in_one_argument
+    with_fixture_cli do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        root = File.join(dir, "invocation")
+        source = selected_config(dir)
+        FileUtils.mkdir_p(work)
+        prompt = "implement the reviewed plan\n" + ("x" * 150_000)
+
+        prepared = AgentCliRuntime.prepare!(
+          preparation_request(
+            work:, root:, source:, prompt:,
+            credential_environment_keys: [ "ANTHROPIC_API_KEY" ]
+          ),
+          env: fixture.fetch(:env).merge("ANTHROPIC_API_KEY" => "configured")
+        )
+
+        refute_includes prepared.invocation.argv, prompt
+        assert_operator prepared.invocation.argv.join.bytesize, :<, 8_192
+        assert_equal prompt, prepared.invocation.stdin_data
+      ensure
+        prepared&.cleanup!
       end
     end
   end
@@ -630,11 +657,11 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
                           credential_file: nil, model: "anthropic/claude-sonnet-4-5",
                           permission_mode: "read-only", permission_policy: nil,
                           additional_read_roots: [], additional_write_roots: [],
-                          edit_patterns: [])
+                          edit_patterns: [], prompt: "make the atomic edit")
     AgentCliRuntime::OpenCodePreparationRequest.new(
       request: AgentCliRuntime::Request.new(
         profile: :opencode,
-        prompt: "make the atomic edit",
+        prompt:,
         permission_mode:,
         model:,
         effort: "high"

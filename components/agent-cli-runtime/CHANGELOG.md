@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Deliver OpenCode run prompts through its native non-TTY stdin reader instead
+  of one positional argv element. This keeps reviewed implementation plans
+  above Linux's per-argument size limit from failing before process launch with
+  `Errno::E2BIG`.
+
 ## 0.2.3 - 2026-08-21
 
 - Classify extracted provider failures once at the runtime boundary as

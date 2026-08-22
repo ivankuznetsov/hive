@@ -100,7 +100,7 @@ constructs a package profile from them. Every profile freezes after init.
 | `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`, `"opencode"`). |
 | `env_bin_override_key:` | Env var name (`"HIVE_CLAUDE_BIN"` etc.) that overrides `bin_default` when set non-empty. |
 | `headless_flag:` | The `-p` / `--prompt` style flag. |
-| `prompt_style:` | `:positional`, `:headless_flag_value`, `:stdin`, or `:piped_stdin`; controls where the rendered prompt is delivered. `:stdin` includes a `-` argv marker, while `:piped_stdin` does not. Defaults to `:stdin` for a profile named `codex` (backward compatibility), otherwise `:positional`. Built-in Pi uses `:piped_stdin`. |
+| `prompt_style:` | `:positional`, `:headless_flag_value`, `:stdin`, or `:piped_stdin`; controls where the rendered prompt is delivered. `:stdin` includes a `-` argv marker, while `:piped_stdin` does not. Defaults to `:stdin` for a profile named `codex` (backward compatibility), otherwise `:positional`. Built-in Pi and OpenCode use `:piped_stdin` so large prompts do not occupy one OS-limited argv element. |
 | `permission_skip_flag:` | The CLI's "no-prompt" flag (e.g. `--dangerously-skip-permissions` for claude). |
 | `add_dir_flag:` | Optional flag to grant FS access outside cwd; `nil` means the profile cannot extend the sandbox (triggers `warn_isolation_reduced`). |
 | `budget_flag:` | Optional `--budget USD` style flag. A profile-native flag supplies the run cap; provider protocol parsing determines whether the run ended because that cap was exhausted. |

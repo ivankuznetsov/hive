@@ -45,6 +45,28 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_implementation_sized_prompt_is_piped_without_crossing_exec_argument_limit
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "large-prompt-260812-aaaa")
+      root = File.join(fixture.fetch(:dir), "invocation-large-prompt")
+      prompt = "implement the reviewed plan\n" + ("x" * 150_000)
+
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture, invocation_root: root, prompt:
+        ).run!
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      run = calls.find { |line| line.start_with?("run --auto ") }
+      assert run
+      assert_operator run.bytesize, :<, 8_192
+      refute_includes run, prompt
+      refute File.exist?(root)
+    end
+  end
+
   def test_nonzero_malformed_timeout_and_inspection_failure_skip_or_bound_inspection
     {
       auth_failure: [ :authentication_failure, 0 ],

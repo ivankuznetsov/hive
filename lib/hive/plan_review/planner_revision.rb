@@ -13,6 +13,7 @@ module Hive
   module PlanReview
     class PlannerRevision
       MAX_CANDIDATE_BYTES = 1024 * 1024
+      RESULT_CONTRACT_VERSION = 2
 
       Result = Data.define(:outcome, :candidate_bytes, :candidate_digest, :route_receipt, :diagnostic) do
         def success? = outcome == "success"
@@ -81,15 +82,21 @@ module Hive
             }
           end
           output_valid = report.required_outputs_valid?
-          timed_out_complete = result[:timed_out] && output_valid &&
-                               Hive::Markers.current(output_path).name == :complete
-          unless (result[:status] == :ok && output_valid) || timed_out_complete
+          complete_candidate = output_valid && Hive::Markers.current(output_path).name == :complete
+          artifact_override = result[:status] != :ok && complete_candidate
+          unless (result[:status] == :ok && output_valid) || artifact_override
             return { "status" => "retryable_failure", "diagnostic" => result[:error_message] }
+          end
+
+          diagnostic = if result[:timed_out]
+                         "salvaged complete candidate after planner timeout"
+          elsif artifact_override
+                         "salvaged complete candidate after planner telemetry failure"
           end
 
           {
             "status" => "success",
-            "diagnostic" => timed_out_complete ? "salvaged complete candidate after planner timeout" : nil,
+            "diagnostic" => diagnostic,
             "actual_route" => planner_identity.merge("model" => result.dig(:usage, :model).to_s).reject do |key, value|
               key == "model" && value.empty?
             end

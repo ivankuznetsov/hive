@@ -3,7 +3,7 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-08-16
+updated: 2026-08-21
 tags: [agent, runtime, component, gem, cli]
 ---
 
@@ -43,9 +43,11 @@ SemVer-governed behavior; orchestration policy stays injectable or outside the
 package.
 
 The prompt transport distinguishes stdin with an argv marker (`:stdin`, used
-by Codex) from a raw non-TTY pipe (`:piped_stdin`, used by Pi). Pi's native
-pipe reader constructs the initial message from stdin, so implementation-sized
-prompts never occupy one operating-system-limited argv element.
+by Codex) from a raw non-TTY pipe (`:piped_stdin`, used by Pi and OpenCode).
+Both CLIs construct the initial message from that pipe, so implementation-sized
+prompts never occupy one operating-system-limited argv element. This matters
+before the total `ARG_MAX` ceiling: Linux rejects one argument at roughly 128
+KiB, which a deeply reviewed plan can exceed on its own.
 
 OpenCode adds a stricter, additive preparation surface because its safe
 headless contract depends on an invocation-owned configuration overlay. An
@@ -57,13 +59,15 @@ owner-private XDG config/data/cache/state homes, compiles deny-first permission
 rules, and returns a `PreparedInvocation`. The value exposes discrete argv,
 non-secret child-environment overrides, requested-route evidence, generated
 paths, and idempotent `cleanup!`; it never starts `opencode run`. The process
-owner forwards only the named credential keys and must invoke cleanup from its
-own lifecycle `ensure`.
+owner forwards only the named credential keys, binds any compiled `stdin_data`
+to the run process, and must invoke cleanup from its own lifecycle `ensure`.
 
 The OpenCode route-aware probe requires `1.18.16+`, all pinned run/export
-flags, a selected authentication source, and the exact cached
-`provider/model` plus requested variant while remote model fetching and ambient
-project configuration are disabled. Generic `probe(profile)` and
+flags, a selected authentication source, and an exact `provider/model` plus
+requested variant while remote model fetching and ambient project
+configuration are disabled. An exact route declared by the selected overlay is
+authoritative and skips the large verbose CLI inventory; an undeclared route
+must still exist in that bounded local inventory. Generic `probe(profile)` and
 `prepare!(profile)` remain compatible for legacy profiles. OpenCode's ordinary
 `nil`, `read-only`, and `workspace-write` compilation paths fail closed unless
 the prepared overlay supplies its explicit typed policy and trusted `--auto`
@@ -73,7 +77,9 @@ Prepared overlays reserve every XDG/config/disable key, remove selected
 per-agent permission blocks, forward credentials only when they match the
 requested provider, and emit worktree-relative edit patterns. Nested read-only
 exceptions are re-applied after writable rules because OpenCode uses the last
-matching permission. Probe children start from an explicitly cleared
+matching permission. Workspace-write requests may also carry explicit
+deny-first Bash patterns; absent patterns keep shell denied, and the patterns
+remain application permissions rather than an OS sandbox. Probe children start from an explicitly cleared
 environment, and cleanup refuses a replaced invocation root without masking a
 completed Hive result.
 
@@ -87,6 +93,14 @@ assistant record, records requested and actual nested routes separately, and
 uses its token/cache/reasoning/cost fields without converting absence to zero.
 Timeout, cancellation, authentication failure, configuration failure, generic
 CLI failure, malformed output, and completion remain distinct outcomes.
+Nonzero OpenCode runs that carry an upstream idle-timeout/504 diagnostic are
+normalized as `timed_out` rather than generic `cli_failure`; Hive projects that
+use marker-owned stages record the ordinary transient `timeout` reason while
+preserving any partial artifact bytes for scheduler-owned retry.
+When OpenCode exits zero with an empty terminal assistant message after writing
+a current terminal stage artifact, Hive trusts that controller-scoped artifact;
+the strict malformed transcript remains a failure whenever the artifact itself
+is incomplete.
 Unknown additive event payloads are discarded after binding any supplied
 session identity; only bounded, redacted type summaries survive. Exact
 truncation evidence is carried separately from final-message bytes. Legacy

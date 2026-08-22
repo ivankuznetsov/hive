@@ -7,6 +7,7 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
     profile = AgentCliRuntime::Profiles.fetch(:opencode)
     assert_equal "1.18.16", profile.min_version
     assert_equal "opencode-cli/v1", profile.launcher_identity
+    assert_equal :piped_stdin, profile.prompt_style
     assert_equal [ "--model", "anthropic/claude-sonnet-4-5" ],
                  profile.identity_arguments(
                    model: "anthropic/claude-sonnet-4-5",
@@ -19,6 +20,63 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
       )
     end
     assert_match(/explicit OpenCode permission policy/, error.message)
+  end
+
+  def test_route_probe_gives_only_the_large_model_inventory_a_longer_deadline
+    calls = []
+    success = Object.new
+    success.define_singleton_method(:success?) { true }
+    profile = Object.new
+    profile.define_singleton_method(:name) { :opencode }
+    profile.define_singleton_method(:binary_installed?) { |env:| !env.nil? }
+    profile.define_singleton_method(:bin) { |env:| env && "opencode" }
+    profile.define_singleton_method(:check_version!) { |env:| env && "1.18.18" }
+    profile.define_singleton_method(:min_version) { "1.18.16" }
+    profile.define_singleton_method(:launcher_identity) { "opencode-cli/v1" }
+    profile.define_singleton_method(:env_bin_override_keys) { [] }
+    profile.define_singleton_method(:capture_local) do |*arguments, env:, timeout_sec: 10|
+      calls << [ arguments, timeout_sec, env ]
+      output = case arguments
+      when [ "run", "--help" ]
+        "--model --variant --format --dir --pure --auto"
+      when [ "export", "--help" ]
+        "--sanitize"
+      when [ "auth", "list" ]
+        "openrouter\n"
+      when [ "models", "openrouter", "--verbose" ]
+        "openrouter/stealth/ox-alpha\n{\"variants\":{\"high\":{}}}\n"
+      else
+        raise "unexpected inspection call: #{arguments.inspect}"
+      end
+      [ output, "", success ]
+    end
+    request = AgentCliRuntime::ProbeRequest.new(
+      profile: :opencode,
+      route: "openrouter/stealth/ox-alpha",
+      variant: "high",
+      environment: {},
+      credential_environment_keys: [ "OPENROUTER_API_KEY" ]
+    )
+
+    profiles = AgentCliRuntime::Profiles
+    singleton = profiles.singleton_class
+    original_resolve = profiles.method(:resolve)
+    singleton.define_method(:resolve) { |_value| profile }
+    result = begin
+      AgentCliRuntime::OpenCode::Probe.call!(
+        request, env: { "OPENROUTER_API_KEY" => "selected" }
+      )
+    ensure
+      singleton.define_method(:resolve, original_resolve)
+    end
+
+    assert result.ready
+    inventory = calls.find do |arguments, _timeout, _env|
+      arguments == [ "models", "openrouter", "--verbose" ]
+    end
+    assert_equal 30, inventory.fetch(1)
+    assert_equal [ 10 ], calls.reject { |entry| entry == inventory }
+                             .map { |entry| entry.fetch(1) }.uniq
   end
 
   def test_prepare_builds_a_private_hermetic_invocation_without_spawning_run
@@ -46,9 +104,9 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
           fixture.fetch(:bin), "run", "--auto",
           "--model", "anthropic/claude-sonnet-4-5",
           "--variant", "high", "--dir", work, "--pure",
-          "--format", "json", "make the atomic edit"
+          "--format", "json"
         ], prepared.invocation.argv
-        assert_nil prepared.invocation.stdin_data
+        assert_equal "make the atomic edit", prepared.invocation.stdin_data
         assert_equal :opencode, prepared.invocation.provider
         assert_equal "anthropic/claude-sonnet-4-5", prepared.requested_route.to_s
         assert_equal [ "ANTHROPIC_API_KEY" ],
@@ -87,6 +145,11 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
         assert_equal "deny", config.dig("permission", "edit")
         assert_equal "deny", config.dig("permission", "bash")
         assert_equal "deny", config.dig("permission", "external_directory", "*")
+        temporary = prepared.environment.fetch("TMPDIR")
+        assert_equal "allow",
+                     config.dig("permission", "external_directory", temporary)
+        assert_equal "allow",
+                     config.dig("permission", "external_directory", "#{temporary}/**")
         assert_equal original, File.binread(source)
 
         calls = File.readlines(fixture.fetch(:log), chomp: true)
@@ -102,6 +165,86 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
         prepared.cleanup!
         assert File.file?(source)
         assert File.directory?(work)
+      end
+    end
+  end
+
+  def test_prepared_invocation_pipes_a_prompt_larger_than_linux_allows_in_one_argument
+    with_fixture_cli do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        root = File.join(dir, "invocation")
+        source = selected_config(dir)
+        FileUtils.mkdir_p(work)
+        prompt = "implement the reviewed plan\n" + ("x" * 150_000)
+
+        prepared = AgentCliRuntime.prepare!(
+          preparation_request(
+            work:, root:, source:, prompt:,
+            credential_environment_keys: [ "ANTHROPIC_API_KEY" ]
+          ),
+          env: fixture.fetch(:env).merge("ANTHROPIC_API_KEY" => "configured")
+        )
+
+        refute_includes prepared.invocation.argv, prompt
+        assert_operator prepared.invocation.argv.join.bytesize, :<, 8_192
+        assert_equal prompt, prepared.invocation.stdin_data
+      ensure
+        prepared&.cleanup!
+      end
+    end
+  end
+
+  def test_selected_custom_model_survives_a_stale_local_inventory
+    with_fixture_cli(mode: :wrong_route) do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        root = File.join(dir, "invocation")
+        FileUtils.mkdir_p(work)
+        config = {
+          "provider" => {
+            "anthropic" => {
+              "models" => {
+                "claude-sonnet-4-5" => {
+                  "variants" => { "high" => {} }
+                }
+              }
+            }
+          }
+        }
+
+        prepared = AgentCliRuntime.prepare!(
+          preparation_request(
+            work:, root:, source: nil, configuration: config,
+            credential_environment_keys: [ "ANTHROPIC_API_KEY" ]
+          ),
+          env: fixture.fetch(:env)
+        )
+
+        assert prepared.probe_result.ready
+        assert_equal [ "high" ], prepared.probe_result.available_variants
+        calls = File.readlines(fixture.fetch(:log), chomp: true)
+        refute calls.any? { |line| line.include?("models anthropic --verbose") }
+        prepared.cleanup!
+      end
+    end
+  end
+
+  def test_stale_inventory_still_fails_without_a_selected_model_declaration
+    with_fixture_cli(mode: :wrong_route) do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        FileUtils.mkdir_p(work)
+
+        assert_raises(AgentCliRuntime::RouteUnavailable) do
+          AgentCliRuntime.prepare!(
+            preparation_request(
+              work:, root: File.join(dir, "invocation"),
+              source: selected_config(dir)
+            ),
+            env: fixture.fetch(:env)
+          )
+        end
       end
     end
   end
@@ -136,6 +279,11 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
                      policy.dig("external_directory", "#{readable}/**")
         assert_equal "allow",
                      policy.dig("external_directory", "#{writable}/**")
+        temporary = prepared.environment.fetch("TMPDIR")
+        assert_equal "allow", policy.dig("external_directory", temporary)
+        assert_equal "allow", policy.dig("external_directory", "#{temporary}/**")
+        assert_equal "allow", policy.dig("edit", temporary)
+        assert_equal "allow", policy.dig("edit", "#{temporary}/**")
       ensure
         prepared&.cleanup!
       end
@@ -188,6 +336,31 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
         assert_equal "allow", edit.fetch("docs/**")
         refute edit.key?("**")
         refute edit.key?("#{work}/**")
+      ensure
+        prepared&.cleanup!
+      end
+    end
+  end
+
+  def test_workspace_write_compiles_only_declared_bash_patterns
+    with_fixture_cli do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        FileUtils.mkdir_p(work)
+        prepared = AgentCliRuntime.prepare!(
+          preparation_request(
+            work:, root: File.join(dir, "invocation"), source: selected_config(dir),
+            permission_mode: "workspace-write",
+            bash_patterns: [ "bundle*", "bin/*", "git*" ]
+          ),
+          env: fixture.fetch(:env)
+        )
+        bash = JSON.parse(File.read(prepared.configuration_path)).dig("permission", "bash")
+
+        assert_equal "deny", bash.fetch("*")
+        assert_equal "allow", bash.fetch("bundle*")
+        assert_equal "allow", bash.fetch("bin/*")
+        assert_equal "allow", bash.fetch("git*")
       ensure
         prepared&.cleanup!
       end
@@ -519,11 +692,12 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
                           credential_file: nil, model: "anthropic/claude-sonnet-4-5",
                           permission_mode: "read-only", permission_policy: nil,
                           additional_read_roots: [], additional_write_roots: [],
-                          edit_patterns: [])
+                          edit_patterns: [], bash_patterns: [],
+                          prompt: "make the atomic edit")
     AgentCliRuntime::OpenCodePreparationRequest.new(
       request: AgentCliRuntime::Request.new(
         profile: :opencode,
-        prompt: "make the atomic edit",
+        prompt:,
         permission_mode:,
         model:,
         effort: "high"
@@ -537,7 +711,8 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
       permission_policy:,
       additional_read_roots:,
       additional_write_roots:,
-      edit_patterns:
+      edit_patterns:,
+      bash_patterns:
     )
   end
 

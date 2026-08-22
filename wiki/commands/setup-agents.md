@@ -174,6 +174,12 @@ Operation state (`planned`, `skipped`, `succeeded`, `failed`) is separate from
 final health (`healthy`, `missing`, `stale`, `incompatible`, `conflicting`,
 `unavailable`).
 
+For OpenCode, a successfully configured exact pinned plugin may resolve through
+the invocation-owned prepared overlay before a persistent package directory
+exists. Post-verification treats that exact package-bound `configured:`
+identity as healthy instead of asking the operator to repeat an already
+successful plugin configuration.
+
 | Code | Meaning |
 |---:|---|
 | 0 | All available targeted rows are healthy/no-op; remaining rows are unavailable-only skips. |

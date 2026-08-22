@@ -13,6 +13,7 @@ require "hive/markers"
 require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
+require "hive/plan_review/planner_revision"
 require "hive/plan_review/transition_guard"
 require "hive/patrol_fix/projection"
 require "hive/plan_review/approval_policy"
@@ -720,8 +721,13 @@ module Hive
         retry_due?(plan_review["retry_at"]) ?
           ACTIONS.fetch(:plan_review_retry_due) : ACTIONS.fetch(:plan_review_retry_wait)
       when "blocked"
-        unsupported_review? ?
-          ACTIONS.fetch(:plan_review_unsupported) : ACTIONS.fetch(:plan_review_blocked)
+        if stale_planner_revision_contract?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif unsupported_review?
+          ACTIONS.fetch(:plan_review_unsupported)
+        else
+          ACTIONS.fetch(:plan_review_blocked)
+        end
       else
         ACTIONS.fetch(:plan_reviewing)
       end
@@ -905,6 +911,24 @@ module Hive
       value.nil? || Time.iso8601(value) <= @clock.call
     rescue ArgumentError, TypeError
       false
+    end
+
+    # A blocked planner-revision series is terminal only under the result
+    # contract that adjudicated it. When Hive upgrades that contract, the
+    # orchestrator owns one new bounded attempt series; classify this exact
+    # stale-controller case as runnable so the daemon can reach that recovery
+    # path without an operator manufacturing a linked plan generation.
+    def stale_planner_revision_contract?
+      route = Array(plan_review["routes"]).reverse.find do |entry|
+        entry["role"] == "planner_revision"
+      end
+      return false unless route
+      return false unless %w[provider_limit timeout retryable_failure].include?(route["outcome"])
+
+      Integer(route["planner_revision_contract_version"] || 0) <
+        Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
+    rescue ArgumentError, TypeError
+      true
     end
 
     # An awaiting-decision projection normally belongs to the operator. A

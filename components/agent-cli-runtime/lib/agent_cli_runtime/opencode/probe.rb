@@ -6,6 +6,7 @@ module AgentCliRuntime
       REQUIRED_RUN_FLAGS = %w[
         --model --variant --format --dir --pure --auto
       ].freeze
+      MODEL_INVENTORY_TIMEOUT_SECONDS = 30
       SAFE_ENVIRONMENT_KEYS = %w[
         HOME LANG LC_ALL LOGNAME PATH SHELL SSL_CERT_DIR SSL_CERT_FILE
         TMPDIR USER
@@ -106,14 +107,19 @@ module AgentCliRuntime
         )
         evidence << evidence(profile, :auth_configuration)
 
-        models_output = capture!(
-          profile, child_env, "models", request.route.provider, "--verbose"
-        )
-        variants = variants_for(models_output, request.route.to_s)
-        if variants.nil?
+        configured_variants = request.configured_variants
+        inventory_variants = if configured_variants.nil?
+          models_output = capture!(
+            profile, child_env, "models", request.route.provider, "--verbose",
+            timeout_sec: MODEL_INVENTORY_TIMEOUT_SECONDS
+          )
+          variants_for(models_output, request.route.to_s)
+        end
+        if configured_variants.nil? && inventory_variants.nil?
           raise RouteUnavailable,
                 "requested OpenCode route is unavailable in the local model inventory"
         end
+        variants = [ *inventory_variants, *configured_variants ].uniq.sort.freeze
         if request.variant && !variants.include?(request.variant)
           raise RouteUnavailable,
                 "requested OpenCode variant is unavailable for the exact route"
@@ -165,8 +171,10 @@ module AgentCliRuntime
       end
       private_class_method :child_environment
 
-      def capture!(profile, environment, *arguments)
-        out, err, status = profile.capture_local(*arguments, env: environment)
+      def capture!(profile, environment, *arguments, timeout_sec: nil)
+        options = { env: environment }
+        options[:timeout_sec] = timeout_sec if timeout_sec
+        out, err, status = profile.capture_local(*arguments, **options)
         unless status.success?
           diagnostic = normalized_output("#{err}\n#{out}")
           raise ConfigurationError,

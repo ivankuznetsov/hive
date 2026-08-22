@@ -164,6 +164,62 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_exhausted_planner_revision_retries_after_result_contract_upgrade
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      revision = TransientRevision.new(revised)
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+      runner = orchestrator(task, cfg, adapter:, planner_revision: revision)
+
+      blocked = runner.advance!
+      assert_equal "blocked", blocked.record.state
+
+      routes = blocked.record["routes"].map(&:dup)
+      routes.last.delete("planner_revision_contract_version")
+      legacy = Hive::PlanReview::Record.new(
+        blocked.record.to_h.merge(
+          "version" => blocked.record.version + 1,
+          "routes" => routes,
+          "updated_at" => "2026-08-12T12:01:00.000000Z"
+        )
+      )
+      store = runner.instance_variable_get(:@store)
+      store.publish_current!(legacy, expected_version: blocked.record.version)
+
+      cleared = runner.advance!
+
+      assert_equal "cleared", cleared.record.state
+      assert_equal 2, revision.calls.length
+      reset = cleared.record["routes"].find { |route| route["contract_upgrade_recovery"] }
+      assert_equal true, reset.fetch("recovery_reset")
+      assert_equal Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION,
+                   reset.fetch("planner_revision_contract_version")
+    end
+  end
+
+  # `Integer()` refuses both a non-numeric string and a non-numeric type. A
+  # route carrying either is unreadable adjudication evidence, so the series
+  # must re-run under the current contract instead of trusting a version the
+  # orchestrator never compared.
+  def test_unreadable_planner_revision_contract_version_reads_as_stale
+    orchestrator = Hive::PlanReview::Orchestrator.allocate
+    current = Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
+
+    assert orchestrator.send(
+      :stale_planner_revision_contract?,
+      { "planner_revision_contract_version" => "v1" }
+    )
+    assert orchestrator.send(
+      :stale_planner_revision_contract?,
+      { "planner_revision_contract_version" => { "major" => current } }
+    )
+    refute orchestrator.send(
+      :stale_planner_revision_contract?,
+      { "planner_revision_contract_version" => current }
+    )
+  end
+
   def test_selected_fallback_keeps_the_preferred_request_and_probe_history
     with_task(standard_plan) do |task, cfg|
       preferred = route_identity("grok", "grok-4.6", "grok", "preferred")

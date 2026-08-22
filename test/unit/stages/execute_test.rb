@@ -27,7 +27,10 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
-  FakeGit = Struct.new(:head, :branch, :dirty, :ancestor_result, :raise_head, :raise_ancestor, keyword_init: true) do
+  FakeGit = Struct.new(
+    :head, :branch, :dirty, :ancestor_result, :raise_head, :raise_ancestor,
+    :message, :raise_message, keyword_init: true
+  ) do
     def head_sha
       raise Hive::GitError, "head failed" if raise_head
 
@@ -46,6 +49,12 @@ class HiveStagesExecuteTest < Minitest::Test
       raise Hive::GitError, "ancestor failed" if raise_ancestor
 
       ancestor_result
+    end
+
+    def commit_message(_revision)
+      raise Hive::GitError, "message failed" if raise_message
+
+      message.to_s
     end
   end
 
@@ -343,6 +352,162 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_accepts_attested_clean_opencode_commit_over_empty_terminal_message
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      worktree = File.join(dir, "worktree")
+      write_pointer(
+        task, "path" => worktree, "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "new-head", branch: task.slug, dirty: false, ancestor_result: true,
+        message: "done\n\n#{Hive::Stages::Execute.completion_trailer(File.binread(File.join(task.folder, 'plan.md')))}\n"
+      )
+      result = {
+        status: :error,
+        exit_code: 0,
+        normalized_outcome_kind: :malformed_output,
+        error_message: "OpenCode terminal assistant message is empty",
+        implementation_provider: "opencode"
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("opencode"), worktree)
+      end
+
+      assert_equal({ commit: "execute_complete", status: :execute_complete }, run_result)
+      assert_equal :execute_complete, Hive::Markers.current(task.state_file).name
+    end
+  end
+
+  def test_run_pass_rejects_unattested_clean_opencode_checkpoint_with_empty_terminal_message
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      worktree = File.join(dir, "worktree")
+      write_pointer(
+        task, "path" => worktree, "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "new-head", branch: task.slug, dirty: false,
+        ancestor_result: true, message: "feat: U1 checkpoint\n"
+      )
+      result = {
+        status: :error,
+        exit_code: 0,
+        normalized_outcome_kind: :malformed_output,
+        error_message: "OpenCode terminal assistant message is empty",
+        implementation_provider: "opencode"
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("opencode"), worktree)
+      end
+
+      assert_equal({ commit: "implementer_failed", status: :error }, run_result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "implementer_failed", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_run_pass_rejects_opencode_completion_when_commit_message_cannot_be_read
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      worktree = File.join(dir, "worktree")
+      write_pointer(
+        task, "path" => worktree, "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "new-head", branch: task.slug, dirty: false,
+        ancestor_result: true, raise_message: true
+      )
+      result = {
+        status: :error,
+        exit_code: 0,
+        normalized_outcome_kind: :malformed_output,
+        error_message: "OpenCode terminal assistant message is empty",
+        implementation_provider: "opencode"
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("opencode"), worktree)
+      end
+
+      assert_equal({ commit: "implementer_failed", status: :error }, run_result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "implementer_failed", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_run_pass_rejects_dirty_opencode_commit_with_empty_terminal_message
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      worktree = File.join(dir, "worktree")
+      write_pointer(
+        task, "path" => worktree, "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "new-head", branch: task.slug, dirty: true, ancestor_result: true
+      )
+      result = {
+        status: :error,
+        exit_code: 0,
+        normalized_outcome_kind: :malformed_output,
+        error_message: "OpenCode terminal assistant message is empty",
+        implementation_provider: "opencode"
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("opencode"), worktree)
+      end
+
+      assert_equal({ commit: "implementer_failed", status: :error }, run_result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "implementer_failed", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_run_pass_rejects_nonzero_opencode_commit_with_empty_terminal_message
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      worktree = File.join(dir, "worktree")
+      write_pointer(
+        task, "path" => worktree, "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "new-head", branch: task.slug, dirty: false, ancestor_result: true
+      )
+      result = {
+        status: :error,
+        exit_code: 1,
+        normalized_outcome_kind: :malformed_output,
+        error_message: "OpenCode terminal assistant message is empty",
+        implementation_provider: "opencode"
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("opencode"), worktree)
+      end
+
+      assert_equal({ commit: "implementer_failed", status: :error }, run_result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "implementer_failed", marker.attrs.fetch("reason")
+    end
+  end
+
   def test_run_pass_attributes_failure_to_persisted_provider
     with_tmp_dir do |dir|
       task = build_task(dir)
@@ -388,6 +553,42 @@ class HiveStagesExecuteTest < Minitest::Test
 
       assert_includes Hive::Markers.current(task.state_file).attrs["files"],
                       Hive::TaskJournal::JOURNAL_BASENAME
+    end
+  end
+
+  def test_run_pass_restores_controller_owned_task_marker_tampering
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      original_task = "# Execute\n\n<!-- AGENT_WORKING -->\n"
+      File.write(task.state_file, original_task)
+      write_pointer(
+        task, "path" => File.join(dir, "worktree"), "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "base", branch: task.slug, dirty: false, ancestor_result: true
+      )
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            agent_custody.call do
+              File.write(task.state_file, "agent replaced controller state\n")
+              { status: :ok }
+            end
+          }
+        ) do
+          result = Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
+          assert_equal({ commit: "implementer_tampered", status: :error }, result)
+        end
+      end
+
+      restored = File.read(task.state_file)
+      assert_includes restored, "# Execute"
+      refute_includes restored, "agent replaced controller state"
+      assert_equal :error, Hive::Markers.current(task.state_file).name
     end
   end
 
@@ -960,6 +1161,11 @@ class HiveStagesExecuteTest < Minitest::Test
           assert_same cfg, spawned.fetch(:cfg)
           assert_equal "execute", spawned.fetch(:implementation_stage)
           assert spawned.fetch(:defer_implementation_observation)
+          digest = Digest::SHA256.file(File.join(task.folder, "plan.md")).hexdigest
+          assert_includes(
+            spawned.fetch(:prompt),
+            "Hive-Execute-Complete: #{digest}"
+          )
         end
       end
     end

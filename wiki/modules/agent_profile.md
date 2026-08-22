@@ -64,8 +64,9 @@ contract.
 
 OpenCode uses the component's additive prepared-invocation ABI while keeping
 process supervision in Hive. `Hive::Agent` prepares a private overlay, starts
-exactly one `opencode run` process with a selected child environment, captures
-bounded stdout and stderr, and records timeout or cancellation before parsing.
+exactly one `opencode run` process with a selected child environment and the
+prepared prompt on owner-private file-backed stdin, captures bounded stdout
+and stderr, and records timeout or cancellation before parsing.
 After a zero exit it may start one non-model `opencode export --sanitize`
 inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that
@@ -100,7 +101,7 @@ constructs a package profile from them. Every profile freezes after init.
 | `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`, `"opencode"`). |
 | `env_bin_override_key:` | Env var name (`"HIVE_CLAUDE_BIN"` etc.) that overrides `bin_default` when set non-empty. |
 | `headless_flag:` | The `-p` / `--prompt` style flag. |
-| `prompt_style:` | `:positional`, `:headless_flag_value`, `:stdin`, or `:piped_stdin`; controls where the rendered prompt is delivered. `:stdin` includes a `-` argv marker, while `:piped_stdin` does not. Defaults to `:stdin` for a profile named `codex` (backward compatibility), otherwise `:positional`. Built-in Pi uses `:piped_stdin`. |
+| `prompt_style:` | `:positional`, `:headless_flag_value`, `:stdin`, or `:piped_stdin`; controls where the rendered prompt is delivered. `:stdin` includes a `-` argv marker, while `:piped_stdin` does not. Defaults to `:stdin` for a profile named `codex` (backward compatibility), otherwise `:positional`. Built-in Pi and OpenCode use `:piped_stdin` so large prompts do not occupy one OS-limited argv element. |
 | `permission_skip_flag:` | The CLI's "no-prompt" flag (e.g. `--dangerously-skip-permissions` for claude). |
 | `add_dir_flag:` | Optional flag to grant FS access outside cwd; `nil` means the profile cannot extend the sandbox (triggers `warn_isolation_reduced`). |
 | `budget_flag:` | Optional `--budget USD` style flag. A profile-native flag supplies the run cap; provider protocol parsing determines whether the run ended because that cap was exhausted. |
@@ -234,8 +235,17 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   `provider/model` route; supported effort values render as `--variant` only
   after route-aware capability validation. Hive prepares private XDG/config
   homes, forwards only configured credential names, and maps read-only/scoped
-  stage permissions to deny-first OpenCode rules. A successful run is complete
-  only after its terminal message correlates with sanitized session export.
+  stage permissions to deny-first OpenCode rules. Local capability inspection
+  remains bounded at 10 seconds per command except for the version probe and
+  verbose model inventory, which get 30 seconds because Bun startup under
+  sustained host I/O and a cold hermetic provider catalog can both exceed the
+  generic bound before any model invocation starts. Exact custom
+  models and variants declared in the selected provider configuration are
+  combined with that inventory: this keeps a new operator-pinned route usable
+  when the fetch-disabled bundled catalog is stale, while an undeclared route
+  missing from the CLI inventory still fails closed. A successful run is
+  complete only after its terminal message correlates with sanitized session
+  export.
   `Hive::SkillCheck::OpenCode` resolves project/user skills and explicitly
   configured plugin roots. Setup can atomically add the pinned Compound
   Engineering `3.21.4` plugin entry. Skill-bearing roles verify the selected
@@ -243,6 +253,11 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   skill that shadows it, while normal execution never mutates the selected
   source config. `:output_file_exists` remains the generic profile default;
   individual Hive stages continue to select their existing status mode.
+
+If a prepared launch fails after brainstorm answers were recorded, automatic
+recovery distinguishes Hive's `hive-answer:v1` bindings from legacy or manual
+answer text. Fully controller-bound answers are replay-safe and let the daemon
+resume the same round; unbound answer content still requires an operator.
 
 For OpenCode execute, open-PR, review-fix, and review-CI attempts,
 `ImplementationIdentity::Store` appends an
@@ -276,7 +291,10 @@ sanitized export supplied it.
   mappings run the static CLI inside bubblewrap with only the task, package,
   and descriptor-declared extra read roots mounted. Bounded OpenCode actors use
   the same portable output-materialization boundary with an invocation-owned
-  deny-first overlay and no unrestricted shell. Caller context does not
+  deny-first overlay and no unrestricted shell. The overlay admits its own
+  cleanup-bound `TMPDIR` as an external directory so a model can consume
+  intermediate analysis it created there; other generated config, data, cache,
+  state, and credential paths remain outside the model's declared roots. Caller context does not
   widen a bounded actor; only explicit `yolo` inherits the owning project root.
   For all portable runners, Hive asks
   for schema-constrained file content under a read-only policy and atomically

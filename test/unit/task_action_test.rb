@@ -167,6 +167,41 @@ class TaskActionTest < Minitest::Test
     )
     assert_equal "plan_review_blocked", blocked.key
     assert_nil blocked.command
+
+    stale_revision = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: {
+        "state" => "blocked", "required_action" => "repair the planner route",
+        "routes" => [
+          {
+            "role" => "planner_revision", "outcome" => "retryable_failure",
+            "planner_revision_contract_version" => 1
+          }
+        ]
+      }
+    )
+    assert_equal "plan_reviewing", stale_revision.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", stale_revision.command
+
+    # A contract version Hive cannot parse is unreadable adjudication
+    # evidence, not a current verdict. Classify the row as runnable so the
+    # orchestrator re-runs the bounded series rather than stranding the task
+    # on a value it never compared.
+    unreadable_revision = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: {
+        "state" => "blocked", "required_action" => "repair the planner route",
+        "routes" => [
+          {
+            "role" => "planner_revision", "outcome" => "timeout",
+            "planner_revision_contract_version" => "v1"
+          }
+        ]
+      }
+    )
+    assert_equal "plan_reviewing", unreadable_revision.key
+    assert_equal "hive plan-review-run demo-260426-aaaa",
+                 unreadable_revision.command
   end
 
   def test_policy_eligible_awaiting_decision_is_runnable

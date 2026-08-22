@@ -8,6 +8,7 @@ class AgentCliRuntimeOpenCodeContractTest < Minitest::Test
     run-tool-and-unknown.jsonl
     run-auth-error.jsonl
     run-configuration-error.jsonl
+    run-upstream-timeout-error.jsonl
   ].freeze
 
   def test_help_fixture_pins_required_non_interactive_capabilities

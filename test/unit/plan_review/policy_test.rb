@@ -145,6 +145,32 @@ class PlanReviewPolicyTest < Minitest::Test
     refute_equal first.policy_fingerprint, third.policy_fingerprint
   end
 
+  def test_effective_review_model_routing_rekeys_without_tracking_unrelated_stages
+    base = {
+      "plan_review" => config,
+      "models" => {
+        "plan_review" => { "model" => "openrouter/stealth/ox-alpha" },
+        "plan_review_adversarial" => { "model" => "gpt-5.6-sol", "effort" => "high" },
+        "execute" => { "model" => "gpt-5.6-terra" }
+      }
+    }
+    changed_reviewer = Marshal.load(Marshal.dump(base))
+    changed_reviewer.dig("models", "plan_review_adversarial")["effort"] = "xhigh"
+    changed_execute = Marshal.load(Marshal.dump(base))
+    changed_execute.dig("models", "execute")["model"] = "gpt-5.6-sol"
+
+    fingerprint = ->(cfg) do
+      Hive::PlanReview::Policy.evaluate(
+        workflow_id: "coding", signals: signals(skip: false), config: cfg
+      ).policy_fingerprint
+    end
+
+    refute_equal fingerprint.call(base), fingerprint.call(changed_reviewer)
+    assert_equal fingerprint.call(base), fingerprint.call(changed_execute)
+    refute_equal Hive::PlanReview::Policy.configuration_fingerprint(base),
+                 Hive::PlanReview::Policy.configuration_fingerprint(changed_reviewer)
+  end
+
   def test_non_integer_classifier_version_is_a_config_error
     error = assert_raises(Hive::ConfigError) do
       Hive::PlanReview::Policy.evaluate(

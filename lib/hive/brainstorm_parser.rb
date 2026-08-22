@@ -11,9 +11,16 @@ module Hive
   # daemon (gating auto-resume until every question is answered) need it.
   # `Hive::Bot::BrainstormParser` remains as a back-compat alias.
   module BrainstormParser
-    Question = Struct.new(:round, :n, :text, :answer, keyword_init: true) do
+    Question = Struct.new(
+      :round, :n, :text, :answer, :answer_encoding,
+      keyword_init: true
+    ) do
       def answered?
         !answer.nil?
+      end
+
+      def controller_bound_answer?
+        answered? && answer_encoding == :v1
       end
     end
 
@@ -156,7 +163,8 @@ module Hive
         round: current[:round],
         n: current[:n],
         text: clean_body(current[:question_lines]),
-        answer: clean_answer(current[:answer_lines], encoding: current[:answer_encoding])
+        answer: clean_answer(current[:answer_lines], encoding: current[:answer_encoding]),
+        answer_encoding: current[:answer_encoding]
       )
     end
     private_class_method :finalize

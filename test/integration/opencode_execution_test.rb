@@ -106,10 +106,14 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
         assert_equal "feat: fake OpenCode execution", commit_subject.strip
 
         observation = observations.fetch(0)
+        assert_operator observation.fetch("stdin_bytes"), :>, 0
+        refute observation.fetch("prompt_in_argv")
         assert_confined_workspace_write_policy(
           observation.fetch("permission"),
           working_directory: worktree,
-          additional_write_root: folder
+          additional_write_root: nil,
+          denied_write_root: folder,
+          allowed_bash_pattern: "git*"
         )
         assert observation.fetch("selected_credential_present")
         refute observation.fetch("ambient_credential_present")
@@ -161,6 +165,8 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
       assert_equal :complete, result.fetch(:status)
       assert_equal :complete, Hive::Markers.current(task.state_file).name
       observation = observations.fetch(0)
+      assert_operator observation.fetch("stdin_bytes"), :>, 0
+      refute observation.fetch("prompt_in_argv")
       assert observation.fetch("skill_invocation_present")
       assert_equal "allow", observation.dig("permission", "skill")
       assert_confined_workspace_write_policy(
@@ -187,8 +193,10 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
     }
     config[stage] ||= {}
     config[stage]["agent"] = "opencode"
+    tools = %w[Read Write Edit]
+    tools << "Bash(git*)" if stage == "execute"
     config[stage]["permissions"] = {
-      "preset" => "scoped", "tools" => %w[Read Write Edit]
+      "preset" => "scoped", "tools" => tools
     }
     config["models"] ||= {}
     routing_stage = stage == "execute" ? "execute_implementation" : stage
@@ -234,19 +242,32 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
   end
 
   def assert_confined_workspace_write_policy(permission, working_directory:,
-                                             additional_write_root:)
+                                             additional_write_root:,
+                                             denied_write_root: nil,
+                                             allowed_bash_pattern: nil)
     assert_equal "deny", permission.fetch("*")
-    assert_equal "deny", permission.fetch("bash")
+    if allowed_bash_pattern
+      assert_equal "deny", permission.dig("bash", "*")
+      assert_equal "allow", permission.dig("bash", allowed_bash_pattern)
+    else
+      assert_equal "deny", permission.fetch("bash")
+    end
     assert_equal "deny", permission.dig("edit", "*")
     assert_equal "allow", permission.dig("edit", "**")
     absolute_working_allow = permission.fetch("edit").any? do |pattern, action|
       action == "allow" && pattern.start_with?(working_directory)
     end
     refute absolute_working_allow, permission.fetch("edit").inspect
-    unless additional_write_root == working_directory
+    if additional_write_root && additional_write_root != working_directory
       assert_equal "allow", permission.dig("edit", additional_write_root)
       assert_equal "allow",
                    permission.dig("edit", "#{additional_write_root}/**")
+    end
+    if denied_write_root
+      refute_equal "allow", permission.dig("edit", denied_write_root)
+      refute_equal "allow", permission.dig("edit", "#{denied_write_root}/**")
+      refute_equal "allow",
+                   permission.dig("external_directory", denied_write_root)
     end
     assert_equal "deny", permission.dig("external_directory", "*")
   end
@@ -267,6 +288,7 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
       require "json"
 
       command = ARGV.first
+      prompt = command == "run" ? STDIN.read : ""
       directory_index = ARGV.index("--dir")
       working_directory = directory_index && ARGV[directory_index + 1]
       File.open(#{@calls.dump}, "a", 0o600) do |file|
@@ -300,7 +322,9 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
             "working_directory" => working_directory,
             "invocation_root" => File.dirname(ENV.fetch("XDG_CONFIG_HOME")),
             "permission" => permission,
-            "skill_invocation_present" => ARGV.last.include?("/ce-plan"),
+            "stdin_bytes" => prompt.bytesize,
+            "prompt_in_argv" => ARGV.include?(prompt),
+            "skill_invocation_present" => prompt.include?("/ce-plan"),
             "selected_credential_present" => !ENV["ANTHROPIC_API_KEY"].to_s.empty?,
             "ambient_credential_present" => !ENV["OPENAI_API_KEY"].to_s.empty?
           }

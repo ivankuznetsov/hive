@@ -110,7 +110,7 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
     end
   end
 
-  def test_brainstorm_answered_content_is_unsafe
+  def test_brainstorm_unbound_answered_content_is_unsafe
     with_tmp_dir do |dir|
       File.write(File.join(dir, "brainstorm.md"), <<~MD)
         ## Round 1
@@ -122,7 +122,25 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
       ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "2-brainstorm"))
 
       assert_equal false, ok
-      assert_includes reason, "answers present"
+      assert_includes reason, "unbound brainstorm answers present"
+    end
+  end
+
+  def test_brainstorm_controller_bound_answers_are_safe
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "brainstorm.md"), <<~MD)
+        ## Round 1
+        ### Q1. What?
+        ### A1. <!-- hive-answer:v1 -->
+        User answer
+      MD
+
+      ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(
+        row(folder: dir, stage: "2-brainstorm")
+      )
+
+      assert_equal true, ok
+      assert_includes reason, "controller-bound brainstorm answers"
     end
   end
 

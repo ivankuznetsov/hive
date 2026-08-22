@@ -184,6 +184,12 @@ class AgentCliRuntimeProbeTest < Minitest::Test
     assert_equal %i[claude codex pi grok opencode], results.map(&:provider)
   end
 
+  def test_opencode_version_check_has_cold_start_headroom
+    assert_equal 30, AgentCliRuntime::Profiles::OPENCODE.version_check_timeout_sec
+    assert_equal AgentCliRuntime::Profile::CAPTURE_TIMEOUT_SECONDS,
+                 fixture_profile(bin: Gem.ruby).version_check_timeout_sec
+  end
+
   private
 
   def fixture_profile(bin:, cli_capabilities: {})

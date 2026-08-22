@@ -150,6 +150,10 @@ class AgentCliRuntimeOpenCodeResultParserTest < Minitest::Test
       stdout: fixture("run-configuration-error.jsonl"),
       termination: AgentCliRuntime::TerminationEvidence.new(exit_code: 1)
     )
+    upstream_timeout = normalize(
+      stdout: fixture("run-upstream-timeout-error.jsonl"),
+      termination: AgentCliRuntime::TerminationEvidence.new(exit_code: 1)
+    )
     cli = normalize(
       stdout: fixture("run-malformed-json.jsonl"),
       stderr: "process failed",
@@ -158,6 +162,8 @@ class AgentCliRuntimeOpenCodeResultParserTest < Minitest::Test
 
     assert_equal :authentication_failure, auth.kind
     assert_equal :configuration_failure, config.kind
+    assert_equal :timed_out, upstream_timeout.kind
+    assert_includes upstream_timeout.diagnostic, "Upstream idle timeout exceeded"
     assert_equal :cli_failure, cli.kind
     refute_includes auth.diagnostic, "sk-"
     assert_includes auth.diagnostic, "[REDACTED:openai_api_key]"

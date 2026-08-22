@@ -137,6 +137,11 @@ module Hive
     def capture_identity(pid)
       start_time = Hive::ProcessKill.process_start_time(pid)
       if start_time.to_s.empty?
+        # The process may exit after its matching environment was read. Gone
+        # is the successful cleanup condition; a still-live process without a
+        # stable identity remains unsafe to signal and fails closed.
+        return nil unless Hive::ProcessKill.pid_alive?(pid)
+
         raise CleanupError, "process-custody identity is unavailable for pid #{pid}"
       end
 

@@ -328,62 +328,49 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
-  def test_live_custody_cleanup_failure_is_returned_as_a_typed_agent_error
+  def test_a_failing_reap_turns_a_clean_transcript_into_an_error
     with_fixture do |fixture|
-      task = make_task(fixture.fetch(:dir), slug: "live-cleanup-failure-260822-aaaa")
+      task = make_task(fixture.fetch(:dir), slug: "reap-failure-260822-aaaa")
       agent = build_agent(
         task, fixture,
-        invocation_root: File.join(fixture.fetch(:dir), "invocation-live-cleanup-failure")
+        invocation_root: File.join(fixture.fetch(:dir), "invocation-reap-failure")
       )
-      cleanup_calls = 0
-      custody = Object.new
-      custody.define_singleton_method(:environment) do
-        { Hive::InvocationProcessCustody::ENVIRONMENT_KEY => "a" * 64 }
-      end
-      custody.define_singleton_method(:cleanup!) do
-        cleanup_calls += 1
-        raise Hive::InvocationProcessCustody::CleanupError, "synthetic survivor"
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        with_replaced_singleton_method(
+          Hive::InvocationProcessCustody, :new, -> { UnreapableCustody.new }
+        ) { agent.run! }
       end
 
-      replacement = ->(**) { custody }
-      result = with_replaced_singleton_method(
-        Hive::InvocationProcessCustody, :new, replacement
-      ) do
-        with_env("ANTHROPIC_API_KEY" => "secret-canary") { agent.run! }
-      end
-
+      refute result.fetch(:process_cleanup_completed)
       assert_equal :error, result.fetch(:status)
       assert_equal "process_cleanup_failed", result.fetch(:error_reason)
-      assert_match(/synthetic survivor/, result.fetch(:process_cleanup_error))
-      assert_equal 1, cleanup_calls
+      assert_match(/left 1 process/, result.fetch(:process_cleanup_error))
     end
   end
 
-  def test_pre_spawn_failure_reports_a_custody_cleanup_failure
-    with_fixture(mode: :remove_after_probe) do |fixture|
-      task = make_task(fixture.fetch(:dir), slug: "pre-spawn-cleanup-failure-260822-aaaa")
+  def test_a_reap_failure_while_unwinding_is_warned_rather_than_swallowed
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "reap-unwind-260822-aaaa")
       agent = build_agent(
         task, fixture,
-        invocation_root: File.join(fixture.fetch(:dir), "invocation-pre-spawn-cleanup-failure")
+        invocation_root: File.join(fixture.fetch(:dir), "invocation-reap-unwind")
       )
-      custody = Object.new
-      custody.define_singleton_method(:environment) { {} }
-      custody.define_singleton_method(:cleanup!) do
-        raise Hive::InvocationProcessCustody::CleanupError, "synthetic survivor"
-      end
-
-      replacement = ->(**) { custody }
+      # Custody is registered before the child environment is assembled, so a
+      # failure in between still owes the ensure path a reap attempt.
+      agent.send(:ensure_log_dir)
+      error = nil
       _out, err = capture_io do
-        with_replaced_singleton_method(
-          Hive::InvocationProcessCustody, :new, replacement
-        ) do
-          assert_raises(Errno::ENOENT) do
-            with_env("ANTHROPIC_API_KEY" => "secret-canary") { agent.run! }
+        error = assert_raises(RuntimeError) do
+          with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+            with_replaced_singleton_method(
+              Hive::InvocationProcessCustody, :new, -> { UnusableCustody.new }
+            ) { agent.send(:spawn_opencode_and_wait) }
           end
         end
       end
 
-      assert_match(/OpenCode process cleanup failed: synthetic survivor/, err)
+      assert_match(/custody environment is unavailable/, error.message)
+      assert_match(/OpenCode process cleanup failed: .*left 1 process/, err)
     end
   end
 
@@ -582,6 +569,25 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     folder = File.join(dir, ".hive-state", "stages", "4-execute", slug)
     FileUtils.mkdir_p(folder)
     Hive::Task.new(folder)
+  end
+
+  # Reaping is a kernel-facing operation with no injectable seam in the agent,
+  # so the failure modes are exercised through stand-ins for the custody.
+  class UnreapableCustody
+    def environment
+      {}
+    end
+
+    def cleanup!
+      raise Hive::InvocationProcessCustody::CleanupError,
+            "invocation left 1 process(es) alive after TERM/KILL"
+    end
+  end
+
+  class UnusableCustody < UnreapableCustody
+    def environment
+      raise "custody environment is unavailable"
+    end
   end
 
   def build_agent(task, fixture, invocation_root:, timeout_sec: 5,

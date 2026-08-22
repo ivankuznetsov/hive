@@ -38,47 +38,139 @@ class InvocationProcessCustodyTest < Minitest::Test
     end
   end
 
-  def test_cleanup_fails_when_a_process_survives_both_signals
-    custody = Hive::InvocationProcessCustody.new(token: "b" * 64)
-    custody.define_singleton_method(:terminate_until_empty) { |*, **| nil }
-    custody.define_singleton_method(:matching_processes) do
-      [ { pid: 4242, start_time: "still-current" } ]
-    end
+  def test_a_process_that_outlives_term_and_kill_fails_the_cleanup
+    skip "exact process-custody integration requires Linux procfs" unless
+      RUBY_PLATFORM.include?("linux") && File.directory?("/proc")
 
-    error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+    with_tmp_dir do |dir|
+      # A signalled child stays in procfs as an unreaped zombie, so the
+      # inventory keeps matching it after both signals have been spent.
+      lingering = Process.spawn(
+        RbConfig.ruby, "-e", "trap('TERM') { exit! 0 }; sleep",
+        out: File::NULL, err: File::NULL
+      )
+      write_proc_entry(dir, lingering, environ: custody_environ(TOKEN))
+      custody = build_custody(dir)
+
+      error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+        custody.cleanup!
+      end
+
+      assert_match(/1 process\(es\) alive after TERM\/KILL/, error.message)
+    ensure
+      reap_child(lingering) if lingering
+    end
+  end
+
+  def test_entries_that_vanish_before_their_environment_is_read_are_skipped
+    skip "exact process-custody integration requires Linux procfs" unless
+      RUBY_PLATFORM.include?("linux") && File.directory?("/proc")
+
+    with_tmp_dir do |dir|
+      # Process exit races the inventory: the pid is listed but its environ
+      # is already gone. That is an ordinary exit, not a cleanup failure.
+      write_proc_entry(dir, 424_242, environ: nil)
+
+      assert build_custody(dir).cleanup!
+    end
+  end
+
+  def test_an_empty_process_environment_is_a_non_match
+    skip "exact process-custody integration requires Linux procfs" unless
+      RUBY_PLATFORM.include?("linux") && File.directory?("/proc")
+
+    with_tmp_dir do |dir|
+      write_proc_entry(dir, 424_242, environ: "")
+
+      assert build_custody(dir).cleanup!
+    end
+  end
+
+  def test_an_oversized_process_environment_fails_the_cleanup
+    skip "exact process-custody integration requires Linux procfs" unless
+      RUBY_PLATFORM.include?("linux") && File.directory?("/proc")
+
+    with_tmp_dir do |dir|
+      oversized =
+        "\0" * (Hive::InvocationProcessCustody::MAX_ENVIRONMENT_BYTES + 1)
+      write_proc_entry(dir, 424_242, environ: oversized)
+
+      error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+        build_custody(dir).cleanup!
+      end
+
+      assert_match(/environment exceeds its bound/, error.message)
+    end
+  end
+
+  def test_an_unreadable_procfs_root_fails_the_cleanup
+    skip "exact process-custody integration requires Linux procfs" unless
+      RUBY_PLATFORM.include?("linux") && File.directory?("/proc")
+    skip "root ignores directory permissions" if Process.uid.zero?
+
+    with_tmp_dir do |dir|
+      root = File.join(dir, "proc")
+      FileUtils.mkdir_p(root)
+      File.chmod(0o000, root)
+      begin
+        error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+          build_custody(root).cleanup!
+        end
+
+        assert_match(/procfs is unavailable: Errno::EACCES/, error.message)
+      ensure
+        File.chmod(0o700, root)
+      end
+    end
+  end
+
+  def test_a_matching_process_that_exits_before_identity_capture_is_skipped
+    skip "exact process-custody integration requires Linux procfs" unless
+      RUBY_PLATFORM.include?("linux") && File.directory?("/proc")
+
+    with_tmp_dir do |dir|
+      reaped = Process.spawn(RbConfig.ruby, "-e", "exit! 0",
+                             out: File::NULL, err: File::NULL)
+      Process.wait(reaped)
+      write_proc_entry(dir, reaped, environ: custody_environ(TOKEN))
+
+      assert build_custody(dir).cleanup!
+    end
+  end
+
+  def test_cleanup_falls_back_to_the_ps_inventory_without_procfs
+    skip "exact process-custody integration requires Linux procfs" unless
+      RUBY_PLATFORM.include?("linux") && File.directory?("/proc")
+
+    with_tmp_dir do |dir|
+      # macOS/BSD hosts have no procfs; point the custody at an absent root
+      # so the `ps xeww` inventory is the only way it can find the process.
+      custody = Hive::InvocationProcessCustody.new(
+        token: TOKEN, proc_root: File.join(dir, "absent-proc")
+      )
+      owned = spawn_detached(custody.environment)
+
       custody.cleanup!
+
+      refute process_alive_with_start?(owned)
+    ensure
+      terminate_exact(owned) if owned
     end
-
-    assert_match(/1 process\(es\) alive/, error.message)
   end
 
-  def test_non_procfs_platform_uses_the_bounded_ps_inventory
-    custody = Hive::InvocationProcessCustody.new(
-      token: "c" * 64, proc_root: "/definitely/not/proc"
-    )
-    custody.define_singleton_method(:ps_matches) { [] }
+  def test_an_unusable_ps_inventory_fails_the_cleanup
+    with_tmp_dir do |dir|
+      custody = Hive::InvocationProcessCustody.new(
+        token: TOKEN, proc_root: File.join(dir, "absent-proc")
+      )
+      unavailable = ->(*) { raise Errno::ENOENT }
 
-    assert custody.cleanup!
-  end
-
-  def test_procfs_races_and_inventory_errors_are_bounded
-    Dir.mktmpdir("hive-process-custody-proc") do |proc_root|
-      FileUtils.mkdir(File.join(proc_root, "4242"))
-      custody = Hive::InvocationProcessCustody.new(token: "d" * 64, proc_root:)
-
-      # The numeric process row disappearing before environ is read is a normal
-      # procfs race and must not turn successful cleanup into a failure.
-      assert custody.cleanup!
-
-      File.binwrite(File.join(proc_root, "4242", "environ"), "")
-      assert custody.cleanup!, "an empty procfs environment cannot match custody"
-
-      error = with_replaced_singleton_method(Dir, :children, ->(*) { raise Errno::EIO }) do
+      error = with_replaced_singleton_method(Open3, :capture3, unavailable) do
         assert_raises(Hive::InvocationProcessCustody::CleanupError) do
           custody.cleanup!
         end
       end
-      assert_match(/procfs is unavailable: Errno::EIO/, error.message)
+      assert_match(/ps inventory is unavailable: Errno::ENOENT/, error.message)
     end
   end
 
@@ -95,10 +187,13 @@ class InvocationProcessCustodyTest < Minitest::Test
 
       replacement = ->(*) { nil }
       with_replaced_singleton_method(Hive::ProcessKill, :process_start_time, replacement) do
-        error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
-          custody.send(:capture_identity, 4242)
+        alive = ->(*) { true }
+        with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, alive) do
+          error = assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+            custody.send(:capture_identity, 4242)
+          end
+          assert_match(/identity is unavailable for pid 4242/, error.message)
         end
-        assert_match(/identity is unavailable for pid 4242/, error.message)
       end
     end
   end
@@ -177,7 +272,84 @@ class InvocationProcessCustodyTest < Minitest::Test
     end
   end
 
+  def test_a_process_that_exits_before_its_signal_lands_is_not_a_failure
+    skip "exact process-custody integration requires Linux procfs" unless
+      RUBY_PLATFORM.include?("linux") && File.directory?("/proc")
+
+    with_tmp_dir do |dir|
+      entry = write_proc_entry(dir, Process.ppid, environ: custody_environ(TOKEN))
+      # The pid dies between the inventory read and the kill(2); the next
+      # sweep no longer lists it, which is a completed exit and not an error.
+      vanish = ->(_seconds) { FileUtils.rm_rf(entry) }
+      custody = Hive::InvocationProcessCustody.new(
+        token: TOKEN, proc_root: dir, clock: -> { 0.0 }, sleeper: vanish
+      )
+
+      assert with_replaced_singleton_method(
+        Process, :kill, signal_raising(Errno::ESRCH)
+      ) { custody.cleanup! }
+    end
+  end
+
+  def test_a_process_that_cannot_be_signalled_fails_the_cleanup
+    skip "exact process-custody integration requires Linux procfs" unless
+      RUBY_PLATFORM.include?("linux") && File.directory?("/proc")
+
+    with_tmp_dir do |dir|
+      write_proc_entry(dir, Process.ppid, environ: custody_environ(TOKEN))
+      custody = build_custody(dir)
+
+      error = with_replaced_singleton_method(
+        Process, :kill, signal_raising(Errno::EPERM)
+      ) do
+        assert_raises(Hive::InvocationProcessCustody::CleanupError) do
+          custody.cleanup!
+        end
+      end
+
+      assert_match(/cannot signal same-user pid #{Process.ppid}/, error.message)
+    end
+  end
+
   private
+
+  # Fixed so fake procfs environments can name the token they must match.
+  TOKEN = "b" * 64
+
+  def build_custody(proc_root)
+    Hive::InvocationProcessCustody.new(
+      token: TOKEN, proc_root: proc_root,
+      clock: advancing_clock, sleeper: ->(_seconds) { }
+    )
+  end
+
+  # Spend each grace period in a single sweep so the signal ladder does not
+  # hold the suite for TERM_GRACE_SECONDS + KILL_GRACE_SECONDS.
+  def advancing_clock
+    ticks = 0.0
+    -> { ticks += 1_000.0 }
+  end
+
+  def custody_environ(token)
+    "PATH=/usr/bin\0#{Hive::InvocationProcessCustody::ENVIRONMENT_KEY}=#{token}\0"
+  end
+
+  def write_proc_entry(root, pid, environ:)
+    entry = File.join(root, pid.to_s)
+    FileUtils.mkdir_p(entry)
+    File.binwrite(File.join(entry, "environ"), environ) if environ
+    entry
+  end
+
+  # Signal 0 stays real: it is a liveness probe, not a termination request.
+  def signal_raising(error_class)
+    real_kill = Process.method(:kill)
+    lambda do |signal, *pids|
+      raise error_class unless signal == 0
+
+      real_kill.call(signal, *pids)
+    end
+  end
 
   def spawn_detached(environment)
     reader, writer = IO.pipe
@@ -208,6 +380,15 @@ class InvocationProcessCustodyTest < Minitest::Test
 
   def process_alive_with_start?(target)
     Hive::ProcessKill.captured_process_current?(target, require_identity: true)
+  end
+
+  def reap_child(pid)
+    begin
+      Process.kill("KILL", pid)
+    rescue Errno::ESRCH
+      nil
+    end
+    Process.wait(pid)
   end
 
   def terminate_exact(target)

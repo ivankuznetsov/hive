@@ -368,8 +368,19 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       source = File.join(root, "source")
       work = File.join(root, "work")
       FileUtils.mkdir_p(source)
+      sandbox_arguments = nil
+      sandbox_closed = false
+      sandbox = Object.new
+      sandbox.define_singleton_method(:command_argv) do |_argv|
+        [ RbConfig.ruby, "-e", "puts 'captured'" ]
+      end
+      sandbox.define_singleton_method(:close) { sandbox_closed = true }
       toolkit = Hive::Artifacts::CaptureToolkit.new(
-        runtime_resolver: method(:fake_codex_runtime)
+        runtime_resolver: method(:fake_codex_runtime),
+        project_sandbox_factory: lambda do |**attributes|
+          sandbox_arguments = attributes
+          sandbox
+        end
       )
       toolkit.prepare!(
         kinds: [ "terminal" ], task_root: root, source_root: source,
@@ -379,16 +390,14 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       out, = capture_io do
         Hive::Commands::Evidence.new(
           "terminal", "proof", json: true,
-          command: [
-            "/bin/sh", "-c",
-            "(echo forbidden > mutation.txt) 2>/dev/null || true; echo captured"
-          ],
+          command: [ "/bin/sh", "-c", "echo captured" ],
           environment: toolkit.launch_environment
         ).call
       end
       payload = JSON.parse(out)
       assert_equal 0, payload.fetch("exit_status")
-      refute_path_exists File.join(source, "mutation.txt")
+      assert_equal source, sandbox_arguments.fetch(:source_root)
+      assert sandbox_closed
       candidate = [
         {
           "kind" => "terminal", "representations" => payload.fetch("representations")

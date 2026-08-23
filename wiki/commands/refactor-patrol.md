@@ -78,7 +78,9 @@ Historical accepted `fix` and `discuss` dispositions can be reserved once with
 `script/migrate_patrol_findings.rb [PROJECT_ROOT] [--dry-run]`. The importer
 uses the current source adapter, ignores dismissals and historical action
 records, preflights occurrence conflicts, and is idempotent against existing
-Patrol Fix admissions. It does not revive an Architecture Patrol action lane.
+Patrol Fix admissions. It creates no workflow task folders; semantic admission
+and normal workflow capacity decide when a reserved disposition materializes.
+It does not revive an Architecture Patrol action lane.
 
 ## Output
 

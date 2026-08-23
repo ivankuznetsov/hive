@@ -23,28 +23,29 @@ the task graph without making status itself perform daemon reconciliation. The
 Patrol Fix runtime re-reads the project registry when the admission
 scheduler asks for source ports, so projects registered after daemon start are
 admitted without a restart. Each active project retains one `AdmissionStore`
-instance across ticks. Every record read still comes from descriptor-safe
+instance across ticks. Every selected record still comes from descriptor-safe
 durable bytes, but an unchanged SHA-256 digest reuses the already frozen,
 fully validated record; changed bytes are parsed and validated again, and
 stores for removed registrations are evicted. Each store retains at most 512
-records and 16 MiB of their serialized durable bytes. Inventory scans keep a
-stable subset when that budget is full, while writes can evict older entries so
-active work remains warm. Capacity compaction removes its cache entry with the
-durable file. This keeps an unchanged admission inventory from repeating full
-schema/source validation every 30 seconds without making daemon memory scale to
-the maximum durable backlog. One corrupt store produces a bounded failed event
-while the remaining project ports continue.
+records and 16 MiB of their serialized durable bytes. Full inventory scans keep
+a stable subset when that budget is full, while writes can evict older entries
+so active work remains warm. Capacity compaction removes its cache entry with
+the durable file. This keeps unchanged admissions from repeating full
+schema/source validation without making daemon memory scale to the maximum
+durable backlog. One corrupt store produces a bounded failed event while the
+remaining project ports continue.
 Patrol Fix otherwise uses the standard task/status contracts and adds no daemon
 operational projection.
 
-Each Patrol Fix admission scan uses one non-creating managed-directory read
-session. It validates the complete bounded filename inventory before streaming
-the caller-validated record names through one opened parent directory;
-canonical record and descriptor/name-binding validation stay per record.
-Directory traversal is therefore constant as the record count rises, while
-bounded record reads and validation remain linear. Reads remain lock-free and
-do not create an absent store. This changes no migration, watcher, cache,
-schema, scheduler policy, capacity, or task materialization behavior.
+Runtime Patrol Fix admission scans acquire the inventory lock without waiting,
+read the durable pending index once, and open only the selected due records (at
+most the bounded scheduler batch). Explicit migration rebuilds and historical
+source-evidence lookups still need the complete inventory; those paths use one
+non-creating managed-directory read session, validate all bounded filenames,
+and stream the validated names through one opened parent directory. Canonical
+record and descriptor/name-binding validation stay per record. Full-scan
+directory traversal is therefore constant as the record count rises, while its
+record reads remain linear. An absent store is not created.
 
 Daemon and bot startup never run storage migrations. Operators perform every
 global and project cutover explicitly through `hive migrate` or

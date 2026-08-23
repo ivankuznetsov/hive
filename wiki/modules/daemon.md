@@ -199,18 +199,20 @@ request creation time and attempt claim deadline; otherwise later rows could
 be born with already-expired claim windows and fail every detached handoff as
 `launch_handoff_failed`.
 
-Scheduler decisions are captured in memory as each row is evaluated. At the
-end of the tick the dispatcher fetches status a second time and publishes a
-`complete` snapshot only after matching task identity, generation, stage,
-marker/attrs, attempt, state-file mtime, action, dependency/admission policy,
-and blocked state across that source window. Added, removed, or policy-changed
-rows receive an unavailable disposition instead of a stale decision. The
-assembler rejects the entire tick as `duplicate_task_identity` when either
-source frame still contains multiple physical rows for one project/slug, so a
-provider hold or dispatch decision from one row cannot be attached to another.
-The status-side join rechecks the same fields, so a decision cannot remain
-authoritative after a change between the completed daemon tick and a later
-status read. The record also carries daemon generation/PID/start identity,
+Scheduler decisions are captured in memory as each row is evaluated from the
+tick's one authoritative status frame. The dispatcher publishes that frame at
+completion without running a duplicate fleet projection. A status-side
+temporal fence accepts the snapshot only when the current task graph was
+sampled at or after snapshot completion; it then rechecks task identity,
+generation, stage, marker/attrs, attempt, state-file mtime, action,
+dependency/admission policy, and blocked state. A decision therefore cannot
+remain authoritative after a change during the tick or before a later status
+read. Status generation timestamps retain microseconds for same-second
+ordering, and missing or malformed source-window timestamps fail closed. The
+assembler still rejects a source frame containing multiple physical
+rows for one project/slug as `duplicate_task_identity`, so a provider hold or
+dispatch decision from one row cannot be attached to another. The record also
+carries daemon generation/PID/start identity,
 sequence and validity window, capacity, queue counters, provider holds,
 coordinator recovery receipts, and per-task owner/reason.
 An explicit admission also contributes its exact sanitized routing decision to
@@ -223,8 +225,7 @@ Retry dispositions additionally carry the exact marker-age `retry_at`,
 whether the boundary is due, the current safety verdict, and its reason.
 `retry_cooldown` is scheduler-owned, `retry_in_flight` is agent-owned, and
 `retry_safety_blocked` is operator-owned (or Hive-owned when inspection itself
-failed). Failed reconciliation/status
-or failed revalidation publishes `failed`. Snapshot age starts at the actual
+failed). Failed reconciliation/status publishes `failed`. Snapshot age starts at the actual
 completion sample rather than the tick-start sample, and a SIGHUP poll-interval
 reload immediately reconfigures the assembler's next validity window.
 

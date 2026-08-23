@@ -370,7 +370,10 @@ reader also caches each immutable attempt binding, including a missing result,
 so journal replay and closure validation cannot repeat the same global point
 read within one snapshot. The default store opens only the current v4 layout
 and never runs or monitors migration. The store and cache are not
-process-global, so a later scan still observes fresh durable attempt data.
+process-global, so a later scan still observes fresh durable attempt data. The
+internal `--daemon-task` fast-tick scan shares one store and one reader the
+same way, across every requested project, so a bounded daemon tick never
+rebuilds them per project.
 
 Stage moves are treated as a normal filesystem race. If an entry disappears between the stage glob and any in-folder row read, `collect_rows` rescues `Errno::ENOENT`, re-checks the folder path, and skips it only when the folder is gone. The rescue is deliberately folder-level: an `ENOENT` while the task folder still exists is re-raised as a real status command failure, because in-place state-file writers may truncate content but should not make the state file transiently absent inside a surviving folder. A forward stage move can resurface under the later stage in the same scan; a backward move to an already-scanned stage can disappear for one poll and then reappear on the next refresh. After all stages are scanned, `drop_transient_stage_moves` looks only at duplicate-slug groups and removes every duplicate row whose folder no longer exists. If two live folders still share a slug, both rows remain and `annotate_actions` still passes `stage_collision: true` into `Hive::TaskAction`. This keeps `hive status --json` and TUI snapshots from briefly showing an old-stage and new-stage copy during a normal `mv`, without hiding persistent duplicate state.
 

@@ -12,6 +12,9 @@ date: 2026-08-22
   task during a status scan.
 - The projection payload is unchanged; a regression test pins scan-scoped
   reuse across multiple tasks.
+- The internal `--daemon-task` fast-tick scan added by the incremental daemon
+  status work shares the same scan-scoped store across every requested project,
+  so a bounded tick opens the store once rather than once per project.
 - Attempt stores, daemon startup, and bot startup no longer invoke the global
   recovery migration or monitor legacy state. Only `hive migrate` and
   `hive migrate --all` perform the quiesced cutover.

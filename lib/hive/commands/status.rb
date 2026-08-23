@@ -433,6 +433,7 @@ module Hive
         selected = projects.select { |project| targets.key?(project.fetch("name")) }
         workflow_generations = capture_workflow_generations(selected)
         archive_backfiller = shared_archive_backfiller
+        owns_attempt_store = acquire_status_attempt_store
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
@@ -451,6 +452,8 @@ module Hive
             )
           end
         }
+      ensure
+        @status_attempt_store = nil if owns_attempt_store
       end
 
       # Isolate per-project failures. A single project with a malformed

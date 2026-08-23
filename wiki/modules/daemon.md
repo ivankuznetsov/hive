@@ -27,6 +27,15 @@ store produces a bounded failed event while the remaining project ports continue
 Patrol Fix otherwise uses the standard task/status contracts and adds no daemon
 operational projection.
 
+Each Patrol Fix admission scan uses one non-creating managed-directory read
+session. It validates the complete bounded filename inventory before streaming
+the caller-validated record names through one opened parent directory;
+canonical record and descriptor/name-binding validation stay per record.
+Directory traversal is therefore constant as the record count rises, while
+bounded record reads and validation remain linear. Reads remain lock-free and
+do not create an absent store. This changes no migration, watcher, cache,
+schema, scheduler policy, capacity, or task materialization behavior.
+
 Daemon and bot startup never run storage migrations. Operators perform every
 global and project cutover explicitly through `hive migrate` or
 `hive migrate --all` while those processes are stopped. Startup opens only the

@@ -423,15 +423,24 @@ module Hive
       end
 
       def each_record
-        records = []
-        @directory.each_child("records", missing: true) do |name|
-          next if name.end_with?(".lock")
-          match = /\A(.+)\.json\z/.match(name)
-          corrupt!("admission inventory contains an unknown entry") unless match
-          records << match[1]
-          corrupt!("admission inventory exceeds the bounded limit") if records.length > MAX_RECORDS
-        end
-        records.sort.map { |id| fetch(id) }
+        @directory.with_read_session(missing: true) do
+          records = []
+          @directory.each_child("records", missing: true) do |name|
+            next if name.end_with?(".lock")
+            match = /\A(.+)\.json\z/.match(name)
+            corrupt!("admission inventory contains an unknown entry") unless match
+            records << match[1]
+            corrupt!("admission inventory exceeds the bounded limit") if records.length > MAX_RECORDS
+          end
+          names = records.sort.map { |id| "#{occurrence_id!(id)}.json" }
+          @directory.read_children(
+            "records", names: names,
+            max_bytes: MAX_RECORD_BYTES, missing: true
+          ).map do |name, bytes|
+            id = name.delete_suffix(".json")
+            bytes && parse_record(bytes, expected_id: id)
+          end
+        end || []
       end
 
       def mutate(occurrence_id, create: false)

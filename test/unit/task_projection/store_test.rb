@@ -54,6 +54,22 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
+  def test_cached_read_uses_the_bounded_checkpoint_without_reading_the_full_journal
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      expected = store.rebuild!
+
+      projection = with_replaced_singleton_method(
+        store, :journal_bytes, -> { raise "full journal read must not run" }
+      ) do
+        store.read_cached
+      end
+
+      assert_equal expected.to_h, projection.to_h
+    end
+  end
+
   def test_valid_snapshot_uses_narrow_attempt_binding_read_when_available
     with_tmp_dir do |dir|
       attempt = durable_attempt
@@ -192,8 +208,12 @@ class TaskProjectionStoreTest < Minitest::Test
         task_folder: dir, attempt_store: exploding_store
       )
 
-      error = assert_raises(Hive::TaskProjection::InvalidJournal) { store.read }
-      assert_includes error.message, "attempt store unavailable"
+      %i[read read_cached].each do |method_name|
+        error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+          store.public_send(method_name)
+        end
+        assert_includes error.message, "attempt store unavailable"
+      end
     end
   end
 
@@ -219,6 +239,119 @@ class TaskProjectionStoreTest < Minitest::Test
       assert_equal "unsatisfied", health.fetch("state")
       assert_equal "attempt_terminal_failed", health.fetch("reason")
       assert_equal true, health.dig("provenance", "projection_reconciled_attempt_state")
+    end
+  end
+
+  def test_cached_read_reconciles_terminal_attempt_without_reading_the_full_journal
+    with_tmp_dir do |dir|
+      attempt = durable_attempt
+      attempt_store = Object.new
+      attempt_store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
+        attempt if attempt_id == "attempt-1"
+      end
+      attempt_store.define_singleton_method(:fetch) do |attempt_id|
+        attempt if attempt_id == "attempt-1"
+      end
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      write_journal(dir, [ condition_event("event-1") ])
+      store.rebuild!
+      attempt["state"] = "terminal"
+      attempt["outcome"] = "failed"
+      attempt["lease_version"] = 2
+      expected = store.read.to_h
+
+      bounded = with_replaced_singleton_method(
+        store, :journal_bytes, -> { raise "full journal read must not run" }
+      ) do
+        store.read_bounded
+      end
+
+      assert_equal "current", bounded.state
+      assert_equal expected, bounded.projection.to_h
+      assert_equal "attempt_terminal_failed",
+                   bounded.projection.current_condition("AgentHealthy").fetch("reason")
+
+      projection = with_replaced_singleton_method(
+        store, :journal_bytes, -> { raise "full journal read must not run" }
+      ) do
+        store.read_cached
+      end
+      assert_equal expected, projection.to_h
+    end
+  end
+
+  def test_cached_read_falls_back_to_the_full_journal_after_an_append
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      store.rebuild!
+      File.open(store.journal_path, "a") do |journal|
+        journal.write("#{JSON.generate(condition_event('event-2', state: 'unsatisfied'))}\n")
+      end
+      full_reads = 0
+      store.define_singleton_method(:journal_bytes) do
+        full_reads += 1
+        File.binread(journal_path)
+      end
+
+      projection = store.read_cached
+
+      assert_equal 1, full_reads
+      assert_equal "unsatisfied", projection.current_condition("AgentHealthy").fetch("state")
+    end
+  end
+
+  def test_cached_read_falls_back_after_same_size_journal_mutation
+    with_tmp_dir do |dir|
+      records = 100.times.map { |index| condition_event("event-#{index}") }
+      write_journal(dir, records)
+      store = projection_store(dir)
+      store.rebuild!
+      bytes = File.binread(store.journal_path)
+      replacement = bytes.sub('"event_id":"event-50"', '"event_id":"event-x0"')
+      assert_equal bytes.bytesize, replacement.bytesize
+      refute_equal bytes, replacement
+      File.binwrite(store.journal_path, replacement)
+      changed_at = Time.now + 1
+      File.utime(changed_at, changed_at, store.journal_path)
+      full_reads = 0
+      store.define_singleton_method(:journal_bytes) do
+        full_reads += 1
+        File.binread(journal_path)
+      end
+
+      projection = store.read_cached
+
+      assert_equal 1, full_reads
+      assert_equal Digest::SHA256.hexdigest(replacement), projection["journal"].fetch("hash")
+    end
+  end
+
+  def test_cached_read_fails_closed_after_attempt_identity_changes
+    with_tmp_dir do |dir|
+      attempt = durable_attempt
+      attempt_store = Object.new
+      attempt_store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
+        attempt if attempt_id == "attempt-1"
+      end
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      write_journal(dir, [ condition_event("event-1") ])
+      store.rebuild!
+      attempt["task_slug"] = "forged-task"
+      full_reads = 0
+      store.define_singleton_method(:journal_bytes) do
+        full_reads += 1
+        File.binread(journal_path)
+      end
+
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) { store.read_cached }
+
+      assert_equal 1, full_reads
+      assert_includes error.message, "durable attempt mismatch: task"
     end
   end
 

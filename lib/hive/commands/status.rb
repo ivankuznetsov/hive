@@ -1433,7 +1433,7 @@ module Hive
         attempt_store = status_attempt_store
         projection = Hive::TaskProjection::Store.new(
           task_folder: task.folder, attempt_store: attempt_store
-        ).read(marker: marker)
+        ).read_cached(marker: marker)
         project ||= project_name_for(task)
         closure = Hive::TaskClosure.projection(
           task, project: project, attempt_store: attempt_store

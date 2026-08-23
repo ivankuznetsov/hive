@@ -11,7 +11,6 @@ require "hive/pid_file"
 require "hive/paths"
 require "hive/update_check/state"
 require "hive/commands/service_installer/result_presenter"
-require "hive/recovery/migration"
 
 module Hive
   module Commands
@@ -101,8 +100,6 @@ module Hive
         FileUtils.mkdir_p(@hive_home)
         FileUtils.mkdir_p(File.dirname(pid_file))
         FileUtils.mkdir_p(File.dirname(log_file))
-        Hive::Recovery::Migration.ensure!(state_home: @hive_home)
-
         lock_file = File.open(pid_file, File::RDWR | File::CREAT, 0o644)
         unless lock_file.flock(File::LOCK_EX | File::LOCK_NB)
           payload = pid_file_payload

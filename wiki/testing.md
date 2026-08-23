@@ -58,6 +58,42 @@ authorized run on the unchanged exact head can produce authenticated evidence.
 
 ## Local feedback loop
 
+The default fast loop for implementation is `bundle exec rake coverage:changed` (or the
+equivalent focused files via `bin/test`). It maps git-diff-touched `lib/`
+sources to their mirrored test files, runs only those, and enforces exact
+line coverage on the changed sources; the global 100% gate stays CI's job.
+Mapping accepts only mirrored paths or the explicit override table in
+`test/support/changed_coverage.rb`; an unmapped or ambiguous basename fails
+loudly instead of running a plausibly unrelated test. `HIVE_COVERAGE_BASE`
+overrides the merge base.
+
+```bash
+bundle exec rake coverage:changed                         # locked bundle + focused exact coverage
+bin/test test/unit/a_test.rb test/integration/b_test.rb   # every named file, with a plain-Ruby fallback
+```
+
+The plain-Ruby fallback clears inherited Bundler activation before
+launching the `ruby` selected by `PATH`. That matters when `bin/test` is itself
+called from a bundled parent: the fallback must not re-enter the parent's bundle
+under a different system Ruby. Set `HIVE_TEST_REQUIRE_BUNDLE=1` for authoritative
+coverage or CI checks, where an unlocked fallback must fail closed instead.
+
+Known flakes are measured before they are masked. The nightly seed sweep
+(`.github/workflows/nightly-flake-sweep.yml`) runs the exact default-suite
+manifest under seeds 101, 202, and 303. Analysis accepts only that complete,
+unique seed set with identical manifest digests; missing, duplicate, corrupt,
+suite-mismatched, incompletely loaded, zero-test, or test-count-mismatched
+reports produce no derived candidates or timings. Complete
+failing matrices retain their analysis and issue evidence before the workflow
+reports failure. The resulting timing and flake artifacts are evidence for a
+later reviewed change; required PR CI does not consume them automatically.
+
+Root Minitest suites emit `tmp/ci-failure-evidence.json` on CI failures with
+the seed, test identifier, source location, and focused repro command. Every
+root-Minitest-owning job in `ci.yml` retains that file: coverage shards,
+expensive proof gates, e2e harness library tests, the advisory TUI latency job,
+and the macOS launchd proof.
+
 During implementation, run the smallest relevant test files directly:
 
 ```bash
@@ -153,6 +189,14 @@ bundle exec rake test:tui_reactivity_perf
 bundle exec rake test:setup_agents_integration
 bundle exec rake test:babysitter_dry_run_security_matrix
 ```
+
+The required TUI reactivity gate enforces row completeness and archive-size
+scaling without host-speed thresholds. A separate
+`TUI reactivity absolute latency (advisory)` job opts into the absolute budgets
+with `HIVE_TUI_PERF_ABSOLUTE=1`. Runner load can exceed those workstation-tuned
+budgets, so the measurement step records a warning and retains failure evidence
+without making the job red; the machine-independent scaling proof in the
+protected `rake test (Ruby 3.4)` aggregate remains authoritative.
 
 The packaged-web gate is commit-bound: it archives `HEAD:web` to reproduce the
 release artifact. Commit relevant web changes before using that task locally;
@@ -379,6 +423,30 @@ collector preload makes even sparse `exit!` flushes expensive enough to lose
 subprocess results under six-runner contention. The downstream aggregate still
 enumerates every `lib/` source, treats absent entries as unloaded, and enforces
 the same exact line threshold; lazy collection does not weaken the final gate.
+
+`HiveTestCoverage.dump_process_result!` reads `Coverage.result(stop: false,
+clear: false)`. The keyword arguments are load-bearing: `Coverage.result`
+ends measurement by default, and the pre-`exit!` sparse flush can run in a
+process that keeps executing tests afterwards (a fork parent, or a stubbed
+`exit!` that never reaches `Kernel#exit!`). Stopping there dropped every line
+that process ran later, and the "coverage measurement is not enabled" rescue
+swallowed the final dump — so a shard reported green while thousands of lines
+silently went uncovered, with the deficit migrating between shards whenever
+the partition reshuffled. Keeping results cumulative lets each process's last
+dump overwrite its own pid-keyed file as a superset.
+
+The same measurement-loss class has a second entry point: `configure!`
+repoints `@root`, `@lib_dir`, and `@resultset_dir` on the module singleton,
+so a test that points them at a `Dir.mktmpdir` and never restores them sends
+the shard's own `at_exit` dump into a scratch directory nobody collects. The
+shard still exits zero, and the merged gate falls thousands of lines short
+in whichever shard owns the leaking test file. Tests that need a temporary
+coverage root go through `HiveCoverageConfigSandbox` (`test/support/
+coverage_config_sandbox.rb`), which snapshots and restores every state ivar;
+`with_coverage_config` wraps one assertion, `configure_coverage_root!` /
+`restore_coverage_config!` wrap a whole class via setup/teardown. A lint test
+in `test/unit/coverage_test.rb` fails any `_test.rb` that calls `configure!`
+without a restore path, because the failure mode is silent.
 
 In CI (`CI=true`), tests that exercise backgrounding commands must force a foreground path (for example `foreground: true`) or stub daemonization. Otherwise the test process can daemonize before Minitest `after_run` writes `coverage/coverage.json`, leaving the parent coverage task with a missing report while child output keeps streaming. Bundler evaluates the gemspec before coverage starts, so the bootstrap reloads the preloaded `lib/hive/version.rb`, `lib/hive/errors.rb`, and `lib/hive.rb` files in dependency order. Reloaded code must therefore be idempotent; for example, self-derived enum constants must exclude `:ALL` to stay reload-safe.
 

@@ -82,7 +82,26 @@ module Hive
       end
 
       def fetch
-        out, err, status = Open3.capture3(@extra_env, @hive_bin, "status", "--json")
+        fetch_command("status", "--json")
+      end
+
+      def fetch_tasks(task_keys)
+        keys = Array(task_keys).map do |project, slug|
+          [ project.to_s, slug.to_s ]
+        end.uniq
+        references = keys.map { |project, slug| "#{project}:#{slug}" }
+        return Result.new(ok: true) if references.empty?
+
+        fetch_command(
+          "status", "--json", "--daemon-task", *references,
+          require_partial: true, expected_task_keys: keys
+        )
+      end
+
+      private
+
+      def fetch_command(*argv, require_partial: false, expected_task_keys: nil)
+        out, err, status = Open3.capture3(@extra_env, @hive_bin, *argv)
         unless status.success?
           return Result.new(
             ok: false, rows: [], projects: [], hidden_archived_task_count: 0,
@@ -97,6 +116,10 @@ module Hive
         # it into the skew degrade would relabel a genuine "ok=false:
         # <reason>" as a misleading "restart to pick up the new version".
         validate_envelope!(doc)
+        if require_partial && doc["partial"] != true
+          raise ArgumentError, "bounded status response is missing partial=true"
+        end
+        validate_bounded_projects!(doc, expected_task_keys) if require_partial
         skew = schema_skew(doc)
         # An OLDER payload (a stale `hive` on PATH than this daemon
         # expects) can't be trusted to carry the fields the dispatcher
@@ -114,6 +137,7 @@ module Hive
 
         begin
           rows = extract_rows(doc)
+          validate_bounded_rows!(rows, expected_task_keys) if require_partial
           projects = extract_projects(doc)
         rescue StandardError => e
           # ONLY a failure inside best-effort EXTRACTION degrades. On a
@@ -148,8 +172,6 @@ module Hive
         )
       end
 
-      private
-
       # Envelope-shape validation (hard errors) ONLY. A missing/wrong
       # `schema` key or `ok=false` is a malformed/failed envelope and must
       # still raise. Schema VERSION skew is NOT validated here — it is
@@ -162,6 +184,33 @@ module Hive
         return if doc["ok"] == true
 
         raise ArgumentError, "envelope ok=false: #{doc['error_class']} #{doc['message']}"
+      end
+
+      def validate_bounded_projects!(doc, expected_task_keys)
+        expected_projects = Array(expected_task_keys).map(&:first).uniq.sort
+        projects = Array(doc["projects"])
+        actual_projects = projects.map { |project| project["name"].to_s }.uniq.sort
+        unless actual_projects == expected_projects
+          raise ArgumentError,
+                "bounded status response projects do not match requested projects"
+        end
+
+        failed = projects.find { |project| project["error"] }
+        return unless failed
+
+        raise ArgumentError,
+              "bounded status project #{failed['name']} failed: #{failed['error']}"
+      end
+
+      def validate_bounded_rows!(rows, expected_task_keys)
+        expected = Array(expected_task_keys).each_with_object({}) do |key, index|
+          index[key] = true
+        end
+        unexpected = rows.find { |row| !expected[[ row.project.to_s, row.slug.to_s ]] }
+        return unless unexpected
+
+        raise ArgumentError,
+              "bounded status returned unrequested task #{unexpected.project}:#{unexpected.slug}"
       end
 
       # Classify the envelope's schema_version against what THIS daemon was

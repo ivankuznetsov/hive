@@ -34,7 +34,6 @@ require "hive/conditions/attempt_observer"
 require "hive/modules/event_publisher"
 require "hive/modules/daemon_runtime"
 require "hive/commands/service_installer/result_presenter"
-require "hive/recovery/migration"
 
 module Hive
   module Commands
@@ -145,8 +144,6 @@ module Hive
 
         # Stale PID file from a prior crash → safe to remove.
         File.delete(pid_file) if File.exist?(pid_file)
-        Hive::Recovery::Migration.ensure!(state_home: @hive_home)
-
         if @detach
           Process.daemon(true, true)
         end

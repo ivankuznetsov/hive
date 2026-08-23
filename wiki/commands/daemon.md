@@ -3,14 +3,14 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-08-21
+updated: 2026-08-23
 tags: [command, daemon, automation, plan-review, json]
 ---
 
 **TLDR**: `hive daemon SUBCOMMAND` is the operator surface for the
 auto-advancing dispatcher (ADR-024). One long-running process wakes
-every 1s for cheap child-exit/state-mtime probes, runs a full
-`hive status --json` scan on change or every 30s as a backstop, dispatches
+every 1s for bounded child-exit/state-mtime probes, refreshes only the changed
+task rows, and runs a full `hive status --json` scan every 30s as repair. It dispatches
 workflow verbs (`hive plan` / `develop` / `open-pr` / `review` /
 `artifacts` / `finalize`) on tasks ready to advance, and
 auto-archives safely delivered coding tasks from any PR-bearing stage 5–8
@@ -165,7 +165,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `poll_interval_sec` | 30 | Backstop cadence for full status scans. Min 5. |
-| `fast_poll_sec` | 1 | Cheap wake cadence for child reaps and state-file/stage-dir mtime probes between full scans. Min 1. |
+| `fast_poll_sec` | 1 | Cheap wake cadence for child reaps and a rotating batch of at most 64 tracked state-file mtime probes between full scans. Only exact changed task rows refresh; dependency-bearing rows wait for the full scan. Min 1. |
 | `auto_retry.enabled` | — | **Inert.** Retired as a kill switch: `ERROR` / `REVIEW_ERROR` retries are unconditional and follow one backoff ladder. The key is still shape-validated so a typo fails loudly, but setting it changes nothing. Pause a project with `daemon.enabled: false` instead. |
 | `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |
 | `pr_merge_poll_interval_sec` | 300 | Durable per-candidate merge reconciliation cadence. Min 60 to respect GitHub rate limits; failure counts remain uncapped and backoff is persisted. |

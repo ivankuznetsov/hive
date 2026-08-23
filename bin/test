@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Focused test runner for agent sandboxes and developer shells alike.
+#
+#   bin/test test/unit/foo_test.rb [more files...] [-- seed options]
+#
+# Prefers the project bundle; falls back to plain ruby when bundler is
+# absent or the bundle is not installed (common in minimal agent sandboxes).
+set -euo pipefail
+
+# Ruby executes only the first file argument; the rest become ARGV and are not
+# loaded. Use one tiny loader so every leading test file is required while the
+# remaining flags stay available to Minitest.
+runner='files = ARGV.take_while { |arg| !arg.start_with?("-") }; abort "bin/test: provide at least one test file" if files.empty?; ARGV.shift(files.length); files.each { |path| require File.expand_path(path) }'
+
+if command -v bundle >/dev/null 2>&1 && bundle check >/dev/null 2>&1; then
+  exec bundle exec ruby -Itest -Ilib -e "$runner" "$@"
+elif [[ "${HIVE_TEST_REQUIRE_BUNDLE:-}" == "1" ]]; then
+  echo "bin/test: the locked bundle is required but unavailable or incomplete" >&2
+  exit 1
+else
+  echo "bin/test: bundle unavailable or incomplete; running with plain ruby" >&2
+  # A parent `bundle exec` injects Bundler through RUBYOPT/RUBYLIB. Leaving
+  # those active makes this branch re-enter that bundle with whichever `ruby`
+  # PATH selects, which can be a different and incompatible Ruby installation.
+  unset RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH BUNDLER_SETUP BUNDLER_VERSION
+  exec ruby -Itest -Ilib -e "$runner" "$@"
+fi

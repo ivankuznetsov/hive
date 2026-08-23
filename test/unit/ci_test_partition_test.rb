@@ -138,14 +138,17 @@ class CiTestPartitionTest < Minitest::Test
 
       coverage_gate = workflow.fetch("jobs").fetch("test")
       assert_equal "coverage (Ruby 3.4)", coverage_gate.fetch("name")
+      assert_equal 20, coverage_gate.fetch("timeout-minutes")
       assert_equal "${{ always() }}", coverage_gate.fetch("if")
       assert_equal "coverage-shards", coverage_gate.fetch("needs")
-      shard_verdict = coverage_gate.fetch("steps").fetch(0)
-      assert_equal "Require every coverage collector", shard_verdict.fetch("name")
+      shard_verdict = coverage_gate.fetch("steps").find { |step| step["name"] == "Require every coverage collector" }
       assert_equal "bash", shard_verdict.fetch("shell")
       assert_equal "${{ needs.coverage-shards.result }}",
                    shard_verdict.dig("env", "HIVE_COVERAGE_SHARDS_RESULT")
       assert_equal 'test "$HIVE_COVERAGE_SHARDS_RESULT" = "success"', shard_verdict.fetch("run")
+      coverage_notice = coverage_gate.fetch("steps").find { |step| step["name"] == "Aggregation-only notice (no tests run in this job)" }
+      assert coverage_notice, "coverage merge job must self-describe as an aggregator"
+      assert_includes coverage_notice.fetch("run"), "GITHUB_STEP_SUMMARY"
       download = coverage_gate.fetch("steps").find { |step| step["name"] == "Download coverage shards" }
       assert_equal DOWNLOAD_ARTIFACT_ACTION, download.fetch("uses")
       assert_equal "coverage-shard-*", download.dig("with", "pattern")
@@ -165,9 +168,7 @@ class CiTestPartitionTest < Minitest::Test
       assert_equal "${{ always() }}", required_gate.fetch("if")
       assert_equal %w[test expensive-test-gates e2e], required_gate.fetch("needs")
 
-      required_step = required_gate.fetch("steps").fetch(0)
-      assert_equal "Require coverage, functional e2e, and expensive proof gates",
-                   required_step.fetch("name")
+      required_step = required_gate.fetch("steps").find { |step| step["name"] == "Require coverage, functional e2e, and expensive proof gates" }
       assert_equal "${{ needs.test.result }}",
                    required_step.fetch("env").fetch("HIVE_COVERAGE_RESULT")
       assert_equal "${{ needs.expensive-test-gates.result }}",
@@ -181,6 +182,97 @@ class CiTestPartitionTest < Minitest::Test
         test "$HIVE_E2E_RESULT" = "success"
       SHELL
     end
+  end
+
+  def test_required_proofs_do_not_use_path_based_shortcuts
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+    jobs = workflow.fetch("jobs")
+
+    refute jobs.key?("changes"), "required CI must not classify broad path groups as proof-free"
+    %w[coverage-shards expensive-test-gates e2e web-tests].each do |job_name|
+      job = jobs.fetch(job_name)
+      refute_equal "changes", job["needs"]
+      refute_includes job.fetch("if", ""), "needs.changes"
+    end
+
+    install_smoke = File.read(File.join(ROOT, ".github", "workflows", "install-smoke.yml"))
+    refute_match(/^\s+paths:\s*$/, install_smoke,
+                 "install smoke must report on every PR until branch protection and ownership are proven")
+  end
+
+  def test_every_root_minitest_job_retains_failure_evidence
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+    jobs = workflow.fetch("jobs")
+
+    %w[coverage-shards expensive-test-gates tui-reactivity-latency e2e launchd-macos].each do |job_name|
+      upload = jobs.fetch(job_name).fetch("steps").find do |step|
+        step["uses"] == UPLOAD_ARTIFACT_ACTION &&
+          step.dig("with", "path").to_s.include?("tmp/ci-failure-evidence.json")
+      end
+      assert upload, "#{job_name} runs root Minitest but does not retain its failure evidence"
+      if job_name == "tui-reactivity-latency"
+        assert_equal "${{ steps.measure.outcome == 'failure' }}", upload.fetch("if")
+      else
+        assert_includes %w[failure() always()], upload.fetch("if")
+      end
+      assert_equal "warn", upload.dig("with", "if-no-files-found")
+    end
+  end
+
+  def test_nightly_sweep_validates_the_complete_matrix_before_final_verdict
+    workflow = YAML.safe_load_file(
+      File.join(ROOT, ".github", "workflows", "nightly-flake-sweep.yml"),
+      aliases: true,
+    )
+    analyze = workflow.fetch("jobs").fetch("analyze")
+    steps = analyze.fetch("steps")
+    merge = steps.find { |step| step["name"] == "Merge reports into candidates and timings" }
+    issue = steps.find { |step| step["name"] == "File or update the flake-candidate issue" }
+    retain = steps.find { |step| step["name"] == "Retain merged analysis" }
+    verdict = steps.find { |step| step["name"] == "Enforce complete green sweep" }
+
+    expected_seeds = workflow.dig("jobs", "sweep", "strategy", "matrix", "seed")
+    assert_includes merge.fetch("run"), "--expected-seeds \"#{expected_seeds.join(',')}\""
+    refute merge["continue-on-error"], "the wrapper must capture the analyzer status explicitly"
+    assert_includes issue.fetch("if"), "steps.merge.outputs.artifacts"
+    refute_includes issue.fetch("run"), "--search"
+    assert_includes issue.fetch("run"), "--arg title"
+    assert_includes issue.fetch("run"), ".title == $title"
+    assert_equal "${{ always() }}", verdict.fetch("if")
+    assert_includes verdict.fetch("run"), "HIVE_ANALYSIS_STATUS"
+    assert_includes verdict.fetch("run"), "HIVE_SWEEP_RESULT"
+    assert_operator steps.index(retain), :<, steps.index(verdict)
+    assert_operator steps.index(issue), :<, steps.index(verdict)
+
+    issue_renderer = File.read(File.join(ROOT, "script", "render_flake_issue.rb"))
+    refute_includes issue_renderer, "flake_quarantine"
+    refute_includes issue_renderer, "coverage:timings"
+    assert_includes issue_renderer, "required CI does not consume it automatically"
+  end
+
+  def test_absolute_tui_latency_is_advisory_and_separate_from_required_scaling
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+    jobs = workflow.fetch("jobs")
+    advisory = jobs.fetch("tui-reactivity-latency")
+    run = advisory.fetch("steps").find { |step| step["name"] == "Measure absolute TUI latency" }
+    report = advisory.fetch("steps").find { |step| step["name"] == "Report absolute TUI latency" }
+    retain = advisory.fetch("steps").find { |step| step["name"] == "Retain failure evidence" }
+
+    assert_equal "TUI reactivity absolute latency (advisory)", advisory.fetch("name")
+    refute advisory.key?("continue-on-error"),
+           "an advisory lane must finish green so exact-head automation can reach terminal success"
+    assert_equal true, run.fetch("continue-on-error")
+    assert_equal "1", run.fetch("env").fetch("HIVE_TUI_PERF_ABSOLUTE")
+    assert_equal "bundle exec rake test:tui_reactivity_perf", run.fetch("run")
+    assert_equal "${{ always() }}", report.fetch("if")
+    assert_equal "${{ steps.measure.outcome }}",
+                 report.fetch("env").fetch("HIVE_TUI_LATENCY_OUTCOME")
+    assert_includes report.fetch("run"), "GITHUB_STEP_SUMMARY"
+    assert_equal "${{ steps.measure.outcome == 'failure' }}", retain.fetch("if")
+
+    required_needs = jobs.fetch("required-test-gate").fetch("needs")
+    refute_includes required_needs, "tui-reactivity-latency"
+    assert_includes required_needs, "expensive-test-gates"
   end
 
   def test_workflow_creator_hostile_campaign_is_opt_in
@@ -198,6 +290,25 @@ class CiTestPartitionTest < Minitest::Test
       refute_includes workflow, "test:hostile"
       refute_includes workflow, "HIVE_HOSTILE_TESTS"
     end
+  end
+
+  def test_every_workflow_sets_up_ruby_before_shelling_out_to_bundler
+    offenders = Dir.glob(File.join(ROOT, ".github", "workflows", "*.yml")).sort.flat_map do |path|
+      workflow = YAML.safe_load_file(path, aliases: true)
+      workflow.fetch("jobs", {}).flat_map do |job_name, job|
+        ruby_ready = false
+        job.fetch("steps", []).filter_map do |step|
+          ruby_ready ||= step["uses"].to_s.start_with?("ruby/setup-ruby")
+          next if ruby_ready || !step["run"].to_s.match?(/(?:\A|[;&|\s])bundle\s/)
+
+          "#{File.basename(path)} / #{job_name} / #{step["name"] || step["run"]}"
+        end
+      end
+    end
+
+    assert_empty offenders,
+      "these steps shell out to bundler before their job sets up Ruby, so they die " \
+        "with `bundle: command not found`"
   end
 
   def test_brakeman_reads_the_web_gemfile_while_scanning_the_repository_root
@@ -263,9 +374,11 @@ class CiTestPartitionTest < Minitest::Test
     assert_equal "Hive web (Rails tests + system)", web_gate.fetch("name")
     assert_equal "${{ always() }}", web_gate.fetch("if")
     assert_equal "web-tests", web_gate.fetch("needs")
-    gate_step = web_gate.fetch("steps").fetch(0)
+    gate_step = web_gate.fetch("steps").find { |step| step["name"] == "Require Rails integration, system, and golden-path gates" }
     assert_equal "${{ needs.web-tests.result }}", gate_step.dig("env", "HIVE_WEB_TESTS_RESULT")
     assert_equal 'test "$HIVE_WEB_TESTS_RESULT" = "success"', gate_step.fetch("run")
+    web_notice = web_gate.fetch("steps").find { |step| step["name"] == "Aggregation-only notice (no tests run in this job)" }
+    assert web_notice, "web aggregate job must self-describe as an aggregator"
   end
 
   def test_incident_duration_budget_is_advisory_and_separate_from_functional_e2e
@@ -315,16 +428,10 @@ class CiTestPartitionTest < Minitest::Test
     )
 
     scenario = e2e_steps.find { |step| step["name"] == "Run real-subprocess scenarios" }
-    upload = e2e_steps.find { |step| step["uses"] == UPLOAD_ARTIFACT_ACTION }
+    upload = e2e_steps.find { |step| step.dig("with", "name") == "hive-e2e-report" }
     assert_equal download.fetch("with").fetch("name"), upload.fetch("with").fetch("name")
-    assert_equal(
-      scenario.fetch("env").fetch("HIVE_E2E_RUNS_DIR"),
-      upload.fetch("with").fetch("path")
-    )
-    assert_equal(
-      integrity.fetch("env").fetch("HIVE_E2E_RUNS_DIR"),
-      upload.fetch("with").fetch("path")
-    )
+    assert_equal scenario.fetch("env").fetch("HIVE_E2E_RUNS_DIR"), upload.dig("with", "path")
+    assert_equal integrity.fetch("env").fetch("HIVE_E2E_RUNS_DIR"), upload.dig("with", "path")
     assert_equal(
       enforce.fetch("env").fetch("HIVE_E2E_RUNS_DIR"),
       download.fetch("with").fetch("path")

@@ -4,13 +4,15 @@ require "hive/task_projection/store"
 class TaskProjectionStoreTest < Minitest::Test
   include HiveTestHelper
 
-  def test_default_attempt_store_runs_layout_migration_without_an_override
+  def test_default_attempt_store_opens_current_layout_without_migration
     with_tmp_dir do |root|
       with_env("HIVE_HOME" => root, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
         store = Hive::TaskProjection::Store.new(task_folder: root)
-        assert_equal File.join(root, "attempts", "v4"), store.attempt_store.root
+        assert_equal File.join(root, "attempts", "v4"),
+                     store.attempt_store.instance_variable_get(:@root)
       end
-      assert File.file?(File.join(root, "attempts", "v2"))
+      refute File.exist?(File.join(root, "attempts", "v2"))
+      refute File.exist?(File.join(root, "recovery-migration-v6.json"))
     end
   end
 

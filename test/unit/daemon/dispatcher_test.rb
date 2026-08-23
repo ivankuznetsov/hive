@@ -339,8 +339,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
       }
     end
 
-    def resume(request:, row:, now: nil)
-      @resumes << { request: request, row: row, now: now }
+    def resume(request:, row:, now: nil, admission_context: nil)
+      @resumes << {
+        request: request, row: row, now: now,
+        admission_context: admission_context
+      }
       Hive::Daemon::RecoveryCoordinator::Receipt.new(
         status: @status,
         request_id: request.request_id,
@@ -742,6 +745,131 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 3, coordinator.resumes.size
     assert_empty supervisor.spawned
     assert_equal 0, controller.daily_count_for("p1", T0)
+  end
+
+  def test_dispatch_request_scan_reuses_one_admission_context_for_all_recoveries
+    coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+    dispatcher, = make_dispatcher(rows: [], recovery_coordinator: coordinator)
+    requests = recovery_scan_requests("s1", "s2")
+    rows = recovery_scan_rows("s1", "s2")
+    rows.define_singleton_method(:find) do |*|
+      raise "dispatch scan must use its row index"
+    end
+    admission_context = Hive::DependencyAdmission::Context.new(projects: [])
+    context_builds = 0
+    registry_reads = 0
+
+    with_replaced_singleton_method(Q, :pending, ->(**) { requests }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        lambda do
+          registry_reads += 1
+          [ { "name" => "p1", "path" => "/tmp/p1" } ]
+        end
+      ) do
+        with_replaced_singleton_method(
+          Hive::DependencySnapshot, :admission_context,
+          lambda do |_projects|
+            context_builds += 1
+            admission_context
+          end
+        ) do
+          dispatcher.send(:process_dispatch_requests, now: T0, rows: rows)
+        end
+      end
+    end
+
+    assert_equal 1, registry_reads
+    assert_equal 1, context_builds
+    assert_equal [ admission_context, admission_context ],
+                 coordinator.resumes.map { |entry| entry.fetch(:admission_context) }
+  end
+
+  def test_empty_dispatch_request_scan_skips_global_index_work
+    dispatcher, = make_dispatcher(rows: [])
+    rows = Object.new
+    rows.define_singleton_method(:each) { raise "empty queue must not index status rows" }
+
+    with_replaced_singleton_method(Q, :pending, ->(**) { [] }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { raise "empty queue must not read the registry" }
+      ) do
+        dispatcher.send(:process_dispatch_requests, now: T0, rows: rows)
+      end
+    end
+  end
+
+  def test_dispatch_request_scan_caches_context_build_failure_and_continues
+    coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [], recovery_coordinator: coordinator
+    )
+    requests = recovery_scan_requests("s1", "s2")
+    rows = recovery_scan_rows("s1", "s2")
+    context_builds = 0
+
+    with_replaced_singleton_method(Q, :pending, ->(**) { requests }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "p1", "path" => "/tmp/p1" } ] }
+      ) do
+        with_replaced_singleton_method(
+          Hive::DependencySnapshot, :admission_context,
+          lambda do |_projects|
+            context_builds += 1
+            raise "fleet snapshot unavailable"
+          end
+        ) do
+          dispatcher.send(:process_dispatch_requests, now: T0, rows: rows)
+        end
+      end
+    end
+
+    assert_equal 1, context_builds
+    assert_empty coordinator.resumes
+    blocked = logger.events.filter_map do |name, attributes|
+      next unless name == :dispatch_request_blocked
+      next unless attributes[:reason] == "admission_context_unavailable"
+
+      attributes[:request_id]
+    end
+    assert_equal %w[recovery-s1 recovery-s2], blocked
+    refute logger.events.any? { |name, _| name == :dispatch_request_rejected }
+  end
+
+  def test_dispatch_request_scan_caches_registry_failure_without_pacing_recoveries
+    coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [], recovery_coordinator: coordinator
+    )
+    requests = recovery_scan_requests("s1", "s2")
+    rows = recovery_scan_rows("s1", "s2")
+    registry_reads = 0
+
+    with_replaced_singleton_method(Q, :pending, ->(**) { requests }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        lambda do
+          registry_reads += 1
+          raise "project registry unavailable"
+        end
+      ) do
+        dispatcher.send(:process_dispatch_requests, now: T0, rows: rows)
+      end
+    end
+
+    assert_equal 1, registry_reads
+    assert_empty coordinator.resumes
+    assert_empty coordinator.deferred
+    blocked = logger.events.filter_map do |name, attributes|
+      next unless name == :dispatch_request_blocked
+      next unless attributes[:reason] == "project_registry_unavailable"
+
+      attributes[:request_id]
+    end
+    assert_equal %w[recovery-s1 recovery-s2], blocked
+    refute logger.events.any? { |name, _| name == :dispatch_request_rejected }
   end
 
   def test_recovery_request_waits_when_the_status_observation_is_missing
@@ -6363,8 +6491,18 @@ end
 
   def stub_find_project!(dispatcher, project_name)
     Hive::Config.singleton_class.alias_method(:__orig_find_project, :find_project) unless Hive::Config.singleton_class.method_defined?(:__orig_find_project)
+    Hive::Config.singleton_class.alias_method(:__orig_registered_projects, :registered_projects) unless Hive::Config.singleton_class.method_defined?(:__orig_registered_projects)
     Hive::Config.define_singleton_method(:find_project) do |name|
       name == project_name ? { "name" => project_name, "path" => "/tmp/nonexistent", "hive_state_path" => "/tmp/nonexistent/.hive-state" } : nil
+    end
+    Hive::Config.define_singleton_method(:registered_projects) do
+      [
+        {
+          "name" => project_name,
+          "path" => "/tmp/nonexistent",
+          "hive_state_path" => "/tmp/nonexistent/.hive-state"
+        }
+      ]
     end
     dispatcher
   end
@@ -6372,6 +6510,11 @@ end
   def restore_find_project!
     if Hive::Config.singleton_class.method_defined?(:__orig_find_project)
       Hive::Config.define_singleton_method(:find_project, Hive::Config.method(:__orig_find_project))
+    end
+    if Hive::Config.singleton_class.method_defined?(:__orig_registered_projects)
+      Hive::Config.define_singleton_method(
+        :registered_projects, Hive::Config.method(:__orig_registered_projects)
+      )
     end
   end
 
@@ -7876,6 +8019,30 @@ end
   end
 
   private
+
+  def recovery_scan_requests(*slugs)
+    slugs.map do |slug|
+      Hive::Daemon::DispatchRequestQueue::Request.new(
+        request_id: "recovery-#{slug}", created_at: T0,
+        project: "p1", slug: slug,
+        argv: [ "hive", "run", slug, "--stage", "4-execute", "--project", "p1", "--json" ],
+        requestor: "web", trigger: "recovery",
+        task_generation: "c" * 64, task_id: 1,
+        expected_stage: "4-execute", expected_marker_name: "error",
+        expected_marker_id: "m1", recovery: dispatcher_recovery,
+        schema_version: 5
+      )
+    end
+  end
+
+  def recovery_scan_rows(*slugs)
+    slugs.map do |slug|
+      row(
+        slug: slug, stage: "4-execute", marker: "error", action: "error",
+        marker_attrs: { "reason" => "timeout", "marker_id" => "m1" }
+      )
+    end
+  end
 
   def dispatcher_recovery(phase: "admitted")
     {

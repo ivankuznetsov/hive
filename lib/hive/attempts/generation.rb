@@ -53,7 +53,7 @@ module Hive
         )
       end
 
-      def self.artifact_token(task, state_file_content: nil)
+      def self.artifact_token(task, state_file_content: nil, admission_context: nil)
         digest = ::Digest::SHA256.new
         digest << "hive-progress-v2\0"
         digest << task.state_file.to_s
@@ -68,7 +68,13 @@ module Hive
         end
         if task.respond_to?(:project_root) && task.respond_to?(:slug)
           digest << "\0dependency-admission\0"
-          digest << Hive::DependencySnapshot.admission_fingerprint(task)
+          fingerprint_options = {}
+          if admission_context
+            fingerprint_options[:admission_context] = admission_context
+          end
+          digest << Hive::DependencySnapshot.admission_fingerprint(
+            task, **fingerprint_options
+          )
         end
         digest.hexdigest
       rescue SystemCallError, IOError => e

@@ -354,6 +354,40 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_resume_reuses_the_scan_admission_context_for_every_generation_check
+    observed_contexts = []
+    resolver = lambda do |resolved_task, project:, intended_stage:, state_file_content:,
+                          admission_context: nil|
+      observed_contexts << admission_context
+      progress = Digest::SHA256.hexdigest(
+        [ resolved_task.state_file, state_file_content ].join("\0")
+      )
+      FakeGeneration.new(
+        progress_token: progress,
+        task_generation: Digest::SHA256.hexdigest(
+          [ project, intended_stage, progress ].join("\0")
+        )
+      )
+    end
+
+    with_fixture(generation_resolver: resolver) do |coordinator, row, state_home|
+      coordinator.request(
+        row: row, requestor: "web", request_id: "recover-context", now: NOW
+      )
+      request = Q.pending(state_home: state_home).fetch(0)
+      observed_contexts.clear
+      admission_context = Object.new
+
+      resumed = coordinator.resume(
+        request: request, row: row, admission_context: admission_context
+      )
+
+      assert_equal "cleared", resumed.phase
+      refute_empty observed_contexts
+      assert observed_contexts.all? { |context| context.equal?(admission_context) }
+    end
+  end
+
   def test_resume_matches_unicode_marker_attrs_after_json_round_trip
     attrs = {
       "reason" => "implementer_failed",
@@ -1784,7 +1818,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   end
 
   def with_fixture(marker_attrs: nil, marker_name: "ERROR", mtime: NOW - 3600,
-                   safety: nil, task_resolver_builder: nil, task_id: 817)
+                   safety: nil, task_resolver_builder: nil, task_id: 817,
+                   generation_resolver: nil)
     Dir.mktmpdir("hive-recovery-coordinator") do |dir|
       folder = File.join(dir, "task")
       FileUtils.mkdir_p(folder)
@@ -1812,7 +1847,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         state_home: dir,
         task_resolver: task_resolver,
         safety: safety || ->(_row) { [ true, "safe" ] },
-        generation_resolver: lambda do |resolved_task, project:, intended_stage:, state_file_content:|
+        generation_resolver: generation_resolver || lambda do |resolved_task, project:, intended_stage:, state_file_content:|
           progress = Digest::SHA256.hexdigest(
             [ resolved_task.state_file, state_file_content ].join("\0")
           )

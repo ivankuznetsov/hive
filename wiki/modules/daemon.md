@@ -22,8 +22,18 @@ publishes an owner-private, atomic operational snapshot. `hive status
 the task graph without making status itself perform daemon reconciliation. The
 Patrol Fix runtime re-reads the project registry when the admission
 scheduler asks for source ports, so projects registered after daemon start are
-admitted without a restart. Each project has one `AdmissionStore`; one corrupt
-store produces a bounded failed event while the remaining project ports continue.
+admitted without a restart. Each active project retains one `AdmissionStore`
+instance across ticks. Every record read still comes from descriptor-safe
+durable bytes, but an unchanged SHA-256 digest reuses the already frozen,
+fully validated record; changed bytes are parsed and validated again, and
+stores for removed registrations are evicted. Each store retains at most 512
+records and 16 MiB of their serialized durable bytes. Inventory scans keep a
+stable subset when that budget is full, while writes can evict older entries so
+active work remains warm. Capacity compaction removes its cache entry with the
+durable file. This keeps an unchanged admission inventory from repeating full
+schema/source validation every 30 seconds without making daemon memory scale to
+the maximum durable backlog. One corrupt store produces a bounded failed event
+while the remaining project ports continue.
 Patrol Fix otherwise uses the standard task/status contracts and adds no daemon
 operational projection.
 

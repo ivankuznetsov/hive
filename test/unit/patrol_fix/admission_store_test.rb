@@ -615,6 +615,80 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
     end
   end
 
+  def test_pending_reuses_validated_records_when_durable_bytes_are_unchanged
+    Dir.mktmpdir do |dir|
+      writer = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      3.times do |index|
+        writer.reserve!(
+          occurrence_id: "cached-finding-#{index}",
+          snapshot: source_snapshot(identity: "finding-#{index}"), now: NOW
+        )
+      end
+      reader = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      parse_calls = 0
+      original = reader.method(:parse_record)
+      reader.define_singleton_method(:parse_record) do |bytes, expected_id:|
+        parse_calls += 1
+        original.call(bytes, expected_id: expected_id)
+      end
+
+      first = reader.pending(now: NOW)
+      second = reader.pending(now: NOW + 1)
+
+      assert_equal first, second
+      assert_equal 3, parse_calls,
+                   "unchanged admission records should be validated only once per store"
+
+      path = File.join(dir, "records", "cached-finding-1.json")
+      changed = JSON.parse(File.binread(path))
+      changed["updated_at"] = (NOW + 2).iso8601
+      File.binwrite(path, Hive::PatrolFix.canonical_json(changed))
+
+      refreshed = reader.pending(now: NOW + 2)
+
+      assert_equal (NOW + 2).iso8601,
+                   refreshed.find { |record| record["occurrence_id"] == "cached-finding-1" }
+                            .fetch("updated_at")
+      assert_equal 4, parse_calls,
+                   "changed durable bytes must invalidate the validated-record cache"
+    end
+  end
+
+  def test_record_cache_respects_entry_and_byte_budgets_without_scan_churn
+    Dir.mktmpdir do |dir|
+      writer = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      3.times do |index|
+        writer.reserve!(
+          occurrence_id: "bounded-cache-#{index}",
+          snapshot: source_snapshot(identity: "finding-#{index}"), now: NOW
+        )
+      end
+      paths = Dir[File.join(dir, "records", "*.json")].sort
+      byte_budget = paths.first(2).sum { |path| File.size(path) }
+
+      with_cache_limits(records: 2, bytes: byte_budget) do
+        reader = Hive::PatrolFix::AdmissionStore.new(root: dir)
+        parse_calls = 0
+        original = reader.method(:parse_record)
+        reader.define_singleton_method(:parse_record) do |bytes, expected_id:|
+          parse_calls += 1
+          original.call(bytes, expected_id: expected_id)
+        end
+
+        reader.pending(now: NOW)
+        cache = reader.instance_variable_get(:@record_cache)
+
+        assert_equal 2, cache.length
+        assert_operator cache.sum { |_id, entry| entry.fetch(:bytesize) }, :<=, byte_budget
+
+        reader.pending(now: NOW + 1)
+
+        assert_equal 4, parse_calls,
+                     "a bounded full scan should retain its cached subset without churn"
+      end
+    end
+  end
+
   def test_capacity_compacts_only_acknowledged_records_before_reserving
     with_max_records(1) do
       Dir.mktmpdir do |dir|
@@ -625,6 +699,7 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
           occurrence_id: "new-pending", snapshot: source_snapshot(identity: "finding-2"), now: NOW
         )
 
+        refute store.instance_variable_get(:@record_cache).key?("old-terminal")
         assert_nil store.fetch("old-terminal")
         assert_equal "new-pending", current.fetch("occurrence_id")
         assert_equal [ "new-pending" ], store.pending.map { |record| record.fetch("occurrence_id") }
@@ -1005,6 +1080,21 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
   ensure
     Hive::PatrolFix::AdmissionStore.send(:remove_const, :MAX_RECORDS)
     Hive::PatrolFix::AdmissionStore.const_set(:MAX_RECORDS, original)
+  end
+
+  def with_cache_limits(records:, bytes:)
+    klass = Hive::PatrolFix::AdmissionStore
+    originals = {
+      MAX_CACHE_RECORDS: klass::MAX_CACHE_RECORDS,
+      MAX_CACHE_BYTES: klass::MAX_CACHE_BYTES
+    }
+    originals.each_key { |name| klass.send(:remove_const, name) }
+    klass.const_set(:MAX_CACHE_RECORDS, records)
+    klass.const_set(:MAX_CACHE_BYTES, bytes)
+    yield
+  ensure
+    originals&.each_key { |name| klass.send(:remove_const, name) if klass.const_defined?(name, false) }
+    originals&.each { |name, value| klass.const_set(name, value) }
   end
 
   def source_snapshot(identity: "finding-1")

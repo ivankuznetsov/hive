@@ -164,7 +164,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `poll_interval_sec` | 30 | Backstop cadence for full status scans. Min 5. |
+| `poll_interval_sec` | 30 | Minimum completion-to-start interval between periodic full status repair scans. Min 5. Slow periodic scans cannot chain; ancillary completion can still request an immediate follow-up scan. |
 | `fast_poll_sec` | 1 | Cheap wake cadence for child reaps and a rotating batch of at most 64 tracked state-file mtime probes between full scans. Only exact changed task rows refresh; dependency-bearing rows wait for the full scan. Min 1. |
 | `auto_retry.enabled` | — | **Inert.** Retired as a kill switch: `ERROR` / `REVIEW_ERROR` retries are unconditional and follow one backoff ladder. The key is still shape-validated so a typo fails loudly, but setting it changes nothing. Pause a project with `daemon.enabled: false` instead. |
 | `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |

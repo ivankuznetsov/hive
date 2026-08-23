@@ -249,9 +249,12 @@ module Hive
       # handling, no sleep. Public so tests can drive a single tick
       # deterministically.
       def tick(now: Time.now)
+        tick_started = false
+        tick_clock_started_at = nil
         return unless admission_open?
 
-        @last_tick_at = now
+        tick_clock_started_at = full_tick_clock_time
+        tick_started = true
         publish_operational_snapshot(:begin_tick, phase: "started", now: now)
         # PR-40 follow-up #2: clear the per-tick enable cache so a
         # `daemon.enabled` flip in `<project>/.hive-state/config.yml`
@@ -527,6 +530,12 @@ module Hive
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)
+      ensure
+        if tick_started
+          @last_tick_at = full_tick_completion_time(
+            started_at: now, clock_started_at: tick_clock_started_at
+          )
+        end
       end
 
       # A fast tick is intentionally task-local. It refreshes only rows whose
@@ -824,6 +833,15 @@ module Hive
 
       def full_tick_due?(now)
         @last_tick_at.nil? || (now - @last_tick_at) >= @poll_interval_sec
+      end
+
+      def full_tick_completion_time(started_at:, clock_started_at:)
+        elapsed = [ full_tick_clock_time - clock_started_at, 0 ].max
+        started_at.utc + elapsed
+      end
+
+      def full_tick_clock_time
+        @clock ? @clock.call.utc : Time.now.utc
       end
 
       def cheap_probe(now:)

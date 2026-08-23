@@ -156,6 +156,9 @@ module Hive
       RETRY_BACKOFF_SEC = [ 5, 10, 60, 300, 900, 3600 ].freeze
       DETERMINISTIC_FAILURE_THRESHOLD = 3
       FAILURE_HISTORY_LIMIT = 64
+      INERT_BLOCK_REASONS = %w[
+        deterministic_failure generation_conflict task_identity_conflict
+      ].freeze
 
       # A deliberate human retry is not the automatic sweep. The cooldown
       # paces Hive's own retries; gating an operator on it leaves a task idle
@@ -611,6 +614,10 @@ module Hive
         recovery = request.recovery
         return unavailable_request(request, "request_has_no_recovery_transition") unless recovery.is_a?(Hash)
         return receipt_for_request(request, now: now) if %w[dispatched terminal].include?(recovery["phase"])
+        return receipt_for_request(request, now: now) if
+          INERT_BLOCK_REASONS.include?(recovery["blocked_reason"])
+        return receipt_for_request(request, now: now) if
+          recovery["blocked_reason"].nil? && !recovery_due?(recovery, now: now)
 
         task = resolve_task_for(row)
         Hive::Lock.with_task_lock(task.folder, "operation" => "recovery_transition") do
@@ -621,7 +628,9 @@ module Hive
             recovery = current_request.recovery
             return receipt_for_request(current_request, now: now) if %w[dispatched terminal].include?(recovery["phase"])
             return receipt_for_request(current_request, now: now) if
-              recovery["blocked_reason"] == "deterministic_failure"
+              INERT_BLOCK_REASONS.include?(recovery["blocked_reason"])
+            return receipt_for_request(current_request, now: now) if
+              recovery["blocked_reason"].nil? && !recovery_due?(recovery, now: now)
 
             locked_task = resolve_task_for(row)
             unless same_task_identity?(task, locked_task) &&

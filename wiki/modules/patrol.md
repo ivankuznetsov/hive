@@ -120,6 +120,12 @@ tick rather than blocking the daemon. Existing unindexed stores must be
 initialized explicitly with `hive migrate`; daemon ticks never perform a full
 index rebuild or run a migration watcher.
 
+Task materialization revalidates the semantic candidate set immediately before
+binding. If that set changed, it resets the admission to `pending` and the
+scheduler treats the resulting stale-decision signal as fresh semantic work;
+it never converts that intentional reset into a materialization retry. Genuine
+I/O or task-store failures continue through the bounded `retry_wait` path.
+
 Architecture discovery claims retain PID, process-start-time, process-group,
 lease, heartbeat, owner, and generation. A stale generation cannot checkpoint.
 A new daemon may reclaim a dead exact process; live or unverifiable ownership

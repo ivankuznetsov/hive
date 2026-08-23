@@ -494,6 +494,15 @@ advances a workflow stage directly:
    recovery request and generation, returns it to scheduler ownership, and
    starts the next observed failure series from fresh evidence.
 
+   Recovery replay rejects non-actionable work before reopening the task.
+   Cooling requests return their existing cooldown receipt, while immutable
+   `generation_conflict`, `task_identity_conflict`, and
+   `deterministic_failure` blockers return their parked receipt without task
+   resolution, task locking, or generation reconstruction. Safety and health
+   blockers remain actionable because their external condition can recover.
+   This keeps a historical recovery queue from turning each daemon tick into
+   one full task reconstruction per parked request.
+
    `StaleAgentHealer` is only the automatic scheduler for those durable errors.
    After the shared marker-age cooldown it submits the observed row to
    `RecoveryCoordinator`; it never clears a recoverable marker itself and has

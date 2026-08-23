@@ -1046,6 +1046,62 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     )
   end
 
+  def test_resume_replays_inert_blocks_without_reopening_the_task
+    task_resolutions = 0
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(
+      task_resolver: lambda do |**|
+        task_resolutions += 1
+        raise "inert recovery must not resolve its task"
+      end,
+      attempt_store: Object.new
+    )
+
+    Hive::Daemon::RecoveryCoordinator::INERT_BLOCK_REASONS.each do |reason|
+      request = request_for_helpers(
+        recovery: {
+          "phase" => "cleared",
+          "failure_origin" => "timeout",
+          "next_eligible_at" => (NOW - 60).iso8601(6),
+          "owner" => "operator",
+          "blocked_reason" => reason,
+          "blocked_remediation" => "refresh status"
+        }
+      )
+
+      receipt = coordinator.resume(request: request, row: Object.new, now: NOW)
+
+      assert_equal "blocked", receipt.status
+      assert_equal reason, receipt.reason
+    end
+    assert_equal 0, task_resolutions
+  end
+
+  def test_resume_replays_cooldown_without_reopening_the_task
+    task_resolutions = 0
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(
+      task_resolver: lambda do |**|
+        task_resolutions += 1
+        raise "cooldown recovery must not resolve its task"
+      end,
+      attempt_store: Object.new
+    )
+    request = request_for_helpers(
+      recovery: {
+        "phase" => "cleared",
+        "failure_origin" => "timeout",
+        "next_eligible_at" => (NOW + 60).iso8601(6),
+        "owner" => "scheduler",
+        "blocked_reason" => nil,
+        "blocked_remediation" => nil
+      }
+    )
+
+    receipt = coordinator.resume(request: request, row: Object.new, now: NOW)
+
+    assert_equal "cooldown", receipt.status
+    assert_equal 0, task_resolutions
+  end
+
   def test_post_clear_dispatch_failure_uses_the_shared_retry_ladder
     with_fixture do |coordinator, row, state_home|
       coordinator.request(

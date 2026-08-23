@@ -282,6 +282,35 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
+  def test_cached_read_trusts_final_attempt_binding_without_an_attempt_store_read
+    with_tmp_dir do |dir|
+      attempt = durable_attempt.merge(
+        "state" => "terminal", "outcome" => "failed", "lease_version" => 2
+      )
+      reads = 0
+      attempt_store = Object.new
+      attempt_store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
+        reads += 1
+        attempt if attempt_id == "attempt-1"
+      end
+      attempt_store.define_singleton_method(:fetch) do |attempt_id|
+        attempt if attempt_id == "attempt-1"
+      end
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      write_journal(dir, [ condition_event("event-1") ])
+      store.rebuild!
+      reads = 0
+
+      projection = store.read_cached
+
+      assert_equal 0, reads
+      assert_equal "attempt_terminal_failed",
+                   projection.current_condition("AgentHealthy").fetch("reason")
+    end
+  end
+
   def test_cached_read_falls_back_to_the_full_journal_after_an_append
     with_tmp_dir do |dir|
       write_journal(dir, [ condition_event("event-1") ])

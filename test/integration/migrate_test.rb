@@ -1415,6 +1415,33 @@ class MigrateTest < Minitest::Test
     assert_empty err
   end
 
+  def test_patrol_index_cutover_class_entrypoint_delegates_to_the_instance
+    fake = Object.new
+    fake.define_singleton_method(:restart_daemon_for_patrol_index_cutover!) { :restarted }
+    original_new = Hive::Commands::Migrate.method(:new)
+    Hive::Commands::Migrate.define_singleton_method(:new) { fake }
+
+    assert_equal :restarted,
+                 Hive::Commands::Migrate.restart_daemon_for_patrol_index_cutover!
+  ensure
+    Hive::Commands::Migrate.define_singleton_method(:new, original_new)
+  end
+
+  def test_patrol_index_cutover_restart_failure_is_actionable
+    migrate = migrate_command("/tmp/project")
+    migrate.define_singleton_method(:read_daemon_pid) { 1234 }
+    migrate.define_singleton_method(:daemon_alive?) { |_pid| true }
+    migrate.define_singleton_method(:systemctl_available?) { true }
+    migrate.define_singleton_method(:system) { |*_args, **_kwargs| false }
+
+    error = assert_raises(Hive::Error) do
+      migrate.send(:restart_daemon_for_patrol_index_cutover!)
+    end
+
+    assert_includes error.message, "could not restart hive-daemon"
+    assert_includes error.message, "rerun `hive migrate`"
+  end
+
   def test_read_daemon_pid_accepts_hash_payload
     with_tmp_dir do |dir|
       File.write(File.join(dir, ".daemon.pid"), { "pid" => 4321 }.to_yaml)

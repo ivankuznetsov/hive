@@ -504,6 +504,93 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
     end
   end
 
+  def test_pending_rejects_malformed_and_invalid_index_envelopes
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "ready", snapshot: source_snapshot, now: NOW)
+      path = File.join(dir, "pending-index.json")
+
+      File.binwrite(path, "{")
+      malformed = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.pending(now: NOW)
+      end
+      assert_includes malformed.message, "index is malformed"
+
+      invalid = {
+        "schema" => "wrong",
+        "schema_version" => 1,
+        "entries" => { "ready" => nil }
+      }
+      File.binwrite(path, Hive::PatrolFix.canonical_json(invalid))
+      fields = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.pending(now: NOW)
+      end
+      assert_includes fields.message, "index fields are invalid"
+    end
+  end
+
+  def test_mutation_rejects_an_index_that_places_a_record_later_than_durable_state
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "ready", snapshot: source_snapshot, now: NOW)
+      path = File.join(dir, "pending-index.json")
+      index = JSON.parse(File.binread(path))
+      index.fetch("entries")["ready"] = (NOW + 60).iso8601
+      File.binwrite(path, Hive::PatrolFix.canonical_json(index))
+
+      error = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.record_retry!(
+          "ready", reason: "transient", error_class: "IOError",
+          retry_at: NOW + 120, now: NOW
+        )
+      end
+
+      assert_includes error.message, "index is inconsistent"
+    end
+  end
+
+  def test_new_index_operations_translate_managed_directory_safety_failures
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "unsafe-index", snapshot: source_snapshot, now: NOW)
+      directory = store.instance_variable_get(:@directory)
+
+      original_lock = directory.method(:with_lock)
+      directory.define_singleton_method(:with_lock) do |path, **options, &block|
+        if path == "inventory.lock"
+          original_lock.call(path, **options, &block)
+        else
+          raise Hive::ManagedDirectory::UnsafeError, "unsafe record lock"
+        end
+      end
+      mutation = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.record_retry!(
+          "unsafe-index", reason: "transient", error_class: "IOError",
+          retry_at: NOW + 60, now: NOW
+        )
+      end
+      assert_includes mutation.message, "unsafe record lock"
+    end
+
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      directory = store.instance_variable_get(:@directory)
+      directory.define_singleton_method(:entry_type) do |*_args, **_options|
+        raise Hive::ManagedDirectory::UnsafeError, "unsafe index inventory"
+      end
+
+      pending = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.pending(now: NOW)
+      end
+      rebuilt = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.rebuild_pending_index!
+      end
+
+      assert_includes pending.message, "unsafe index inventory"
+      assert_includes rebuilt.message, "unsafe index inventory"
+    end
+  end
+
   def test_index_transition_order_can_only_leave_an_early_crash_entry
     Dir.mktmpdir do |dir|
       store = Hive::PatrolFix::AdmissionStore.new(root: dir)

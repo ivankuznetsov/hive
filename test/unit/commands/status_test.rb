@@ -2802,6 +2802,91 @@ class CommandsStatusTest < Minitest::Test
     assert_equal false, context.dig("demo", "daemon_enabled")
   end
 
+  def test_operational_payload_reuses_captured_project_config_for_daemon_context
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(
+        File.join(hive_state, "config.yml"),
+        { "daemon" => { "enabled" => true } }.to_yaml
+      )
+      project = status_project(project_root, hive_state)
+      original_load = Hive::Config.method(:load)
+      config_loads = 0
+
+      payload = with_replaced_singleton_method(
+        Hive::Config,
+        :load,
+        lambda do |path|
+          config_loads += 1
+          original_load.call(path)
+        end
+      ) do
+        Hive::Commands::Status.new.operational_payload(
+          [ project ], scheduler_snapshot: nil
+        )
+      end
+
+      assert_equal "unavailable", payload.dig("scheduler", "status")
+      assert_equal 1, config_loads,
+                   "a full operational scan must parse each project config once"
+    end
+  end
+
+  def test_operational_payload_falls_back_to_config_after_generation_capture_failure
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(
+        File.join(hive_state, "config.yml"),
+        { "daemon" => { "enabled" => true } }.to_yaml
+      )
+      project = status_project(project_root, hive_state)
+      command = Hive::Commands::Status.new
+      command.define_singleton_method(:capture_workflow_generations) do |_projects|
+        { File.expand_path(project_root) => RuntimeError.new("generation failed") }
+      end
+      original_load = Hive::Config.method(:load)
+      config_loads = 0
+
+      payload = with_replaced_singleton_method(
+        Hive::Config,
+        :load,
+        lambda do |path|
+          config_loads += 1
+          original_load.call(path)
+        end
+      ) do
+        command.operational_payload([ project ], scheduler_snapshot: nil)
+      end
+
+      assert_equal "unavailable", payload.dig("scheduler", "status")
+      assert_equal 1, config_loads
+    end
+  end
+
+  def test_operational_payload_falls_back_to_config_when_generation_capture_skips_project
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      config_path = File.join(hive_state, "config.yml")
+      File.write(config_path, { "daemon" => { "enabled" => true } }.to_yaml)
+      project = status_project(
+        project_root, File.join(project_root, "missing-state")
+      )
+      command = Hive::Commands::Status.new
+
+      payload = command.operational_payload([ project ], scheduler_snapshot: nil)
+
+      assert_equal "unavailable", payload.dig("scheduler", "status")
+
+      File.write(config_path, { "unsupported_root_key" => true }.to_yaml)
+      assert_raises(Hive::UnsupportedProjectConfigError) do
+        command.operational_payload([ project ], scheduler_snapshot: nil)
+      end
+    end
+  end
+
   # Retry policy is no longer read from global config here, so a broken global
   # file must not be able to influence a project's daemon_enabled verdict.
   def test_operational_project_context_ignores_unreadable_global_config

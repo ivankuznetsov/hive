@@ -140,10 +140,14 @@ scanning any project's rows, captures one UTC `now`, and then publishes either
 the ordinary or dedicated archive projection. Dependency admission uses those
 same captured generations and is built from the complete
 graph before presentation filtering, so an expired completed dependency still
-satisfies its dependants. Daemon, bot, TUI, and web consume the ordinary
-projection. The TUI separately caches a fresh archive-mode payload for its
-dedicated archive pane and dependency context; it never reconstructs ordinary
-visibility from row timestamps.
+satisfies its dependants. When concise operational status builds that graph, it
+also derives each project's `daemon.enabled` context from the captured
+generation instead of parsing the project config a second time. Callers that
+provide an existing status payload retain the context-only config read and do
+not trigger a new workflow-generation scan. Daemon, bot, TUI, and web consume
+the ordinary projection. The TUI separately caches a fresh archive-mode
+payload for its dedicated archive pane and dependency context; it never
+reconstructs ordinary visibility from row timestamps.
 
 The JSON envelope isolates project-local failures. Missing roots report
 `error: missing_project_path`, missing state roots report

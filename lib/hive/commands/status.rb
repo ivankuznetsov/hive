@@ -349,10 +349,16 @@ module Hive
         Hive::TerminalText.escape(value)
       end
 
-      def operational_project_context(projects)
+      def operational_project_context(projects, workflow_generations: nil)
         projects.to_h do |project|
           enabled = begin
-            Hive::Config.load(project.fetch("path")).dig("daemon", "enabled") == true
+            generation = workflow_generation_for(project, workflow_generations) if workflow_generations
+            config = if generation && !generation.is_a?(Exception)
+              generation.config
+            else
+              Hive::Config.load(project.fetch("path"))
+            end
+            config&.dig("daemon", "enabled") == true
           rescue Hive::UnsupportedProjectConfigError
             raise
           rescue Hive::Error, SystemCallError
@@ -368,8 +374,13 @@ module Hive
       end
 
       def operational_status(projects, scheduler_snapshot:, status_payload:, now: Time.now.utc)
-        source = status_payload || json_payload(projects, now: now)
-        project_context = operational_project_context(projects)
+        workflow_generations = capture_workflow_generations(projects) unless status_payload
+        source = status_payload || json_payload(
+          projects, now: now, workflow_generations: workflow_generations
+        )
+        project_context = operational_project_context(
+          projects, workflow_generations: workflow_generations
+        )
         if scheduler_snapshot.equal?(AUTO_SCHEDULER_SNAPSHOT)
           scheduler_snapshot = if project_context.any? { |_name, context| context["daemon_enabled"] == true }
             Hive::Daemon::OperationalSnapshot::Reader.new.read(now: now)

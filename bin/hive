@@ -1,5 +1,12 @@
 #!/usr/bin/env ruby
 
+source_agent_runtime_lib = File.expand_path(
+  "../components/agent-cli-runtime/lib",
+  __dir__
+)
+if File.file?(File.join(source_agent_runtime_lib, "agent_cli_runtime.rb"))
+  $LOAD_PATH.unshift(source_agent_runtime_lib)
+end
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "hive"

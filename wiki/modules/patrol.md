@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/, lib/hive/refactor_patrol/, lib/hive/patrol_fix/, script/migrate_patrol_findings.rb
 created: 2026-05-28
-updated: 2026-08-21
+updated: 2026-08-23
 tags: [module, patrol, architecture, workflow]
 ---
 
@@ -107,6 +107,25 @@ The Patrol arbiter alternates ready ordinary and architecture candidates under
 reservation revalidates current project registration/configuration and acquires
 the native store claim immediately before dispatch.
 
+Patrol Fix admission scheduling reads one compact pending index per project.
+The index maps each active occurrence to either immediate eligibility or its
+next decision-expiry/retry time, so `pending(limit:)` opens at most twice the
+selected record limit when crash repair is needed instead of parsing the
+complete admission inventory. An uncontended clean tick still opens only the
+records it returns. Authoritative records remain the source of truth. Normal
+state transitions maintain the index under the inventory lock; selected stale
+entries left by an interrupted cross-file transition are repaired while the
+same bounded tick continues to ready work. A contended scheduler read skips one
+tick rather than blocking the daemon. Existing unindexed stores must be
+initialized explicitly with `hive migrate`; daemon ticks never perform a full
+index rebuild or run a migration watcher.
+
+Task materialization revalidates the semantic candidate set immediately before
+binding. If that set changed, it resets the admission to `pending` and the
+scheduler treats the resulting stale-decision signal as fresh semantic work;
+it never converts that intentional reset into a materialization retry. Genuine
+I/O or task-store failures continue through the bounded `retry_wait` path.
+
 Architecture discovery claims retain PID, process-start-time, process-group,
 lease, heartbeat, owner, and generation. A stale generation cannot checkpoint.
 A new daemon may reclaim a dead exact process; live or unverifiable ownership
@@ -145,20 +164,21 @@ GitHub issue.
 
 `script/migrate_patrol_findings.rb [PROJECT_ROOT] [--dry-run]` reads active
 ordinary findings from the local native StateStore and accepted historical
-Architecture Patrol `fix` and `discuss` dispositions from JobStore. Ordinary
-findings become `patrol-fix` tasks through `TaskCapture`; Architecture Patrol
-dispositions are converted by the current source adapter and reserved in the
-shared `AdmissionStore`. Dismissals and historical action records are ignored.
+Architecture Patrol `fix` and `discuss` dispositions from JobStore. Both lanes
+use their current source adapters and reserve immutable snapshots in the shared
+`AdmissionStore`; the importer creates no workflow task folders. The ordinary
+admission scheduler materializes a task only after semantic admission and
+workflow-capacity checks. Dismissals and historical action records are ignored.
 It is the only Patrol migration path. It has no daemon hook, timer, module
 owner, cutover state, rollback, qualification report, or compatibility reader.
 
-The importer is idempotent by
-`patrol-fix:legacy-finding:<finding-id>`. Matching existing tasks are reused;
-conflicting matching metadata fails closed. Unrelated malformed task metadata
-is ignored. Architecture reservations are idempotent by occurrence identity and
-source digest, with conflicts rejected before mutation. Legacy ordinary
-findings without a target revision use the current default-branch revision;
-secret-like source text is redacted before task bytes are written.
+The importer is idempotent by each adapter's occurrence identity and source
+digest. Duplicate ordinary finding IDs and conflicts across either lane are
+rejected before mutation; existing matching admissions are reused. It never
+scans existing workflow tasks.
+Legacy ordinary findings without a target revision use the current
+default-branch revision; secret-like source text is redacted before admission
+bytes are written.
 
 ## Read models
 
@@ -179,6 +199,10 @@ the standard task projections.
   or publication engine is runnable.
 - Remote PR publication goes through `Hive::GithubPublication`.
 - Historical import is explicit, local, one-time, and never daemon-triggered.
+- Existing admission index construction is explicit through `hive migrate`;
+  runtime reads stay bounded and never scan-rebuild the projection.
+- Ordinary Patrol retries idempotent admission publication for an already
+  persisted active finding, so an interrupted handoff cannot strand evidence.
 
 ## Backlinks
 

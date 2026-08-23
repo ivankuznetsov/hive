@@ -22,10 +22,30 @@ publishes an owner-private, atomic operational snapshot. `hive status
 the task graph without making status itself perform daemon reconciliation. The
 Patrol Fix runtime re-reads the project registry when the admission
 scheduler asks for source ports, so projects registered after daemon start are
-admitted without a restart. Each project has one `AdmissionStore`; one corrupt
-store produces a bounded failed event while the remaining project ports continue.
+admitted without a restart. Each active project retains one `AdmissionStore`
+instance across ticks. Every selected record still comes from descriptor-safe
+durable bytes, but an unchanged SHA-256 digest reuses the already frozen,
+fully validated record; changed bytes are parsed and validated again, and
+stores for removed registrations are evicted. Each store retains at most 512
+records and 16 MiB of their serialized durable bytes. Full inventory scans keep
+a stable subset when that budget is full, while writes can evict older entries
+so active work remains warm. Capacity compaction removes its cache entry with
+the durable file. This keeps unchanged admissions from repeating full
+schema/source validation without making daemon memory scale to the maximum
+durable backlog. One corrupt store produces a bounded failed event while the
+remaining project ports continue.
 Patrol Fix otherwise uses the standard task/status contracts and adds no daemon
 operational projection.
+
+Runtime Patrol Fix admission scans acquire the inventory lock without waiting,
+read the durable pending index once, and open only the selected due records (at
+most the bounded scheduler batch). Explicit migration rebuilds and historical
+source-evidence lookups still need the complete inventory; those paths use one
+non-creating managed-directory read session, validate all bounded filenames,
+and stream the validated names through one opened parent directory. Canonical
+record and descriptor/name-binding validation stay per record. Full-scan
+directory traversal is therefore constant as the record count rises, while its
+record reads remain linear. An absent store is not created.
 
 Daemon and bot startup never run storage migrations. Operators perform every
 global and project cutover explicitly through `hive migrate` or
@@ -179,18 +199,20 @@ request creation time and attempt claim deadline; otherwise later rows could
 be born with already-expired claim windows and fail every detached handoff as
 `launch_handoff_failed`.
 
-Scheduler decisions are captured in memory as each row is evaluated. At the
-end of the tick the dispatcher fetches status a second time and publishes a
-`complete` snapshot only after matching task identity, generation, stage,
-marker/attrs, attempt, state-file mtime, action, dependency/admission policy,
-and blocked state across that source window. Added, removed, or policy-changed
-rows receive an unavailable disposition instead of a stale decision. The
-assembler rejects the entire tick as `duplicate_task_identity` when either
-source frame still contains multiple physical rows for one project/slug, so a
-provider hold or dispatch decision from one row cannot be attached to another.
-The status-side join rechecks the same fields, so a decision cannot remain
-authoritative after a change between the completed daemon tick and a later
-status read. The record also carries daemon generation/PID/start identity,
+Scheduler decisions are captured in memory as each row is evaluated from the
+tick's one authoritative status frame. The dispatcher publishes that frame at
+completion without running a duplicate fleet projection. A status-side
+temporal fence accepts the snapshot only when the current task graph was
+sampled at or after snapshot completion; it then rechecks task identity,
+generation, stage, marker/attrs, attempt, state-file mtime, action,
+dependency/admission policy, and blocked state. A decision therefore cannot
+remain authoritative after a change during the tick or before a later status
+read. Status generation timestamps retain microseconds for same-second
+ordering, and missing or malformed source-window timestamps fail closed. The
+assembler still rejects a source frame containing multiple physical
+rows for one project/slug as `duplicate_task_identity`, so a provider hold or
+dispatch decision from one row cannot be attached to another. The record also
+carries daemon generation/PID/start identity,
 sequence and validity window, capacity, queue counters, provider holds,
 coordinator recovery receipts, and per-task owner/reason.
 An explicit admission also contributes its exact sanitized routing decision to
@@ -203,8 +225,7 @@ Retry dispositions additionally carry the exact marker-age `retry_at`,
 whether the boundary is due, the current safety verdict, and its reason.
 `retry_cooldown` is scheduler-owned, `retry_in_flight` is agent-owned, and
 `retry_safety_blocked` is operator-owned (or Hive-owned when inspection itself
-failed). Failed reconciliation/status
-or failed revalidation publishes `failed`. Snapshot age starts at the actual
+failed). Failed reconciliation/status publishes `failed`. Snapshot age starts at the actual
 completion sample rather than the tick-start sample, and a SIGHUP poll-interval
 reload immediately reconfigures the assembler's next validity window.
 
@@ -472,6 +493,15 @@ advances a workflow stage directly:
    `workflow.retry` action is the explicit unpark verb. It keeps the same
    recovery request and generation, returns it to scheduler ownership, and
    starts the next observed failure series from fresh evidence.
+
+   Recovery replay rejects non-actionable work before reopening the task.
+   Cooling requests return their existing cooldown receipt, while immutable
+   `generation_conflict`, `task_identity_conflict`, and
+   `deterministic_failure` blockers return their parked receipt without task
+   resolution, task locking, or generation reconstruction. Safety and health
+   blockers remain actionable because their external condition can recover.
+   This keeps a historical recovery queue from turning each daemon tick into
+   one full task reconstruction per parked request.
 
    `StaleAgentHealer` is only the automatic scheduler for those durable errors.
    After the shared marker-age cooldown it submits the observed row to

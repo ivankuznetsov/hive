@@ -126,6 +126,13 @@ module Hive
         # producer and cannot accumulate untriaged duplicates.
         unless @dry_run
           admission.persistable_findings.each { |finding| state.write_finding(finding) }
+          # Persistence intentionally precedes publication. If publication was
+          # interrupted after the finding write, retry the same idempotent
+          # admission on the next cycle instead of stranding active evidence.
+          adapter = state.patrol_fix_admission_adapter
+          admission.findings.each do |finding|
+            adapter.publish_finding!(finding) unless adapter.published_for_finding?(finding)
+          end
           write_selection_audit(state, candidates, skipped)
         end
 

@@ -96,8 +96,9 @@ module Hive
       end
 
       # Builds one coherent tick record. Decisions are captured in memory as
-      # the dispatcher evaluates rows, then joined only after a second status
-      # read proves the task identity/generation/stage/marker did not change.
+      # the dispatcher evaluates one authoritative status frame. Operational
+      # consumers accept them only from task graphs sampled after completion
+      # and whose task identity/generation/stage/marker fields still match.
       class Assembler
         attr_reader :tick_sequence
 
@@ -166,35 +167,30 @@ module Hive
           )
         end
 
-        def complete(initial_rows:, final_rows:, controller:, queue:, recoveries:,
-                     initial_hidden_archived_task_count: 0,
-                     final_hidden_archived_task_count: 0,
+        def complete(rows:, controller:, queue:, recoveries:,
+                     hidden_archived_task_count: 0,
                      now: Time.now.utc)
-          initial_rows = Array(initial_rows)
-          final_rows = Array(final_rows)
+          rows = Array(rows)
           validate_hidden_count!(
-            initial_hidden_archived_task_count, label: "initial_hidden_archived_task_count"
+            hidden_archived_task_count, label: "hidden_archived_task_count"
           )
-          validate_hidden_count!(
-            final_hidden_archived_task_count, label: "final_hidden_archived_task_count"
-          )
-          duplicate_keys = duplicate_row_keys(initial_rows) | duplicate_row_keys(final_rows)
+          duplicate_keys = duplicate_row_keys(rows)
           unless duplicate_keys.empty?
             identities = duplicate_keys.sort.map { |project, slug| "#{project}:#{slug}" }
             return fail(reason: "duplicate_task_identity: #{identities.join(', ')}", now: now)
           end
 
-          tasks = revalidated_tasks(initial_rows, final_rows)
+          tasks = observed_tasks(rows)
           task_index = tasks.to_h do |task|
             [ [ task.dig("identity", "project"), task.dig("identity", "slug") ], task ]
           end
-          holds = provider_holds(final_rows)
+          holds = provider_holds(rows)
           overlay_provider_dispositions!(task_index, holds)
           overlay_recovery_dispositions!(task_index, recoveries || {})
           @store.write(
             base_record(phase: "complete", now: now).merge(
               "reason" => nil,
-              "hidden_archived_task_count" => final_hidden_archived_task_count,
+              "hidden_archived_task_count" => hidden_archived_task_count,
               "capacity" => controller || {},
               "queue" => queue || {},
               "provider_holds" => holds,
@@ -251,39 +247,19 @@ module Hive
           raise ArgumentError, "#{label} must be a non-negative integer"
         end
 
-        def revalidated_tasks(initial_rows, final_rows)
-          initial = initial_rows.to_h { |row| [ row_key(row), row ] }
-          final = final_rows.to_h { |row| [ row_key(row), row ] }
-          initial_records = initial.transform_values { |row| task_record(row) }
-          final_records = final.transform_values { |row| task_record(row) }
-          (initial.keys | final.keys).sort.map do |key|
-            before = initial[key]
-            after = final[key]
-            before_record = initial_records[key]
-            after_record = final_records[key]
-            disposition = if before.nil?
-              unavailable("added_during_tick")
-            elsif after.nil?
-              unavailable("removed_during_tick")
-            elsif record_fingerprint(before_record) != record_fingerprint(after_record)
-              unavailable("changed_during_tick")
-            else
-              @observations.fetch(
-                key,
-                {
-                  "status" => "available",
-                  "decision" => "not_evaluated",
-                  "owner" => "scheduler",
-                  "reason" => "no dispatch decision was required"
-                }
-              )
-            end
-            (after_record || before_record).merge("disposition" => disposition)
+        def observed_tasks(rows)
+          rows.sort_by { |row| row_key(row) }.map do |row|
+            disposition = @observations.fetch(
+              row_key(row),
+              {
+                "status" => "available",
+                "decision" => "not_evaluated",
+                "owner" => "scheduler",
+                "reason" => "no dispatch decision was required"
+              }
+            )
+            task_record(row).merge("disposition" => disposition)
           end
-        end
-
-        def unavailable(reason)
-          { "status" => "unavailable", "decision" => nil, "owner" => "unknown", "reason" => reason }
         end
 
         def task_record(row)
@@ -309,10 +285,6 @@ module Hive
             "blocked" => value(row, :blocked) == true,
             "admission_error" => canonical_record(value(row, :admission_error))
           }
-        end
-
-        def record_fingerprint(record)
-          ::Digest::SHA256.hexdigest(JSON.generate(record))
         end
 
         def row_key(row)
@@ -593,6 +565,15 @@ module Hive
           raise ArgumentError, "invalid daemon identity" unless record["daemon"].is_a?(Hash)
           Time.parse(record.fetch("observed_at"))
           Time.parse(record.fetch("valid_until"))
+          window = record.fetch("source_window")
+          raise ArgumentError, "invalid source window" unless window.is_a?(Hash)
+
+          Time.parse(window.fetch("started_at"))
+          if record["phase"] == "started"
+            raise ArgumentError, "invalid source window" unless window["completed_at"].nil?
+          else
+            Time.parse(window.fetch("completed_at"))
+          end
         end
 
         def daemon_matches?(record, expected)

@@ -262,6 +262,11 @@ module Hive
     def scheduler_from_snapshot(snapshot)
       @daemon_snapshot = snapshot
       status = snapshot.fetch("status", "unavailable")
+      reason = snapshot["reason"]
+      if status == "current" && task_graph_predates_snapshot?(snapshot)
+        status = "unavailable"
+        reason = "task_graph_predates_scheduler_snapshot"
+      end
       @scheduler_task_index = if status == "current"
         Array(snapshot["tasks"]).to_h do |task|
           [ [ task.dig("identity", "project"), task.dig("identity", "slug") ], task ]
@@ -273,13 +278,13 @@ module Hive
       unless status == "current"
         issues << issue(
           code: "scheduler_#{status}", source: "scheduler",
-          message: "daemon scheduler observation is #{status}: #{snapshot['reason'] || 'unknown reason'}",
+          message: "daemon scheduler observation is #{status}: #{reason || 'unknown reason'}",
           remediation: "check hive daemon status --json and wait for one complete reconciliation tick"
         )
       end
       {
         "status" => status,
-        "reason" => snapshot["reason"],
+        "reason" => reason,
         "observed_at" => snapshot["observed_at"],
         "valid_until" => snapshot["valid_until"],
         "tick_sequence" => snapshot["tick_sequence"],
@@ -288,6 +293,15 @@ module Hive
         "provider_holds" => Array(snapshot["provider_holds"]),
         "issues" => issues + Array(snapshot["issues"])
       }
+    end
+
+    def task_graph_predates_snapshot?(snapshot)
+      completed_at = snapshot.dig("source_window", "completed_at")
+      return true if completed_at.to_s.empty?
+
+      Time.iso8601(@status_payload.fetch("generated_at")) < Time.iso8601(completed_at)
+    rescue ArgumentError, TypeError, KeyError
+      true
     end
 
     def daemon_payload(projects, scheduler, attempt_storage:)

@@ -78,9 +78,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         safety_reason: "worktree clean"
       )
       assembler.complete(
-        initial_rows: [ observed ], final_rows: [ observed ],
-        initial_hidden_archived_task_count: 2,
-        final_hidden_archived_task_count: 2,
+        rows: [ observed ], hidden_archived_task_count: 2,
         controller: { "limits" => { "global" => 2 }, "in_flight" => 2 },
         queue: { "pending" => 1 },
         recoveries: {}, now: T0 + 1
@@ -106,7 +104,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
-  def test_hidden_archive_count_change_is_published_from_revalidated_snapshot
+  def test_hidden_archive_count_is_published_from_the_tick_snapshot
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")
       _store, assembler, reader = build(path)
@@ -114,9 +112,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
 
       assembler.begin_tick(now: T0)
       assembler.complete(
-        initial_rows: [ observed ], final_rows: [ observed ],
-        initial_hidden_archived_task_count: 1,
-        final_hidden_archived_task_count: 2,
+        rows: [ observed ], hidden_archived_task_count: 2,
         controller: {}, queue: {}, recoveries: {}, now: T0 + 1
       )
 
@@ -199,7 +195,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assembler.begin_tick(now: T0)
       assembler.reconfigure(poll_interval_sec: 5)
       assembler.complete(
-        initial_rows: [ observed ], final_rows: [ observed ],
+        rows: [ observed ],
         controller: {}, queue: {}, recoveries: {}, now: T0 + 40
       )
 
@@ -255,8 +251,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         retry_at: (T0 + 3_600).iso8601(6)
       )
       assembler.complete(
-        initial_rows: [ fresh ],
-        final_rows: [ fresh ],
+        rows: [ fresh ],
         controller: {},
         queue: {},
         recoveries: recoveries,
@@ -299,7 +294,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
 
       assembler.begin_tick(now: T0)
       assembler.complete(
-        initial_rows: [ completed ], final_rows: [ completed ],
+        rows: [ completed ],
         controller: {}, queue: {}, recoveries: recoveries, now: T0 + 1
       )
 
@@ -344,7 +339,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         reason: "a newer durable attempt is running"
       )
       assembler.complete(
-        initial_rows: [ live ], final_rows: [ live ],
+        rows: [ live ],
         controller: {}, queue: {}, recoveries: recoveries, now: T0 + 1
       )
 
@@ -432,7 +427,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
 
       assembler.begin_tick(now: T0)
       assembler.complete(
-        initial_rows: [ held ], final_rows: [ held ], controller: {}, queue: {},
+        rows: [ held ], controller: {}, queue: {},
         recoveries: {}, now: T0 + 1
       )
 
@@ -455,7 +450,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
 
       assembler.begin_tick(now: T0)
       assembler.complete(
-        initial_rows: [ held, replacement ], final_rows: [ held, replacement ],
+        rows: [ held, replacement ],
         controller: {}, queue: {}, recoveries: {}, now: T0 + 1
       )
 
@@ -486,84 +481,6 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
-  def test_changed_row_stays_visible_with_unavailable_disposition
-    with_tmp_dir do |dir|
-      path = File.join(dir, "snapshot", "state.json")
-      _store, assembler, reader = build(path)
-      before = row
-      after = row(stage: "5-open-pr", marker: "complete")
-
-      assembler.begin_tick(now: T0)
-      assembler.observe(before, decision: "dispatched", owner: "scheduler", reason: "dispatched")
-      assembler.complete(
-        initial_rows: [ before ], final_rows: [ after ], controller: {}, queue: {},
-        recoveries: {}, now: T0 + 1
-      )
-
-      disposition = reader.read(now: T0 + 2).dig("tasks", 0, "disposition")
-      assert_equal "unavailable", disposition.fetch("status")
-      assert_equal "changed_during_tick", disposition.fetch("reason")
-      assert_nil disposition["decision"]
-    end
-  end
-
-  def test_policy_bearing_changes_invalidate_the_tick_disposition
-    with_tmp_dir do |dir|
-      path = File.join(dir, "snapshot", "state.json")
-      _store, assembler, reader = build(path)
-      before = row
-      after = row(
-        marker_attrs: { "marker_id" => "marker-2" },
-        state_file_mtime: T0 + 1,
-        action: "admission_error",
-        depends_on: "demo:base",
-        blocked_by: "demo:base",
-        dependency_stage: "7-artifacts",
-        blocked: true,
-        admission_error: {
-          "reason_code" => "dependency_task_missing",
-          "offending_ref" => "demo:base",
-          "safe_correction" => "repair the dependency"
-        }
-      )
-
-      assembler.begin_tick(now: T0)
-      assembler.observe(before, decision: "global_cap", owner: "scheduler", reason: "full")
-      assembler.complete(
-        initial_rows: [ before ], final_rows: [ after ], controller: {}, queue: {},
-        recoveries: {}, now: T0 + 1
-      )
-
-      task = reader.read(now: T0 + 2).fetch("tasks").first
-      assert_equal "unavailable", task.dig("disposition", "status")
-      assert_equal "changed_during_tick", task.dig("disposition", "reason")
-      assert_equal "admission_error", task.fetch("action")
-      assert_equal true, task.fetch("blocked")
-      assert_equal "dependency_task_missing", task.dig("admission_error", "reason_code")
-    end
-  end
-
-  def test_added_and_removed_rows_are_retained_as_unavailable
-    with_tmp_dir do |dir|
-      path = File.join(dir, "snapshot", "state.json")
-      _store, assembler, reader = build(path)
-      removed = row(slug: "removed")
-      added = row(slug: "added")
-
-      assembler.begin_tick(now: T0)
-      assembler.complete(
-        initial_rows: [ removed ], final_rows: [ added ], controller: {}, queue: {},
-        recoveries: {}, now: T0 + 1
-      )
-
-      reasons = reader.read(now: T0 + 2).fetch("tasks").to_h do |task|
-        [ task.dig("identity", "slug"), task.dig("disposition", "reason") ]
-      end
-      assert_equal "added_during_tick", reasons.fetch("added")
-      assert_equal "removed_during_tick", reasons.fetch("removed")
-    end
-  end
-
   def test_reader_rejects_expired_previous_generation_and_corrupt_records
     with_tmp_dir do |dir|
       path = File.join(dir, "snapshot", "state.json")
@@ -571,7 +488,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       observed = row
       assembler.begin_tick(now: T0)
       assembler.complete(
-        initial_rows: [ observed ], final_rows: [ observed ], controller: {}, queue: {},
+        rows: [ observed ], controller: {}, queue: {},
         recoveries: {}, now: T0
       )
 
@@ -585,6 +502,25 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
 
       File.write(path, "not json")
       assert_equal "invalid", reader.read(now: T0 + 1).fetch("status")
+    end
+  end
+
+  def test_reader_rejects_a_complete_record_without_a_source_window
+    with_tmp_dir do |dir|
+      path = File.join(dir, "snapshot", "state.json")
+      _store, assembler, reader = build(path)
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        rows: [ row ], controller: {}, queue: {}, recoveries: {}, now: T0 + 1
+      )
+      record = JSON.parse(File.read(path))
+      record.delete("source_window")
+      File.write(path, JSON.generate(record))
+
+      snapshot = reader.read(now: T0 + 2)
+
+      assert_equal "invalid", snapshot.fetch("status")
+      assert_equal "snapshot_invalid", snapshot.fetch("reason")
     end
   end
 
@@ -699,14 +635,12 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
 
       error = assert_raises(ArgumentError) do
         assembler.complete(
-          initial_rows: [], final_rows: [],
-          initial_hidden_archived_task_count: -1,
-          final_hidden_archived_task_count: 0,
+          rows: [], hidden_archived_task_count: -1,
           controller: {}, queue: {}, recoveries: {}, now: T0 + 1
         )
       end
 
-      assert_includes error.message, "initial_hidden_archived_task_count"
+      assert_includes error.message, "hidden_archived_task_count"
       assert_includes error.message, "non-negative integer"
     end
   end

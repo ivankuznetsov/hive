@@ -478,6 +478,122 @@ class OperationalStatusTest < Minitest::Test
     assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_stale"
   end
 
+  def test_task_graph_sampled_before_snapshot_completion_rejects_scheduler_dispositions
+    source_task = task(action: "ready_to_plan", slug: "older-task-graph")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot["source_window"] = {
+      "started_at" => "2026-07-20T09:59:59Z",
+      "completed_at" => "2026-07-20T10:00:01Z"
+    }
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "partial", result.fetch("completeness")
+    assert_equal "unavailable", result.dig("scheduler", "status")
+    assert_equal "task_graph_predates_scheduler_snapshot",
+                 result.dig("scheduler", "reason")
+    assert_equal "unavailable", result.dig("tasks", 0, "freshness", "scheduler_status")
+  end
+
+  def test_task_graph_sampled_after_snapshot_completion_accepts_scheduler_dispositions
+    source_task = task(action: "ready_to_plan", slug: "newer-task-graph")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot["source_window"] = {
+      "started_at" => "2026-07-20T09:59:58Z",
+      "completed_at" => "2026-07-20T09:59:59Z"
+    }
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "complete", result.fetch("completeness")
+    assert_equal "current", result.dig("scheduler", "status")
+    assert_equal "global_cap", result.dig("tasks", 0, "reasons", 0, "code")
+  end
+
+  def test_malformed_snapshot_completion_time_fails_the_temporal_fence_closed
+    source_task = task(action: "ready_to_plan", slug: "invalid-source-window")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot["source_window"] = {
+      "started_at" => "2026-07-20T09:59:59Z",
+      "completed_at" => "not-a-time"
+    }
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "unavailable", result.dig("scheduler", "status")
+    assert_equal "task_graph_predates_scheduler_snapshot",
+                 result.dig("scheduler", "reason")
+  end
+
+  def test_missing_snapshot_source_window_fails_the_temporal_fence_closed
+    source_task = task(action: "ready_to_plan", slug: "missing-source-window")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot.delete("source_window")
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "unavailable", result.dig("scheduler", "status")
+    assert_equal "task_graph_predates_scheduler_snapshot",
+                 result.dig("scheduler", "reason")
+  end
+
+  def test_same_second_task_graph_sampled_after_completion_passes_the_temporal_fence
+    source_task = task(action: "ready_to_plan", slug: "same-second-ordering")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot["source_window"] = {
+      "started_at" => "2026-07-20T10:00:00.100000Z",
+      "completed_at" => "2026-07-20T10:00:00.800000Z"
+    }
+    payload = status_payload(source_task)
+    payload["generated_at"] = "2026-07-20T10:00:00.900000Z"
+
+    result = project(
+      payload,
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "complete", result.fetch("completeness")
+    assert_equal "current", result.dig("scheduler", "status")
+    assert_equal "global_cap", result.dig("tasks", 0, "reasons", 0, "code")
+  end
+
   def test_current_scheduler_snapshot_reports_a_missing_task
     source_task = task(action: "ready_to_plan", slug: "missing-from-snapshot")
     snapshot = scheduler_snapshot_for(
@@ -1141,8 +1257,12 @@ class OperationalStatusTest < Minitest::Test
     {
       "status" => "current",
       "phase" => "complete",
-      "observed_at" => "2026-07-20T10:00:01Z",
+      "observed_at" => "2026-07-20T09:59:59.500000Z",
       "valid_until" => "2026-07-20T10:01:31Z",
+      "source_window" => {
+        "started_at" => "2026-07-20T09:59:58.000000Z",
+        "completed_at" => "2026-07-20T09:59:59.500000Z"
+      },
       "tick_sequence" => 7,
       "daemon" => {
         "generation" => "daemon-generation-1",

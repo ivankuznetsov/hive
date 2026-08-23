@@ -416,7 +416,7 @@ module Hive
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
           "ok" => true,
-          "generated_at" => now.iso8601,
+          "generated_at" => now.iso8601(6),
           "projects" => projects.map do |p|
             project_payload_or_degraded(
               p,
@@ -449,7 +449,7 @@ module Hive
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
           "ok" => true,
-          "generated_at" => now.utc.iso8601,
+          "generated_at" => now.utc.iso8601(6),
           "partial" => true,
           "projects" => selected.map do |project|
             project_payload_or_degraded(

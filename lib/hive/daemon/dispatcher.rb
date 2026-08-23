@@ -520,8 +520,8 @@ module Hive
         refresh_status_index(result.rows)
 
         publish_complete_operational_snapshot(
-          initial_rows: result.rows,
-          initial_hidden_archived_task_count: result.hidden_archived_task_count,
+          rows: result.rows,
+          hidden_archived_task_count: result.hidden_archived_task_count,
           now: now
         )
 
@@ -1840,26 +1840,16 @@ module Hive
         log_operational_snapshot_failure(phase: "observe", error: e)
       end
 
-      def publish_complete_operational_snapshot(initial_rows:, initial_hidden_archived_task_count: 0, now:)
+      def publish_complete_operational_snapshot(rows:, hidden_archived_task_count: 0, now:)
         return unless @operational_snapshot
 
-        verification = @status_consumer.fetch
         completed_at = operational_snapshot_now
-        unless verification.ok
-          publish_operational_snapshot(
-            :fail, phase: "failed", reason: "revalidation_status_failure", now: completed_at
-          )
-          return
-        end
-
         queue_state = operational_queue_state
         publish_operational_snapshot(
           :complete,
           phase: "complete",
-          initial_rows: initial_rows,
-          final_rows: verification.rows,
-          initial_hidden_archived_task_count: initial_hidden_archived_task_count,
-          final_hidden_archived_task_count: verification.hidden_archived_task_count,
+          rows: rows,
+          hidden_archived_task_count: hidden_archived_task_count,
           controller: @controller.operational_snapshot(now: completed_at),
           queue: operational_queue_snapshot(now: completed_at, queue_state: queue_state),
           recoveries: operational_recovery_snapshot(queue_state: queue_state),

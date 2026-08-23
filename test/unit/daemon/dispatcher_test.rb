@@ -4512,13 +4512,78 @@ end
 
 def test_changed_task_ticks_do_not_delay_the_periodic_full_repair_scan
   status_row = row(action: nil, command: nil)
-  dispatcher, = make_dispatcher(rows: [ status_row ])
+  dispatcher, = make_dispatcher(rows: [ status_row ], clock: -> { T0 })
 
   dispatcher.tick(now: T0)
   dispatcher.tick_changed(task_keys: [ [ "p1", "s1" ] ], now: T0 + 10)
 
   refute dispatcher.send(:full_tick_due?, T0 + 29)
   assert dispatcher.send(:full_tick_due?, T0 + 30)
+end
+
+def test_full_repair_interval_starts_after_a_long_full_tick_completes
+  completed_at = T0 + 45
+  current_time = T0
+  dispatcher, = make_dispatcher(rows: [], clock: -> { current_time })
+  status = dispatcher.instance_variable_get(:@status_consumer)
+  original_fetch = status.method(:fetch)
+  status.define_singleton_method(:fetch) do
+    result = original_fetch.call
+    current_time = completed_at
+    result
+  end
+
+  dispatcher.tick(now: T0)
+
+  refute dispatcher.send(:full_tick_due?, completed_at + 29),
+         "a slow full scan must not cause an immediate replacement scan"
+  assert dispatcher.send(:full_tick_due?, completed_at + 30)
+end
+
+def test_failed_full_repair_also_waits_from_completion_before_retrying
+  completed_at = T0 + 45
+  current_time = T0
+  failed = Hive::Daemon::StatusConsumer::Result.new(
+    ok: false, rows: [], projects: [], error: "status failed"
+  )
+  dispatcher, = make_dispatcher(status_result: failed, clock: -> { current_time })
+  status = dispatcher.instance_variable_get(:@status_consumer)
+  original_fetch = status.method(:fetch)
+  status.define_singleton_method(:fetch) do
+    result = original_fetch.call
+    current_time = completed_at
+    result
+  end
+
+  dispatcher.tick(now: T0)
+
+  refute dispatcher.send(:full_tick_due?, completed_at + 29),
+         "a failed scan must not create a status-failure retry storm"
+  assert dispatcher.send(:full_tick_due?, completed_at + 30)
+end
+
+def test_clockless_full_tick_keeps_completion_on_the_callers_timeline
+  completed_at = T0 + 45
+  current_time = T0
+  dispatcher, = make_dispatcher(rows: [])
+  status = dispatcher.instance_variable_get(:@status_consumer)
+  original_fetch = status.method(:fetch)
+  status.define_singleton_method(:fetch) do
+    result = original_fetch.call
+    current_time = completed_at
+    result
+  end
+
+  original_now = Time.method(:now)
+  Time.define_singleton_method(:now) { current_time }
+  begin
+    dispatcher.tick(now: T0)
+  ensure
+    Time.define_singleton_method(:now, original_now)
+  end
+
+  refute dispatcher.send(:full_tick_due?, completed_at + 29)
+  assert dispatcher.send(:full_tick_due?, completed_at + 30)
 end
 
 def test_changed_task_ticks_leave_global_schedulers_to_the_full_scan

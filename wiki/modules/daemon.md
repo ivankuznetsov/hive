@@ -155,8 +155,12 @@ row triggers an immediate full tick so Patrol and digest follow-up keeps its
 existing wake behavior. `daemon.poll_interval_sec`
 (default 30s) remains the full-scan repair cadence for fleet schedulers, new or
 removed tasks, metadata/config changes, dependency release, archive counts,
-and operational snapshot publication. Incremental ticks do not move that
-deadline, so continuous edits cannot starve repair.
+and operational snapshot publication. The periodic interval starts when a full
+scan finishes, so a periodic scan that grows beyond 30 seconds cannot make its
+periodic replacement immediately overdue and pin the dispatcher in continuous
+fleet scans. Incremental ticks do not move that deadline, so continuous edits
+cannot starve repair. Ancillary completion can still request an immediate full
+follow-up scan.
 
 On graceful shutdown, the supervisor snapshots each ancillary child's verified
 descendant tree and original process group before sending TERM, then escalates

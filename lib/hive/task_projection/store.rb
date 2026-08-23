@@ -627,6 +627,7 @@ module Hive
 
         bindings.map do |binding|
           return nil unless binding.is_a?(Hash)
+          next binding if Hive::Attempts::Record::FINAL_STATES.include?(binding["state"])
 
           attempt = fetch_attempt_binding(binding["attempt_id"])
           return nil unless attempt

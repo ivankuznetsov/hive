@@ -121,6 +121,7 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/commands/circuits.rb",
           "lib/hive/commands/daemon.rb",
           "lib/hive/commands/module/dry_run.rb",
+          "lib/hive/commands/status.rb",
           "lib/hive/conditions/execute_boundary.rb",
           "lib/hive/artifacts/outcome_evidence/store.rb",
           "lib/hive/implementation_identity/store.rb",

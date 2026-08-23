@@ -1393,6 +1393,87 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_status_projection_reuses_one_attempt_store_across_tasks
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      tasks = %w[first second].map do |name|
+        folder = write_status_task(
+          hive_state, "4-execute", "#{name}-projection-260822-abcd",
+          state_file: "task.md", marker: "EXECUTE_COMPLETE"
+        )
+        Hive::Task.new(folder)
+      end
+      stores = []
+      original_new = Hive::Attempts::Store.method(:new)
+
+      with_replaced_singleton_method(
+        Hive::Attempts::Store, :new,
+        lambda do |**kwargs|
+          stores << kwargs unless kwargs.key?(:root)
+          original_new.call(**kwargs)
+        end
+      ) do
+        command = Hive::Commands::Status.new
+        command.send(:with_status_attempt_store) do
+          tasks.each do |task|
+            marker = Hive::Markers.current(task.state_file)
+            command.send(:status_projection, task, marker)
+          end
+        end
+      end
+
+      assert_equal 1, stores.length,
+                   "one status scan must not rebuild the global Attempts store per task"
+    end
+  end
+
+  def test_daemon_task_scan_reuses_one_attempt_store_across_projects
+    with_tmp_dir do |root|
+      slug = "fast-tick-260823-abcd"
+      projects = %w[demo other].map do |name|
+        project_root = File.join(root, name)
+        hive_state = File.join(project_root, ".hive-state")
+        write_status_task(hive_state, "1-inbox", slug, state_file: "idea.md", marker: "WAITING")
+        { "name" => name, "path" => project_root, "hive_state_path" => hive_state }
+      end
+      opens = 0
+      original_runtime = Hive::Attempts::Store.method(:runtime)
+
+      with_replaced_singleton_method(
+        Hive::Attempts::Store, :runtime,
+        lambda do |**kwargs|
+          opens += 1
+          original_runtime.call(**kwargs)
+        end
+      ) do
+        command = Hive::Commands::Status.new(
+          json: true, daemon_tasks: projects.map { |project| "#{project.fetch('name')}:#{slug}" }
+        )
+        command.daemon_task_payload(projects, now: Time.utc(2026, 8, 23))
+      end
+
+      assert_equal 1, opens,
+                   "one bounded daemon status scan must not rebuild the global Attempts store per project"
+    end
+  end
+
+  def test_each_json_scan_opens_a_fresh_attempt_store_even_without_tasks
+    opens = 0
+    store = Object.new
+    store.define_singleton_method(:projection_reader) { self }
+    factory = lambda do |**|
+      opens += 1
+      store
+    end
+
+    with_replaced_singleton_method(Hive::Attempts::Store, :runtime, factory) do
+      command = Hive::Commands::Status.new
+      2.times { command.send(:json_payload, []) }
+    end
+
+    assert_equal 2, opens
+  end
+
   def test_collect_rows_skips_old_stage_entry_that_vanishes_mid_read
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

@@ -27,6 +27,11 @@ store produces a bounded failed event while the remaining project ports continue
 Patrol Fix otherwise uses the standard task/status contracts and adds no daemon
 operational projection.
 
+Daemon and bot startup never run storage migrations. Operators perform every
+global and project cutover explicitly through `hive migrate` or
+`hive migrate --all` while those processes are stopped. Startup opens only the
+current attempt layout and contains no legacy migration preflight or watcher.
+
 `StatusConsumer` passes through the additive condition projection fields and
 the project-level `hidden_archived_task_count` from ordinary `hive status
 --json`. Its result sums that count without copying hidden rows into daemon

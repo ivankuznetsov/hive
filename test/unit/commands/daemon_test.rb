@@ -157,8 +157,10 @@ class HiveCommandsDaemonTest < Minitest::Test
       File.join(@home, "attempts", "v4"),
       attempts_api.instance_variable_get(:@store).root
     )
-    assert File.file?(File.join(@home, "attempts", "v2")),
-           "daemon default opener must publish the old-binary fence"
+    refute File.exist?(File.join(@home, "attempts", "v2")),
+           "daemon startup must not run attempt migration"
+    refute File.exist?(File.join(@home, "recovery-migration-v6.json")),
+           "daemon startup must leave migration to hive migrate"
     reconciler = captured.fetch(:refactor_patrol_merge_reconciler)
     assert_instance_of Hive::Daemon::RefactorPatrolMergeReconciler, reconciler
     assert_same reconciler, captured.fetch(:merge_watcher).instance_variable_get(:@merge_intake),

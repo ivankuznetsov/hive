@@ -22,6 +22,25 @@ module Hive
     class Store
       DEFAULT_ROOT = Object.new.freeze
 
+      # Read-only, scan-scoped projection view. Task journals and closure
+      # validation commonly ask for the same immutable attempt binding while
+      # projecting one fleet snapshot. Keep that point read coherent and pay
+      # for it once without making the long-lived runtime store cache mutable
+      # hot attempt state across scans.
+      class ProjectionReader
+        def initialize(store)
+          @store = store
+          @bindings = {}
+        end
+
+        def fetch_projection_binding(attempt_id)
+          key = attempt_id.to_s
+          return @bindings[key] if @bindings.key?(key)
+
+          @bindings[key] = @store.fetch_projection_binding(attempt_id)
+        end
+      end
+
       def self.open_default(state_home: Hive::Paths.state_home, create_directories: true)
         root = default_root(state_home)
         new(root: root, create_directories: create_directories)
@@ -223,6 +242,10 @@ module Hive
         return hot if hot
 
         permanent_proofs.fetch_projection_binding(attempt_id)
+      end
+
+      def projection_reader
+        ProjectionReader.new(self)
       end
 
       def fetch_hot(attempt_id)

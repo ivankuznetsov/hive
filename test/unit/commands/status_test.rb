@@ -6,6 +6,135 @@ require "hive/task_action"
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
 
+  def test_daemon_task_payload_reads_only_exact_requested_rows
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      requested = "requested-task-260823-abcd"
+      write_status_task(
+        hive_state, "1-inbox", requested, state_file: "idea.md", marker: "WAITING"
+      )
+      write_status_task(
+        hive_state, "1-inbox", "unrelated-task-260823-abcd",
+        state_file: "idea.md", marker: "WAITING"
+      )
+      command_class = Class.new(Hive::Commands::Status) do
+        def stage_task_entries(_stage_dir)
+          raise "bounded daemon status must not enumerate stage children"
+        end
+      end
+      command = command_class.new(json: true, daemon_tasks: [ "demo:#{requested}" ])
+
+      payload = command.daemon_task_payload(
+        [ status_project(project_root, hive_state) ], now: Time.utc(2026, 8, 23)
+      )
+
+      assert_equal true, payload.fetch("partial")
+      assert_equal [ requested ], payload.dig("projects", 0, "tasks").map { |row| row.fetch("slug") }
+      assert_equal false, payload.dig("projects", 0, "tasks", 0, "blocked")
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
+      assert_empty schema.validate(payload).to_a
+    end
+  end
+
+  def test_daemon_task_call_emits_the_partial_envelope
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "changed-task-260823-abcd"
+      write_status_task(
+        hive_state, "1-inbox", slug, state_file: "idea.md", marker: "WAITING"
+      )
+      project = status_project(project_root, hive_state)
+      command = Hive::Commands::Status.new(
+        json: true, daemon_tasks: [ "demo:#{slug}" ]
+      )
+
+      output, error = with_replaced_singleton_method(
+        Hive::Config, :registered_projects, -> { [ project ] }
+      ) do
+        capture_io { command.call }
+      end
+
+      payload = JSON.parse(output)
+      assert_equal true, payload.fetch("partial")
+      assert_equal [ slug ], payload.dig("projects", 0, "tasks").map { |row| row.fetch("slug") }
+      assert_equal "", error
+    end
+  end
+
+  def test_daemon_task_payload_holds_dependencies_for_the_authoritative_full_scan
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      dependent = "dependent-task-260823-abcd"
+      folder = write_status_task(
+        hive_state, "1-inbox", dependent, state_file: "idea.md", marker: "WAITING"
+      )
+      Hive::TaskMeta.write(
+        folder, id: 2, slug: dependent, display_name: nil,
+        depends_on: "prerequisite-task-260823-abcd"
+      )
+      write_status_task(
+        hive_state, "9-done", "prerequisite-task-260823-abcd",
+        state_file: "done.md", marker: "COMPLETE"
+      )
+      command = Hive::Commands::Status.new(
+        json: true, daemon_tasks: [ "demo:#{dependent}" ]
+      )
+
+      payload = command.daemon_task_payload([ status_project(project_root, hive_state) ])
+      row = payload.dig("projects", 0, "tasks", 0)
+
+      assert_equal dependent, row.fetch("slug")
+      assert_equal true, row.fetch("blocked")
+      assert_equal "admission_error", row.fetch("action")
+      assert_equal "dependency_validation_failed",
+                   row.dig("admission_error", "reason_code")
+      assert_includes row.dig("admission_error", "safe_correction"), "full dependency scan"
+    end
+  end
+
+  def test_daemon_task_payload_fails_closed_when_dependency_projection_raises
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "changed-task-260823-cdef"
+      write_status_task(
+        hive_state, "1-inbox", slug, state_file: "idea.md", marker: "WAITING"
+      )
+      command = Hive::Commands::Status.new(
+        json: true, daemon_tasks: [ "demo:#{slug}" ]
+      )
+      command.define_singleton_method(:apply_dependency_verdict) do |*|
+        raise "synthetic dependency failure"
+      end
+
+      payload = nil
+      _output, error = capture_io do
+        payload = command.daemon_task_payload([ status_project(project_root, hive_state) ])
+      end
+      row = payload.dig("projects", 0, "tasks", 0)
+
+      assert_equal true, row.fetch("blocked")
+      assert_equal "dependency_validation_failed",
+                   row.dig("admission_error", "reason_code")
+      assert_includes error, "holding changed rows until the next full scan"
+    end
+  end
+
+  def test_daemon_task_mode_requires_json_and_registered_project_slug_identity
+    command = Hive::Commands::Status.new(daemon_tasks: [ "demo:task-260823-abcd" ])
+    error = assert_raises(Hive::InvalidTaskPath) do
+      command.send(:validate_mode_combinations!)
+    end
+    assert_includes error.message, "requires plain --json"
+
+    invalid = Hive::Commands::Status.new(
+      json: true, daemon_tasks: [ "missing:task-260823-abcd" ]
+    )
+    error = assert_raises(Hive::InvalidTaskPath) do
+      invalid.send(:daemon_task_targets, [])
+    end
+    assert_includes error.message, "registered-project:task-slug"
+  end
+
   def test_json_payload_exposes_resolved_clean_exit_config
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -1300,9 +1429,11 @@ class CommandsStatusTest < Minitest::Test
 
   def test_each_json_scan_opens_a_fresh_attempt_store_even_without_tasks
     opens = 0
+    store = Object.new
+    store.define_singleton_method(:projection_reader) { self }
     factory = lambda do |**|
       opens += 1
-      Object.new
+      store
     end
 
     with_replaced_singleton_method(Hive::Attempts::Store, :runtime, factory) do

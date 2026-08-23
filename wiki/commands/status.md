@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-13
+updated: 2026-08-23
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler]
 ---
 
@@ -23,6 +23,7 @@ table.
 | `hive status --operational` | Explicit alias for the same concise human view. |
 | `hive status --operational --json` | `hive-operational-status.v4` agent document. V4 adds a required nullable exact routing decision; superseded v1-v3 are removed after coordinated in-repository migration. |
 | `hive status --json` | Complete `hive-status.v7` graph for daemon, bot, TUI, and current consumers. |
+| `hive status --json --daemon-task PROJECT:SLUG ...` | Internal daemon fast-tick surface. Emits `partial: true`, reads only the named task folders across bounded stage paths, and holds dependency-bearing rows until the next full graph scan. |
 | `hive status --full` | Former grouped detailed human table. |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`/`--full`. |
 
@@ -364,11 +365,12 @@ and otherwise the directory mtime; `observation_mtime` is the state-file mtime
 when present, then `meta.yml`, then the directory fallback.
 
 One full status scan opens one read-only durable attempt store and shares it
-across every task projection and closure projection. The default store opens
-only the current v4 layout and never runs or monitors migration. Keeping the
-store scan-scoped prevents a large task corpus from rebuilding the same store
-collaborators once per row. The store is not process-global, so a later scan
-still observes fresh durable attempt data.
+across every task projection and closure projection. A scan-scoped projection
+reader also caches each immutable attempt binding, including a missing result,
+so journal replay and closure validation cannot repeat the same global point
+read within one snapshot. The default store opens only the current v4 layout
+and never runs or monitors migration. The store and cache are not
+process-global, so a later scan still observes fresh durable attempt data.
 
 Stage moves are treated as a normal filesystem race. If an entry disappears between the stage glob and any in-folder row read, `collect_rows` rescues `Errno::ENOENT`, re-checks the folder path, and skips it only when the folder is gone. The rescue is deliberately folder-level: an `ENOENT` while the task folder still exists is re-raised as a real status command failure, because in-place state-file writers may truncate content but should not make the state file transiently absent inside a surviving folder. A forward stage move can resurface under the later stage in the same scan; a backward move to an already-scanned stage can disappear for one poll and then reappear on the next refresh. After all stages are scanned, `drop_transient_stage_moves` looks only at duplicate-slug groups and removes every duplicate row whose folder no longer exists. If two live folders still share a slug, both rows remain and `annotate_actions` still passes `stage_collision: true` into `Hive::TaskAction`. This keeps `hive status --json` and TUI snapshots from briefly showing an old-stage and new-stage copy during a normal `mv`, without hiding persistent duplicate state.
 

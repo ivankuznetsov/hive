@@ -1274,6 +1274,8 @@ module Hive
                          desc: "emit the agent-first operational status view (combine with --json for its v1 envelope)"
     option :full, type: :boolean, default: false,
                   desc: "show the detailed human task table (cannot be combined with --json or --operational)"
+    option :daemon_task, type: :array,
+                         desc: "internal: emit bounded project:slug rows for a daemon fast tick"
     def status
       require "hive/commands/status"
       Hive::Commands::Status.new(
@@ -1284,7 +1286,8 @@ module Hive
         write: options[:write],
         force: options[:force],
         operational: options[:operational],
-        full: options[:full]
+        full: options[:full],
+        daemon_tasks: options[:daemon_task]
       ).call
     end
 

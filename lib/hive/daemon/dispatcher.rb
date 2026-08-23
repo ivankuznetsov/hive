@@ -38,6 +38,7 @@ require "hive/install_channel"
 require "hive/commands/update"
 require "hive/attempts/api"
 require "hive/attempts/generation"
+require "hive/dependency_snapshot"
 require "hive/terminal_outcome"
 
 module Hive
@@ -2364,6 +2365,43 @@ module Hive
         @dispatch_request_log_signatures.delete_if do |(request_id, _event), _signature|
           !current_request_ids.key?(request_id)
         end
+        return if pending.empty?
+
+        begin
+          registered_projects = Hive::Config.registered_projects
+          projects_by_name = {}
+          registered_projects.each do |project|
+            projects_by_name[project.fetch("name").to_s] ||= project
+          end
+          project_lookup = projects_by_name.method(:[])
+        rescue StandardError => e
+          registered_projects = nil
+          project_lookup = ->(_name) { raise e }
+        end
+        rows_by_task = {}
+        rows.each do |row|
+          key = [ row.project.to_s, row.slug.to_s ]
+          rows_by_task[key] ||= row
+        end
+        admission_context = nil
+        admission_context_error = nil
+        admission_context_loaded = false
+        admission_context_loader = lambda do
+          unless admission_context_loaded
+            begin
+              admission_context = Hive::DependencySnapshot.admission_context(
+                registered_projects
+              )
+            rescue StandardError => e
+              admission_context_error = e
+            ensure
+              admission_context_loaded = true
+            end
+          end
+          raise admission_context_error if admission_context_error
+
+          admission_context
+        end
 
         # Per-slug in-flight gate within this tick: if we just spawned
         # for (project, slug) on this tick, defer subsequent requests
@@ -2387,7 +2425,11 @@ module Hive
           # the next tick to retry; the failure is logged for
           # operator visibility. Per R-01 from PR #241 ce-code-review.
           begin
-            process_dispatch_request_iteration(req, now: now, rows: rows)
+            process_dispatch_request_iteration(
+              req, now: now, rows: rows,
+              row_index: rows_by_task, project_lookup: project_lookup,
+              admission_context_loader: admission_context_loader
+            )
           rescue StandardError => e
             recovery_receipt = defer_recovery_after_dispatch_failure(req, now: now)
             @logger.event(:dispatch_request_rejected,
@@ -2434,7 +2476,9 @@ module Hive
       # process_dispatch_requests captures any error from the gate
       # checks AND the actual spawn. Returns nil; side effects via
       # @controller, @logger, and the queue's remove() call.
-      def process_dispatch_request_iteration(req, now:, rows:)
+      def process_dispatch_request_iteration(req, now:, rows:, row_index: nil,
+                                             project_lookup: nil,
+                                             admission_context_loader: nil)
         return unless admission_open?
 
         unless Hive::Daemon::DispatchRequestQueue.valid_argv?(req.argv)
@@ -2452,7 +2496,12 @@ module Hive
           return
         end
 
-        unless Hive::Config.find_project(req.project)
+        project = if project_lookup
+          project_lookup.call(req.project.to_s)
+        else
+          Hive::Config.find_project(req.project)
+        end
+        unless project
           if req.recovery.is_a?(Hash)
             log_dispatch_request_once(
               :dispatch_request_blocked,
@@ -2484,11 +2533,15 @@ module Hive
           return
         end
 
-        if req.recovery.is_a?(Hash)
-          row = rows.find do |candidate|
+        row = if row_index
+          row_index[[ req.project.to_s, req.slug.to_s ]]
+        else
+          rows.find do |candidate|
             candidate.project.to_s == req.project.to_s &&
               candidate.slug.to_s == req.slug.to_s
           end
+        end
+        if req.recovery.is_a?(Hash)
           unless row
             log_dispatch_request_once(
               :dispatch_request_blocked,
@@ -2497,7 +2550,21 @@ module Hive
             )
             return
           end
-          recovery_receipt = @recovery_coordinator.resume(request: req, row: row, now: now)
+          resume_options = { request: req, row: row, now: now }
+          if admission_context_loader
+            begin
+              resume_options[:admission_context] = admission_context_loader.call
+            rescue StandardError => e
+              log_dispatch_request_once(
+                :dispatch_request_blocked,
+                request_id: req.request_id, project: req.project,
+                slug: req.slug, reason: "admission_context_unavailable",
+                error: "#{e.class}: #{e.message[0, 200]}"
+              )
+              return
+            end
+          end
+          recovery_receipt = @recovery_coordinator.resume(**resume_options)
           unless recovery_receipt.status == "queued" &&
                  recovery_receipt.phase == "cleared"
             log_dispatch_request_once(
@@ -2516,7 +2583,6 @@ module Hive
         end
 
         if dependency_gated_request?(req)
-          row = rows.find { |candidate| candidate.project == req.project && candidate.slug == req.slug }
           if row&.admission_error
             log_dispatch_request_once(
               :dispatch_request_blocked,

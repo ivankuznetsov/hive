@@ -756,6 +756,16 @@ recovery receipts remain durable for history, while filesystem pruning is
 throttled to one pass per hour so a five-second dispatcher loop does not
 rescan and rewrite retention state continuously.
 
+Recovery generation checks also share one immutable dependency-admission
+context per queue scan. The dispatcher creates it lazily only when a recovery
+request reaches the coordinator, then reuses its global project/task indexes
+and verdict cache for every later request in that scan. Each request still
+re-resolves its canonical task and reads that task's state file under the task
+lock. Empty request queues skip all global-index setup. A context-build failure
+is retained for the rest of the scan and blocks each affected request as
+`admission_context_unavailable`, without repeating the fleet traversal or
+misclassifying the failure as a spawn error.
+
 ```
 :dispatch_request_observed   request_id=… project=… slug=…
 :dispatch_request_dispatched pid=… command=…   (only when dispatched)

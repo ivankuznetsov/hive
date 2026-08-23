@@ -79,6 +79,76 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_explicit_migrate_rebuilds_the_patrol_fix_pending_index_once
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        root = File.join(dir, ".hive-state", "patrol-fix", "admissions")
+        store = Hive::PatrolFix::AdmissionStore.new(root: root)
+        store.reserve!(
+          occurrence_id: "legacy-admission",
+          snapshot: patrol_fix_source_snapshot,
+          now: Time.utc(2026, 8, 23, 12)
+        )
+        File.delete(File.join(root, "pending-index.json"))
+        restarts = 0
+
+        first_out, = capture_io do
+          migrate_command(
+            dir, daemon_restarter: -> { restarts += 1 }, daemon_cutover: -> { false }
+          ).call
+        end
+        second_out, = capture_io do
+          migrate_command(
+            dir, daemon_restarter: -> { restarts += 1 }, daemon_cutover: -> { false }
+          ).call
+        end
+
+        assert File.file?(File.join(root, "pending-index.json"))
+        assert_includes first_out, "rebuilt Patrol Fix admission index (1 pending of 1 records)"
+        refute_includes second_out, "rebuilt Patrol Fix admission index"
+        assert_equal 1, restarts
+      end
+    end
+  end
+
+  def test_patrol_index_cutover_restarts_then_rebuilds_once_more
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        root = File.join(dir, ".hive-state", "patrol-fix", "admissions")
+        store = Hive::PatrolFix::AdmissionStore.new(root: root)
+        store.reserve!(
+          occurrence_id: "legacy-admission",
+          snapshot: patrol_fix_source_snapshot,
+          now: Time.utc(2026, 8, 23, 12)
+        )
+        index_path = File.join(root, "pending-index.json")
+        File.delete(index_path)
+        cutovers = 0
+        restarts = 0
+
+        capture_io do
+          migrate_command(
+            dir,
+            daemon_cutover: lambda {
+              cutovers += 1
+              File.delete(index_path)
+              true
+            },
+            daemon_restarter: -> { restarts += 1 }
+          ).call
+        end
+
+        assert_equal 1, cutovers
+        assert_equal 0, restarts
+        assert File.file?(index_path)
+        assert_equal [ "legacy-admission" ],
+                     store.pending.map { |record| record.fetch("occurrence_id") }
+      end
+    end
+  end
+
   def test_backfills_plan_review_requirement_before_execute_but_grandfathers_execute
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -1306,6 +1376,45 @@ class MigrateTest < Minitest::Test
     assert_includes err, "restart it manually so its in-memory stage layout refreshes"
   end
 
+  def test_patrol_index_cutover_restart_fails_closed_without_systemctl
+    migrate = migrate_command("/tmp/project")
+    migrate.define_singleton_method(:read_daemon_pid) { 1234 }
+    migrate.define_singleton_method(:daemon_alive?) { |_pid| true }
+    migrate.define_singleton_method(:systemctl_available?) { false }
+
+    error = assert_raises(Hive::Error) do
+      migrate.send(:restart_daemon_for_patrol_index_cutover!)
+    end
+
+    assert_includes error.message, "hive daemon stop"
+    assert_includes error.message, "rerun `hive migrate`"
+  end
+
+  def test_patrol_index_cutover_restart_is_synchronous
+    migrate = migrate_command("/tmp/project")
+    calls = []
+    migrate.define_singleton_method(:read_daemon_pid) { 1234 }
+    migrate.define_singleton_method(:daemon_alive?) { |_pid| true }
+    migrate.define_singleton_method(:systemctl_available?) { true }
+    migrate.define_singleton_method(:system) do |*args, **kwargs|
+      calls << [ args, kwargs ]
+      true
+    end
+
+    restarted = nil
+    out, err = capture_io do
+      restarted = migrate.send(:restart_daemon_for_patrol_index_cutover!)
+    end
+
+    assert restarted
+    assert_equal [
+      [ [ "systemctl", "--user", "restart", "hive-daemon" ],
+        { out: File::NULL, err: File::NULL } ]
+    ], calls
+    assert_includes out, "Patrol Fix admission index cutover"
+    assert_empty err
+  end
+
   def test_read_daemon_pid_accepts_hash_payload
     with_tmp_dir do |dir|
       File.write(File.join(dir, ".daemon.pid"), { "pid" => 4321 }.to_yaml)
@@ -1558,6 +1667,17 @@ class MigrateTest < Minitest::Test
       project_path,
       display_name_generator: display_name_generator,
       **options
+    )
+  end
+
+  def patrol_fix_source_snapshot
+    Hive::PatrolFix::SourceSnapshot.build(
+      engine: "ordinary_patrol", identity: "finding-1", title: "Repair refresh",
+      summary: "Refresh fails", target_revision: "1" * 40,
+      evidence: [ "Reachable failure" ], affected_code: [ "lib/demo.rb" ],
+      reproduction_guidance: "Run focused test", discovery_run: "run-1",
+      semantic_lineage: [ "refresh" ], aliases: [], external_issues: [],
+      existing_pull_requests: [], accepted_at: "2026-08-23T12:00:00Z"
     )
   end
 

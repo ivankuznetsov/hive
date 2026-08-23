@@ -416,7 +416,7 @@ module Hive
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
           "ok" => true,
-          "generated_at" => now.iso8601,
+          "generated_at" => now.iso8601(6),
           "projects" => projects.map do |p|
             project_payload_or_degraded(
               p,
@@ -449,7 +449,7 @@ module Hive
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
           "ok" => true,
-          "generated_at" => now.utc.iso8601,
+          "generated_at" => now.utc.iso8601(6),
           "partial" => true,
           "projects" => selected.map do |project|
             project_payload_or_degraded(
@@ -1433,7 +1433,7 @@ module Hive
         attempt_store = status_attempt_store
         projection = Hive::TaskProjection::Store.new(
           task_folder: task.folder, attempt_store: attempt_store
-        ).read(marker: marker)
+        ).read_cached(marker: marker)
         project ||= project_name_for(task)
         closure = Hive::TaskClosure.projection(
           task, project: project, attempt_store: attempt_store

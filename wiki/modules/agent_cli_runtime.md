@@ -3,7 +3,7 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-08-21
+updated: 2026-08-22
 tags: [agent, runtime, component, gem, cli]
 ---
 
@@ -35,6 +35,12 @@ authentication mode.
 Hive uses that inventory to remove ambient API credentials from child launches
 and select CLI subscription/session state. That is Hive policy, not a package
 restriction for independent consumers.
+
+`bin/hive` prefers `components/agent-cli-runtime/lib` when it is present in a
+source checkout. This keeps dogfood and benchmark clones on the component
+contract reviewed in the same commit, even when the operator also has an older
+published `agent-cli-runtime` gem installed. Packaged Hive remains unchanged
+because its gem does not include the monorepo component directory.
 
 Compilation returns argv and optional stdin without executing a process.
 Requested controls fail closed with `UnsupportedCapability` when a profile

@@ -1428,10 +1428,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatcher.tick(now: T0)
 
       assert_equal %i[begin_tick observe complete], snapshot.calls.map(&:first)
+      assert_equal 1, dispatcher.instance_variable_get(:@status_consumer).fetch_count
       assert_equal "dispatched", snapshot.calls[1][1].fetch(:decision).to_s
       complete = snapshot.calls.last.last
-      assert_equal [ observed ], complete.fetch(:initial_rows)
-      assert_equal [ observed ], complete.fetch(:final_rows)
+      assert_equal [ observed ], complete.fetch(:rows)
       assert_equal "current", complete.dig(:queue, "status")
       assert_equal completed_at, complete.fetch(:now)
     end
@@ -1801,24 +1801,16 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
-  def test_operational_snapshot_revalidation_and_assembly_failures_publish_failed_state
+  def test_operational_snapshot_assembly_failure_publishes_failed_state
     snapshot = FakeOperationalSnapshot.new
-    failed = Hive::Daemon::StatusConsumer::Result.new(
-      ok: false, rows: [], projects: [], error: "revalidation failed"
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      operational_snapshot: snapshot
     )
-    dispatcher, = make_dispatcher(status_result: failed, operational_snapshot: snapshot)
+    dispatcher.define_singleton_method(:operational_queue_state) do
+      raise IOError, "queue assembly failed"
+    end
 
-    dispatcher.send(:publish_complete_operational_snapshot, initial_rows: [], now: T0)
-
-    assert_equal :fail, snapshot.calls.last.first
-    assert_equal "revalidation_status_failure", snapshot.calls.last.last.fetch(:reason)
-
-    snapshot = FakeOperationalSnapshot.new
-    dispatcher, _supervisor, _controller, logger = make_dispatcher(operational_snapshot: snapshot)
-    status = dispatcher.instance_variable_get(:@status_consumer)
-    status.define_singleton_method(:fetch) { raise IOError, "status assembly failed" }
-
-    dispatcher.send(:publish_complete_operational_snapshot, initial_rows: [], now: T0)
+    dispatcher.send(:publish_complete_operational_snapshot, rows: [], now: T0)
 
     assert_equal "snapshot_assembly_failure", snapshot.calls.last.last.fetch(:reason)
     assert logger.events.any? { |name, attrs|

@@ -6,6 +6,14 @@ require "hive/task_action"
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
 
+  def test_status_payloads_preserve_subsecond_generation_time
+    now = Time.utc(2026, 8, 23) + Rational(123_456, 1_000_000)
+    command = Hive::Commands::Status.new(json: true, daemon_tasks: [])
+
+    assert_equal now.iso8601(6), command.json_payload([], now: now).fetch("generated_at")
+    assert_equal now.iso8601(6), command.daemon_task_payload([], now: now).fetch("generated_at")
+  end
+
   def test_daemon_task_payload_reads_only_exact_requested_rows
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -1375,7 +1383,7 @@ class CommandsStatusTest < Minitest::Test
       task = Hive::Task.new(folder)
       marker = Hive::Markers.current(task.state_file)
       broken_store = Object.new
-      broken_store.define_singleton_method(:read) { |**| raise Errno::EACCES, "blocked" }
+      broken_store.define_singleton_method(:read_cached) { |**| raise Errno::EACCES, "blocked" }
 
       _out, err = capture_io do
         with_replaced_singleton_method(

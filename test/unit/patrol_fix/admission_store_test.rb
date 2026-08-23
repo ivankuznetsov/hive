@@ -244,7 +244,7 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
     end
   end
 
-  def test_pending_reads_the_inventory_with_one_native_anchor_open
+  def test_full_inventory_reads_use_one_native_anchor_open
     Dir.mktmpdir do |dir|
       store = Hive::PatrolFix::AdmissionStore.new(root: dir)
       %w[c-pending a-pending b-pending].each_with_index do |occurrence, index|
@@ -259,7 +259,7 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
       original_open = native.method(:open_absolute_directory)
       anchor_opens = 0
 
-      pending = with_replaced_singleton_method(
+      records = with_replaced_singleton_method(
         native,
         :open_absolute_directory,
         lambda do |path|
@@ -267,26 +267,59 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
           original_open.call(path)
         end
       ) do
-        store.pending
+        store.send(:each_record)
       end
 
       assert_equal %w[a-pending b-pending c-pending],
-                   pending.map { |record| record.fetch("occurrence_id") }
+                   records.map { |record| record.fetch("occurrence_id") }
       assert_equal 1, anchor_opens
     end
   end
 
-  def test_pending_does_not_create_a_missing_store
+  def test_pending_reads_only_the_index_selected_records
     Dir.mktmpdir do |dir|
-      root = File.join(dir, "admissions")
-      store = Hive::PatrolFix::AdmissionStore.new(root: root)
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      12.times do |index|
+        occurrence = format("a-future-%02d", index)
+        store.reserve!(
+          occurrence_id: occurrence,
+          snapshot: source_snapshot(identity: "finding-future-#{index}"), now: NOW
+        )
+        store.record_retry!(
+          occurrence, reason: "transient", error_class: "IOError",
+          retry_at: NOW + 3_600, now: NOW
+        )
+      end
+      store.reserve!(
+        occurrence_id: "z-ready",
+        snapshot: source_snapshot(identity: "finding-ready"), now: NOW
+      )
 
-      assert_empty store.pending
+      directory = store.instance_variable_get(:@directory)
+      record_reads = []
+      original_read = directory.method(:read)
+      directory.define_singleton_method(:read) do |path, **options|
+        record_reads << path if path.match?(%r{\Arecords/.*\.json\z})
+        original_read.call(path, **options)
+      end
+
+      pending = store.pending(limit: 1, now: NOW)
+
+      assert_equal [ "z-ready" ], pending.map { |record| record.fetch("occurrence_id") }
+      assert_equal [ "records/z-ready.json" ], record_reads
+    end
+  end
+
+  def test_pending_does_not_create_an_empty_store
+    Dir.mktmpdir do |dir|
+      root = File.join(dir, "missing")
+
+      assert_empty Hive::PatrolFix::AdmissionStore.new(root: root).pending(now: NOW)
       refute_path_exists root
     end
   end
 
-  def test_pending_directory_traversal_does_not_grow_with_inventory
+  def test_full_inventory_directory_traversal_does_not_grow_with_inventory
     Dir.mktmpdir do |dir|
       store = Hive::PatrolFix::AdmissionStore.new(root: dir)
       store.reserve!(occurrence_id: "a-pending", snapshot: source_snapshot, now: NOW)
@@ -303,7 +336,7 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
             opens += 1
             original_open.call(parent, name)
           end
-        ) { store.pending }
+        ) { store.send(:each_record) }
         opens
       end
 
@@ -320,7 +353,7 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
     end
   end
 
-  def test_pending_rejects_unknown_inventory_entries_before_reading_records
+  def test_full_inventory_rejects_unknown_entries_before_reading_records
     Dir.mktmpdir do |dir|
       store = Hive::PatrolFix::AdmissionStore.new(root: dir)
       store.reserve!(occurrence_id: "known", snapshot: source_snapshot, now: NOW)
@@ -337,7 +370,9 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
           original_read.call(*args, **kwargs, &block)
         end
       ) do
-        assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) { store.pending }
+        assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+          store.send(:each_record)
+        end
       end
 
       assert_match(/unknown entry/, error.message)
@@ -345,7 +380,7 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
     end
   end
 
-  def test_pending_rejects_inventory_overflow_before_reading_records
+  def test_full_inventory_rejects_overflow_before_reading_records
     Dir.mktmpdir do |dir|
       store = Hive::PatrolFix::AdmissionStore.new(root: dir)
       3.times do |index|
@@ -368,12 +403,296 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
         end
       ) do
         with_max_records(2) do
-          assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) { store.pending }
+          assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+            store.send(:each_record)
+          end
         end
       end
 
       assert_match(/bounded limit/, error.message)
       assert_empty reads
+    end
+  end
+
+  def test_existing_inventory_requires_explicit_pending_index_migration
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(
+        occurrence_id: "legacy-ready",
+        snapshot: source_snapshot(identity: "legacy-finding"), now: NOW
+      )
+      File.delete(File.join(dir, "pending-index.json"))
+
+      error = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.pending(now: NOW)
+      end
+      assert_includes error.message, "hive migrate"
+
+      first = store.rebuild_pending_index!
+      second = store.rebuild_pending_index!
+
+      assert_equal({ changed: true, records: 1, indexed: 1 }, first)
+      assert_equal({ changed: false, records: 1, indexed: 1 }, second)
+      assert_equal [ "legacy-ready" ],
+                   store.pending(now: NOW).map { |record| record.fetch("occurrence_id") }
+    end
+  end
+
+  def test_pending_repairs_only_a_selected_stale_index_entry
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "retry-later", snapshot: source_snapshot, now: NOW)
+      store.record_retry!(
+        "retry-later", reason: "transient", error_class: "IOError",
+        retry_at: NOW + 3_600, now: NOW
+      )
+      path = File.join(dir, "pending-index.json")
+      index = JSON.parse(File.binread(path))
+      index.fetch("entries")["retry-later"] = nil
+      File.binwrite(path, Hive::PatrolFix.canonical_json(index))
+      store.reserve!(
+        occurrence_id: "z-ready",
+        snapshot: source_snapshot(identity: "ready-finding"), now: NOW
+      )
+
+      directory = store.instance_variable_get(:@directory)
+      record_reads = []
+      original_read = directory.method(:read)
+      directory.define_singleton_method(:read) do |candidate, **options|
+        record_reads << candidate if candidate.match?(%r{\Arecords/.*\.json\z})
+        original_read.call(candidate, **options)
+      end
+
+      assert_equal [ "z-ready" ],
+                   store.pending(limit: 1, now: NOW).map { |record| record.fetch("occurrence_id") }
+      assert_equal [ "records/retry-later.json", "records/z-ready.json" ], record_reads
+      repaired = JSON.parse(File.binread(path))
+      assert_equal (NOW + 3_600).iso8601,
+                   repaired.dig("entries", "retry-later")
+    end
+  end
+
+  def test_pending_skips_a_tick_instead_of_waiting_for_the_inventory_lock
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "ready", snapshot: source_snapshot, now: NOW)
+      directory = store.instance_variable_get(:@directory)
+
+      directory.with_lock("inventory.lock") do
+        assert_empty store.pending(limit: 1, now: NOW)
+      end
+
+      assert_equal [ "ready" ],
+                   store.pending(limit: 1, now: NOW).map { |record| record.fetch("occurrence_id") }
+    end
+  end
+
+  def test_pending_rejects_a_non_timestamp_index_eligibility
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "ready", snapshot: source_snapshot, now: NOW)
+      path = File.join(dir, "pending-index.json")
+      index = JSON.parse(File.binread(path))
+      index.fetch("entries")["ready"] = false
+      File.binwrite(path, Hive::PatrolFix.canonical_json(index))
+
+      error = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.pending(limit: 1, now: NOW)
+      end
+
+      assert_includes error.message, "eligibility is invalid"
+    end
+  end
+
+  def test_pending_rejects_malformed_and_invalid_index_envelopes
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "ready", snapshot: source_snapshot, now: NOW)
+      path = File.join(dir, "pending-index.json")
+
+      File.binwrite(path, "{")
+      malformed = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.pending(now: NOW)
+      end
+      assert_includes malformed.message, "index is malformed"
+
+      invalid = {
+        "schema" => "wrong",
+        "schema_version" => 1,
+        "entries" => { "ready" => nil }
+      }
+      File.binwrite(path, Hive::PatrolFix.canonical_json(invalid))
+      fields = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.pending(now: NOW)
+      end
+      assert_includes fields.message, "index fields are invalid"
+    end
+  end
+
+  def test_mutation_rejects_an_index_that_places_a_record_later_than_durable_state
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "ready", snapshot: source_snapshot, now: NOW)
+      path = File.join(dir, "pending-index.json")
+      index = JSON.parse(File.binread(path))
+      index.fetch("entries")["ready"] = (NOW + 60).iso8601
+      File.binwrite(path, Hive::PatrolFix.canonical_json(index))
+
+      error = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.record_retry!(
+          "ready", reason: "transient", error_class: "IOError",
+          retry_at: NOW + 120, now: NOW
+        )
+      end
+
+      assert_includes error.message, "index is inconsistent"
+    end
+  end
+
+  def test_new_index_operations_translate_managed_directory_safety_failures
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "unsafe-index", snapshot: source_snapshot, now: NOW)
+      directory = store.instance_variable_get(:@directory)
+
+      original_lock = directory.method(:with_lock)
+      directory.define_singleton_method(:with_lock) do |path, **options, &block|
+        if path == "inventory.lock"
+          original_lock.call(path, **options, &block)
+        else
+          raise Hive::ManagedDirectory::UnsafeError, "unsafe record lock"
+        end
+      end
+      mutation = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.record_retry!(
+          "unsafe-index", reason: "transient", error_class: "IOError",
+          retry_at: NOW + 60, now: NOW
+        )
+      end
+      assert_includes mutation.message, "unsafe record lock"
+    end
+
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      directory = store.instance_variable_get(:@directory)
+      directory.define_singleton_method(:entry_type) do |*_args, **_options|
+        raise Hive::ManagedDirectory::UnsafeError, "unsafe index inventory"
+      end
+
+      pending = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.pending(now: NOW)
+      end
+      rebuilt = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
+        store.rebuild_pending_index!
+      end
+
+      assert_includes pending.message, "unsafe index inventory"
+      assert_includes rebuilt.message, "unsafe index inventory"
+    end
+  end
+
+  def test_index_transition_order_can_only_leave_an_early_crash_entry
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      store.reserve!(occurrence_id: "ordered-crash", snapshot: source_snapshot, now: NOW)
+      directory = store.instance_variable_get(:@directory)
+      writes = []
+      original_write = directory.method(:atomic_write)
+      directory.define_singleton_method(:atomic_write) do |path, content, **options|
+        writes << path
+        original_write.call(path, content, **options)
+      end
+
+      store.prepare_decision!(
+        "ordered-crash", candidates: [], current_head: "2" * 40,
+        lease_expires_at: NOW + 60, now: NOW
+      )
+      assert_equal [ "records/ordered-crash.json", "pending-index.json" ], writes
+
+      writes.clear
+      store.expire_decision!("ordered-crash", now: NOW + 60)
+      assert_equal [ "pending-index.json", "records/ordered-crash.json" ], writes
+    end
+  end
+
+  def test_pending_reuses_validated_records_when_durable_bytes_are_unchanged
+    Dir.mktmpdir do |dir|
+      writer = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      3.times do |index|
+        writer.reserve!(
+          occurrence_id: "cached-finding-#{index}",
+          snapshot: source_snapshot(identity: "finding-#{index}"), now: NOW
+        )
+      end
+      reader = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      parse_calls = 0
+      original = reader.method(:parse_record)
+      reader.define_singleton_method(:parse_record) do |bytes, expected_id:|
+        parse_calls += 1
+        original.call(bytes, expected_id: expected_id)
+      end
+
+      first = reader.pending(now: NOW)
+      second = reader.pending(now: NOW + 1)
+
+      assert_equal first, second
+      assert_equal 3, parse_calls,
+                   "unchanged admission records should be validated only once per store"
+
+      path = File.join(dir, "records", "cached-finding-1.json")
+      changed = JSON.parse(File.binread(path))
+      changed["updated_at"] = (NOW + 2).iso8601
+      File.binwrite(path, Hive::PatrolFix.canonical_json(changed))
+
+      refreshed = reader.pending(now: NOW + 2)
+
+      assert_equal (NOW + 2).iso8601,
+                   refreshed.find { |record| record["occurrence_id"] == "cached-finding-1" }
+                            .fetch("updated_at")
+      assert_equal 4, parse_calls,
+                   "changed durable bytes must invalidate the validated-record cache"
+    end
+  end
+
+  def test_record_cache_respects_entry_and_byte_budgets_without_scan_churn
+    Dir.mktmpdir do |dir|
+      writer = Hive::PatrolFix::AdmissionStore.new(root: dir)
+      3.times do |index|
+        writer.reserve!(
+          occurrence_id: "bounded-cache-#{index}",
+          snapshot: source_snapshot(identity: "finding-#{index}"), now: NOW
+        )
+      end
+      paths = Dir[File.join(dir, "records", "*.json")].sort
+      byte_budget = paths.first(2).sum { |path| File.size(path) }
+
+      with_cache_limits(records: 2, bytes: byte_budget) do
+        reader = Hive::PatrolFix::AdmissionStore.new(root: dir)
+        parse_calls = 0
+        original = reader.method(:parse_record)
+        reader.define_singleton_method(:parse_record) do |bytes, expected_id:|
+          parse_calls += 1
+          original.call(bytes, expected_id: expected_id)
+        end
+
+        reader.pending(now: NOW)
+        cache = reader.instance_variable_get(:@record_cache)
+
+        assert_equal 2, cache.length
+        assert_operator cache.sum { |_id, entry| entry.fetch(:bytesize) }, :<=, byte_budget
+
+        reader.pending(now: NOW + 1)
+
+        assert_equal 4, parse_calls,
+                     "a bounded full scan should retain its cached subset without churn"
+
+        reader.prepare_decision!(
+          "bounded-cache-1", candidates: [], current_head: "2" * 40, now: NOW + 2
+        )
+
+        assert_equal [ "bounded-cache-1" ],
+                     reader.instance_variable_get(:@record_cache).keys
+      end
     end
   end
 
@@ -387,9 +706,33 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
           occurrence_id: "new-pending", snapshot: source_snapshot(identity: "finding-2"), now: NOW
         )
 
+        refute store.instance_variable_get(:@record_cache).key?("old-terminal")
         assert_nil store.fetch("old-terminal")
         assert_equal "new-pending", current.fetch("occurrence_id")
         assert_equal [ "new-pending" ], store.pending.map { |record| record.fetch("occurrence_id") }
+      end
+    end
+  end
+
+  def test_capacity_compaction_removes_a_crash_left_terminal_index_entry
+    with_max_records(1) do
+      Dir.mktmpdir do |dir|
+        store = Hive::PatrolFix::AdmissionStore.new(root: dir)
+        reserve_and_acknowledge(store, "old-terminal")
+        index_path = File.join(dir, "pending-index.json")
+        index = JSON.parse(File.binread(index_path))
+        index.fetch("entries")["old-terminal"] = nil
+        File.binwrite(index_path, Hive::PatrolFix.canonical_json(index))
+
+        current = store.reserve!(
+          occurrence_id: "new-pending",
+          snapshot: source_snapshot(identity: "finding-2"), now: NOW
+        )
+
+        assert_nil store.fetch("old-terminal")
+        assert_equal "new-pending", current.fetch("occurrence_id")
+        assert_equal [ "new-pending" ],
+                     store.pending.map { |record| record.fetch("occurrence_id") }
       end
     end
   end
@@ -669,6 +1012,7 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
       assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) { store.fetch(occurrence) }
 
       File.binwrite(path, Hive::PatrolFix.canonical_json(baseline))
+      store.rebuild_pending_index!
       store.record_retry!(
         occurrence, reason: "transient", error_class: "IOError",
         retry_at: NOW + 60, now: NOW
@@ -743,6 +1087,21 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
   ensure
     Hive::PatrolFix::AdmissionStore.send(:remove_const, :MAX_RECORDS)
     Hive::PatrolFix::AdmissionStore.const_set(:MAX_RECORDS, original)
+  end
+
+  def with_cache_limits(records:, bytes:)
+    klass = Hive::PatrolFix::AdmissionStore
+    originals = {
+      MAX_CACHE_RECORDS: klass::MAX_CACHE_RECORDS,
+      MAX_CACHE_BYTES: klass::MAX_CACHE_BYTES
+    }
+    originals.each_key { |name| klass.send(:remove_const, name) }
+    klass.const_set(:MAX_CACHE_RECORDS, records)
+    klass.const_set(:MAX_CACHE_BYTES, bytes)
+    yield
+  ensure
+    originals&.each_key { |name| klass.send(:remove_const, name) if klass.const_defined?(name, false) }
+    originals&.each { |name, value| klass.const_set(name, value) }
   end
 
   def source_snapshot(identity: "finding-1")

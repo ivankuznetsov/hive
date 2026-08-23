@@ -303,8 +303,7 @@ module Hive
       end
 
       def default_attempt_store
-        root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
-        root.empty? ? Hive::Attempts::Store.new : Hive::Attempts::Store.new(root: root)
+        Hive::Attempts::Store.runtime
       end
     end
   end

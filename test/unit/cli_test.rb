@@ -803,8 +803,17 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "2-gather", "--write", "--force", "--json" ])
       assert_equal({
         json: true, diagnose: "slug", project: "proj", stage: "2-gather",
-        write: true, force: true, operational: false, full: false
+        write: true, force: true, operational: false, full: false,
+        daemon_tasks: nil
       }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::Status) do |calls|
+      Hive::CLI.start([
+        "status", "--json", "--daemon-task", "demo:first-task", "demo:second-task"
+      ])
+      assert_equal [ "demo:first-task", "demo:second-task" ],
+                   calls.first.dig(:kwargs, :daemon_tasks)
     end
 
     with_command_new_stub(Hive::Commands::Status) do |calls|

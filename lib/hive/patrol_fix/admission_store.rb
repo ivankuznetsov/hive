@@ -14,6 +14,8 @@ module Hive
       SCHEMA_VERSION = 2
       MAX_RECORD_BYTES = 512 * 1024
       MAX_RECORDS = 8_192
+      MAX_CACHE_BYTES = 16 * 1024 * 1024
+      MAX_CACHE_RECORDS = 512
       MAX_CANDIDATES = 64
       MAX_CANDIDATE_BYTES = 6 * 1024
       MAX_CANDIDATE_CONTEXT_BYTES = 192 * 1024
@@ -43,6 +45,8 @@ module Hive
       def initialize(root:)
         @root = File.expand_path(root)
         @directory = Hive::ManagedDirectory.new(root: @root, label: "Patrol-fix admission store")
+        @record_cache = {}
+        @record_cache_bytes = 0
       end
 
       def reserve!(occurrence_id:, snapshot:, now: Time.now.utc)
@@ -75,7 +79,12 @@ module Hive
       def fetch(occurrence_id)
         id = occurrence_id!(occurrence_id)
         bytes = @directory.read(record_path(id), max_bytes: MAX_RECORD_BYTES, missing: true)
-        bytes && parse_record(bytes, expected_id: id)
+        unless bytes
+          delete_cached_record(id)
+          return
+        end
+
+        validated_record(id, bytes)
       end
 
       def prepare_decision!(occurrence_id, candidates:, current_head:, inventory: nil,
@@ -440,22 +449,26 @@ module Hive
           record = parse_record(bytes, expected_id: id)
           next unless record.fetch("status") == "acknowledged"
 
-          [ record.dig("acknowledgement", "acknowledged_at"), record.fetch("created_at"), name, bytes ]
+          [
+            record.dig("acknowledgement", "acknowledged_at"),
+            record.fetch("created_at"), id, name, bytes
+          ]
         end.sort
         if removable.length < required
           conflict!("admission capacity contains active work")
         end
         selected = removable.first(required)
         index, index_bytes = read_pending_index
-        selected.each do |_acknowledged_at, _created_at, name, _bytes|
-          set_pending_index_entry(index, name.delete_suffix(".json"), UNINDEXED)
+        selected.each do |_acknowledged_at, _created_at, id, _name, _bytes|
+          set_pending_index_entry(index, id, UNINDEXED)
         end
         write_pending_index(index, previous_bytes: index_bytes)
-        selected.each do |_acknowledged_at, _created_at, name, bytes|
+        selected.each do |_acknowledged_at, _created_at, id, name, bytes|
           @directory.unlink(
             File.join("records", name),
             expected_digest: Digest::SHA256.hexdigest(bytes), max_bytes: MAX_RECORD_BYTES
           )
+          delete_cached_record(id)
         end
       end
 
@@ -492,7 +505,7 @@ module Hive
             max_bytes: MAX_RECORD_BYTES, missing: true
           ).map do |name, bytes|
             id = name.delete_suffix(".json")
-            bytes && parse_record(bytes, expected_id: id)
+            bytes && validated_record(id, bytes)
           end
         end || []
       end
@@ -510,7 +523,55 @@ module Hive
           records << occurrence_id!(match[1])
           corrupt!("admission inventory exceeds the bounded limit") if records.length > MAX_RECORDS
         end
-        records.sort
+        ids = records.sort
+        live = ids.to_h { |id| [ id, true ] }
+        @record_cache.keys.each do |id|
+          delete_cached_record(id) unless live.key?(id)
+        end
+        ids
+      end
+
+      # Durable bytes remain authoritative on every read. Re-reading the
+      # bounded file detects external writers; unchanged SHA-256 bytes reuse
+      # the already deep-frozen, fully validated record instead of repeating
+      # schema and source validation on every daemon tick.
+      def validated_record(id, bytes)
+        digest = Digest::SHA256.hexdigest(bytes)
+        cached = @record_cache[id]
+        return cached.fetch(:record) if cached && cached.fetch(:digest) == digest
+
+        delete_cached_record(id) if cached
+        record = parse_record(bytes, expected_id: id)
+        cache_record(id, digest, record, bytes.bytesize, evict: !cached.nil?)
+        record
+      end
+
+      # An inventory scan keeps a stable bounded subset instead of churning
+      # through every record once the budget is full. Writes and changed cached
+      # records may evict the oldest entries so active work stays warm.
+      def cache_record(id, digest, record, bytesize, evict: false)
+        delete_cached_record(id)
+        return if bytesize > MAX_CACHE_BYTES
+
+        while evict && cache_full?(bytesize) && !@record_cache.empty?
+          delete_cached_record(@record_cache.each_key.first)
+        end
+        return if cache_full?(bytesize)
+
+        @record_cache[id] = {
+          digest: digest, record: record, bytesize: bytesize
+        }.freeze
+        @record_cache_bytes += bytesize
+      end
+
+      def cache_full?(bytesize)
+        @record_cache.length >= MAX_CACHE_RECORDS ||
+          @record_cache_bytes + bytesize > MAX_CACHE_BYTES
+      end
+
+      def delete_cached_record(id)
+        cached = @record_cache.delete(id)
+        @record_cache_bytes -= cached.fetch(:bytesize) if cached
       end
 
       def mutate(occurrence_id, create: false, &block)
@@ -522,7 +583,7 @@ module Hive
         @directory.with_lock(File.join("records", "#{id}.lock")) do
           relative = record_path(id)
           original = @directory.read(relative, max_bytes: MAX_RECORD_BYTES, missing: true)
-          record = original && parse_record(original, expected_id: id)
+          record = original && validated_record(id, original)
           conflict!("admission occurrence is missing") unless record || create
           replacement = yield(record && PatrolFix.deep_copy(record))
           validate_record!(replacement, expected_id: id)
@@ -556,7 +617,11 @@ module Hive
             set_pending_index_entry(index, id, replacement_entry)
             write_pending_index(index, previous_bytes: index_bytes)
           end
-          PatrolFix.deep_freeze(replacement)
+          frozen = PatrolFix.deep_freeze(replacement)
+          cache_record(
+            id, Digest::SHA256.hexdigest(bytes), frozen, bytes.bytesize, evict: true
+          )
+          frozen
         end
       rescue Hive::ManagedDirectory::UnsafeError => e
         corrupt!(e.message)

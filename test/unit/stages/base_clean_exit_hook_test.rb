@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/stages/base"
+require "hive/stages/execute"
 require "hive/task"
 require "hive/markers"
 require "hive/worktree"
